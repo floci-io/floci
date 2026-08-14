@@ -95,6 +95,14 @@ class AslExecutorPathIntrinsicsTest {
     }
 
     @Test
+    void bracketQuotedMembersSupportNamesOutsideDotShorthand() throws Exception {
+        JsonNode root = mapper.readTree("{\"config\":{\"max-limit\":2},\"a.b\":3}");
+
+        assertEquals(2, executor.resolvePath("$['config']['max-limit']", root).asInt());
+        assertEquals(3, executor.resolvePath("$['a.b']", root).asInt());
+    }
+
+    @Test
     void resolvePathNodeDistinguishesExplicitNullFromMissing() throws Exception {
         JsonNode root = mapper.readTree("{\"x\":null}");
         // An explicit null exists, so it is present (not a MissingNode)...

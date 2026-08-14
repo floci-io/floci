@@ -231,32 +231,37 @@ final class CognitoAuthFlowHandler {
         String refreshToken = params.get("REFRESH_TOKEN");
         if (refreshToken == null) throw new AwsException("InvalidParameterException", "REFRESH_TOKEN is required", 400);
         String[] parts = service.parseRefreshToken(refreshToken);
-        if (parts != null) {
-            String username = parts[1];
-            String tokenClientId = parts[2];
-            long iat = parts.length > 3 && !parts[3].isEmpty() ? Long.parseLong(parts[3]) : 0L;
-            String refreshTokenUuid = parts.length > 4 ? parts[4] : null;
-            
-            // Check revocation before issuing new tokens
-            service.validateRefreshTokenNotRevoked(refreshTokenUuid, pool.getId(), username, iat);
-            
-            try {
-                CognitoUser user = service.adminGetUser(pool.getId(), username);
-                CognitoService.ClaimsOverride override = firePreTokenGeneration(pool, client, user,
-                        clientMetadata, "TokenGeneration_RefreshTokens");
-                Map<String, Object> auth = new HashMap<>();
-                auth.put("AccessToken", service.generateSignedJwt(user, pool, "access", client, override, refreshTokenUuid));
-                auth.put("IdToken", service.generateSignedJwt(user, pool, "id", client, override, refreshTokenUuid));
-                auth.put("ExpiresIn", service.getAccessTokenExpiresInSeconds(client));
-                auth.put("TokenType", "Bearer");
-                Map<String, Object> result = new HashMap<>();
-                result.put("AuthenticationResult", auth);
-                return result;
-            } catch (AwsException ignored) { }
+        if (parts == null) {
+            throw new AwsException("NotAuthorizedException", "Invalid Refresh Token", 400);
         }
+        String username = parts[1];
+        long iat;
+        try {
+            iat = parts.length > 3 && !parts[3].isEmpty() ? Long.parseLong(parts[3]) : 0L;
+        } catch (NumberFormatException e) {
+            throw new AwsException("NotAuthorizedException", "Invalid Refresh Token", 400);
+        }
+        String refreshTokenUuid = parts.length > 4 ? parts[4] : null;
+
+        // Check revocation before issuing new tokens
+        service.validateRefreshTokenNotRevoked(refreshTokenUuid, pool.getId(), username, iat);
+
+        CognitoUser user;
+        try {
+            user = service.adminGetUser(pool.getId(), username);
+        } catch (AwsException ae) {
+            // Real Cognito never reveals whether the encoded username exists; any
+            // refresh token that doesn't resolve to a real user is simply invalid.
+            if ("UserNotFoundException".equals(ae.getErrorCode())) {
+                throw new AwsException("NotAuthorizedException", "Invalid Refresh Token", 400);
+            }
+            throw ae;
+        }
+        CognitoService.ClaimsOverride override = firePreTokenGeneration(pool, client, user,
+                clientMetadata, "TokenGeneration_RefreshTokens");
         Map<String, Object> auth = new HashMap<>();
-        auth.put("AccessToken", service.generateTokenString("access", "unknown", pool, client));
-        auth.put("IdToken", service.generateTokenString("id", "unknown", pool, client));
+        auth.put("AccessToken", service.generateSignedJwt(user, pool, "access", client, override, refreshTokenUuid));
+        auth.put("IdToken", service.generateSignedJwt(user, pool, "id", client, override, refreshTokenUuid));
         auth.put("ExpiresIn", service.getAccessTokenExpiresInSeconds(client));
         auth.put("TokenType", "Bearer");
         Map<String, Object> result = new HashMap<>();

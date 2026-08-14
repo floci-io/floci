@@ -22,7 +22,8 @@ quarkus:
   native:
     resources:
       # The Pricing service reads its bundled snapshot, EC2 reads its image
-      # catalog (ec2/image-catalog.yaml), AppSync's GraphQL parser reads its
+      # catalog (ec2/image-catalog.yaml), IAM reads its AWS managed-policy
+      # catalog (iam/managed-policies.yaml), AppSync's GraphQL parser reads its
       # message bundles, and API Gateway's Velocity engine reads its default
       # properties at runtime via
       # ClassLoader#getResourceAsStream. Quarkus's static resource analysis
@@ -32,6 +33,7 @@ quarkus:
         - pricing-snapshots/**
         - ui/*.html
         - ec2/*.yaml
+        - iam/*.yaml
         - i18n/*.properties
         - org/apache/velocity/runtime/defaults/*.properties
     additional-build-args:
@@ -56,6 +58,7 @@ quarkus:
       - --initialize-at-run-time=io.github.hectorvent.floci.services.cloudfront.CloudFrontService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.emr.EmrService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.elasticbeanstalk.ElasticBeanstalkService
+      - --initialize-at-run-time=graphql.util.IdGenerator
 
 
 floci:
@@ -231,6 +234,9 @@ floci:
       enabled: true
       enforcement-enabled: false
       seed-deployer-principal: false
+      # account-alias: ""  # When set, seeds the account alias at startup so callers can read one
+                           # without creating it first. Unset means the account has no alias,
+                           # matching AWS. Example: FLOCI_SERVICES_IAM_ACCOUNT_ALIAS=my-account
     msk:
       enabled: true
       mock: false
@@ -241,6 +247,13 @@ floci:
       enabled: true
       mock: false
       default-image: "rabbitmq:3-management"
+    kinesis-analytics:
+      enabled: true
+      mock: false
+      # default-image: optional override; uncomment to pin every application to a single image
+      # (e.g. a private registry mirror). When unset, the image is chosen from the requested
+      # RuntimeEnvironment (KinesisAnalyticsRuntimes.imageFor, e.g. FLINK-1_19 -> apache/flink:1.19).
+      # default-image: "apache/flink:1.18"
     elasticache:
       enabled: true
       proxy-base-port: 6379
@@ -258,9 +271,12 @@ floci:
       mock: false                                 # FLOCI_SERVICES_RDS_MOCK — true = metadata only, no Docker (useful for CI)
       proxy-base-port: 7001
       proxy-max-port: 7099
-      default-postgres-image: "postgres:16-alpine"
-      default-mysql-image: "mysql:8.0"
-      default-mariadb-image: "mariadb:11"
+      # endpoint-host: localhost                 # Hostname clients use; enables published-port translation in Docker
+      # Omit image overrides to adapt Floci's built-in images to EngineVersion.
+      # Uncomment an override to pin that engine to an exact image.
+      # default-postgres-image: "registry.example.com/postgres:16-alpine"
+      # default-mysql-image: "registry.example.com/mysql:8.0"
+      # default-mariadb-image: "registry.example.com/mariadb:11"
     rds-data:
       enabled: true
       transaction-ttl-seconds: 180
@@ -300,6 +316,10 @@ floci:
     stepfunctions:
       enabled: true
       allow-plaintext-http: false
+    swf:
+      enabled: true
+      timeout-sweep-enabled: true
+      timeout-sweep-interval-seconds: 1
     cloudformation:
       enabled: true
     acm:
@@ -414,6 +434,8 @@ floci:
       enabled: true
     autoscaling:
       enabled: true
+    applicationautoscaling:
+      enabled: true
     elasticbeanstalk:
       enabled: true
     backup:
@@ -446,6 +468,7 @@ floci:
       enabled: true
     cloudfront:
       enabled: true
+      allowed-private-origin-hosts: []
     appsync:
       enabled: true
       schema-worker-threads: 4

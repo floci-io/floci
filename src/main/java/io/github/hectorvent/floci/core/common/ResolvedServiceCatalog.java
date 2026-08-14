@@ -14,8 +14,11 @@ import io.github.hectorvent.floci.services.iot.IotController;
 import io.github.hectorvent.floci.services.iot.IotDataController;
 import io.github.hectorvent.floci.services.pipes.PipesController;
 import io.github.hectorvent.floci.services.lambda.LambdaController;
+import io.github.hectorvent.floci.services.lambdamicrovms.LambdaMicrovmsController;
+import io.github.hectorvent.floci.services.lambdamicrovms.LambdaNetworkConnectorsController;
 import io.github.hectorvent.floci.services.opensearch.OpenSearchController;
 import io.github.hectorvent.floci.services.cloudfront.CloudFrontController;
+import io.github.hectorvent.floci.services.cloudfront.CloudFrontServingController;
 import io.github.hectorvent.floci.services.route53.Route53Controller;
 import io.github.hectorvent.floci.services.ses.SesController;
 import io.github.hectorvent.floci.services.appsync.AppSyncController;
@@ -82,7 +85,10 @@ public class ResolvedServiceCatalog {
                         "lambda", storageMode(config.storage().services().lambda().mode(), config.storage().mode()),
                         config.storage().services().lambda().flushIntervalMs(), null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
-                        Set.of(), Set.of("lambda"), Set.of(), Set.of(LambdaController.class)),
+                        Set.of(), Set.of("lambda"), Set.of(),
+                        Set.of(LambdaController.class,
+                                LambdaMicrovmsController.class,
+                                LambdaNetworkConnectorsController.class)),
                 descriptor("apigateway", "apigateway", config.services().apigateway().enabled(), true,
                         "apigateway", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
@@ -178,6 +184,11 @@ public class ResolvedServiceCatalog {
                         "kinesis", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON, ServiceProtocol.CBOR),
                         Set.of("Kinesis_20131202."), Set.of("kinesis"), Set.of(), Set.of()),
+                descriptor("kinesisanalytics", "kinesisanalytics",
+                        config.services().kinesisAnalytics().enabled(), true,
+                        "kinesisanalytics", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
+                        protocols(ServiceProtocol.JSON),
+                        Set.of("KinesisAnalytics_20180523."), Set.of("kinesisanalytics"), Set.of(), Set.of()),
                 descriptor("kms", "kms", config.services().kms().enabled(), true,
                         "kms", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
@@ -191,6 +202,10 @@ public class ResolvedServiceCatalog {
                         "stepfunctions", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON, ServiceProtocol.CBOR),
                         Set.of("AWSStepFunctions."), Set.of("states"), Set.of("SFN"), Set.of()),
+                descriptor("swf", "swf", config.services().swf().enabled(), true,
+                        "swf", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
+                        protocols(ServiceProtocol.JSON),
+                        Set.of("SimpleWorkflowService."), Set.of("swf"), Set.of(), Set.of()),
                 descriptor("cloudformation", "cloudformation", config.services().cloudformation().enabled(), true,
                         null, null, 5000L, null, ServiceProtocol.QUERY,
                         protocols(ServiceProtocol.QUERY),
@@ -330,6 +345,12 @@ public class ResolvedServiceCatalog {
                         "autoscaling", config.storage().mode(), 5000L, AwsNamespaces.AUTOSCALING, ServiceProtocol.QUERY,
                         protocols(ServiceProtocol.QUERY),
                         Set.of(), Set.of("autoscaling"), Set.of(), Set.of()),
+                descriptor("application-autoscaling", "applicationautoscaling",
+                        config.services().applicationautoscaling().enabled(), true,
+                        "applicationautoscaling", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
+                        protocols(ServiceProtocol.JSON),
+                        Set.of("AnyScaleFrontendService."), Set.of("application-autoscaling"),
+                        Set.of(), Set.of()),
                 descriptor("elasticbeanstalk", "elasticbeanstalk",
                         config.services().elasticbeanstalk().enabled(), true,
                         "elasticbeanstalk",
@@ -384,7 +405,8 @@ public class ResolvedServiceCatalog {
                         "cloudfront", storageMode(config.storage().services().cloudfront().mode(), config.storage().mode()),
                         5000L, AwsNamespaces.CLOUDFRONT, ServiceProtocol.REST_XML,
                         protocols(ServiceProtocol.REST_XML),
-                        Set.of(), Set.of("cloudfront"), Set.of(), Set.of(CloudFrontController.class)),
+                        Set.of(), Set.of("cloudfront"), Set.of(),
+                        Set.of(CloudFrontController.class, CloudFrontServingController.class)),
                 descriptor("appsync", "appsync", config.services().appsync().enabled(), true,
                         "appsync", storageMode(config.storage().services().appsync().mode(), config.storage().mode()),
                         config.storage().services().appsync().flushIntervalMs(), null, ServiceProtocol.REST_JSON,

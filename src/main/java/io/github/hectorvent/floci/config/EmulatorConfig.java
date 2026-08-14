@@ -531,6 +531,7 @@ public interface EmulatorConfig {
         IamServiceConfig iam();
         MskServiceConfig msk();
         AmazonMqServiceConfig amazonmq();
+        KinesisAnalyticsServiceConfig kinesisAnalytics();
         ElastiCacheServiceConfig elasticache();
         MemoryDbServiceConfig memorydb();
         RdsServiceConfig rds();
@@ -549,6 +550,7 @@ public interface EmulatorConfig {
         KmsServiceConfig kms();
         CognitoServiceConfig cognito();
         StepFunctionsServiceConfig stepfunctions();
+        SwfServiceConfig swf();
         CloudFormationServiceConfig cloudformation();
         AcmServiceConfig acm();
         AthenaServiceConfig athena();
@@ -570,6 +572,7 @@ public interface EmulatorConfig {
         CodeDeployServiceConfig codedeploy();
         CodePipelineServiceConfig codepipeline();
         AutoScalingServiceConfig autoscaling();
+        ApplicationAutoScalingServiceConfig applicationautoscaling();
         ElasticBeanstalkServiceConfig elasticbeanstalk();
         BackupServiceConfig backup();
         NeptuneServiceConfig neptune();
@@ -693,6 +696,11 @@ public interface EmulatorConfig {
         boolean enabled();
     }
 
+    interface ApplicationAutoScalingServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
     interface ElasticBeanstalkServiceConfig {
         @WithDefault("true")
         boolean enabled();
@@ -782,6 +790,13 @@ public interface EmulatorConfig {
 
         @WithDefault("false")
         boolean seedDeployerPrincipal();
+
+        /**
+         * Alias to seed for the default account at startup, so callers that read the account
+         * alias find one without creating it first. Unset means the account has no alias, which
+         * is the AWS default.
+         */
+        Optional<String> accountAlias();
     }
 
     interface MskServiceConfig {
@@ -810,6 +825,23 @@ public interface EmulatorConfig {
 
         @WithDefault("rabbitmq:3-management")
         String defaultImage();
+    }
+
+    interface KinesisAnalyticsServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        /** When true, StartApplication comes up RUNNING immediately with no backing Flink
+         *  container. Useful for tests and hosts without a Docker daemon. */
+        @WithDefault("false")
+        boolean mock();
+
+        /**
+         * Optional fixed image used for every application regardless of the requested
+         * {@code RuntimeEnvironment} (private registry mirror, pinned patch). When unset, the image
+         * is chosen from the runtime via {@code KinesisAnalyticsRuntimes.imageFor(runtimeEnvironment)}.
+         */
+        Optional<String> defaultImage();
     }
 
     interface ElastiCacheServiceConfig {
@@ -853,6 +885,10 @@ public interface EmulatorConfig {
     }
 
     interface RdsServiceConfig {
+        String DEFAULT_POSTGRES_IMAGE = "postgres:16-alpine";
+        String DEFAULT_MYSQL_IMAGE = "mysql:8.0";
+        String DEFAULT_MARIADB_IMAGE = "mariadb:11";
+
         @WithDefault("true")
         boolean enabled();
 
@@ -868,14 +904,17 @@ public interface EmulatorConfig {
         @WithDefault("7099")
         int proxyMaxPort();
 
-        @WithDefault("postgres:16-alpine")
-        String defaultPostgresImage();
+        /** Empty when Floci should adapt its built-in image to the requested engine version. */
+        Optional<String> defaultPostgresImage();
 
-        @WithDefault("mysql:8.0")
-        String defaultMysqlImage();
+        /** Empty when Floci should adapt its built-in image to the requested engine version. */
+        Optional<String> defaultMysqlImage();
 
-        @WithDefault("mariadb:11")
-        String defaultMariadbImage();
+        /** Empty when Floci should adapt its built-in image to the requested engine version. */
+        Optional<String> defaultMariadbImage();
+
+        /** Hostname advertised for RDS endpoints. Uses published Docker ports when configured. */
+        Optional<String> endpointHost();
 
         /** Docker network to attach DB containers to. Empty = default bridge. */
         Optional<String> dockerNetwork();
@@ -1047,6 +1086,26 @@ public interface EmulatorConfig {
         /** Allows invoking plain HTTP endpoints. By default, AWS only allows HTTPS. */
         @WithDefault("true")
         boolean allowPlaintextHttp();
+    }
+
+    interface SwfServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        /**
+         * Run the background sweep that expires activity, decision, workflow and timer
+         * timeouts. Setting this to {@code false} leaves timeouts recorded but never
+         * fired, which is useful for tests that drive the clock themselves.
+         */
+        @WithDefault("true")
+        boolean timeoutSweepEnabled();
+
+        /**
+         * How often the timeout sweep runs. SWF timeouts are specified in whole seconds,
+         * so a 1s sweep bounds the observable lateness of an expiry at one second.
+         */
+        @WithDefault("1")
+        long timeoutSweepIntervalSeconds();
     }
 
     interface CloudFormationServiceConfig {
@@ -1284,6 +1343,12 @@ public interface EmulatorConfig {
 
         @WithDefault("cloudfront.net")
         String domainSuffix();
+
+        /**
+         * Exact custom-origin hostnames allowed to resolve to private or otherwise non-routable
+         * addresses. Empty by default to match CloudFront's public custom-origin boundary.
+         */
+        Optional<List<String>> allowedPrivateOriginHosts();
     }
 
     interface AppSyncServiceConfig {

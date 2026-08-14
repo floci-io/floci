@@ -28,6 +28,15 @@ public class Ec2QueryHandler {
     private static final DateTimeFormatter ISO_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'")
             .withZone(ZoneOffset.UTC);
 
+    /** ReplaceRoute targets AWS accepts that a stored {@code Route} cannot represent here. */
+    private static final List<String> UNSUPPORTED_ROUTE_TARGETS = List.of(
+            "CarrierGatewayId", "CoreNetworkArn", "EgressOnlyInternetGatewayId", "InstanceId",
+            "LocalGatewayId", "NetworkInterfaceId", "OdbNetworkArn",
+            "TransitGatewayId", "VpcEndpointId", "VpcPeeringConnectionId");
+
+    /** The gateway id a route table's built-in route carries (see Ec2Service#createRouteTable). */
+    private static final String LOCAL_GATEWAY_ID = "local";
+
     private final Ec2Service service;
     private final EmulatorConfig config;
     private final FlowLogService flowLogService;
@@ -70,6 +79,11 @@ public class Ec2QueryHandler {
                 case "DescribeFlowLogs" -> handleDescribeFlowLogs(params, region);
                 case "DeleteFlowLogs" -> handleDeleteFlowLogs(params, region);
                 case "DescribePrefixLists" -> handleDescribePrefixLists(params, region);
+                case "CreateManagedPrefixList" -> handleCreateManagedPrefixList(params, region);
+                case "DescribeManagedPrefixLists" -> handleDescribeManagedPrefixLists(params, region);
+                case "GetManagedPrefixListEntries" -> handleGetManagedPrefixListEntries(params, region);
+                case "ModifyManagedPrefixList" -> handleModifyManagedPrefixList(params, region);
+                case "DeleteManagedPrefixList" -> handleDeleteManagedPrefixList(params, region);
                 case "CreateDefaultVpc" -> handleCreateDefaultVpc(params, region);
                 case "AssociateVpcCidrBlock" -> handleAssociateVpcCidrBlock(params, region);
                 case "DisassociateVpcCidrBlock" -> handleDisassociateVpcCidrBlock(params, region);
@@ -123,6 +137,7 @@ public class Ec2QueryHandler {
                 case "AssociateRouteTable" -> handleAssociateRouteTable(params, region);
                 case "DisassociateRouteTable" -> handleDisassociateRouteTable(params, region);
                 case "CreateRoute" -> handleCreateRoute(params, region);
+                case "ReplaceRoute" -> handleReplaceRoute(params, region);
                 case "DeleteRoute" -> handleDeleteRoute(params, region);
                 // Network ACLs
                 case "CreateNetworkAcl" -> handleCreateNetworkAcl(params, region);
@@ -307,6 +322,15 @@ public class Ec2QueryHandler {
         throw new AwsException("InvalidParameterValue", name + " is not a valid boolean.", 400);
     }
 
+    /**
+     * Reads the {@code IpPermissions.N} list of an authorize/revoke request.
+     *
+     * <p>Each permission carries up to four kinds of source, and every one of them has to be read
+     * here or it is silently dropped before the service layer ever sees it (#2190). Note the EC2
+     * Query protocol serializes the {@code UserIdGroupPairs} member under the wire name
+     * {@code Groups}, which is why a group reference arrives as
+     * {@code IpPermissions.1.Groups.1.GroupId} rather than under the SDK-facing field name.
+     */
     private List<IpPermission> parseIpPermissions(MultivaluedMap<String, String> p, String prefix) {
         List<IpPermission> perms = new ArrayList<>();
         for (int i = 1; ; i++) {
@@ -324,6 +348,32 @@ public class Ec2QueryHandler {
                 if (cidr == null) break;
                 String desc = p.getFirst(prefix + "." + i + ".IpRanges." + j + ".Description");
                 perm.getIpRanges().add(new IpRange(cidr, desc));
+            }
+            for (int j = 1; ; j++) {
+                String cidr = p.getFirst(prefix + "." + i + ".Ipv6Ranges." + j + ".CidrIpv6");
+                if (cidr == null) {
+                    break;
+                }
+                String desc = p.getFirst(prefix + "." + i + ".Ipv6Ranges." + j + ".Description");
+                perm.getIpv6Ranges().add(new Ipv6Range(cidr, desc));
+            }
+            for (int j = 1; ; j++) {
+                String base = prefix + "." + i + ".Groups." + j;
+                String groupId = p.getFirst(base + ".GroupId");
+                String groupName = p.getFirst(base + ".GroupName");
+                String userId = p.getFirst(base + ".UserId");
+                String desc = p.getFirst(base + ".Description");
+                // A default-VPC caller may reference a group by name alone, so the loop cannot end
+                // on a missing GroupId.
+                if (groupId == null && groupName == null && userId == null && desc == null) {
+                    break;
+                }
+                UserIdGroupPair pair = new UserIdGroupPair();
+                pair.setGroupId(groupId);
+                pair.setGroupName(groupName);
+                pair.setUserId(userId);
+                pair.setDescription(desc);
+                perm.getUserIdGroupPairs().add(pair);
             }
             perms.add(perm);
         }
@@ -410,6 +460,19 @@ public class Ec2QueryHandler {
         int maxCount = Integer.parseInt(p.getOrDefault("MaxCount", List.of("1")).get(0));
         String keyName = p.getFirst("KeyName");
         String subnetId = p.getFirst("SubnetId");
+        // The launch-time public-IP override arrives either on the primary
+        // network interface spec (the shape Terraform's
+        // associate_public_ip_address sends) or as the legacy top-level
+        // parameter. AWS rejects both at once, so the interface spec wins when
+        // present. Absent means "use the subnet's MapPublicIpOnLaunch default".
+        String assocParam = p.getFirst("NetworkInterface.1.AssociatePublicIpAddress");
+        if (assocParam == null) {
+            assocParam = p.getFirst("AssociatePublicIpAddress");
+        }
+        Boolean associatePublicIp = assocParam == null ? null : Boolean.parseBoolean(assocParam);
+        if (subnetId == null) {
+            subnetId = p.getFirst("NetworkInterface.1.SubnetId");
+        }
         String clientToken = p.getFirst("ClientToken");
         List<String> sgIds = getList(p, "SecurityGroupId");
 
@@ -456,7 +519,8 @@ public class Ec2QueryHandler {
         }
 
         Reservation res = service.runInstances(region, imageId, instanceType, minCount, maxCount,
-                keyName, sgIds, subnetId, clientToken, instanceTags, userData, iamInstanceProfileArn);
+                keyName, sgIds, subnetId, clientToken, instanceTags, userData, iamInstanceProfileArn,
+                associatePublicIp);
 
         XmlBuilder xml = new XmlBuilder()
                 .start("RunInstancesResponse", AwsNamespaces.EC2)
@@ -970,6 +1034,142 @@ public class Ec2QueryHandler {
         }
         xml.end("prefixListSet").end("DescribePrefixListsResponse");
         return xmlResponse(xml.build());
+    }
+
+    private Response handleCreateManagedPrefixList(MultivaluedMap<String, String> p, String region) {
+        ManagedPrefixList list = service.createManagedPrefixList(
+                region,
+                p.getFirst("PrefixListName"),
+                p.getFirst("AddressFamily"),
+                intOrNull(p, "MaxEntries"),
+                parsePrefixListEntries(p, "Entry"),
+                parseTagsForResource(p, "prefix-list"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("CreateManagedPrefixListResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("prefixList").raw(managedPrefixListXml(list)).end("prefixList")
+                .end("CreateManagedPrefixListResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDescribeManagedPrefixLists(MultivaluedMap<String, String> p, String region) {
+        List<String> ids = getList(p, "PrefixListId");
+        Map<String, List<String>> filters = getFilters(p);
+        List<ManagedPrefixList> lists = service.describeManagedPrefixLists(region, ids, filters);
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeManagedPrefixListsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("prefixListSet");
+        for (ManagedPrefixList list : lists) {
+            xml.start("item").raw(managedPrefixListXml(list)).end("item");
+        }
+        xml.end("prefixListSet").end("DescribeManagedPrefixListsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleGetManagedPrefixListEntries(MultivaluedMap<String, String> p, String region) {
+        List<PrefixListEntry> entries = service.getManagedPrefixListEntries(
+                region, p.getFirst("PrefixListId"), longOrNull(p, "TargetVersion"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("GetManagedPrefixListEntriesResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("entrySet");
+        for (PrefixListEntry entry : entries) {
+            xml.start("item").elem("cidr", entry.getCidr());
+            if (entry.getDescription() != null) {
+                xml.elem("description", entry.getDescription());
+            }
+            xml.end("item");
+        }
+        xml.end("entrySet").end("GetManagedPrefixListEntriesResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleModifyManagedPrefixList(MultivaluedMap<String, String> p, String region) {
+        List<PrefixListEntry> removeEntries = parsePrefixListEntries(p, "RemoveEntry");
+        ManagedPrefixList list = service.modifyManagedPrefixList(
+                region,
+                p.getFirst("PrefixListId"),
+                longOrNull(p, "CurrentVersion"),
+                p.getFirst("PrefixListName"),
+                intOrNull(p, "MaxEntries"),
+                parsePrefixListEntries(p, "AddEntry"),
+                removeEntries.stream().map(PrefixListEntry::getCidr).toList());
+        XmlBuilder xml = new XmlBuilder()
+                .start("ModifyManagedPrefixListResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("prefixList").raw(managedPrefixListXml(list)).end("prefixList")
+                .end("ModifyManagedPrefixListResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDeleteManagedPrefixList(MultivaluedMap<String, String> p, String region) {
+        ManagedPrefixList list = service.deleteManagedPrefixList(region, p.getFirst("PrefixListId"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("DeleteManagedPrefixListResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("prefixList").raw(managedPrefixListXml(list)).end("prefixList")
+                .end("DeleteManagedPrefixListResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private String managedPrefixListXml(ManagedPrefixList list) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("prefixListId", list.getPrefixListId())
+                .elem("addressFamily", list.getAddressFamily())
+                .elem("state", list.getState());
+        if (list.getStateMessage() != null) {
+            xml.elem("stateMessage", list.getStateMessage());
+        }
+        xml.elem("prefixListArn", list.getPrefixListArn())
+                .elem("prefixListName", list.getPrefixListName())
+                .elem("maxEntries", list.getMaxEntries() == null ? 0 : list.getMaxEntries())
+                .elem("version", list.getVersion())
+                .elem("ownerId", list.getOwnerId());
+        xml.raw(tagSetXml(list.getTags()));
+        return xml.build();
+    }
+
+    // Entry lists arrive as Entry.N.Cidr / AddEntry.N.Cidr / RemoveEntry.N.Cidr. RemoveEntry
+    // carries only a Cidr on the wire, which parses here as an entry with a null description.
+    private List<PrefixListEntry> parsePrefixListEntries(MultivaluedMap<String, String> p, String prefix) {
+        List<PrefixListEntry> entries = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String cidr = p.getFirst(prefix + "." + i + ".Cidr");
+            if (cidr == null) break;
+            entries.add(new PrefixListEntry(cidr, p.getFirst(prefix + "." + i + ".Description")));
+        }
+        return entries;
+    }
+
+    // Malformed numerics must surface as a client error, not escape the handler as an
+    // unchecked NumberFormatException and turn into a 500. Only an absent parameter is null: a
+    // present but blank value is malformed input, and treating it as absent would quietly drop
+    // the conditional-version check on ModifyManagedPrefixList.
+    private Integer intOrNull(MultivaluedMap<String, String> p, String name) {
+        String value = p.getFirst(name);
+        if (value == null) {
+            return null;
+        }
+        try {
+            return Integer.valueOf(value);
+        } catch (NumberFormatException e) {
+            throw new AwsException("InvalidParameterValue",
+                    "Invalid value '" + value + "' for " + name + ".", 400);
+        }
+    }
+
+    private Long longOrNull(MultivaluedMap<String, String> p, String name) {
+        String value = p.getFirst(name);
+        if (value == null) {
+            return null;
+        }
+        try {
+            return Long.valueOf(value);
+        } catch (NumberFormatException e) {
+            throw new AwsException("InvalidParameterValue",
+                    "Invalid value '" + value + "' for " + name + ".", 400);
+        }
     }
 
     private Response handleDeleteVpcEndpoints(MultivaluedMap<String, String> p, String region) {
@@ -1497,6 +1697,33 @@ public class Ec2QueryHandler {
         String natGwId = p.getFirst("NatGatewayId");
         service.createRoute(region, rtId, dest, gwId, natGwId);
         return booleanResponse("CreateRoute");
+    }
+
+    private Response handleReplaceRoute(MultivaluedMap<String, String> p, String region) {
+        // A route holds only a gateway or a NAT gateway here. Every other AWS target keeps the
+        // UnsupportedOperation it returned before this action existed, rather than being accepted
+        // and quietly clearing the route it was meant to repoint.
+        for (String target : UNSUPPORTED_ROUTE_TARGETS) {
+            if (p.getFirst(target) != null) {
+                throw new AwsException("UnsupportedOperation",
+                        "ReplaceRoute with " + target + " is not supported.", 400);
+            }
+        }
+        String rtId = p.getFirst("RouteTableId");
+        String dest = p.getFirst("DestinationCidrBlock");
+        String gwId = p.getFirst("GatewayId");
+        String natGwId = p.getFirst("NatGatewayId");
+        // Resetting a route to the local target is expressible: `local` is the gateway id the
+        // route table's built-in route already carries, so it needs no new field on Route.
+        if (Boolean.parseBoolean(p.getFirst("LocalTarget"))) {
+            if (gwId != null || natGwId != null) {
+                throw new AwsException("InvalidParameterCombination",
+                        "ReplaceRoute takes exactly one target.", 400);
+            }
+            gwId = LOCAL_GATEWAY_ID;
+        }
+        service.replaceRoute(region, rtId, dest, gwId, natGwId);
+        return booleanResponse("ReplaceRoute");
     }
 
     private Response handleDeleteRoute(MultivaluedMap<String, String> p, String region) {
@@ -2214,8 +2441,20 @@ public class Ec2QueryHandler {
         if (rule.getFromPort() != null) xml.elem("fromPort", String.valueOf(rule.getFromPort()));
         if (rule.getToPort() != null) xml.elem("toPort", String.valueOf(rule.getToPort()));
         xml.elem("cidrIpv4", rule.getCidrIpv4())
-                .elem("cidrIpv6", rule.getCidrIpv6())
-                .elem("description", rule.getDescription())
+                .elem("cidrIpv6", rule.getCidrIpv6());
+        // Guarded: unlike elem(), start()/end() emit even when every child is null, which would put
+        // an empty <referencedGroupInfo/> on every CIDR rule.
+        ReferencedSecurityGroup ref = rule.getReferencedGroupInfo();
+        if (ref != null) {
+            xml.start("referencedGroupInfo")
+                    .elem("groupId", ref.getGroupId())
+                    .elem("peeringStatus", ref.getPeeringStatus())
+                    .elem("userId", ref.getUserId())
+                    .elem("vpcId", ref.getVpcId())
+                    .elem("vpcPeeringConnectionId", ref.getVpcPeeringConnectionId())
+                    .end("referencedGroupInfo");
+        }
+        xml.elem("description", rule.getDescription())
                 .raw(tagSetXml(rule.getTags()));
         return xml.build();
     }
@@ -2689,7 +2928,10 @@ public class Ec2QueryHandler {
             xml.end("ipRanges")
                     .start("ipv6Ranges");
             for (Ipv6Range r : perm.getIpv6Ranges()) {
-                xml.start("item").elem("cidrIpv6", r.getCidrIpv6()).end("item");
+                xml.start("item")
+                        .elem("cidrIpv6", r.getCidrIpv6())
+                        .elem("description", r.getDescription())
+                        .end("item");
             }
             xml.end("ipv6Ranges")
                     .start("groups");
@@ -2698,6 +2940,7 @@ public class Ec2QueryHandler {
                         .elem("userId", g.getUserId())
                         .elem("groupId", g.getGroupId())
                         .elem("groupName", g.getGroupName())
+                        .elem("description", g.getDescription())
                         .end("item");
             }
             xml.end("groups").end("item");

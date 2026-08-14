@@ -19,6 +19,7 @@ public class SecurityGroupRule {
     private Integer toPort;
     private String cidrIpv4;
     private String cidrIpv6;
+    private ReferencedSecurityGroup referencedGroupInfo;
     private String description;
     private List<Tag> tags = new ArrayList<>();
 
@@ -50,6 +51,11 @@ public class SecurityGroupRule {
 
     public String getCidrIpv6() { return cidrIpv6; }
     public void setCidrIpv6(String cidrIpv6) { this.cidrIpv6 = cidrIpv6; }
+
+    public ReferencedSecurityGroup getReferencedGroupInfo() { return referencedGroupInfo; }
+    public void setReferencedGroupInfo(ReferencedSecurityGroup referencedGroupInfo) {
+        this.referencedGroupInfo = referencedGroupInfo;
+    }
 
     public String getDescription() { return description; }
     public void setDescription(String description) { this.description = description; }

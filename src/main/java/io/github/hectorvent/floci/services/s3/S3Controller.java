@@ -231,6 +231,12 @@ public class S3Controller {
         try {
             S3Service.RequestAuthorization authorization = S3RequestAuthorizationParser.parseIfRequired(
                     s3Service.isAuthEnforced(), httpHeaders, uriInfo);
+            if (isWebsiteRequest(httpHeaders, uriInfo)) {
+                Response websiteResponse = serveWebsiteObject(bucket, "", authorization);
+                if (websiteResponse != null) {
+                    return headOnlyResponse(websiteResponse);
+                }
+            }
             s3Service.authorizeBucketRead(bucket, "s3:ListBucket", authorization);
             s3Service.headBucket(bucket);
             String bucketRegion = s3Service.getBucketRegion(bucket);
@@ -416,6 +422,7 @@ public class S3Controller {
                                 @QueryParam("start-after") String startAfter,
                                 @QueryParam("encoding-type") String encodingType,
                                 @QueryParam("key-marker") String keyMarker,
+                                @QueryParam("version-id-marker") String versionIdMarker,
                                 @QueryParam("marker") String marker,
                                 @Context UriInfo uriInfo,
                                 @Context HttpHeaders httpHeaders) {
@@ -437,7 +444,8 @@ public class S3Controller {
             }
             if (hasQueryParam(uriInfo, "versions")) {
                 s3Service.authorizeBucketRead(bucket, "s3:ListBucketVersions", authorization);
-                return handleListObjectVersions(bucket, prefix, maxKeys, keyMarker);
+                return handleListObjectVersions(bucket, prefix, delimiter, maxKeys, keyMarker, versionIdMarker,
+                        encodingType);
             }
             if (hasQueryParam(uriInfo, "location")) {
                 s3Service.authorizeBucketRead(bucket, "s3:GetBucketLocation", authorization);
@@ -497,35 +505,15 @@ public class S3Controller {
                 return Response.ok(s3Service.getBucketRequestPayment(bucket)).build();
             }
 
-            // --- Website Hosting Redirection Logic ---
-            if (isWebsiteRequest(httpHeaders, uriInfo) && (uriInfo.getQueryParameters().isEmpty() || (uriInfo.getQueryParameters().size() == 1 && hasQueryParam(uriInfo, "list-type")))) {
-                try {
-                    WebsiteConfiguration webConfig = s3Service.getBucketWebsite(bucket);
-                    if (webConfig.getIndexDocument() != null) {
-                        try {
-                            s3Service.authorizeGetObject(bucket, webConfig.getIndexDocument(), null, authorization);
-                            S3Object indexObj = s3Service.getObject(bucket, webConfig.getIndexDocument());
-                            return Response.ok(indexObj.getData())
-                                    .type(indexObj.getContentType())
-                                    .header("Content-Length", indexObj.getSize())
-                                    .header("ETag", indexObj.getETag())
-                                    .header("x-amz-website-redirect-location", "index")
-                                    .build();
-                        } catch (AwsException e) {
-                            if (!isWebsiteErrorDocumentTrigger(e)) {
-                                throw e;
-                            }
-                            Response r = serveErrorDocument(bucket, webConfig, authorization, e.getHttpStatus());
-                            if (r != null) {
-                                return r;
-                            }
-                        }
-                    }
-                } catch (AwsException e) {
-                    if (!"NoSuchWebsiteConfiguration".equals(e.getErrorCode())) {
-                        throw e;
-                    }
-                    // Bucket is not a website, continue to listObjects
+            // --- S3 static-website index resolution (site root) ---
+            // A website endpoint has no S3 REST API, so it serves the index document for the site root
+            // regardless of any query string — e.g. a single-page-app OAuth callback GET
+            // /?code=...&state=... must return index.html, not a ListObjects response. (?list-type and
+            // other sub-resource queries only reach the REST endpoint, never a website host.)
+            if (isWebsiteRequest(httpHeaders, uriInfo)) {
+                Response website = serveWebsiteObject(bucket, "", authorization);
+                if (website != null) {
+                    return website;
                 }
             }
 
@@ -545,8 +533,8 @@ public class S3Controller {
                     .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
                     .start("ListBucketResult", AwsNamespaces.S3)
                     .elem("Name", bucket)
-                    .elem("Prefix", prefix != null ? prefix : "")
-                    .elem("Delimiter", delimiter)
+                    .elem("Prefix", maybeEncode(prefix != null ? prefix : "", encodingType))
+                    .elem("Delimiter", maybeEncode(delimiter, encodingType))
                     .elem("MaxKeys", max);
             if (v2) {
                 xml.elem("KeyCount", objects.size() + commonPrefixes.size());
@@ -554,7 +542,7 @@ public class S3Controller {
             xml.elem("IsTruncated", result.isTruncated());
             for (S3Object obj : objects) {
                 xml.start("Contents")
-                   .elem("Key", obj.getKey())
+                   .elem("Key", maybeEncode(obj.getKey(), encodingType))
                    .elem("LastModified", ISO_FORMAT.format(obj.getLastModified()))
                    .elem("ETag", obj.getETag())
                    .elem("Size", obj.getSize())
@@ -563,7 +551,7 @@ public class S3Controller {
             }
             for (String cp : commonPrefixes) {
                 xml.start("CommonPrefixes")
-                   .elem("Prefix", cp)
+                   .elem("Prefix", maybeEncode(cp, encodingType))
                    .end("CommonPrefixes");
             }
             if (encodingType != null) {
@@ -577,12 +565,12 @@ public class S3Controller {
                     xml.elem("NextContinuationToken", result.nextContinuationToken());
                 }
                 if (startAfter != null) {
-                    xml.elem("StartAfter", startAfter);
+                    xml.elem("StartAfter", maybeEncode(startAfter, encodingType));
                 }
             } else {
-                xml.elem("Marker", marker != null ? marker : "");
+                xml.elem("Marker", maybeEncode(marker != null ? marker : "", encodingType));
                 if (result.isTruncated() && result.nextContinuationToken() != null) {
-                    xml.elem("NextMarker", result.nextContinuationToken());
+                    xml.elem("NextMarker", maybeEncode(result.nextContinuationToken(), encodingType));
                 }
             }
             xml.end("ListBucketResult");
@@ -746,6 +734,13 @@ public class S3Controller {
             authorization = S3RequestAuthorizationParser.parseIfRequired(
                     s3Service.isAuthEnforced(), httpHeaders, uriInfo);
 
+            if (isWebsiteRequest(httpHeaders, uriInfo)) {
+                Response website = serveWebsiteObject(bucket, key, authorization);
+                if (website != null) {
+                    return website;
+                }
+            }
+
             if (uploadId != null) {
                 s3Service.authorizeObjectRead(bucket, key, versionId, "s3:ListMultipartUploadParts", authorization);
                 return handleListParts(bucket, key, uploadId, maxPartsQuery, partNumberMarkerQuery);
@@ -816,16 +811,9 @@ public class S3Controller {
         } catch (AwsException e) {
             emitCloudTrailEvent("GetObject", bucket, key, 0L, 0L, e.getErrorCode(), e.getMessage());
             if (isWebsiteErrorDocumentTrigger(e) && isWebsiteRequest(httpHeaders, uriInfo)) {
-                try {
-                    WebsiteConfiguration webConfig = s3Service.getBucketWebsite(bucket);
-                    Response r = serveErrorDocument(bucket, webConfig, authorization, e.getHttpStatus());
-                    if (r != null) {
-                        return r;
-                    }
-                } catch (AwsException websiteException) {
-                    if (!"NoSuchWebsiteConfiguration".equals(websiteException.getErrorCode())) {
-                        return xmlErrorResponse(websiteException);
-                    }
+                Response websiteError = serveWebsiteErrorResponse(bucket, authorization, e);
+                if (websiteError != null) {
+                    return websiteError;
                 }
             }
             return xmlErrorResponse(e);
@@ -964,10 +952,17 @@ public class S3Controller {
                                @HeaderParam("x-amz-checksum-mode") String checksumMode,
                                @Context UriInfo uriInfo,
                                @Context HttpHeaders httpHeaders) {
+        S3Service.RequestAuthorization authorization = S3Service.RequestAuthorization.unsigned();
         try {
             key = extractObjectKey(uriInfo, bucket);
-            S3Service.RequestAuthorization authorization = S3RequestAuthorizationParser.parseIfRequired(
+            authorization = S3RequestAuthorizationParser.parseIfRequired(
                     s3Service.isAuthEnforced(), httpHeaders, uriInfo);
+            if (isWebsiteRequest(httpHeaders, uriInfo)) {
+                Response websiteResponse = serveWebsiteObject(bucket, key, authorization);
+                if (websiteResponse != null) {
+                    return headOnlyResponse(websiteResponse);
+                }
+            }
             s3Service.authorizeGetObject(bucket, key, versionId, authorization);
 
             S3Object obj = s3Service.headObject(bucket, key, versionId);
@@ -1002,6 +997,12 @@ public class S3Controller {
             return resp.build();
         } catch (AwsException e) {
             emitCloudTrailEvent("HeadObject", bucket, key, 0L, 0L, e.getErrorCode(), e.getMessage());
+            if (isWebsiteErrorDocumentTrigger(e) && isWebsiteRequest(httpHeaders, uriInfo)) {
+                Response websiteError = serveWebsiteErrorResponse(bucket, authorization, e);
+                if (websiteError != null) {
+                    return headOnlyResponse(websiteError);
+                }
+            }
             return xmlErrorResponse(e);
         }
     }
@@ -1164,7 +1165,8 @@ public class S3Controller {
                         httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-algorithm"),
                         httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key"),
                         httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key-MD5"),
-                        getChecksumAlgorithm(httpHeaders));
+                        getChecksumAlgorithm(httpHeaders),
+                        parseInlineTaggingHeader(httpHeaders.getHeaderString("x-amz-tagging")));
                 String xml = new XmlBuilder()
                         .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
                         .start("InitiateMultipartUploadResult", AwsNamespaces.S3)
@@ -1200,7 +1202,10 @@ public class S3Controller {
                 if (preconditionResponse != null) {
                     return preconditionResponse;
                 }
-                S3Object obj = s3Service.completeMultipartUpload(bucket, key, uploadId, partNumbers);
+                String checksumType = httpHeaders.getHeaderString("x-amz-checksum-type");
+                S3Checksum expectedChecksum = extractChecksumFromHeaders(httpHeaders);
+                S3Object obj = s3Service.completeMultipartUpload(bucket, key, uploadId, partNumbers,
+                        checksumType, expectedChecksum);
                 String baseUrl = uriInfo.getBaseUri().toString();
                 if (baseUrl.endsWith("/")) {
                     baseUrl = baseUrl.substring(0, baseUrl.length() - 1);
@@ -1234,6 +1239,10 @@ public class S3Controller {
     private Response handleDeleteObjects(String bucket, byte[] body) {
         String xml = new String(body, StandardCharsets.UTF_8);
         List<String> keys = XmlParser.extractAll(xml, "Key");
+        if (keys.isEmpty()) {
+            throw new AwsException("MalformedXML",
+                    "The XML you provided was not well-formed.", 400);
+        }
         boolean quiet = XmlParser.containsValue(xml, "Quiet", "true");
         S3Service.DeleteObjectsResult result = s3Service.deleteObjects(bucket, keys);
 
@@ -1371,31 +1380,43 @@ public class S3Controller {
         return Response.ok(xml.build()).type(MediaType.APPLICATION_XML).build();
     }
 
-    private Response handleListObjectVersions(String bucket, String prefix, Integer maxKeys, String keyMarker) {
+    private Response handleListObjectVersions(String bucket, String prefix, String delimiter, Integer maxKeys,
+                                              String keyMarker, String versionIdMarker, String encodingType) {
+        if (hasText(versionIdMarker) && !hasText(keyMarker)) {
+            throw new AwsException("InvalidArgument",
+                    "A version-id marker cannot be specified without a key marker.", 400);
+        }
         int max = (maxKeys != null && maxKeys > 0) ? maxKeys : 1000;
-        S3Service.ListVersionsResult result = s3Service.listObjectVersions(bucket, prefix, max, keyMarker);
+        S3Service.ListVersionsResult result =
+                s3Service.listObjectVersions(bucket, prefix, delimiter, max, keyMarker, versionIdMarker);
         XmlBuilder xml = new XmlBuilder()
                 .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
                 .start("ListVersionsResult", AwsNamespaces.S3)
                 .elem("Name", bucket)
-                .elem("Prefix", prefix)
-                .elem("KeyMarker", keyMarker)
-                .elem("MaxKeys", max)
-                .elem("IsTruncated", result.isTruncated());
+                .elem("Prefix", maybeEncode(prefix, encodingType))
+                .elem("KeyMarker", maybeEncode(keyMarker, encodingType))
+                // Version ids are opaque, so they are echoed verbatim like ContinuationToken.
+                .elem("VersionIdMarker", versionIdMarker);
+        if (delimiter != null) {
+            xml.elem("Delimiter", maybeEncode(delimiter, encodingType));
+        }
+        xml.elem("MaxKeys", max)
+           .elem("IsTruncated", result.isTruncated());
         if (result.isTruncated()) {
-            xml.elem("NextKeyMarker", result.nextKeyMarker());
+            xml.elem("NextKeyMarker", maybeEncode(result.nextKeyMarker(), encodingType));
+            xml.elem("NextVersionIdMarker", result.nextVersionIdMarker());
         }
         for (S3Object obj : result.versions()) {
             if (obj.isDeleteMarker()) {
                 xml.start("DeleteMarker")
-                   .elem("Key", obj.getKey())
+                   .elem("Key", maybeEncode(obj.getKey(), encodingType))
                    .elem("VersionId", obj.getVersionId())
                    .elem("IsLatest", obj.isLatest())
                    .elem("LastModified", ISO_FORMAT.format(obj.getLastModified()))
                    .end("DeleteMarker");
             } else {
                 xml.start("Version")
-                   .elem("Key", obj.getKey())
+                   .elem("Key", maybeEncode(obj.getKey(), encodingType))
                    .elem("VersionId", obj.getVersionId() != null ? obj.getVersionId() : "null")
                    .elem("IsLatest", obj.isLatest())
                    .elem("LastModified", ISO_FORMAT.format(obj.getLastModified()))
@@ -1404,6 +1425,14 @@ public class S3Controller {
                    .elem("StorageClass", obj.getStorageClass())
                    .end("Version");
             }
+        }
+        for (String cp : result.commonPrefixes()) {
+            xml.start("CommonPrefixes")
+               .elem("Prefix", maybeEncode(cp, encodingType))
+               .end("CommonPrefixes");
+        }
+        if (encodingType != null) {
+            xml.elem("EncodingType", encodingType);
         }
         xml.end("ListVersionsResult");
         return Response.ok(xml.build()).type(MediaType.APPLICATION_XML).build();
@@ -2189,12 +2218,104 @@ public class S3Controller {
         return host != null && host.contains("s3-website");
     }
 
-    private Response serveErrorDocument(String bucket, WebsiteConfiguration cfg,
-                                        S3Service.RequestAuthorization authorization, int status) {
-        if (cfg.getErrorDocument() == null) {
+    private static Response headOnlyResponse(Response response) {
+        return Response.fromResponse(response)
+                .entity(null)
+                .build();
+    }
+
+    /**
+     * Applies S3 static-website index-document resolution to a website-endpoint GET, mirroring how the
+     * real {@code <bucket>.s3-website-<region>.amazonaws.com} endpoint serves a site:
+     * <ul>
+     *   <li>a "directory" request (the site root, or any key ending in {@code /}) serves the index
+     *       document for that prefix — e.g. {@code /docs/} serves {@code docs/index.html};</li>
+     *   <li>a non-slash path that is not itself an object but has an index document underneath it is a
+     *       folder, so it 302-redirects to the slash-terminated form (so the page's relative asset URLs
+     *       resolve against the right base);</li>
+     *   <li>a missing index document returns the configured error document, or S3's default
+     *       website error response when no custom document is configured.</li>
+     * </ul>
+     * Returns {@code null} when the request should be served by the normal object path — i.e. an exact
+     * object hit, or a bucket that has no website configuration at all. The index read is authorized
+     * (a no-op unless S3 auth enforcement is enabled), matching the object-serving path.
+     */
+    private Response serveWebsiteObject(String bucket, String key,
+                                        S3Service.RequestAuthorization authorization) {
+        WebsiteConfiguration cfg;
+        try {
+            cfg = s3Service.getBucketWebsite(bucket);
+        } catch (AwsException e) {
+            // Only "no website configuration" means fall through to normal handling; a real error
+            // (e.g. NoSuchBucket) must propagate rather than be masked as "not a website".
+            if (!"NoSuchWebsiteConfiguration".equals(e.getErrorCode())) {
+                throw e;
+            }
             return null;
         }
+        String index = cfg.getIndexDocument();
+        if (index == null) {
+            return null;
+        }
+        // The routing layer strips a trailing slash from the object key, so recover the "directory"
+        // intent from the raw request path: a trailing slash (or the site root) means "serve this
+        // prefix's index document"; the prefix is the key without any trailing slash.
+        var request = currentVertxRequest.getCurrent().request();
+        String rawPath = request.path();
+        boolean directory = key.isEmpty() || rawPath.endsWith("/");
+        String prefix = key.endsWith("/") ? key.substring(0, key.length() - 1) : key;
+
+        if (directory) {
+            String indexKey = prefix.isEmpty() ? index : prefix + "/" + index;
+            try {
+                s3Service.authorizeGetObject(bucket, indexKey, null, authorization);
+                S3Object indexObj = s3Service.headObject(bucket, indexKey, null);
+                // A website endpoint serves the index document with no response-header overrides and no
+                // checksum headers (no viewer sends response-* or x-amz-checksum-mode to a website endpoint).
+                return fullObjectResponse(bucket, indexKey, null, indexObj,
+                        new ResponseHeaderOverrides(null, null, null, null, null, null), false);
+            } catch (AwsException e) {
+                if (!isWebsiteErrorDocumentTrigger(e)) {
+                    throw e;
+                }
+                Response err = serveErrorDocument(bucket, cfg, authorization, e.getHttpStatus());
+                return err != null ? err : xmlErrorResponse(e);
+            }
+        }
+        // Not slash-terminated: an exact object is served by the normal path; a prefix that exists only
+        // as a "folder" (an index document lives beneath it) 302-redirects to the slash-terminated form
+        // so the page's relative asset URLs resolve against the right base (matching real S3).
+        if (!s3Service.objectExists(bucket, prefix) && s3Service.objectExists(bucket, prefix + "/" + index)) {
+            // The query string is deliberately dropped: real S3 answers
+            // GET /photos?code=abc&state=xyz with a bare "Location: /photos/" (verified against a
+            // live website endpoint in us-east-1, same for HEAD and for nested prefixes).
+            return Response.status(Response.Status.FOUND)
+                    .header("Location", rawPath + "/")
+                    .build();
+        }
+        return null;
+    }
+
+    private Response serveWebsiteErrorResponse(String bucket,
+                                               S3Service.RequestAuthorization authorization,
+                                               AwsException cause) {
+        try {
+            WebsiteConfiguration webConfig = s3Service.getBucketWebsite(bucket);
+            return serveErrorDocument(bucket, webConfig, authorization, cause.getHttpStatus());
+        } catch (AwsException websiteException) {
+            if (!"NoSuchWebsiteConfiguration".equals(websiteException.getErrorCode())) {
+                return xmlErrorResponse(websiteException);
+            }
+            return null;
+        }
+    }
+
+    private Response serveErrorDocument(String bucket, WebsiteConfiguration cfg,
+                                        S3Service.RequestAuthorization authorization, int status) {
         int responseStatus = status == 403 ? 403 : 404;
+        if (cfg.getErrorDocument() == null) {
+            return defaultWebsiteErrorResponse(responseStatus);
+        }
         try {
             s3Service.authorizeGetObject(bucket, cfg.getErrorDocument(), null, authorization);
             S3Object err = s3Service.getObject(bucket, cfg.getErrorDocument());
@@ -2209,13 +2330,19 @@ public class S3Controller {
             if (!isWebsiteErrorDocumentTrigger(e)) {
                 throw e;
             }
-            return Response.status(responseStatus)
-                    .entity(defaultWebsiteErrorBody(responseStatus))
-                    .type(MediaType.TEXT_HTML)
-                    .header("x-amz-error-code", websiteErrorCode(responseStatus))
-                    .header("x-amz-error-message", websiteErrorMessage(responseStatus))
-                    .build();
+            return defaultWebsiteErrorResponse(responseStatus);
         }
+    }
+
+    private static Response defaultWebsiteErrorResponse(int status) {
+        String body = defaultWebsiteErrorBody(status);
+        return Response.status(status)
+                .entity(body)
+                .type(MediaType.TEXT_HTML)
+                .header("Content-Length", body.getBytes(StandardCharsets.UTF_8).length)
+                .header("x-amz-error-code", websiteErrorCode(status))
+                .header("x-amz-error-message", websiteErrorMessage(status))
+                .build();
     }
 
     private static boolean isWebsiteErrorDocumentTrigger(AwsException e) {
@@ -2790,7 +2917,7 @@ public class S3Controller {
             return uriInfo.getPathParameters().getFirst("key");
         }
         String rawKey = rawPath.substring(prefixIndex + bucketPrefix.length());
-        String key = URLDecoder.decode(rawKey, StandardCharsets.UTF_8);
+        String key = URLDecoder.decode(rawKey.replace("+", "%2B"), StandardCharsets.UTF_8);
         validateKeyNoTraversal(key);
         return key;
     }
@@ -2819,7 +2946,7 @@ public class S3Controller {
         String rawPath = queryIndex >= 0 ? rawUri.substring(0, queryIndex) : rawUri;
         String decodedPath;
         try {
-            decodedPath = URLDecoder.decode(rawPath, StandardCharsets.UTF_8);
+            decodedPath = URLDecoder.decode(rawPath.replace("+", "%2B"), StandardCharsets.UTF_8);
         }
         catch (IllegalArgumentException e) {
             throw new AwsException("BadRequest", null, 400);
@@ -3000,7 +3127,7 @@ public class S3Controller {
 
     private String decodeCopySourceComponent(String value, String originalCopySource) {
         try {
-            return URLDecoder.decode(value, StandardCharsets.UTF_8);
+            return URLDecoder.decode(value.replace("+", "%2B"), StandardCharsets.UTF_8);
         } catch (IllegalArgumentException e) {
             throw new AwsException("InvalidArgument", "Invalid copy source: " + originalCopySource, 400);
         }
@@ -3010,5 +3137,30 @@ public class S3Controller {
     }
 
     private record CopySourceRef(String bucket, String objectKey, String versionId) {
+    }
+
+    /**
+     * Percent-encodes a response field when the request asked for {@code encoding-type=url}.
+     *
+     * <p>Applied only to the fields AWS encodes ({@code Key}, {@code Prefix}, {@code Delimiter},
+     * {@code StartAfter}, {@code Marker}/{@code NextMarker} and {@code KeyMarker}/{@code NextKeyMarker}).
+     * Opaque tokens such as {@code ContinuationToken} and version ids are returned verbatim so clients can
+     * feed them straight back as query parameters.
+     *
+     * <p>{@code URLEncoder} emits {@code application/x-www-form-urlencoded} output, so the result is
+     * post-processed into the RFC 3986 form S3 uses: {@code '+'} back to {@code %20}, {@code '*'} to
+     * {@code %2A} and {@code %7E} back to a literal {@code '~'}.
+     */
+    private String maybeEncode(String val, String encodingType) {
+        if (val == null) {
+            return null;
+        }
+        if ("url".equalsIgnoreCase(encodingType)) {
+            return java.net.URLEncoder.encode(val, StandardCharsets.UTF_8)
+                    .replace("+", "%20")
+                    .replace("*", "%2A")
+                    .replace("%7E", "~");
+        }
+        return val;
     }
 }

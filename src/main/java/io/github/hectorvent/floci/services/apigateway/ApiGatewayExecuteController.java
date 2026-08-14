@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.apigateway.model.ApiGatewayResource;
+import io.github.hectorvent.floci.services.apigateway.model.ApiKey;
 import io.github.hectorvent.floci.services.apigateway.model.Integration;
 import io.github.hectorvent.floci.services.apigateway.model.IntegrationResponse;
 import io.github.hectorvent.floci.services.apigateway.model.MethodConfig;
@@ -41,9 +42,14 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
@@ -65,6 +71,15 @@ public class ApiGatewayExecuteController {
 
     private static final Logger LOG = Logger.getLogger(ApiGatewayExecuteController.class);
     private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() {};
+    private static final Set<String> V2_TEXT_CONTENT_TYPES = Set.of(
+            MediaType.TEXT_PLAIN,
+            MediaType.TEXT_HTML,
+            "text/csv",
+            MediaType.TEXT_XML,
+            MediaType.APPLICATION_JSON,
+            MediaType.APPLICATION_XML,
+            "application/javascript",
+            "application/graphql");
 
     private final ApiGatewayService apiGatewayService;
     private final ApiGatewayV2Service apiGatewayV2Service;
@@ -76,6 +91,7 @@ public class ApiGatewayExecuteController {
     private final WebSocketConnectionManager webSocketConnectionManager;
     private final ElbV2Service elbV2Service;
     private final SqsQueryHandler sqsQueryHandler;
+    private final ApiGatewayExecuteRouteContext routeContext;
 
     @Inject
     public ApiGatewayExecuteController(ApiGatewayService apiGatewayService, ApiGatewayV2Service apiGatewayV2Service,
@@ -84,7 +100,8 @@ public class ApiGatewayExecuteController {
                                        AwsServiceRouter serviceRouter,
                                        WebSocketConnectionManager webSocketConnectionManager,
                                        ElbV2Service elbV2Service,
-                                       SqsQueryHandler sqsQueryHandler) {
+                                       SqsQueryHandler sqsQueryHandler,
+                                       ApiGatewayExecuteRouteContext routeContext) {
         this.apiGatewayService = apiGatewayService;
         this.apiGatewayV2Service = apiGatewayV2Service;
         this.lambdaService = lambdaService;
@@ -95,6 +112,7 @@ public class ApiGatewayExecuteController {
         this.webSocketConnectionManager = webSocketConnectionManager;
         this.elbV2Service = elbV2Service;
         this.sqsQueryHandler = sqsQueryHandler;
+        this.routeContext = routeContext;
     }
 
     /** Matches an ELBv2 listener ARN (ALB {@code app/} or NLB {@code net/}); group 1 = region. */
@@ -232,30 +250,37 @@ public class ApiGatewayExecuteController {
     Response dispatch(String httpMethod, String apiId, String stageName,
                               String proxy, HttpHeaders headers, UriInfo uriInfo, byte[] body) {
         String region = regionResolver.resolveRegion(headers);
-
-        // Check if this is a v2 (HTTP API) or v1 (REST API)
-        boolean isV2 = false;
-        try {
-            apiGatewayV2Service.getApi(region, apiId);
-            isV2 = true;
-        } catch (AwsException ignored) {
-            // Not a v2 API — fall through to v1 handling
+        String httpApiRegion = routeContext.httpApiRegion();
+        if (httpApiRegion != null) {
+            return dispatchV2(httpMethod, apiId, stageName, proxy, headers, uriInfo, body, httpApiRegion);
         }
 
-        if (isV2) {
-            return dispatchV2(httpMethod, apiId, stageName, proxy, headers, uriInfo, body, region);
-        }
-
-        // Resolve region for unsigned data-plane requests
-        String auth = headers.getHeaderString("Authorization");
-        if (auth == null || auth.isBlank()) {
+        String preferredRegion = region;
+        // True for SigV4-unsigned requests, and also for requests whose Authorization header
+        // isn't a SigV4 credential at all (e.g. a Cognito bearer JWT) - resolveRegion silently
+        // fell back to defaultRegion in both cases, so the resolved region is a guess.
+        boolean regionUnresolved = regionResolver.resolveRegionFromAuthOrNull(
+                headers == null ? null : headers.getHeaderString("Authorization")) == null;
+        if (regionUnresolved) {
             region = apiGatewayService.resolveRestApiRegion(region, apiId);
         }
 
-        // Verify API and stage exist
-        Stage stage;
         try {
             apiGatewayService.getRestApi(region, apiId);
+        } catch (AwsException restApiError) {
+            String v2Region = apiGatewayV2Service.resolveApiRegion(preferredRegion, apiId);
+            try {
+                apiGatewayV2Service.getApi(v2Region, apiId);
+                return dispatchV2(httpMethod, apiId, stageName, proxy, headers, uriInfo, body, v2Region);
+            } catch (AwsException ignored) {
+                return Response.status(restApiError.getHttpStatus())
+                        .entity(jsonMessage(restApiError.getMessage()))
+                        .type(MediaType.APPLICATION_JSON).build();
+            }
+        }
+
+        Stage stage;
+        try {
             stage = apiGatewayService.getStage(region, apiId, stageName);
         } catch (AwsException e) {
             return Response.status(e.getHttpStatus())
@@ -510,15 +535,23 @@ public class ApiGatewayExecuteController {
                                      String httpMethod, String requestPath,
                                      String resourcePath, String resourceId, Stage stage, UriInfo uriInfo,
                                      String resolvedApiKey) {
+        // Recover the trailing slash the JAX-RS {proxy} binding strips, so the authorizer sees
+        // the same raw path the Lambda later receives from buildProxyEvent (AWS parity). Path
+        // matching and path-parameter extraction keep using the normalized requestPath.
+        String preservedPath = preserveTrailingSlash(requestPath, uriInfo.getRequestUri().getRawPath());
+
         ObjectNode node = objectMapper.createObjectNode();
         node.put("type", auth.getType());
+        // methodArn keeps the normalized path: it is matched against IAM-style policy resources,
+        // where a stray trailing slash would silently fail wildcards an authorizer already returns.
+        // No AWS behavior was found pinning it either way, so the conservative form wins.
         node.put("methodArn", buildMethodArn(region, apiId, stageName, httpMethod, requestPath));
         if ("TOKEN".equals(auth.getType())) {
             String headerName = auth.getIdentitySource().replace("method.request.header.", "");
             node.put("authorizationToken", headers.getHeaderString(headerName));
         } else if ("REQUEST".equals(auth.getType())) {
             node.put("resource", resourcePath);
-            node.put("path", requestPath);
+            node.put("path", preservedPath);
             node.put("httpMethod", httpMethod);
             putSingleValueHeaders(node, headers);
             putMultiValueHeaders(node, headers);
@@ -545,7 +578,7 @@ public class ApiGatewayExecuteController {
             ctx.put("apiId", apiId);
             ctx.put("resourceId", resourceId != null ? resourceId : "");
             ctx.put("resourcePath", resourcePath);
-            ctx.put("path", requestPath);
+            ctx.put("path", preservedPath);
             ctx.put("httpMethod", httpMethod);
             ctx.put("stage", stageName);
             ctx.put("requestId", UUID.randomUUID().toString());
@@ -582,9 +615,15 @@ public class ApiGatewayExecuteController {
             boolean planCoversStage = plan.getApiStages().stream()
                     .anyMatch(s -> apiId.equals(s.apiId()) && stageName.equals(s.stage()));
             if (!planCoversStage) continue;
-            // Check if any key in this plan matches the header value
+            // Check if any key in this plan matches the header value. The usage plan key holds a copy
+            // of the value, so the key itself must still exist and be enabled for the match to count.
             for (UsagePlanKey planKey : apiGatewayService.getUsagePlanKeys(region, plan.getId())) {
-                if (keyHeader.equals(planKey.getValue())) {
+                if (!keyHeader.equals(planKey.getValue())) {
+                    continue;
+                }
+                if (apiGatewayService.findApiKey(region, planKey.getId())
+                        .filter(ApiKey::isEnabled)
+                        .isPresent()) {
                     return planKey.getValue();
                 }
             }
@@ -615,9 +654,15 @@ public class ApiGatewayExecuteController {
                                    byte[] body, String requestId,
                                    String principalId, Map<String, Object> authorizerContext,
                                    String resolvedApiKey) {
+        // The JAX-RS {proxy} binding strips a trailing slash, but a trailing slash is
+        // significant in the delivered path (routers treat /x and /x/ as distinct routes).
+        // Recover it from the raw request URI for the event path fields. Resource matching
+        // and path-parameter extraction continue to use the normalized `path`.
+        String requestPath = preserveTrailingSlash(path, uriInfo.getRequestUri().getRawPath());
+
         ObjectNode event = objectMapper.createObjectNode();
         event.put("resource", resourcePath);
-        event.put("path", path);
+        event.put("path", requestPath);
         event.put("httpMethod", httpMethod);
 
         putSingleValueHeaders(event, headers);
@@ -625,8 +670,12 @@ public class ApiGatewayExecuteController {
         putQueryStringParameters(event, uriInfo);
         putMultiValueQueryStringParameters(event, uriInfo);
 
+        // pathParameters come from the matcher, which ran on the normalized path, so the greedy
+        // {proxy+} value has no trailing slash on real AWS even when event.path keeps one.
         ObjectNode pathParams = event.putObject("pathParameters");
-        if (proxy != null && !proxy.isEmpty()) pathParams.put("proxy", proxy);
+        if (proxy != null && !proxy.isEmpty()) {
+            pathParams.put("proxy", proxy);
+        }
         extractPathParams(resourcePath, path).forEach(pathParams::put);
 
         // stageVariables: populate from the Stage object (null if no variables configured)
@@ -652,7 +701,7 @@ public class ApiGatewayExecuteController {
         ctx.put("domainPrefix", apiId);
         ctx.put("extendedRequestId", requestId);
         ctx.put("httpMethod", httpMethod);
-        ctx.put("path", path);
+        ctx.put("path", requestPath);
         ctx.put("protocol", "HTTP/1.1");
         ctx.put("requestId", requestId);
         ctx.put("requestTime", requestTime);
@@ -766,7 +815,7 @@ public class ApiGatewayExecuteController {
         }
     }
 
-    private Response buildProxyResponse(InvokeResult result) {
+    Response buildProxyResponse(InvokeResult result) {
         if (result.getPayload() == null || result.getPayload().length == 0) {
             return Response.status(result.getFunctionError() != null ? 502 : result.getStatusCode()).build();
         }
@@ -793,9 +842,9 @@ public class ApiGatewayExecuteController {
                 String bodyStr = bodyNode.asText();
                 boolean isBase64 = node.path("isBase64Encoded").asBoolean(false);
                 byte[] bytes = isBase64 ? Base64.getDecoder().decode(bodyStr) : bodyStr.getBytes();
-                String ct = MediaType.APPLICATION_JSON;
-                JsonNode ctNode = node.path("headers").path("Content-Type");
-                if (!ctNode.isMissingNode() && !ctNode.isNull()) ct = ctNode.asText();
+                String ct = findHeaderIgnoreCase(multiHeaders, "Content-Type")
+                        .or(() -> findHeaderIgnoreCase(respHeaders, "Content-Type"))
+                        .orElse(MediaType.APPLICATION_JSON);
                 builder.entity(bytes).type(ct);
             }
             return builder.build();
@@ -803,6 +852,29 @@ public class ApiGatewayExecuteController {
             LOG.warnv("Failed to parse Lambda response: {0}", e.getMessage());
             return Response.status(502).entity(result.getPayload()).type(MediaType.APPLICATION_JSON).build();
         }
+    }
+
+    /**
+     * HTTP header names are case-insensitive on the wire (RFC 7230 §3.2), and Lambda proxy
+     * integrations commonly return lowercased names (e.g. the AWS Lambda Web Adapter emits
+     * "content-type", not "Content-Type"). A plain JsonNode#path lookup is exact-case and
+     * silently misses those, so Content-Type detection needs to scan case-insensitively.
+     * Handles both the "headers" shape (single string value) and the "multiValueHeaders"
+     * shape (array value, first element wins).
+     */
+    private static Optional<String> findHeaderIgnoreCase(JsonNode headersNode, String name) {
+        if (headersNode == null || !headersNode.isObject()) {
+            return Optional.empty();
+        }
+        var it = headersNode.fields();
+        while (it.hasNext()) {
+            var e = it.next();
+            if (e.getKey().equalsIgnoreCase(name)) {
+                JsonNode value = e.getValue().isArray() ? e.getValue().get(0) : e.getValue();
+                return value == null || value.isNull() ? Optional.empty() : Optional.of(value.asText());
+            }
+        }
+        return Optional.empty();
     }
 
     // ──────────────────────────── AWS (non-proxy) ────────────────────────────
@@ -942,6 +1014,18 @@ public class ApiGatewayExecuteController {
         try {
             if (target.action() == null) {
                 MultivaluedMap<String, String> formParams = parseFormUrlEncoded(transformedBody);
+
+                if ("sqs".equals(target.service()) && target.path() != null) {
+                    formParams.computeIfAbsent("QueueUrl", (_) -> {
+                        String resourcePath = target.path();
+                        int indexOfLastSlash = resourcePath.lastIndexOf('/');
+                        String queueName = indexOfLastSlash >= 0 && indexOfLastSlash < resourcePath.length() - 1
+                                ? resourcePath.substring(indexOfLastSlash + 1) : resourcePath;
+
+                        return Collections.singletonList(queueName);
+                    });
+                }
+
                 serviceResponse = serviceRouter.invokeQuery(target.service(), formParams, region);
             } else {
                 JsonNode requestJson = objectMapper.readTree(transformedBody);
@@ -1156,42 +1240,71 @@ public class ApiGatewayExecuteController {
         String template = ir.responseTemplates() != null
                 ? ir.responseTemplates().getOrDefault("application/json", "") : "";
 
-        if (template.isEmpty()) {
-            return Response.status(Integer.parseInt(ir.statusCode()))
-                    .type(MediaType.APPLICATION_JSON)
-                    .build();
+        int status = Integer.parseInt(ir.statusCode());
+        String responseBody = null;
+        Map<String, String> vtlHeaderOverrides = new HashMap<>();
+
+        if (!template.isEmpty()) {
+            // Evaluate the response template through VTL (supports $context.responseOverride etc.)
+            String requestId = UUID.randomUUID().toString();
+            String bodyStr = body != null && body.length > 0 ? new String(body) : null;
+
+            Map<String, String> headerMap = new HashMap<>();
+            for (Map.Entry<String, List<String>> e : headers.getRequestHeaders().entrySet()) {
+                if (!e.getValue().isEmpty()) headerMap.put(e.getKey(), e.getValue().get(0));
+            }
+            Map<String, String> queryMap = new HashMap<>();
+            for (Map.Entry<String, List<String>> e : uriInfo.getQueryParameters().entrySet()) {
+                if (!e.getValue().isEmpty()) queryMap.put(e.getKey(), e.getValue().get(0));
+            }
+            Map<String, String> pathMap = new HashMap<>(extractPathParams(resource.getPath(), path));
+
+            VtlTemplateEngine.VtlContext vtlCtx = new VtlTemplateEngine.VtlContext(
+                    bodyStr, headerMap, queryMap, pathMap, stageName, httpMethod,
+                    resource.getPath(), requestId, regionResolver.getAccountId(), null);
+
+            VtlTemplateEngine.EvaluateResult result = vtlEngine.evaluate(template, vtlCtx);
+            if (result.statusOverride() != null) status = result.statusOverride();
+            responseBody = result.body();
+            vtlHeaderOverrides = result.headerOverrides();
         }
 
-        // Evaluate the response template through VTL (supports $context.responseOverride etc.)
-        String requestId = UUID.randomUUID().toString();
-        String bodyStr = body != null && body.length > 0 ? new String(body) : null;
-
-        Map<String, String> headerMap = new HashMap<>();
-        for (Map.Entry<String, List<String>> e : headers.getRequestHeaders().entrySet()) {
-            if (!e.getValue().isEmpty()) headerMap.put(e.getKey(), e.getValue().get(0));
+        Response.ResponseBuilder rb = Response.status(status).type(MediaType.APPLICATION_JSON);
+        if (responseBody != null) {
+            rb.entity(responseBody);
         }
-        Map<String, String> queryMap = new HashMap<>();
-        for (Map.Entry<String, List<String>> e : uriInfo.getQueryParameters().entrySet()) {
-            if (!e.getValue().isEmpty()) queryMap.put(e.getKey(), e.getValue().get(0));
-        }
-        Map<String, String> pathMap = new HashMap<>(extractPathParams(resource.getPath(), path));
 
-        VtlTemplateEngine.VtlContext vtlCtx = new VtlTemplateEngine.VtlContext(
-                bodyStr, headerMap, queryMap, pathMap, stageName, httpMethod,
-                resource.getPath(), requestId, regionResolver.getAccountId(), null);
-
-        VtlTemplateEngine.EvaluateResult result = vtlEngine.evaluate(template, vtlCtx);
-
-        int status = result.statusOverride() != null
-                ? result.statusOverride()
-                : Integer.parseInt(ir.statusCode());
-
-        Response.ResponseBuilder rb = Response.status(status)
-                .entity(result.body())
-                .type(MediaType.APPLICATION_JSON);
-
-        for (Map.Entry<String, String> hdr : result.headerOverrides().entrySet()) {
+        // $context.responseOverride header assignments (VTL) take precedence.
+        for (Map.Entry<String, String> hdr : vtlHeaderOverrides.entrySet()) {
             rb.header(hdr.getKey(), hdr.getValue());
+        }
+        // Header names a VTL $context.responseOverride already set (HTTP header names are
+        // case-insensitive); these win, so skip a responseParameters entry for the same header
+        // rather than adding a second value for it.
+        Set<String> vtlOverriddenHeaders = new HashSet<>();
+        for (String name : vtlHeaderOverrides.keySet()) {
+            vtlOverriddenHeaders.add(name.toLowerCase(Locale.ROOT));
+        }
+
+        // Apply static header mappings from the integration response's responseParameters.
+        // This is what makes MOCK-integration CORS work (e.g. OPTIONS preflight returning
+        // Access-Control-Allow-Origin/-Methods/-Headers). A MOCK has no backend, so only
+        // static ('literal') and response-body-JSONPath sources resolve; header sources
+        // (integration.response.header.*) yield null and are skipped.
+        if (ir.responseParameters() != null) {
+            for (Map.Entry<String, String> param : ir.responseParameters().entrySet()) {
+                String dest = param.getKey();   // method.response.header.X-Foo
+                if (!dest.startsWith("method.response.header.")) continue;
+                String headerName = dest.substring("method.response.header.".length());
+                if (vtlOverriddenHeaders.contains(headerName.toLowerCase(Locale.ROOT))) {
+                    continue;   // a VTL $context.responseOverride for this header takes precedence
+                }
+                String headerValue = resolveResponseParameter(param.getValue(),
+                        new HashMap<>(), responseBody != null ? responseBody : "{}");
+                if (headerValue != null) {
+                    rb.header(headerName, headerValue);
+                }
+            }
         }
 
         return rb.build();
@@ -1202,6 +1315,22 @@ public class ApiGatewayExecuteController {
     private Response dispatchV2(String httpMethod, String apiId, String stageName,
                                 String proxy, HttpHeaders headers, UriInfo uriInfo,
                                 byte[] body, String region) {
+        // disableExecuteApiEndpoint is enforced here rather than in the caller because both the
+        // host-based route (*.execute-api.localhost.*, already rejected by ApiGatewayExecuteApiHostFilter)
+        // and the direct /execute-api/{apiId}/{stage}/... route land here. Checking at the single
+        // choke point keeps the two entry points from disagreeing about whether an API is invokable.
+        // A missing API is not this method's error to report — findMatchingRoute below 404s.
+        try {
+            if (apiGatewayV2Service.getApi(region, apiId).isDisableExecuteApiEndpoint()) {
+                return Response.status(Response.Status.NOT_FOUND)
+                        .entity(jsonMessage("Not Found"))
+                        .type(MediaType.APPLICATION_JSON).build();
+            }
+        } catch (AwsException e) {
+            LOG.debugv(e, "HTTP API lookup failed before execute-api dispatch: apiId={0}, region={1}",
+                    apiId, region);
+        }
+
         String path = "/" + (proxy == null ? "" : proxy);
 
         Route route = apiGatewayV2Service.findMatchingRoute(region, apiId, httpMethod, path);
@@ -1256,7 +1385,7 @@ public class ApiGatewayExecuteController {
 
         String requestId = UUID.randomUUID().toString();
         String eventJson = buildV2ProxyEvent(httpMethod, path, route.getRouteKey(),
-                apiId, stageName, headers, uriInfo, body, requestId);
+                apiId, region, stageName, headers, uriInfo, body, requestId);
 
         LOG.debugv("execute-api v2: {0} {1}/{2}{3} → Lambda {4}", httpMethod, apiId, stageName, path, functionName);
 
@@ -1822,7 +1951,7 @@ public class ApiGatewayExecuteController {
     }
 
     String buildV2ProxyEvent(String httpMethod, String path, String routeKey,
-                                     String apiId, String stageName,
+                                     String apiId, String region, String stageName,
                                      HttpHeaders headers, UriInfo uriInfo,
                                      byte[] body, String requestId) {
         ObjectNode event = objectMapper.createObjectNode();
@@ -1855,7 +1984,7 @@ public class ApiGatewayExecuteController {
         ObjectNode ctx = event.putObject("requestContext");
         ctx.put("accountId", regionResolver.getAccountId());
         ctx.put("apiId", apiId);
-        ctx.put("domainName", apiId + ".execute-api.us-east-1.amazonaws.com");
+        ctx.put("domainName", apiId + ".execute-api." + region + ".amazonaws.com");
         ctx.put("domainPrefix", apiId);
         ctx.put("requestId", requestId);
         ctx.put("routeKey", routeKey != null ? routeKey : "$default");
@@ -1873,8 +2002,11 @@ public class ApiGatewayExecuteController {
                 ? headers.getHeaderString("User-Agent") : "");
 
         if (body != null && body.length > 0) {
-            event.put("body", new String(body));
-            event.put("isBase64Encoded", false);
+            boolean isText = isV2TextContentType(headers.getHeaderString(HttpHeaders.CONTENT_TYPE));
+            event.put("body", isText
+                    ? new String(body, StandardCharsets.UTF_8)
+                    : Base64.getEncoder().encodeToString(body));
+            event.put("isBase64Encoded", !isText);
         } else {
             event.putNull("body");
             event.put("isBase64Encoded", false);
@@ -1884,6 +2016,25 @@ public class ApiGatewayExecuteController {
             return objectMapper.writeValueAsString(event);
         } catch (Exception e) {
             throw new RuntimeException("Failed to serialize v2 proxy event", e);
+        }
+    }
+
+    private static boolean isV2TextContentType(String contentType) {
+        if (contentType == null || contentType.isBlank()) {
+            return false;
+        }
+
+        try {
+            MediaType mediaType = MediaType.valueOf(contentType);
+            String type = (mediaType.getType() + "/" + mediaType.getSubtype()).toLowerCase(Locale.ROOT);
+            if (mediaType.getParameters().isEmpty()) {
+                return V2_TEXT_CONTENT_TYPES.contains(type);
+            }
+            return (MediaType.TEXT_PLAIN.equals(type) || MediaType.APPLICATION_JSON.equals(type))
+                    && mediaType.getParameters().size() == 1
+                    && StandardCharsets.UTF_8.name().equalsIgnoreCase(mediaType.getParameters().get("charset"));
+        } catch (IllegalArgumentException e) {
+            return false;
         }
     }
 
@@ -1913,6 +2064,23 @@ public class ApiGatewayExecuteController {
     }
 
     // ──────────────────────────── Path matching ────────────────────────────
+
+    /**
+     * Re-appends a trailing slash that the JAX-RS {@code {proxy}} path-param binding strips.
+     * A trailing slash is significant in the proxy event path (many routers treat {@code /x}
+     * and {@code /x/} as distinct routes), so it is recovered from the raw request URI. The
+     * normalized path is still used for resource matching and path-parameter extraction, which
+     * mirrors AWS routing {@code /x/} to the {@code /x} resource while keeping the slash in the
+     * delivered event. Returns {@code normalizedPath} unchanged for the root path or when the
+     * raw request had no trailing slash.
+     */
+    static String preserveTrailingSlash(String normalizedPath, String rawRequestPath) {
+        if (!"/".equals(normalizedPath) && !normalizedPath.endsWith("/")
+                && rawRequestPath != null && rawRequestPath.endsWith("/")) {
+            return normalizedPath + "/";
+        }
+        return normalizedPath;
+    }
 
     /**
      * Finds all matching resources for {@code requestPath}, sorted by specificity.

@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.s3;
 
+import io.github.hectorvent.floci.services.s3.model.S3Checksum;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -501,12 +502,243 @@ class S3MultipartIntegrationTest {
 
     @Test
     @Order(18)
+    void multipartUploadAppliesInlineTagging() {
+        String taggedKey = "tagged-multipart.bin";
+        String taggingUploadId = given()
+            .header("x-amz-tagging", "token=abc-123&teamId=42&note=hello%20world")
+        .when()
+            .post("/" + BUCKET + "/" + taggedKey + "?uploads")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath().getString("InitiateMultipartUploadResult.UploadId");
+
+        given()
+            .body("TaggedPartData")
+        .when()
+            .put("/" + BUCKET + "/" + taggedKey + "?uploadId=" + taggingUploadId + "&partNumber=1")
+        .then()
+            .statusCode(200);
+
+        String completeXml = """
+                <CompleteMultipartUpload>
+                    <Part><PartNumber>1</PartNumber><ETag>etag1</ETag></Part>
+                </CompleteMultipartUpload>""";
+        given()
+            .contentType("application/xml")
+            .body(completeXml)
+        .when()
+            .post("/" + BUCKET + "/" + taggedKey + "?uploadId=" + taggingUploadId)
+        .then()
+            .statusCode(200);
+
+        // Tags from the x-amz-tagging header on CreateMultipartUpload must be present
+        // on the completed object, including URL-decoded values.
+        given()
+        .when()
+            .get("/" + BUCKET + "/" + taggedKey + "?tagging")
+        .then()
+            .statusCode(200)
+            .body(containsString("<Key>token</Key>"))
+            .body(containsString("<Value>abc-123</Value>"))
+            .body(containsString("<Key>teamId</Key>"))
+            .body(containsString("<Value>42</Value>"))
+            .body(containsString("<Key>note</Key>"))
+            .body(containsString("<Value>hello world</Value>"));
+    }
+
+    @Test
+    @Order(19)
+    void initiateMultipartUploadRejectsMalformedTaggingHeader() {
+        given()
+            .header("x-amz-tagging", "missing-equals-sign")
+        .when()
+            .post("/" + BUCKET + "/bad-tagging.bin?uploads")
+        .then()
+            .statusCode(400)
+            .body(containsString("InvalidArgument"));
+    }
+
+    @Test
+    @Order(20)
+    void completeMultipartUploadRejectsMismatchedFullObjectChecksum() {
+        String key = "checksum-mismatch-multipart.bin";
+        String newUploadId = given()
+            .header("x-amz-checksum-algorithm", "CRC32")
+        .when()
+            .post("/" + BUCKET + "/" + key + "?uploads")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath().getString("InitiateMultipartUploadResult.UploadId");
+
+        given()
+            .body("Part1Data-Hello")
+        .when()
+            .put("/" + BUCKET + "/" + key + "?uploadId=" + newUploadId + "&partNumber=1")
+        .then()
+            .statusCode(200);
+
+        String completeXml = """
+                <CompleteMultipartUpload>
+                    <Part><PartNumber>1</PartNumber><ETag>etag1</ETag></Part>
+                </CompleteMultipartUpload>""";
+
+        given()
+            .contentType("application/xml")
+            .header("x-amz-checksum-type", "FULL_OBJECT")
+            .header("x-amz-checksum-crc32", "AAAAAA==")
+            .body(completeXml)
+        .when()
+            .post("/" + BUCKET + "/" + key + "?uploadId=" + newUploadId)
+        .then()
+            .statusCode(400)
+            .body(containsString("BadDigest"));
+
+        // The checksum mismatch rejects completion before the upload is consumed, so abort it explicitly.
+        given()
+        .when()
+            .delete("/" + BUCKET + "/" + key + "?uploadId=" + newUploadId)
+        .then()
+            .statusCode(204);
+    }
+
+    @Test
+    @Order(21)
+    void completeMultipartUploadAcceptsMatchingFullObjectChecksum() {
+        String key = "checksum-match-multipart.bin";
+        String data = "Part1Data-Hello";
+        String correctCrc32 = S3Checksum.crc32Base64(data.getBytes(StandardCharsets.UTF_8));
+
+        String newUploadId = given()
+            .header("x-amz-checksum-algorithm", "CRC32")
+        .when()
+            .post("/" + BUCKET + "/" + key + "?uploads")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath().getString("InitiateMultipartUploadResult.UploadId");
+
+        given()
+            .body(data)
+        .when()
+            .put("/" + BUCKET + "/" + key + "?uploadId=" + newUploadId + "&partNumber=1")
+        .then()
+            .statusCode(200);
+
+        String completeXml = """
+                <CompleteMultipartUpload>
+                    <Part><PartNumber>1</PartNumber><ETag>etag1</ETag></Part>
+                </CompleteMultipartUpload>""";
+
+        given()
+            .contentType("application/xml")
+            .header("x-amz-checksum-type", "FULL_OBJECT")
+            .header("x-amz-checksum-crc32", correctCrc32)
+            .body(completeXml)
+        .when()
+            .post("/" + BUCKET + "/" + key + "?uploadId=" + newUploadId)
+        .then()
+            .statusCode(200)
+            .body(containsString("<CompleteMultipartUploadResult"));
+    }
+
+    @Test
+    @Order(22)
+    void completeMultipartUploadRejectsFullObjectShaChecksum() {
+        String key = "checksum-sha-full-object-multipart.bin";
+        String newUploadId = given()
+            .header("x-amz-checksum-algorithm", "SHA256")
+        .when()
+            .post("/" + BUCKET + "/" + key + "?uploads")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath().getString("InitiateMultipartUploadResult.UploadId");
+
+        given()
+            .body("Part1Data-Hello")
+        .when()
+            .put("/" + BUCKET + "/" + key + "?uploadId=" + newUploadId + "&partNumber=1")
+        .then()
+            .statusCode(200);
+
+        String completeXml = """
+                <CompleteMultipartUpload>
+                    <Part><PartNumber>1</PartNumber><ETag>etag1</ETag></Part>
+                </CompleteMultipartUpload>""";
+
+        given()
+            .contentType("application/xml")
+            .header("x-amz-checksum-type", "FULL_OBJECT")
+            .header("x-amz-checksum-sha256", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+            .body(completeXml)
+        .when()
+            .post("/" + BUCKET + "/" + key + "?uploadId=" + newUploadId)
+        .then()
+            .statusCode(400)
+            .body(containsString("InvalidRequest"));
+
+        given()
+        .when()
+            .delete("/" + BUCKET + "/" + key + "?uploadId=" + newUploadId)
+        .then()
+            .statusCode(204);
+    }
+
+    @Test
+    @Order(23)
+    void completeMultipartUploadReportsFullObjectChecksumType() {
+        String key = "checksum-type-multipart.bin";
+        String data = "Part1Data-Hello";
+        String correctCrc32 = S3Checksum.crc32Base64(data.getBytes(StandardCharsets.UTF_8));
+
+        String newUploadId = given()
+            .header("x-amz-checksum-algorithm", "CRC32")
+        .when()
+            .post("/" + BUCKET + "/" + key + "?uploads")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath().getString("InitiateMultipartUploadResult.UploadId");
+
+        given()
+            .body(data)
+        .when()
+            .put("/" + BUCKET + "/" + key + "?uploadId=" + newUploadId + "&partNumber=1")
+        .then()
+            .statusCode(200);
+
+        String completeXml = """
+                <CompleteMultipartUpload>
+                    <Part><PartNumber>1</PartNumber><ETag>etag1</ETag></Part>
+                </CompleteMultipartUpload>""";
+
+        given()
+            .contentType("application/xml")
+            .header("x-amz-checksum-type", "FULL_OBJECT")
+            .header("x-amz-checksum-crc32", correctCrc32)
+            .body(completeXml)
+        .when()
+            .post("/" + BUCKET + "/" + key + "?uploadId=" + newUploadId)
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("x-amz-object-attributes", "Checksum")
+        .when()
+            .get("/" + BUCKET + "/" + key + "?attributes")
+        .then()
+            .statusCode(200)
+            .body(containsString("<ChecksumType>FULL_OBJECT</ChecksumType>"));
+    }
+
+    @Test
+    @Order(24)
     void cleanUp() {
         given().when().delete("/" + BUCKET + "/" + KEY).then().statusCode(204);
+        given().when().delete("/" + BUCKET + "/tagged-multipart.bin").then().statusCode(204);
         given().when().delete("/" + BUCKET + "/source-for-copy.bin").then().statusCode(204);
         given().when().delete("/" + BUCKET + "/copy-dest.bin").then().statusCode(204);
         given().when().delete("/" + BUCKET + "/sse-c-multipart.bin").then().statusCode(204);
         given().when().delete("/" + BUCKET + "/sse-c-source-for-copy.bin").then().statusCode(204);
+        given().when().delete("/" + BUCKET + "/checksum-match-multipart.bin").then().statusCode(204);
+        given().when().delete("/" + BUCKET + "/checksum-type-multipart.bin").then().statusCode(204);
         given().when().delete("/" + BUCKET).then().statusCode(204);
     }
 

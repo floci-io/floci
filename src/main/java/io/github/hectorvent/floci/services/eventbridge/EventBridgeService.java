@@ -24,6 +24,7 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.databind.node.TextNode;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -136,9 +137,8 @@ public class EventBridgeService {
 
     public EventBus createEventBus(String name, String description,
                                    Map<String, String> tags, String region) {
-        if (name == null || name.isBlank()) {
-            throw new AwsException("ValidationException", "EventBus name is required.", 400);
-        }
+        validateCustomEventBusName(name);
+        validateEventBusDescription(description);
         String key = busKey(region, name);
         if (busStore.get(key).isPresent()) {
             throw new AwsException("ResourceAlreadyExistsException",
@@ -165,13 +165,15 @@ public class EventBridgeService {
             throw new AwsException("ValidationException", "EventBus name is required.", 400);
         }
         String effectiveName = resolvedBusName(name);
+        validateEventBusNameForMutation(effectiveName);
         if ("default".equals(effectiveName)) {
             throw new AwsException("ValidationException", "Cannot delete the default event bus.", 400);
         }
         String key = busKey(region, effectiveName);
-        EventBus bus = busStore.get(key)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                        "EventBus not found: " + effectiveName, 404));
+        EventBus bus = busStore.get(key).orElse(null);
+        if (bus == null) {
+            return;
+        }
         String rulePrefix = ruleKeyPrefix(region, effectiveName);
         boolean hasRules = ruleStore.keys().stream().anyMatch(k -> k.startsWith(rulePrefix));
         if (hasRules) {
@@ -191,7 +193,7 @@ public class EventBridgeService {
         }
         return busStore.get(busKey(region, effectiveName))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                        "EventBus not found: " + name, 404));
+                        "EventBus not found: " + name, 400));
     }
 
     public EventBus updateEventBus(String name,
@@ -200,19 +202,22 @@ public class EventBridgeService {
                                    String deadLetterConfig,
                                    String logConfig,
                                    String region) {
+        validateEventBusDescription(description);
+        if (name != null) {
+            validateEventBusNameForMutation(name);
+        }
         // Name identifies the bus; never mutated (AWS does not support rename).
-        String effectiveName = name == null || name.isBlank() ? "default" : name;
+        String effectiveName = name == null ? "default" : name;
         EventBus bus = "default".equals(effectiveName)
                 ? getOrCreateDefaultBus(region)
                 : busStore.get(busKey(region, effectiveName))
                         .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                                "EventBus not found: " + effectiveName, 404));
+                                "EventBus not found: " + effectiveName, 400));
 
-        // Only mark dirty when a field is both non-blank AND different from
-        // the value currently on the bus — re-sending the same value is a no-op.
+        // Description accepts an explicit empty string so callers can clear it. A null value means
+        // the field was omitted and must remain unchanged.
         boolean dirty = false;
-        if (description != null && !description.isBlank()
-                && !description.equals(bus.getDescription())) {
+        if (description != null && !description.equals(bus.getDescription())) {
             bus.setDescription(description);
             dirty = true;
         }
@@ -238,6 +243,34 @@ public class EventBridgeService {
                     effectiveName, bus.getArn(), region);
         }
         return bus;
+    }
+
+    private void validateCustomEventBusName(String name) {
+        if (name == null || name.isBlank()) {
+            throw new AwsException("ValidationException", "EventBus name is required.", 400);
+        }
+        if (name.length() > 256
+                || !name.matches("[.\\-_A-Za-z0-9]+")
+                || "default".equals(name)) {
+            throw new AwsException("ValidationException",
+                    "Invalid custom event bus name: " + name, 400);
+        }
+    }
+
+    private void validateEventBusDescription(String description) {
+        if (description != null && description.length() > 512) {
+            throw new AwsException("ValidationException",
+                    "EventBus description must not exceed 512 characters.", 400);
+        }
+    }
+
+    private void validateEventBusNameForMutation(String name) {
+        if (name.isEmpty()
+                || name.length() > 256
+                || !name.matches("[/\\.\\-_A-Za-z0-9]+")) {
+            throw new AwsException("ValidationException",
+                    "Invalid event bus name: " + name, 400);
+        }
     }
 
     public List<EventBus> listEventBuses(String namePrefix, String region) {
@@ -650,7 +683,15 @@ public class EventBridgeService {
         return putEvents(entries, region, null);
     }
 
-    private PutEventsResult putEvents(List<Map<String, Object>> entries, String region, String accountId) {
+    /**
+     * Publishes entries to a bus, optionally naming the account the bus lives in.
+     *
+     * @param accountId account owning the target bus, or {@code null} to resolve against the
+     *                  caller's request context. Only {@code null} carries the un-prefixed
+     *                  legacy-key fallback in {@link AccountAwareStorageBackend#get}, so pass
+     *                  {@code null} whenever the target is in the caller's own account.
+     */
+    public PutEventsResult putEvents(List<Map<String, Object>> entries, String region, String accountId) {
         int failed = 0;
         List<Map<String, String>> resultEntries = new ArrayList<>();
 
@@ -875,8 +916,7 @@ public class EventBridgeService {
             JsonNode expected = field.getValue();
             JsonNode actualField = actual.get(field.getKey());
             if (expected.isArray()) {
-                String actualStr = actualField != null ? actualField.asText(null) : null;
-                if (!matchesArrayField(expected, actualStr)) {
+                if (!matchesArrayField(expected, actualField)) {
                     return false;
                 }
             } else if (expected.isObject()) {
@@ -900,25 +940,23 @@ public class EventBridgeService {
     }
 
     private boolean matchesArrayField(JsonNode arrayNode, String value) {
+        JsonNode actual = value != null ? TextNode.valueOf(value) : null;
+        return matchesArrayField(arrayNode, actual);
+    }
+
+    private boolean matchesArrayField(JsonNode arrayNode, JsonNode actual) {
         for (JsonNode element : arrayNode) {
-            if (matchesSingleElement(element, value)) {
+            if (matchesSingleElement(element, actual)) {
                 return true;
             }
         }
         return false;
     }
 
-    private boolean matchesSingleElement(JsonNode element, String value) {
-        // Exact string match
-        if (element.isTextual()) {
-            return value != null && value.equals(element.asText());
-        }
-        // Null literal match
-        if (element.isNull()) {
-            return value == null;
-        }
+    private boolean matchesSingleElement(JsonNode element, JsonNode actual) {
         // Content filter object
         if (element.isObject()) {
+            String value = actual != null && actual.isTextual() ? actual.asText() : null;
             if (element.has("prefix")) {
                 return value != null && value.startsWith(element.get("prefix").asText());
             }
@@ -930,11 +968,16 @@ public class EventBridgeService {
             }
             if (element.has("anything-but")) {
                 JsonNode anythingBut = element.get("anything-but");
+                if (anythingBut.isValueNode()) {
+                    return actual != null && !actual.isNull() && !matchesExactValue(anythingBut, actual);
+                }
                 if (anythingBut.isArray()) {
                     for (JsonNode v : anythingBut) {
-                        if (v.isTextual() && v.asText().equals(value)) return false;
+                        if (matchesExactValue(v, actual)) {
+                            return false;
+                        }
                     }
-                    return value != null;
+                    return actual != null && !actual.isNull();
                 }
                 if (anythingBut.isObject() && anythingBut.has("prefix")) {
                     return value != null && !value.startsWith(anythingBut.get("prefix").asText());
@@ -942,8 +985,32 @@ public class EventBridgeService {
             }
             if (element.has("exists")) {
                 boolean shouldExist = element.get("exists").asBoolean();
-                return shouldExist ? (value != null) : (value == null);
+                boolean present = actual != null;
+                return shouldExist == present;
             }
+            return false;
+        }
+        // Exact literal match (string, null, boolean, number)
+        return matchesExactValue(element, actual);
+    }
+
+    private boolean matchesExactValue(JsonNode expected, JsonNode actual) {
+        if (expected.isNull()) {
+            return actual != null && actual.isNull();
+        }
+        if (actual == null) {
+            return false;
+        }
+        if (expected.isTextual()) {
+            return actual.isTextual() && expected.asText().equals(actual.asText());
+        }
+        if (expected.isBoolean()) {
+            return actual.isBoolean() && expected.booleanValue() == actual.booleanValue();
+        }
+        if (expected.isNumber()) {
+            // AWS normalizes numbers before comparing: 300, 300.0 and 3.0e2
+            // are all considered equal.
+            return actual.isNumber() && expected.decimalValue().compareTo(actual.decimalValue()) == 0;
         }
         return false;
     }

@@ -69,6 +69,7 @@ class EmulatorLifecycleTest {
     @Mock private NeptuneContainerManager neptuneContainerManager;
     @Mock private NeptuneProxyManager neptuneProxyManager;
     @Mock private io.github.hectorvent.floci.services.amazonmq.container.RabbitMqManager rabbitMqManager;
+    @Mock private io.github.hectorvent.floci.services.kinesisanalytics.container.FlinkContainerManager flinkContainerManager;
     @Mock private RdsService rdsService;
     @Mock private io.github.hectorvent.floci.services.elbv2.ElbV2Service elbV2Service;
     @Mock private InitializationHooksRunner initializationHooksRunner;
@@ -103,7 +104,7 @@ class EmulatorLifecycleTest {
                 elastiCacheProxyManager, rdsContainerManager, rdsProxyManager,
                 memoryDbContainerManager, memoryDbProxyManager,
                 docDbContainerManager, neptuneContainerManager, neptuneProxyManager,
-                rabbitMqManager, rdsService, elbV2Service,
+                rabbitMqManager, flinkContainerManager, rdsService, elbV2Service,
                 initializationHooksRunner, sqsPoller, kinesisPoller, dynamodbStreamsPoller,
                 pipesService, ec2MetadataServer, ecrRegistryManager, flociUiManager, initLifecycleState,
                 schemaCreationWorker, containerTeardowns, persistentPathValidator);
@@ -161,6 +162,21 @@ class EmulatorLifecycleTest {
         emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
 
         Mockito.verify(elbV2Service, Mockito.never()).restorePersistedRuntime();
+    }
+
+    @Test
+    @DisplayName("Should rehydrate AppSync schemas after orphan recovery on startup")
+    void shouldRehydrateAppSyncSchemasAfterOrphanRecovery() {
+        stubStorageConfig();
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        var inOrder = Mockito.inOrder(storageFactory, schemaCreationWorker);
+        inOrder.verify(storageFactory).loadAll();
+        inOrder.verify(schemaCreationWorker).recoverOrphans();
+        inOrder.verify(schemaCreationWorker).rehydrateSchemas();
     }
 
     @Test
