@@ -160,7 +160,6 @@ public class OpenSearchController {
     public Response updateDomainConfig(@Context HttpHeaders headers,
                                         @PathParam("domainName") String domainName,
                                         String body) {
-        String region = regionResolver.resolveRegion(headers);
         try {
             JsonNode req = objectMapper.readTree(body);
             String engineVersion = req.path("EngineVersion").asText(null);
@@ -176,7 +175,7 @@ public class OpenSearchController {
                     parseDomainEndpointOptions(req.path("DomainEndpointOptions")));
 
             Domain domain = service.updateDomainConfig(domainName, engineVersion, clusterConfig,
-                    ebsOptions, accessPolicies, options, region);
+                    ebsOptions, accessPolicies, options);
 
             long epochSeconds = domain.getCreatedAt() != null ? domain.getCreatedAt().getEpochSecond() : 0;
             ObjectNode response = objectMapper.createObjectNode();

@@ -172,15 +172,14 @@ public class OpenSearchService {
     }
 
     public Domain updateDomainConfig(String domainName, String engineVersion,
-                                      ClusterConfig clusterConfig, EbsOptions ebsOptions,
-                                      String region) {
+                                      ClusterConfig clusterConfig, EbsOptions ebsOptions) {
         return updateDomainConfig(domainName, engineVersion, clusterConfig, ebsOptions, null,
-                DomainOptions.EMPTY, region);
+                DomainOptions.EMPTY);
     }
 
     public Domain updateDomainConfig(String domainName, String engineVersion,
                                       ClusterConfig clusterConfig, EbsOptions ebsOptions,
-                                      String accessPolicies, DomainOptions options, String region) {
+                                      String accessPolicies, DomainOptions options) {
         Domain domain = describeDomain(domainName);
         OpenSearchVersions.validate(engineVersion);
         validateOptions(options);
