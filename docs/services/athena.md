@@ -18,13 +18,48 @@ Floci emulates Amazon Athena with **real SQL execution** powered by a [floci-duc
 | `GetWorkGroup` | Returns information about a workgroup |
 | `ListWorkGroups` | Lists all workgroups |
 | `CreateWorkGroup` | Creates a new workgroup |
-| `ListDataCatalogs` | - |
-| `GetDataCatalog` | - |
-| `ListDatabases` | - |
-| `ListTableMetadata` | - |
-| `GetTableMetadata` | - |
+| `ListDataCatalogs` | Lists the built-in Glue catalog followed by the catalogs created here |
+| `GetDataCatalog` | Returns a catalog's type, description and parameters |
+| `CreateDataCatalog` | Creates a `LAMBDA`, `GLUE`, `HIVE` or `FEDERATED` catalog with tags |
+| `UpdateDataCatalog` | Replaces a catalog's type, description and parameters |
+| `DeleteDataCatalog` | Removes a catalog and returns it |
+| `ListTagsForResource` | Returns tags for a data catalog or workgroup ARN |
+| `TagResource` | Adds tags to a data catalog or workgroup ARN |
+| `UntagResource` | Removes tags by key from a data catalog or workgroup ARN |
+| `ListDatabases` | Lists the Glue databases visible to a catalog |
+| `ListTableMetadata` | Lists Glue tables in a database as Athena table metadata |
+| `GetTableMetadata` | Returns one Glue table as Athena table metadata |
 | `DeleteWorkGroup` | Deletes a workgroup |
 <!-- floci:actions:end -->
+
+## Data catalogs
+
+Every region carries the built-in `AwsDataCatalog` (type `GLUE`), which cannot be created,
+modified or deleted and always sorts first in `ListDataCatalogs`. `CreateDataCatalog`
+accepts the four modelled types — `LAMBDA`, `GLUE`, `HIVE` and `FEDERATED` — and any other
+value is rejected with `InvalidRequestException`. `Type`, `Description` and the
+`Parameters` map are stored verbatim and come back from `GetDataCatalog`, `ListDataCatalogs`
+and the `DeleteDataCatalog` response.
+
+`Status` is `CREATE_COMPLETE` from the create response onwards. AWS creates `FEDERATED`
+catalogs asynchronously, but nothing here is asynchronous, so reporting `CREATE_IN_PROGRESS`
+would strand any caller polling for completion. A `FEDERATED` catalog also reports
+`ConnectionType`, read from its `connection-type` parameter; the other types carry no
+connection type and the field is omitted rather than guessed.
+
+Note that catalog metadata is registration only — `ListDatabases`, `ListTableMetadata` and
+`GetTableMetadata` still read from Glue regardless of which catalog is named.
+
+## Tags
+
+`TagResource`, `UntagResource` and `ListTagsForResource` work on Athena ARNs:
+
+- `arn:aws:athena:{region}:{account}:datacatalog/{name}`
+- `arn:aws:athena:{region}:{account}:workgroup/{name}`
+
+Tags passed to `CreateDataCatalog` or `CreateWorkGroup` are visible through
+`ListTagsForResource` immediately. Deleting the catalog or workgroup drops its tags. An ARN
+with no backing resource raises `ResourceNotFoundException`.
 
 ## How it works
 
