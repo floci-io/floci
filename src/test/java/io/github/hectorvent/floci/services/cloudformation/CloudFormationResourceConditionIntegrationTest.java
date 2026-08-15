@@ -5,10 +5,15 @@ import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
+
 import static io.restassured.RestAssured.given;
+import static org.awaitility.Awaitility.await;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
 
 @QuarkusTest
 class CloudFormationResourceConditionIntegrationTest {
@@ -158,7 +163,7 @@ class CloudFormationResourceConditionIntegrationTest {
     }
 
     @Test
-    void updateStack_whenConditionDeletionFails_completesAndLeavesResourceUnmanaged() {
+    void updateStack_whenConditionDeletionFails_keepsResourceTrackedAsDeleteFailed() {
         String suffix = Long.toString(System.nanoTime(), 36);
         String stackName = "cfn-cond-delete-fail-" + suffix;
         String bucketName = "condition-delete-fail-" + suffix;
@@ -231,7 +236,10 @@ class CloudFormationResourceConditionIntegrationTest {
                 .post("/")
             .then()
                 .statusCode(200)
-                .body(not(containsString("<LogicalResourceId>OptionalBucket</LogicalResourceId>")));
+                // The cleanup delete failed (bucket non-empty), so the resource must remain under
+                // stack management as DELETE_FAILED instead of being dropped and orphaned.
+                .body(containsString("<LogicalResourceId>OptionalBucket</LogicalResourceId>"))
+                .body(containsString("<ResourceStatus>DELETE_FAILED</ResourceStatus>"));
 
             given()
                 .contentType("application/x-www-form-urlencoded")
@@ -264,8 +272,8 @@ class CloudFormationResourceConditionIntegrationTest {
                 .statusCode(200);
         } finally {
             given().header("Host", bucketName + ".localhost").delete("/object.txt");
-            given().header("Host", bucketName + ".localhost").delete("/");
             deleteStack(stackName);
+            awaitStackGone(stackName);
         }
     }
 
@@ -834,10 +842,10 @@ class CloudFormationResourceConditionIntegrationTest {
     }
 
     @Test
-    void deleteStack_afterConditionDeletionFailure_doesNotReclaimUnmanagedResource() {
-        // Codifies Floci's UPDATE_COMPLETE_CLEANUP_IN_PROGRESS-style behavior: when a condition-driven
-        // cleanup delete fails, the resource is dropped from stack management. A later DeleteStack
-        // therefore never reclaims it — it is no longer part of the stack.
+    void deleteStack_afterConditionDeletionFailure_retriesAndReclaimsResource() {
+        // When a condition-driven cleanup delete fails (bucket non-empty), the resource stays under
+        // stack management as DELETE_FAILED. Once the blocker is cleared, a later DeleteStack must
+        // retry the deletion and reclaim the backing resource instead of leaving it orphaned.
         String suffix = Long.toString(System.nanoTime(), 36);
         String stackName = "cfn-cond-del-orphan-" + suffix;
         String bucketName = "condition-orphan-" + suffix;
@@ -882,8 +890,8 @@ class CloudFormationResourceConditionIntegrationTest {
             .then()
                 .statusCode(200);
 
-            // Cleanup delete fails (bucket non-empty), but the update still completes and the bucket
-            // leaves stack management.
+            // Cleanup delete fails (bucket non-empty), but the update still completes; the bucket
+            // stays under stack management as DELETE_FAILED.
             updateStack(stackName, disabledTemplate);
             given()
                 .contentType("application/x-www-form-urlencoded")
@@ -895,9 +903,23 @@ class CloudFormationResourceConditionIntegrationTest {
                 .statusCode(200)
                 .body(containsString("<StackStatus>UPDATE_COMPLETE</StackStatus>"));
 
-            // DeleteStack now has nothing to reclaim: the orphaned bucket is untracked and survives.
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DescribeStackResources")
+                .formParam("StackName", stackName)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("<LogicalResourceId>OptionalBucket</LogicalResourceId>"))
+                .body(containsString("<ResourceStatus>DELETE_FAILED</ResourceStatus>"));
+
+            // Clear the blocker, then DeleteStack must retry the still-tracked DELETE_FAILED resource
+            // and reclaim the backing bucket rather than orphaning it.
+            given().header("Host", bucketName + ".localhost").delete("/object.txt").then().statusCode(204);
             deleteStack(stackName);
-            given().header("Host", bucketName + ".localhost").when().get("/").then().statusCode(200);
+            awaitStackGone(stackName);
+            given().header("Host", bucketName + ".localhost").when().get("/").then().statusCode(404);
         } finally {
             given().header("Host", bucketName + ".localhost").delete("/object.txt");
             given().header("Host", bucketName + ".localhost").delete("/");
@@ -940,5 +962,22 @@ class CloudFormationResourceConditionIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+    }
+
+    private static void awaitStackGone(String stackName) {
+        await()
+            .atMost(Duration.ofSeconds(30))
+            .pollInterval(Duration.ofMillis(50))
+            .untilAsserted(() -> {
+                String body = given()
+                    .contentType("application/x-www-form-urlencoded")
+                    .formParam("Action", "DescribeStacks")
+                    .formParam("StackName", stackName)
+                .when().post("/").then().extract().asString();
+                if (body.contains("<StackStatus>DELETE_FAILED</StackStatus>")) {
+                    fail("stack delete failed: " + body);
+                }
+                assertTrue(body.contains("does not exist"), "stack still exists: " + body);
+            });
     }
 }

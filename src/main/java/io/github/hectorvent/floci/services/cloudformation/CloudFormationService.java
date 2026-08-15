@@ -1141,9 +1141,10 @@ public class CloudFormationService {
     /**
      * Removes resources that were provisioned by an earlier execution but whose resource-level
      * {@code Condition} is false in the current template. Physical deletion honors the resource's
-     * deletion policy. A failed physical deletion leaves the resource in the underlying service but
-     * still removes it from stack management. Resources removed from the template entirely are
-     * outside this condition-specific cleanup.
+     * deletion policy. A failed physical deletion leaves the resource in the underlying service and
+     * keeps it under stack management as {@code DELETE_FAILED}, so a later {@code DeleteStack} or
+     * {@code UpdateStack} can retry the cleanup instead of orphaning the backing resource.
+     * Resources removed from the template entirely are outside this condition-specific cleanup.
      *
      * @return one {@link UpdateCleanupFailure} per resource whose physical deletion failed
      */
@@ -1184,9 +1185,13 @@ public class CloudFormationService {
                         : "Resource deletion failed during update cleanup";
                 failures.add(new UpdateCleanupFailure(
                         resource.getLogicalId(), resource.getPhysicalId(), reason));
+                // Keep the resource under stack management as DELETE_FAILED. Removing it here would
+                // drop it from DescribeStackResources while the backing resource still exists,
+                // orphaning it and preventing a later DeleteStack/UpdateStack from retrying cleanup.
+                resource.setStatus("DELETE_FAILED");
+                resource.setStatusReason(reason);
                 addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
                         resource.getResourceType(), "DELETE_FAILED", reason);
-                stack.getResources().remove(resource.getLogicalId());
                 LOG.warnv("Failed to delete condition-disabled {0} ({1}) in stack {2}: {3}",
                         resource.getResourceType(), resource.getPhysicalId(),
                         stack.getStackName(), reason);
