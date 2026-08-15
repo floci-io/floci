@@ -278,3 +278,20 @@ setup() {
     fi
     [ "$status" -eq 0 ]
 }
+
+@test "Terraform: IAM role attaches managed policies outside the curated set" {
+    run aws_cmd iam list-attached-role-policies --role-name floci-compat-managed-policy-role \
+        --query "sort_by(AttachedPolicies, &PolicyArn)[].PolicyArn" --output text
+    assert_success
+    assert_output --partial "arn:aws:iam::aws:policy/AmazonEC2ReadOnlyAccess"
+    assert_output --partial "arn:aws:iam::aws:policy/service-role/AmazonElasticMapReduceRole"
+}
+
+# A policy AWS does not publish must still be rejected, otherwise a typo silently
+# "succeeds" and Terraform/CloudFormation never surface the mistake.
+@test "Terraform: attaching a nonexistent managed policy still fails" {
+    run aws_cmd iam attach-role-policy --role-name floci-compat-managed-policy-role \
+        --policy-arn "arn:aws:iam::aws:policy/AmazonS3FullAcess"
+    assert_failure
+    assert_output --partial "NoSuchEntity"
+}

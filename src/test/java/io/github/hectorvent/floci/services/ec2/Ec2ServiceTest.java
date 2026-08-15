@@ -3,16 +3,18 @@ package io.github.hectorvent.floci.services.ec2;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.core.storage.InMemoryStorage;
-import io.github.hectorvent.floci.core.storage.StorageBackend;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
 import io.github.hectorvent.floci.services.ec2.model.BlockDeviceMapping;
 import io.github.hectorvent.floci.services.ec2.model.EbsBlockDevice;
 import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
+import io.github.hectorvent.floci.services.ec2.model.Image;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
 import io.github.hectorvent.floci.services.ec2.model.ManagedPrefixList;
+import io.github.hectorvent.floci.services.ec2.model.IpPermission;
+import io.github.hectorvent.floci.services.ec2.model.IpRange;
 import io.github.hectorvent.floci.services.ec2.model.PrefixListEntry;
 import io.github.hectorvent.floci.services.ec2.model.NetworkInterface;
 import io.github.hectorvent.floci.services.ec2.model.Reservation;
@@ -27,12 +29,19 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
@@ -377,6 +386,72 @@ class Ec2ServiceTest {
     }
 
     @Test
+    void deleteKeyPairByNameRemovesItFromTheStore() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+
+        service.createKeyPair("us-east-1", "by-name");
+        service.deleteKeyPair("us-east-1", "by-name", null);
+
+        // A deleted key pair is gone for good: describe by name must report NotFound
+        // rather than returning the key that DeleteKeyPair claimed to remove.
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.describeKeyPairs("us-east-1", List.of("by-name"), List.of()));
+        assertEquals("InvalidKeyPair.NotFound", error.getErrorCode());
+        assertTrue(service.describeKeyPairs("us-east-1", List.of(), List.of()).isEmpty());
+    }
+
+    @Test
+    void deleteKeyPairByNameLeavesOtherKeysAndRegionsIntact() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+
+        service.createKeyPair("us-east-1", "target");
+        service.createKeyPair("us-east-1", "bystander");
+        service.createKeyPair("eu-west-1", "target");
+
+        service.deleteKeyPair("us-east-1", "target", null);
+
+        // Deleting resolves through the store key, so it must not take the same-named
+        // key in another region — nor any other key in the same region — with it.
+        assertEquals(1, service.describeKeyPairs("us-east-1", List.of("bystander"), List.of()).size());
+        assertEquals(1, service.describeKeyPairs("eu-west-1", List.of("target"), List.of()).size());
+    }
+
+    @Test
+    void deleteKeyPairByIdRemovesItFromTheStore() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+
+        String keyPairId = service.createKeyPair("us-east-1", "by-id").getKeyPairId();
+        service.deleteKeyPair("us-east-1", null, keyPairId);
+
+        assertTrue(service.describeKeyPairs("us-east-1", List.of(), List.of()).isEmpty());
+    }
+
+    @Test
+    void deleteKeyPairForUnknownNameIsANoOp() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+
+        service.createKeyPair("us-east-1", "present-key");
+
+        // Real EC2 DeleteKeyPair is idempotent — deleting a key that does not exist
+        // succeeds rather than raising InvalidKeyPair.NotFound.
+        service.deleteKeyPair("us-east-1", "never-existed", null);
+
+        assertEquals(1, service.describeKeyPairs("us-east-1", List.of("present-key"), List.of()).size());
+    }
+
+    @Test
     void registerImageReusingSnapshotDoesNotOverwriteSnapshotMetadata() {
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
                 mock(Ec2PortForwardManager.class),
@@ -396,7 +471,7 @@ class Ec2ServiceTest {
 
     @Test
     void describeSnapshotsDefaultsToOwnedSnapshots() {
-        InMemoryStorage<String, Snapshot> snapshotStore = new InMemoryStorage<>();
+        AccountAwareStorageBackend<Snapshot> snapshotStore = AccountAwareStorageBackend.inMemory("000000000000");
         Snapshot foreign = new Snapshot();
         foreign.setSnapshotId("snap-foreign");
         foreign.setOwnerId("111111111111");
@@ -414,6 +489,133 @@ class Ec2ServiceTest {
 
         assertEquals(1, snapshots.size());
         assertEquals("snap-owned", snapshots.getFirst().getSnapshotId());
+    }
+
+    @Test
+    void createImageRebootsTheSourceInstanceUnlessNoRebootIsSet() {
+        Ec2ContainerManager containerManager = mock(Ec2ContainerManager.class);
+        Ec2Service service = liveService(containerManager, mock(AmiImageResolver.class));
+        String instanceId = runOne(service, "ami-src");
+
+        service.createImage("us-east-1", instanceId, "with-reboot", null, false);
+        verify(containerManager).reboot(argThat(i -> instanceId.equals(i.getInstanceId())));
+
+        service.createImage("us-east-1", instanceId, "without-reboot", null, true);
+        // Still one: NoReboot=true opted the second call out.
+        verify(containerManager, times(1)).reboot(argThat(i -> instanceId.equals(i.getInstanceId())));
+    }
+
+    @Test
+    void runInstancesOnACreatedImageResolvesTheSourceGuest() {
+        AmiImageResolver resolver = mock(AmiImageResolver.class);
+        Ec2Service service = liveService(mock(Ec2ContainerManager.class), resolver);
+        String instanceId = runOne(service, "ami-src");
+
+        String createdAmi = service.createImage("us-east-1", instanceId, "captured", null, true)
+                .getImageId();
+        String chainedAmi = service.createImage("us-east-1", runOne(service, createdAmi),
+                "captured-again", null, true).getImageId();
+
+        runOne(service, createdAmi);
+        runOne(service, chainedAmi);
+
+        // Every launch resolves through to the catalog id; the generated ami-* ids are
+        // unknown to the resolver and would otherwise fall back to the default guest.
+        verify(resolver, times(4)).resolveImage("ami-src");
+        verify(resolver, never()).resolveImage(createdAmi);
+        verify(resolver, never()).resolveImage(chainedAmi);
+    }
+
+    @Test
+    void createImageOnACatalogSourceCarriesItsRootDevice() {
+        Ec2ImageCatalog catalog = mock(Ec2ImageCatalog.class);
+        Ec2ImageCatalog.CatalogImage source = new Ec2ImageCatalog.CatalogImage();
+        source.imageId = "ami-src";
+        source.architecture = "x86_64";
+        source.rootDeviceType = "ebs";
+        source.rootDeviceName = "/dev/xvda";
+        when(catalog.findByIdOrAlias("ami-src")).thenReturn(Optional.of(source));
+        Ec2Service service = liveService(mock(Ec2ContainerManager.class), mock(AmiImageResolver.class), catalog);
+        String instanceId = runOne(service, "ami-src");
+
+        Image image = service.createImage("us-east-1", instanceId, "captured", null, true);
+
+        assertEquals("/dev/xvda", image.getRootDeviceName());
+        assertEquals(1, image.getBlockDeviceMappings().size());
+        BlockDeviceMapping root = image.getBlockDeviceMappings().getFirst();
+        assertEquals("/dev/xvda", root.getDeviceName());
+        assertNotNull(root.getEbs().getSnapshotId());
+
+        // The rebuilt root describes the volume RunInstances actually created for the
+        // source, so DescribeImages does not report a type the instance never had.
+        assertEquals("gp3", root.getEbs().getVolumeType());
+        assertEquals(8, root.getEbs().getVolumeSize());
+
+        // The mapping's snapshot is registered, so DescribeSnapshots can resolve it.
+        List<Snapshot> snapshots = service.describeSnapshots("us-east-1",
+                List.of(root.getEbs().getSnapshotId()), null, null);
+        assertEquals(1, snapshots.size());
+    }
+
+    @Test
+    void createImageTakesItsOwnSnapshotRatherThanTheSourceAmisOne() {
+        Ec2Service service = liveService(mock(Ec2ContainerManager.class), mock(AmiImageResolver.class));
+        Image source = service.registerImage("us-east-1", "source-image", null, null, "/dev/sda1",
+                List.of(blockDeviceMapping("snap-source", 16)));
+
+        Image image = service.createImage("us-east-1", runOne(service, source.getImageId()),
+                "captured", null, true);
+
+        BlockDeviceMapping captured = image.getBlockDeviceMappings().getFirst();
+        assertEquals("/dev/sda1", captured.getDeviceName());
+        assertEquals(16, captured.getEbs().getVolumeSize());
+        assertNotEquals("snap-source", captured.getEbs().getSnapshotId());
+
+        // Both snapshots exist, so deleting one image does not strand the other.
+        assertEquals(2, service.describeSnapshots("us-east-1", List.of(), List.of(), Map.of()).size());
+    }
+
+    @Test
+    void createImageCapturesAVolumeAttachedAfterLaunch() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        Image sourceAmi = service.registerImage("us-east-1", "source-image", null, null, "/dev/sda1",
+                List.of(blockDeviceMapping("snap-source", 8)));
+        Instance inst = service.runInstances("us-east-1", sourceAmi.getImageId(), "t3.micro", 1, 1,
+                null, List.of(), null, null, List.of(), null, null).getInstances().getFirst();
+        inst.setState(InstanceState.running());
+        Volume data = service.createVolume("us-east-1", inst.getPlacement().getAvailabilityZone(),
+                "gp3", 50, false, 0, null, null, List.of());
+        service.attachVolume("us-east-1", data.getVolumeId(), inst.getInstanceId(), "/dev/sdf");
+
+        Image image = service.createImage("us-east-1", inst.getInstanceId(), "captured", null, true);
+
+        // The root device the source AMI describes, plus the volume attached after launch.
+        assertEquals(2, image.getBlockDeviceMappings().size());
+        BlockDeviceMapping attached = image.getBlockDeviceMappings().stream()
+                .filter(m -> "/dev/sdf".equals(m.getDeviceName()))
+                .findFirst().orElseThrow();
+        assertEquals(50, attached.getEbs().getVolumeSize());
+        assertEquals("gp3", attached.getEbs().getVolumeType());
+        assertNotNull(attached.getEbs().getSnapshotId());
+    }
+
+    private static String runOne(Ec2Service service, String imageId) {
+        return service.runInstances("us-east-1", imageId, "t3.micro", 1, 1, null,
+                List.of(), null, null, List.of(), null, null)
+                .getInstances().getFirst().getInstanceId();
+    }
+
+    /** mock=false so the container-manager and resolver interactions actually happen. */
+    private static Ec2Service liveService(Ec2ContainerManager containerManager, AmiImageResolver resolver) {
+        return liveService(containerManager, resolver, mock(Ec2ImageCatalog.class));
+    }
+
+    private static Ec2Service liveService(Ec2ContainerManager containerManager, AmiImageResolver resolver,
+                                          Ec2ImageCatalog catalog) {
+        return new Ec2Service(mockConfig(false), containerManager, mock(Ec2PortForwardManager.class),
+                resolver, catalog, new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
     }
 
     private static BlockDeviceMapping blockDeviceMapping(String snapshotId, int volumeSize) {
@@ -664,6 +866,51 @@ class Ec2ServiceTest {
         }
     }
 
+    /**
+     * Verified against a live AWS account: the three dotted prefixes are rejected, and the
+     * trailing dot matters — {@code com.amazonaws-probe} and {@code comamazonaws.probe} are both
+     * accepted there, so a dotless prefix match would refuse names AWS allows.
+     */
+    @Test
+    void createManagedPrefixListRejectsNamesReservedByAws() {
+        Ec2Service service = prefixListService();
+
+        for (String reserved : new String[] {"com.amazonaws.probe", "com.amazon.probe", "com.aws.probe"}) {
+            AwsException error = assertThrows(AwsException.class, () -> service.createManagedPrefixList(
+                    "us-east-1", reserved, "IPv4", 5, List.of(), List.of()), "expected rejection for " + reserved);
+            assertEquals("InvalidParameterValue", error.getErrorCode());
+        }
+
+        // Names that only look reserved are still allowed.
+        for (String allowed : new String[] {"com.amazonaws-probe", "comamazonaws.probe", "corp"}) {
+            assertEquals(allowed, service.createManagedPrefixList(
+                    "us-east-1", allowed, "IPv4", 5, List.of(), List.of()).getPrefixListName());
+        }
+    }
+
+    /**
+     * Verified against a live AWS account: the rename path applies the same rule, and rejecting it
+     * leaves the existing name in place. A lookalike is still allowed.
+     */
+    @Test
+    void renamingToAReservedNameIsRejected() {
+        Ec2Service service = prefixListService();
+        ManagedPrefixList list = service.createManagedPrefixList("us-east-1", "corp", "IPv4", 5,
+                List.of(), List.of());
+
+        AwsException error = assertThrows(AwsException.class, () -> service.modifyManagedPrefixList(
+                "us-east-1", list.getPrefixListId(), null, "com.amazonaws.us-east-1.s3", null,
+                List.of(), List.of()));
+        assertEquals("InvalidParameterValue", error.getErrorCode());
+        assertEquals("corp", service.describeManagedPrefixLists("us-east-1",
+                List.of(list.getPrefixListId()), Map.of()).getFirst().getPrefixListName());
+
+        service.modifyManagedPrefixList("us-east-1", list.getPrefixListId(), null,
+                "com.amazonaws-renamed", null, List.of(), List.of());
+        assertEquals("com.amazonaws-renamed", service.describeManagedPrefixLists("us-east-1",
+                List.of(list.getPrefixListId()), Map.of()).getFirst().getPrefixListName());
+    }
+
     @Test
     void describeManagedPrefixListsFiltersByName() {
         Ec2Service service = prefixListService();
@@ -822,6 +1069,38 @@ class Ec2ServiceTest {
                 .getFirst().getTags().isEmpty());
     }
 
+    /**
+     * A rule's tags already reach the store and the rule itself; only DescribeTags mistyped them,
+     * so a resource-type filter never matched.
+     */
+    @Test
+    void tagsOnASecurityGroupRuleAreTypedAsSecurityGroupRule() {
+        Ec2Service service = prefixListService();
+        String groupId = service.createSecurityGroup("us-east-1", "db", "db", null).getGroupId();
+        IpPermission perm = new IpPermission();
+        perm.setIpProtocol("tcp");
+        perm.setFromPort(443);
+        perm.setToPort(443);
+        perm.getIpRanges().add(new IpRange("10.0.0.0/8", null));
+        String ruleId = service.authorizeSecurityGroupIngress("us-east-1", groupId, List.of(perm))
+                .getFirst().getSecurityGroupRuleId();
+
+        service.createTags("us-east-1", List.of(ruleId), List.of(new Tag("env", "prod")));
+
+        assertEquals("security-group-rule", service.describeTags("us-east-1",
+                Map.of("resource-id", List.of(ruleId))).getFirst().get("resourceType"));
+        assertEquals(1, service.describeTags("us-east-1",
+                Map.of("resource-type", List.of("security-group-rule"))).size());
+
+        // Tag the group as well, so the sg- classification is genuinely exercised rather than
+        // read off an empty result.
+        service.createTags("us-east-1", List.of(groupId), List.of(new Tag("env", "prod")));
+        assertEquals("security-group", service.describeTags("us-east-1",
+                Map.of("resource-id", List.of(groupId))).getFirst().get("resourceType"));
+        assertEquals(1, service.describeTags("us-east-1",
+                Map.of("resource-type", List.of("security-group"))).size());
+    }
+
     private static EmulatorConfig mockConfig(boolean ec2Mock) {
         EmulatorConfig config = mock(EmulatorConfig.class);
         EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
@@ -834,26 +1113,26 @@ class Ec2ServiceTest {
     }
 
     private static final class InMemoryStorageFactory extends StorageFactory {
-        private final Map<String, StorageBackend<String, ?>> overrides;
+        private final Map<String, AccountAwareStorageBackend<?>> overrides;
 
         private InMemoryStorageFactory() {
             this(Map.of());
         }
 
-        private InMemoryStorageFactory(Map<String, StorageBackend<String, ?>> overrides) {
+        private InMemoryStorageFactory(Map<String, AccountAwareStorageBackend<?>> overrides) {
             super(null, null);
             this.overrides = overrides;
         }
 
         @Override
         @SuppressWarnings("unchecked")
-        public <V> StorageBackend<String, V> create(String serviceName, String fileName,
+        public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
                                                     TypeReference<Map<String, V>> typeReference) {
-            StorageBackend<String, ?> override = overrides.get(fileName);
+            AccountAwareStorageBackend<?> override = overrides.get(fileName);
             if (override != null) {
-                return (StorageBackend<String, V>) override;
+                return (AccountAwareStorageBackend<V>) override;
             }
-            return new InMemoryStorage<>();
+            return AccountAwareStorageBackend.inMemory("000000000000");
         }
     }
 }

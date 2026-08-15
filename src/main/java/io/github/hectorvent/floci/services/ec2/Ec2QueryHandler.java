@@ -113,6 +113,7 @@ public class Ec2QueryHandler {
                 case "ImportKeyPair" -> handleImportKeyPair(params, region);
                 // AMIs
                 case "DescribeImages" -> handleDescribeImages(params, region);
+                case "CreateImage" -> handleCreateImage(params, region);
                 case "RegisterImage" -> handleRegisterImage(params, region);
                 case "DescribeSnapshots" -> handleDescribeSnapshots(params, region);
                 // Tags
@@ -322,6 +323,15 @@ public class Ec2QueryHandler {
         throw new AwsException("InvalidParameterValue", name + " is not a valid boolean.", 400);
     }
 
+    /**
+     * Reads the {@code IpPermissions.N} list of an authorize/revoke request.
+     *
+     * <p>Each permission carries up to four kinds of source, and every one of them has to be read
+     * here or it is silently dropped before the service layer ever sees it (#2190). Note the EC2
+     * Query protocol serializes the {@code UserIdGroupPairs} member under the wire name
+     * {@code Groups}, which is why a group reference arrives as
+     * {@code IpPermissions.1.Groups.1.GroupId} rather than under the SDK-facing field name.
+     */
     private List<IpPermission> parseIpPermissions(MultivaluedMap<String, String> p, String prefix) {
         List<IpPermission> perms = new ArrayList<>();
         for (int i = 1; ; i++) {
@@ -339,6 +349,32 @@ public class Ec2QueryHandler {
                 if (cidr == null) break;
                 String desc = p.getFirst(prefix + "." + i + ".IpRanges." + j + ".Description");
                 perm.getIpRanges().add(new IpRange(cidr, desc));
+            }
+            for (int j = 1; ; j++) {
+                String cidr = p.getFirst(prefix + "." + i + ".Ipv6Ranges." + j + ".CidrIpv6");
+                if (cidr == null) {
+                    break;
+                }
+                String desc = p.getFirst(prefix + "." + i + ".Ipv6Ranges." + j + ".Description");
+                perm.getIpv6Ranges().add(new Ipv6Range(cidr, desc));
+            }
+            for (int j = 1; ; j++) {
+                String base = prefix + "." + i + ".Groups." + j;
+                String groupId = p.getFirst(base + ".GroupId");
+                String groupName = p.getFirst(base + ".GroupName");
+                String userId = p.getFirst(base + ".UserId");
+                String desc = p.getFirst(base + ".Description");
+                // A default-VPC caller may reference a group by name alone, so the loop cannot end
+                // on a missing GroupId.
+                if (groupId == null && groupName == null && userId == null && desc == null) {
+                    break;
+                }
+                UserIdGroupPair pair = new UserIdGroupPair();
+                pair.setGroupId(groupId);
+                pair.setGroupName(groupName);
+                pair.setUserId(userId);
+                pair.setDescription(desc);
+                perm.getUserIdGroupPairs().add(pair);
             }
             perms.add(perm);
         }
@@ -425,6 +461,19 @@ public class Ec2QueryHandler {
         int maxCount = Integer.parseInt(p.getOrDefault("MaxCount", List.of("1")).get(0));
         String keyName = p.getFirst("KeyName");
         String subnetId = p.getFirst("SubnetId");
+        // The launch-time public-IP override arrives either on the primary
+        // network interface spec (the shape Terraform's
+        // associate_public_ip_address sends) or as the legacy top-level
+        // parameter. AWS rejects both at once, so the interface spec wins when
+        // present. Absent means "use the subnet's MapPublicIpOnLaunch default".
+        String assocParam = p.getFirst("NetworkInterface.1.AssociatePublicIpAddress");
+        if (assocParam == null) {
+            assocParam = p.getFirst("AssociatePublicIpAddress");
+        }
+        Boolean associatePublicIp = assocParam == null ? null : Boolean.parseBoolean(assocParam);
+        if (subnetId == null) {
+            subnetId = p.getFirst("NetworkInterface.1.SubnetId");
+        }
         String clientToken = p.getFirst("ClientToken");
         List<String> sgIds = getList(p, "SecurityGroupId");
 
@@ -471,7 +520,8 @@ public class Ec2QueryHandler {
         }
 
         Reservation res = service.runInstances(region, imageId, instanceType, minCount, maxCount,
-                keyName, sgIds, subnetId, clientToken, instanceTags, userData, iamInstanceProfileArn);
+                keyName, sgIds, subnetId, clientToken, instanceTags, userData, iamInstanceProfileArn,
+                associatePublicIp);
 
         XmlBuilder xml = new XmlBuilder()
                 .start("RunInstancesResponse", AwsNamespaces.EC2)
@@ -841,15 +891,64 @@ public class Ec2QueryHandler {
         return xmlResponse(xml.build());
     }
 
+    // The common AWS interface-endpoint services, as short names. Rendered as
+    // com.amazonaws.<region>.<name>. CDK's InterfaceVpcEndpoint (lookupSupportedAzs)
+    // calls DescribeVpcEndpointServices at synth time; an empty set aborts synth.
+    private static final List<String> INTERFACE_ENDPOINT_SERVICES = List.of(
+            "ec2", "ec2messages", "ssm", "ssmmessages", "logs", "monitoring", "sts",
+            "secretsmanager", "kms", "ecr.api", "ecr.dkr", "ecs", "ecs-agent", "ecs-telemetry",
+            "elasticloadbalancing", "sns", "sqs", "kinesis-streams", "kinesis-firehose",
+            "states", "events", "lambda", "glue", "athena", "iot.data", "execute-api");
+
     private Response handleDescribeVpcEndpointServices(MultivaluedMap<String, String> p, String region) {
+        List<String> requested = getList(p, "ServiceName");
+        List<String> azNames = service.describeAvailabilityZones(region).stream()
+                .map(z -> z.get("zoneName")).toList();
+
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeVpcEndpointServicesResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
-                .start("serviceNameSet")
-                .end("serviceNameSet")
-                .start("serviceDetailSet")
-                .end("serviceDetailSet")
-                .end("DescribeVpcEndpointServicesResponse");
+                .start("serviceNameSet");
+        List<String> fullNames = new ArrayList<>();
+        // An explicit ServiceName filter wins: the emulator supports any
+        // interface service in every AZ, so echo exactly what was asked. CDK's
+        // InterfaceVpcEndpoint queries a specific (often custom) service name
+        // and fails if the response omits it or lists no AZs.
+        if (!requested.isEmpty()) {
+            fullNames.addAll(requested);
+        } else {
+            // S3 has both a Gateway and an Interface offering; keep it in the set.
+            for (String name : INTERFACE_ENDPOINT_SERVICES) {
+                fullNames.add("com.amazonaws." + region + "." + name);
+            }
+            fullNames.add("com.amazonaws." + region + ".s3");
+        }
+        for (String full : fullNames) {
+            xml.elem("item", full);
+        }
+        xml.end("serviceNameSet").start("serviceDetailSet");
+        for (String full : fullNames) {
+            // S3 is the one service with both offerings, and AWS reports both
+            // types on its single service detail. Everything else is Interface.
+            List<String> serviceTypes = full.endsWith(".s3")
+                    ? List.of("Gateway", "Interface")
+                    : List.of("Interface");
+            xml.start("item")
+                    .elem("serviceName", full)
+                    .start("serviceType");
+            for (String serviceType : serviceTypes) {
+                xml.start("item").elem("serviceType", serviceType).end("item");
+            }
+            xml.end("serviceType")
+                    .start("availabilityZoneSet");
+            for (String az : azNames) xml.elem("item", az);
+            xml.end("availabilityZoneSet")
+                    .elem("owner", "amazon")
+                    .elem("acceptanceRequired", "false")
+                    .elem("managesVpcEndpoints", "false")
+                    .end("item");
+        }
+        xml.end("serviceDetailSet").end("DescribeVpcEndpointServicesResponse");
         return xmlResponse(xml.build());
     }
 
@@ -1452,6 +1551,21 @@ public class Ec2QueryHandler {
                     .end("item");
         }
         xml.end("imagesSet").end("DescribeImagesResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleCreateImage(MultivaluedMap<String, String> p, String region) {
+        Image image = service.createImage(
+                region,
+                p.getFirst("InstanceId"),
+                p.getFirst("Name"),
+                p.getFirst("Description"),
+                Boolean.parseBoolean(p.getFirst("NoReboot")));
+        XmlBuilder xml = new XmlBuilder()
+                .start("CreateImageResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .elem("imageId", image.getImageId())
+                .end("CreateImageResponse");
         return xmlResponse(xml.build());
     }
 
@@ -2392,8 +2506,20 @@ public class Ec2QueryHandler {
         if (rule.getFromPort() != null) xml.elem("fromPort", String.valueOf(rule.getFromPort()));
         if (rule.getToPort() != null) xml.elem("toPort", String.valueOf(rule.getToPort()));
         xml.elem("cidrIpv4", rule.getCidrIpv4())
-                .elem("cidrIpv6", rule.getCidrIpv6())
-                .elem("description", rule.getDescription())
+                .elem("cidrIpv6", rule.getCidrIpv6());
+        // Guarded: unlike elem(), start()/end() emit even when every child is null, which would put
+        // an empty <referencedGroupInfo/> on every CIDR rule.
+        ReferencedSecurityGroup ref = rule.getReferencedGroupInfo();
+        if (ref != null) {
+            xml.start("referencedGroupInfo")
+                    .elem("groupId", ref.getGroupId())
+                    .elem("peeringStatus", ref.getPeeringStatus())
+                    .elem("userId", ref.getUserId())
+                    .elem("vpcId", ref.getVpcId())
+                    .elem("vpcPeeringConnectionId", ref.getVpcPeeringConnectionId())
+                    .end("referencedGroupInfo");
+        }
+        xml.elem("description", rule.getDescription())
                 .raw(tagSetXml(rule.getTags()));
         return xml.build();
     }
@@ -2867,7 +2993,10 @@ public class Ec2QueryHandler {
             xml.end("ipRanges")
                     .start("ipv6Ranges");
             for (Ipv6Range r : perm.getIpv6Ranges()) {
-                xml.start("item").elem("cidrIpv6", r.getCidrIpv6()).end("item");
+                xml.start("item")
+                        .elem("cidrIpv6", r.getCidrIpv6())
+                        .elem("description", r.getDescription())
+                        .end("item");
             }
             xml.end("ipv6Ranges")
                     .start("groups");
@@ -2876,6 +3005,7 @@ public class Ec2QueryHandler {
                         .elem("userId", g.getUserId())
                         .elem("groupId", g.getGroupId())
                         .elem("groupName", g.getGroupName())
+                        .elem("description", g.getDescription())
                         .end("item");
             }
             xml.end("groups").end("item");

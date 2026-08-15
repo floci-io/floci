@@ -19,7 +19,9 @@ public class LaunchConfiguration {
     private List<String> securityGroups = new ArrayList<>();
     private String userData;
     private String iamInstanceProfile;
-    private boolean associatePublicIpAddress;
+    // Nullable on purpose: AWS treats an absent flag as "fall back to the
+    // subnet's MapPublicIpOnLaunch" and an explicit false as an override.
+    private Boolean associatePublicIpAddress;
     private Instant createdTime;
     private String region;
 
@@ -49,8 +51,8 @@ public class LaunchConfiguration {
     public String getIamInstanceProfile() { return iamInstanceProfile; }
     public void setIamInstanceProfile(String v) { this.iamInstanceProfile = v; }
 
-    public boolean isAssociatePublicIpAddress() { return associatePublicIpAddress; }
-    public void setAssociatePublicIpAddress(boolean v) { this.associatePublicIpAddress = v; }
+    public Boolean getAssociatePublicIpAddress() { return associatePublicIpAddress; }
+    public void setAssociatePublicIpAddress(Boolean v) { this.associatePublicIpAddress = v; }
 
     public Instant getCreatedTime() { return createdTime; }
     public void setCreatedTime(Instant v) { this.createdTime = v; }

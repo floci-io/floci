@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.firehose;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.KinesisStreamSource;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.S3Destination;
 import io.github.hectorvent.floci.services.firehose.model.Record;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -56,7 +57,10 @@ public class FirehoseJsonHandler {
                 }
                 String deliveryStreamType = request.has("DeliveryStreamType")
                         ? request.get("DeliveryStreamType").asText() : null;
-                String arn = firehoseService.createDeliveryStream(name, s3, tags, deliveryStreamType);
+                KinesisStreamSource source = request.has("KinesisStreamSourceConfiguration")
+                        ? mapper.treeToValue(request.get("KinesisStreamSourceConfiguration"), KinesisStreamSource.class)
+                        : null;
+                String arn = firehoseService.createDeliveryStream(name, s3, tags, deliveryStreamType, source);
                 yield Response.ok(Map.of("DeliveryStreamARN", arn)).build();
             }
             case "UpdateDestination" -> {

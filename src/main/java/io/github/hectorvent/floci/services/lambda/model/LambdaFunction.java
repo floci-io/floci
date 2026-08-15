@@ -49,6 +49,7 @@ public class LambdaFunction {
     private List<String> layers = new ArrayList<>();
     private String kmsKeyArn;
     private Map<String, Object> vpcConfig;
+    private List<LambdaFileSystemConfig> fileSystemConfigs = new ArrayList<>();
     private String codeSha256;
 
     /** Non-null only for hot-reload functions. Holds the Docker-host path bind-mounted into /var/task. */
@@ -167,6 +168,11 @@ public class LambdaFunction {
 
     public Map<String, Object> getVpcConfig() { return vpcConfig; }
     public void setVpcConfig(Map<String, Object> vpcConfig) { this.vpcConfig = vpcConfig; }
+
+    public List<LambdaFileSystemConfig> getFileSystemConfigs() { return fileSystemConfigs; }
+    public void setFileSystemConfigs(List<LambdaFileSystemConfig> fileSystemConfigs) {
+        this.fileSystemConfigs = fileSystemConfigs == null ? new ArrayList<>() : new ArrayList<>(fileSystemConfigs);
+    }
 
     public String getCodeSha256() { return codeSha256; }
     public void setCodeSha256(String codeSha256) { this.codeSha256 = codeSha256; }

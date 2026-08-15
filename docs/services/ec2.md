@@ -202,10 +202,10 @@ Floci seeds the following resources on first use in each region so Terraform, th
 | CreateSecurityGroup | Creates a security group in a VPC. |
 | DescribeSecurityGroups | Lists or returns stored security groups. |
 | DeleteSecurityGroup | Deletes a security group from the local EC2 store. |
-| AuthorizeSecurityGroupIngress | Adds inbound permissions to a security group. |
-| AuthorizeSecurityGroupEgress | Adds outbound permissions to a security group. |
-| RevokeSecurityGroupIngress | Removes inbound permissions from a security group. |
-| RevokeSecurityGroupEgress | Removes outbound permissions from a security group. |
+| AuthorizeSecurityGroupIngress | Adds inbound permissions. Sources may be IPv4 ranges, IPv6 ranges, or another security group (`UserIdGroupPairs`, sent on the wire as `Groups`); prefix list sources are not stored. One rule is stored per source, each carrying its own description. |
+| AuthorizeSecurityGroupEgress | Adds outbound permissions, with the same source types as the inbound call. |
+| RevokeSecurityGroupIngress | Removes inbound permissions. Matches on protocol and port range only, so it removes every permission on that port regardless of source. |
+| RevokeSecurityGroupEgress | Removes outbound permissions, matched the same way as the inbound call. |
 | DescribeSecurityGroupRules | Lists stored security group rules. |
 | ModifySecurityGroupRules | Updates supported fields on security group rules. |
 | UpdateSecurityGroupRuleDescriptionsIngress | Updates descriptions on matching inbound security group rules. |
@@ -225,6 +225,8 @@ Floci seeds the following resources on first use in each region so Terraform, th
 | Action | Description |
 |--------|-------------|
 | DescribeImages | Returns AMI metadata known to the local EC2 service. |
+| CreateImage | Captures an instance as a new AMI. Reboots the source unless `NoReboot=true`. |
+| RegisterImage | Registers an AMI from supplied metadata and block device mappings. |
 
 ### Tags
 
@@ -285,6 +287,11 @@ Two AWS-managed prefix lists exist in every region without being created —
 (`pl-02cd2c6b`) — matching the gateway endpoint services on AWS. They are owned by `AWS`,
 read-only, and served by both `DescribePrefixLists` and `DescribeManagedPrefixLists`;
 modifying or deleting one returns `UnsupportedOperation`.
+
+A customer-managed list may not take a name AWS reserves for its own: `com.amazonaws.`,
+`com.amazon.` or `com.aws.`, each including the trailing dot. `CreateManagedPrefixList`
+rejects those with `InvalidParameterValue`; a name that merely resembles one, such as
+`com.amazonaws-internal`, is allowed.
 
 Entries are versioned. A prefix list starts at version 1, and each `ModifyManagedPrefixList`
 that adds or removes entries stores a new version and bumps the counter, so

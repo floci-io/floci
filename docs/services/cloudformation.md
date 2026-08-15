@@ -22,6 +22,7 @@
 | `DescribeStackResources` | Get all resources in a stack |
 | `ListStackResources` | List resource summaries |
 | `GetTemplate` | Retrieve the template body |
+| `GetTemplateSummary` | Summarize a template's Parameters, Resources and Transform sections, by StackName, TemplateBody or TemplateURL |
 | `ValidateTemplate` | Accepted; returns success without validating (stub) |
 | `ListStacks` | List stacks by status |
 | `ListExports` | - |
@@ -57,7 +58,7 @@ cross-resource references.
 | SQS | `Queue`, `QueuePolicy` (accepted; policy not enforced) |
 | SNS | `Topic`, `Subscription` |
 | DynamoDB | `Table`, `GlobalTable` |
-| Lambda | `Function` (Zip via S3/inline `ZipFile`, and Image), `LayerVersion`, `EventSourceMapping` (SQS, Kinesis, DynamoDB Streams) |
+| Lambda | `Function` (Zip via S3/inline `ZipFile`, and Image), `LayerVersion`, `EventSourceMapping` (SQS, Kinesis, DynamoDB Streams), `Version`, `Alias` (also what SAM's `AutoPublishAlias` expands into) |
 | IAM | `Role`, `User`, `AccessKey`, `Policy`, `ManagedPolicy`, `InstanceProfile` |
 | SSM | `Parameter` |
 | KMS | `Key`, `Alias` |
@@ -88,6 +89,20 @@ All other resource types are accepted without error and assigned a synthetic phy
 `arn:aws:stub:::<logicalId>` ARN attribute), so templates with unsupported types still reach
 `CREATE_COMPLETE` rather than failing.
 
+## EventBridge Event Buses
+
+`AWS::Events::EventBus` creates a real custom EventBridge bus. `Name` is required, `Ref` returns
+the bus name, and `Fn::GetAtt` supports `Arn` and `Name`. `Description` and `Tags` are applied when
+the bus is created. Rules that reference the bus are removed before stack deletion.
+
+The current implementation is limited to custom buses with the `Name`, `Description`, `Tags`, and
+`Policy` properties. `EventSourceName`, `KmsKeyIdentifier`, `DeadLetterConfig`, and `LogConfig` are
+rejected with `ValidationError` instead of being silently ignored. AWS models a `Name` change as
+resource replacement; Floci currently rejects that update until generic replacement handling is
+available. `Policy` is applied when the bus is created. Changing `Description`, `Tags`, or `Policy`
+during `UpdateStack` is rejected until transactional resource rollback is available; this prevents a
+failed stack update from leaving the live bus in the rejected configuration.
+
 ## Secrets Manager Target Attachments
 
 `AWS::SecretsManager::SecretTargetAttachment` adds the target's database connection fields to the
@@ -107,6 +122,21 @@ because their backing services are not implemented. A `SecretId` change is appli
 than reproducing CloudFormation's replacement event sequence; failed changes restore affected secret
 data and attachment ownership.
 
+## Auto Scaling Launch Template Resolution
+
+`AWS::AutoScaling::AutoScalingGroup` resolves its launch template through any of the shapes AWS
+accepts, not only by name:
+
+- `LaunchTemplate` with `LaunchTemplateId` **or** `LaunchTemplateName` (plus an optional `Version`).
+  The id and name are distinct lookup keys, so an `lt-` id is matched as an id rather than being
+  treated as a name.
+- A `Ref` to an in-stack `AWS::EC2::LaunchTemplate`, whose `Ref` returns the `lt-` id and whose
+  `Fn::GetAtt LatestVersionNumber` supplies the version.
+- `MixedInstancesPolicy` → `LaunchTemplate` → `LaunchTemplateSpecification`, including
+  `Overrides[].InstanceType` and `InstancesDistribution` (`OnDemandBaseCapacity`,
+  `OnDemandPercentageAboveBaseCapacity`, `SpotAllocationStrategy`). A non-integer where AWS expects
+  a number fails the stack rather than being dropped.
+
 ## Lambda Stack Updates
 
 `AWS::Lambda::Function` resources are reconciled during `UpdateStack` in the same shape as CloudFormation/CDK deployments:
@@ -115,6 +145,17 @@ data and attachment ownership.
 - Code and mutable configuration changes update the existing function in place.
 - Replacement-only changes such as `FunctionName` or `PackageType` changes create a replacement function and remove the old one.
 - S3-backed code stays linked through `S3Bucket` / `S3Key`, so Lambda's reactive S3 sync continues to work for functions created by CloudFormation or CDK.
+
+## RDS Credential Dynamic References
+
+`AWS::RDS::DBInstance` and `AWS::RDS::DBCluster` resolve CloudFormation dynamic
+references in `MasterUsername` and `MasterUserPassword` during resource creation:
+
+- `secretsmanager` references support whole secret strings, JSON keys, version stages, and version IDs.
+- `ssm` references accept `String` and `StringList` parameters, using either the latest value or an explicit positive version.
+- `ssm-secure` references require a `SecureString` parameter and are supported only for `MasterUserPassword`, matching the AWS resource-property allowlist.
+
+Dynamic-reference expansion is currently scoped to these RDS credential properties.
 
 ## Account-Aware Provisioning
 

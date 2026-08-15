@@ -56,6 +56,10 @@ public class IamService implements SessionAccountLookup {
     private static final String DEFAULT_DEPLOYER_USER = "floci-deployer";
     private static final String DEFAULT_DEPLOYER_ACCESS_KEY_ID = "floci";
     private static final String DEFAULT_DEPLOYER_SECRET_ACCESS_KEY = "floci";
+    private static final String ACCOUNT_ALIAS_KEY = "account-alias";
+    /** As AWS documents it: no leading or trailing dash, and no two dashes in a row. */
+    private static final Pattern ACCOUNT_ALIAS_PATTERN =
+            Pattern.compile("^[a-z0-9]([a-z0-9]|-(?!-)){1,61}[a-z0-9]$");
     private static final int MAX_OIDC_CLIENT_IDS = 100;
     private static final int MAX_OIDC_THUMBPRINTS = 5;
     private static final int MAX_OIDC_URL_LENGTH = 255;
@@ -79,11 +83,24 @@ public class IamService implements SessionAccountLookup {
     private final StorageBackend<String, AccessKey> accessKeys;
     private final StorageBackend<String, InstanceProfile> instanceProfiles;
     private final StorageBackend<String, SessionCredential> sessions;
+    /**
+     * Holds at most one entry per account under {@link #ACCOUNT_ALIAS_KEY} — an account alias is a
+     * single value, and the store is already account-namespaced, so no further keying is needed.
+     */
+    private final StorageBackend<String, String> accountAliases;
+    /**
+     * Guards the check-then-write in alias create/delete. Unlike a named resource, where two
+     * racing creates carry the same name and either winner is equivalent, racing alias creates
+     * carry different values — an unguarded race would report success to both callers while
+     * silently keeping only one. A single lock across accounts is enough: alias writes are rare.
+     */
+    private final Object accountAliasLock = new Object();
     private final StorageBackend<String, OpenIDConnectProvider> oidcProviders;
     /** Deletion is synchronous, so an issued task id is a completed one; the value is its role. */
     private final StorageBackend<String, String> serviceLinkedRoleDeletions;
     private final RegionResolver regionResolver;
     private final boolean seedDeployerPrincipal;
+    private final String seededAccountAlias;
 
     /**
      * AWS-managed policies (arn:aws:iam::aws:policy/...), keyed by ARN. These are global —
@@ -102,10 +119,12 @@ public class IamService implements SessionAccountLookup {
             storageFactory.create("iam", "iam-access-keys.json", new TypeReference<>() {}),
             storageFactory.create("iam", "iam-instance-profiles.json", new TypeReference<>() {}),
             storageFactory.create("iam", "iam-sessions.json", new TypeReference<>() {}),
+            storageFactory.create("iam", "iam-account-aliases.json", new TypeReference<>() {}),
             storageFactory.create("iam", "iam-oidc-providers.json", new TypeReference<>() {}),
             storageFactory.create("iam", "iam-slr-deletions.json", new TypeReference<>() {}),
             regionResolver,
-            config.services().iam().seedDeployerPrincipal()
+            config.services().iam().seedDeployerPrincipal(),
+            config.services().iam().accountAlias().orElse(null)
         );
     }
 
@@ -130,7 +149,8 @@ public class IamService implements SessionAccountLookup {
                RegionResolver regionResolver,
                boolean seedDeployerPrincipal) {
         this(users, groups, roles, policies, accessKeys, instanceProfiles, sessions,
-                new InMemoryStorage<>(), new InMemoryStorage<>(), regionResolver, seedDeployerPrincipal);
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                regionResolver, seedDeployerPrincipal, null);
     }
 
     IamService(StorageBackend<String, IamUser> users,
@@ -140,10 +160,12 @@ public class IamService implements SessionAccountLookup {
                StorageBackend<String, AccessKey> accessKeys,
                StorageBackend<String, InstanceProfile> instanceProfiles,
                StorageBackend<String, SessionCredential> sessions,
+               StorageBackend<String, String> accountAliases,
                StorageBackend<String, OpenIDConnectProvider> oidcProviders,
                StorageBackend<String, String> serviceLinkedRoleDeletions,
                RegionResolver regionResolver,
-               boolean seedDeployerPrincipal) {
+               boolean seedDeployerPrincipal,
+               String seededAccountAlias) {
         this.users = users;
         this.groups = groups;
         this.roles = roles;
@@ -151,10 +173,12 @@ public class IamService implements SessionAccountLookup {
         this.accessKeys = accessKeys;
         this.instanceProfiles = instanceProfiles;
         this.sessions = sessions;
+        this.accountAliases = accountAliases;
         this.oidcProviders = oidcProviders;
         this.serviceLinkedRoleDeletions = serviceLinkedRoleDeletions;
         this.regionResolver = regionResolver;
         this.seedDeployerPrincipal = seedDeployerPrincipal;
+        this.seededAccountAlias = seededAccountAlias;
     }
 
     @PostConstruct
@@ -163,6 +187,7 @@ public class IamService implements SessionAccountLookup {
         if (seedDeployerPrincipal) {
             seedDefaultDeployerPrincipal();
         }
+        seedConfiguredAccountAlias();
     }
 
     private static Map<String, IamPolicy> buildAwsManagedPolicies() {
@@ -175,19 +200,35 @@ public class IamService implements SessionAccountLookup {
         return catalog;
     }
 
+    /**
+     * Makes the AWS-managed policy catalog available.
+     *
+     * <p>The catalog itself is the single source of truth: {@link #getPolicy} resolves
+     * {@code arn:aws:iam::aws:policy/*} from it directly, and {@link #listPolicies} reads
+     * the AWS scope from it too. Earlier versions also mirrored every entry into the
+     * default-account store, but that copy was never read back — {@code listPolicies}
+     * explicitly filters AWS-managed ARNs out of the local scan to avoid listing them
+     * twice — and writing the full published catalog to disk on every start costs about a
+     * megabyte of persisted state and several seconds of startup for nothing.
+     */
     void seedAwsManagedPolicies() {
-        // Managed policies are served globally from the catalog (see getPolicy); this also
-        // mirrors them into the default-account store so ListPolicies(Scope=AWS) lists them.
-        int seeded = 0;
-        for (Map.Entry<String, IamPolicy> entry : awsManagedPolicies.entrySet()) {
-            if (policies.get(entry.getKey()).isPresent()) {
-                continue;
-            }
-            policies.put(entry.getKey(), entry.getValue());
-            seeded++;
+        LOG.debugv("AWS managed policy catalog available: {0} policies", awsManagedPolicies.size());
+    }
+
+    private void seedConfiguredAccountAlias() {
+        if (seededAccountAlias == null || seededAccountAlias.isBlank()) {
+            return;
         }
-        if (seeded > 0) {
-            LOG.infov("Seeded {0} AWS managed policies", seeded);
+        validateAccountAlias(seededAccountAlias);
+        Optional<String> stored = accountAliases.get(ACCOUNT_ALIAS_KEY);
+        if (stored.isEmpty()) {
+            accountAliases.put(ACCOUNT_ALIAS_KEY, seededAccountAlias);
+            LOG.infov("Seeded IAM account alias: {0}", seededAccountAlias);
+        } else if (!stored.get().equals(seededAccountAlias)) {
+            // Under persistent storage the alias outlives the process, so a changed configuration
+            // value is ignored on later starts. Say so rather than leaving it to be puzzled out.
+            LOG.debugv("Configured IAM account alias {0} ignored; {1} is already stored",
+                    seededAccountAlias, stored.get());
         }
     }
 
@@ -1229,6 +1270,62 @@ public class IamService implements SessionAccountLookup {
     }
 
     // =========================================================================
+    // Account Aliases
+    // ==================================================================
+    public Optional<String> getAccountAlias() {
+        return accountAliases.get(ACCOUNT_ALIAS_KEY);
+    }
+
+    /**
+     * An account holds one alias, and AWS enforces that by replacement rather than rejection:
+     * creating a free alias while another is set silently swaps it. {@code EntityAlreadyExists}
+     * means the requested name is taken — globally on AWS, since aliases are unique across all
+     * accounts. Only the "you already hold this one" case can arise here, because the store is
+     * namespaced per account and holds no other account's aliases.
+     */
+    public void createAccountAlias(String alias) {
+        validateAccountAlias(alias);
+        synchronized (accountAliasLock) {
+            Optional<String> existing = accountAliases.get(ACCOUNT_ALIAS_KEY);
+            if (existing.isPresent() && existing.get().equals(alias)) {
+                throw new AwsException("EntityAlreadyExists",
+                        "The account alias " + alias + " already exists.", 409);
+            }
+            accountAliases.put(ACCOUNT_ALIAS_KEY, alias);
+        }
+        LOG.infov("Set IAM account alias: {0}", alias);
+    }
+
+    /**
+     * AWS requires the caller to name the alias being removed and rejects a mismatch, so a stale
+     * value in a delete call cannot silently clear the current alias.
+     */
+    public void deleteAccountAlias(String alias) {
+        // AWS applies the same pattern constraint to delete as to create, so a malformed value is
+        // a ValidationError rather than a miss.
+        validateAccountAlias(alias);
+        synchronized (accountAliasLock) {
+            String existing = accountAliases.get(ACCOUNT_ALIAS_KEY)
+                    .orElseThrow(() -> new AwsException("NoSuchEntity",
+                            "The account alias " + alias + " cannot be found.", 404));
+            if (!existing.equals(alias)) {
+                throw new AwsException("NoSuchEntity",
+                        "The account alias " + alias + " cannot be found.", 404);
+            }
+            accountAliases.delete(ACCOUNT_ALIAS_KEY);
+        }
+        LOG.infov("Deleted IAM account alias: {0}", alias);
+    }
+
+    private void validateAccountAlias(String alias) {
+        if (alias == null || !ACCOUNT_ALIAS_PATTERN.matcher(alias).matches()) {
+            throw new AwsException("ValidationError",
+                    "The specified value for accountAlias is invalid. It must be a minimum length of 3 "
+                            + "characters and maximum length of 63 characters, contain only digits, lowercase "
+                            + "letters, and hyphens (-), but cannot begin or end with a hyphen.", 400);
+        }
+    }
+
     // OIDC Identity Providers
     // =========================================================================
 
