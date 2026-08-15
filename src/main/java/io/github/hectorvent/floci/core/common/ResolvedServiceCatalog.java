@@ -439,7 +439,17 @@ public class ResolvedServiceCatalog {
                         protocols(ServiceProtocol.REST_JSON),
                         // Amazon Managed Service for Prometheus signs as "aps"
                         Set.of(), Set.of("aps"), Set.of(),
-                        Set.of(io.github.hectorvent.floci.services.amp.AmpController.class))
+                        Set.of(io.github.hectorvent.floci.services.amp.AmpController.class)),
+                descriptor("ivs", "ivs", config.services().ivs().enabled(), true,
+                        "ivs", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON),
+                        Set.of(), Set.of("ivs"), Set.of(),
+                        Set.of(io.github.hectorvent.floci.services.ivs.IvsController.class)),
+                descriptor("ivschat", "ivschat", config.services().ivschat().enabled(), true,
+                        "ivschat", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON),
+                        Set.of(), Set.of("ivschat"), Set.of(),
+                        Set.of(io.github.hectorvent.floci.services.ivschat.IvschatController.class))
         ));
     }
 

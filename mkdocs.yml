@@ -109,6 +109,8 @@ nav:
     - CloudWatch: services/cloudwatch.md
     - CloudWatch RUM: services/rum.md
     - Managed Prometheus (AMP): services/amp.md
+    - IVS: services/ivs.md
+    - IVS Chat: services/ivschat.md
     - ACM: services/acm.md
     - ECS: services/ecs.md
     - ECR: services/ecr.md

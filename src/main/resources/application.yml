@@ -488,3 +488,7 @@ floci:
       enabled: true
     amp:
       enabled: true
+    ivs:
+      enabled: true
+    ivschat:
+      enabled: true

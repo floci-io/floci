@@ -599,9 +599,21 @@ public interface EmulatorConfig {
         IotDataServiceConfig iotdata();
         RumServiceConfig rum();
         AmpServiceConfig amp();
+        IvsServiceConfig ivs();
+        IvschatServiceConfig ivschat();
     }
 
     interface AmpServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface IvsServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface IvschatServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }
