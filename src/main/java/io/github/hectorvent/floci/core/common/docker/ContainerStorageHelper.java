@@ -102,6 +102,15 @@ public final class ContainerStorageHelper {
             String fallbackId,
             String internalMount) {
         String volumeName = resourceName(config, service, volumeId, fallbackId);
+        applyNamedVolume(builder, lifecycleManager, volumeName, internalMount);
+    }
+
+    /** Mounts a persisted, exact Docker volume name without applying namespace rules again. */
+    public static void applyNamedVolume(
+            ContainerBuilder.Builder builder,
+            ContainerLifecycleManager lifecycleManager,
+            String volumeName,
+            String internalMount) {
         lifecycleManager.ensureVolume(volumeName);
         builder.withNamedVolume(volumeName, internalMount);
     }
@@ -121,11 +130,35 @@ public final class ContainerStorageHelper {
             String volumeId,
             String fallbackId) {
         String volumeName = resourceName(config, service, volumeId, fallbackId);
+        removeNamedVolume(config, lifecycleManager, volumeName);
+    }
+
+    /** Removes or retains a persisted, exact Docker volume name according to storage policy. */
+    public static void removeNamedVolume(
+            EmulatorConfig config,
+            ContainerLifecycleManager lifecycleManager,
+            String volumeName) {
         boolean isMemory = "memory".equals(config.storage().mode());
         if (isMemory || config.storage().pruneVolumesOnDelete()) {
             lifecycleManager.removeVolume(volumeName);
         } else {
             LOG.infov("Retained Docker volume {0}. Remove manually: docker volume rm {0}", volumeName);
+        }
+    }
+
+    /**
+     * Removes an exact named volume according to storage policy and propagates Docker failures.
+     */
+    public static void removeNamedVolumeStrict(
+            EmulatorConfig config,
+            ContainerLifecycleManager lifecycleManager,
+            String volumeName) {
+        boolean isMemory = "memory".equals(config.storage().mode());
+        if (isMemory || config.storage().pruneVolumesOnDelete()) {
+            lifecycleManager.removeVolumeStrict(volumeName);
+        } else {
+            LOG.infov("Retained Docker volume {0}. Remove manually: docker volume rm {0}",
+                    volumeName);
         }
     }
 

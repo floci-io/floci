@@ -16,6 +16,11 @@ public class Ipv6Range {
         this.cidrIpv6 = cidrIpv6;
     }
 
+    public Ipv6Range(String cidrIpv6, String description) {
+        this.cidrIpv6 = cidrIpv6;
+        this.description = description;
+    }
+
     public String getCidrIpv6() { return cidrIpv6; }
     public void setCidrIpv6(String cidrIpv6) { this.cidrIpv6 = cidrIpv6; }
 

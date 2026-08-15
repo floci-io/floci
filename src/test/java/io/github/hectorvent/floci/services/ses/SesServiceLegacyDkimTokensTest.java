@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.ses;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.ses.model.AccountSuppressionAttributes;
+import io.github.hectorvent.floci.services.ses.model.AccountVdmAttributes;
 import io.github.hectorvent.floci.services.ses.model.ConfigurationSet;
 import io.github.hectorvent.floci.services.ses.model.ContactList;
 import io.github.hectorvent.floci.services.ses.model.Contact;
@@ -45,6 +46,7 @@ class SesServiceLegacyDkimTokensTest {
                 new InMemoryStorage<String, ConfigurationSet>(),
                 new InMemoryStorage<String, SuppressedDestination>(),
                 new InMemoryStorage<String, AccountSuppressionAttributes>(),
+                new InMemoryStorage<String, AccountVdmAttributes>(),
                 new InMemoryStorage<String, DedicatedIpPool>(),
                 new InMemoryStorage<String, ContactList>(),
                 new InMemoryStorage<String, Contact>(),
