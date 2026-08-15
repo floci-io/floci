@@ -141,6 +141,47 @@ class MskControllerIntegrationTest {
             .statusCode(400);
     }
 
+    // A wrong-typed field must fail with an AWS-shaped 400, not an unhandled
+    // ClassCastException surfacing as a 500.
+    @Test
+    void createConfigurationRejectsNonStringName() {
+        given()
+            .contentType("application/json")
+            .body("""
+                {"name": 123, "kafkaVersions": ["3.6.0"], "serverProperties": "cHJvcHM="}
+                """)
+        .when()
+            .post("/v1/configurations")
+        .then()
+            .statusCode(400);
+    }
+
+    @Test
+    void createConfigurationRejectsNonArrayKafkaVersions() {
+        given()
+            .contentType("application/json")
+            .body("""
+                {"name": "bad-config", "kafkaVersions": "3.6.0", "serverProperties": "cHJvcHM="}
+                """)
+        .when()
+            .post("/v1/configurations")
+        .then()
+            .statusCode(400);
+    }
+
+    @Test
+    void createConfigurationRejectsKafkaVersionsWithNonStringElements() {
+        given()
+            .contentType("application/json")
+            .body("""
+                {"name": "bad-config", "kafkaVersions": [3.6], "serverProperties": "cHJvcHM="}
+                """)
+        .when()
+            .post("/v1/configurations")
+        .then()
+            .statusCode(400);
+    }
+
     @Test
     void describeConfigurationReturnsNotFoundForUnknownArn() {
         given()

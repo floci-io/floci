@@ -10,6 +10,8 @@ import io.github.hectorvent.floci.services.msk.model.ClusterState;
 import io.github.hectorvent.floci.services.msk.model.ConfigurationState;
 import io.github.hectorvent.floci.services.msk.model.MskCluster;
 import io.github.hectorvent.floci.services.msk.model.MskConfiguration;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
@@ -160,5 +162,21 @@ class MskServiceTest {
                 "test-config", "desc", List.of("3.6.0"), "props");
         mskService.deleteConfiguration(configuration.getArn());
         assertTrue(mskService.listConfigurations().isEmpty());
+    }
+
+    // StorageBackend persists this model via plain Jackson serialization (PersistentStorage,
+    // HybridStorage, WalStorage all call ObjectMapper#writeValue on it directly), so
+    // serverProperties must round-trip through JSON or persistent/hybrid/wal storage modes
+    // silently discard the broker configuration on reload.
+    @Test
+    void configurationServerPropertiesSurvivesJsonRoundTrip() throws Exception {
+        MskConfiguration configuration = mskService.createConfiguration(
+                "test-config", "desc", List.of("3.6.0"), "auto.create.topics.enable=true");
+
+        ObjectMapper mapper = new ObjectMapper().registerModule(new JavaTimeModule());
+        String json = mapper.writeValueAsString(configuration);
+        MskConfiguration restored = mapper.readValue(json, MskConfiguration.class);
+
+        assertEquals("auto.create.topics.enable=true", restored.getServerProperties());
     }
 }

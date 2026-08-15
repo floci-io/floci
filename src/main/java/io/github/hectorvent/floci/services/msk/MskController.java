@@ -10,6 +10,7 @@ import jakarta.ws.rs.core.Response;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -92,12 +93,11 @@ public class MskController {
 
     @POST
     @Path("/v1/configurations")
-    @SuppressWarnings("unchecked")
     public Response createConfiguration(Map<String, Object> request) {
-        String name = (String) request.get("name");
-        String description = (String) request.get("description");
-        List<String> kafkaVersions = (List<String>) request.get("kafkaVersions");
-        String serverProperties = decodeServerProperties((String) request.get("serverProperties"));
+        String name = asString(request.get("name"), "name");
+        String description = asString(request.get("description"), "description");
+        List<String> kafkaVersions = asStringList(request.get("kafkaVersions"), "kafkaVersions");
+        String serverProperties = decodeServerProperties(asString(request.get("serverProperties"), "serverProperties"));
 
         MskConfiguration configuration = mskService.createConfiguration(name, description, kafkaVersions, serverProperties);
         return Response.ok(Map.of(
@@ -111,7 +111,9 @@ public class MskController {
     @GET
     @Path("/v1/configurations")
     public Response listConfigurations() {
-        var configurations = mskService.listConfigurations();
+        var configurations = mskService.listConfigurations().stream()
+                .map(this::toConfigurationView)
+                .toList();
         return Response.ok(Map.of("configurations", configurations)).build();
     }
 
@@ -119,7 +121,7 @@ public class MskController {
     @Path("/v1/configurations/{arn}")
     public Response describeConfiguration(@PathParam("arn") String arn) {
         MskConfiguration configuration = mskService.describeConfiguration(arn);
-        return Response.ok(configuration).build();
+        return Response.ok(toConfigurationView(configuration)).build();
     }
 
     @DELETE
@@ -127,6 +129,21 @@ public class MskController {
     public Response deleteConfiguration(@PathParam("arn") String arn) {
         mskService.deleteConfiguration(arn);
         return Response.ok(Map.of("arn", arn, "state", "DELETING")).build();
+    }
+
+    // AWS's Configuration/DescribeConfigurationResponse shape never includes
+    // serverProperties (that's only returned via DescribeConfigurationRevision), so build
+    // an explicit view instead of serializing the model directly.
+    private Map<String, Object> toConfigurationView(MskConfiguration configuration) {
+        Map<String, Object> view = new HashMap<>();
+        view.put("arn", configuration.getArn());
+        view.put("name", configuration.getName());
+        view.put("description", configuration.getDescription() != null ? configuration.getDescription() : "");
+        view.put("kafkaVersions", configuration.getKafkaVersions());
+        view.put("state", configuration.getState());
+        view.put("creationTime", configuration.getCreationTime());
+        view.put("latestRevision", configuration.getLatestRevision());
+        return view;
     }
 
     private String decodeServerProperties(String serverPropertiesB64) {
@@ -138,5 +155,25 @@ public class MskController {
         } catch (IllegalArgumentException e) {
             throw new AwsException("BadRequestException", "serverProperties must be base64-encoded.", 400);
         }
+    }
+
+    private String asString(Object value, String fieldName) {
+        if (value == null) {
+            return null;
+        }
+        if (!(value instanceof String s)) {
+            throw new AwsException("BadRequestException", fieldName + " must be a string.", 400);
+        }
+        return s;
+    }
+
+    private List<String> asStringList(Object value, String fieldName) {
+        if (value == null) {
+            return null;
+        }
+        if (!(value instanceof List<?> list) || list.stream().anyMatch(item -> !(item instanceof String))) {
+            throw new AwsException("BadRequestException", fieldName + " must be an array of strings.", 400);
+        }
+        return list.stream().map(String.class::cast).toList();
     }
 }

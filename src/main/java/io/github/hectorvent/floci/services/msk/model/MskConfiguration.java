@@ -31,10 +31,12 @@ public class MskConfiguration {
     @JsonProperty("latestRevision")
     private ConfigurationRevision latestRevision;
 
-    // Decoded server.properties content, kept internal - AWS only returns this via
-    // DescribeConfigurationRevision, which is a separate follow-up issue (revision-specific
-    // actions are out of scope for this plain CRUD pass).
-    @JsonIgnore
+    // Decoded server.properties content. Must round-trip through persistent/hybrid/wal
+    // storage (StorageBackend serializes this same model via Jackson), so it cannot be
+    // @JsonIgnore - the controller builds explicit response views instead to keep it out
+    // of Create/List/Describe responses, since AWS only returns it via
+    // DescribeConfigurationRevision (a separate follow-up issue, out of scope here).
+    @JsonProperty("serverProperties")
     private String serverProperties;
 
     @JsonIgnore
