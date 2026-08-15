@@ -78,6 +78,11 @@ public class IamQueryHandler {
             case "ListOpenIDConnectProviderTags" -> handleListOpenIDConnectProviderTags(params);
             case "ListServerCertificates" -> handleListServerCertificates(params);
 
+            // Account Aliases
+            case "ListAccountAliases" -> handleListAccountAliases(params);
+            case "CreateAccountAlias" -> handleCreateAccountAlias(params);
+            case "DeleteAccountAlias" -> handleDeleteAccountAlias(params);
+
             // Groups
             case "CreateGroup" -> handleCreateGroup(params);
             case "GetGroup" -> handleGetGroup(params);
@@ -401,6 +406,29 @@ public class IamQueryHandler {
                 .elem("IsTruncated", false)
                 .build();
         return Response.ok(AwsQueryResponse.envelope("ListServerCertificates", AwsNamespaces.IAM, result)).build();
+    }
+
+    // =========================================================================
+    // Account Aliases
+    // =========================================================================
+
+    // ListAccountAliases is paginated on the wire (IsTruncated) even though an account can only
+    // ever hold one alias, so the envelope carries the flag to match the AWS response shape.
+    private Response handleListAccountAliases(MultivaluedMap<String, String> params) {
+        var xml = new XmlBuilder().start("AccountAliases");
+        iamService.getAccountAlias().ifPresent(alias -> xml.elem("member", alias));
+        xml.end("AccountAliases").elem("IsTruncated", false);
+        return Response.ok(AwsQueryResponse.envelope("ListAccountAliases", AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    private Response handleCreateAccountAlias(MultivaluedMap<String, String> params) {
+        iamService.createAccountAlias(getParam(params, "AccountAlias"));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("CreateAccountAlias", AwsNamespaces.IAM)).build();
+    }
+
+    private Response handleDeleteAccountAlias(MultivaluedMap<String, String> params) {
+        iamService.deleteAccountAlias(getParam(params, "AccountAlias"));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("DeleteAccountAlias", AwsNamespaces.IAM)).build();
     }
 
     // =========================================================================

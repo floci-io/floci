@@ -35,6 +35,7 @@ import software.amazon.awssdk.services.secretsmanager.SecretsManagerClient;
 import software.amazon.awssdk.services.ses.SesClient;
 import software.amazon.awssdk.services.sesv2.SesV2Client;
 import software.amazon.awssdk.services.sfn.SfnClient;
+import software.amazon.awssdk.services.swf.SwfClient;
 import software.amazon.awssdk.services.sns.SnsClient;
 import software.amazon.awssdk.services.sqs.SqsClient;
 import software.amazon.awssdk.services.ssm.SsmClient;
@@ -594,6 +595,22 @@ public final class TestFixtures {
         return SfnClient.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static SwfClient swfClient() {
+        return swfClient(REGION);
+    }
+
+    /**
+     * SWF names are unique per region, so cross-region tests need two clients pointed at the
+     * same emulator with different regions.
+     */
+    public static SwfClient swfClient(Region region) {
+        return SwfClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(region)
                 .credentialsProvider(CREDENTIALS)
                 .build();
     }

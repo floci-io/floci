@@ -34,6 +34,7 @@ import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService
 import io.github.hectorvent.floci.services.cloudwatch.metrics.CloudWatchMetricsService;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.Dimension;
 import io.github.hectorvent.floci.services.autoscaling.AutoScalingService;
+import io.github.hectorvent.floci.services.autoscaling.model.MixedInstancesPolicy;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricAlarm;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.kinesis.KinesisService;
@@ -800,9 +801,9 @@ public class CloudFormationResourceProvisioner {
         String previousNameMode = r.getAttributes().get(LOG_GROUP_NAME_MODE_ATTR);
         if (previousNameMode == null && r.getPhysicalId() != null) {
             // Stacks persisted before FlociLogGroupNameMode existed have no recorded mode, but an
-            // auto-generated name always has the deterministic <stackName>-<logicalId>-<12 hex chars>
-            // shape generatePhysicalName produces, so anything else must have been explicit.
-            previousNameMode = isGeneratedLogGroupName(r.getPhysicalId(), stackName, r.getLogicalId())
+            // auto-generated name always has the deterministic shape generatePhysicalName produces,
+            // so anything else must have been explicit.
+            previousNameMode = isGeneratedName(r.getPhysicalId(), stackName, r.getLogicalId(), 512)
                     ? NAME_MODE_GENERATED
                     : NAME_MODE_EXPLICIT;
         }
@@ -878,20 +879,20 @@ public class CloudFormationResourceProvisioner {
 
     /**
      * Whether {@code physicalId} matches the exact shape {@link #generatePhysicalName} produces for
-     * this stack/logical id: {@code <stackName>-<logicalId>-} followed by exactly 12 lowercase hex
-     * characters. Doesn't account for the (practically unreachable at a 512-character limit)
-     * truncation path in {@link #generatePhysicalName}, so a truncated legacy name is conservatively
-     * treated as explicit rather than misdetected as generated.
+     * this stack/logical id/maxLength: its base-and-truncation logic (minus the random suffix itself)
+     * followed by exactly 12 lowercase hex characters. Used to infer a legacy resource's name mode
+     * (explicit vs. generated) when it predates whatever attribute would otherwise record that.
+     *
+     * <p>Assumes the {@code generatePhysicalName} call this mirrors used {@code lowercase=false} (true
+     * of both current callers, LogGroup and Lambda) and a {@code maxLength} large enough that the
+     * truncated prefix is never empty, i.e. {@code maxLength > 13} (also true of both: 512 and 64). A
+     * future caller with {@code lowercase=true} or a smaller limit would need this generalized further.
      */
-    private boolean isGeneratedLogGroupName(String physicalId, String stackName, String logicalId) {
-        String prefix = stackName + "-" + logicalId + "-";
-        if (!physicalId.startsWith(prefix)) {
+    private boolean isGeneratedName(String physicalId, String stackName, String logicalId, int maxLength) {
+        if (physicalId == null || physicalId.length() < 13) {
             return false;
         }
-        String suffix = physicalId.substring(prefix.length());
-        if (suffix.length() != 12) {
-            return false;
-        }
+        String suffix = physicalId.substring(physicalId.length() - 12);
         for (int i = 0; i < suffix.length(); i++) {
             char c = suffix.charAt(i);
             boolean hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
@@ -899,7 +900,25 @@ public class CloudFormationResourceProvisioner {
                 return false;
             }
         }
-        return true;
+        if (physicalId.charAt(physicalId.length() - 13) != '-') {
+            return false;
+        }
+        String actualPrefix = physicalId.substring(0, physicalId.length() - 13);
+        return actualPrefix.equals(expectedGeneratedNamePrefix(stackName, logicalId, maxLength));
+    }
+
+    /** Mirrors {@link #generatePhysicalName}'s base-and-truncation logic, without the random suffix. */
+    private String expectedGeneratedNamePrefix(String stackName, String logicalId, int maxLength) {
+        String base = stackName + "-" + logicalId;
+        if (maxLength <= 0 || base.length() + 1 + 12 <= maxLength) {
+            return base;
+        }
+        int keep = Math.max(0, maxLength - 12 - 1);
+        String prefix = base.length() > keep ? base.substring(0, keep) : base;
+        while (prefix.endsWith("-")) {
+            prefix = prefix.substring(0, prefix.length() - 1);
+        }
+        return prefix;
     }
 
     private void reconcileLogGroup(String name, Integer retentionInDays, Map<String, String> tags, String region) {
@@ -1068,20 +1087,22 @@ public class CloudFormationResourceProvisioner {
             name = generatePhysicalName(stackName, r.getLogicalId(), 255, false);
         }
         String launchConfigName = resolveOptional(props, "LaunchConfigurationName", engine);
+        String launchTemplateId = null;
         String launchTemplateName = null;
         String launchTemplateVersion = null;
         if (props != null && props.has("LaunchTemplate")) {
             JsonNode lt = props.get("LaunchTemplate");
+            // Id and name are distinct lookup keys in Auto Scaling: passing an lt- id in the name slot
+            // never matches a stored template.
+            launchTemplateId = engine.resolve(lt.path("LaunchTemplateId"));
             launchTemplateName = engine.resolve(lt.path("LaunchTemplateName"));
-            if (launchTemplateName == null || launchTemplateName.isBlank()) {
-                launchTemplateName = engine.resolve(lt.path("LaunchTemplateId"));
-            }
             launchTemplateVersion = engine.resolve(lt.path("Version"));
         }
 
         var asg = autoScalingService.createAutoScalingGroup(region, name,
-                blankToNull(launchConfigName), null, blankToNull(launchTemplateName), blankToNull(launchTemplateVersion),
-                null,
+                blankToNull(launchConfigName),
+                blankToNull(launchTemplateId), blankToNull(launchTemplateName), blankToNull(launchTemplateVersion),
+                resolveMixedInstancesPolicy(props, engine),
                 parseIntProp(props, "MinSize", engine, 0),
                 parseIntProp(props, "MaxSize", engine, 0),
                 parseIntProp(props, "DesiredCapacity", engine, 0),
@@ -1098,6 +1119,72 @@ public class CloudFormationResourceProvisioner {
         // Ref returns the Auto Scaling group name; Fn::GetAtt Arn returns the ASG ARN.
         r.setPhysicalId(name);
         r.getAttributes().put("Arn", asg.getAutoScalingGroupArn());
+    }
+
+    /**
+     * Builds the {@code MixedInstancesPolicy} of an Auto Scaling group from template properties, in the
+     * same shape the Query API parser produces. Returns {@code null} when the property is absent, so
+     * that the group falls back to its {@code LaunchTemplate} or {@code LaunchConfigurationName}.
+     */
+    private MixedInstancesPolicy resolveMixedInstancesPolicy(JsonNode props,
+                                                             CloudFormationTemplateEngine engine) {
+        if (props == null || !props.has("MixedInstancesPolicy") || props.get("MixedInstancesPolicy").isNull()) {
+            return null;
+        }
+        JsonNode policyNode = props.get("MixedInstancesPolicy");
+        MixedInstancesPolicy policy = new MixedInstancesPolicy();
+
+        JsonNode launchTemplateNode = policyNode.path("LaunchTemplate");
+        if (launchTemplateNode.isObject()) {
+            MixedInstancesPolicy.LaunchTemplate launchTemplate = new MixedInstancesPolicy.LaunchTemplate();
+            JsonNode specNode = launchTemplateNode.path("LaunchTemplateSpecification");
+            if (specNode.isObject()) {
+                var specification = new MixedInstancesPolicy.LaunchTemplateSpecification();
+                specification.setLaunchTemplateId(blankToNull(engine.resolve(specNode.path("LaunchTemplateId"))));
+                specification.setLaunchTemplateName(blankToNull(engine.resolve(specNode.path("LaunchTemplateName"))));
+                specification.setVersion(blankToNull(engine.resolve(specNode.path("Version"))));
+                launchTemplate.setLaunchTemplateSpecification(specification);
+            }
+            for (JsonNode overrideNode : launchTemplateNode.path("Overrides")) {
+                String instanceType = engine.resolve(overrideNode.path("InstanceType"));
+                if (instanceType != null && !instanceType.isBlank()) {
+                    var override = new MixedInstancesPolicy.LaunchTemplateOverride();
+                    override.setInstanceType(instanceType);
+                    launchTemplate.getOverrides().add(override);
+                }
+            }
+            policy.setLaunchTemplate(launchTemplate);
+        }
+
+        JsonNode distributionNode = policyNode.path("InstancesDistribution");
+        if (distributionNode.isObject()) {
+            var distribution = new MixedInstancesPolicy.InstancesDistribution();
+            distribution.setOnDemandBaseCapacity(parseOptionalInt("OnDemandBaseCapacity",
+                    engine.resolve(distributionNode.path("OnDemandBaseCapacity"))));
+            distribution.setOnDemandPercentageAboveBaseCapacity(
+                    parseOptionalInt("OnDemandPercentageAboveBaseCapacity",
+                            engine.resolve(distributionNode.path("OnDemandPercentageAboveBaseCapacity"))));
+            distribution.setSpotAllocationStrategy(
+                    blankToNull(engine.resolve(distributionNode.path("SpotAllocationStrategy"))));
+            policy.setInstancesDistribution(distribution);
+        }
+        return policy;
+    }
+
+    /**
+     * Reads an optional integer property. A value that is present but not a number is a template
+     * error, and AWS rejects it rather than treating it as absent.
+     */
+    private Integer parseOptionalInt(String field, String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            return Integer.valueOf(value.trim());
+        } catch (NumberFormatException e) {
+            throw new AwsException("ValidationError",
+                    "Value of property " + field + " must be an integer.", 400);
+        }
     }
 
     private Map<String, String> resolveAsgTags(JsonNode props, CloudFormationTemplateEngine engine) {
@@ -1630,6 +1717,30 @@ public class CloudFormationResourceProvisioner {
         boolean hasExplicitName = explicitName != null && !explicitName.isBlank();
         String packageType = resolveOrDefault(props, "PackageType", engine, "Zip");
         String previousNameMode = r.getAttributes().get(LAMBDA_NAME_MODE_ATTR);
+        if (previousNameMode == null && r.getPhysicalId() != null) {
+            // Functions persisted before LAMBDA_NAME_MODE_ATTR existed have no recorded mode, but an
+            // auto-generated name always has the deterministic shape generatePhysicalName produces,
+            // so anything else must have been explicit (see #1965/#2152 for the LogGroup precedent
+            // this mirrors, and #2163 for this gap).
+            previousNameMode = isGeneratedName(r.getPhysicalId(), stackName, r.getLogicalId(), 64)
+                    ? NAME_MODE_GENERATED
+                    : NAME_MODE_EXPLICIT;
+            if (NAME_MODE_GENERATED.equals(previousNameMode) && !hasExplicitName) {
+                // This inference is what decides explicitRemoved below, and it's the one direction
+                // that can be wrong with no way for Floci to tell: a legacy FunctionName that was
+                // actually pinned explicitly, but happens to exactly match generatePhysicalName's
+                // shape (e.g. a user who deliberately reused a name Floci had previously generated),
+                // is indistinguishable from a name that really was auto-generated all along - the raw
+                // property value from that far back was never persisted to check against. Logged so
+                // an operator relying on this FunctionName removal to trigger a replacement has a
+                // chance to notice it silently didn't, rather than this being an invisible guess.
+                LOG.warnv("Lambda {0} in stack {1}: inferring legacy FunctionName ''{2}'' as "
+                                + "auto-generated because it matches the generated-name shape; if it "
+                                + "was actually set explicitly, removing FunctionName here will not "
+                                + "trigger the replacement AWS would perform",
+                        r.getLogicalId(), stackName, r.getPhysicalId());
+            }
+        }
         String oldPackageType = r.getAttributes().get(LAMBDA_PACKAGE_TYPE_ATTR);
         boolean packageTypeReplacement = r.getPhysicalId() != null
                 && oldPackageType != null

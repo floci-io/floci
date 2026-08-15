@@ -48,6 +48,7 @@ import io.github.hectorvent.floci.services.ec2.model.InternetGateway;
 import io.github.hectorvent.floci.services.ec2.model.InternetGatewayAttachment;
 import io.github.hectorvent.floci.services.ec2.model.IpPermission;
 import io.github.hectorvent.floci.services.ec2.model.IpRange;
+import io.github.hectorvent.floci.services.ec2.model.Ipv6Range;
 import io.github.hectorvent.floci.services.ec2.model.KeyPair;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
@@ -59,6 +60,7 @@ import io.github.hectorvent.floci.services.ec2.model.NetworkAclEntry;
 import io.github.hectorvent.floci.services.ec2.model.PrefixList;
 import io.github.hectorvent.floci.services.ec2.model.PrefixListEntry;
 import io.github.hectorvent.floci.services.ec2.model.Placement;
+import io.github.hectorvent.floci.services.ec2.model.ReferencedSecurityGroup;
 import io.github.hectorvent.floci.services.ec2.model.Reservation;
 import io.github.hectorvent.floci.services.ec2.model.Route;
 import io.github.hectorvent.floci.services.ec2.model.RouteTable;
@@ -68,6 +70,7 @@ import io.github.hectorvent.floci.services.ec2.model.SecurityGroupRule;
 import io.github.hectorvent.floci.services.ec2.model.Snapshot;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
+import io.github.hectorvent.floci.services.ec2.model.UserIdGroupPair;
 import io.github.hectorvent.floci.services.ec2.model.Volume;
 import io.github.hectorvent.floci.services.ec2.model.VolumeAttachment;
 import io.github.hectorvent.floci.services.ec2.model.Vpc;
@@ -85,6 +88,8 @@ public class Ec2Service implements ContainerTeardown {
     private static final Logger LOG = Logger.getLogger(Ec2Service.class);
     private static final DateTimeFormatter ISO_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'")
             .withZone(ZoneOffset.UTC);
+    private static final int DEFAULT_ROOT_VOLUME_SIZE_GIB = 8;
+    private static final String DEFAULT_ROOT_VOLUME_TYPE = "gp3";
 
     private final String accountId;
     private final EmulatorConfig config;
@@ -562,6 +567,23 @@ public class Ec2Service implements ContainerTeardown {
     // Managed prefix lists
     // =========================================================================
 
+    /**
+     * Name prefixes AWS reserves for its own gateway-endpoint lists. The trailing dot is part of
+     * each: {@code com.amazonaws-probe} is accepted on AWS, so matching without it over-rejects.
+     */
+    private static final List<String> RESERVED_PREFIX_LIST_NAME_PREFIXES =
+            List.of("com.amazonaws.", "com.amazon.", "com.aws.");
+
+    /** AWS applies the reserved-name rule to a rename as well as a create. */
+    private void requireUnreservedPrefixListName(String prefixListName) {
+        for (String reserved : RESERVED_PREFIX_LIST_NAME_PREFIXES) {
+            if (prefixListName.startsWith(reserved)) {
+                throw new AwsException("InvalidParameterValue",
+                        "The prefix list name cannot begin with (com.amazonaws., com.amazon., com.aws.).", 400);
+            }
+        }
+    }
+
     private List<ManagedPrefixList> awsManagedPrefixLists(String region) {
         return List.of(
                 awsManagedPrefixList(region, "pl-63a5400a", "com.amazonaws." + region + ".s3",
@@ -595,6 +617,7 @@ public class Ec2Service implements ContainerTeardown {
         if (prefixListName == null || prefixListName.isBlank()) {
             throw new AwsException("MissingParameter", "The request must contain the parameter PrefixListName.", 400);
         }
+        requireUnreservedPrefixListName(prefixListName);
         if (!"IPv4".equals(addressFamily) && !"IPv6".equals(addressFamily)) {
             throw new AwsException("InvalidParameterValue",
                     "Invalid value '" + addressFamily + "' for addressFamily. Valid values are IPv4 and IPv6.", 400);
@@ -705,6 +728,7 @@ public class Ec2Service implements ContainerTeardown {
                 list.setMaxEntries(maxEntries);
             }
             if (prefixListName != null && !prefixListName.isBlank()) {
+                requireUnreservedPrefixListName(prefixListName);
                 list.setPrefixListName(prefixListName);
             }
 
@@ -931,8 +955,8 @@ public class Ec2Service implements ContainerTeardown {
             Volume rootVol = new Volume();
             rootVol.setVolumeId(rootVolId);
             rootVol.setAvailabilityZone(az);
-            rootVol.setVolumeType("gp3");
-            rootVol.setSize(8);
+            rootVol.setVolumeType(DEFAULT_ROOT_VOLUME_TYPE);
+            rootVol.setSize(DEFAULT_ROOT_VOLUME_SIZE_GIB);
             rootVol.setState("in-use");
             rootVol.setRegion(region);
             rootVol.setCreateTime(Instant.now());
@@ -950,7 +974,9 @@ public class Ec2Service implements ContainerTeardown {
             reservation.getInstances().add(inst);
 
             if (!config.services().ec2().mock()) {
-                ResolvedAmiImage dockerImage = amiImageResolver.resolveImage(imageId);
+                // A CreateImage AMI is not in the catalog, so resolve through its source.
+                ResolvedAmiImage dockerImage =
+                        amiImageResolver.resolveImage(resolveLaunchableImageId(region, imageId));
                 String publicKey = null;
                 if (keyName != null) {
                     KeyPair kp = findKeyPair(region, keyName);
@@ -1658,6 +1684,7 @@ public class Ec2Service implements ContainerTeardown {
             SecurityGroup sg = getRequiredSecurityGroup(region, groupId);
             List<IpPermission> next = new ArrayList<>(sg.getIpPermissions());
             for (IpPermission perm : permissions) {
+                resolveGroupReferences(region, sg.getVpcId(), perm);
                 next.add(perm);
                 rules.addAll(createRules(region, groupId, perm, false));
             }
@@ -1675,6 +1702,7 @@ public class Ec2Service implements ContainerTeardown {
             SecurityGroup sg = getRequiredSecurityGroup(region, groupId);
             List<IpPermission> next = new ArrayList<>(sg.getIpPermissionsEgress());
             for (IpPermission perm : permissions) {
+                resolveGroupReferences(region, sg.getVpcId(), perm);
                 next.add(perm);
                 rules.addAll(createRules(region, groupId, perm, true));
             }
@@ -1684,37 +1712,89 @@ public class Ec2Service implements ContainerTeardown {
         return rules;
     }
 
+    /**
+     * Flattens one permission into the {@link SecurityGroupRule} entries DescribeSecurityGroupRules
+     * serves. AWS gives every rule exactly one source, so a permission carrying several sources fans
+     * out into one rule each.
+     */
     private List<SecurityGroupRule> createRules(String region, String groupId, IpPermission perm, boolean egress) {
         List<SecurityGroupRule> rules = new ArrayList<>();
-        List<IpRange> ranges = perm.getIpRanges();
-        if (ranges == null || ranges.isEmpty()) {
-            SecurityGroupRule rule = new SecurityGroupRule();
-            rule.setSecurityGroupRuleId("sgr-" + randomHex(17));
-            rule.setGroupId(groupId);
-            rule.setGroupOwnerId(accountId);
-            rule.setEgress(egress);
-            rule.setIpProtocol(perm.getIpProtocol());
-            rule.setFromPort(perm.getFromPort());
-            rule.setToPort(perm.getToPort());
-            securityGroupRules.put(key(region, rule.getSecurityGroupRuleId()), rule);
-            rules.add(rule);
-        } else {
-            for (IpRange range : ranges) {
-                SecurityGroupRule rule = new SecurityGroupRule();
-                rule.setSecurityGroupRuleId("sgr-" + randomHex(17));
-                rule.setGroupId(groupId);
-                rule.setGroupOwnerId(accountId);
-                rule.setEgress(egress);
-                rule.setIpProtocol(perm.getIpProtocol());
-                rule.setFromPort(perm.getFromPort());
-                rule.setToPort(perm.getToPort());
+        if (perm.getIpRanges() != null) {
+            for (IpRange range : perm.getIpRanges()) {
+                SecurityGroupRule rule = newRule(groupId, perm, egress);
                 rule.setCidrIpv4(range.getCidrIp());
                 rule.setDescription(range.getDescription());
-                securityGroupRules.put(key(region, rule.getSecurityGroupRuleId()), rule);
                 rules.add(rule);
             }
         }
+        if (perm.getIpv6Ranges() != null) {
+            for (Ipv6Range range : perm.getIpv6Ranges()) {
+                SecurityGroupRule rule = newRule(groupId, perm, egress);
+                rule.setCidrIpv6(range.getCidrIpv6());
+                rule.setDescription(range.getDescription());
+                rules.add(rule);
+            }
+        }
+        if (perm.getUserIdGroupPairs() != null) {
+            for (UserIdGroupPair pair : perm.getUserIdGroupPairs()) {
+                SecurityGroupRule rule = newRule(groupId, perm, egress);
+                ReferencedSecurityGroup ref = new ReferencedSecurityGroup();
+                ref.setGroupId(pair.getGroupId());
+                ref.setUserId(pair.getUserId());
+                rule.setReferencedGroupInfo(ref);
+                rule.setDescription(pair.getDescription());
+                rules.add(rule);
+            }
+        }
+        // Real AWS rejects a permission with no source at all; Floci keeps accepting it, so it still
+        // needs a rule to describe.
+        if (rules.isEmpty()) {
+            rules.add(newRule(groupId, perm, egress));
+        }
+        for (SecurityGroupRule rule : rules) {
+            securityGroupRules.put(key(region, rule.getSecurityGroupRuleId()), rule);
+        }
         return rules;
+    }
+
+    private SecurityGroupRule newRule(String groupId, IpPermission perm, boolean egress) {
+        SecurityGroupRule rule = new SecurityGroupRule();
+        rule.setSecurityGroupRuleId("sgr-" + randomHex(17));
+        rule.setGroupId(groupId);
+        rule.setGroupOwnerId(accountId);
+        rule.setEgress(egress);
+        rule.setIpProtocol(perm.getIpProtocol());
+        rule.setFromPort(perm.getFromPort());
+        rule.setToPort(perm.getToPort());
+        return rule;
+    }
+
+    /**
+     * Fills in the source details AWS returns but a caller may leave out: an absent {@code UserId}
+     * is this account, and a reference made by group name is resolved to its group id so the
+     * flattened rule can carry a {@code referencedGroupInfo} (the AWS shape has no group name).
+     *
+     * <p>Group names are unique per VPC rather than per region, so resolution is confined to the
+     * VPC of the group being authorized. A name matching nothing there stays unresolved: Floci does
+     * not check that a referenced group exists, for ids either.
+     */
+    private void resolveGroupReferences(String region, String vpcId, IpPermission perm) {
+        if (perm.getUserIdGroupPairs() == null) {
+            return;
+        }
+        for (UserIdGroupPair pair : perm.getUserIdGroupPairs()) {
+            if (pair.getUserId() == null) {
+                pair.setUserId(accountId);
+            }
+            if (pair.getGroupId() == null && pair.getGroupName() != null) {
+                securityGroups.scan(k -> true).stream()
+                        .filter(sg -> sg.getRegion().equals(region)
+                                && Objects.equals(vpcId, sg.getVpcId())
+                                && pair.getGroupName().equals(sg.getGroupName()))
+                        .findFirst()
+                        .ifPresent(sg -> pair.setGroupId(sg.getGroupId()));
+            }
+        }
     }
 
     public void revokeSecurityGroupIngress(String region, String groupId, List<IpPermission> permissions) {
@@ -1928,6 +2008,156 @@ public class Ec2Service implements ContainerTeardown {
         List<Image> images = new ArrayList<>(catalogImages);
         images.addAll(createdImages);
         return images;
+    }
+
+    public Image createImage(String region, String instanceId, String name, String description,
+                             boolean noReboot) {
+        ensureDefaultResources(region);
+        if (instanceId == null || instanceId.isBlank()) {
+            throw new AwsException("MissingParameter", "The request must contain the parameter InstanceId", 400);
+        }
+        Instance source = getRequiredInstance(region, instanceId);
+
+        // AWS reboots the source instance by default so the image is captured from a quiesced
+        // file system; NoReboot=true opts out and accepts the integrity risk.
+        if (!noReboot) {
+            rebootInstances(region, List.of(instanceId));
+        }
+
+        // The new AMI inherits what it was captured from rather than the registerImage defaults,
+        // so DescribeImages does not report a generic x86_64 / /dev/sda1 image with no devices.
+        Image sourceImage = findImageForCapture(region, source.getImageId());
+        Image image = registerImage(region, name, description,
+                sourceImage != null ? sourceImage.getArchitecture() : null,
+                sourceImage != null ? sourceImage.getRootDeviceName() : null,
+                captureBlockDeviceMappings(region, source, sourceImage));
+
+        // Carry the launchable ancestor so RunInstances on this AMI starts the same guest instead
+        // of falling through to the catalog default.
+        image.setSourceImageId(resolveLaunchableImageId(region, source.getImageId()));
+        registeredImages.put(key(region, image.getImageId()), image);
+        return image;
+    }
+
+    /**
+     * The devices the captured AMI reports. AWS captures what the source AMI describes plus any
+     * volume attached to the instance afterwards, so a data volume added post-launch is part of
+     * the image rather than being dropped.
+     */
+    private List<BlockDeviceMapping> captureBlockDeviceMappings(String region, Instance source,
+                                                                Image sourceImage) {
+        List<BlockDeviceMapping> mappings = new ArrayList<>(sourceImageMappings(sourceImage));
+        Set<String> devices = mappings.stream()
+                .map(BlockDeviceMapping::getDeviceName)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toSet());
+        for (Volume volume : volumes.scan(k -> true)) {
+            if (!region.equals(volume.getRegion())
+                    || volume.getVolumeId().equals(source.getRootVolumeId())) {
+                continue;
+            }
+            for (VolumeAttachment attachment : volume.getAttachments()) {
+                if (!source.getInstanceId().equals(attachment.getInstanceId())
+                        || !devices.add(attachment.getDevice())) {
+                    continue;
+                }
+                mappings.add(attachedMapping(volume, attachment));
+            }
+        }
+        return mappings.isEmpty() ? null : mappings;
+    }
+
+    /** The device an attached volume contributes, snapshotted as of the capture. */
+    private BlockDeviceMapping attachedMapping(Volume volume, VolumeAttachment attachment) {
+        EbsBlockDevice ebs = new EbsBlockDevice();
+        ebs.setSnapshotId("snap-" + randomHex(17));
+        ebs.setVolumeSize(volume.getSize());
+        ebs.setVolumeType(volume.getVolumeType());
+        ebs.setDeleteOnTermination(attachment.isDeleteOnTermination());
+        ebs.setEncrypted(volume.isEncrypted());
+        BlockDeviceMapping mapping = new BlockDeviceMapping();
+        mapping.setDeviceName(attachment.getDevice());
+        mapping.setEbs(ebs);
+        return mapping;
+    }
+
+    /**
+     * A registered source carries its own mappings, while a catalog entry describes only its root
+     * device, so the root is rebuilt from that rather than leaving the capture with no devices.
+     */
+    private List<BlockDeviceMapping> sourceImageMappings(Image sourceImage) {
+        if (sourceImage == null) {
+            return List.of();
+        }
+        List<BlockDeviceMapping> declared = sourceImage.getBlockDeviceMappings();
+        if (declared != null && !declared.isEmpty()) {
+            return declared.stream().map(this::recapture).toList();
+        }
+        String rootDeviceName = sourceImage.getRootDeviceName();
+        if (rootDeviceName == null || rootDeviceName.isBlank()) {
+            return List.of();
+        }
+        EbsBlockDevice ebs = new EbsBlockDevice();
+        ebs.setSnapshotId("snap-" + randomHex(17));
+        ebs.setVolumeSize(DEFAULT_ROOT_VOLUME_SIZE_GIB);
+        ebs.setVolumeType(DEFAULT_ROOT_VOLUME_TYPE);
+        ebs.setDeleteOnTermination(true);
+        BlockDeviceMapping mapping = new BlockDeviceMapping();
+        mapping.setDeviceName(rootDeviceName);
+        mapping.setEbs(ebs);
+        return List.of(mapping);
+    }
+
+    /**
+     * A capture takes its own snapshot of each device. Handing back the source AMI's snapshot ids
+     * would leave two images sharing one snapshot, so deleting either would appear to take the
+     * other's backing with it.
+     */
+    private BlockDeviceMapping recapture(BlockDeviceMapping source) {
+        BlockDeviceMapping mapping = new BlockDeviceMapping();
+        mapping.setDeviceName(source.getDeviceName());
+        EbsBlockDevice sourceEbs = source.getEbs();
+        if (sourceEbs == null) {
+            return mapping;
+        }
+        EbsBlockDevice ebs = new EbsBlockDevice();
+        ebs.setSnapshotId(sourceEbs.getSnapshotId() != null ? "snap-" + randomHex(17) : null);
+        ebs.setVolumeSize(sourceEbs.getVolumeSize());
+        ebs.setVolumeType(sourceEbs.getVolumeType());
+        ebs.setDeleteOnTermination(sourceEbs.getDeleteOnTermination());
+        ebs.setEncrypted(sourceEbs.getEncrypted());
+        mapping.setEbs(ebs);
+        return mapping;
+    }
+
+    /** The image a CreateImage source was launched from, whether catalog-backed or registered. */
+    private Image findImageForCapture(String region, String imageId) {
+        if (imageId == null || imageId.isBlank()) {
+            return null;
+        }
+        Image registered = registeredImages.get(key(region, imageId)).orElse(null);
+        if (registered != null) {
+            return registered;
+        }
+        return imageCatalog.findByIdOrAlias(imageId)
+                .map(Ec2ImageCatalog.CatalogImage::toImage)
+                .orElse(null);
+    }
+
+    /**
+     * Follows CreateImage ancestry back to an id the AMI resolver can map to a guest image.
+     * Images from RegisterImage have no source and stop the walk, as does a catalog id.
+     */
+    private String resolveLaunchableImageId(String region, String imageId) {
+        String current = imageId;
+        for (int hops = 0; hops < 16 && current != null; hops++) {
+            Image registered = registeredImages.get(key(region, current)).orElse(null);
+            if (registered == null || registered.getSourceImageId() == null) {
+                return current;
+            }
+            current = registered.getSourceImageId();
+        }
+        return current;
     }
 
     public Image registerImage(String region, String name, String description, String architecture,
@@ -2498,18 +2728,45 @@ public class Ec2Service implements ContainerTeardown {
     }
 
     private String inferResourceType(String resourceId) {
-        if (resourceId.startsWith("i-")) return "instance";
-        if (resourceId.startsWith("vpc-")) return "vpc";
-        if (resourceId.startsWith("subnet-")) return "subnet";
-        if (resourceId.startsWith("sg-")) return "security-group";
-        if (resourceId.startsWith("igw-")) return "internet-gateway";
-        if (resourceId.startsWith("rtb-")) return "route-table";
-        if (resourceId.startsWith("key-")) return "key-pair";
-        if (resourceId.startsWith("eipalloc-")) return "elastic-ip";
-        if (resourceId.startsWith("lt-")) return "launch-template";
-        if (resourceId.startsWith("vpce-")) return "vpc-endpoint";
-        if (resourceId.startsWith("nat-")) return "natgateway";
-        if (resourceId.startsWith("pl-")) return "prefix-list";
+        if (resourceId.startsWith("i-")) {
+            return "instance";
+        }
+        if (resourceId.startsWith("vpc-")) {
+            return "vpc";
+        }
+        if (resourceId.startsWith("subnet-")) {
+            return "subnet";
+        }
+        if (resourceId.startsWith("sgr-")) {
+            return "security-group-rule";
+        }
+        if (resourceId.startsWith("sg-")) {
+            return "security-group";
+        }
+        if (resourceId.startsWith("igw-")) {
+            return "internet-gateway";
+        }
+        if (resourceId.startsWith("rtb-")) {
+            return "route-table";
+        }
+        if (resourceId.startsWith("key-")) {
+            return "key-pair";
+        }
+        if (resourceId.startsWith("eipalloc-")) {
+            return "elastic-ip";
+        }
+        if (resourceId.startsWith("lt-")) {
+            return "launch-template";
+        }
+        if (resourceId.startsWith("vpce-")) {
+            return "vpc-endpoint";
+        }
+        if (resourceId.startsWith("nat-")) {
+            return "natgateway";
+        }
+        if (resourceId.startsWith("pl-")) {
+            return "prefix-list";
+        }
         return "unknown";
     }
 

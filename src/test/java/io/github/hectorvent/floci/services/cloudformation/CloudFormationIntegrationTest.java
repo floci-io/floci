@@ -33,6 +33,7 @@ import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.Matchers.startsWith;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
 class CloudFormationIntegrationTest {
@@ -7050,6 +7051,494 @@ class CloudFormationIntegrationTest {
             .body("Configuration.ImageConfigResponse.ImageConfig.WorkingDirectory", equalTo("/var/task"));
     }
 
+    // ── Issue #1759: SAM AWS::Serverless::HttpApi transform not expanded ──────
+
+    @Test
+    void createStack_samHttpApiExpandsToRealApiRouteAndAuthorizer() {
+        String template = """
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Resources": {
+                "MyFunction": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "PackageType": "Zip",
+                    "Handler": "index.handler",
+                    "Runtime": "nodejs20.x",
+                    "InlineCode": "exports.handler = async () => ({ statusCode: 200, body: 'hello' });",
+                    "Events": {
+                      "HelloEvent": {
+                        "Type": "HttpApi",
+                        "Properties": {
+                          "ApiId": { "Ref": "MyHttpApi" },
+                          "Path": "/hello",
+                          "Method": "get"
+                        }
+                      }
+                    }
+                  }
+                },
+                "MyHttpApi": {
+                  "Type": "AWS::Serverless::HttpApi",
+                  "Properties": {
+                    "Auth": {
+                      "Authorizers": {
+                        "MyAuthorizer": {
+                          "IdentitySource": "$request.header.Authorization",
+                          "JwtConfiguration": {
+                            "issuer": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_xxxxx",
+                            "audience": ["my-client-id"]
+                          }
+                        }
+                      },
+                      "DefaultAuthorizer": "MyAuthorizer"
+                    }
+                  }
+                }
+              },
+              "Outputs": {
+                "ApiId": { "Value": { "Ref": "MyHttpApi" } }
+              }
+            }
+            """;
+
+        String stackName = "cfn-sam-httpapi-stack";
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+            .formParam("Capabilities", "CAPABILITY_IAM")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String createXml = apigwv2DescribeStacks(stackName);
+        String apiId = apigwOutputValue(createXml, "ApiId");
+
+        // The AWS::Serverless::HttpApi transform resource is a real ApiGatewayV2 API,
+        // not silently dropped by the SAM-type default branch.
+        given()
+            .header("X-Amz-Target", "AmazonApiGatewayV2.GetApis")
+            .contentType(APIGWV2_CONTENT_TYPE)
+            .body("{}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Items.findAll { it.ApiId == '" + apiId + "' }.size()", equalTo(1));
+
+        // The Auth.Authorizers entry expanded to a real JWT authorizer.
+        String authorizerId = getAuthorizers(apiId)
+                .body("Items.size()", equalTo(1))
+                .body("Items[0].Name", equalTo("MyAuthorizer"))
+                .body("Items[0].AuthorizerType", equalTo("JWT"))
+                .body("Items[0].JwtConfiguration.Issuer",
+                        equalTo("https://cognito-idp.us-east-1.amazonaws.com/us-east-1_xxxxx"))
+                .extract().path("Items[0].AuthorizerId");
+
+        // The Function's HttpApi event expanded to a route wired to the DefaultAuthorizer,
+        // backed by an AWS_PROXY integration targeting the function.
+        getRoutes(apiId).body("Items.size()", equalTo(1))
+                .body("Items[0].RouteKey", equalTo("GET /hello"))
+                .body("Items[0].AuthorizationType", equalTo("JWT"))
+                .body("Items[0].AuthorizerId", equalTo(authorizerId));
+
+        getIntegrations(apiId).body("Items.size()", equalTo(1))
+                .body("Items[0].IntegrationType", equalTo("AWS_PROXY"));
+
+        getStages(apiId).body("Items.size()", equalTo(1))
+                .body("Items[0].StageName", equalTo("$default"))
+                .body("Items[0].AutoDeploy", equalTo(true));
+    }
+
+    @Test
+    void createStack_samHttpApiAuthorizerHonorsCustomIdentitySource() {
+        // SAM's Authorizers.<Name>.IdentitySource lets a JWT authorizer read the token from
+        // somewhere other than the default Authorization header — e.g. a query-string token,
+        // the same case CloudFormationResourceProvisioner/ApiGatewayExecuteController already
+        // support end-to-end for raw (non-SAM) templates. The SAM transform must forward it
+        // rather than always emitting the header default.
+        String template = """
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Resources": {
+                "MyFunction": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "PackageType": "Zip",
+                    "Handler": "index.handler",
+                    "Runtime": "nodejs20.x",
+                    "InlineCode": "exports.handler = async () => ({ statusCode: 200, body: 'hello' });",
+                    "Events": {
+                      "HelloEvent": {
+                        "Type": "HttpApi",
+                        "Properties": {
+                          "ApiId": { "Ref": "MyHttpApi" },
+                          "Path": "/hello",
+                          "Method": "get"
+                        }
+                      }
+                    }
+                  }
+                },
+                "MyHttpApi": {
+                  "Type": "AWS::Serverless::HttpApi",
+                  "Properties": {
+                    "Auth": {
+                      "Authorizers": {
+                        "MyAuthorizer": {
+                          "IdentitySource": "$request.querystring.token",
+                          "JwtConfiguration": {
+                            "issuer": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_xxxxx",
+                            "audience": ["my-client-id"]
+                          }
+                        }
+                      },
+                      "DefaultAuthorizer": "MyAuthorizer"
+                    }
+                  }
+                }
+              },
+              "Outputs": {
+                "ApiId": { "Value": { "Ref": "MyHttpApi" } }
+              }
+            }
+            """;
+
+        String stackName = "cfn-sam-httpapi-identitysource-stack";
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+            .formParam("Capabilities", "CAPABILITY_IAM")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String createXml = apigwv2DescribeStacks(stackName);
+        String apiId = apigwOutputValue(createXml, "ApiId");
+
+        // The scalar IdentitySource from the SAM template is forwarded, not overridden with the
+        // $request.header.Authorization default.
+        getAuthorizers(apiId)
+                .body("Items.size()", equalTo(1))
+                .body("Items[0].IdentitySource", hasItems("$request.querystring.token"));
+    }
+
+    @Test
+    void createStack_samHttpApiAuthorizerMissingIdentitySourceIsRejected() {
+        // Real SAM's _validate_jwt_authorizer rejects a JWT authorizer with no IdentitySource
+        // rather than defaulting it — CreateStack must fail the same way instead of silently
+        // provisioning an authorizer that would never have deployed for real.
+        String template = """
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Resources": {
+                "MyFunction": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "PackageType": "Zip",
+                    "Handler": "index.handler",
+                    "Runtime": "nodejs20.x",
+                    "InlineCode": "exports.handler = async () => ({ statusCode: 200, body: 'hello' });",
+                    "Events": {
+                      "HelloEvent": {
+                        "Type": "HttpApi",
+                        "Properties": {
+                          "ApiId": { "Ref": "MyHttpApi" },
+                          "Path": "/hello",
+                          "Method": "get"
+                        }
+                      }
+                    }
+                  }
+                },
+                "MyHttpApi": {
+                  "Type": "AWS::Serverless::HttpApi",
+                  "Properties": {
+                    "Auth": {
+                      "Authorizers": {
+                        "MyAuthorizer": {
+                          "JwtConfiguration": {
+                            "issuer": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_xxxxx",
+                            "audience": ["my-client-id"]
+                          }
+                        }
+                      },
+                      "DefaultAuthorizer": "MyAuthorizer"
+                    }
+                  }
+                }
+              },
+              "Outputs": {
+                "ApiId": { "Value": { "Ref": "MyHttpApi" } }
+              }
+            }
+            """;
+
+        String stackName = "cfn-sam-httpapi-missing-identitysource-stack";
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+            .formParam("Capabilities", "CAPABILITY_IAM")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackStatus>CREATE_FAILED</StackStatus>"))
+            .body(containsString("IdentitySource"));
+    }
+
+    @Test
+    void createStack_samHttpApiAuthorizerMissingJwtConfigurationIsRejected() {
+        // _validate_jwt_authorizer checks JwtConfiguration before IdentitySource, and real SAM
+        // rejects a template missing it rather than provisioning an authorizer that would never
+        // validate a token.
+        String template = """
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Resources": {
+                "MyFunction": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "PackageType": "Zip",
+                    "Handler": "index.handler",
+                    "Runtime": "nodejs20.x",
+                    "InlineCode": "exports.handler = async () => ({ statusCode: 200, body: 'hello' });",
+                    "Events": {
+                      "HelloEvent": {
+                        "Type": "HttpApi",
+                        "Properties": {
+                          "ApiId": { "Ref": "MyHttpApi" },
+                          "Path": "/hello",
+                          "Method": "get"
+                        }
+                      }
+                    }
+                  }
+                },
+                "MyHttpApi": {
+                  "Type": "AWS::Serverless::HttpApi",
+                  "Properties": {
+                    "Auth": {
+                      "Authorizers": {
+                        "MyAuthorizer": {
+                          "IdentitySource": "$request.header.Authorization"
+                        }
+                      },
+                      "DefaultAuthorizer": "MyAuthorizer"
+                    }
+                  }
+                }
+              },
+              "Outputs": {
+                "ApiId": { "Value": { "Ref": "MyHttpApi" } }
+              }
+            }
+            """;
+
+        String stackName = "cfn-sam-httpapi-missing-jwtconfiguration-stack";
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+            .formParam("Capabilities", "CAPABILITY_IAM")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackStatus>CREATE_FAILED</StackStatus>"))
+            .body(containsString("JwtConfiguration"));
+    }
+
+    @Test
+    void createStack_samHttpApiAuthorizerJwtConfigurationKeysAreCaseInsensitive() {
+        // SAM's _get_jwt_configuration lower-cases every JwtConfiguration key before reading it, so
+        // any casing is accepted, not just lowercase-OpenAPI or uppercase-CFN. AUDIENCE and Issuer
+        // (neither the documented lowercase nor the documented uppercase spelling) exercise that a
+        // true case-insensitive fold is happening rather than a check against two hardcoded spellings.
+        String template = """
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Resources": {
+                "MyFunction": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "PackageType": "Zip",
+                    "Handler": "index.handler",
+                    "Runtime": "nodejs20.x",
+                    "InlineCode": "exports.handler = async () => ({ statusCode: 200, body: 'hello' });",
+                    "Events": {
+                      "HelloEvent": {
+                        "Type": "HttpApi",
+                        "Properties": {
+                          "ApiId": { "Ref": "MyHttpApi" },
+                          "Path": "/hello",
+                          "Method": "get"
+                        }
+                      }
+                    }
+                  }
+                },
+                "MyHttpApi": {
+                  "Type": "AWS::Serverless::HttpApi",
+                  "Properties": {
+                    "Auth": {
+                      "Authorizers": {
+                        "MyAuthorizer": {
+                          "IdentitySource": "$request.header.Authorization",
+                          "JwtConfiguration": {
+                            "Issuer": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_xxxxx",
+                            "AUDIENCE": ["my-client-id"]
+                          }
+                        }
+                      },
+                      "DefaultAuthorizer": "MyAuthorizer"
+                    }
+                  }
+                }
+              },
+              "Outputs": {
+                "ApiId": { "Value": { "Ref": "MyHttpApi" } }
+              }
+            }
+            """;
+
+        String stackName = "cfn-sam-httpapi-caseinsensitive-jwtconfig-stack";
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+            .formParam("Capabilities", "CAPABILITY_IAM")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String createXml = apigwv2DescribeStacks(stackName);
+        String apiId = apigwOutputValue(createXml, "ApiId");
+
+        getAuthorizers(apiId)
+            .body("Items.size()", equalTo(1))
+            .body("Items[0].JwtConfiguration.Issuer",
+                    equalTo("https://cognito-idp.us-east-1.amazonaws.com/us-east-1_xxxxx"))
+            .body("Items[0].JwtConfiguration.Audience", contains("my-client-id"));
+    }
+
+    @Test
+    void createStack_samHttpApiPerEventAuthNoneOverridesDefaultAuthorizer() {
+        // Mirrors a function with two HttpApi events on the same explicit HttpApi: one route picks
+        // up Auth.DefaultAuthorizer, the other opts out via Auth: {Authorizer: NONE} (SAM's documented
+        // per-event override) — e.g. a protocol whose auth is handled inside the app itself, which
+        // needs a missing/invalid token to still reach the handler rather than be rejected by the
+        // gateway's authorizer.
+        String template = """
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Resources": {
+                "MyFunction": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "PackageType": "Zip",
+                    "Handler": "index.handler",
+                    "Runtime": "nodejs20.x",
+                    "InlineCode": "exports.handler = async () => ({ statusCode: 200, body: 'hello' });",
+                    "Events": {
+                      "PingEvent": {
+                        "Type": "HttpApi",
+                        "Properties": {
+                          "ApiId": { "Ref": "MyHttpApi" },
+                          "Path": "/v1/ping",
+                          "Method": "get"
+                        }
+                      },
+                      "OpenEvent": {
+                        "Type": "HttpApi",
+                        "Properties": {
+                          "ApiId": { "Ref": "MyHttpApi" },
+                          "Path": "/open",
+                          "Method": "any",
+                          "Auth": { "Authorizer": "NONE" }
+                        }
+                      }
+                    }
+                  }
+                },
+                "MyHttpApi": {
+                  "Type": "AWS::Serverless::HttpApi",
+                  "Properties": {
+                    "Auth": {
+                      "Authorizers": {
+                        "MyAuthorizer": {
+                          "IdentitySource": "$request.header.Authorization",
+                          "JwtConfiguration": {
+                            "issuer": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_xxxxx",
+                            "audience": ["my-client-id"]
+                          }
+                        }
+                      },
+                      "DefaultAuthorizer": "MyAuthorizer"
+                    }
+                  }
+                }
+              },
+              "Outputs": {
+                "ApiId": { "Value": { "Ref": "MyHttpApi" } }
+              }
+            }
+            """;
+
+        String stackName = "cfn-sam-httpapi-per-event-auth-stack";
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+            .formParam("Capabilities", "CAPABILITY_IAM")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String apiId = apigwOutputValue(apigwv2DescribeStacks(stackName), "ApiId");
+
+        getRoutes(apiId).body("Items.size()", equalTo(2))
+                .body("Items.findAll { it.RouteKey == 'GET /v1/ping' }.AuthorizationType", hasItem("JWT"))
+                .body("Items.findAll { it.RouteKey == 'ANY /open' }.AuthorizationType", hasItem("NONE"));
+    }
+
     private static final String SFN_CONTENT_TYPE = "application/x-amz-json-1.0";
 
     @Test
@@ -9309,6 +9798,107 @@ class CloudFormationIntegrationTest {
             .body("Policy", containsString("StmtB"))
             .body("Policy", containsString("111111111111"))
             .body("Policy", containsString("222222222222"));
+    }
+
+    @Test
+    void createStack_fifoQueueKeepsDeduplicationScopeThroughputLimitAndRedrivePolicy() {
+        // #1907: the stack reached CREATE_COMPLETE but DeduplicationScope, FifoThroughputLimit
+        // and RedrivePolicy were silently dropped on the CloudFormation-to-SQS path.
+        String stackName = "cfn-1907-fifo-attrs-stack";
+        String template = """
+            {
+              "Resources": {
+                "Dlq": {
+                  "Type": "AWS::SQS::Queue",
+                  "Properties": {
+                    "FifoQueue": true,
+                    "ContentBasedDeduplication": true
+                  }
+                },
+                "MainQueue": {
+                  "Type": "AWS::SQS::Queue",
+                  "Properties": {
+                    "QueueName": "cfn-1907-main.fifo",
+                    "FifoQueue": true,
+                    "ContentBasedDeduplication": false,
+                    "DeduplicationScope": "messageGroup",
+                    "FifoThroughputLimit": "perMessageGroupId",
+                    "VisibilityTimeout": 30,
+                    "RedrivePolicy": {
+                      "deadLetterTargetArn": {"Fn::GetAtt": ["Dlq", "Arn"]},
+                      "maxReceiveCount": 5
+                    }
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
+
+        // The DLQ had no QueueName: like real CloudFormation, the generated physical name of a
+        // FIFO queue must end in .fifo (SqsService rejects FifoQueue=true otherwise).
+        String resourcesXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackResources")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+        String dlqUrl = physicalIdByLogicalId(resourcesXml, "Dlq");
+        String dlqName = dlqUrl.substring(dlqUrl.lastIndexOf('/') + 1);
+        assertTrue(dlqName.endsWith(".fifo"),
+                "generated DLQ physical name should end with .fifo but was: " + dlqName);
+
+        // Every FIFO attribute and the redrive policy (with the resolved DLQ ARN) survives.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "GetQueueAttributes")
+            .formParam("QueueUrl", "http://localhost:4566/000000000000/cfn-1907-main.fifo")
+            .formParam("AttributeName.1", "All")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("DeduplicationScope"))
+            .body(containsString("messageGroup"))
+            .body(containsString("FifoThroughputLimit"))
+            .body(containsString("perMessageGroupId"))
+            .body(containsString("RedrivePolicy"))
+            .body(containsString("maxReceiveCount"))
+            .body(containsString("arn:aws:sqs:us-east-1:000000000000:" + dlqName));
+
+        // The generated-name DLQ is itself a FIFO queue.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "GetQueueAttributes")
+            .formParam("QueueUrl", dlqUrl)
+            .formParam("AttributeName.1", "All")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("FifoQueue"));
     }
 
 }

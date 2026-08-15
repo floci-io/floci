@@ -91,6 +91,7 @@ nav:
     - Secrets Manager: services/secrets-manager.md
     - CloudFormation: services/cloudformation.md
     - Step Functions: services/step-functions.md
+    - SWF: services/swf.md
     - IAM: services/iam.md
     - STS: services/sts.md
     - ElastiCache: services/elasticache.md
