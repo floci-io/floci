@@ -168,7 +168,8 @@ public class IamActionRegistry {
         var params = ctx.getUriInfo().getQueryParameters();
         boolean acl = params.containsKey("acl");
         boolean tagging = params.containsKey("tagging");
-        if (!acl && !tagging) {
+        boolean accelerate = params.containsKey("accelerate");
+        if (!acl && !tagging && !accelerate) {
             return null;
         }
         // /{bucket}?acl → bucket-level; /{bucket}/{key}?acl → object-level
@@ -193,18 +194,32 @@ public class IamActionRegistry {
                 default -> null;
             };
         }
-        if (isBucketLevel) {
+        if (tagging) {
+            if (isBucketLevel) {
+                return switch (method) {
+                    case "GET" -> "s3:GetBucketTagging";
+                    case "PUT" -> "s3:PutBucketTagging";
+                    case "DELETE" -> "s3:DeleteBucketTagging";
+                    default -> null;
+                };
+            }
             return switch (method) {
-                case "GET" -> "s3:GetBucketTagging";
-                case "PUT" -> "s3:PutBucketTagging";
-                case "DELETE" -> "s3:DeleteBucketTagging";
+                case "GET" -> "s3:GetObjectTagging";
+                case "PUT" -> "s3:PutObjectTagging";
+                case "DELETE" -> "s3:DeleteObjectTagging";
                 default -> null;
             };
         }
+        // Accelerate is a bucket-only subresource, and ?accelerate on an object path is
+        // inert — the object routes ignore it — so only a bucket-level request maps here;
+        // everything else falls through to the standard rule table.
+        if (!isBucketLevel) {
+            return null;
+        }
         return switch (method) {
-            case "GET" -> "s3:GetObjectTagging";
-            case "PUT" -> "s3:PutObjectTagging";
-            case "DELETE" -> "s3:DeleteObjectTagging";
+            case "GET" -> "s3:GetAccelerateConfiguration";
+            case "PUT" -> "s3:PutAccelerateConfiguration";
+            // AWS defines no DELETE for the subresource.
             default -> null;
         };
     }
