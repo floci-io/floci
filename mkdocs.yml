@@ -79,6 +79,7 @@ nav:
     - SNS: services/sns.md
     - SES: services/ses.md
     - S3: services/s3.md
+    - S3 Tables: services/s3tables.md
     - DynamoDB: services/dynamodb.md
     - Lambda: services/lambda.md
     - Lambda MicroVMs: services/lambda-microvms.md

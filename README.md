@@ -223,7 +223,7 @@ Floci supports local emulation for application services, data services, eventing
 | Events and workflows | EventBridge, EventBridge Pipes, EventBridge Scheduler, Step Functions, SWF, CloudWatch Logs, CloudWatch Metrics |
 | API and identity | API Gateway REST, API Gateway v2, AppSync, Cognito, ACM, Route53, Cloud Map |
 | Containers and compute | ECS, EC2, Lightsail, EKS, MWAA, ECR, CodeBuild, CodeDeploy, CodePipeline, AWS Batch, Auto Scaling, Application Auto Scaling, Elastic Beanstalk, ELB v2 |
-| Data, analytics, and AI | Athena, Glue, EMR, Firehose, Managed Service for Apache Flink, OpenSearch, S3 Vectors, Textract, Transcribe, Bedrock Runtime |
+| Data, analytics, and AI | Athena, Glue, EMR, Firehose, Managed Service for Apache Flink, OpenSearch, S3 Tables, S3 Vectors, Textract, Transcribe, Bedrock Runtime |
 | Databases and caching | RDS, RDS Data API, Neptune, DocumentDB, MemoryDB, ElastiCache |
 | Messaging and transfer | SES, Kinesis, MSK, Amazon MQ, Transfer Family, IoT Core |
 | Security and governance | WAF v2, CloudTrail, CloudFront, Resource Groups Tagging API |
