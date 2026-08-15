@@ -61,6 +61,8 @@ floci:
       cloudfront:
       appsync:
         flush-interval-ms: 60000
+      rum:
+        flush-interval-ms: 60000
 
   auth:
     validate-signatures: false
@@ -80,6 +82,7 @@ floci:
 
   protocols:
     strict-claiming: false
+    reject-unknown-service-scope: true
 
   docker:
     log-max-size: "10m"
@@ -122,6 +125,9 @@ floci:
     amazonmq:
       enabled: true
       mock: true
+    kinesis-analytics:
+      enabled: true
+      mock: true
     elasticache:
       enabled: true
       proxy-base-port: 6379
@@ -139,9 +145,6 @@ floci:
       mock: false
       proxy-base-port: 7001
       proxy-max-port: 7099
-      default-postgres-image: "postgres:16-alpine"
-      default-mysql-image: "mysql:8.0"
-      default-mariadb-image: "mariadb:11"
     rds-data:
       enabled: true
       transaction-ttl-seconds: 180
@@ -179,6 +182,10 @@ floci:
     stepfunctions:
       enabled: true
       allow-plaintext-http: true
+    swf:
+      enabled: true
+      timeout-sweep-enabled: true
+      timeout-sweep-interval-seconds: 1
     cloudformation:
       enabled: true
     acm:
@@ -224,6 +231,9 @@ floci:
       enabled: true
       mock: true
       ecr-registry-mirror: true
+    mwaa:
+      enabled: true
+      mock: true
     pipes:
       enabled: true
     elbv2:
@@ -240,6 +250,8 @@ floci:
     codepipeline:
       enabled: true
     autoscaling:
+      enabled: true
+    applicationautoscaling:
       enabled: true
     elasticbeanstalk:
       enabled: true
@@ -269,6 +281,7 @@ floci:
       enabled: true
     cloudfront:
       enabled: true
+      allowed-private-origin-hosts: []
     appsync:
       enabled: true
       schema-worker-threads: 4
@@ -283,4 +296,6 @@ floci:
         host: 127.0.0.1
         port: 1883
     iotdata:
+      enabled: true
+    rum:
       enabled: true

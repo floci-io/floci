@@ -2,7 +2,7 @@ package io.github.hectorvent.floci.services.docdb;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.RegionResolver;
-import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.docdb.container.DocDbContainerManager;
 import io.github.hectorvent.floci.services.docdb.model.DocDbCluster;
@@ -29,7 +29,7 @@ class DocDbServiceTest {
     void setUp() {
         StorageFactory storageFactory = Mockito.mock(StorageFactory.class);
         when(storageFactory.create(anyString(), anyString(), any()))
-                .thenAnswer(invocation -> new InMemoryStorage<>());
+                .thenAnswer(inv -> AccountAwareStorageBackend.inMemory("000000000000"));
 
         EmulatorConfig config = Mockito.mock(EmulatorConfig.class);
         var servicesConfig = Mockito.mock(EmulatorConfig.ServicesConfig.class);
@@ -80,6 +80,33 @@ class DocDbServiceTest {
         assertEquals("available", instance.getStatus());
         assertEquals("localhost", instance.getEndpoint());
         assertEquals(27017, instance.getPort());
+    }
+
+    @Test
+    void listDbClustersMatchesByArnButNotForeignArn() {
+        DocDbCluster cluster = docDbService.createDbCluster(
+                "mock-cluster", null, "admin", "secret", false);
+
+        String arn = cluster.getDbClusterArn();
+        assertEquals(1, docDbService.listDbClusters(arn).size());
+        assertTrue(docDbService.listDbClusters(arn.replace("000000000000", "999999999999")).isEmpty(),
+                "cross-account ARN must not match");
+        assertTrue(docDbService.listDbClusters(arn.replace("us-east-1", "eu-west-1")).isEmpty(),
+                "cross-region ARN must not match");
+    }
+
+    @Test
+    void listDbInstancesMatchesByArnButNotForeignArn() {
+        docDbService.createDbCluster("mock-cluster", null, "admin", "secret", false);
+        DocDbInstance instance = docDbService.createDbInstance(
+                "mock-instance", "mock-cluster", "db.r5.large", null, false);
+
+        String arn = instance.getDbInstanceArn();
+        assertEquals(1, docDbService.listDbInstances(arn).size());
+        assertTrue(docDbService.listDbInstances(arn.replace("000000000000", "999999999999")).isEmpty(),
+                "cross-account ARN must not match");
+        assertTrue(docDbService.listDbInstances(arn.replace("us-east-1", "eu-west-1")).isEmpty(),
+                "cross-region ARN must not match");
     }
 
     @Test

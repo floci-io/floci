@@ -48,15 +48,19 @@ import io.github.hectorvent.floci.services.ec2.model.InternetGateway;
 import io.github.hectorvent.floci.services.ec2.model.InternetGatewayAttachment;
 import io.github.hectorvent.floci.services.ec2.model.IpPermission;
 import io.github.hectorvent.floci.services.ec2.model.IpRange;
+import io.github.hectorvent.floci.services.ec2.model.Ipv6Range;
 import io.github.hectorvent.floci.services.ec2.model.KeyPair;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
+import io.github.hectorvent.floci.services.ec2.model.ManagedPrefixList;
 import io.github.hectorvent.floci.services.ec2.model.NatGateway;
 import io.github.hectorvent.floci.services.ec2.model.NetworkAcl;
 import io.github.hectorvent.floci.services.ec2.model.NetworkAclAssociation;
 import io.github.hectorvent.floci.services.ec2.model.NetworkAclEntry;
 import io.github.hectorvent.floci.services.ec2.model.PrefixList;
+import io.github.hectorvent.floci.services.ec2.model.PrefixListEntry;
 import io.github.hectorvent.floci.services.ec2.model.Placement;
+import io.github.hectorvent.floci.services.ec2.model.ReferencedSecurityGroup;
 import io.github.hectorvent.floci.services.ec2.model.Reservation;
 import io.github.hectorvent.floci.services.ec2.model.Route;
 import io.github.hectorvent.floci.services.ec2.model.RouteTable;
@@ -66,6 +70,7 @@ import io.github.hectorvent.floci.services.ec2.model.SecurityGroupRule;
 import io.github.hectorvent.floci.services.ec2.model.Snapshot;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
+import io.github.hectorvent.floci.services.ec2.model.UserIdGroupPair;
 import io.github.hectorvent.floci.services.ec2.model.Volume;
 import io.github.hectorvent.floci.services.ec2.model.VolumeAttachment;
 import io.github.hectorvent.floci.services.ec2.model.Vpc;
@@ -83,6 +88,8 @@ public class Ec2Service implements ContainerTeardown {
     private static final Logger LOG = Logger.getLogger(Ec2Service.class);
     private static final DateTimeFormatter ISO_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'")
             .withZone(ZoneOffset.UTC);
+    private static final int DEFAULT_ROOT_VOLUME_SIZE_GIB = 8;
+    private static final String DEFAULT_ROOT_VOLUME_TYPE = "gp3";
 
     private final String accountId;
     private final EmulatorConfig config;
@@ -112,6 +119,7 @@ public class Ec2Service implements ContainerTeardown {
     private final StorageBackend<String, NatGateway> natGateways;
     private final StorageBackend<String, SpotInstanceRequest> spotInstanceRequests;
     private final StorageBackend<String, NetworkAcl> networkAcls;
+    private final StorageBackend<String, ManagedPrefixList> managedPrefixLists;
     // resourceId → List<Tag>
     private final StorageBackend<String, List<Tag>> tags;
     private final Set<String> seededRegions = ConcurrentHashMap.newKeySet();
@@ -141,6 +149,7 @@ public class Ec2Service implements ContainerTeardown {
                 storageFactory.create("ec2", "ec2-nat-gateways.json", new TypeReference<Map<String, NatGateway>>() {}),
                 storageFactory.create("ec2", "ec2-spot-instance-requests.json", new TypeReference<Map<String, SpotInstanceRequest>>() {}),
                 storageFactory.create("ec2", "ec2-network-acls.json", new TypeReference<Map<String, NetworkAcl>>() {}),
+                storageFactory.create("ec2", "ec2-managed-prefix-lists.json", new TypeReference<Map<String, ManagedPrefixList>>() {}),
                 storageFactory.create("ec2", "ec2-tags.json", new TypeReference<Map<String, List<Tag>>>() {}));
     }
 
@@ -166,6 +175,7 @@ public class Ec2Service implements ContainerTeardown {
                StorageBackend<String, NatGateway> natGateways,
                StorageBackend<String, SpotInstanceRequest> spotInstanceRequests,
                StorageBackend<String, NetworkAcl> networkAcls,
+               StorageBackend<String, ManagedPrefixList> managedPrefixLists,
                StorageBackend<String, List<Tag>> tags) {
         this.accountId = config.defaultAccountId();
         this.config = config;
@@ -191,6 +201,7 @@ public class Ec2Service implements ContainerTeardown {
         this.natGateways = natGateways;
         this.spotInstanceRequests = spotInstanceRequests;
         this.networkAcls = networkAcls;
+        this.managedPrefixLists = managedPrefixLists;
         this.tags = tags;
     }
 
@@ -534,20 +545,246 @@ public class Ec2Service implements ContainerTeardown {
     // AWS-managed prefix lists for the gateway-endpoint services (S3, DynamoDB). These are
     // not user-created, so they're returned as static managed data per region. Querying any
     // other service name (e.g. an interface endpoint) correctly yields no match.
+    //
+    // The legacy DescribePrefixLists surface projects the same objects that
+    // DescribeManagedPrefixLists serves, so the two APIs cannot report different CIDRs for the
+    // same list.
     public List<PrefixList> describePrefixLists(String region, List<String> ids, Map<String, List<String>> filters) {
-        List<PrefixList> managed = new ArrayList<>();
-        managed.add(new PrefixList("pl-63a5400a", "com.amazonaws." + region + ".s3",
-                new ArrayList<>(List.of("52.216.0.0/15", "54.231.0.0/16"))));
-        managed.add(new PrefixList("pl-02cd2c6b", "com.amazonaws." + region + ".dynamodb",
-                new ArrayList<>(List.of("3.218.182.0/24", "52.94.0.0/22"))));
-
         List<String> names = filters.getOrDefault("prefix-list-name", List.of());
         List<String> filterIds = filters.getOrDefault("prefix-list-id", List.of());
-        return managed.stream()
+        return awsManagedPrefixLists(region).stream()
                 .filter(pl -> ids.isEmpty() || ids.contains(pl.getPrefixListId()))
                 .filter(pl -> filterIds.isEmpty() || filterIds.contains(pl.getPrefixListId()))
                 .filter(pl -> names.isEmpty() || names.contains(pl.getPrefixListName()))
+                .map(pl -> new PrefixList(pl.getPrefixListId(), pl.getPrefixListName(),
+                        pl.currentEntries().stream()
+                                .map(PrefixListEntry::getCidr)
+                                .collect(Collectors.toCollection(ArrayList::new))))
                 .collect(Collectors.toList());
+    }
+
+    // =========================================================================
+    // Managed prefix lists
+    // =========================================================================
+
+    /**
+     * Name prefixes AWS reserves for its own gateway-endpoint lists. The trailing dot is part of
+     * each: {@code com.amazonaws-probe} is accepted on AWS, so matching without it over-rejects.
+     */
+    private static final List<String> RESERVED_PREFIX_LIST_NAME_PREFIXES =
+            List.of("com.amazonaws.", "com.amazon.", "com.aws.");
+
+    /** AWS applies the reserved-name rule to a rename as well as a create. */
+    private void requireUnreservedPrefixListName(String prefixListName) {
+        for (String reserved : RESERVED_PREFIX_LIST_NAME_PREFIXES) {
+            if (prefixListName.startsWith(reserved)) {
+                throw new AwsException("InvalidParameterValue",
+                        "The prefix list name cannot begin with (com.amazonaws., com.amazon., com.aws.).", 400);
+            }
+        }
+    }
+
+    private List<ManagedPrefixList> awsManagedPrefixLists(String region) {
+        return List.of(
+                awsManagedPrefixList(region, "pl-63a5400a", "com.amazonaws." + region + ".s3",
+                        List.of("52.216.0.0/15", "54.231.0.0/16")),
+                awsManagedPrefixList(region, "pl-02cd2c6b", "com.amazonaws." + region + ".dynamodb",
+                        List.of("3.218.182.0/24", "52.94.0.0/22")));
+    }
+
+    private ManagedPrefixList awsManagedPrefixList(String region, String id, String name, List<String> cidrs) {
+        ManagedPrefixList list = new ManagedPrefixList();
+        list.setPrefixListId(id);
+        list.setPrefixListName(name);
+        // AWS-managed lists are owned by AWS itself, not by the calling account.
+        list.setOwnerId("AWS");
+        list.setPrefixListArn(AwsArnUtils.Arn.of("ec2", region, "aws", "prefix-list/" + id).toString());
+        list.setAddressFamily("IPv4");
+        list.setState("create-complete");
+        list.setMaxEntries(cidrs.size());
+        list.setVersion(1);
+        list.setRegion(region);
+        list.setAwsManaged(true);
+        list.getEntriesByVersion().put("1", cidrs.stream()
+                .map(cidr -> new PrefixListEntry(cidr, null))
+                .collect(Collectors.toList()));
+        return list;
+    }
+
+    public ManagedPrefixList createManagedPrefixList(String region, String prefixListName, String addressFamily,
+                                                     Integer maxEntries, List<PrefixListEntry> entries,
+                                                     List<Tag> prefixListTags) {
+        if (prefixListName == null || prefixListName.isBlank()) {
+            throw new AwsException("MissingParameter", "The request must contain the parameter PrefixListName.", 400);
+        }
+        requireUnreservedPrefixListName(prefixListName);
+        if (!"IPv4".equals(addressFamily) && !"IPv6".equals(addressFamily)) {
+            throw new AwsException("InvalidParameterValue",
+                    "Invalid value '" + addressFamily + "' for addressFamily. Valid values are IPv4 and IPv6.", 400);
+        }
+        if (maxEntries == null || maxEntries < 1) {
+            throw new AwsException("InvalidParameterValue",
+                    "Invalid value for maxEntries. It must be greater than 0.", 400);
+        }
+        List<PrefixListEntry> initial = entries == null ? List.of() : entries;
+        if (initial.size() > maxEntries) {
+            throw new AwsException("InvalidParameterValue",
+                    "The number of entries exceeds the maximum of " + maxEntries + ".", 400);
+        }
+        initial.forEach(entry -> validatePrefixListEntry(entry, addressFamily));
+
+        ManagedPrefixList list = new ManagedPrefixList();
+        String prefixListId = "pl-" + randomHex(17);
+        list.setPrefixListId(prefixListId);
+        list.setPrefixListName(prefixListName);
+        list.setPrefixListArn(AwsArnUtils.Arn.of("ec2", region, accountId, "prefix-list/" + prefixListId).toString());
+        list.setAddressFamily(addressFamily);
+        list.setMaxEntries(maxEntries);
+        list.setOwnerId(accountId);
+        list.setRegion(region);
+        // AWS creates asynchronously (create-in-progress then create-complete). Nothing here is
+        // slow, so the list is complete by the time the caller sees it.
+        list.setState("create-complete");
+        list.setVersion(1);
+        list.getEntriesByVersion().put("1", new ArrayList<>(initial));
+        if (prefixListTags != null && !prefixListTags.isEmpty()) {
+            list.setTags(new ArrayList<>(prefixListTags));
+            tags.put(prefixListId, new ArrayList<>(prefixListTags));
+        }
+        managedPrefixLists.put(key(region, prefixListId), list);
+        return list;
+    }
+
+    public List<ManagedPrefixList> describeManagedPrefixLists(String region, List<String> prefixListIds,
+                                                              Map<String, List<String>> filters) {
+        List<ManagedPrefixList> all = new ArrayList<>(awsManagedPrefixLists(region));
+        managedPrefixLists.scan(k -> true).stream()
+                .filter(list -> region.equals(list.getRegion()))
+                .forEach(all::add);
+
+        if (!prefixListIds.isEmpty()) {
+            for (String prefixListId : prefixListIds) {
+                if (all.stream().noneMatch(list -> list.getPrefixListId().equals(prefixListId))) {
+                    throw new AwsException("InvalidPrefixListID.NotFound",
+                            "The prefix list ID '" + prefixListId + "' does not exist.", 400);
+                }
+            }
+        }
+        return all.stream()
+                .filter(list -> prefixListIds.isEmpty() || prefixListIds.contains(list.getPrefixListId()))
+                .filter(list -> matchesFilters(list, filters, region))
+                .collect(Collectors.toList());
+    }
+
+    public List<PrefixListEntry> getManagedPrefixListEntries(String region, String prefixListId, Long targetVersion) {
+        ManagedPrefixList list = getRequiredManagedPrefixList(region, prefixListId);
+        long version = targetVersion != null ? targetVersion : list.getVersion();
+        List<PrefixListEntry> entries = list.getEntriesByVersion().get(String.valueOf(version));
+        if (entries == null) {
+            throw new AwsException("InvalidParameterValue",
+                    "Version " + version + " does not exist for prefix list " + prefixListId + ".", 400);
+        }
+        return entries;
+    }
+
+    /**
+     * Applies removals before additions, matching AWS, so a single call can replace an entry's
+     * description by removing and re-adding the same CIDR. Only an entry change produces a new
+     * version — renaming the list leaves the version untouched.
+     */
+    public ManagedPrefixList modifyManagedPrefixList(String region, String prefixListId, Long currentVersion,
+                                                     String prefixListName, Integer maxEntries,
+                                                     List<PrefixListEntry> addEntries, List<String> removeCidrs) {
+        synchronized (lockFor(key(region, prefixListId))) {
+            ManagedPrefixList list = getRequiredManagedPrefixList(region, prefixListId);
+            requireCustomerManaged(list, "modified");
+            if (currentVersion != null && currentVersion != list.getVersion()) {
+                throw new AwsException("PrefixListVersionMismatch",
+                        "The prefix list has the incorrect version number.", 400);
+            }
+
+            List<PrefixListEntry> updated = new ArrayList<>(list.currentEntries());
+            if (removeCidrs != null && !removeCidrs.isEmpty()) {
+                updated.removeIf(entry -> removeCidrs.contains(entry.getCidr()));
+            }
+            if (addEntries != null) {
+                for (PrefixListEntry entry : addEntries) {
+                    validatePrefixListEntry(entry, list.getAddressFamily());
+                    updated.removeIf(existing -> existing.getCidr().equals(entry.getCidr()));
+                    updated.add(entry);
+                }
+            }
+
+            int effectiveMax = maxEntries != null ? maxEntries : list.getMaxEntries();
+            if (effectiveMax < 1) {
+                throw new AwsException("InvalidParameterValue",
+                        "Invalid value for maxEntries. It must be greater than 0.", 400);
+            }
+            if (updated.size() > effectiveMax) {
+                throw new AwsException("InvalidParameterValue",
+                        "The number of entries exceeds the maximum of " + effectiveMax + ".", 400);
+            }
+            if (maxEntries != null) {
+                list.setMaxEntries(maxEntries);
+            }
+            if (prefixListName != null && !prefixListName.isBlank()) {
+                requireUnreservedPrefixListName(prefixListName);
+                list.setPrefixListName(prefixListName);
+            }
+
+            boolean entriesChanged = (addEntries != null && !addEntries.isEmpty())
+                    || (removeCidrs != null && !removeCidrs.isEmpty());
+            if (entriesChanged) {
+                long nextVersion = list.getVersion() + 1;
+                list.getEntriesByVersion().put(String.valueOf(nextVersion), updated);
+                list.setVersion(nextVersion);
+            }
+            list.setState("modify-complete");
+            managedPrefixLists.put(key(region, prefixListId), list);
+            return list;
+        }
+    }
+
+    public ManagedPrefixList deleteManagedPrefixList(String region, String prefixListId) {
+        synchronized (lockFor(key(region, prefixListId))) {
+            ManagedPrefixList list = getRequiredManagedPrefixList(region, prefixListId);
+            requireCustomerManaged(list, "deleted");
+            managedPrefixLists.delete(key(region, prefixListId));
+            tags.delete(prefixListId);
+            // AWS reports delete-complete on the returned object even though it is now gone.
+            list.setState("delete-complete");
+            return list;
+        }
+    }
+
+    private ManagedPrefixList getRequiredManagedPrefixList(String region, String prefixListId) {
+        if (prefixListId == null || prefixListId.isBlank()) {
+            throw new AwsException("MissingParameter",
+                    "The request must contain the parameter PrefixListId.", 400);
+        }
+        return describeManagedPrefixLists(region, List.of(prefixListId), Map.of()).stream()
+                .findFirst()
+                .orElseThrow(() -> new AwsException("InvalidPrefixListID.NotFound",
+                        "The prefix list ID '" + prefixListId + "' does not exist.", 400));
+    }
+
+    private void requireCustomerManaged(ManagedPrefixList list, String verb) {
+        if (list.isAwsManaged()) {
+            throw new AwsException("UnsupportedOperation",
+                    "The prefix list " + list.getPrefixListId()
+                            + " is an AWS-managed prefix list and cannot be " + verb + ".", 400);
+        }
+    }
+
+    private void validatePrefixListEntry(PrefixListEntry entry, String addressFamily) {
+        if (entry.getCidr() == null || entry.getCidr().isBlank()) {
+            throw new AwsException("MissingParameter", "Every prefix list entry must specify a Cidr.", 400);
+        }
+        boolean ipv6 = entry.getCidr().contains(":");
+        if (ipv6 != "IPv6".equals(addressFamily)) {
+            throw new AwsException("InvalidParameterValue",
+                    "The CIDR '" + entry.getCidr() + "' does not match the address family " + addressFamily + ".", 400);
+        }
     }
 
     private String key(String region, String id) {
@@ -606,6 +843,17 @@ public class Ec2Service implements ContainerTeardown {
                                     List<String> securityGroupIds, String subnetId,
                                     String clientToken, List<Tag> instanceTags,
                                     String userData, String iamInstanceProfileArn) {
+        return runInstances(region, imageId, instanceType, minCount, maxCount, keyName,
+                securityGroupIds, subnetId, clientToken, instanceTags, userData,
+                iamInstanceProfileArn, null);
+    }
+
+    public Reservation runInstances(String region, String imageId, String instanceType,
+                                    int minCount, int maxCount, String keyName,
+                                    List<String> securityGroupIds, String subnetId,
+                                    String clientToken, List<Tag> instanceTags,
+                                    String userData, String iamInstanceProfileArn,
+                                    Boolean associatePublicIp) {
         if (imageId == null || imageId.isBlank()) {
             throw new AwsException("MissingParameter", "The request must contain the parameter ImageId", 400);
         }
@@ -663,6 +911,12 @@ public class Ec2Service implements ContainerTeardown {
             inst.setPlacement(new Placement(az));
             inst.setSubnetId(finalSubnetId);
             inst.setVpcId(vpcId);
+            // AWS precedence (#1984): the launch-time AssociatePublicIpAddress
+            // override wins in both directions; the subnet's MapPublicIpOnLaunch
+            // attribute is only the default when the launch does not specify it.
+            inst.setAssociatePublicIp(associatePublicIp != null
+                    ? associatePublicIp
+                    : subnet != null && subnet.isMapPublicIpOnLaunch());
             inst.setPrivateIpAddress(privateIp);
             inst.setPrivateDnsName("ip-" + privateIp.replace('.', '-') + ".ec2.internal");
             inst.setKeyName(keyName);
@@ -701,8 +955,8 @@ public class Ec2Service implements ContainerTeardown {
             Volume rootVol = new Volume();
             rootVol.setVolumeId(rootVolId);
             rootVol.setAvailabilityZone(az);
-            rootVol.setVolumeType("gp3");
-            rootVol.setSize(8);
+            rootVol.setVolumeType(DEFAULT_ROOT_VOLUME_TYPE);
+            rootVol.setSize(DEFAULT_ROOT_VOLUME_SIZE_GIB);
             rootVol.setState("in-use");
             rootVol.setRegion(region);
             rootVol.setCreateTime(Instant.now());
@@ -720,7 +974,9 @@ public class Ec2Service implements ContainerTeardown {
             reservation.getInstances().add(inst);
 
             if (!config.services().ec2().mock()) {
-                ResolvedAmiImage dockerImage = amiImageResolver.resolveImage(imageId);
+                // A CreateImage AMI is not in the catalog, so resolve through its source.
+                ResolvedAmiImage dockerImage =
+                        amiImageResolver.resolveImage(resolveLaunchableImageId(region, imageId));
                 String publicKey = null;
                 if (keyName != null) {
                     KeyPair kp = findKeyPair(region, keyName);
@@ -1302,6 +1558,9 @@ public class Ec2Service implements ContainerTeardown {
     // ─── Subnets ───────────────────────────────────────────────────────────────
 
     public Subnet createSubnet(String region, String vpcId, String cidrBlock, String availabilityZone) {
+        if (vpcId == null || vpcId.isBlank()) {
+            throw new AwsException("MissingParameter", "The request must contain the parameter VpcId", 400);
+        }
         ensureDefaultResources(region);
         getRequiredVpc(region, vpcId);
 
@@ -1425,6 +1684,7 @@ public class Ec2Service implements ContainerTeardown {
             SecurityGroup sg = getRequiredSecurityGroup(region, groupId);
             List<IpPermission> next = new ArrayList<>(sg.getIpPermissions());
             for (IpPermission perm : permissions) {
+                resolveGroupReferences(region, sg.getVpcId(), perm);
                 next.add(perm);
                 rules.addAll(createRules(region, groupId, perm, false));
             }
@@ -1442,6 +1702,7 @@ public class Ec2Service implements ContainerTeardown {
             SecurityGroup sg = getRequiredSecurityGroup(region, groupId);
             List<IpPermission> next = new ArrayList<>(sg.getIpPermissionsEgress());
             for (IpPermission perm : permissions) {
+                resolveGroupReferences(region, sg.getVpcId(), perm);
                 next.add(perm);
                 rules.addAll(createRules(region, groupId, perm, true));
             }
@@ -1451,37 +1712,89 @@ public class Ec2Service implements ContainerTeardown {
         return rules;
     }
 
+    /**
+     * Flattens one permission into the {@link SecurityGroupRule} entries DescribeSecurityGroupRules
+     * serves. AWS gives every rule exactly one source, so a permission carrying several sources fans
+     * out into one rule each.
+     */
     private List<SecurityGroupRule> createRules(String region, String groupId, IpPermission perm, boolean egress) {
         List<SecurityGroupRule> rules = new ArrayList<>();
-        List<IpRange> ranges = perm.getIpRanges();
-        if (ranges == null || ranges.isEmpty()) {
-            SecurityGroupRule rule = new SecurityGroupRule();
-            rule.setSecurityGroupRuleId("sgr-" + randomHex(17));
-            rule.setGroupId(groupId);
-            rule.setGroupOwnerId(accountId);
-            rule.setEgress(egress);
-            rule.setIpProtocol(perm.getIpProtocol());
-            rule.setFromPort(perm.getFromPort());
-            rule.setToPort(perm.getToPort());
-            securityGroupRules.put(key(region, rule.getSecurityGroupRuleId()), rule);
-            rules.add(rule);
-        } else {
-            for (IpRange range : ranges) {
-                SecurityGroupRule rule = new SecurityGroupRule();
-                rule.setSecurityGroupRuleId("sgr-" + randomHex(17));
-                rule.setGroupId(groupId);
-                rule.setGroupOwnerId(accountId);
-                rule.setEgress(egress);
-                rule.setIpProtocol(perm.getIpProtocol());
-                rule.setFromPort(perm.getFromPort());
-                rule.setToPort(perm.getToPort());
+        if (perm.getIpRanges() != null) {
+            for (IpRange range : perm.getIpRanges()) {
+                SecurityGroupRule rule = newRule(groupId, perm, egress);
                 rule.setCidrIpv4(range.getCidrIp());
                 rule.setDescription(range.getDescription());
-                securityGroupRules.put(key(region, rule.getSecurityGroupRuleId()), rule);
                 rules.add(rule);
             }
         }
+        if (perm.getIpv6Ranges() != null) {
+            for (Ipv6Range range : perm.getIpv6Ranges()) {
+                SecurityGroupRule rule = newRule(groupId, perm, egress);
+                rule.setCidrIpv6(range.getCidrIpv6());
+                rule.setDescription(range.getDescription());
+                rules.add(rule);
+            }
+        }
+        if (perm.getUserIdGroupPairs() != null) {
+            for (UserIdGroupPair pair : perm.getUserIdGroupPairs()) {
+                SecurityGroupRule rule = newRule(groupId, perm, egress);
+                ReferencedSecurityGroup ref = new ReferencedSecurityGroup();
+                ref.setGroupId(pair.getGroupId());
+                ref.setUserId(pair.getUserId());
+                rule.setReferencedGroupInfo(ref);
+                rule.setDescription(pair.getDescription());
+                rules.add(rule);
+            }
+        }
+        // Real AWS rejects a permission with no source at all; Floci keeps accepting it, so it still
+        // needs a rule to describe.
+        if (rules.isEmpty()) {
+            rules.add(newRule(groupId, perm, egress));
+        }
+        for (SecurityGroupRule rule : rules) {
+            securityGroupRules.put(key(region, rule.getSecurityGroupRuleId()), rule);
+        }
         return rules;
+    }
+
+    private SecurityGroupRule newRule(String groupId, IpPermission perm, boolean egress) {
+        SecurityGroupRule rule = new SecurityGroupRule();
+        rule.setSecurityGroupRuleId("sgr-" + randomHex(17));
+        rule.setGroupId(groupId);
+        rule.setGroupOwnerId(accountId);
+        rule.setEgress(egress);
+        rule.setIpProtocol(perm.getIpProtocol());
+        rule.setFromPort(perm.getFromPort());
+        rule.setToPort(perm.getToPort());
+        return rule;
+    }
+
+    /**
+     * Fills in the source details AWS returns but a caller may leave out: an absent {@code UserId}
+     * is this account, and a reference made by group name is resolved to its group id so the
+     * flattened rule can carry a {@code referencedGroupInfo} (the AWS shape has no group name).
+     *
+     * <p>Group names are unique per VPC rather than per region, so resolution is confined to the
+     * VPC of the group being authorized. A name matching nothing there stays unresolved: Floci does
+     * not check that a referenced group exists, for ids either.
+     */
+    private void resolveGroupReferences(String region, String vpcId, IpPermission perm) {
+        if (perm.getUserIdGroupPairs() == null) {
+            return;
+        }
+        for (UserIdGroupPair pair : perm.getUserIdGroupPairs()) {
+            if (pair.getUserId() == null) {
+                pair.setUserId(accountId);
+            }
+            if (pair.getGroupId() == null && pair.getGroupName() != null) {
+                securityGroups.scan(k -> true).stream()
+                        .filter(sg -> sg.getRegion().equals(region)
+                                && Objects.equals(vpcId, sg.getVpcId())
+                                && pair.getGroupName().equals(sg.getGroupName()))
+                        .findFirst()
+                        .ifPresent(sg -> pair.setGroupId(sg.getGroupId()));
+            }
+        }
     }
 
     public void revokeSecurityGroupIngress(String region, String groupId, List<IpPermission> permissions) {
@@ -1583,8 +1896,27 @@ public class Ec2Service implements ContainerTeardown {
 
     public List<KeyPair> describeKeyPairs(String region, List<String> keyNames, List<String> keyPairIds) {
         ensureDefaultResources(region);
-        return keyPairs.scan(k -> true).stream()
+        List<KeyPair> regionKeyPairs = keyPairs.scan(k -> true).stream()
                 .filter(k -> k.getRegion().equals(region))
+                .collect(Collectors.toList());
+
+        // A named/id lookup for a key pair that does not exist is an error in real
+        // AWS (InvalidKeyPair.NotFound), not an empty result — otherwise idempotent
+        // callers that treat exit 0 as "present" skip creating the key.
+        for (String keyName : keyNames) {
+            if (regionKeyPairs.stream().noneMatch(k -> keyName.equals(k.getKeyName()))) {
+                throw new AwsException("InvalidKeyPair.NotFound",
+                        "The key pair '" + keyName + "' does not exist", 400);
+            }
+        }
+        for (String keyPairId : keyPairIds) {
+            if (regionKeyPairs.stream().noneMatch(k -> keyPairId.equals(k.getKeyPairId()))) {
+                throw new AwsException("InvalidKeyPair.NotFound",
+                        "The key pair ID '" + keyPairId + "' does not exist", 400);
+            }
+        }
+
+        return regionKeyPairs.stream()
                 .filter(k -> keyNames.isEmpty() || keyNames.contains(k.getKeyName()))
                 .filter(k -> keyPairIds.isEmpty() || keyPairIds.contains(k.getKeyPairId()))
                 .collect(Collectors.toList());
@@ -1595,7 +1927,13 @@ public class Ec2Service implements ContainerTeardown {
         if (keyPairId != null && !keyPairId.isEmpty()) {
             keyPairs.delete(key(region, keyPairId));
         } else {
-            keyPairs.scan(k -> true).removeIf(k -> k.getRegion().equals(region) && k.getKeyName().equals(keyName));
+            // scan() returns a detached copy, so the key pair has to be resolved to its
+            // store key and deleted through the backend — mutating the scan result does
+            // not touch the store.
+            keyPairs.scan(k -> true).stream()
+                    .filter(k -> k.getRegion().equals(region) && k.getKeyName().equals(keyName))
+                    .map(KeyPair::getKeyPairId)
+                    .forEach(id -> keyPairs.delete(key(region, id)));
         }
     }
 
@@ -1670,6 +2008,156 @@ public class Ec2Service implements ContainerTeardown {
         List<Image> images = new ArrayList<>(catalogImages);
         images.addAll(createdImages);
         return images;
+    }
+
+    public Image createImage(String region, String instanceId, String name, String description,
+                             boolean noReboot) {
+        ensureDefaultResources(region);
+        if (instanceId == null || instanceId.isBlank()) {
+            throw new AwsException("MissingParameter", "The request must contain the parameter InstanceId", 400);
+        }
+        Instance source = getRequiredInstance(region, instanceId);
+
+        // AWS reboots the source instance by default so the image is captured from a quiesced
+        // file system; NoReboot=true opts out and accepts the integrity risk.
+        if (!noReboot) {
+            rebootInstances(region, List.of(instanceId));
+        }
+
+        // The new AMI inherits what it was captured from rather than the registerImage defaults,
+        // so DescribeImages does not report a generic x86_64 / /dev/sda1 image with no devices.
+        Image sourceImage = findImageForCapture(region, source.getImageId());
+        Image image = registerImage(region, name, description,
+                sourceImage != null ? sourceImage.getArchitecture() : null,
+                sourceImage != null ? sourceImage.getRootDeviceName() : null,
+                captureBlockDeviceMappings(region, source, sourceImage));
+
+        // Carry the launchable ancestor so RunInstances on this AMI starts the same guest instead
+        // of falling through to the catalog default.
+        image.setSourceImageId(resolveLaunchableImageId(region, source.getImageId()));
+        registeredImages.put(key(region, image.getImageId()), image);
+        return image;
+    }
+
+    /**
+     * The devices the captured AMI reports. AWS captures what the source AMI describes plus any
+     * volume attached to the instance afterwards, so a data volume added post-launch is part of
+     * the image rather than being dropped.
+     */
+    private List<BlockDeviceMapping> captureBlockDeviceMappings(String region, Instance source,
+                                                                Image sourceImage) {
+        List<BlockDeviceMapping> mappings = new ArrayList<>(sourceImageMappings(sourceImage));
+        Set<String> devices = mappings.stream()
+                .map(BlockDeviceMapping::getDeviceName)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toSet());
+        for (Volume volume : volumes.scan(k -> true)) {
+            if (!region.equals(volume.getRegion())
+                    || volume.getVolumeId().equals(source.getRootVolumeId())) {
+                continue;
+            }
+            for (VolumeAttachment attachment : volume.getAttachments()) {
+                if (!source.getInstanceId().equals(attachment.getInstanceId())
+                        || !devices.add(attachment.getDevice())) {
+                    continue;
+                }
+                mappings.add(attachedMapping(volume, attachment));
+            }
+        }
+        return mappings.isEmpty() ? null : mappings;
+    }
+
+    /** The device an attached volume contributes, snapshotted as of the capture. */
+    private BlockDeviceMapping attachedMapping(Volume volume, VolumeAttachment attachment) {
+        EbsBlockDevice ebs = new EbsBlockDevice();
+        ebs.setSnapshotId("snap-" + randomHex(17));
+        ebs.setVolumeSize(volume.getSize());
+        ebs.setVolumeType(volume.getVolumeType());
+        ebs.setDeleteOnTermination(attachment.isDeleteOnTermination());
+        ebs.setEncrypted(volume.isEncrypted());
+        BlockDeviceMapping mapping = new BlockDeviceMapping();
+        mapping.setDeviceName(attachment.getDevice());
+        mapping.setEbs(ebs);
+        return mapping;
+    }
+
+    /**
+     * A registered source carries its own mappings, while a catalog entry describes only its root
+     * device, so the root is rebuilt from that rather than leaving the capture with no devices.
+     */
+    private List<BlockDeviceMapping> sourceImageMappings(Image sourceImage) {
+        if (sourceImage == null) {
+            return List.of();
+        }
+        List<BlockDeviceMapping> declared = sourceImage.getBlockDeviceMappings();
+        if (declared != null && !declared.isEmpty()) {
+            return declared.stream().map(this::recapture).toList();
+        }
+        String rootDeviceName = sourceImage.getRootDeviceName();
+        if (rootDeviceName == null || rootDeviceName.isBlank()) {
+            return List.of();
+        }
+        EbsBlockDevice ebs = new EbsBlockDevice();
+        ebs.setSnapshotId("snap-" + randomHex(17));
+        ebs.setVolumeSize(DEFAULT_ROOT_VOLUME_SIZE_GIB);
+        ebs.setVolumeType(DEFAULT_ROOT_VOLUME_TYPE);
+        ebs.setDeleteOnTermination(true);
+        BlockDeviceMapping mapping = new BlockDeviceMapping();
+        mapping.setDeviceName(rootDeviceName);
+        mapping.setEbs(ebs);
+        return List.of(mapping);
+    }
+
+    /**
+     * A capture takes its own snapshot of each device. Handing back the source AMI's snapshot ids
+     * would leave two images sharing one snapshot, so deleting either would appear to take the
+     * other's backing with it.
+     */
+    private BlockDeviceMapping recapture(BlockDeviceMapping source) {
+        BlockDeviceMapping mapping = new BlockDeviceMapping();
+        mapping.setDeviceName(source.getDeviceName());
+        EbsBlockDevice sourceEbs = source.getEbs();
+        if (sourceEbs == null) {
+            return mapping;
+        }
+        EbsBlockDevice ebs = new EbsBlockDevice();
+        ebs.setSnapshotId(sourceEbs.getSnapshotId() != null ? "snap-" + randomHex(17) : null);
+        ebs.setVolumeSize(sourceEbs.getVolumeSize());
+        ebs.setVolumeType(sourceEbs.getVolumeType());
+        ebs.setDeleteOnTermination(sourceEbs.getDeleteOnTermination());
+        ebs.setEncrypted(sourceEbs.getEncrypted());
+        mapping.setEbs(ebs);
+        return mapping;
+    }
+
+    /** The image a CreateImage source was launched from, whether catalog-backed or registered. */
+    private Image findImageForCapture(String region, String imageId) {
+        if (imageId == null || imageId.isBlank()) {
+            return null;
+        }
+        Image registered = registeredImages.get(key(region, imageId)).orElse(null);
+        if (registered != null) {
+            return registered;
+        }
+        return imageCatalog.findByIdOrAlias(imageId)
+                .map(Ec2ImageCatalog.CatalogImage::toImage)
+                .orElse(null);
+    }
+
+    /**
+     * Follows CreateImage ancestry back to an id the AMI resolver can map to a guest image.
+     * Images from RegisterImage have no source and stop the walk, as does a catalog id.
+     */
+    private String resolveLaunchableImageId(String region, String imageId) {
+        String current = imageId;
+        for (int hops = 0; hops < 16 && current != null; hops++) {
+            Image registered = registeredImages.get(key(region, current)).orElse(null);
+            if (registered == null || registered.getSourceImageId() == null) {
+                return current;
+            }
+            current = registered.getSourceImageId();
+        }
+        return current;
     }
 
     public Image registerImage(String region, String name, String description, String architecture,
@@ -2204,7 +2692,12 @@ public class Ec2Service implements ContainerTeardown {
         NetworkAcl networkAcl = networkAcls.get(storeKey).orElse(null);
         if (networkAcl != null) { networkAcl.setTags(new ArrayList<>(tagList)); networkAcls.put(storeKey, networkAcl); return; }
         Address address = addresses.get(storeKey).orElse(null);
-        if (address != null) { address.setTags(new ArrayList<>(tagList)); addresses.put(storeKey, address); }
+        if (address != null) { address.setTags(new ArrayList<>(tagList)); addresses.put(storeKey, address); return; }
+        ManagedPrefixList prefixList = managedPrefixLists.get(storeKey).orElse(null);
+        if (prefixList != null) {
+            prefixList.setTags(new ArrayList<>(tagList));
+            managedPrefixLists.put(storeKey, prefixList);
+        }
     }
 
     public List<Map<String, String>> describeTags(String region, Map<String, List<String>> filters) {
@@ -2243,17 +2736,45 @@ public class Ec2Service implements ContainerTeardown {
     }
 
     private String inferResourceType(String resourceId) {
-        if (resourceId.startsWith("i-")) return "instance";
-        if (resourceId.startsWith("vpc-")) return "vpc";
-        if (resourceId.startsWith("subnet-")) return "subnet";
-        if (resourceId.startsWith("sg-")) return "security-group";
-        if (resourceId.startsWith("igw-")) return "internet-gateway";
-        if (resourceId.startsWith("rtb-")) return "route-table";
-        if (resourceId.startsWith("key-")) return "key-pair";
-        if (resourceId.startsWith("eipalloc-")) return "elastic-ip";
-        if (resourceId.startsWith("lt-")) return "launch-template";
-        if (resourceId.startsWith("vpce-")) return "vpc-endpoint";
-        if (resourceId.startsWith("nat-")) return "natgateway";
+        if (resourceId.startsWith("i-")) {
+            return "instance";
+        }
+        if (resourceId.startsWith("vpc-")) {
+            return "vpc";
+        }
+        if (resourceId.startsWith("subnet-")) {
+            return "subnet";
+        }
+        if (resourceId.startsWith("sgr-")) {
+            return "security-group-rule";
+        }
+        if (resourceId.startsWith("sg-")) {
+            return "security-group";
+        }
+        if (resourceId.startsWith("igw-")) {
+            return "internet-gateway";
+        }
+        if (resourceId.startsWith("rtb-")) {
+            return "route-table";
+        }
+        if (resourceId.startsWith("key-")) {
+            return "key-pair";
+        }
+        if (resourceId.startsWith("eipalloc-")) {
+            return "elastic-ip";
+        }
+        if (resourceId.startsWith("lt-")) {
+            return "launch-template";
+        }
+        if (resourceId.startsWith("vpce-")) {
+            return "vpc-endpoint";
+        }
+        if (resourceId.startsWith("nat-")) {
+            return "natgateway";
+        }
+        if (resourceId.startsWith("pl-")) {
+            return "prefix-list";
+        }
         return "unknown";
     }
 
@@ -2399,6 +2920,41 @@ public class Ec2Service implements ContainerTeardown {
             Route route = new Route(destinationCidrBlock, gatewayId, "CreateRoute");
             route.setNatGatewayId(natGatewayId);
             next.add(route);
+            current.setRoutes(next);
+            routeTables.put(key(region, routeTableId), current);
+        }
+    }
+
+    public void replaceRoute(String region, String routeTableId, String destinationCidrBlock, String gatewayId, String natGatewayId) {
+        if (destinationCidrBlock == null || destinationCidrBlock.isBlank()) {
+            throw new AwsException("MissingParameter",
+                    "The request must include DestinationCidrBlock; routes are matched on their IPv4 destination.", 400);
+        }
+        // AWS takes exactly one target. Rejecting both-or-neither also keeps the targets this
+        // emulator cannot model (transit gateway, network interface, peering connection, ...) from
+        // silently clearing the route and reporting success.
+        boolean hasGateway = gatewayId != null && !gatewayId.isBlank();
+        boolean hasNatGateway = natGatewayId != null && !natGatewayId.isBlank();
+        if (hasGateway == hasNatGateway) {
+            throw new AwsException("InvalidParameterCombination",
+                    "ReplaceRoute takes exactly one target, and only GatewayId or NatGatewayId is supported.", 400);
+        }
+
+        ensureDefaultResources(region);
+        synchronized (lockFor(key(region, routeTableId))) {
+            RouteTable current = getRequiredRouteTable(region, routeTableId);
+            List<Route> next = new ArrayList<>(current.getRoutes());
+            Route existing = next.stream()
+                    .filter(r -> destinationCidrBlock.equals(r.getDestinationCidrBlock()))
+                    .findFirst()
+                    .orElseThrow(() -> new AwsException("InvalidRoute.NotFound",
+                            "The route identified by " + destinationCidrBlock + " does not exist", 400));
+
+            // The target the request does not name is cleared rather than carried over from the
+            // route being replaced.
+            Route replacement = new Route(destinationCidrBlock, hasGateway ? gatewayId : null, existing.getOrigin());
+            replacement.setNatGatewayId(hasNatGateway ? natGatewayId : null);
+            next.set(next.indexOf(existing), replacement);
             current.setRoutes(next);
             routeTables.put(key(region, routeTableId), current);
         }
@@ -2716,6 +3272,15 @@ public class Ec2Service implements ContainerTeardown {
                 case "vpc-id" -> matchesValue(values, subnet.getVpcId());
                 case "state" -> matchesValue(values, subnet.getState());
                 case "availabilityZone", "availability-zone" -> matchesValue(values, subnet.getAvailabilityZone());
+                case "cidr-block", "cidrBlock", "cidr" -> matchesValue(values, subnet.getCidrBlock());
+                default -> true;
+            };
+        }
+        if (resource instanceof ManagedPrefixList prefixList) {
+            return switch (filterName) {
+                case "prefix-list-id" -> matchesValue(values, prefixList.getPrefixListId());
+                case "prefix-list-name" -> matchesValue(values, prefixList.getPrefixListName());
+                case "owner-id" -> matchesValue(values, prefixList.getOwnerId());
                 default -> true;
             };
         }
@@ -2844,6 +3409,7 @@ public class Ec2Service implements ContainerTeardown {
         if (resource instanceof Address addr) return addr.getTags();
         if (resource instanceof Volume vol) return vol.getTags();
         if (resource instanceof NetworkInterface ni) return ni.getTagSet();
+        if (resource instanceof ManagedPrefixList prefixList) return prefixList.getTags();
         if (resource instanceof LaunchTemplate lt) return lt.getTags();
         if (resource instanceof VpcEndpoint endpoint) return endpoint.getTags();
         if (resource instanceof NatGateway natGateway) return natGateway.getTags();
@@ -2904,6 +3470,95 @@ public class Ec2Service implements ContainerTeardown {
                     "The volume '" + volumeId + "' does not exist.", 400);
         }
         volumes.delete(key(region, volumeId));
+    }
+
+    public VolumeAttachment attachVolume(String region, String volumeId, String instanceId, String device) {
+        ensureDefaultResources(region);
+        if (volumeId == null || volumeId.isEmpty()) {
+            throw new AwsException("MissingParameter",
+                    "The parameter VolumeId is missing", 400);
+        }
+        if (instanceId == null || instanceId.isEmpty()) {
+            throw new AwsException("MissingParameter",
+                    "The parameter InstanceId is missing", 400);
+        }
+        if (device == null || device.isEmpty()) {
+            throw new AwsException("MissingParameter",
+                    "The parameter Device is missing", 400);
+        }
+        Volume volume = getRequiredVolume(region, volumeId);
+        Instance inst = getRequiredInstance(region, instanceId);
+        if (!List.of("running", "stopped").contains(inst.getState().getName())) {
+            throw new AwsException("IncorrectInstanceState",
+                    "The instance '" + inst.getInstanceId() + "' is not in a state from which it can be attached", 400);
+        }
+        if (!inst.getPlacement().getAvailabilityZone().equals(volume.getAvailabilityZone())) {
+            throw new AwsException(
+                    "InvalidParameterValue",
+                    "The volume '" + volume.getVolumeId() +
+                            "' and instance '" + inst.getInstanceId() +
+                            "' must be in the same Availability Zone", 400);
+        }
+        if (!"available".equals(volume.getState())) {
+            throw new AwsException("VolumeInUse",
+                    "Volume '" + volumeId + "' is already attached", 400);
+        }
+
+        VolumeAttachment attachment = new VolumeAttachment();
+        attachment.setVolumeId(volumeId);
+        attachment.setInstanceId(instanceId);
+        attachment.setDevice(device);
+        attachment.setState("attached");
+        attachment.setAttachTime(Instant.now());
+        attachment.setDeleteOnTermination(false); // Default for attached volumes
+
+        volume.getAttachments().add(attachment);
+        volume.setState("in-use");
+        volumes.put(key(region, volumeId), volume);
+        return attachment;
+    }
+
+    public VolumeAttachment detachVolume(String region, String volumeId, String instanceId, String device, boolean force) {
+        if (volumeId == null || volumeId.isEmpty()) {
+            throw new AwsException("MissingParameter", "The parameter VolumeId is missing", 400);
+        }
+        ensureDefaultResources(region);
+        Volume volume = getRequiredVolume(region, volumeId);
+
+        if ("available".equals(volume.getState()) || volume.getAttachments().isEmpty()) {
+            throw new AwsException("InvalidVolume.NotAttached",
+                    "Volume '" + volumeId + "' is not attached", 400);
+        }
+        VolumeAttachment target = volume.getAttachments().getFirst();
+        if (instanceId != null && !target.getInstanceId().equals(instanceId)) {
+            throw new AwsException("InvalidAttachment.NotFound",
+                    "Volume '" + volumeId + "' is not attached to instance '" + instanceId + "'", 400);
+        }
+        if (device != null && !target.getDevice().equals(device)) {
+            throw new AwsException("InvalidAttachment.NotFound",
+                    "Volume '" + volumeId + "' is not attached with device '" + device + "'", 400);
+        }
+        Instance inst = getRequiredInstance(region, target.getInstanceId());
+        if (!inst.getState().getName().equals("stopped") && target.getDevice().equals(inst.getRootDeviceName())) {
+            throw new AwsException("OperationNotPermitted",
+                    "The root volume of an instance cannot be detached while the instance is running", 400);
+        }
+        if (!force && target.getDevice().equals(inst.getRootDeviceName())) {
+            throw new AwsException("InvalidParameterCombination",
+                    "Device " + inst.getRootDeviceName() + " has the root partition on it. Detaching it will damage the " +
+                            "filesystem/partition tables. To force detachment, use the force parameter", 400);
+        }
+        target.setState("detached");
+        volume.getAttachments().clear();
+        volume.setState("available");
+        volumes.put(key(region, volumeId), volume);
+        return target;
+    }
+
+    private Volume getRequiredVolume(String region, String volumeId) {
+        return volumes.get(key(region, volumeId)).orElseThrow(() ->
+                new AwsException("InvalidVolume.NotFound", "The volume '" + volumeId + "' does not exist", 400)
+        );
     }
 
     // ─── Network Interfaces ─────────────────────────────────────────────────────

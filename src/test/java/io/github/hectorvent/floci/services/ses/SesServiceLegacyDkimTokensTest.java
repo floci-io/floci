@@ -3,9 +3,12 @@ package io.github.hectorvent.floci.services.ses;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.ses.model.AccountSuppressionAttributes;
+import io.github.hectorvent.floci.services.ses.model.AccountVdmAttributes;
 import io.github.hectorvent.floci.services.ses.model.ConfigurationSet;
 import io.github.hectorvent.floci.services.ses.model.ContactList;
 import io.github.hectorvent.floci.services.ses.model.Contact;
+import io.github.hectorvent.floci.services.ses.model.ReceiptRuleSet;
+import io.github.hectorvent.floci.services.ses.model.CustomVerificationEmailTemplate;
 import io.github.hectorvent.floci.services.ses.model.DedicatedIpPool;
 import io.github.hectorvent.floci.services.ses.model.EmailTemplate;
 import io.github.hectorvent.floci.services.ses.model.Identity;
@@ -43,9 +46,13 @@ class SesServiceLegacyDkimTokensTest {
                 new InMemoryStorage<String, ConfigurationSet>(),
                 new InMemoryStorage<String, SuppressedDestination>(),
                 new InMemoryStorage<String, AccountSuppressionAttributes>(),
+                new InMemoryStorage<String, AccountVdmAttributes>(),
                 new InMemoryStorage<String, DedicatedIpPool>(),
                 new InMemoryStorage<String, ContactList>(),
                 new InMemoryStorage<String, Contact>(),
+                new InMemoryStorage<String, String>(),
+                new InMemoryStorage<String, ReceiptRuleSet>(),
+                new InMemoryStorage<String, CustomVerificationEmailTemplate>(),
                 mock(SmtpRelay.class),
                 new ObjectMapper(),
                 Clock.systemUTC());

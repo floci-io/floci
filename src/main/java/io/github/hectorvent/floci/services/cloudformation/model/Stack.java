@@ -17,6 +17,7 @@ public class Stack {
     private Instant creationTime = Instant.now();
     private Instant lastUpdatedTime;
     private String templateBody;
+    private String originalTemplateBody;
     private List<String> capabilities = new ArrayList<>();
     private Map<String, String> parameters = new LinkedHashMap<>();
     private Map<String, String> outputs = new LinkedHashMap<>();
@@ -45,6 +46,8 @@ public class Stack {
     public void setLastUpdatedTime(Instant lastUpdatedTime) { this.lastUpdatedTime = lastUpdatedTime; }
     public String getTemplateBody() { return templateBody; }
     public void setTemplateBody(String templateBody) { this.templateBody = templateBody; }
+    public String getOriginalTemplateBody() { return originalTemplateBody; }
+    public void setOriginalTemplateBody(String originalTemplateBody) { this.originalTemplateBody = originalTemplateBody; }
     public List<String> getCapabilities() { return capabilities; }
     public void setCapabilities(List<String> capabilities) { this.capabilities = capabilities; }
     public Map<String, String> getParameters() { return parameters; }

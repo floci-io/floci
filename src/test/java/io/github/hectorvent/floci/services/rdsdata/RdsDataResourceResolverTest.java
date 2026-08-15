@@ -28,8 +28,7 @@ class RdsDataResourceResolverTest {
         cluster.setDbClusterArn("arn:aws:rds:us-east-1:000000000000:cluster:cluster1");
         cluster.setContainerHost("127.0.0.1");
         cluster.setContainerPort(3306);
-        when(rdsService.listDbClusters(null)).thenReturn(List.of(cluster));
-        when(rdsService.listDbInstances(null)).thenReturn(List.of());
+        when(rdsService.getDbCluster("cluster1", "us-east-1")).thenReturn(cluster);
 
         RdsDataResourceResolver.DatabaseTarget target = new RdsDataResourceResolver(rdsService)
                 .resolve("arn:aws:rds:us-east-1:000000000000:cluster:cluster1");
@@ -43,15 +42,27 @@ class RdsDataResourceResolverTest {
     @Test
     void missingResourceUsesModeledDataApiBadRequestCode() {
         RdsService rdsService = mock(RdsService.class);
-        when(rdsService.listDbClusters(null)).thenReturn(List.of());
-        when(rdsService.listDbInstances(null)).thenReturn(List.of());
-        when(rdsService.getDbCluster("missing")).thenThrow(new AwsException("DBClusterNotFoundFault", "missing", 404));
-        when(rdsService.getDbInstance("missing")).thenThrow(new AwsException("DBInstanceNotFound", "missing", 404));
+        when(rdsService.getDbCluster("missing", "us-east-1"))
+                .thenThrow(new AwsException("DBClusterNotFoundFault", "missing", 404));
 
         AwsException error = assertThrows(AwsException.class, () -> new RdsDataResourceResolver(rdsService)
                 .resolve("arn:aws:rds:us-east-1:000000000000:cluster:missing"));
 
         assertEquals("BadRequestException", error.getErrorCode());
         assertEquals(400, error.getHttpStatus());
+    }
+
+    @Test
+    void rejectsResourceArnOutsideSignedRequestRegionBeforeLookup() {
+        RdsService rdsService = mock(RdsService.class);
+
+        AwsException error = assertThrows(AwsException.class, () ->
+                new RdsDataResourceResolver(rdsService).resolve(
+                        "arn:aws:rds:us-west-2:000000000000:cluster:cluster1",
+                        "us-east-1"));
+
+        assertEquals("BadRequestException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        org.mockito.Mockito.verifyNoInteractions(rdsService);
     }
 }

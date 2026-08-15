@@ -697,13 +697,29 @@ class Ec2Tests {
 
     @Test
     @Order(49)
-    @DisplayName("DescribeVpcEndpointServices - returns empty list")
+    @DisplayName("DescribeVpcEndpointServices - lists the common services with AZs")
     void describeVpcEndpointServices() {
         DescribeVpcEndpointServicesResponse resp = ec2.describeVpcEndpointServices(
                 DescribeVpcEndpointServicesRequest.builder().build());
 
-        assertThat(resp.serviceNames()).isEmpty();
-        assertThat(resp.serviceDetails()).isEmpty();
+        assertThat(resp.serviceNames()).contains("com.amazonaws.us-east-1.s3");
+        assertThat(resp.serviceDetails()).isNotEmpty();
+
+        ServiceDetail s3 = resp.serviceDetails().stream()
+                .filter(d -> d.serviceName().equals("com.amazonaws.us-east-1.s3"))
+                .findFirst()
+                .orElseThrow();
+        // S3 is the one service offering both endpoint types.
+        assertThat(s3.serviceType().stream().map(ServiceTypeDetail::serviceTypeAsString).toList())
+                .containsExactlyInAnyOrder("Gateway", "Interface");
+        assertThat(s3.availabilityZones()).isNotEmpty();
+
+        ServiceDetail ecr = resp.serviceDetails().stream()
+                .filter(d -> d.serviceName().equals("com.amazonaws.us-east-1.ecr.api"))
+                .findFirst()
+                .orElseThrow();
+        assertThat(ecr.serviceType().stream().map(ServiceTypeDetail::serviceTypeAsString).toList())
+                .containsExactly("Interface");
     }
 
     @Test

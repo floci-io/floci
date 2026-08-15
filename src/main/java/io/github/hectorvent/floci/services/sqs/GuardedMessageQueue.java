@@ -120,9 +120,13 @@ class GuardedMessageQueue {
         // message from a previous ReceiveMessage call is blocked until that
         // message is deleted or its visibility expires. Within a single call
         // we may return multiple messages from the same group (preserving
-        // insertion order), up to MaxNumberOfMessages.
+        // insertion order), up to MaxNumberOfMessages. A not-visible message
+        // that was never claimed — no receipt handle — is only waiting out its
+        // DelaySeconds and must not lock its group.
         Set<String> groupsWithInFlight =
-                messages.stream().filter(msg -> !msg.isVisible() && msg.getMessageGroupId() != null)
+                messages.stream()
+                        .filter(msg -> !msg.isVisible() && msg.getReceiptHandle() != null
+                                && msg.getMessageGroupId() != null)
                         .map(Message::getMessageGroupId).collect(Collectors.toSet());
 
         for (Message msg : messages) {
