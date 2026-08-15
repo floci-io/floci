@@ -1685,7 +1685,7 @@ public class SesController {
             if (body != null && !body.isBlank()) {
                 requireJsonObject(objectMapper.readTree(body));
             }
-            SesService.ContactsWithList listed = sesService.listContacts(contactListName, region);
+            SesContactService.ContactsWithList listed = sesService.listContacts(contactListName, region);
             ObjectNode result = objectMapper.createObjectNode();
             ArrayNode arr = result.putArray("Contacts");
             for (Contact c : listed.contacts()) {
@@ -1705,7 +1705,7 @@ public class SesController {
                                @PathParam("contactListName") String contactListName,
                                @PathParam("emailAddress") String emailAddress) {
         String region = regionResolver.resolveRegion(headers);
-        SesService.ContactWithList result = sesService.getContact(contactListName, emailAddress, region);
+        SesContactService.ContactWithList result = sesService.getContact(contactListName, emailAddress, region);
         return Response.ok(contactJson(result.contact(), result.list(), true)).build();
     }
 
