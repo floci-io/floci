@@ -19,6 +19,7 @@ import io.github.hectorvent.floci.services.ec2.model.Vpc;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
 import io.github.hectorvent.floci.services.iam.model.IamUser;
+import io.github.hectorvent.floci.services.amp.AmpService;
 import io.github.hectorvent.floci.services.ivs.IvsService;
 import io.github.hectorvent.floci.services.ivschat.IvschatService;
 import io.github.hectorvent.floci.services.medialive.MediaLiveService;
@@ -44,6 +45,7 @@ public class CloudControlService {
     private final Ec2Service ec2Service;
     private final IamService iamService;
     private final CloudFormationResourceProvisioner provisioner;
+    private final AmpService ampService;
     private final IvsService ivsService;
     private final IvschatService ivschatService;
     private final MediaLiveService mediaLiveService;
@@ -88,8 +90,10 @@ public class CloudControlService {
     @Inject
     public CloudControlService(S3Service s3Service, Ec2Service ec2Service,
                                IamService iamService, CloudFormationResourceProvisioner provisioner,
-                               IvsService ivsService, IvschatService ivschatService,
+                               AmpService ampService, IvsService ivsService,
+                               IvschatService ivschatService,
                                MediaLiveService mediaLiveService, ObjectMapper mapper) {
+        this.ampService = ampService;
         this.s3Service = s3Service;
         this.ec2Service = ec2Service;
         this.iamService = iamService;
@@ -286,6 +290,10 @@ public class CloudControlService {
             case "AWS::IVSChat::LoggingConfiguration" -> arnListed(ivschatService.listLoggingConfigurations(),
                     l -> l.getArn(), l -> null, l -> l.getTags());
             case "AWS::MediaLive::Multiplex" -> multiplexes();
+            case "AWS::APS::Workspace" -> arnListed(ampService.listWorkspaces(null, region),
+                    w -> w.getArn(), w -> w.getAlias(), w -> w.getTags());
+            case "AWS::APS::Scraper" -> arnListed(ampService.listScrapers(region),
+                    sc -> sc.getArn(), sc -> sc.getAlias(), sc -> sc.getTags());
             default -> List.of();
         };
     }

@@ -36,6 +36,7 @@ class CloudControlServiceTest {
         CloudControlService service = new CloudControlService(
                 mock(S3Service.class), ec2Service, mock(IamService.class),
                 mock(CloudFormationResourceProvisioner.class),
+                mock(io.github.hectorvent.floci.services.amp.AmpService.class),
                 mock(io.github.hectorvent.floci.services.ivs.IvsService.class),
                 mock(io.github.hectorvent.floci.services.ivschat.IvschatService.class),
                 mock(io.github.hectorvent.floci.services.medialive.MediaLiveService.class),
