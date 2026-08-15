@@ -59,6 +59,10 @@ class SqsCfnProvisionerTest {
             });
             return resolved;
         });
+        when(engine.resolveJsonAttribute(any())).thenAnswer(inv -> {
+            JsonNode resolved = engine.resolveNode(inv.getArgument(0));
+            return resolved != null && resolved.isTextual() ? resolved.asText() : resolved.toString();
+        });
         return new ProvisionContext(engine, "us-east-1", "000000000000", "my-stack");
     }
 

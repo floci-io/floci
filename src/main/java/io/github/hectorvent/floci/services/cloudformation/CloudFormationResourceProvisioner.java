@@ -1768,7 +1768,7 @@ public class CloudFormationResourceProvisioner {
 
         Map<String, String> attributes = new HashMap<>();
         if (props.has("FilterPolicy") && !props.path("FilterPolicy").isNull()) {
-            attributes.put("FilterPolicy", engine.resolveNode(props.path("FilterPolicy")).toString());
+            attributes.put("FilterPolicy", engine.resolveJsonAttribute(props.path("FilterPolicy")));
         }
         if (props.has("FilterPolicyScope")) {
             attributes.put("FilterPolicyScope", engine.resolve(props.path("FilterPolicyScope")));
@@ -1777,7 +1777,7 @@ public class CloudFormationResourceProvisioner {
             attributes.put("RawMessageDelivery", engine.resolve(props.path("RawMessageDelivery")));
         }
         if (props.has("RedrivePolicy") && !props.path("RedrivePolicy").isNull()) {
-            attributes.put("RedrivePolicy", engine.resolveNode(props.path("RedrivePolicy")).toString());
+            attributes.put("RedrivePolicy", engine.resolveJsonAttribute(props.path("RedrivePolicy")));
         }
 
         var sub = snsService.subscribe(topicArn, protocol, endpoint, region, attributes);
@@ -4508,7 +4508,7 @@ public class CloudFormationResourceProvisioner {
         if (hasDefinitionString) {
             definition = resolveOptional(props, "DefinitionString", engine);
         } else if (hasDefinition) {
-            definition = engine.resolveNode(props.get("Definition")).toString();
+            definition = engine.resolveJsonAttribute(props.get("Definition"));
         } else {
             JsonNode location = engine.resolveNode(props.get("DefinitionS3Location"));
             String bucket = location.path("Bucket").asText(null);

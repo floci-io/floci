@@ -49,6 +49,10 @@ class IamRoleCfnProvisionerTest {
             return node == null ? null : node.asText();
         });
         when(engine.resolveNode(any())).thenAnswer(inv -> inv.getArgument(0));
+        when(engine.resolveJsonAttribute(any())).thenAnswer(inv -> {
+            JsonNode node = inv.getArgument(0);
+            return node != null && node.isTextual() ? node.asText() : node.toString();
+        });
         return new ProvisionContext(engine, "us-east-1", ACCOUNT_ID, "test-stack");
     }
 
@@ -97,6 +101,32 @@ class IamRoleCfnProvisionerTest {
         InOrder order = inOrder(iam);
         order.verify(iam).putRolePolicy("app-role", "bucket-read", EMPTY_TRUST);
         order.verify(iam).putRolePolicy("app-role", "log-write", EMPTY_TRUST);
+    }
+
+    @Test
+    void inlinePolicyPassesThroughAlreadySerializedPolicyDocumentString() {
+        // Same failure mode as #2317: CDK can emit an inline PolicyDocument as an
+        // already-serialized JSON string (e.g. via Fn::Join). resolveNode collapses that to a
+        // TextNode whose toString() re-quotes/escapes the JSON; the policy must be stored verbatim.
+        stubCreate("app-role");
+        StackResource r = resource();
+        String serialized = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Action\":\"s3:GetObject\",\"Resource\":\"*\"}]}";
+        JsonNode props = props(String.format("""
+                {
+                  "RoleName": "app-role",
+                  "Policies": [
+                    {"PolicyName": "serialized-doc",
+                     "PolicyDocument": "%s"}
+                  ]
+                }
+                """, serialized.replace("\"", "\\\"")));
+
+        provisioner.provision(r, props, ctx());
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<String> docCaptor = ArgumentCaptor.forClass(String.class);
+        verify(iam).putRolePolicy(eq("app-role"), eq("serialized-doc"), docCaptor.capture());
+        assertEquals(serialized, docCaptor.getValue());
     }
 
     @Test

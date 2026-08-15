@@ -5250,6 +5250,99 @@ class CloudFormationIntegrationTest {
     }
 
     @Test
+    void createStack_snsSubscriptionKeepsSerializedStringRedrivePolicyAndFilterPolicy() {
+        // Reproduces #2317: CDK emits RedrivePolicy / FilterPolicy via Fn::Join as an
+        // already-serialized JSON string. resolveNode collapses the Fn::Join to a TextNode, and a
+        // naive toString() re-quotes/escapes the JSON a second time — the value SNS stores (and
+        // GetSubscriptionAttributes returns) must be the literal policy JSON instead.
+        String stackName = "cfn-sns-sub-string-policies-stack";
+        String template = """
+            {
+              "Resources": {
+                "MyTopic": {
+                  "Type": "AWS::SNS::Topic",
+                  "Properties": {
+                    "TopicName": "cfn-sub-string-policies-topic"
+                  }
+                },
+                "MyQueue": {
+                  "Type": "AWS::SQS::Queue",
+                  "Properties": {
+                    "QueueName": "cfn-sub-string-policies-queue"
+                  }
+                },
+                "MyDLQ": {
+                  "Type": "AWS::SQS::Queue",
+                  "Properties": {
+                    "QueueName": "cfn-sub-string-policies-dlq"
+                  }
+                },
+                "MySubscription": {
+                  "Type": "AWS::SNS::Subscription",
+                  "Properties": {
+                    "TopicArn": {"Ref": "MyTopic"},
+                    "Protocol": "sqs",
+                    "Endpoint": {"Fn::GetAtt": ["MyQueue", "Arn"]},
+                    "FilterPolicy": {
+                      "Fn::Join": ["", [
+                        "{\\"store\\":[\\"shoes\\"]}"
+                      ]]
+                    },
+                    "RedrivePolicy": {
+                      "Fn::Join": ["", [
+                        "{\\"deadLetterTargetArn\\":\\"",
+                        {"Fn::GetAtt": ["MyDLQ", "Arn"]},
+                        "\\"}"
+                      ]]
+                    }
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String resourcesXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackResources")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+
+        String subArn = physicalIdByLogicalId(resourcesXml, "MySubscription");
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "GetSubscriptionAttributes")
+            .formParam("SubscriptionArn", subArn)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("FilterPolicy"))
+            .body(containsString("store"))
+            .body(containsString("RedrivePolicy"))
+            .body(containsString("deadLetterTargetArn"))
+            .body(containsString("arn:aws:sqs:us-east-1:000000000000:cfn-sub-string-policies-dlq"))
+            // A double-encoded value would come back with the JSON-escaped quote (backslash before
+            // the XML-escaped &quot;) inside the value; the stored attribute must be the literal
+            // policy JSON with no backslash-escape sequences.
+            .body(not(containsString("\\&quot;")));
+    }
+
+    @Test
     void createStack_withCognitoUserPoolAndClient() {
         String template = """
             {

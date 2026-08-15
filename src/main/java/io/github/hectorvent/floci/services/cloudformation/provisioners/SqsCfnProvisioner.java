@@ -85,8 +85,7 @@ public class SqsCfnProvisioner implements CfnResourceProvisioner {
                 // CDK commonly emits RedrivePolicy as an already-serialized string via Fn::Join,
                 // which resolveNode collapses to a TextNode — unwrap it instead of calling
                 // toString(), which would JSON-re-encode (quote/escape) the string a second time.
-                JsonNode redrivePolicy = ctx.engine().resolveNode(props.path("RedrivePolicy"));
-                attrs.put("RedrivePolicy", redrivePolicy.isTextual() ? redrivePolicy.asText() : redrivePolicy.toString());
+                attrs.put("RedrivePolicy", ctx.engine().resolveJsonAttribute(props.path("RedrivePolicy")));
             }
         }
         Queue queue = sqsService.createQueue(queueName, attrs, ctx.region());

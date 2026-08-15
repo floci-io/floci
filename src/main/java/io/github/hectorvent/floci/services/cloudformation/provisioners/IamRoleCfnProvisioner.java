@@ -166,7 +166,7 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
                                 + " has no PolicyDocument.", 400);
                     }
                     iamService.putRolePolicy(resolvedRoleName, policyName,
-                            ctx.engine().resolveNode(document).toString());
+                            ctx.engine().resolveJsonAttribute(document));
                     inlineWrittenByThisAttempt.add(policyName);
                 }
             }
