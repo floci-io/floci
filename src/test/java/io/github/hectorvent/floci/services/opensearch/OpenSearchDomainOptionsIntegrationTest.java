@@ -232,4 +232,30 @@ class OpenSearchDomainOptionsIntegrationTest {
             .then().statusCode(200)
             .body("DomainStatus.AccessPolicies", equalTo(updatedPolicy));
     }
+
+    @Test
+    void updateDomainConfigClearsAccessPoliciesWithEmptyString() {
+        // AccessPolicies has a documented minimum length of 0, unlike EngineVersion where a
+        // blank value means "leave untouched" - an empty string here is a real "clear the
+        // policy" request and must not be treated as absent.
+        String originalPolicy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Principal\":\"*\",\"Action\":\"es:*\"}]}";
+
+        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+            .body("{\"DomainName\":\"opts-access\",\"EngineVersion\":\"OpenSearch_2.19\","
+                    + "\"AccessPolicies\":\"" + originalPolicy.replace("\"", "\\\"") + "\"}")
+            .when().post("/2021-01-01/opensearch/domain")
+            .then().statusCode(200);
+
+        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+            .body("{\"AccessPolicies\":\"\"}")
+            .when().post("/2021-01-01/opensearch/domain/opts-access/config")
+            .then().statusCode(200)
+            .body("DomainConfig.AccessPolicies.Options", equalTo(""));
+
+        given().header("Authorization", AUTH_HEADER)
+            .when().get("/2021-01-01/opensearch/domain/opts-access")
+            .then().statusCode(200)
+            .body("DomainStatus.AccessPolicies", equalTo(""));
+    }
 }
