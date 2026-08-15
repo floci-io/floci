@@ -61,7 +61,7 @@ class SesServiceListManagementTest {
         service = new SesService(
                 new InMemoryStorage<String, Identity>(),
                 new InMemoryStorage<String, SentEmail>(),
-                new InMemoryStorage<String, Boolean>(),
+                new SesAccountService(new InMemoryStorage<String, Boolean>()),
                 new InMemoryStorage<String, EmailTemplate>(),
                 new InMemoryStorage<String, ConfigurationSet>(),
                 new InMemoryStorage<String, SuppressedDestination>(),

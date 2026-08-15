@@ -85,7 +85,8 @@ public class SesService {
 
     private final StorageBackend<String, Identity> identityStore;
     private final StorageBackend<String, SentEmail> emailStore;
-    private final StorageBackend<String, Boolean> accountSettingsStore;
+    // Account-level settings, extracted to its own service. The facade delegates.
+    private final SesAccountService accountService;
     private final StorageBackend<String, EmailTemplate> templateStore;
     private final StorageBackend<String, ConfigurationSet> configSetStore;
     private final StorageBackend<String, SuppressedDestination> suppressionStore;
@@ -126,15 +127,14 @@ public class SesService {
 
     @Inject
     public SesService(StorageFactory storageFactory, SesReceiptRuleService receiptRuleService,
-                       SmtpRelay smtpRelay, ObjectMapper objectMapper,
+                       SesAccountService accountService, SmtpRelay smtpRelay, ObjectMapper objectMapper,
                        SesEventPublisher eventPublisher, EmulatorConfig config, Route53Service route53Service,
                        Clock clock) {
         this.identityStore = storageFactory.create("ses", "ses-identities.json",
                 new TypeReference<Map<String, Identity>>() {});
         this.emailStore = storageFactory.create("ses", "ses-emails.json",
                 new TypeReference<Map<String, SentEmail>>() {});
-        this.accountSettingsStore = storageFactory.create("ses", "ses-account-settings.json",
-                new TypeReference<Map<String, Boolean>>() {});
+        this.accountService = accountService;
         this.templateStore = storageFactory.create("ses", "ses-templates.json",
                 new TypeReference<Map<String, EmailTemplate>>() {});
         this.configSetStore = storageFactory.create("ses", "ses-config-sets.json",
@@ -167,7 +167,7 @@ public class SesService {
 
     SesService(StorageBackend<String, Identity> identityStore,
                StorageBackend<String, SentEmail> emailStore,
-               StorageBackend<String, Boolean> accountSettingsStore,
+               SesAccountService accountService,
                StorageBackend<String, EmailTemplate> templateStore,
                StorageBackend<String, ConfigurationSet> configSetStore,
                StorageBackend<String, SuppressedDestination> suppressionStore,
@@ -182,14 +182,14 @@ public class SesService {
                SmtpRelay smtpRelay,
                ObjectMapper objectMapper,
                Clock clock) {
-        this(identityStore, emailStore, accountSettingsStore, templateStore, configSetStore, suppressionStore,
+        this(identityStore, emailStore, accountService, templateStore, configSetStore, suppressionStore,
                 accountSuppressionStore, accountVdmStore, dedicatedIpPoolStore, contactListStore, contactStore,
                 policyStore, receiptRuleService, cvetStore, smtpRelay, objectMapper, null, clock);
     }
 
     SesService(StorageBackend<String, Identity> identityStore,
                StorageBackend<String, SentEmail> emailStore,
-               StorageBackend<String, Boolean> accountSettingsStore,
+               SesAccountService accountService,
                StorageBackend<String, EmailTemplate> templateStore,
                StorageBackend<String, ConfigurationSet> configSetStore,
                StorageBackend<String, SuppressedDestination> suppressionStore,
@@ -207,7 +207,7 @@ public class SesService {
                Clock clock) {
         this.identityStore = identityStore;
         this.emailStore = emailStore;
-        this.accountSettingsStore = accountSettingsStore;
+        this.accountService = accountService;
         this.templateStore = templateStore;
         this.configSetStore = configSetStore;
         this.suppressionStore = suppressionStore;
@@ -1149,12 +1149,11 @@ public class SesService {
     }
 
     public boolean isAccountSendingEnabled(String region) {
-        return accountSettingsStore.get("sending::" + region).orElse(true);
+        return accountService.isAccountSendingEnabled(region);
     }
 
     public void setAccountSendingEnabled(String region, boolean enabled) {
-        accountSettingsStore.put("sending::" + region, enabled);
-        LOG.infov("Updated account sending enabled for region {0}: {1}", region, enabled);
+        accountService.setAccountSendingEnabled(region, enabled);
     }
 
     // VDM (Virtual Deliverability Manager) is opt-in and per region: GetAccount omits VdmAttributes

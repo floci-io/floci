@@ -52,7 +52,7 @@ class SesServiceDkimLookupCacheTest {
         service = new SesService(
                 identityStore,
                 new InMemoryStorage<String, SentEmail>(),
-                new InMemoryStorage<String, Boolean>(),
+                new SesAccountService(new InMemoryStorage<String, Boolean>()),
                 new InMemoryStorage<String, EmailTemplate>(),
                 new InMemoryStorage<String, ConfigurationSet>(),
                 new InMemoryStorage<String, SuppressedDestination>(),
