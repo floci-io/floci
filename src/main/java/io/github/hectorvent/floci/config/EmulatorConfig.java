@@ -608,9 +608,58 @@ public interface EmulatorConfig {
         AppRunnerServiceConfig apprunner();
         RedshiftServiceConfig redshift();
         AccessAnalyzerServiceConfig accessanalyzer();
+        BedrockServiceConfig bedrock();
+        GlobalAcceleratorServiceConfig globalaccelerator();
+        CognitoIdentityServiceConfig cognitoidentity();
+        CodeArtifactServiceConfig codeartifact();
+        ConnectServiceConfig connect();
+        AppIntegrationsServiceConfig appintegrations();
+        DataSyncServiceConfig datasync();
+        CodeGuruReviewerServiceConfig codegurureviewer();
+        AuditManagerServiceConfig auditmanager();
     }
 
     interface AccessAnalyzerServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface BedrockServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface GlobalAcceleratorServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface CognitoIdentityServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface CodeArtifactServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface ConnectServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface AppIntegrationsServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface DataSyncServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface CodeGuruReviewerServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }
@@ -626,6 +675,11 @@ public interface EmulatorConfig {
     }
 
     interface AppRunnerServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface AuditManagerServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }
