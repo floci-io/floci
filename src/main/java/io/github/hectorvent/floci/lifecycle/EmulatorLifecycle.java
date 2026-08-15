@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.ec2.Ec2MetadataServer;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.floci.ui.FlociUiManager;
 import io.github.hectorvent.floci.services.amazonmq.container.RabbitMqManager;
+import io.github.hectorvent.floci.services.kinesisanalytics.container.FlinkContainerManager;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheContainerManager;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheMemcachedContainerManager;
 import io.github.hectorvent.floci.services.elasticache.proxy.ElastiCacheProxyManager;
@@ -22,6 +23,7 @@ import io.github.hectorvent.floci.services.neptune.container.NeptuneContainerMan
 import io.github.hectorvent.floci.services.neptune.proxy.NeptuneProxyManager;
 import io.github.hectorvent.floci.services.pipes.PipesService;
 import io.github.hectorvent.floci.services.appsync.graphql.SchemaCreationWorker;
+import io.github.hectorvent.floci.services.elbv2.ElbV2Service;
 import io.github.hectorvent.floci.services.rds.RdsService;
 import io.github.hectorvent.floci.services.memorydb.container.MemoryDbContainerManager;
 import io.github.hectorvent.floci.services.memorydb.proxy.MemoryDbProxyManager;
@@ -74,7 +76,9 @@ public class EmulatorLifecycle {
     private final NeptuneContainerManager neptuneContainerManager;
     private final NeptuneProxyManager neptuneProxyManager;
     private final RabbitMqManager rabbitMqManager;
+    private final FlinkContainerManager flinkContainerManager;
     private final RdsService rdsService;
+    private final ElbV2Service elbV2Service;
     private final InitializationHooksRunner initializationHooksRunner;
     private final SqsEventSourcePoller sqsPoller;
     private final KinesisEventSourcePoller kinesisPoller;
@@ -102,7 +106,9 @@ public class EmulatorLifecycle {
                              NeptuneContainerManager neptuneContainerManager,
                              NeptuneProxyManager neptuneProxyManager,
                              RabbitMqManager rabbitMqManager,
+                             FlinkContainerManager flinkContainerManager,
                              RdsService rdsService,
+                             ElbV2Service elbV2Service,
                              InitializationHooksRunner initializationHooksRunner,
                              SqsEventSourcePoller sqsPoller,
                              KinesisEventSourcePoller kinesisPoller,
@@ -129,7 +135,9 @@ public class EmulatorLifecycle {
         this.neptuneContainerManager = neptuneContainerManager;
         this.neptuneProxyManager = neptuneProxyManager;
         this.rabbitMqManager = rabbitMqManager;
+        this.flinkContainerManager = flinkContainerManager;
         this.rdsService = rdsService;
+        this.elbV2Service = elbV2Service;
         this.initializationHooksRunner = initializationHooksRunner;
         this.sqsPoller = sqsPoller;
         this.kinesisPoller = kinesisPoller;
@@ -167,12 +175,16 @@ public class EmulatorLifecycle {
         serviceRegistry.logEnabledServices();
         storageFactory.loadAll();
         schemaCreationWorker.recoverOrphans();
+        schemaCreationWorker.rehydrateSchemas();
 
         sqsPoller.startPersistedPollers();
         kinesisPoller.startPersistedPollers();
         dynamodbStreamsPoller.startPersistedPollers();
         pipesService.startPersistedPollers();
         rdsService.restorePersistedRuntime();
+        if (config.services().elbv2().enabled()) {
+            elbV2Service.restorePersistedRuntime();
+        }
 
         if (config.services().ec2().enabled() && !config.services().ec2().mock()) {
             ec2MetadataServer.start().exceptionally(ex -> {
@@ -272,6 +284,7 @@ public class EmulatorLifecycle {
         docDbContainerManager.stopAll();
         neptuneContainerManager.stopAll();
         rabbitMqManager.stopAll();
+        flinkContainerManager.stopAll();
         ecrRegistryManager.shutdown();
         flociUiManager.shutdown();
         // Centralized teardown for process-bound containers (Lambda warm pool, ECS tasks,

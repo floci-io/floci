@@ -126,6 +126,11 @@ public class CloudWatchLogsService {
     // ──────────────────────────── Log Groups ────────────────────────────
 
     public void createLogGroup(String name, Integer retentionInDays, Map<String, String> tags, String region) {
+        createLogGroup(name, retentionInDays, tags, false, region);
+    }
+
+    public void createLogGroup(String name, Integer retentionInDays, Map<String, String> tags,
+                               boolean deletionProtectionEnabled, String region) {
         if (name == null || name.isBlank()) {
             throw new AwsException("InvalidParameterException", "logGroupName is required.", 400);
         }
@@ -138,6 +143,7 @@ public class CloudWatchLogsService {
         group.setLogGroupName(name);
         group.setCreatedTime(System.currentTimeMillis());
         group.setRetentionInDays(retentionInDays);
+        group.setDeletionProtectionEnabled(deletionProtectionEnabled);
         if (tags != null) {
             group.setTags(new HashMap<>(tags));
         }
@@ -147,9 +153,15 @@ public class CloudWatchLogsService {
 
     public void deleteLogGroup(String name, String region) {
         String key = groupKey(region, name);
-        groupStore.get(key)
+        LogGroup group = groupStore.get(key)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "The specified log group does not exist: " + name, 400));
+        if (group.isDeletionProtectionEnabled()) {
+            throw new AwsException("ValidationException",
+                    "The specified log group has deletion protection enabled. "
+                            + "Disable deletion protection before deleting the log group.",
+                    400);
+        }
 
         // Cascade: delete all streams and events for this group
         String streamPrefix = streamKeyPrefix(region, name);
@@ -167,6 +179,10 @@ public class CloudWatchLogsService {
         LOG.infov("Deleted log group: {0}", name);
     }
 
+    public boolean logGroupExists(String name, String region) {
+        return groupStore.get(groupKey(region, name)).isPresent();
+    }
+
     public List<LogGroup> describeLogGroups(String prefix, String region) {
         String storagePrefix = groupKeyPrefix(region);
         List<LogGroup> result = groupStore.scan(k -> {
@@ -181,6 +197,15 @@ public class CloudWatchLogsService {
         });
         result.sort(Comparator.comparing(LogGroup::getLogGroupName));
         return result;
+    }
+
+    public void putLogGroupDeletionProtection(String groupName, boolean enabled, String region) {
+        String key = groupKey(region, groupName);
+        LogGroup group = groupStore.get(key)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "The specified log group does not exist: " + groupName, 400));
+        group.setDeletionProtectionEnabled(enabled);
+        groupStore.put(key, group);
     }
 
     public void putRetentionPolicy(String groupName, int days, String region) {
@@ -362,6 +387,8 @@ public class CloudWatchLogsService {
             int end = parseTokenIndex(nextToken, 2);
             pageEnd = Math.min(end, total);
             pageStart = Math.max(pageEnd - maxEvents, 0);
+        } else if (nextToken != null) {
+            throw invalidNextToken();
         } else if (!startFromHead) {
             pageEnd = total;
             pageStart = Math.max(total - maxEvents, 0);
@@ -375,14 +402,30 @@ public class CloudWatchLogsService {
     }
 
     private int parseTokenIndex(String token, int prefixLen) {
+        int index;
         try {
-            return Integer.parseInt(token.substring(prefixLen));
+            index = Integer.parseInt(token.substring(prefixLen));
         } catch (NumberFormatException e) {
-            return 0;
+            throw invalidNextToken();
         }
+        if (index < 0) {
+            throw invalidNextToken();
+        }
+        return index;
     }
 
-    public record FilteredLogEventsResult(List<LogEvent> events, String nextToken) {}
+    private AwsException invalidNextToken() {
+        return new AwsException("InvalidParameterException", "The specified nextToken is invalid.", 400);
+    }
+
+    /**
+     * A FilterLogEvents match paired with the stream that emitted it. FilterLogEvents is the
+     * cross-stream API, so the stream is what lets a caller attribute a hit; GetLogEvents needs
+     * no such pairing because the caller named the stream in the request.
+     */
+    public record FilteredEvent(String logStreamName, LogEvent event) {}
+
+    public record FilteredLogEventsResult(List<FilteredEvent> events, String nextToken) {}
 
     public FilteredLogEventsResult filterLogEvents(String groupName, List<String> streamNames,
                                                     Long startTime, Long endTime,
@@ -392,25 +435,31 @@ public class CloudWatchLogsService {
                 maxEventsPerQuery);
 
         String groupPrefix = groupKeyPrefix(region) + groupName + "::";
-        List<LogEvent> all = new ArrayList<>();
+        List<String> requested = streamNames == null ? List.of() : streamNames;
 
-        if (streamNames != null && !streamNames.isEmpty()) {
-            for (String sn : streamNames) {
-                String eventPrefix = eventKeyPrefix(region, groupName, sn);
-                all.addAll(eventStore.scan(k -> k.startsWith(eventPrefix)));
+        // Walk keys rather than values: the key is the only place the emitting stream is
+        // recorded, so reading it back is what lets each match carry its stream name. It also
+        // keeps a stream-restricted filter to one pass over the keyset instead of one scan per
+        // requested stream, since every scan walks the whole keyset regardless of its prefix.
+        List<FilteredEvent> all = new ArrayList<>();
+        for (String key : eventStore.keys()) {
+            if (!key.startsWith(groupPrefix)) {
+                continue;
             }
-        } else {
-            // All streams in group
-            all.addAll(eventStore.scan(k -> k.startsWith(groupPrefix)));
+            String streamName = streamNameFromEventKey(key, groupPrefix);
+            if (!requested.isEmpty() && !requested.contains(streamName)) {
+                continue;
+            }
+            eventStore.get(key).ifPresent(e -> all.add(new FilteredEvent(streamName, e)));
         }
 
-        all.sort(EVENT_ORDER);
+        all.sort(Comparator.comparing(FilteredEvent::event, EVENT_ORDER));
 
-        List<LogEvent> result = all.stream()
-                .filter(e -> (startTime == null || e.getTimestamp() >= startTime)
-                        && (endTime == null || e.getTimestamp() <= endTime))
-                .filter(e -> filterPattern == null || filterPattern.isBlank()
-                        || e.getMessage().contains(filterPattern))
+        List<FilteredEvent> result = all.stream()
+                .filter(f -> (startTime == null || f.event().getTimestamp() >= startTime)
+                        && (endTime == null || f.event().getTimestamp() <= endTime))
+                .filter(f -> filterPattern == null || filterPattern.isBlank()
+                        || f.event().getMessage().contains(filterPattern))
                 .limit(maxEvents)
                 .toList();
 
@@ -686,6 +735,21 @@ public class CloudWatchLogsService {
                                     long timestamp, String uuid) {
         return region + "::" + groupName + "::" + streamName + "::"
                 + String.format("%015d", timestamp) + "::" + uuid;
+    }
+
+    /**
+     * Recover the emitting stream from an event key, which {@link #eventKey} lays out as
+     * {@code <region>::<group>::<stream>::<timestamp>::<uuid>}. The stream is bounded by the
+     * caller's group prefix on the left and by the trailing timestamp and uuid on the right, both
+     * of which are generated here and contain no "::", so the name comes back whole even though
+     * nothing stops a caller from creating a stream whose name holds a ':'.
+     */
+    private static String streamNameFromEventKey(String eventKey, String groupPrefix) {
+        int uuidSeparator = eventKey.lastIndexOf("::");
+        int timestampSeparator = uuidSeparator < 0 ? -1 : eventKey.lastIndexOf("::", uuidSeparator - 1);
+        return timestampSeparator < groupPrefix.length()
+                ? eventKey.substring(groupPrefix.length())
+                : eventKey.substring(groupPrefix.length(), timestampSeparator);
     }
 
     private static String subscriptionFilterKeyPrefix(String region, String logGroupName) {

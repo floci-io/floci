@@ -28,7 +28,10 @@ public class CacheBehavior implements CacheBehaviorSettings {
     private Map<String, Object> forwardedValues;
     private boolean trustedSignersEnabled;
     private List<String> trustedSigners;
-    private boolean trustedKeyGroupsEnabled;
+    // Private-content key group IDs whose public keys may sign requests.
+    // Explicit enablement controls signature enforcement; when unset, a
+    // non-empty key group list implies enabled.
+    private Boolean trustedKeyGroupsEnabled;
     private List<String> trustedKeyGroups;
 
     public CacheBehavior() {}
@@ -93,8 +96,14 @@ public class CacheBehavior implements CacheBehaviorSettings {
     public List<String> getTrustedSigners() { return trustedSigners; }
     public void setTrustedSigners(List<String> trustedSigners) { this.trustedSigners = trustedSigners; }
 
-    public boolean isTrustedKeyGroupsEnabled() { return trustedKeyGroupsEnabled; }
-    public void setTrustedKeyGroupsEnabled(boolean trustedKeyGroupsEnabled) { this.trustedKeyGroupsEnabled = trustedKeyGroupsEnabled; }
+    public boolean isTrustedKeyGroupsEnabled() {
+        return trustedKeyGroupsEnabled != null
+                ? trustedKeyGroupsEnabled
+                : trustedKeyGroups != null && !trustedKeyGroups.isEmpty();
+    }
+    public void setTrustedKeyGroupsEnabled(boolean trustedKeyGroupsEnabled) {
+        this.trustedKeyGroupsEnabled = trustedKeyGroupsEnabled;
+    }
 
     public List<String> getTrustedKeyGroups() { return trustedKeyGroups; }
     public void setTrustedKeyGroups(List<String> trustedKeyGroups) { this.trustedKeyGroups = trustedKeyGroups; }

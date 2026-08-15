@@ -109,6 +109,24 @@ class RdsQueryHandlerTest {
     }
 
     @Test
+    void describeDbInstances_filterByDbiResourceId() {
+        DbInstance instance = makeInstance("mydb");
+        instance.setDbiResourceId("db-RESOURCE123");
+        when(service.listDbInstancesByDbiResourceIds(List.of("db-RESOURCE123", "db-RESOURCE456")))
+                .thenReturn(List.of(instance));
+
+        MultivaluedMap<String, String> p = params();
+        p.add("Filters.Filter.1.Name", "dbi-resource-id");
+        p.add("Filters.Filter.1.Values.Value.1", "db-RESOURCE123");
+        p.add("Filters.Filter.1.Values.Value.2", "db-RESOURCE456");
+        Response response = handler.handle("DescribeDBInstances", p);
+
+        verify(service).listDbInstancesByDbiResourceIds(List.of("db-RESOURCE123", "db-RESOURCE456"));
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<DBInstanceIdentifier>mydb</DBInstanceIdentifier>"));
+    }
+
+    @Test
     void describeDbInstances_directIdentifierTakesPriorityOverFilters() {
         when(service.listDbInstances(any())).thenReturn(List.of());
 
@@ -783,6 +801,72 @@ class RdsQueryHandlerTest {
 
         assertEquals(404, response.getStatus());
         assertTrue(((String) response.getEntity()).contains("DBSubnetGroupNotFoundFault"));
+    }
+
+    // ─────────────── NotFound faults for missing identifiers (AWS parity) ───────────────
+
+    @Test
+    void describeDbInstances_missingIdentifierFaultsWithDbInstanceNotFound() {
+        when(service.listDbInstances("missing")).thenReturn(List.of());
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBInstanceIdentifier", "missing");
+        Response response = handler.handle("DescribeDBInstances", p);
+
+        assertEquals(404, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<Code>DBInstanceNotFound</Code>"),
+                "Expected DBInstanceNotFound error code, got: " + body);
+        assertTrue(body.contains("DBInstance missing not found."),
+                "Expected AWS-style message, got: " + body);
+    }
+
+    @Test
+    void describeDbInstances_filtersFormReturnsEmptyListForMissing() {
+        when(service.listDbInstances("missing")).thenReturn(List.of());
+
+        MultivaluedMap<String, String> p = params();
+        p.add("Filters.Filter.1.Name", "db-instance-id");
+        p.add("Filters.Filter.1.Values.Value.1", "missing");
+        Response response = handler.handle("DescribeDBInstances", p);
+
+        assertEquals(200, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<DBInstances>"),
+                "Filters form must return an empty list, not fault: " + body);
+        assertFalse(body.contains("DBInstanceNotFound"));
+    }
+
+    @Test
+    void describeDbClusters_missingIdentifierFaultsWithDbClusterNotFoundFault() {
+        when(service.listDbClusters("missing")).thenReturn(List.of());
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBClusterIdentifier", "missing");
+        Response response = handler.handle("DescribeDBClusters", p);
+
+        assertEquals(404, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<Code>DBClusterNotFoundFault</Code>"),
+                "Expected DBClusterNotFoundFault error code, got: " + body);
+        assertTrue(body.contains("DBCluster missing not found."),
+                "Expected AWS-style message, got: " + body);
+    }
+
+    @Test
+    void describeDbClusters_filtersFormReturnsEmptyListForMissing() {
+        when(service.listDbClusters("missing")).thenReturn(List.of());
+
+        MultivaluedMap<String, String> p = params();
+        p.add("Filters.Filter.1.Name", "db-cluster-id");
+        p.add("Filters.Filter.1.Values.Value.1", "missing");
+        Response response = handler.handle("DescribeDBClusters", p);
+
+        assertEquals(200, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<DBClusters>"),
+                "Filters form must return an empty list, not fault: " + body);
+        assertFalse(body.contains("DBClusterNotFoundFault"));
     }
 
     // ──────────────────────────── Helpers ────────────────────────────

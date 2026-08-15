@@ -100,6 +100,33 @@ class ContainerLauncherVolumeNamingTest {
                 "a later lastModified must produce a different volume name");
     }
 
+    @Test
+    void efsVolumeNameIncludesStableHashOfCompleteArn() {
+        String arn = "arn:aws:elasticfilesystem:us-east-1:000000000000:"
+                + "access-point/fsap-0123456789abcdef0";
+
+        String volumeName = ContainerLauncher.efsVolumeName(arn);
+
+        assertEquals("floci-efs-fsap-0123456789abcdef0-"
+                        + "9d6eafd2aec94d4518a004f005725b4b3c673c1506436bb7368cfd5450fc0810",
+                volumeName);
+        assertEquals(volumeName, ContainerLauncher.efsVolumeName(arn));
+        assertTrue(DOCKER_VOLUME_NAME.matcher(volumeName).matches(),
+                "EFS volume name must be Docker-safe, was: " + volumeName);
+    }
+
+    @Test
+    void efsVolumeNameDistinguishesSameResourceIdAcrossArns() {
+        String eastArn = "arn:aws:elasticfilesystem:us-east-1:000000000000:"
+                + "access-point/fsap-0123456789abcdef0";
+        String westArn = "arn:aws:elasticfilesystem:us-west-2:111111111111:"
+                + "access-point/fsap-0123456789abcdef0";
+
+        assertNotEquals(ContainerLauncher.efsVolumeName(eastArn),
+                ContainerLauncher.efsVolumeName(westArn),
+                "the complete ARN must participate in volume identity");
+    }
+
     @TempDir
     Path tempDir;
 

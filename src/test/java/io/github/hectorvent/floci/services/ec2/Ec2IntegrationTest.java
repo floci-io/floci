@@ -258,7 +258,11 @@ class Ec2IntegrationTest {
     }
 
     @Test
-    @Order(10)
+    // Runs after the DescribeNetworkInterfaces pagination tests at @Order(92), like the
+    // metadata test below. Terminating the source instance is not enough on its own:
+    // TerminateInstances flips the state to shutting-down synchronously and only reaches
+    // terminated on a background task, and describeNetworkInterfaces filters on terminated.
+    @Order(322)
     void createImageFromInstanceReturnsDescribableAmi() {
         String imgInstanceId = given()
             .formParam("Action", "RunInstances")
@@ -296,6 +300,74 @@ class Ec2IntegrationTest {
         .then()
             .statusCode(200)
             .body("DescribeImagesResponse.imagesSet.item.name", equalTo("created-from-instance"));
+
+        // The source instance is terminated here rather than left running: the
+        // DescribeNetworkInterfaces pagination tests at @Order(92) assert that the
+        // final page carries no nextToken, which an extra live ENI would break.
+        given()
+            .formParam("Action", "TerminateInstances")
+            .formParam("InstanceId.1", imgInstanceId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    // Runs last: it launches two extra instances, and the DescribeNetworkInterfaces
+    // pagination tests at @Order(92) assert on exact ENI counts.
+    @Order(321)
+    void createImageInheritsTheSourceImageMetadata() {
+        // An arm64 source: a created AMI that reported the registerImage defaults would come
+        // back x86_64 here, which is the whole point of the assertion.
+        String armInstanceId = given()
+            .formParam("Action", "RunInstances")
+            .formParam("ImageId", "ami-ubuntu2404-arm64")
+            .formParam("InstanceType", "t4g.micro")
+            .formParam("MinCount", "1")
+            .formParam("MaxCount", "1")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("RunInstancesResponse.instancesSet.item.instanceId");
+
+        String amiId = given()
+            .formParam("Action", "CreateImage")
+            .formParam("InstanceId", armInstanceId)
+            .formParam("Name", "created-from-arm-instance")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("CreateImageResponse.imageId");
+
+        given()
+            .formParam("Action", "DescribeImages")
+            .formParam("ImageId.1", amiId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeImagesResponse.imagesSet.item.architecture", equalTo("arm64"));
+
+        // The created AMI is launchable, not just describable.
+        given()
+            .formParam("Action", "RunInstances")
+            .formParam("ImageId", amiId)
+            .formParam("InstanceType", "t4g.micro")
+            .formParam("MinCount", "1")
+            .formParam("MaxCount", "1")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("RunInstancesResponse.instancesSet.item.imageId", equalTo(amiId));
     }
 
     @Test
@@ -737,6 +809,37 @@ class Ec2IntegrationTest {
     }
 
     @Test
+    @Order(20)
+    void createSubnetWithoutVpcIdReturnsMissingParameter() {
+        given()
+            .formParam("Action", "CreateSubnet")
+            .formParam("CidrBlock", "10.0.2.0/24")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("MissingParameter"))
+            .body("Response.Errors.Error.Message", equalTo("The request must contain the parameter VpcId"));
+    }
+
+    @Test
+    @Order(20)
+    void createSubnetWithBlankVpcIdReturnsMissingParameter() {
+        given()
+            .formParam("Action", "CreateSubnet")
+            .formParam("VpcId", "   ")
+            .formParam("CidrBlock", "10.0.2.0/24")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("MissingParameter"))
+            .body("Response.Errors.Error.Message", equalTo("The request must contain the parameter VpcId"));
+    }
+
+    @Test
     @Order(21)
     void describeSubnetById() {
         given()
@@ -917,10 +1020,11 @@ class Ec2IntegrationTest {
         .then()
             .statusCode(200)
             .contentType("application/xml")
-            // Must contain at least the default egress-all rule plus the authorized
-            // ingress (ssh/22) and egress (tcp/443) rules
+            // Exactly the default egress-all rule plus the authorized ingress (ssh/22) and egress
+            // (tcp/443) rules. Exact, not "at least": each permission carries a single source, so a
+            // fan-out that double-emitted would still satisfy a lower bound.
             .body("DescribeSecurityGroupRulesResponse.securityGroupRuleSet.item.size()",
-                    greaterThanOrEqualTo(3))
+                    equalTo(3))
             .body("DescribeSecurityGroupRulesResponse.securityGroupRuleSet.item.groupId",
                     everyItem(equalTo(securityGroupId)));
     }
@@ -995,6 +1099,20 @@ class Ec2IntegrationTest {
         .then()
             .statusCode(200)
             .body("DescribeKeyPairsResponse.keySet.item.keyName", equalTo("test-key"));
+    }
+
+    @Test
+    @Order(41)
+    void describeKeyPairsRejectsMissingName() {
+        given()
+            .formParam("Action", "DescribeKeyPairs")
+            .formParam("KeyName.1", "does-not-exist")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidKeyPair.NotFound"));
     }
 
     @Test
@@ -2021,7 +2139,8 @@ class Ec2IntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("DescribeTagsResponse.tagSet.item.find { it.key == 'Name' }.value", equalTo("test-instance"));
+            .body("DescribeTagsResponse.tagSet.item.find { it.key == 'Name' && it.resourceId == '"
+                    + instanceId + "' }.value", equalTo("test-instance"));
     }
 
     @Test
@@ -2052,7 +2171,8 @@ class Ec2IntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("DescribeTagsResponse.tagSet.item.key", equalTo("Name"));
+            .body("DescribeTagsResponse.tagSet.item.size()", greaterThanOrEqualTo(1))
+            .body("DescribeTagsResponse.tagSet.item.findAll { it.key != 'Name' }.size()", equalTo(0));
     }
 
     @Test
@@ -2310,11 +2430,6 @@ class Ec2IntegrationTest {
 
         org.hamcrest.MatcherAssert.assertThat(body, not(containsString("<nextToken>")));
     }
-
-    // =========================================================================
-    // Network Interfaces — Error Handling (Phase 6)
-    // =========================================================================
-
     @Test
     @Order(92)
     void describeNetworkInterfacesNotFound() {
@@ -2421,11 +2536,6 @@ class Ec2IntegrationTest {
                 .statusCode(200);
         }
     }
-
-    // =========================================================================
-    // Volumes
-    // =========================================================================
-
     @Test
     @Order(93)
     void createVolume() {
@@ -2681,6 +2791,50 @@ class Ec2IntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+
+        // DeleteKeyPair always answers 200, so the delete is only proven by a
+        // follow-up describe.
+        given()
+            .formParam("Action", "DescribeKeyPairs")
+            .formParam("KeyPairId.1", keyPairId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidKeyPair.NotFound"));
+    }
+
+    @Test
+    @Order(108)
+    void deleteKeyPairByName() {
+        given()
+            .formParam("Action", "CreateKeyPair")
+            .formParam("KeyName", "delete-by-name-key")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .formParam("Action", "DeleteKeyPair")
+            .formParam("KeyName", "delete-by-name-key")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .formParam("Action", "DescribeKeyPairs")
+            .formParam("KeyName.1", "delete-by-name-key")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidKeyPair.NotFound"));
     }
 
     @Test

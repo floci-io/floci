@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.msk;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.msk.model.ClusterState;
 import io.github.hectorvent.floci.services.msk.model.MskCluster;
@@ -26,7 +27,7 @@ class MskServiceTest {
     void setUp() {
         storageFactory = Mockito.mock(StorageFactory.class);
         when(storageFactory.create(Mockito.anyString(), Mockito.anyString(), Mockito.any()))
-                .thenReturn(new InMemoryStorage<>());
+                .thenReturn(AccountAwareStorageBackend.inMemory("000000000000"));
 
         config = Mockito.mock(EmulatorConfig.class);
         var servicesConfig = Mockito.mock(EmulatorConfig.ServicesConfig.class);
@@ -85,5 +86,36 @@ class MskServiceTest {
         MskCluster cluster = mskService.createCluster("test-cluster");
         mskService.deleteCluster(cluster.getClusterArn());
         assertTrue(mskService.listClusters().isEmpty());
+    }
+
+    @Test
+    void createClusterReportsActiveFromFirstReadWhileBrokerStarts() {
+        // Non-mock mode with a working Docker daemon: the cluster record reports its terminal
+        // ACTIVE state from the first read (what SDK/Terraform waiters poll on DescribeCluster)
+        // instead of gating on Redpanda readiness — same pattern as MediaLive multiplexes.
+        when(config.services().msk().mock()).thenReturn(false);
+        when(redpandaManager.tryStartContainer(Mockito.any())).thenReturn(true);
+
+        MskCluster cluster = mskService.createCluster("docker-cluster");
+
+        assertEquals(ClusterState.ACTIVE, cluster.getState());
+        assertEquals(ClusterState.ACTIVE,
+                mskService.describeCluster(cluster.getClusterArn()).getState());
+    }
+
+    @Test
+    void createClusterWithoutDockerDaemonStillReachesActive() {
+        // tryStartContainer() returns false when no Docker daemon is reachable. The cluster
+        // record is metadata, so the create still succeeds, reaches ACTIVE, and reports a
+        // placeholder bootstrap address until a daemon appears.
+        when(config.services().msk().mock()).thenReturn(false);
+        when(redpandaManager.tryStartContainer(Mockito.any())).thenReturn(false);
+
+        MskCluster cluster = mskService.createCluster("no-docker-cluster");
+
+        assertEquals(ClusterState.ACTIVE, cluster.getState());
+        assertEquals("localhost:9092", cluster.getBootstrapBrokers());
+        assertEquals("no-docker-cluster",
+                mskService.describeCluster(cluster.getClusterArn()).getClusterName());
     }
 }

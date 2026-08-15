@@ -75,6 +75,21 @@ class S3ServiceTest {
     }
 
     @Test
+    void objectExistsReturnsFalseForMissingKey() {
+        s3Service.createBucket("exists-bucket", "us-east-1");
+        assertFalse(s3Service.objectExists("exists-bucket", "no-such-key"));
+    }
+
+    @Test
+    void objectExistsRethrowsWhenBucketMissing() {
+        // A missing key returns false, but a non-"not found" storage error (here NoSuchBucket) must
+        // surface rather than be masked as "object absent".
+        AwsException e = assertThrows(AwsException.class,
+                () -> s3Service.objectExists("no-such-bucket", "any-key"));
+        assertEquals("NoSuchBucket", e.getErrorCode());
+    }
+
+    @Test
     void createDuplicateBucketInUsEast1IsIdempotent() {
         Bucket first = s3Service.createBucket("test-bucket", "us-east-1");
         Bucket duplicate = s3Service.createBucket("test-bucket", "us-east-1");
@@ -177,7 +192,7 @@ class S3ServiceTest {
         byte[] data = "file content".getBytes(StandardCharsets.UTF_8);
         s3Service.putObject("test-bucket", "docs/readme.txt", data, "text/plain", null);
 
-        Path filePath = tempDir.resolve("s3/test-bucket/docs/readme.txt.s3data");
+        Path filePath = tempDir.resolve("s3/.accounts/000000000000/test-bucket/docs/readme.txt.s3data");
         assertTrue(Files.exists(filePath));
         assertArrayEquals(data, assertDoesNotThrow(() -> Files.readAllBytes(filePath)));
     }
@@ -225,7 +240,7 @@ class S3ServiceTest {
         s3Service.createBucket("test-bucket", "us-east-1");
         s3Service.putObject("test-bucket", "file.txt", "data".getBytes(), null, null);
 
-        Path filePath = tempDir.resolve("s3/test-bucket/file.txt.s3data");
+        Path filePath = tempDir.resolve("s3/.accounts/000000000000/test-bucket/file.txt.s3data");
         assertTrue(Files.exists(filePath));
 
         s3Service.deleteObject("test-bucket", "file.txt");
@@ -335,7 +350,7 @@ class S3ServiceTest {
         S3Object retrieved = s3Service.getObject("dest-bucket", "copy.txt");
         assertArrayEquals("content".getBytes(), retrieved.getData());
 
-        assertTrue(Files.exists(tempDir.resolve("s3/dest-bucket/copy.txt.s3data")));
+        assertTrue(Files.exists(tempDir.resolve("s3/.accounts/000000000000/dest-bucket/copy.txt.s3data")));
     }
 
     @Test
@@ -420,7 +435,7 @@ class S3ServiceTest {
         S3Object marker = s3Service.getObject("test-bucket", "output.parquet");
         assertArrayEquals(markerData, marker.getData());
 
-        Path bucketDir = tempDir.resolve("s3/test-bucket");
+        Path bucketDir = tempDir.resolve("s3/.accounts/000000000000/test-bucket");
         assertTrue(Files.isDirectory(bucketDir.resolve("output.parquet")));
         assertTrue(Files.isRegularFile(bucketDir.resolve("output.parquet.s3data")));
         assertTrue(Files.isRegularFile(bucketDir.resolve("output.parquet/part-0001.parquet.s3data")));
@@ -443,7 +458,7 @@ class S3ServiceTest {
         S3Object child = s3Service.getObject("test-bucket", "output.parquet/part-0001.parquet");
         assertArrayEquals(childData, child.getData());
 
-        Path bucketDir = tempDir.resolve("s3/test-bucket");
+        Path bucketDir = tempDir.resolve("s3/.accounts/000000000000/test-bucket");
         assertTrue(Files.isRegularFile(bucketDir.resolve("output.parquet.s3data")));
         assertTrue(Files.isDirectory(bucketDir.resolve("output.parquet")));
         assertTrue(Files.isRegularFile(bucketDir.resolve("output.parquet/part-0001.parquet.s3data")));

@@ -1,0 +1,197 @@
+#!/usr/bin/env bats
+# EC2 tests
+
+setup() {
+    load 'test_helper/common-setup'
+    PREFIX_LIST_NAME="bats-prefix-list-$(unique_name)"
+    PREFIX_LIST_ID=""
+    SG_VPC_ID=""
+    SG_SOURCE_ID=""
+    SG_TARGET_ID=""
+}
+
+teardown() {
+    if [ -n "$PREFIX_LIST_ID" ]; then
+        aws_cmd ec2 delete-managed-prefix-list --prefix-list-id "$PREFIX_LIST_ID" >/dev/null 2>&1 || true
+    fi
+    for sg in "$SG_TARGET_ID" "$SG_SOURCE_ID"; do
+        if [ -n "$sg" ]; then
+            aws_cmd ec2 delete-security-group --group-id "$sg" >/dev/null 2>&1 || true
+        fi
+    done
+    if [ -n "$SG_VPC_ID" ]; then
+        aws_cmd ec2 delete-vpc --vpc-id "$SG_VPC_ID" >/dev/null 2>&1 || true
+    fi
+}
+
+# Creates a prefix list holding 10.0.0.0/8 and sets PREFIX_LIST_ID.
+create_prefix_list() {
+    local out
+    out=$(aws_cmd ec2 create-managed-prefix-list \
+        --prefix-list-name "$PREFIX_LIST_NAME" \
+        --address-family IPv4 \
+        --max-entries 5 \
+        --entries 'Cidr=10.0.0.0/8,Description=corporate')
+    PREFIX_LIST_ID=$(json_get "$out" '.PrefixList.PrefixListId')
+}
+
+@test "EC2: create managed prefix list" {
+    run aws_cmd ec2 create-managed-prefix-list \
+        --prefix-list-name "$PREFIX_LIST_NAME" \
+        --address-family IPv4 \
+        --max-entries 5 \
+        --entries 'Cidr=10.0.0.0/8,Description=corporate'
+    assert_success
+    PREFIX_LIST_ID=$(json_get "$output" '.PrefixList.PrefixListId')
+    [ -n "$PREFIX_LIST_ID" ]
+
+    state=$(json_get "$output" '.PrefixList.State')
+    [ "$state" = "create-complete" ]
+    version=$(json_get "$output" '.PrefixList.Version')
+    [ "$version" = "1" ]
+}
+
+@test "EC2: describe managed prefix list by id" {
+    create_prefix_list
+
+    run aws_cmd ec2 describe-managed-prefix-lists --prefix-list-ids "$PREFIX_LIST_ID"
+    assert_success
+    name=$(json_get "$output" '.PrefixLists[0].PrefixListName')
+    [ "$name" = "$PREFIX_LIST_NAME" ]
+}
+
+@test "EC2: describe managed prefix lists exposes the AWS-managed S3 list" {
+    run aws_cmd ec2 describe-managed-prefix-lists \
+        --filters "Name=prefix-list-name,Values=com.amazonaws.${AWS_DEFAULT_REGION}.s3"
+    assert_success
+    id=$(json_get "$output" '.PrefixLists[0].PrefixListId')
+    [ "$id" = "pl-63a5400a" ]
+    owner=$(json_get "$output" '.PrefixLists[0].OwnerId')
+    [ "$owner" = "AWS" ]
+}
+
+@test "EC2: get managed prefix list entries" {
+    create_prefix_list
+
+    run aws_cmd ec2 get-managed-prefix-list-entries --prefix-list-id "$PREFIX_LIST_ID"
+    assert_success
+    cidr=$(json_get "$output" '.Entries[0].Cidr')
+    [ "$cidr" = "10.0.0.0/8" ]
+    desc=$(json_get "$output" '.Entries[0].Description')
+    [ "$desc" = "corporate" ]
+}
+
+@test "EC2: modify managed prefix list bumps version and keeps history" {
+    create_prefix_list
+
+    run aws_cmd ec2 modify-managed-prefix-list \
+        --prefix-list-id "$PREFIX_LIST_ID" \
+        --add-entries 'Cidr=192.168.0.0/16,Description=lab'
+    assert_success
+    version=$(json_get "$output" '.PrefixList.Version')
+    [ "$version" = "2" ]
+
+    run aws_cmd ec2 get-managed-prefix-list-entries --prefix-list-id "$PREFIX_LIST_ID"
+    assert_success
+    count=$(json_get "$output" '.Entries | length')
+    [ "$count" = "2" ]
+
+    run aws_cmd ec2 get-managed-prefix-list-entries --prefix-list-id "$PREFIX_LIST_ID" --target-version 1
+    assert_success
+    count=$(json_get "$output" '.Entries | length')
+    [ "$count" = "1" ]
+}
+
+@test "EC2: modify with a stale current version is rejected" {
+    create_prefix_list
+    aws_cmd ec2 modify-managed-prefix-list --prefix-list-id "$PREFIX_LIST_ID" \
+        --add-entries 'Cidr=192.168.0.0/16' >/dev/null
+
+    run aws_cmd ec2 modify-managed-prefix-list \
+        --prefix-list-id "$PREFIX_LIST_ID" \
+        --current-version 1 \
+        --add-entries 'Cidr=172.16.0.0/12'
+    assert_failure
+    assert_output --partial "PrefixListVersionMismatch"
+}
+
+@test "EC2: AWS-managed prefix list cannot be modified" {
+    run aws_cmd ec2 modify-managed-prefix-list \
+        --prefix-list-id pl-63a5400a \
+        --add-entries 'Cidr=10.1.0.0/16'
+    assert_failure
+    assert_output --partial "UnsupportedOperation"
+}
+
+@test "EC2: delete managed prefix list" {
+    create_prefix_list
+    local created_id="$PREFIX_LIST_ID"
+
+    run aws_cmd ec2 delete-managed-prefix-list --prefix-list-id "$created_id"
+    assert_success
+    state=$(json_get "$output" '.PrefixList.State')
+    [ "$state" = "delete-complete" ]
+    PREFIX_LIST_ID=""
+
+    run aws_cmd ec2 describe-managed-prefix-lists --prefix-list-ids "$created_id"
+    assert_failure
+    assert_output --partial "InvalidPrefixListID.NotFound"
+}
+
+@test "EC2: legacy describe-prefix-lists still serves the gateway lists" {
+    run aws_cmd ec2 describe-prefix-lists \
+        --filters "Name=prefix-list-name,Values=com.amazonaws.${AWS_DEFAULT_REGION}.s3"
+    assert_success
+    id=$(json_get "$output" '.PrefixLists[0].PrefixListId')
+    [ "$id" = "pl-63a5400a" ]
+}
+
+# Creates a VPC holding a source and a target security group, and sets SG_VPC_ID,
+# SG_SOURCE_ID and SG_TARGET_ID.
+create_sg_pair() {
+    local out
+    out=$(aws_cmd ec2 create-vpc --cidr-block 10.0.0.0/16)
+    SG_VPC_ID=$(json_get "$out" '.Vpc.VpcId')
+    out=$(aws_cmd ec2 create-security-group \
+        --group-name "$(unique_name bats-sg-source)" \
+        --description "traffic source" --vpc-id "$SG_VPC_ID")
+    SG_SOURCE_ID=$(json_get "$out" '.GroupId')
+    out=$(aws_cmd ec2 create-security-group \
+        --group-name "$(unique_name bats-sg-target)" \
+        --description "traffic target" --vpc-id "$SG_VPC_ID")
+    SG_TARGET_ID=$(json_get "$out" '.GroupId')
+}
+
+@test "EC2: ingress rule keeps its source security group" {
+    create_sg_pair
+
+    # The CLI serializes UserIdGroupPairs under the wire name "Groups", so this exercises the
+    # form the reporter of #2190 actually sent.
+    run aws_cmd ec2 authorize-security-group-ingress --group-id "$SG_TARGET_ID" \
+        --ip-permissions "IpProtocol=tcp,FromPort=443,ToPort=443,UserIdGroupPairs=[{GroupId=$SG_SOURCE_ID,Description=from-source-sg}]"
+    assert_success
+    ref=$(json_get "$output" '.SecurityGroupRules[0].ReferencedGroupInfo.GroupId')
+    [ "$ref" = "$SG_SOURCE_ID" ]
+
+    # Control: the CIDR form of the same rule.
+    aws_cmd ec2 authorize-security-group-ingress --group-id "$SG_TARGET_ID" \
+        --ip-permissions 'IpProtocol=tcp,FromPort=8443,ToPort=8443,IpRanges=[{CidrIp=10.0.0.0/8,Description=control}]' >/dev/null
+
+    run aws_cmd ec2 describe-security-groups --group-ids "$SG_TARGET_ID"
+    assert_success
+    gid=$(json_get "$output" '.SecurityGroups[0].IpPermissions[] | select(.FromPort==443) | .UserIdGroupPairs[0].GroupId')
+    [ "$gid" = "$SG_SOURCE_ID" ]
+    desc=$(json_get "$output" '.SecurityGroups[0].IpPermissions[] | select(.FromPort==443) | .UserIdGroupPairs[0].Description')
+    [ "$desc" = "from-source-sg" ]
+    cidr=$(json_get "$output" '.SecurityGroups[0].IpPermissions[] | select(.FromPort==8443) | .IpRanges[0].CidrIp')
+    [ "$cidr" = "10.0.0.0/8" ]
+
+    run aws_cmd ec2 describe-security-group-rules --filters "Name=group-id,Values=$SG_TARGET_ID"
+    assert_success
+    ref=$(json_get "$output" '.SecurityGroupRules[] | select(.FromPort==443) | .ReferencedGroupInfo.GroupId')
+    [ "$ref" = "$SG_SOURCE_ID" ]
+    desc=$(json_get "$output" '.SecurityGroupRules[] | select(.FromPort==443) | .Description')
+    [ "$desc" = "from-source-sg" ]
+    cidr=$(json_get "$output" '.SecurityGroupRules[] | select(.FromPort==8443) | .CidrIpv4')
+    [ "$cidr" = "10.0.0.0/8" ]
+}

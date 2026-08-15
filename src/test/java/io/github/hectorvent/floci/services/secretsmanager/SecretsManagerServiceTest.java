@@ -61,6 +61,30 @@ class SecretsManagerServiceTest {
     }
 
     @Test
+    void getSecretValueWithMatchingVersionIdAndStage() {
+        service.createSecret("paired", "v1", null, null, null, null, REGION);
+        SecretVersion current = service.getSecretValue("paired", null, null, REGION);
+
+        SecretVersion fetched = service.getSecretValue("paired",
+                current.getVersionId(), "AWSCURRENT", REGION);
+        assertEquals("v1", fetched.getSecretString());
+    }
+
+    @Test
+    void getSecretValueWithMismatchedVersionIdAndStageThrows() {
+        // botocore: when both are supplied they must refer to the same version; moto and
+        // LocalStack both raise InvalidRequestException with this message.
+        service.createSecret("mismatched", "v1", null, null, null, null, REGION);
+        SecretVersion current = service.getSecretValue("mismatched", null, null, REGION);
+
+        AwsException thrown = assertThrows(AwsException.class, () ->
+                service.getSecretValue("mismatched", current.getVersionId(), "AWSPREVIOUS", REGION));
+        assertEquals("InvalidRequestException", thrown.getErrorCode());
+        assertTrue(thrown.getMessage().contains(
+                "You provided a VersionStage that is not associated to the provided VersionId."));
+    }
+
+    @Test
     void putSecretValueRotatesVersion() {
         service.createSecret("my-secret", "v1", null, null, null, null, REGION);
         service.putSecretValue("my-secret", "v2", null, null, REGION, null);
@@ -159,6 +183,34 @@ class SecretsManagerServiceTest {
 
         assertEquals("my-secret", described.getName());
         assertEquals("desc", described.getDescription());
+    }
+
+    @Test
+    void targetAttachmentClaimIsExclusiveAndIdempotentForItsOwner() {
+        service.createSecret("my-secret", "value", null, null, null, null, REGION);
+
+        assertTrue(service.claimTargetAttachment("my-secret", "stack/First", REGION));
+        assertFalse(service.claimTargetAttachment("my-secret", "stack/First", REGION));
+        AwsException duplicate = assertThrows(AwsException.class,
+                () -> service.claimTargetAttachment("my-secret", "stack/Second", REGION));
+
+        assertEquals("ResourceExistsException", duplicate.getErrorCode());
+        assertTrue(duplicate.getMessage().contains("already attached"));
+        assertTrue(service.canManageTargetAttachment("my-secret", "stack/First", REGION));
+        assertFalse(service.canManageTargetAttachment("my-secret", "stack/Second", REGION));
+    }
+
+    @Test
+    void targetAttachmentClaimCanOnlyBeReleasedByItsOwner() {
+        service.createSecret("my-secret", "value", null, null, null, null, REGION);
+        service.claimTargetAttachment("my-secret", "stack/First", REGION);
+
+        service.releaseTargetAttachment("my-secret", "stack/Second", REGION);
+        assertThrows(AwsException.class,
+                () -> service.claimTargetAttachment("my-secret", "stack/Second", REGION));
+
+        service.releaseTargetAttachment("my-secret", "stack/First", REGION);
+        assertTrue(service.claimTargetAttachment("my-secret", "stack/Second", REGION));
     }
 
     @Test

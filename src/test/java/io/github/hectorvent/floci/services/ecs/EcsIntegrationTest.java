@@ -363,21 +363,24 @@ class EcsIntegrationTest {
                             "essential": true,
                             "secrets": [
                                 {"name": "DB_PASSWORD", "valueFrom": "%s"},
+                                {"name": "DB_TOKEN", "valueFrom": "%s:token::"},
                                 {"name": "CONFIG_VALUE", "valueFrom": "/app/config"}
                             ]
                         }
                     ]
                 }
-                """.formatted(secretArn))
+                """.formatted(secretArn, secretArn))
         .when()
             .post("/")
         .then()
             .statusCode(200)
-            .body("taskDefinition.containerDefinitions[0].secrets", hasSize(2))
+            .body("taskDefinition.containerDefinitions[0].secrets", hasSize(3))
             .body("taskDefinition.containerDefinitions[0].secrets[0].name", equalTo("DB_PASSWORD"))
             .body("taskDefinition.containerDefinitions[0].secrets[0].valueFrom", equalTo(secretArn))
-            .body("taskDefinition.containerDefinitions[0].secrets[1].name", equalTo("CONFIG_VALUE"))
-            .body("taskDefinition.containerDefinitions[0].secrets[1].valueFrom", equalTo("/app/config"))
+            .body("taskDefinition.containerDefinitions[0].secrets[1].name", equalTo("DB_TOKEN"))
+            .body("taskDefinition.containerDefinitions[0].secrets[1].valueFrom", equalTo(secretArn + ":token::"))
+            .body("taskDefinition.containerDefinitions[0].secrets[2].name", equalTo("CONFIG_VALUE"))
+            .body("taskDefinition.containerDefinitions[0].secrets[2].valueFrom", equalTo("/app/config"))
         .extract()
             .path("taskDefinition.taskDefinitionArn");
 
@@ -389,11 +392,13 @@ class EcsIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("taskDefinition.containerDefinitions[0].secrets", hasSize(2))
+            .body("taskDefinition.containerDefinitions[0].secrets", hasSize(3))
             .body("taskDefinition.containerDefinitions[0].secrets[0].name", equalTo("DB_PASSWORD"))
             .body("taskDefinition.containerDefinitions[0].secrets[0].valueFrom", equalTo(secretArn))
-            .body("taskDefinition.containerDefinitions[0].secrets[1].name", equalTo("CONFIG_VALUE"))
-            .body("taskDefinition.containerDefinitions[0].secrets[1].valueFrom", equalTo("/app/config"));
+            .body("taskDefinition.containerDefinitions[0].secrets[1].name", equalTo("DB_TOKEN"))
+            .body("taskDefinition.containerDefinitions[0].secrets[1].valueFrom", equalTo(secretArn + ":token::"))
+            .body("taskDefinition.containerDefinitions[0].secrets[2].name", equalTo("CONFIG_VALUE"))
+            .body("taskDefinition.containerDefinitions[0].secrets[2].valueFrom", equalTo("/app/config"));
     }
 
     @Test

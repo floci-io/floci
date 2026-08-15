@@ -373,12 +373,12 @@ class ApiGatewayIntegrationTest {
                 .statusCode(404);
     }
 
-    // ──────────────────────────── _custom_id_ tag ────────────────────────────
+    // ──────────────────────────── _custom_id_ tag (deprecated) ────────────────────────────
 
     @Test @Order(50)
     void createRestApi_customIdTag_usesTagValueAsApiId() {
         String body = """
-                {"name":"custom-id-api","tags":{"_custom_id_":"MYCUSTOMNAME"}}
+                {"name":"custom-id-api","tags":{"_custom_id_":"MYCUSTOMNAME","env":"test"}}
                 """;
         given()
                 .contentType(ContentType.JSON)
@@ -387,7 +387,9 @@ class ApiGatewayIntegrationTest {
                 .then()
                 .statusCode(201)
                 .body("id", equalTo("MYCUSTOMNAME"))
-                .body("tags._custom_id_", equalTo("MYCUSTOMNAME"));
+                // The override key is consumed, not persisted; unrelated tags survive.
+                .body("tags._custom_id_", nullValue())
+                .body("tags.env", equalTo("test"));
     }
 
     @Test @Order(51)
@@ -400,10 +402,108 @@ class ApiGatewayIntegrationTest {
                 .body("name", equalTo("custom-id-api"));
     }
 
+    // ──────────────────────────── floci:override-id tag ────────────────────────────
+
     @Test @Order(52)
+    void createRestApi_flociOverrideIdTag_usesTagValueAsApiId() {
+        String body = """
+                {"name":"override-id-api","tags":{"floci:override-id":"MYOVERRIDEID"}}
+                """;
+        given()
+                .contentType(ContentType.JSON)
+                .body(body)
+                .when().post("/restapis")
+                .then()
+                .statusCode(201)
+                .body("id", equalTo("MYOVERRIDEID"))
+                .body("tags._custom_id_", nullValue())
+                .body("tags.'floci:override-id'", nullValue());
+    }
+
+    @Test @Order(53)
+    void createRestApi_bothOverrideKeys_prefersFlociOverrideId() {
+        String body = """
+                {"name":"both-keys-api","tags":{"floci:override-id":"WINNER","_custom_id_":"LOSER"}}
+                """;
+        given()
+                .contentType(ContentType.JSON)
+                .body(body)
+                .when().post("/restapis")
+                .then()
+                .statusCode(201)
+                .body("id", equalTo("WINNER"));
+    }
+
+    @Test @Order(54)
+    void createRestApi_blankOverrideId_isRejected() {
+        String body = """
+                {"name":"blank-override-api","tags":{"floci:override-id":"   "}}
+                """;
+        given()
+                .contentType(ContentType.JSON)
+                .body(body)
+                .when().post("/restapis")
+                .then()
+                .statusCode(400)
+                .body("message", containsString("must not be blank"));
+    }
+
+    @Test @Order(55)
+    void createRestApi_overrideIdWithPathSeparator_isRejected() {
+        String body = """
+                {"name":"bad-override-api","tags":{"floci:override-id":"has/slash"}}
+                """;
+        given()
+                .contentType(ContentType.JSON)
+                .body(body)
+                .when().post("/restapis")
+                .then()
+                .statusCode(400)
+                .body("message", containsString("unsupported characters"));
+    }
+
+    @Test @Order(56)
+    void createRestApi_duplicateOverrideId_isRejectedWithConflict() {
+        String body = """
+                {"name":"duplicate-override-api","tags":{"floci:override-id":"MYOVERRIDEID"}}
+                """;
+        given()
+                .contentType(ContentType.JSON)
+                .body(body)
+                .when().post("/restapis")
+                .then()
+                .statusCode(409)
+                .body("message", containsString("already exists"));
+        // The original API is untouched.
+        given()
+                .when().get("/restapis/MYOVERRIDEID")
+                .then()
+                .statusCode(200)
+                .body("name", equalTo("override-id-api"));
+    }
+
+    @Test @Order(57)
+    void getRestApi_flociOverrideId_resolvesById() {
+        given()
+                .when().get("/restapis/MYOVERRIDEID")
+                .then()
+                .statusCode(200)
+                .body("id", equalTo("MYOVERRIDEID"))
+                .body("name", equalTo("override-id-api"));
+    }
+
+    @Test @Order(58)
     void deleteRestApi_customId() {
         given()
                 .when().delete("/restapis/MYCUSTOMNAME")
+                .then()
+                .statusCode(202);
+        given()
+                .when().delete("/restapis/MYOVERRIDEID")
+                .then()
+                .statusCode(202);
+        given()
+                .when().delete("/restapis/WINNER")
                 .then()
                 .statusCode(202);
     }

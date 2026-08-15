@@ -68,7 +68,7 @@ public class MemoryDbContainerManager {
     public MemoryDbContainerHandle start(String clusterName, String image) {
         LOG.infov("Starting MemoryDB backend container for cluster: {0}", clusterName);
 
-        String containerName = ContainerStorageHelper.resourceName(config, "memorydb", null, clusterName);
+        String containerName = containerName(clusterName);
 
         lifecycleManager.removeIfExists(containerName);
 
@@ -171,6 +171,28 @@ public class MemoryDbContainerManager {
         }
         activeContainers.remove(handle.getClusterName());
         lifecycleManager.stopAndRemove(handle.getContainerId(), handle.getLogStream());
+    }
+
+    /**
+     * Stops and removes the backend container for a cluster by name, if one exists.
+     * Used by the service's provisioning rollback: {@link #start} registers the container in
+     * {@code activeContainers} <em>before</em> {@link #waitForBackendReady}, so a readiness
+     * timeout throws without ever returning the handle to the caller. In that case rollback
+     * can't go through {@link #stop} (it has no handle), so it cleans up by name instead. Falls
+     * back to the deterministic container name to catch a container that failed before it was
+     * registered. Idempotent — a no-op when nothing is running for the name.
+     */
+    public void stopByClusterName(String clusterName) {
+        MemoryDbContainerHandle handle = activeContainers.get(clusterName);
+        if (handle != null) {
+            stop(handle);
+            return;
+        }
+        lifecycleManager.removeIfExists(containerName(clusterName));
+    }
+
+    private String containerName(String clusterName) {
+        return ContainerStorageHelper.resourceName(config, "memorydb", null, clusterName);
     }
 
     public void stopAll() {

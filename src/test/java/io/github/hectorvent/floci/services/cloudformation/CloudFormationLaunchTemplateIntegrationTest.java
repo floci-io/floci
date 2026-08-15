@@ -76,6 +76,18 @@ class CloudFormationLaunchTemplateIntegrationTest {
             .statusCode(200)
             .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"))
             .body(containsString("<OutputValue>i-"));
+
+        // Delete the stack so the instance is terminated: a live instance would otherwise leak
+        // into the shared emulator state and change what EC2 describe calls in other tests see.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", "DeleteStack")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
     }
 
     @Test

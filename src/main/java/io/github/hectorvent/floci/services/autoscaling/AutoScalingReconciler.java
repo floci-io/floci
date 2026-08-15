@@ -296,7 +296,8 @@ public class AutoScalingReconciler {
                     null,
                     propagatedInstanceTags(asg, launchSource),
                     launchSource.userData(),
-                    launchSource.iamInstanceProfile());
+                    launchSource.iamInstanceProfile(),
+                    launchSource.associatePublicIpAddress());
 
             for (Instance ec2Inst : reservation.getInstances()) {
                 AsgInstance asgInst = new AsgInstance();
@@ -413,7 +414,11 @@ public class AutoScalingReconciler {
                     lc.getIamInstanceProfile(),
                     null,
                     null,
-                    null);
+                    null,
+                    // Forwarded as-is: an explicit false has to beat a public
+                    // subnet's MapPublicIpOnLaunch, and only null means
+                    // "fall back to the subnet default".
+                    lc.getAssociatePublicIpAddress());
         }
 
         LaunchTemplate launchTemplate = resolveLaunchTemplate(asg);
@@ -438,7 +443,8 @@ public class AutoScalingReconciler {
                     version.getIamInstanceProfileArn(),
                     asg.getLaunchTemplateId(),
                     asg.getLaunchTemplateName(),
-                    resolvedVersion);
+                    resolvedVersion,
+                    null);
         }
 
         MixedInstancesPolicy.LaunchTemplateSpecification specification =
@@ -469,7 +475,8 @@ public class AutoScalingReconciler {
                                 ? mixedLaunchTemplate.getLaunchTemplateId()
                                 : specification.getLaunchTemplateId(),
                         specification.getLaunchTemplateName(),
-                        resolvedVersion);
+                        resolvedVersion,
+                        null);
             }
         }
 
@@ -558,7 +565,8 @@ public class AutoScalingReconciler {
             String iamInstanceProfile,
             String launchTemplateId,
             String launchTemplateName,
-            String launchTemplateVersion) {}
+            String launchTemplateVersion,
+            Boolean associatePublicIpAddress) {}
 
     // Override for describeAutoScalingGroups with null region (all regions)
     // The service only filters by region when non-null; null means all.

@@ -12,6 +12,8 @@ floci:
     docker-host: unix:///var/run/docker.sock
 ```
 
+**Running natively on Windows** (not inside WSL or a container): Windows has no equivalent of `/var/run/docker.sock`, so when `docker-host` is left at its default and `DOCKER_HOST` isn't set, Floci automatically falls back to Docker Desktop's named pipe (`npipe:////./pipe/docker_engine`) instead. An explicit `docker-host` or `DOCKER_HOST` always takes priority over this fallback.
+
 Environment variable: `FLOCI_DOCKER_DOCKER_HOST`
 
 When running Floci inside Docker Compose, mount the host socket:

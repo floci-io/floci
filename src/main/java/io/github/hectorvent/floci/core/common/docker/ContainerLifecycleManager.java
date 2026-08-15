@@ -5,6 +5,8 @@ import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.CreateContainerCmd;
 import com.github.dockerjava.api.command.CreateContainerResponse;
 import com.github.dockerjava.api.command.InspectContainerResponse;
+import com.github.dockerjava.api.command.InspectVolumeResponse;
+import com.github.dockerjava.api.command.ListVolumesResponse;
 import com.github.dockerjava.api.exception.DockerException;
 import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.Bind;
@@ -26,6 +28,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
@@ -162,35 +165,59 @@ public class ContainerLifecycleManager {
      * @param logStream optional log stream to close (may be null)
      */
     public void stopAndRemove(String containerId, Closeable logStream) {
+        stopAndRemove(containerId, logStream, 5);
+    }
+
+    /**
+     * Stops and removes a container, closing any associated log stream.
+     *
+     * @param containerId the container ID to stop and remove
+     * @param logStream optional log stream to close (may be null)
+     * @param stopTimeoutSeconds seconds to wait for the container to stop cleanly after
+     *        SIGTERM before Docker sends SIGKILL. Must be a non-negative integer.
+     */
+    public void stopAndRemove(String containerId, Closeable logStream, int stopTimeoutSeconds) {
         LOG.infov("Stopping container {0}", containerId);
 
-        // Close log stream first
-        if (logStream != null) {
-            try {
-                logStream.close();
-            } catch (Exception e) {
-                LOG.debugv("Error closing log stream: {0}", e.getMessage());
-            }
-        }
-
-        // Stop container
+        boolean stoppedOrMissing = false;
         try {
-            dockerClient.stopContainerCmd(containerId).withTimeout(5).exec();
+            dockerClient.stopContainerCmd(containerId).withTimeout(stopTimeoutSeconds).exec();
+            stoppedOrMissing = true;
         } catch (NotFoundException e) {
             LOG.debugv("Container {0} not found (already removed)", containerId);
-            return;
+            stoppedOrMissing = true;
         } catch (Exception e) {
             LOG.warnv("Error stopping container {0}: {1}", containerId, e.getMessage());
         }
 
-        // Remove container
+        // Force removal is the recovery path when Docker could not stop the container cleanly. It also
+        // terminates the follow-log transport, allowing its terminal callback to drain the final tail.
+        boolean removedOrMissing = false;
         try {
             dockerClient.removeContainerCmd(containerId).withForce(true).exec();
+            removedOrMissing = true;
             LOG.debugv("Removed container {0}", containerId);
         } catch (NotFoundException e) {
             // Already gone
+            removedOrMissing = true;
         } catch (Exception e) {
             LOG.warnv("Error removing container {0}: {1}", containerId, e.getMessage());
+        }
+
+        if (logStream != null && (stoppedOrMissing || removedOrMissing)) {
+            closeLogStreamAfterContainerStop(logStream);
+        }
+    }
+
+    /**
+     * Releases lifecycle ownership of a log stream after its container has stopped. Docker's terminal
+     * callback normally flushes the final tail; a bounded fallback handles a broken transport.
+     */
+    public void closeLogStreamAfterContainerStop(Closeable logStream) {
+        try {
+            logStream.close();
+        } catch (Exception e) {
+            LOG.debugv("Error closing log stream: {0}", e.getMessage());
         }
     }
 
@@ -312,15 +339,23 @@ public class ContainerLifecycleManager {
 
     /**
      * Removes a named Docker volume, ignoring errors if it does not exist or is still in use.
+     * Returns whether the volume is confirmed gone: true if it was removed or was already absent,
+     * false if Docker refused (e.g. still in use by a container) or the attempt failed for some
+     * other reason (e.g. a transient daemon error). Callers that need to retry a removal should
+     * treat false as "unconfirmed, try again later" rather than "definitely still there" - a single
+     * boolean here can't always distinguish those two cases from the daemon's response alone.
      */
-    public void removeVolume(String volumeName) {
+    public boolean removeVolume(String volumeName) {
         try {
             dockerClient.removeVolumeCmd(volumeName).exec();
             LOG.debugv("Removed volume {0}", volumeName);
+            return true;
         } catch (NotFoundException e) {
-            // Already gone — nothing to do
+            // Already gone, which satisfies the caller's goal just as much as removing it would.
+            return true;
         } catch (Exception e) {
             LOG.warnv("Error removing volume {0}: {1}", volumeName, e.getMessage());
+            return false;
         }
     }
 
@@ -504,6 +539,34 @@ public class ContainerLifecycleManager {
         } catch (DockerException e) {
             LOG.warnv("Failed to inspect volume ''{0}'': {1}", name, e.getMessage());
             return false;
+        }
+    }
+
+    /**
+     * Attempts to take an authoritative snapshot of all named volumes in the container runtime.
+     * An empty optional means the runtime could not be queried; it is intentionally distinct from
+     * a successful query that returned an empty set so cleanup callers fail closed.
+     */
+    public Optional<Set<String>> tryListVolumeNames() {
+        try {
+            ListVolumesResponse response = dockerClient.listVolumesCmd().exec();
+            if (response == null) {
+                LOG.warn("Container runtime returned no volume-list response");
+                return Optional.empty();
+            }
+            List<InspectVolumeResponse> volumes = response.getVolumes();
+            if (volumes == null) {
+                LOG.warn("Container runtime returned a volume-list response without an inventory");
+                return Optional.empty();
+            }
+            Set<String> names = volumes.stream()
+                    .map(InspectVolumeResponse::getName)
+                    .filter(name -> name != null && !name.isBlank())
+                    .collect(java.util.stream.Collectors.toUnmodifiableSet());
+            return Optional.of(names);
+        } catch (RuntimeException e) {
+            LOG.warnv("Failed to list container-runtime volumes: {0}", e.getMessage());
+            return Optional.empty();
         }
     }
 

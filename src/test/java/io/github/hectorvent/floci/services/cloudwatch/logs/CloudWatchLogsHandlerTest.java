@@ -16,6 +16,7 @@ import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -96,6 +97,102 @@ class CloudWatchLogsHandlerTest {
 
         assertEquals(200, response.getStatus());
         assertEquals(GROUP, ((JsonNode) response.getEntity()).path("logGroupIdentifier").asText());
+    }
+
+    @Test
+    void createLogGroupWithDeletionProtectionIsReturnedByDescribeLogGroups() {
+        String protectedGroup = GROUP + "-created-protected";
+        ObjectNode create = MAPPER.createObjectNode();
+        create.put("logGroupName", protectedGroup);
+        create.put("deletionProtectionEnabled", true);
+
+        handler.handle("CreateLogGroup", create, REGION);
+
+        ObjectNode describe = MAPPER.createObjectNode();
+        describe.put("logGroupNamePrefix", protectedGroup);
+        JsonNode group = ((JsonNode) handler.handle("DescribeLogGroups", describe, REGION).getEntity())
+                .path("logGroups").get(0);
+        assertEquals(protectedGroup, group.path("logGroupName").asText());
+        assertTrue(group.path("deletionProtectionEnabled").asBoolean());
+    }
+
+    @Test
+    void putLogGroupDeletionProtectionPersistsByName() {
+        ObjectNode request = MAPPER.createObjectNode();
+        request.put("logGroupIdentifier", GROUP);
+        request.put("deletionProtectionEnabled", true);
+
+        Response response = handler.handle("PutLogGroupDeletionProtection", request, REGION);
+
+        assertEquals(200, response.getStatus());
+        assertTrue(service.describeLogGroups(GROUP, REGION).getFirst().isDeletionProtectionEnabled());
+    }
+
+    @Test
+    void putLogGroupDeletionProtectionAcceptsArnIdentifier() {
+        ObjectNode request = MAPPER.createObjectNode();
+        request.put("logGroupIdentifier", GROUP_ARN);
+        request.put("deletionProtectionEnabled", true);
+
+        handler.handle("PutLogGroupDeletionProtection", request, REGION);
+
+        assertTrue(service.describeLogGroups(GROUP, REGION).getFirst().isDeletionProtectionEnabled());
+    }
+
+    @Test
+    void putLogGroupDeletionProtectionRequiresIdentifier() {
+        ObjectNode request = MAPPER.createObjectNode();
+        request.put("deletionProtectionEnabled", true);
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> handler.handle("PutLogGroupDeletionProtection", request, REGION));
+
+        assertEquals("InvalidParameterException", error.getErrorCode());
+    }
+
+    @Test
+    void putLogGroupDeletionProtectionRequiresBoolean() {
+        ObjectNode request = MAPPER.createObjectNode();
+        request.put("logGroupIdentifier", GROUP);
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> handler.handle("PutLogGroupDeletionProtection", request, REGION));
+
+        assertEquals("InvalidParameterException", error.getErrorCode());
+    }
+
+    @Test
+    void putLogGroupDeletionProtectionRequiresExistingGroup() {
+        ObjectNode request = MAPPER.createObjectNode();
+        request.put("logGroupIdentifier", "/missing");
+        request.put("deletionProtectionEnabled", true);
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> handler.handle("PutLogGroupDeletionProtection", request, REGION));
+
+        assertEquals("ResourceNotFoundException", error.getErrorCode());
+    }
+
+    @Test
+    void protectedLogGroupCannotBeDeletedUntilProtectionIsDisabled() {
+        ObjectNode protection = MAPPER.createObjectNode();
+        protection.put("logGroupIdentifier", GROUP);
+        protection.put("deletionProtectionEnabled", true);
+        handler.handle("PutLogGroupDeletionProtection", protection, REGION);
+
+        ObjectNode deletion = MAPPER.createObjectNode();
+        deletion.put("logGroupName", GROUP);
+        AwsException error = assertThrows(AwsException.class,
+                () -> handler.handle("DeleteLogGroup", deletion, REGION));
+        assertEquals("ValidationException", error.getErrorCode());
+        assertThat(error.getMessage(), containsString("Disable deletion protection"));
+
+        protection.put("deletionProtectionEnabled", false);
+        handler.handle("PutLogGroupDeletionProtection", protection, REGION);
+        Response response = handler.handle("DeleteLogGroup", deletion, REGION);
+
+        assertEquals(200, response.getStatus());
+        assertFalse(service.logGroupExists(GROUP, REGION));
     }
 
     @Test
@@ -208,6 +305,56 @@ class CloudWatchLogsHandlerTest {
         JsonNode events = ((ObjectNode) response.getEntity()).path("events");
         assertEquals(1, events.size());
         assertThat(events.get(0).path("message").asText(), containsString("ERROR"));
+        assertEquals(STREAM, events.get(0).path("logStreamName").asText());
+    }
+
+    @Test
+    void filterLogEventsAttributesEachMatchToItsStream() {
+        // FilterLogEvents spans streams, so a caller can only attribute a hit if the response
+        // says which stream emitted it.
+        String otherStream = "postgresql.log.2026-06-05";
+        service.createLogStream(GROUP, otherStream, REGION);
+
+        long now = System.currentTimeMillis();
+        service.putLogEvents(GROUP, STREAM, java.util.List.of(
+                java.util.Map.of("timestamp", now, "message", "ERROR: from first")
+        ), REGION);
+        service.putLogEvents(GROUP, otherStream, java.util.List.of(
+                java.util.Map.of("timestamp", now + 1, "message", "ERROR: from second")
+        ), REGION);
+
+        ObjectNode request = MAPPER.createObjectNode();
+        request.put("logGroupName", GROUP);
+        request.put("filterPattern", "ERROR");
+
+        Response response = handler.handle("FilterLogEvents", request, REGION);
+
+        assertEquals(200, response.getStatus());
+        JsonNode events = ((ObjectNode) response.getEntity()).path("events");
+        assertEquals(2, events.size());
+        assertEquals(STREAM, events.get(0).path("logStreamName").asText());
+        assertEquals(otherStream, events.get(1).path("logStreamName").asText());
+    }
+
+    @Test
+    void getLogEventsOmitsLogStreamName() {
+        // OutputLogEvent has no logStreamName in real AWS: the caller named the stream in the
+        // request, so echoing it back would be a shape floci invents.
+        long now = System.currentTimeMillis();
+        service.putLogEvents(GROUP, STREAM, java.util.List.of(
+                java.util.Map.of("timestamp", now, "message", "only one stream here")
+        ), REGION);
+
+        ObjectNode request = MAPPER.createObjectNode();
+        request.put("logGroupName", GROUP);
+        request.put("logStreamName", STREAM);
+
+        Response response = handler.handle("GetLogEvents", request, REGION);
+
+        assertEquals(200, response.getStatus());
+        JsonNode events = ((ObjectNode) response.getEntity()).path("events");
+        assertEquals(1, events.size());
+        assertTrue(events.get(0).path("logStreamName").isMissingNode());
     }
 
     @Test

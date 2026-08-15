@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ssm.model.Command;
 import io.github.hectorvent.floci.services.ssm.model.CommandInvocation;
@@ -390,9 +391,9 @@ class SsmCommandServiceDirectExecutionTest {
         }
 
         @Override
-        public <V> StorageBackend<String, V> create(String serviceName, String fileName,
+        public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
                                                     TypeReference<Map<String, V>> typeReference) {
-            return new InMemoryStorage<>();
+            return AccountAwareStorageBackend.inMemory("000000000000");
         }
     }
 }

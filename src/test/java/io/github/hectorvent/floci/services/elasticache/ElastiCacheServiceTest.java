@@ -1,7 +1,8 @@
 package io.github.hectorvent.floci.services.elasticache;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
-import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheContainerHandle;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheContainerManager;
@@ -12,6 +13,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -50,8 +53,8 @@ class ElastiCacheServiceTest {
         when(ecConfig.defaultImage()).thenReturn("valkey/valkey:8");
         when(config.hostname()).thenReturn(java.util.Optional.of("localhost"));
 
-        when(storageFactory.create(anyString(), anyString(), any())).thenAnswer(inv -> new InMemoryStorage<>());
-        when(containerManager.start(anyString(), anyString()))
+        when(storageFactory.create(anyString(), anyString(), any())).thenAnswer(inv -> AccountAwareStorageBackend.inMemory("000000000000"));
+        when(containerManager.tryStart(anyString(), anyString()))
                 .thenReturn(new ElastiCacheContainerHandle("cid", "grp", "localhost", 6379));
         doNothing().when(proxyManager).startProxy(anyString(), any(), anyInt(), anyString(), anyInt(), any());
 
@@ -109,7 +112,7 @@ class ElastiCacheServiceTest {
     void failedProvisioningRollsBackContainerAndReleasesProxyPort() {
         ElastiCacheContainerHandle handle =
                 new ElastiCacheContainerHandle("cid", "grp", "localhost", 6379);
-        when(containerManager.start(anyString(), anyString())).thenReturn(handle);
+        when(containerManager.tryStart(anyString(), anyString())).thenReturn(handle);
 
         // Proxy startup blows up after the port is reserved and the container is started.
         doThrow(new RuntimeException("proxy boom"))
@@ -119,9 +122,10 @@ class ElastiCacheServiceTest {
         assertThrows(RuntimeException.class,
                 () -> service.createReplicationGroup("grp", "test", AuthMode.PASSWORD, null));
 
-        // Rollback stopped the proxy and the already-started container.
+        // Rollback stops by the exact handle, not a fresh by-id lookup.
         verify(proxyManager).stopProxy("grp");
         verify(containerManager).stop(handle);
+        verify(containerManager, never()).stopByGroupId(anyString());
 
         // The reserved proxy port was released: a subsequent successful create reuses the base port
         // instead of skipping to the next one (which is what a leak would cause).
@@ -134,25 +138,74 @@ class ElastiCacheServiceTest {
     }
 
     @Test
-    void failedContainerStartReleasesPortWithoutTouchingProxyOrContainer() {
-        // Container start blows up before any handle exists.
-        doThrow(new RuntimeException("container boom"))
-                .when(containerManager).start(eq("grp"), anyString());
+    void failedContainerStartupCleansUpContainerByIdAndReleasesPort() {
+        // Models a readiness timeout: start() throws without ever returning a handle.
+        doThrow(new RuntimeException("readiness boom"))
+                .when(containerManager).tryStart(eq("grp"), anyString());
 
-        // The original failure must propagate to the caller (we clean up, then rethrow).
         assertThrows(RuntimeException.class,
                 () -> service.createReplicationGroup("grp", "test", AuthMode.PASSWORD, null));
 
-        // No container started and no proxy started, so rollback must not call either stop.
         verify(proxyManager, never()).stopProxy(anyString());
-        verify(containerManager, never()).stop(any());
+        verify(containerManager).stopByGroupId("grp");
 
         // The reserved proxy port was still released: a subsequent successful create reuses the base port.
-        when(containerManager.start(anyString(), anyString()))
+        when(containerManager.tryStart(anyString(), anyString()))
                 .thenReturn(new ElastiCacheContainerHandle("cid", "grp2", "localhost", 6379));
         ReplicationGroup recovered =
                 service.createReplicationGroup("grp2", "test", AuthMode.PASSWORD, null);
         assertEquals(16379, recovered.getProxyPort(),
                 "Port from the failed create must be released so the next group reuses it");
+    }
+
+    @Test
+    void concurrentCreateForSameGroupIdIsRejectedWhileFirstIsProvisioning() throws InterruptedException {
+        CountDownLatch startedLatch = new CountDownLatch(1);
+        CountDownLatch releaseLatch = new CountDownLatch(1);
+        when(containerManager.tryStart(anyString(), anyString())).thenAnswer(inv -> {
+            startedLatch.countDown();
+            assertTrue(releaseLatch.await(5, TimeUnit.SECONDS), "test timed out waiting for release");
+            return new ElastiCacheContainerHandle("cid", "grp", "localhost", 6379);
+        });
+
+        Thread firstRequest = new Thread(() ->
+                service.createReplicationGroup("grp", "test", AuthMode.PASSWORD, null));
+        firstRequest.start();
+        assertTrue(startedLatch.await(5, TimeUnit.SECONDS), "first request never reached container start");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.createReplicationGroup("grp", "test", AuthMode.PASSWORD, null));
+        assertEquals("ReplicationGroupAlreadyExistsFault", ex.jsonType());
+        verify(containerManager, never()).stop(any());
+        verify(containerManager, never()).stopByGroupId(anyString());
+
+        releaseLatch.countDown();
+        firstRequest.join(5000);
+
+        assertEquals("grp", service.getReplicationGroup("grp").getReplicationGroupId());
+    }
+
+    @Test
+    void createWithoutDockerDaemonStillReachesAvailable() {
+        // tryStart() returns null when no Docker daemon is reachable. The replication group
+        // record is metadata, so the create still succeeds, the group reaches 'available' on the
+        // first describe (what SDK/Terraform waiters poll), and no auth proxy is started.
+        when(containerManager.tryStart(anyString(), anyString())).thenReturn(null);
+
+        ReplicationGroup group =
+                service.createReplicationGroup("no-docker-grp", "test", AuthMode.PASSWORD, null);
+
+        assertEquals(io.github.hectorvent.floci.services.elasticache.model.ReplicationGroupStatus.AVAILABLE,
+                group.getStatus());
+        assertEquals("localhost", group.getConfigurationEndpoint().address());
+        assertEquals(16379, group.getProxyPort());
+        verify(proxyManager, never()).startProxy(anyString(), any(), anyInt(), anyString(), anyInt(), any());
+
+        assertEquals("no-docker-grp",
+                service.getReplicationGroup("no-docker-grp").getReplicationGroupId());
+
+        // Delete must not reach for a container that was never created.
+        service.deleteReplicationGroup("no-docker-grp");
+        verify(containerManager, never()).stop(any());
     }
 }

@@ -136,6 +136,58 @@ class StepFunctionsSqsIntegrationTest {
 
     @Test
     @Order(5)
+    void waitForTaskToken_preservesExecutionInputContextAfterCallback() throws Exception {
+        String definition = """
+                {
+                    "StartAt": "WaitTask",
+                    "States": {
+                        "WaitTask": {
+                            "Type": "Task",
+                            "Resource": "arn:aws:states:::sqs:sendMessage.waitForTaskToken",
+                            "Parameters": {
+                                "QueueUrl": "%s",
+                                "MessageBody": {"task_token.$": "$$.Task.Token"}
+                            },
+                            "Next": "ResolveDocs"
+                        },
+                        "ResolveDocs": {
+                            "Type": "Pass",
+                            "Parameters": {"document_pids.$": "$$.Execution.Input.document_pids"},
+                            "Next": "MapDocs"
+                        },
+                        "MapDocs": {
+                            "Type": "Map",
+                            "ItemsPath": "$.document_pids",
+                            "ItemSelector": {"document_pid.$": "$$.Map.Item.Value"},
+                            "ItemProcessor": {
+                                "ProcessorConfig": {"Mode": "INLINE"},
+                                "StartAt": "Echo",
+                                "States": {"Echo": {"Type": "Pass", "End": true}}
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """.formatted(callbackQueueUrl);
+
+        String smArn = createStateMachine("execution-input-context-" + System.currentTimeMillis(), definition);
+        String execArn = startExecution(smArn, "{\"document_pids\":[\"doc-a\",\"doc-b\",\"doc-c\"]}");
+
+        JsonNode message = receiveSingleMessage(callbackQueueUrl);
+        String taskToken = mapper.readTree(message.path("Body").asText()).path("task_token").asText();
+        assertFalse(taskToken.isBlank());
+
+        sendTaskSuccess(taskToken, "{}");
+        JsonNode output = mapper.readTree(waitForExecution(execArn));
+        assertEquals(mapper.readTree("""
+                [{"document_pid":"doc-a"},{"document_pid":"doc-b"},{"document_pid":"doc-c"}]
+                """), output);
+
+        deleteMessage(callbackQueueUrl, message.path("ReceiptHandle").asText());
+    }
+
+    @Test
+    @Order(6)
     void awsSdk_nonExistentQueue_fails_withSdkStyleErrorName() throws Exception {
         String definition = buildStateMachineDefinition("arn:aws:states:::aws-sdk:sqs:sendMessage", """
                 {
@@ -151,7 +203,7 @@ class StepFunctionsSqsIntegrationTest {
     }
 
     @Test
-    @Order(6)
+    @Order(7)
     void cleanup_deleteQueues() {
         deleteQueue(queueUrl);
         deleteQueue(callbackQueueUrl);

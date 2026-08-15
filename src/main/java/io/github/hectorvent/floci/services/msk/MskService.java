@@ -76,11 +76,17 @@ public class MskService {
         cluster.setVolumeId(String.format("%06x", new SecureRandom().nextInt(0xFFFFFF)));
 
         if (config.services().msk().mock()) {
-            cluster.setState(ClusterState.ACTIVE);
             cluster.setBootstrapBrokers("localhost:9092");
-        } else {
-            redpandaManager.startContainer(cluster);
+        } else if (!redpandaManager.tryStartContainer(cluster)) {
+            LOG.warnv("MSK cluster {0} created without a backing Kafka broker: no Docker daemon "
+                    + "is reachable. Metadata operations work; producing and consuming do not "
+                    + "until a daemon appears.", clusterName);
+            cluster.setBootstrapBrokers("localhost:9092");
         }
+        // A cluster record is metadata, and SDK/Terraform waiters poll DescribeCluster for
+        // ACTIVE, so the cluster reports its terminal state from the first read (same pattern
+        // as MediaLive multiplexes) instead of gating on backing-broker readiness.
+        cluster.setState(ClusterState.ACTIVE);
 
         storage.put(clusterArn, cluster);
         return cluster;

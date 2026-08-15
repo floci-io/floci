@@ -9,15 +9,19 @@ import io.github.hectorvent.floci.services.cloudfront.model.*;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.Response;
+import org.jboss.logging.Logger;
 
 import java.net.URI;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Function;
 
 @Path("/2020-05-31")
 public class CloudFrontController {
+
+    private static final Logger LOG = Logger.getLogger(CloudFrontController.class);
 
     private static final String NS = AwsNamespaces.CLOUDFRONT;
     private static final String XML = "application/xml";
@@ -125,21 +129,21 @@ public class CloudFrontController {
     public Response listDistributions(@QueryParam("Marker") String marker,
                                       @QueryParam("MaxItems") @DefaultValue("100") int maxItems) {
         try {
-            List<Distribution> dists = service.listDistributions(marker, maxItems);
-            long total = service.listDistributions(null, Integer.MAX_VALUE).size();
-            boolean truncated = dists.size() == maxItems && dists.size() < total;
+            Page<Distribution> page = page(
+                    service.listDistributions(marker, paginationFetchLimit(maxItems)),
+                    maxItems, Distribution::getId);
+            int totalDistributions =
+                    service.listDistributions(null, Integer.MAX_VALUE).size();
 
             XmlBuilder xml = new XmlBuilder()
                     .start("DistributionList", NS)
                     .elem("Marker", marker != null ? marker : "")
+                    .elem("NextMarker", page.nextMarker())
                     .elem("MaxItems", maxItems)
-                    .elem("IsTruncated", truncated);
-            if (truncated && !dists.isEmpty()) {
-                xml.elem("NextMarker", dists.get(dists.size() - 1).getId());
-            }
-            xml.elem("Quantity", dists.size())
+                    .elem("IsTruncated", page.truncated())
+                    .elem("Quantity", totalDistributions)
                     .start("Items");
-            for (Distribution d : dists) {
+            for (Distribution d : page.items()) {
                 xml.raw(xmlDistributionSummary(d));
             }
             xml.end("Items")
@@ -208,17 +212,19 @@ public class CloudFrontController {
                                       @QueryParam("Marker") String marker,
                                       @QueryParam("MaxItems") @DefaultValue("100") int maxItems) {
         try {
-            List<Invalidation> invs = service.listInvalidations(id, marker, maxItems);
-            boolean truncated = invs.size() == maxItems;
+            Page<Invalidation> page = page(
+                    service.listInvalidations(id, marker, paginationFetchLimit(maxItems)),
+                    maxItems, Invalidation::getId);
 
             XmlBuilder xml = new XmlBuilder()
                     .start("InvalidationList", NS)
                     .elem("Marker", marker != null ? marker : "")
+                    .elem("NextMarker", page.nextMarker())
                     .elem("MaxItems", maxItems)
-                    .elem("IsTruncated", truncated)
-                    .elem("Quantity", invs.size())
+                    .elem("IsTruncated", page.truncated())
+                    .elem("Quantity", page.items().size())
                     .start("Items");
-            for (Invalidation inv : invs) {
+            for (Invalidation inv : page.items()) {
                 xml.start("InvalidationSummary")
                         .elem("Id", inv.getId())
                         .elem("Status", inv.getStatus())
@@ -321,17 +327,17 @@ public class CloudFrontController {
                                       @QueryParam("MaxItems") @DefaultValue("100") int maxItems,
                                       @QueryParam("Type") String type) {
         try {
-            List<CachePolicy> policies = service.listCachePolicies(marker, maxItems);
-            boolean truncated = policies.size() == maxItems;
+            Page<CachePolicy> page = page(
+                    service.listCachePolicies(marker, paginationFetchLimit(maxItems)),
+                    maxItems, CachePolicy::getId);
 
             XmlBuilder xml = new XmlBuilder()
                     .start("CachePolicyList", NS)
-                    .elem("Marker", marker != null ? marker : "")
+                    .elem("NextMarker", page.nextMarker())
                     .elem("MaxItems", maxItems)
-                    .elem("IsTruncated", truncated)
-                    .elem("Quantity", policies.size())
+                    .elem("Quantity", page.items().size())
                     .start("Items");
-            for (CachePolicy p : policies) {
+            for (CachePolicy p : page.items()) {
                 xml.start("CachePolicySummary")
                         .elem("Type", "custom")
                         .raw(xmlCachePolicyResponse(p))
@@ -433,17 +439,17 @@ public class CloudFrontController {
                                               @QueryParam("MaxItems") @DefaultValue("100") int maxItems,
                                               @QueryParam("Type") String type) {
         try {
-            List<OriginRequestPolicy> policies = service.listOriginRequestPolicies(marker, maxItems);
-            boolean truncated = policies.size() == maxItems;
+            Page<OriginRequestPolicy> page = page(
+                    service.listOriginRequestPolicies(marker, paginationFetchLimit(maxItems)),
+                    maxItems, OriginRequestPolicy::getId);
 
             XmlBuilder xml = new XmlBuilder()
                     .start("OriginRequestPolicyList", NS)
-                    .elem("Marker", marker != null ? marker : "")
+                    .elem("NextMarker", page.nextMarker())
                     .elem("MaxItems", maxItems)
-                    .elem("IsTruncated", truncated)
-                    .elem("Quantity", policies.size())
+                    .elem("Quantity", page.items().size())
                     .start("Items");
-            for (OriginRequestPolicy p : policies) {
+            for (OriginRequestPolicy p : page.items()) {
                 xml.start("OriginRequestPolicySummary")
                         .elem("Type", "custom")
                         .raw(xmlOriginRequestPolicyResponse(p))
@@ -546,17 +552,17 @@ public class CloudFrontController {
                                                 @QueryParam("MaxItems") @DefaultValue("100") int maxItems,
                                                 @QueryParam("Type") String type) {
         try {
-            List<ResponseHeadersPolicy> policies = service.listResponseHeadersPolicies(marker, maxItems);
-            boolean truncated = policies.size() == maxItems;
+            Page<ResponseHeadersPolicy> page = page(
+                    service.listResponseHeadersPolicies(marker, paginationFetchLimit(maxItems)),
+                    maxItems, ResponseHeadersPolicy::getId);
 
             XmlBuilder xml = new XmlBuilder()
                     .start("ResponseHeadersPolicyList", NS)
-                    .elem("Marker", marker != null ? marker : "")
+                    .elem("NextMarker", page.nextMarker())
                     .elem("MaxItems", maxItems)
-                    .elem("IsTruncated", truncated)
-                    .elem("Quantity", policies.size())
+                    .elem("Quantity", page.items().size())
                     .start("Items");
-            for (ResponseHeadersPolicy p : policies) {
+            for (ResponseHeadersPolicy p : page.items()) {
                 xml.start("ResponseHeadersPolicySummary")
                         .elem("Type", "custom")
                         .raw(xmlResponseHeadersPolicyResponse(p))
@@ -660,17 +666,19 @@ public class CloudFrontController {
     public Response listOriginAccessControls(@QueryParam("Marker") String marker,
                                              @QueryParam("MaxItems") @DefaultValue("100") int maxItems) {
         try {
-            List<OriginAccessControl> oacs = service.listOriginAccessControls(marker, maxItems);
-            boolean truncated = oacs.size() == maxItems;
+            Page<OriginAccessControl> page = page(
+                    service.listOriginAccessControls(marker, paginationFetchLimit(maxItems)),
+                    maxItems, OriginAccessControl::getId);
 
             XmlBuilder xml = new XmlBuilder()
                     .start("OriginAccessControlList", NS)
                     .elem("Marker", marker != null ? marker : "")
+                    .elem("NextMarker", page.nextMarker())
                     .elem("MaxItems", maxItems)
-                    .elem("IsTruncated", truncated)
-                    .elem("Quantity", oacs.size())
+                    .elem("IsTruncated", page.truncated())
+                    .elem("Quantity", page.items().size())
                     .start("Items");
-            for (OriginAccessControl o : oacs) {
+            for (OriginAccessControl o : page.items()) {
                 xml.raw(xmlOriginAccessControlSummary(o));
             }
             xml.end("Items").end("OriginAccessControlList");
@@ -768,18 +776,20 @@ public class CloudFrontController {
             @QueryParam("Marker") String marker,
             @QueryParam("MaxItems") @DefaultValue("100") int maxItems) {
         try {
-            List<CloudFrontOriginAccessIdentity> oais =
-                    service.listCloudFrontOriginAccessIdentities(marker, maxItems);
-            boolean truncated = oais.size() == maxItems;
+            Page<CloudFrontOriginAccessIdentity> page = page(
+                    service.listCloudFrontOriginAccessIdentities(
+                            marker, paginationFetchLimit(maxItems)),
+                    maxItems, CloudFrontOriginAccessIdentity::getId);
 
             XmlBuilder xml = new XmlBuilder()
                     .start("CloudFrontOriginAccessIdentityList", NS)
                     .elem("Marker", marker != null ? marker : "")
+                    .elem("NextMarker", page.nextMarker())
                     .elem("MaxItems", maxItems)
-                    .elem("IsTruncated", truncated)
-                    .elem("Quantity", oais.size())
+                    .elem("IsTruncated", page.truncated())
+                    .elem("Quantity", page.items().size())
                     .start("Items");
-            for (CloudFrontOriginAccessIdentity o : oais) {
+            for (CloudFrontOriginAccessIdentity o : page.items()) {
                 xml.start("CloudFrontOriginAccessIdentitySummary")
                         .elem("Id", o.getId())
                         .elem("S3CanonicalUserId", o.getS3CanonicalUserId())
@@ -880,13 +890,16 @@ public class CloudFrontController {
                                   @QueryParam("Marker") String marker,
                                   @QueryParam("MaxItems") @DefaultValue("100") int maxItems) {
         try {
-            List<CloudFrontFunction> fns = service.listFunctions(stage);
+            Page<CloudFrontFunction> page = page(
+                    service.listFunctions(stage, marker, paginationFetchLimit(maxItems)),
+                    maxItems, CloudFrontFunction::getName);
             XmlBuilder xml = new XmlBuilder()
                     .start("FunctionList", NS)
+                    .elem("NextMarker", page.nextMarker())
                     .elem("MaxItems", maxItems)
-                    .elem("Quantity", fns.size())
+                    .elem("Quantity", page.items().size())
                     .start("Items");
-            for (CloudFrontFunction fn : fns) {
+            for (CloudFrontFunction fn : page.items()) {
                 xml.start("FunctionSummary")
                         .elem("Name", fn.getName())
                         .elem("Status", fn.getStatus())
@@ -1026,18 +1039,20 @@ public class CloudFrontController {
     public Response listContinuousDeploymentPolicies(@QueryParam("Marker") String marker,
                                                       @QueryParam("MaxItems") @DefaultValue("100") int maxItems) {
         try {
-            List<ContinuousDeploymentPolicy> policies =
-                    service.listContinuousDeploymentPolicies(marker, maxItems);
-            boolean truncated = policies.size() == maxItems;
+            Page<ContinuousDeploymentPolicy> page = page(
+                    service.listContinuousDeploymentPolicies(
+                            marker, paginationFetchLimit(maxItems)),
+                    maxItems, ContinuousDeploymentPolicy::getId);
+            int totalPolicies = service.listContinuousDeploymentPolicies(
+                    null, Integer.MAX_VALUE).size();
 
             XmlBuilder xml = new XmlBuilder()
                     .start("ContinuousDeploymentPolicyList", NS)
-                    .elem("Marker", marker != null ? marker : "")
+                    .elem("NextMarker", page.nextMarker())
                     .elem("MaxItems", maxItems)
-                    .elem("IsTruncated", truncated)
-                    .elem("Quantity", policies.size())
+                    .elem("Quantity", totalPolicies)
                     .start("Items");
-            for (ContinuousDeploymentPolicy p : policies) {
+            for (ContinuousDeploymentPolicy p : page.items()) {
                 xml.start("ContinuousDeploymentPolicySummary")
                         .elem("Type", "custom")
                         .raw(xmlContinuousDeploymentPolicyResponse(p))
@@ -1159,17 +1174,17 @@ public class CloudFrontController {
     public Response listPublicKeys(@QueryParam("Marker") String marker,
                                    @QueryParam("MaxItems") @DefaultValue("100") int maxItems) {
         try {
-            List<PublicKey> keys = service.listPublicKeys(marker, maxItems);
-            boolean truncated = keys.size() == maxItems;
+            Page<PublicKey> page = page(
+                    service.listPublicKeys(marker, paginationFetchLimit(maxItems)),
+                    maxItems, PublicKey::getId);
 
             XmlBuilder xml = new XmlBuilder()
                     .start("PublicKeyList", NS)
-                    .elem("Marker", marker != null ? marker : "")
+                    .elem("NextMarker", page.nextMarker())
                     .elem("MaxItems", maxItems)
-                    .elem("IsTruncated", truncated)
-                    .elem("Quantity", keys.size())
+                    .elem("Quantity", page.items().size())
                     .start("Items");
-            for (PublicKey k : keys) {
+            for (PublicKey k : page.items()) {
                 xml.raw(xmlPublicKeySummary(k));
             }
             xml.end("Items").end("PublicKeyList");
@@ -1219,8 +1234,7 @@ public class CloudFrontController {
                     .start("KeyGroupConfig", NS)
                     .elem("Name", group.getName() != null ? group.getName() : "")
                     .elem("Comment", group.getComment() != null ? group.getComment() : "")
-                    .raw(xmlQuantityItems("Items", "PublicKey", items.size(),
-                            items.stream().map(k -> "<PublicKey>" + XmlBuilder.escape(k) + "</PublicKey>").toList()))
+                    .raw(xmlDirectItems("Items", "PublicKey", items))
                     .end("KeyGroupConfig")
                     .build();
             return Response.ok(xml, XML).header("ETag", group.getEtag()).build();
@@ -1268,17 +1282,17 @@ public class CloudFrontController {
     public Response listKeyGroups(@QueryParam("Marker") String marker,
                                   @QueryParam("MaxItems") @DefaultValue("100") int maxItems) {
         try {
-            List<KeyGroup> groups = service.listKeyGroups(marker, maxItems);
-            boolean truncated = groups.size() == maxItems;
+            Page<KeyGroup> page = page(
+                    service.listKeyGroups(marker, paginationFetchLimit(maxItems)),
+                    maxItems, KeyGroup::getId);
 
             XmlBuilder xml = new XmlBuilder()
                     .start("KeyGroupList", NS)
-                    .elem("Marker", marker != null ? marker : "")
+                    .elem("NextMarker", page.nextMarker())
                     .elem("MaxItems", maxItems)
-                    .elem("IsTruncated", truncated)
-                    .elem("Quantity", groups.size())
+                    .elem("Quantity", page.items().size())
                     .start("Items");
-            for (KeyGroup g : groups) {
+            for (KeyGroup g : page.items()) {
                 xml.start("KeyGroupSummary").raw(xmlKeyGroupResponse(g)).end("KeyGroupSummary");
             }
             xml.end("Items").end("KeyGroupList");
@@ -1363,19 +1377,22 @@ public class CloudFrontController {
     public Response listRealtimeLogConfigs(@QueryParam("Marker") String marker,
                                            @QueryParam("MaxItems") @DefaultValue("100") int maxItems) {
         try {
-            List<RealtimeLogConfig> configs = service.listRealtimeLogConfigs(marker, maxItems);
-            boolean truncated = configs.size() == maxItems;
+            Page<RealtimeLogConfig> page = page(
+                    service.listRealtimeLogConfigs(marker, paginationFetchLimit(maxItems)),
+                    maxItems, RealtimeLogConfig::getName);
 
             XmlBuilder xml = new XmlBuilder()
                     .start("RealtimeLogConfigs", NS)
                     .elem("MaxItems", maxItems)
-                    .elem("IsTruncated", truncated)
-                    .elem("Quantity", configs.size())
                     .start("Items");
-            for (RealtimeLogConfig c : configs) {
+            for (RealtimeLogConfig c : page.items()) {
                 xml.raw(xmlRealtimeLogConfigBody(c));
             }
-            xml.end("Items").end("RealtimeLogConfigs");
+            xml.end("Items")
+                    .elem("IsTruncated", page.truncated())
+                    .elem("Marker", marker != null ? marker : "")
+                    .elem("NextMarker", page.nextMarker())
+                    .end("RealtimeLogConfigs");
             return Response.ok(xml.build(), XML).build();
         } catch (AwsException e) {
             return xmlErrorResponse(e);
@@ -1531,18 +1548,18 @@ public class CloudFrontController {
     public Response listFieldLevelEncryptionConfigs(@QueryParam("Marker") String marker,
                                                      @QueryParam("MaxItems") @DefaultValue("100") int maxItems) {
         try {
-            List<FieldLevelEncryptionConfig> configs =
-                    service.listFieldLevelEncryptionConfigs(marker, maxItems);
-            boolean truncated = configs.size() == maxItems;
+            Page<FieldLevelEncryptionConfig> page = page(
+                    service.listFieldLevelEncryptionConfigs(
+                            marker, paginationFetchLimit(maxItems)),
+                    maxItems, FieldLevelEncryptionConfig::getId);
 
             XmlBuilder xml = new XmlBuilder()
                     .start("FieldLevelEncryptionList", NS)
-                    .elem("Marker", marker != null ? marker : "")
+                    .elem("NextMarker", page.nextMarker())
                     .elem("MaxItems", maxItems)
-                    .elem("IsTruncated", truncated)
-                    .elem("Quantity", configs.size())
+                    .elem("Quantity", page.items().size())
                     .start("Items");
-            for (FieldLevelEncryptionConfig c : configs) {
+            for (FieldLevelEncryptionConfig c : page.items()) {
                 xml.raw(xmlFieldLevelEncryptionConfigResponse(c));
             }
             xml.end("Items").end("FieldLevelEncryptionList");
@@ -1624,18 +1641,18 @@ public class CloudFrontController {
     public Response listFieldLevelEncryptionProfiles(@QueryParam("Marker") String marker,
                                                       @QueryParam("MaxItems") @DefaultValue("100") int maxItems) {
         try {
-            List<FieldLevelEncryptionProfile> profiles =
-                    service.listFieldLevelEncryptionProfiles(marker, maxItems);
-            boolean truncated = profiles.size() == maxItems;
+            Page<FieldLevelEncryptionProfile> page = page(
+                    service.listFieldLevelEncryptionProfiles(
+                            marker, paginationFetchLimit(maxItems)),
+                    maxItems, FieldLevelEncryptionProfile::getId);
 
             XmlBuilder xml = new XmlBuilder()
                     .start("FieldLevelEncryptionProfileList", NS)
-                    .elem("Marker", marker != null ? marker : "")
+                    .elem("NextMarker", page.nextMarker())
                     .elem("MaxItems", maxItems)
-                    .elem("IsTruncated", truncated)
-                    .elem("Quantity", profiles.size())
+                    .elem("Quantity", page.items().size())
                     .start("Items");
-            for (FieldLevelEncryptionProfile p : profiles) {
+            for (FieldLevelEncryptionProfile p : page.items()) {
                 xml.raw(xmlFieldLevelEncryptionProfileResponse(p));
             }
             xml.end("Items").end("FieldLevelEncryptionProfileList");
@@ -1699,10 +1716,7 @@ public class CloudFrontController {
                 .elem("Enabled", false)
                 .elem("Quantity", 0)
                 .end("ActiveTrustedSigners")
-                .start("ActiveTrustedKeyGroups")
-                .elem("Enabled", false)
-                .elem("Quantity", 0)
-                .end("ActiveTrustedKeyGroups")
+                .raw(xmlActiveTrustedKeyGroups(dist.getConfig()))
                 .start("DistributionConfig")
                 .raw(xmlDistributionConfigBody(dist.getConfig()))
                 .end("DistributionConfig")
@@ -2033,6 +2047,52 @@ public class CloudFrontController {
         return xml.build();
     }
 
+    private String xmlTrustedKeyGroups(
+            boolean enabled, List<String> trustedKeyGroups) {
+        List<String> keyGroups = trustedKeyGroups != null ? trustedKeyGroups : List.of();
+        XmlBuilder xml = new XmlBuilder()
+                .start("TrustedKeyGroups")
+                .elem("Enabled", enabled)
+                .elem("Quantity", keyGroups.size());
+        if (!keyGroups.isEmpty()) {
+            xml.start("Items");
+            for (String keyGroup : keyGroups) {
+                xml.elem("KeyGroup", keyGroup);
+            }
+            xml.end("Items");
+        }
+        return xml.end("TrustedKeyGroups").build();
+    }
+
+    private String xmlActiveTrustedKeyGroups(DistributionConfig config) {
+        List<KeyGroup> groups = service.activeTrustedKeyGroups(config);
+        XmlBuilder xml = new XmlBuilder()
+                .start("ActiveTrustedKeyGroups")
+                .elem("Enabled", !groups.isEmpty())
+                .elem("Quantity", groups.size());
+        if (!groups.isEmpty()) {
+            xml.start("Items");
+            for (KeyGroup group : groups) {
+                List<String> keyPairIds =
+                        group.getItems() != null ? group.getItems() : List.of();
+                xml.start("KeyGroup")
+                        .elem("KeyGroupId", group.getId())
+                        .start("KeyPairIds")
+                        .elem("Quantity", keyPairIds.size());
+                if (!keyPairIds.isEmpty()) {
+                    xml.start("Items");
+                    for (String keyPairId : keyPairIds) {
+                        xml.elem("KeyPairId", keyPairId);
+                    }
+                    xml.end("Items");
+                }
+                xml.end("KeyPairIds").end("KeyGroup");
+            }
+            xml.end("Items");
+        }
+        return xml.end("ActiveTrustedKeyGroups").build();
+    }
+
     private String xmlViewerCertificate(Map<String, String> vc) {
         XmlBuilder xml = new XmlBuilder().start("ViewerCertificate");
         if (vc != null && !vc.isEmpty()) {
@@ -2231,6 +2291,11 @@ public class CloudFrontController {
                 .build();
     }
 
+    /** Renders a possibly-null value as a string, using the empty string for {@code null}. */
+    private static String str(Object value) {
+        return value != null ? value.toString() : "";
+    }
+
     private String xmlQuantityItems(String wrapper, String itemTag, int count, List<String> items) {
         XmlBuilder xml = new XmlBuilder().start(wrapper).elem("Quantity", count);
         if (count > 0 && items != null && !items.isEmpty()) {
@@ -2243,6 +2308,29 @@ public class CloudFrontController {
         xml.end(wrapper);
         return xml.build();
     }
+
+    private String xmlDirectItems(String wrapper, String itemTag, List<String> items) {
+        XmlBuilder xml = new XmlBuilder().start(wrapper);
+        for (String item : items) {
+            xml.elem(itemTag, item);
+        }
+        return xml.end(wrapper).build();
+    }
+
+    private static int paginationFetchLimit(int maxItems) {
+        return maxItems > 0 && maxItems < Integer.MAX_VALUE ? maxItems + 1 : maxItems;
+    }
+
+    private static <T> Page<T> page(List<T> candidates, int maxItems,
+                                    Function<T, String> markerFunction) {
+        boolean truncated = maxItems > 0 && candidates.size() > maxItems;
+        List<T> items = truncated ? candidates.subList(0, maxItems) : candidates;
+        String nextMarker = truncated && !items.isEmpty()
+                ? markerFunction.apply(items.get(items.size() - 1)) : null;
+        return new Page<>(items, truncated, nextMarker);
+    }
+
+    private record Page<T>(List<T> items, boolean truncated, String nextMarker) {}
 
     private Response xmlErrorResponse(AwsException e) {
         String xml = new XmlBuilder()
@@ -2414,8 +2502,30 @@ public class CloudFrontController {
 
         CloudFrontXml.Node keyGroups = node.child("TrustedKeyGroups");
         if (keyGroups != null) {
+            // CloudFront validates the TrustedKeyGroups complex type's shape before it looks up
+            // any key group: Enabled and Quantity are required members, and Quantity must match
+            // the number of Items. Skipping this would let a malformed block fall through to a
+            // misleading TrustedKeyGroupDoesNotExist from the existence check.
+            String enabledText = keyGroups.text("Enabled", null);
+            String quantityText = keyGroups.text("Quantity", null);
+            if (enabledText == null || quantityText == null) {
+                throw new AwsException("InvalidArgument",
+                        "The parameter TrustedKeyGroups is invalid: Enabled and Quantity are required.", 400);
+            }
+            List<String> keyGroupIds = textsOfItems(keyGroups, "KeyGroup");
+            int quantity;
+            try {
+                quantity = Integer.parseInt(quantityText.trim());
+            } catch (NumberFormatException e) {
+                throw new AwsException("InvalidArgument",
+                        "The parameter TrustedKeyGroups.Quantity is invalid.", 400);
+            }
+            if (quantity != keyGroupIds.size()) {
+                throw new AwsException("InconsistentQuantities",
+                        "The parameter TrustedKeyGroups.Quantity does not match the number of items.", 400);
+            }
             behavior.setTrustedKeyGroupsEnabled(keyGroups.bool("Enabled", false));
-            behavior.setTrustedKeyGroups(textsOfItems(keyGroups, "KeyGroup"));
+            behavior.setTrustedKeyGroups(keyGroupIds);
         }
 
         CloudFrontXml.Node forwarded = node.child("ForwardedValues");
@@ -2563,9 +2673,10 @@ public class CloudFrontController {
         OriginAccessControl oac = new OriginAccessControl();
         oac.setName(XmlParser.extractFirst(body, "Name", null));
         oac.setDescription(XmlParser.extractFirst(body, "Description", null));
-        oac.setSigningProtocol(XmlParser.extractFirst(body, "SigningProtocol", "sigv4"));
-        oac.setSigningBehavior(XmlParser.extractFirst(body, "SigningBehavior", "always"));
-        oac.setOriginAccessControlOriginType(XmlParser.extractFirst(body, "OriginAccessControlOriginType", "s3"));
+        oac.setSigningProtocol(XmlParser.extractFirst(body, "SigningProtocol", null));
+        oac.setSigningBehavior(XmlParser.extractFirst(body, "SigningBehavior", null));
+        oac.setOriginAccessControlOriginType(
+                XmlParser.extractFirst(body, "OriginAccessControlOriginType", null));
         return oac;
     }
 
@@ -2648,8 +2759,7 @@ public class CloudFrontController {
                 .start("KeyGroupConfig")
                 .elem("Name", group.getName() != null ? group.getName() : "")
                 .elem("Comment", group.getComment() != null ? group.getComment() : "")
-                .raw(xmlQuantityItems("Items", "PublicKey", items.size(),
-                        items.stream().map(k -> "<PublicKey>" + XmlBuilder.escape(k) + "</PublicKey>").toList()))
+                .raw(xmlDirectItems("Items", "PublicKey", items))
                 .end("KeyGroupConfig")
                 .end("KeyGroup");
         return xml.build();

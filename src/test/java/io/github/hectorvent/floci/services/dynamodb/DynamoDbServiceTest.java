@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.dynamodb.model.AttributeDefinition;
 import io.github.hectorvent.floci.services.dynamodb.model.ConditionalCheckFailedException;
+import io.github.hectorvent.floci.services.dynamodb.model.GlobalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -117,6 +118,48 @@ class DynamoDbServiceTest {
     @Test
     void describeTableNotFound() {
         assertThrows(AwsException.class, () -> service.describeTable("NonExistent", "eu-west-1"));
+    }
+
+    @Test
+    void applyReplicaUpdatesRejectsBlankRegion() {
+        createUsersTable("us-east-1");
+
+        AwsException exception = assertThrows(AwsException.class,
+                () -> service.applyReplicaUpdates("Users", List.of(" "), List.of(), "us-east-1"));
+
+        assertEquals("ValidationException", exception.getErrorCode());
+        assertEquals(400, exception.getHttpStatus());
+    }
+
+    @Test
+    void repeatedReplicaCreateAndDeleteAreIdempotent() {
+        createUsersTable("us-east-1");
+
+        service.applyReplicaUpdates("Users", List.of("eu-west-1"), List.of(), "us-east-1");
+        service.applyReplicaUpdates("Users", List.of("eu-west-1"), List.of(), "us-east-1");
+
+        assertEquals(List.of("eu-west-1"),
+                service.describeTable("Users", "us-east-1").getReplicaRegions());
+
+        service.applyReplicaUpdates("Users", List.of(), List.of("eu-west-1"), "us-east-1");
+        service.applyReplicaUpdates("Users", List.of(), List.of("eu-west-1"), "us-east-1");
+
+        assertTrue(service.describeTable("Users", "us-east-1").getReplicaRegions().isEmpty());
+    }
+
+    @Test
+    void invalidReplicaUpdateLeavesExistingReplicasUnchanged() {
+        createUsersTable("us-east-1");
+        service.applyReplicaUpdates(
+                "Users", List.of("eu-west-1"), List.of(), List.of(), "us-east-1");
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.applyReplicaUpdates(
+                        "Users", List.of(), List.of(), List.of("ap-south-1"), "us-east-1"));
+
+        assertEquals("ValidationException", exception.getErrorCode());
+        assertEquals(List.of("eu-west-1"),
+                service.describeTable("Users", "us-east-1").getReplicaRegions());
     }
 
     @Test
@@ -357,6 +400,66 @@ class DynamoDbServiceTest {
         assertEquals(List.of("o3", "o2", "o1"), results.items().stream()
                 .map(result -> result.get("orderId").get("S").asText())
                 .toList());
+    }
+
+    /**
+     * Regression for floci-io/floci#1675: a GSI whose sort key is composite (more than one RANGE
+     * attribute) must order by ALL sort-key attributes in schema order, so ScanIndexForward=false
+     * yields the reverse of the full composite order. Previously only the first RANGE attribute
+     * (here {@code state}, identical across the rows) was used, so {@code createdAt} never
+     * participated and ordering/reversal were effectively ignored.
+     */
+    @Test
+    void queryOnCompositeSortKeyGsiRespectsScanIndexForward() {
+        String region = "us-east-1";
+        GlobalSecondaryIndex gsi = new GlobalSecondaryIndex(
+                "memberIndex",
+                List.of(
+                        new KeySchemaElement("memberName", "HASH"),
+                        new KeySchemaElement("state", "RANGE"),
+                        new KeySchemaElement("createdAt", "RANGE")),
+                null, "ALL", null);
+        service.createTable("Requests",
+                List.of(new KeySchemaElement("requestId", "HASH")),
+                List.of(
+                        new AttributeDefinition("requestId", "S"),
+                        new AttributeDefinition("memberName", "S"),
+                        new AttributeDefinition("state", "S"),
+                        new AttributeDefinition("createdAt", "S")),
+                5L, 5L, List.of(gsi), region);
+
+        // Same memberName + state. Deliberately make base-table key order (requestId: a, b, c)
+        // DISAGREE with createdAt order, so a correct result can only come from sorting on the
+        // second composite component (createdAt) — not from incidental storage order.
+        service.putItem("Requests", item("requestId", "a", "memberName", "alice",
+                "state", "ACTIVE", "createdAt", "2026-07-14T00:00:03Z"), region);
+        service.putItem("Requests", item("requestId", "b", "memberName", "alice",
+                "state", "ACTIVE", "createdAt", "2026-07-14T00:00:01Z"), region);
+        service.putItem("Requests", item("requestId", "c", "memberName", "alice",
+                "state", "ACTIVE", "createdAt", "2026-07-14T00:00:02Z"), region);
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":pk", attributeValue("S", "alice"));
+        exprValues.set(":st", attributeValue("S", "ACTIVE"));
+        exprValues.set(":from", attributeValue("S", "1970-01-01T00:00:00Z"));
+        exprValues.set(":to", attributeValue("S", "2100-01-01T00:00:00Z"));
+        String kce = "memberName = :pk AND state = :st AND createdAt BETWEEN :from AND :to";
+
+        DynamoDbService.QueryResult ascending = service.query("Requests", null, exprValues,
+                kce, null, null, true, "memberIndex", null, null, region);
+        assertEquals(
+                List.of("2026-07-14T00:00:01Z", "2026-07-14T00:00:02Z", "2026-07-14T00:00:03Z"),
+                ascending.items().stream()
+                        .map(result -> result.get("createdAt").get("S").asText())
+                        .toList());
+
+        DynamoDbService.QueryResult descending = service.query("Requests", null, exprValues,
+                kce, null, null, false, "memberIndex", null, null, region);
+        assertEquals(
+                List.of("2026-07-14T00:00:03Z", "2026-07-14T00:00:02Z", "2026-07-14T00:00:01Z"),
+                descending.items().stream()
+                        .map(result -> result.get("createdAt").get("S").asText())
+                        .toList());
     }
 
     @Test
@@ -959,6 +1062,10 @@ class DynamoDbServiceTest {
     private ObjectNode mapAttributeValue(String key, String value) {
         ObjectNode inner = mapper.createObjectNode();
         inner.set(key, attributeValue("S", value));
+        return mapAttributeValue(inner);
+    }
+
+    private ObjectNode mapAttributeValue(ObjectNode inner) {
         ObjectNode node = mapper.createObjectNode();
         node.set("M", inner);
         return node;
@@ -1409,6 +1516,176 @@ class DynamoDbServiceTest {
         JsonNode notifs = updated.get("settings").get("M").get("notifications").get("M");
         assertTrue(notifs.has("email"), "email should still exist");
         assertFalse(notifs.has("sms"), "sms should be removed");
+    }
+
+    @Test
+    void updateItemAddResolvesNestedPlaceholderPath() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode invocationSummary = mapper.createObjectNode();
+        invocationSummary.set("eventsAvailable", attributeValue("N", "0"));
+        ObjectNode functionInvocationSummaries = mapper.createObjectNode();
+        functionInvocationSummaries.set("ISA_10136", mapAttributeValue(invocationSummary));
+
+        ObjectNode initialItem = item("userId", "nested-add-placeholder");
+        initialItem.set("functionInvocationSummaries", mapAttributeValue(functionInvocationSummaries));
+        service.putItem("Users", initialItem, region);
+
+        ObjectNode names = mapper.createObjectNode();
+        names.put("#fis", "functionInvocationSummaries");
+        names.put("#isa", "ISA_10136");
+        names.put("#ea", "eventsAvailable");
+        ObjectNode values = mapper.createObjectNode();
+        values.set(":one", attributeValue("N", "1"));
+
+        service.updateItem("Users", userIdKey("nested-add-placeholder"), null,
+                "ADD #fis.#isa.#ea :one", names, values, "ALL_NEW", region);
+
+        JsonNode stored = service.getItem("Users", userIdKey("nested-add-placeholder"), region);
+        assertEquals(1, stored.path("functionInvocationSummaries").path("M")
+                .path("ISA_10136").path("M").path("eventsAvailable").path("N").asInt());
+        assertFalse(stored.has("#fis.#isa.#ea"), "ADD must not create a phantom top-level attribute");
+    }
+
+    @Test
+    void updateItemAddTraversesLiteralDottedPath() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode nested = mapper.createObjectNode();
+        nested.set("c", attributeValue("N", "4"));
+        ObjectNode parent = mapper.createObjectNode();
+        parent.set("b", mapAttributeValue(nested));
+        ObjectNode initialItem = item("userId", "nested-add-literal");
+        initialItem.set("a", mapAttributeValue(parent));
+        service.putItem("Users", initialItem, region);
+
+        ObjectNode values = mapper.createObjectNode();
+        values.set(":three", attributeValue("N", "3"));
+
+        service.updateItem("Users", userIdKey("nested-add-literal"), null,
+                "ADD a.b.c :three", null, values, "ALL_NEW", region);
+
+        JsonNode stored = service.getItem("Users", userIdKey("nested-add-literal"), region);
+        assertEquals("7", stored.path("a").path("M").path("b").path("M").path("c").path("N").asText());
+        assertFalse(stored.has("a.b.c"), "ADD must not create a phantom top-level attribute");
+    }
+
+    @Test
+    void updateItemAddSeedsMissingNestedLeafUnderExistingParents() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode parent = mapper.createObjectNode();
+        parent.set("b", mapAttributeValue(mapper.createObjectNode()));
+        ObjectNode initialItem = item("userId", "nested-add-missing-leaf");
+        initialItem.set("a", mapAttributeValue(parent));
+        service.putItem("Users", initialItem, region);
+
+        ObjectNode values = mapper.createObjectNode();
+        values.set(":five", attributeValue("N", "5"));
+
+        service.updateItem("Users", userIdKey("nested-add-missing-leaf"), null,
+                "ADD a.b.c :five", null, values, "ALL_NEW", region);
+
+        JsonNode stored = service.getItem("Users", userIdKey("nested-add-missing-leaf"), region);
+        assertEquals("5", stored.path("a").path("M").path("b").path("M").path("c").path("N").asText());
+        assertFalse(stored.has("a.b.c"), "ADD must write the missing leaf at its document path");
+    }
+
+    @Test
+    void updateItemAddUnionsNestedSetAtPlaceholderPath() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode metadata = mapper.createObjectNode();
+        metadata.set("tags", stringSetAttributeValue("alpha", "beta"));
+        ObjectNode initialItem = item("userId", "nested-add-set");
+        initialItem.set("metadata", mapAttributeValue(metadata));
+        service.putItem("Users", initialItem, region);
+
+        ObjectNode names = mapper.createObjectNode();
+        names.put("#meta", "metadata");
+        names.put("#tags", "tags");
+        ObjectNode values = mapper.createObjectNode();
+        values.set(":tags", stringSetAttributeValue("beta", "gamma"));
+
+        service.updateItem("Users", userIdKey("nested-add-set"), null,
+                "ADD #meta.#tags :tags", names, values, "ALL_NEW", region);
+
+        JsonNode stored = service.getItem("Users", userIdKey("nested-add-set"), region);
+        java.util.Set<String> tags = new java.util.HashSet<>();
+        stored.path("metadata").path("M").path("tags").path("SS").forEach(value -> tags.add(value.asText()));
+        assertEquals(java.util.Set.of("alpha", "beta", "gamma"), tags);
+        assertFalse(stored.has("#meta.#tags"), "ADD must not create a phantom top-level attribute");
+    }
+
+    @Test
+    void updateItemDeleteMutatesAndRemovesNestedSetAtPlaceholderPath() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode settings = mapper.createObjectNode();
+        settings.set("labels", stringSetAttributeValue("keep", "drop"));
+        ObjectNode initialItem = item("userId", "nested-delete-set");
+        initialItem.set("settings", mapAttributeValue(settings));
+        service.putItem("Users", initialItem, region);
+
+        ObjectNode names = mapper.createObjectNode();
+        names.put("#settings", "settings");
+        names.put("#labels", "labels");
+        ObjectNode values = mapper.createObjectNode();
+        values.set(":labels", stringSetAttributeValue("drop"));
+
+        service.updateItem("Users", userIdKey("nested-delete-set"), null,
+                "DELETE #settings.#labels :labels", names, values, "ALL_NEW", region);
+
+        JsonNode stored = service.getItem("Users", userIdKey("nested-delete-set"), region);
+        JsonNode remaining = stored.path("settings").path("M").path("labels").path("SS");
+        assertEquals(1, remaining.size());
+        assertEquals("keep", remaining.get(0).asText());
+
+        values.set(":labels", stringSetAttributeValue("keep"));
+        service.updateItem("Users", userIdKey("nested-delete-set"), null,
+                "DELETE #settings.#labels :labels", names, values, "ALL_NEW", region);
+
+        stored = service.getItem("Users", userIdKey("nested-delete-set"), region);
+        assertFalse(stored.path("settings").path("M").has("labels"),
+                "DELETE must remove a nested attribute when its set becomes empty");
+        assertFalse(stored.has("#settings.#labels"), "DELETE must not create a phantom top-level attribute");
+
+        assertDoesNotThrow(() -> service.updateItem("Users", userIdKey("nested-delete-set"), null,
+                "DELETE #settings.#labels :labels", names, values, "ALL_NEW", region));
+        JsonNode afterMissingPathDelete = service.getItem("Users", userIdKey("nested-delete-set"), region);
+        assertFalse(afterMissingPathDelete.path("settings").path("M").has("labels"),
+                "DELETE on a missing nested path must be a no-op");
+    }
+
+    @Test
+    void updateItemTopLevelAddAndDeleteRemainUnchanged() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode initialItem = item("userId", "top-level-add-delete");
+        initialItem.set("counter", attributeValue("N", "2"));
+        initialItem.set("tags", stringSetAttributeValue("keep", "drop"));
+        service.putItem("Users", initialItem, region);
+
+        ObjectNode names = mapper.createObjectNode();
+        names.put("#counter", "counter");
+        names.put("#tags", "tags");
+        ObjectNode values = mapper.createObjectNode();
+        values.set(":three", attributeValue("N", "3"));
+        values.set(":drop", stringSetAttributeValue("drop"));
+
+        service.updateItem("Users", userIdKey("top-level-add-delete"), null,
+                "ADD #counter :three DELETE #tags :drop", names, values, "ALL_NEW", region);
+
+        JsonNode stored = service.getItem("Users", userIdKey("top-level-add-delete"), region);
+        assertEquals("5", stored.path("counter").path("N").asText());
+        assertEquals(1, stored.path("tags").path("SS").size());
+        assertEquals("keep", stored.path("tags").path("SS").get(0).asText());
     }
 
     // --- UpdateExpression clause separator tests ---

@@ -13,6 +13,8 @@ import java.util.List;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.hasKey;
+import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.startsWith;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -1105,5 +1107,80 @@ class KmsIntegrationTest {
                 .post("/")
                 .then()
                 .statusCode(expectedStatusCode);
+    }
+
+    // ── Issue #1528 — ListKeyPolicies ────────────────────────────────────────
+
+    @Test
+    void listKeyPoliciesReturnsDefaultPolicyThroughJsonHandler() {
+        String keyId = given()
+                .header("X-Amz-Target", "TrentService.CreateKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"Description\":\"list-key-policies\"}")
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200)
+                .extract()
+                .path("KeyMetadata.KeyId");
+
+        given()
+                .header("X-Amz-Target", "TrentService.ListKeyPolicies")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("""
+                    {"KeyId":"%s"}
+                    """.formatted(keyId))
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200)
+                .body("PolicyNames.size()", equalTo(1))
+                .body("PolicyNames[0]", equalTo("default"))
+                .body("Truncated", equalTo(false))
+                // Truncated is always false, so NextMarker must be absent rather than null.
+                .body("$", not(hasKey("NextMarker")));
+    }
+
+    @Test
+    void listKeyPoliciesIgnoresLimitAndMarker() {
+        String keyId = given()
+                .header("X-Amz-Target", "TrentService.CreateKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"Description\":\"list-key-policies-paging\"}")
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200)
+                .extract()
+                .path("KeyMetadata.KeyId");
+
+        // A single policy name cannot be paginated, and ListKeyPolicies does not declare
+        // InvalidMarkerException, so both parameters are accepted without error.
+        given()
+                .header("X-Amz-Target", "TrentService.ListKeyPolicies")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("""
+                    {"KeyId":"%s","Limit":1,"Marker":"anything"}
+                    """.formatted(keyId))
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200)
+                .body("PolicyNames[0]", equalTo("default"))
+                .body("Truncated", equalTo(false));
+    }
+
+    @Test
+    void listKeyPoliciesReturnsNotFoundForUnknownKey() {
+        // Asserting the error type only. Floci returns 404 where real KMS uses 400 for
+        // NotFoundException, a pre-existing service-wide deviation that is not this change's to fix.
+        given()
+                .header("X-Amz-Target", "TrentService.ListKeyPolicies")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyId\":\"non-existent-id\"}")
+                .when()
+                .post("/")
+                .then()
+                .body("__type", equalTo("NotFoundException"));
     }
 }

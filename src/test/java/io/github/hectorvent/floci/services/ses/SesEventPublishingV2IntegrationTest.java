@@ -546,8 +546,8 @@ class SesEventPublishingV2IntegrationTest {
                 .header("X-Amz-Target", "Firehose_20150804.CreateDeliveryStream")
                 .body("""
                     {"DeliveryStreamName": "%s",
-                     "S3DestinationConfiguration": {"BucketARN": "arn:aws:s3:::%s"}}
-                    """.formatted(FIREHOSE_STREAM, FIREHOSE_BUCKET))
+                     "S3DestinationConfiguration": {"BucketARN": "arn:aws:s3:::%s", "Prefix": "%s/"}}
+                    """.formatted(FIREHOSE_STREAM, FIREHOSE_BUCKET, FIREHOSE_STREAM))
         .when()
                 .post("/")
         .then()
@@ -676,8 +676,8 @@ class SesEventPublishingV2IntegrationTest {
                 .header("X-Amz-Target", "Firehose_20150804.CreateDeliveryStream")
                 .body("""
                     {"DeliveryStreamName": "%s",
-                     "S3DestinationConfiguration": {"BucketARN": "arn:aws:s3:::%s"}}
-                    """.formatted(streamDisabled, FIREHOSE_BUCKET))
+                     "S3DestinationConfiguration": {"BucketARN": "arn:aws:s3:::%s", "Prefix": "%s/"}}
+                    """.formatted(streamDisabled, FIREHOSE_BUCKET, streamDisabled))
         .when()
                 .post("/")
         .then()

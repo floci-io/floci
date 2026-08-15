@@ -43,6 +43,15 @@ class CloudWatchLogsServiceTest {
         List<LogGroup> groups = service.describeLogGroups(null, REGION);
         assertEquals(1, groups.size());
         assertEquals("/app/logs", groups.getFirst().getLogGroupName());
+        assertFalse(groups.getFirst().isDeletionProtectionEnabled());
+    }
+
+    @Test
+    void createLogGroupWithDeletionProtectionEnabled() {
+        service.createLogGroup("/app/protected", null, null, true, REGION);
+
+        LogGroup group = service.describeLogGroups("/app/protected", REGION).getFirst();
+        assertTrue(group.isDeletionProtectionEnabled());
     }
 
     @Test
@@ -70,6 +79,29 @@ class CloudWatchLogsServiceTest {
     void deleteLogGroupNotFoundThrows() {
         assertThrows(AwsException.class, () ->
                 service.deleteLogGroup("/missing", REGION));
+    }
+
+    @Test
+    void protectedLogGroupMustBeDisabledBeforeDeletion() {
+        service.createLogGroup("/app/protected", null, null, true, REGION);
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.deleteLogGroup("/app/protected", REGION));
+        assertEquals("ValidationException", error.getErrorCode());
+        assertTrue(service.logGroupExists("/app/protected", REGION));
+
+        service.putLogGroupDeletionProtection("/app/protected", false, REGION);
+        service.deleteLogGroup("/app/protected", REGION);
+
+        assertFalse(service.logGroupExists("/app/protected", REGION));
+    }
+
+    @Test
+    void putLogGroupDeletionProtectionRequiresExistingGroup() {
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.putLogGroupDeletionProtection("/missing", true, REGION));
+
+        assertEquals("ResourceNotFoundException", error.getErrorCode());
     }
 
     @Test
@@ -217,7 +249,7 @@ class CloudWatchLogsServiceTest {
 
         assertEquals(10, result.events().size());
         for (int i = 0; i < 10; i++) {
-            assertEquals("SEQLINE-" + i, result.events().get(i).getMessage(),
+            assertEquals("SEQLINE-" + i, result.events().get(i).event().getMessage(),
                     "event at index " + i + " out of ingestion order");
         }
     }
@@ -254,7 +286,87 @@ class CloudWatchLogsServiceTest {
         CloudWatchLogsService.FilteredLogEventsResult result = service.filterLogEvents(
                 "/app/logs", null, null, null, "ERROR", 100, REGION);
         assertEquals(2, result.events().size());
-        assertTrue(result.events().stream().allMatch(e -> e.getMessage().contains("ERROR")));
+        assertTrue(result.events().stream().allMatch(f -> f.event().getMessage().contains("ERROR")));
+    }
+
+    @Test
+    void filterLogEventsCarriesEmittingStreamPerEvent() {
+        service.createLogGroup("/app/logs", null, null, REGION);
+        service.createLogStream("/app/logs", "stream-1", REGION);
+        service.createLogStream("/app/logs", "stream-2", REGION);
+
+        long now = System.currentTimeMillis();
+        service.putLogEvents("/app/logs", "stream-1",
+                List.of(Map.of("timestamp", now, "message", "ERROR: from one")), REGION);
+        service.putLogEvents("/app/logs", "stream-2",
+                List.of(Map.of("timestamp", now + 1, "message", "ERROR: from two")), REGION);
+
+        CloudWatchLogsService.FilteredLogEventsResult result = service.filterLogEvents(
+                "/app/logs", null, null, null, "ERROR", 100, REGION);
+
+        assertEquals(2, result.events().size());
+        assertEquals("stream-1", result.events().get(0).logStreamName());
+        assertEquals("stream-2", result.events().get(1).logStreamName());
+    }
+
+    @Test
+    void filterLogEventsRestrictedToNamedStreamsSkipsTheRest() {
+        service.createLogGroup("/app/logs", null, null, REGION);
+        service.createLogStream("/app/logs", "stream-1", REGION);
+        service.createLogStream("/app/logs", "stream-2", REGION);
+
+        long now = System.currentTimeMillis();
+        service.putLogEvents("/app/logs", "stream-1",
+                List.of(Map.of("timestamp", now, "message", "keep me")), REGION);
+        service.putLogEvents("/app/logs", "stream-2",
+                List.of(Map.of("timestamp", now + 1, "message", "drop me")), REGION);
+
+        CloudWatchLogsService.FilteredLogEventsResult result = service.filterLogEvents(
+                "/app/logs", List.of("stream-2"), null, null, null, 100, REGION);
+
+        assertEquals(1, result.events().size());
+        assertEquals("stream-2", result.events().getFirst().logStreamName());
+        assertEquals("drop me", result.events().getFirst().event().getMessage());
+    }
+
+    @Test
+    void filterLogEventsDoesNotLeakEventsFromAPrefixSiblingGroup() {
+        // "/app/logs" must not sweep up "/app/logs-archive": the key layout separates the group
+        // from the stream with "::", so the group prefix has to be matched with it.
+        service.createLogGroup("/app/logs", null, null, REGION);
+        service.createLogStream("/app/logs", "stream-1", REGION);
+        service.createLogGroup("/app/logs-archive", null, null, REGION);
+        service.createLogStream("/app/logs-archive", "stream-1", REGION);
+
+        long now = System.currentTimeMillis();
+        service.putLogEvents("/app/logs", "stream-1",
+                List.of(Map.of("timestamp", now, "message", "live")), REGION);
+        service.putLogEvents("/app/logs-archive", "stream-1",
+                List.of(Map.of("timestamp", now, "message", "archived")), REGION);
+
+        CloudWatchLogsService.FilteredLogEventsResult result = service.filterLogEvents(
+                "/app/logs", null, null, null, null, 100, REGION);
+
+        assertEquals(1, result.events().size());
+        assertEquals("live", result.events().getFirst().event().getMessage());
+    }
+
+    @Test
+    void filterLogEventsRecoversStreamNamesHoldingAColon() {
+        // AWS forbids ':' in a stream name but floci does not enforce that, so the stream a match
+        // is attributed to must not depend on the name being AWS-legal.
+        String awkward = "app:worker:1";
+        service.createLogGroup("/app/logs", null, null, REGION);
+        service.createLogStream("/app/logs", awkward, REGION);
+
+        service.putLogEvents("/app/logs", awkward,
+                List.of(Map.of("timestamp", System.currentTimeMillis(), "message", "hello")), REGION);
+
+        CloudWatchLogsService.FilteredLogEventsResult result = service.filterLogEvents(
+                "/app/logs", null, null, null, null, 100, REGION);
+
+        assertEquals(1, result.events().size());
+        assertEquals(awkward, result.events().getFirst().logStreamName());
     }
 
     @Test
@@ -371,6 +483,64 @@ class CloudWatchLogsServiceTest {
 
         assertEquals(0, atEnd.events().size());
         assertEquals("f/3", atEnd.nextForwardToken(), "token must echo back to signal end of stream");
+    }
+
+    @Test
+    void getLogEventsRejectsMalformedNextToken() {
+        service.createLogGroup("/app/logs", null, null, REGION);
+        service.createLogStream("/app/logs", "stream-1", REGION);
+        putEvents("/app/logs", "stream-1", System.currentTimeMillis(), 3);
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.getLogEvents("/app/logs", "stream-1", null, null, 10, true, "f/not-a-token", REGION));
+
+        assertEquals("InvalidParameterException", exception.getErrorCode());
+        assertEquals(400, exception.getHttpStatus());
+        assertEquals("The specified nextToken is invalid.", exception.getMessage());
+    }
+
+    @Test
+    void getLogEventsRejectsNegativeNextToken() {
+        service.createLogGroup("/app/logs", null, null, REGION);
+        service.createLogStream("/app/logs", "stream-1", REGION);
+        putEvents("/app/logs", "stream-1", System.currentTimeMillis(), 3);
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.getLogEvents("/app/logs", "stream-1", null, null, 10, true, "b/-1", REGION));
+
+        assertEquals("InvalidParameterException", exception.getErrorCode());
+        assertEquals(400, exception.getHttpStatus());
+        assertEquals("The specified nextToken is invalid.", exception.getMessage());
+    }
+
+    @Test
+    void getLogEventsRejectsOverflowNextToken() {
+        service.createLogGroup("/app/logs", null, null, REGION);
+        service.createLogStream("/app/logs", "stream-1", REGION);
+        putEvents("/app/logs", "stream-1", System.currentTimeMillis(), 3);
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.getLogEvents("/app/logs", "stream-1", null, null, 10, true, "f/2147483648", REGION));
+
+        assertEquals("InvalidParameterException", exception.getErrorCode());
+        assertEquals(400, exception.getHttpStatus());
+        assertEquals("The specified nextToken is invalid.", exception.getMessage());
+    }
+
+    @Test
+    void getLogEventsRejectsUnrecognizedNextTokens() {
+        service.createLogGroup("/app/logs", null, null, REGION);
+        service.createLogStream("/app/logs", "stream-1", REGION);
+        putEvents("/app/logs", "stream-1", System.currentTimeMillis(), 3);
+
+        for (String token : List.of("", "x/1", "garbage")) {
+            AwsException exception = assertThrows(AwsException.class, () ->
+                    service.getLogEvents("/app/logs", "stream-1", null, null, 10, true, token, REGION));
+
+            assertEquals("InvalidParameterException", exception.getErrorCode());
+            assertEquals(400, exception.getHttpStatus());
+            assertEquals("The specified nextToken is invalid.", exception.getMessage());
+        }
     }
 
     @Test

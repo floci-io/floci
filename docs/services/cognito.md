@@ -64,6 +64,7 @@ Standalone `TagResource` rejects reserved `floci:*` keys. `ListTagsForResource` 
 | AdminDeleteUser | Deletes a user from a user pool. |
 | AdminSetUserPassword | Sets a user's password and permanent-password status. |
 | AdminUpdateUserAttributes | Updates attributes for a user in a user pool. |
+| AdminLinkProviderForUser | Links an external IdP identity to an existing user's `identities` attribute. |
 
 ### User Operations
 

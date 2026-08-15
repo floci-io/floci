@@ -483,6 +483,43 @@ class CloudWatchLogsInsightsQueryTest {
     }
 
     @Test
+    void unsupportedFilterOperatorsDropTheStageInsteadOfMisparsing() {
+        String group = "search/query-operators";
+        String stream = "s-1";
+        createGroupStream(service, group, stream);
+        put(group, stream, BASE_MS + 1000, "INFO", "JOB-1", "info-line");
+        put(group, stream, BASE_MS + 2000, "ERROR", "JOB-1", "error-line");
+
+        // '>=', '<=' and '=~' used to lose their comparison character to the equality scan, leaving a
+        // dead field ("level >") that silently matched nothing. None of these is supported, so each one
+        // drops the whole stage with a warning and every row comes back.
+        for (String expr : List.of("level >= 'INFO'", "level <= 'INFO'", "level =~ /INFO/", ">= 'INFO'",
+                "level > 'INFO'", "level < 'INFO'", "level like /INFO/", "level not like /INFO/",
+                "level in ['INFO']")) {
+            assertEquals(2, rowsFor(group, "fields @message | filter " + expr).size(),
+                    "unsupported operator must drop the whole filter stage: " + expr);
+        }
+    }
+
+    @Test
+    void supportedFilterOperatorsStillParse() {
+        String group = "search/query-equality";
+        String stream = "s-1";
+        createGroupStream(service, group, stream);
+        put(group, stream, BASE_MS + 1000, "INFO", "JOB-1", "info-line");
+        put(group, stream, BASE_MS + 2000, "ERROR", "JOB-1", "error-line");
+        putRaw(service, group, stream, BASE_MS + 3000, idLog("REQ>=42", "quoted"));
+
+        assertEquals(1, rowsFor(group, "fields @message | filter level = 'ERROR'").size());
+        assertEquals(1, rowsFor(group, "fields @message | filter level == 'ERROR'").size());
+        assertEquals(2, rowsFor(group, "fields @message | filter level != 'ERROR'").size());
+
+        // A '>=' inside the quoted value is not an operator — the real '=' still wins.
+        assertEquals("REQ>=42",
+                rowsFor(group, "fields params.id | filter params.id = 'REQ>=42'").get(0).get("params.id"));
+    }
+
+    @Test
     void statisticsReportScannedAndMatched() {
         String group = "data-studio/insights";
         String stream = "s-1";
@@ -593,6 +630,15 @@ class CloudWatchLogsInsightsQueryTest {
         createGroupStream(svc, group, stream);
         putRaw(svc, group, stream, BASE_MS + 2000, jobLog("INFO", "x", "JOB-1"));
         return svc;
+    }
+
+    /** Run {@code query} over the full window on the default service and return its completed rows. */
+    private List<LinkedHashMap<String, String>> rowsFor(String group, String query) {
+        long startSec = BASE_MS / 1000 - 10;
+        CloudWatchLogsService.QueryState state = service.getQueryResults(
+                service.startQuery(List.of(group), startSec, startSec + 86400, query, null, REGION));
+        assertEquals("Complete", state.status());
+        return state.rows();
     }
 
     private void createGroupStream(CloudWatchLogsService svc, String group, String stream) {
