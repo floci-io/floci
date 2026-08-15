@@ -92,7 +92,8 @@ public class SesService {
     // Account suppression attributes + the per-address suppression list (two stores) extracted to
     // SesSuppressionService. The facade delegates; its send filters read via it.
     private final SesSuppressionService suppressionService;
-    private final StorageBackend<String, DedicatedIpPool> dedicatedIpPoolStore;
+    // Dedicated IP pools extracted to SesDedicatedIpService. The facade delegates.
+    private final SesDedicatedIpService dedicatedIpService;
     // Contact lists and contacts (two stores) extracted to SesContactService. The
     // facade delegates, and its send-path list-management orchestration calls into the service.
     private final SesContactService contactService;
@@ -119,7 +120,8 @@ public class SesService {
     public SesService(StorageFactory storageFactory, SesReceiptRuleService receiptRuleService,
                        SesAccountService accountService, SesCvetService cvetService,
                        SesPolicyService policyService, SesContactService contactService,
-                       SesSuppressionService suppressionService, SmtpRelay smtpRelay, ObjectMapper objectMapper,
+                       SesSuppressionService suppressionService, SesDedicatedIpService dedicatedIpService,
+                       SmtpRelay smtpRelay, ObjectMapper objectMapper,
                        SesEventPublisher eventPublisher, EmulatorConfig config, Route53Service route53Service,
                        Clock clock) {
         this.identityStore = storageFactory.create("ses", "ses-identities.json",
@@ -132,8 +134,7 @@ public class SesService {
         this.configSetStore = storageFactory.create("ses", "ses-config-sets.json",
                 new TypeReference<Map<String, ConfigurationSet>>() {});
         this.suppressionService = suppressionService;
-        this.dedicatedIpPoolStore = storageFactory.create("ses", "ses-dedicated-ip-pools.json",
-                new TypeReference<Map<String, DedicatedIpPool>>() {});
+        this.dedicatedIpService = dedicatedIpService;
         this.contactService = contactService;
         this.policyService = policyService;
         this.receiptRuleService = receiptRuleService;
@@ -153,7 +154,7 @@ public class SesService {
                StorageBackend<String, EmailTemplate> templateStore,
                StorageBackend<String, ConfigurationSet> configSetStore,
                SesSuppressionService suppressionService,
-               StorageBackend<String, DedicatedIpPool> dedicatedIpPoolStore,
+               SesDedicatedIpService dedicatedIpService,
                SesContactService contactService,
                SesPolicyService policyService,
                SesReceiptRuleService receiptRuleService,
@@ -162,7 +163,7 @@ public class SesService {
                ObjectMapper objectMapper,
                Clock clock) {
         this(identityStore, emailStore, accountService, templateStore, configSetStore, suppressionService,
-                dedicatedIpPoolStore, contactService, policyService,
+                dedicatedIpService, contactService, policyService,
                 receiptRuleService, cvetService, smtpRelay, objectMapper, null, clock);
     }
 
@@ -172,7 +173,7 @@ public class SesService {
                StorageBackend<String, EmailTemplate> templateStore,
                StorageBackend<String, ConfigurationSet> configSetStore,
                SesSuppressionService suppressionService,
-               StorageBackend<String, DedicatedIpPool> dedicatedIpPoolStore,
+               SesDedicatedIpService dedicatedIpService,
                SesContactService contactService,
                SesPolicyService policyService,
                SesReceiptRuleService receiptRuleService,
@@ -187,7 +188,7 @@ public class SesService {
         this.templateStore = templateStore;
         this.configSetStore = configSetStore;
         this.suppressionService = suppressionService;
-        this.dedicatedIpPoolStore = dedicatedIpPoolStore;
+        this.dedicatedIpService = dedicatedIpService;
         this.contactService = contactService;
         this.policyService = policyService;
         this.receiptRuleService = receiptRuleService;
@@ -1689,57 +1690,26 @@ public class SesService {
 
     // ──────────────────────── Dedicated IP Pools ────────────────────────
 
-    private static final java.util.Set<String> SCALING_MODES = java.util.Set.of("STANDARD", "MANAGED");
+    // Storage lives in SesDedicatedIpService; the facade forwards.
 
     public DedicatedIpPool createDedicatedIpPool(String poolName, String scalingMode, String region) {
-        if (poolName == null || poolName.isBlank()) {
-            throw new AwsException("BadRequestException", "PoolName is required.", 400);
-        }
-        String effectiveScaling = (scalingMode == null || scalingMode.isBlank()) ? "STANDARD" : scalingMode;
-        if (!SCALING_MODES.contains(effectiveScaling)) {
-            throw new AwsException("BadRequestException", "The ScalingMode parameter is invalid.", 400);
-        }
-        String key = dedicatedIpPoolKey(region, poolName);
-        if (dedicatedIpPoolStore.get(key).isPresent()) {
-            throw new AwsException("AlreadyExistsException",
-                    "The pool <" + poolName + "> already exists.", 400);
-        }
-        DedicatedIpPool pool = new DedicatedIpPool(poolName, effectiveScaling);
-        dedicatedIpPoolStore.put(key, pool);
-        LOG.infov("Created SES dedicated IP pool: {0} in region {1}", poolName, region);
-        return pool;
+        return dedicatedIpService.createDedicatedIpPool(poolName, scalingMode, region);
     }
 
     public DedicatedIpPool getDedicatedIpPool(String poolName, String region) {
-        return dedicatedIpPoolStore.get(dedicatedIpPoolKey(region, poolName))
-                .orElseThrow(() -> new AwsException("NotFoundException",
-                        "The requested pool <" + poolName + "> does not exist.", 404));
+        return dedicatedIpService.getDedicatedIpPool(poolName, region);
     }
 
     public boolean dedicatedIpPoolExists(String poolName, String region) {
-        return dedicatedIpPoolStore.get(dedicatedIpPoolKey(region, poolName)).isPresent();
+        return dedicatedIpService.dedicatedIpPoolExists(poolName, region);
     }
 
     public List<String> listDedicatedIpPools(String region) {
-        String prefix = "dedicatedIpPool::" + region + "::";
-        return dedicatedIpPoolStore.scan(k -> k.startsWith(prefix)).stream()
-                .map(DedicatedIpPool::getPoolName)
-                .sorted()
-                .toList();
+        return dedicatedIpService.listDedicatedIpPools(region);
     }
 
     public void deleteDedicatedIpPool(String poolName, String region) {
-        String key = dedicatedIpPoolKey(region, poolName);
-        if (dedicatedIpPoolStore.get(key).isEmpty()) {
-            throw new AwsException("NotFoundException",
-                    "The requested pool <" + poolName + "> does not exist.", 404);
-        }
-        dedicatedIpPoolStore.delete(key);
-        LOG.infov("Deleted SES dedicated IP pool: {0} in region {1}", poolName, region);
-    }
-
-    private static String dedicatedIpPoolKey(String region, String name) {
-        return "dedicatedIpPool::" + region + "::" + name;
+        dedicatedIpService.deleteDedicatedIpPool(poolName, region);
     }
 
 

@@ -65,7 +65,7 @@ class SesServiceListManagementTest {
                 new InMemoryStorage<String, EmailTemplate>(),
                 new InMemoryStorage<String, ConfigurationSet>(),
                 new SesSuppressionService(new InMemoryStorage<String, SuppressedDestination>(), new InMemoryStorage<String, AccountSuppressionAttributes>()),
-                new InMemoryStorage<String, DedicatedIpPool>(),
+                new SesDedicatedIpService(new InMemoryStorage<String, DedicatedIpPool>()),
                 new SesContactService(new InMemoryStorage<String, ContactList>(), contactStore, Clock.systemUTC()),
                 new SesPolicyService(new InMemoryStorage<String, String>(), new ObjectMapper()),
                 new SesReceiptRuleService(new InMemoryStorage<String, ReceiptRuleSet>(), Clock.systemUTC()),
