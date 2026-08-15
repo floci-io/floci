@@ -109,6 +109,7 @@ nav:
     - EventBridge Scheduler: services/scheduler.md
     - CloudWatch: services/cloudwatch.md
     - CloudWatch RUM: services/rum.md
+    - GuardDuty: services/guardduty.md
     - ACM: services/acm.md
     - ECS: services/ecs.md
     - ECR: services/ecr.md

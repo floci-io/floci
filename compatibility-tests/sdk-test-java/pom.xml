@@ -253,6 +253,11 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>rum</artifactId>
         </dependency>
+        <!-- GuardDuty client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>guardduty</artifactId>
+        </dependency>
         <!-- Secrets Manager client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>

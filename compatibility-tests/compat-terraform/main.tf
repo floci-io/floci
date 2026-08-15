@@ -115,13 +115,13 @@ resource "aws_secretsmanager_secret_version" "db_creds" {
 
 # -- RDS DB Instance -----------------------------------------------------------
 resource "aws_db_instance" "app" {
-  identifier        = "floci-compat-db"
-  engine            = "postgres"
-  engine_version    = "15"
-  instance_class    = "db.t3.micro"
-  allocated_storage = 20
-  username          = "admin"
-  password          = "Password1!"
+  identifier          = "floci-compat-db"
+  engine              = "postgres"
+  engine_version      = "15"
+  instance_class      = "db.t3.micro"
+  allocated_storage   = 20
+  username            = "admin"
+  password            = "Password1!"
   skip_final_snapshot = true
 }
 
@@ -495,4 +495,75 @@ output "tagged_role_arn" {
 
 output "tagged_policy_arn" {
   value = aws_iam_policy.tagged.arn
+}
+
+# -- GuardDuty -----------------------------------------------------------------
+# Detector, per-feature configuration, and organization configuration mirror the
+# resource set an org security-baseline stack manages. additional_configuration
+# is an ordered list block: Floci must echo it back in submitted order or every
+# re-plan proposes a replacement.
+resource "aws_guardduty_detector" "compat" {
+  enable                       = true
+  finding_publishing_frequency = "SIX_HOURS"
+
+  tags = {
+    Environment = "compat-test"
+  }
+}
+
+resource "aws_guardduty_detector_feature" "runtime_monitoring" {
+  detector_id = aws_guardduty_detector.compat.id
+  name        = "RUNTIME_MONITORING"
+  status      = "ENABLED"
+
+  additional_configuration {
+    name   = "ECS_FARGATE_AGENT_MANAGEMENT"
+    status = "ENABLED"
+  }
+
+  additional_configuration {
+    name   = "EC2_AGENT_MANAGEMENT"
+    status = "ENABLED"
+  }
+
+  additional_configuration {
+    name   = "EKS_ADDON_MANAGEMENT"
+    status = "DISABLED"
+  }
+}
+
+resource "aws_guardduty_organization_configuration" "compat" {
+  detector_id                      = aws_guardduty_detector.compat.id
+  auto_enable_organization_members = "ALL"
+}
+
+resource "aws_guardduty_organization_configuration_feature" "runtime_monitoring" {
+  detector_id = aws_guardduty_detector.compat.id
+  name        = "RUNTIME_MONITORING"
+  auto_enable = "ALL"
+
+  additional_configuration {
+    name        = "ECS_FARGATE_AGENT_MANAGEMENT"
+    auto_enable = "ALL"
+  }
+
+  additional_configuration {
+    name        = "EC2_AGENT_MANAGEMENT"
+    auto_enable = "ALL"
+  }
+
+  additional_configuration {
+    name        = "EKS_ADDON_MANAGEMENT"
+    auto_enable = "NONE"
+  }
+
+  depends_on = [aws_guardduty_organization_configuration.compat]
+}
+
+output "guardduty_detector_id" {
+  value = aws_guardduty_detector.compat.id
+}
+
+output "guardduty_detector_arn" {
+  value = aws_guardduty_detector.compat.arn
 }

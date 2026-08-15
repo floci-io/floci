@@ -347,3 +347,40 @@ setup() {
     fi
     [ "$status" -eq 0 ]
 }
+
+@test "Terraform: GuardDuty detector is created with features" {
+    run aws_cmd guardduty list-detectors --query "DetectorIds[0]" --output text
+    assert_success
+    DETECTOR_ID="$output"
+    run aws_cmd guardduty get-detector --detector-id "$DETECTOR_ID" \
+        --query "[Status, FindingPublishingFrequency]" --output text
+    assert_success
+    assert_output --partial "ENABLED"
+    assert_output --partial "SIX_HOURS"
+}
+
+@test "Terraform: GuardDuty organization configuration round-trips" {
+    run aws_cmd guardduty list-detectors --query "DetectorIds[0]" --output text
+    assert_success
+    DETECTOR_ID="$output"
+    run aws_cmd guardduty describe-organization-configuration --detector-id "$DETECTOR_ID" \
+        --query "AutoEnableOrganizationMembers" --output text
+    assert_success
+    assert_output "ALL"
+}
+
+# additional_configuration is an ordered list block; drift here means the
+# emulator reordered the list on read-back.
+@test "Terraform: re-planning GuardDuty reports no changes" {
+    cd "$TF_DIR"
+    run terraform plan -var="endpoint=${FLOCI_ENDPOINT}" -input=false -no-color -detailed-exitcode \
+        -target=aws_guardduty_detector.compat \
+        -target=aws_guardduty_detector_feature.runtime_monitoring \
+        -target=aws_guardduty_organization_configuration.compat \
+        -target=aws_guardduty_organization_configuration_feature.runtime_monitoring
+    if [ "$status" -eq 2 ]; then
+        echo "# drift detected on re-plan:" >&3
+        echo "$output" >&3
+    fi
+    [ "$status" -eq 0 ]
+}
