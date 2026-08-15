@@ -502,6 +502,102 @@ class KmsServiceTest {
     }
 
     @Test
+    void updateAlias() {
+        KmsKey keyA = kmsService.createKey(null, REGION);
+        KmsKey keyB = kmsService.createKey(null, REGION);
+        kmsService.createAlias("alias/my-key", keyA.getKeyId(), REGION);
+
+        kmsService.updateAlias("alias/my-key", keyB.getKeyId(), REGION);
+
+        List<KmsAlias> aliases = kmsService.listAliases(REGION);
+        assertEquals(1, aliases.size());
+        assertEquals(keyB.getKeyId(), aliases.getFirst().getTargetKeyId());
+    }
+
+    @Test
+    void updateAliasNotFoundThrows() {
+        KmsKey key = kmsService.createKey(null, REGION);
+        AwsException ex = assertThrows(AwsException.class, () ->
+                kmsService.updateAlias("alias/missing", key.getKeyId(), REGION));
+
+        assertEquals("NotFoundException", ex.getErrorCode());
+    }
+
+    @Test
+    void updateAliasForNonExistentTargetKeyThrows() {
+        KmsKey key = kmsService.createKey(null, REGION);
+        kmsService.createAlias("alias/my-key", key.getKeyId(), REGION);
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                kmsService.updateAlias("alias/my-key", "no-such-key", REGION));
+
+        assertEquals("NotFoundException", ex.getErrorCode());
+        assertEquals(key.getKeyId(), kmsService.listAliases(REGION).getFirst().getTargetKeyId());
+    }
+
+    @Test
+    void updateAliasForPendingDeletionTargetThrows() {
+        KmsKey keyA = kmsService.createKey(null, REGION);
+        KmsKey keyB = kmsService.createKey(null, REGION);
+        kmsService.createAlias("alias/my-key", keyA.getKeyId(), REGION);
+        kmsService.scheduleKeyDeletion(keyB.getKeyId(), 7, REGION);
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                kmsService.updateAlias("alias/my-key", keyB.getKeyId(), REGION));
+
+        assertEquals("KMSInvalidStateException", ex.getErrorCode());
+        assertEquals(keyA.getKeyId(), kmsService.listAliases(REGION).getFirst().getTargetKeyId());
+    }
+
+    @Test
+    void updateAliasForIncompatibleKeyUsageThrows() {
+        KmsKey symmetricKey = kmsService.createKey(null, REGION);
+        KmsKey hmacKey = kmsService.createKey("hmac key", "GENERATE_VERIFY_MAC", "HMAC_256", null, Map.of(), REGION);
+        kmsService.createAlias("alias/my-key", symmetricKey.getKeyId(), REGION);
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                kmsService.updateAlias("alias/my-key", hmacKey.getKeyId(), REGION));
+
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals(symmetricKey.getKeyId(), kmsService.listAliases(REGION).getFirst().getTargetKeyId());
+    }
+
+    @Test
+    void updateAliasAllowsSameTypeDifferentSpec() {
+        KmsKey rsa2048 = kmsService.createKey("rsa 2048", "SIGN_VERIFY", "RSA_2048", null, Map.of(), REGION);
+        KmsKey rsa3072 = kmsService.createKey("rsa 3072", "SIGN_VERIFY", "RSA_3072", null, Map.of(), REGION);
+        kmsService.createAlias("alias/my-key", rsa2048.getKeyId(), REGION);
+
+        kmsService.updateAlias("alias/my-key", rsa3072.getKeyId(), REGION);
+
+        assertEquals(rsa3072.getKeyId(), kmsService.listAliases(REGION).getFirst().getTargetKeyId());
+    }
+
+    @Test
+    void updateAliasAllowsSameUsageDifferentAsymmetricFamily() {
+        KmsKey rsaKey = kmsService.createKey("rsa key", "SIGN_VERIFY", "RSA_2048", null, Map.of(), REGION);
+        KmsKey eccKey = kmsService.createKey("ecc key", "SIGN_VERIFY", "ECC_NIST_P256", null, Map.of(), REGION);
+        kmsService.createAlias("alias/my-key", rsaKey.getKeyId(), REGION);
+
+        kmsService.updateAlias("alias/my-key", eccKey.getKeyId(), REGION);
+
+        assertEquals(eccKey.getKeyId(), kmsService.listAliases(REGION).getFirst().getTargetKeyId());
+    }
+
+    @Test
+    void updateAliasRejectsSymmetricToAsymmetricEvenWithSameUsage() {
+        KmsKey symmetricKey = kmsService.createKey(null, REGION);
+        KmsKey rsaEncryptKey = kmsService.createKey("rsa encrypt key", "ENCRYPT_DECRYPT", "RSA_2048", null, Map.of(), REGION);
+        kmsService.createAlias("alias/my-key", symmetricKey.getKeyId(), REGION);
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                kmsService.updateAlias("alias/my-key", rsaEncryptKey.getKeyId(), REGION));
+
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals(symmetricKey.getKeyId(), kmsService.listAliases(REGION).getFirst().getTargetKeyId());
+    }
+
+    @Test
     void deleteAlias() {
         KmsKey key = kmsService.createKey(null, REGION);
         kmsService.createAlias("alias/to-delete", key.getKeyId(), REGION);

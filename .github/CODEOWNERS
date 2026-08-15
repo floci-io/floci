@@ -1,12 +1,19 @@
 # CODEOWNERS for floci
 #
-# Scopes release-sensitive paths to the primary maintainer so CI, release
-# config, and Dockerfile changes always trigger a review ping. Add more
-# owners as the maintainer roster grows.
+# Routes application code to this repository's maintainers (see MAINTAINERS.md) and keeps
+# release-sensitive paths with the Lead, per the org-wide GOVERNANCE.md.
+#
+# Order matters: the LAST matching pattern wins, so the Lead-reserved paths below stay
+# authoritative over the broader area rules above them.
 #
 # Docs: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
 
 # Default: no global owner (unowned files fall through to normal review rules).
+
+# Application code
+/src/                    @hectorvent @pgermosen
+/compatibility-tests/    @hectorvent @pgermosen
+/docs/                   @hectorvent @pgermosen
 
 # CI, release automation, workflow hygiene
 /.github/                @hectorvent

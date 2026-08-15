@@ -8,6 +8,7 @@ import java.util.Map;
 import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 
 class CloudFormationTemplateEngineTest {
 
@@ -57,5 +58,34 @@ class CloudFormationTemplateEngineTest {
     void selectFromCidrResolvesSubnetByIndex() {
         assertEquals("10.0.2.0/24",
                 engine().resolve(json("{\"Fn::Select\": [2, {\"Fn::Cidr\": [\"10.0.0.0/16\", 4, 8]}]}")));
+    }
+
+    @Test
+    void resolveJsonAttributeUnwrapsAlreadySerializedStringFromFnJoin() {
+        // Reproduces #2317: CDK emits RedrivePolicy / FilterPolicy / Definition as an Fn::Join
+        // that resolveNode collapses to a TextNode. toString() on that node re-quotes and
+        // re-escapes the JSON a second time; resolveJsonAttribute must pass the literal string
+        // through instead.
+        String serialized = "{\"deadLetterTargetArn\":\"arn:aws:sqs:us-east-1:000000000000:dlq\"}";
+        String escaped = serialized.replace("\"", "\\\"");
+        String joined = "{\"Fn::Join\":[\"\",[\"" + escaped + "\"]]}";
+
+        assertEquals(serialized, engine().resolveJsonAttribute(json(joined)));
+    }
+
+    @Test
+    void resolveJsonAttributeSerializesPlainObjectNode() {
+        // The object form keeps working: a template object with a resolved intrinsic must still
+        // reach the service as the JSON string it parses.
+        assertEquals(
+                "{\"deadLetterTargetArn\":\"Dlq.Arn\"}",
+                engine().resolveJsonAttribute(json(
+                        "{\"deadLetterTargetArn\":{\"Fn::GetAtt\":[\"Dlq\",\"Arn\"]}}")));
+    }
+
+    @Test
+    void resolveJsonAttributeReturnsNullForMissingOrNullNode() {
+        assertNull(engine().resolveJsonAttribute(json("null")));
+        assertNull(engine().resolveJsonAttribute(mapper.createArrayNode().path("nope")));
     }
 }

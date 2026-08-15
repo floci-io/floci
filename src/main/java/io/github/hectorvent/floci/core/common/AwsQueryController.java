@@ -368,7 +368,10 @@ public class AwsQueryController {
             "AddTagsToResource", "ListTagsForResource", "RemoveTagsFromResource",
             "CreateDBCluster", "DescribeDBClusters", "DeleteDBCluster", "ModifyDBCluster",
             "CreateDBParameterGroup", "DescribeDBParameterGroups",
-            "DeleteDBParameterGroup", "ModifyDBParameterGroup", "DescribeDBParameters"
+            "DeleteDBParameterGroup", "ModifyDBParameterGroup", "DescribeDBParameters",
+            "DescribeDBProxies", "CreateDBProxy", "ModifyDBProxy", "DeleteDBProxy",
+            "RegisterDBProxyTargets", "DeregisterDBProxyTargets",
+            "DescribeDBProxyTargetGroups", "ModifyDBProxyTargetGroup", "DescribeDBProxyTargets"
     );
 
     private static final Set<String> CLOUDFORMATION_ACTIONS = Set.of(
@@ -389,6 +392,8 @@ public class AwsQueryController {
             "GetAccountSendingEnabled", "ListVerifiedEmailAddresses", "DeleteVerifiedEmailAddress",
             "SetIdentityNotificationTopic", "GetIdentityNotificationAttributes",
             "SetIdentityFeedbackForwardingEnabled",
+            "SetIdentityDkimEnabled",
+            "VerifyDomainDkim",
             "SetIdentityHeadersInNotificationsEnabled",
             "SetIdentityMailFromDomain", "GetIdentityMailFromDomainAttributes",
             "GetIdentityDkimAttributes",

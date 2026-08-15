@@ -272,6 +272,7 @@ public interface EmulatorConfig {
         LightsailStorageConfig lightsail();
         CodePipelineStorageConfig codepipeline();
         S3VectorsStorageConfig s3vectors();
+        S3TablesStorageConfig s3tables();
         EcsStorageConfig ecs();
         CodeBuildStorageConfig codebuild();
         ConfigStorageConfig config();
@@ -440,6 +441,13 @@ public interface EmulatorConfig {
         long flushIntervalMs();
     }
 
+    interface S3TablesStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+
     interface EcsStorageConfig {
         Optional<String> mode();
 
@@ -595,6 +603,7 @@ public interface EmulatorConfig {
         LightsailServiceConfig lightsail();
         UiServiceConfig ui();
         S3VectorsServiceConfig s3vectors();
+        S3TablesServiceConfig s3tables();
         IotServiceConfig iot();
         IotDataServiceConfig iotdata();
         CloudHsmV2ServiceConfig cloudhsmv2();
@@ -642,6 +651,11 @@ public interface EmulatorConfig {
         boolean enabled();
     }
     interface S3VectorsServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface S3TablesServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }

@@ -44,6 +44,8 @@ floci:
         flush-interval-ms: 60000
       s3vectors:
         flush-interval-ms: 60000
+      s3tables:
+        flush-interval-ms: 60000
       ecs:
         flush-interval-ms: 60000
       codebuild:
@@ -287,6 +289,8 @@ floci:
       schema-worker-threads: 4
       schema-worker-shutdown-timeout-seconds: 30
     s3vectors:
+      enabled: true
+    s3tables:
       enabled: true
     iot:
       enabled: true

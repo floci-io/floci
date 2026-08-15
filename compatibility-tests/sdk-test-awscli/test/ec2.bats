@@ -146,6 +146,46 @@ create_prefix_list() {
     [ "$id" = "pl-63a5400a" ]
 }
 
+# ─── security group rules sourced from a prefix list ────────────────────────
+
+@test "EC2: authorize a security group rule from a prefix list" {
+    create_prefix_list
+    local sg
+    sg=$(aws_cmd ec2 create-security-group --group-name "$(unique_name bats-sg)" \
+            --description "prefix list source" --query 'GroupId' --output text)
+
+    run aws_cmd ec2 authorize-security-group-ingress --group-id "$sg" \
+        --ip-permissions "IpProtocol=tcp,FromPort=5432,ToPort=5432,PrefixListIds=[{PrefixListId=$PREFIX_LIST_ID,Description=from-corp}]"
+    assert_success
+    pl=$(json_get "$output" '.SecurityGroupRules[0].PrefixListId')
+    [ "$pl" = "$PREFIX_LIST_ID" ]
+
+    run aws_cmd ec2 describe-security-groups --group-ids "$sg"
+    assert_success
+    nested=$(json_get "$output" '.SecurityGroups[0].IpPermissions[0].PrefixListIds[0].PrefixListId')
+    [ "$nested" = "$PREFIX_LIST_ID" ]
+
+    run aws_cmd ec2 describe-security-group-rules --filters "Name=group-id,Values=$sg"
+    assert_success
+    found=$(echo "$output" | jq --arg pl "$PREFIX_LIST_ID" '.SecurityGroupRules | any(.PrefixListId == $pl)')
+    [ "$found" = "true" ]
+
+    aws_cmd ec2 delete-security-group --group-id "$sg" >/dev/null 2>&1 || true
+}
+
+@test "EC2: authorizing from an unknown prefix list is rejected" {
+    local sg
+    sg=$(aws_cmd ec2 create-security-group --group-name "$(unique_name bats-sg)" \
+            --description "unknown prefix list" --query 'GroupId' --output text)
+
+    run aws_cmd ec2 authorize-security-group-ingress --group-id "$sg" \
+        --ip-permissions 'IpProtocol=tcp,FromPort=1,ToPort=1,PrefixListIds=[{PrefixListId=pl-doesnotexist}]'
+    assert_failure
+    assert_output --partial "InvalidPrefixListID.NotFound"
+
+    aws_cmd ec2 delete-security-group --group-id "$sg" >/dev/null 2>&1 || true
+}
+
 # Creates a VPC holding a source and a target security group, and sets SG_VPC_ID,
 # SG_SOURCE_ID and SG_TARGET_ID.
 create_sg_pair() {

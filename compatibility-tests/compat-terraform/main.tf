@@ -458,3 +458,41 @@ resource "aws_iam_role_policy_attachment" "emr_service_role" {
 output "managed_policy_role_arn" {
   value = aws_iam_role.managed_policy_attach.arn
 }
+
+# The provider reads tags off the GetRole/GetPolicy/GetFunction response rather than by calling
+# List*Tags, so a tagged resource that does not echo them back applies cleanly and then diffs on
+# every subsequent plan. The re-plan assertion below is what catches that.
+resource "aws_iam_role" "tagged" {
+  name               = "floci-compat-tagged-role"
+  assume_role_policy = data.aws_iam_policy_document.lambda_assume_role.json
+
+  tags = {
+    Environment = "compat"
+    Owner       = "floci"
+  }
+}
+
+resource "aws_iam_policy" "tagged" {
+  name        = "floci-compat-tagged-policy"
+  description = "Tagged policy used to assert tags survive a round trip"
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = "s3:GetObject"
+      Resource = "*"
+    }]
+  })
+
+  tags = {
+    Environment = "compat"
+  }
+}
+
+output "tagged_role_arn" {
+  value = aws_iam_role.tagged.arn
+}
+
+output "tagged_policy_arn" {
+  value = aws_iam_policy.tagged.arn
+}

@@ -104,6 +104,17 @@ public class LambdaController {
             code.put("RepositoryType", "S3");
         }
 
+        // GetFunction carries the function's tags alongside Configuration and Code. Clients read
+        // them from here rather than calling ListTags, so omitting the field makes a tagged
+        // function read back untagged and diff on every plan. Unlike IAM, Lambda has no
+        // list-subset rule to gate this on — ListFunctions returns FunctionConfiguration, which
+        // has no Tags field at all.
+        Map<String, String> tags = fn.getTags();
+        if (tags != null && !tags.isEmpty()) {
+            ObjectNode tagsNode = root.putObject("Tags");
+            tags.forEach(tagsNode::put);
+        }
+
         return Response.ok(root).build();
     }
 

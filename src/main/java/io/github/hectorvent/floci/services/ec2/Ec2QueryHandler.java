@@ -336,17 +336,27 @@ public class Ec2QueryHandler {
         List<IpPermission> perms = new ArrayList<>();
         for (int i = 1; ; i++) {
             String proto = p.getFirst(prefix + "." + i + ".IpProtocol");
-            if (proto == null) break;
+            if (proto == null) {
+                break;
+            }
             IpPermission perm = new IpPermission();
             perm.setIpProtocol(proto);
             String fromPort = p.getFirst(prefix + "." + i + ".FromPort");
             String toPort = p.getFirst(prefix + "." + i + ".ToPort");
-            if (fromPort != null) perm.setFromPort(Integer.parseInt(fromPort));
-            if (toPort != null) perm.setToPort(Integer.parseInt(toPort));
+            if (fromPort != null) {
+                perm.setFromPort(Integer.parseInt(fromPort));
+            }
+            if (toPort != null) {
+                perm.setToPort(Integer.parseInt(toPort));
+            }
             for (int j = 1; ; j++) {
                 String cidr = p.getFirst(prefix + "." + i + ".IpRanges." + j + ".CidrIp");
-                if (cidr == null) cidr = p.getFirst(prefix + "." + i + ".IpRanges." + j);
-                if (cidr == null) break;
+                if (cidr == null) {
+                    cidr = p.getFirst(prefix + "." + i + ".IpRanges." + j);
+                }
+                if (cidr == null) {
+                    break;
+                }
                 String desc = p.getFirst(prefix + "." + i + ".IpRanges." + j + ".Description");
                 perm.getIpRanges().add(new IpRange(cidr, desc));
             }
@@ -375,6 +385,14 @@ public class Ec2QueryHandler {
                 pair.setUserId(userId);
                 pair.setDescription(desc);
                 perm.getUserIdGroupPairs().add(pair);
+            }
+            for (int j = 1; ; j++) {
+                String prefixListId = p.getFirst(prefix + "." + i + ".PrefixListIds." + j + ".PrefixListId");
+                if (prefixListId == null) {
+                    break;
+                }
+                String desc = p.getFirst(prefix + "." + i + ".PrefixListIds." + j + ".Description");
+                perm.getPrefixListIds().add(new PrefixListId(prefixListId, desc));
             }
             perms.add(perm);
         }
@@ -2506,7 +2524,8 @@ public class Ec2QueryHandler {
         if (rule.getFromPort() != null) xml.elem("fromPort", String.valueOf(rule.getFromPort()));
         if (rule.getToPort() != null) xml.elem("toPort", String.valueOf(rule.getToPort()));
         xml.elem("cidrIpv4", rule.getCidrIpv4())
-                .elem("cidrIpv6", rule.getCidrIpv6());
+                .elem("cidrIpv6", rule.getCidrIpv6())
+                .elem("prefixListId", rule.getPrefixListId());
         // Guarded: unlike elem(), start()/end() emit even when every child is null, which would put
         // an empty <referencedGroupInfo/> on every CIDR rule.
         ReferencedSecurityGroup ref = rule.getReferencedGroupInfo();
@@ -3008,7 +3027,14 @@ public class Ec2QueryHandler {
                         .elem("description", g.getDescription())
                         .end("item");
             }
-            xml.end("groups").end("item");
+            xml.end("groups").start("prefixListIds");
+            for (PrefixListId prefixList : perm.getPrefixListIds()) {
+                xml.start("item")
+                        .elem("prefixListId", prefixList.getPrefixListId())
+                        .elem("description", prefixList.getDescription())
+                        .end("item");
+            }
+            xml.end("prefixListIds").end("item");
         }
         xml.end(wrapperTag);
         return xml.build();

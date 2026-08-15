@@ -13,6 +13,8 @@ import io.github.hectorvent.floci.services.ec2.model.Image;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
 import io.github.hectorvent.floci.services.ec2.model.ManagedPrefixList;
+import io.github.hectorvent.floci.services.ec2.model.SecurityGroupRule;
+import io.github.hectorvent.floci.services.ec2.model.PrefixListId;
 import io.github.hectorvent.floci.services.ec2.model.IpPermission;
 import io.github.hectorvent.floci.services.ec2.model.IpRange;
 import io.github.hectorvent.floci.services.ec2.model.PrefixListEntry;
@@ -21,6 +23,7 @@ import io.github.hectorvent.floci.services.ec2.model.Reservation;
 import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
 import io.github.hectorvent.floci.services.ec2.model.Snapshot;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
+import io.github.hectorvent.floci.services.ec2.model.UserIdGroupPair;
 import io.github.hectorvent.floci.services.ec2.model.VpcEndpoint;
 import io.github.hectorvent.floci.services.ec2.model.Volume;
 import io.github.hectorvent.floci.services.ec2.model.VolumeAttachment;
@@ -35,6 +38,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.argThat;
@@ -1067,6 +1071,180 @@ class Ec2ServiceTest {
         service.deleteTags("us-east-1", List.of(created.getPrefixListId()), List.of(new Tag("env", null)));
         assertTrue(service.describeManagedPrefixLists("us-east-1", List.of(created.getPrefixListId()), Map.of())
                 .getFirst().getTags().isEmpty());
+    }
+
+    // =========================================================================
+    // Security group rules sourced from a prefix list
+    // =========================================================================
+
+    private static IpPermission tcpPermission(int port) {
+        IpPermission perm = new IpPermission();
+        perm.setIpProtocol("tcp");
+        perm.setFromPort(port);
+        perm.setToPort(port);
+        return perm;
+    }
+
+    @Test
+    void authorizeIngressFromAPrefixListCreatesARuleCarryingIt() {
+        Ec2Service service = prefixListService();
+        ManagedPrefixList list = service.createManagedPrefixList("us-east-1", "corp", "IPv4", 5,
+                List.of(new PrefixListEntry("10.0.0.0/8", null)), List.of());
+        String groupId = service.createSecurityGroup("us-east-1", "db", "db", null).getGroupId();
+
+        IpPermission perm = tcpPermission(5432);
+        perm.getPrefixListIds().add(new PrefixListId(list.getPrefixListId(), "from-corp"));
+        List<SecurityGroupRule> rules = service.authorizeSecurityGroupIngress("us-east-1", groupId, List.of(perm));
+
+        assertEquals(1, rules.size());
+        SecurityGroupRule rule = rules.getFirst();
+        assertEquals(list.getPrefixListId(), rule.getPrefixListId());
+        assertEquals("from-corp", rule.getDescription());
+        assertNull(rule.getCidrIpv4(), "a prefix list rule carries no CIDR");
+        assertFalse(rule.isEgress());
+        assertEquals(5432, rule.getFromPort());
+    }
+
+    @Test
+    void authorizeAgainstAnUnknownPrefixListIsRejected() {
+        Ec2Service service = prefixListService();
+        String groupId = service.createSecurityGroup("us-east-1", "db", "db", null).getGroupId();
+
+        IpPermission perm = tcpPermission(5432);
+        perm.getPrefixListIds().add(new PrefixListId("pl-doesnotexist", null));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.authorizeSecurityGroupIngress("us-east-1", groupId, List.of(perm)));
+        assertEquals("InvalidPrefixListID.NotFound", error.getErrorCode());
+        // The rejected rule must not have been stored. The group still holds its default
+        // allow-all egress rule, so the check is for an ingress rule rather than for none.
+        assertTrue(service.describeSecurityGroupRules("us-east-1", List.of(groupId), List.of()).stream()
+                .noneMatch(r -> !r.isEgress() || r.getPrefixListId() != null));
+    }
+
+    /** AWS emits one rule per source, so a permission naming both expands to two. */
+    @Test
+    void aPermissionNamingBothACidrAndAPrefixListYieldsARuleForEach() {
+        Ec2Service service = prefixListService();
+        ManagedPrefixList list = service.createManagedPrefixList("us-east-1", "corp", "IPv4", 5,
+                List.of(), List.of());
+        String groupId = service.createSecurityGroup("us-east-1", "db", "db", null).getGroupId();
+
+        IpPermission perm = tcpPermission(443);
+        perm.getIpRanges().add(new IpRange("10.1.0.0/16", "direct"));
+        perm.getPrefixListIds().add(new PrefixListId(list.getPrefixListId(), "via-list"));
+        List<SecurityGroupRule> rules = service.authorizeSecurityGroupIngress("us-east-1", groupId, List.of(perm));
+
+        assertEquals(2, rules.size());
+        assertEquals(1, rules.stream().filter(r -> "10.1.0.0/16".equals(r.getCidrIpv4())).count());
+        assertEquals(1, rules.stream().filter(r -> list.getPrefixListId().equals(r.getPrefixListId())).count());
+    }
+
+    /**
+     * Verified against a live AWS account: a permission naming a valid CIDR alongside an unknown
+     * prefix list persists neither, so the whole call has to resolve before anything is written.
+     */
+    @Test
+    void anUnknownPrefixListLeavesNoPartialRuleFromTheSamePermission() {
+        Ec2Service service = prefixListService();
+        String groupId = service.createSecurityGroup("us-east-1", "db", "db", null).getGroupId();
+
+        IpPermission perm = tcpPermission(5432);
+        perm.getIpRanges().add(new IpRange("10.9.0.0/16", "direct"));
+        perm.getPrefixListIds().add(new PrefixListId("pl-doesnotexist", null));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.authorizeSecurityGroupIngress("us-east-1", groupId, List.of(perm)));
+        assertEquals("InvalidPrefixListID.NotFound", error.getErrorCode());
+        assertTrue(service.describeSecurityGroupRules("us-east-1", List.of(groupId), List.of()).stream()
+                .noneMatch(r -> !r.isEgress()), "the CIDR rule must not survive the rejection");
+    }
+
+    /** A later bad permission must not leave an earlier good one applied either. */
+    @Test
+    void anUnknownPrefixListInASecondPermissionLeavesTheFirstUnapplied() {
+        Ec2Service service = prefixListService();
+        String groupId = service.createSecurityGroup("us-east-1", "db", "db", null).getGroupId();
+
+        IpPermission good = tcpPermission(443);
+        good.getIpRanges().add(new IpRange("10.1.0.0/16", null));
+        IpPermission bad = tcpPermission(5432);
+        bad.getPrefixListIds().add(new PrefixListId("pl-doesnotexist", null));
+
+        assertThrows(AwsException.class,
+                () -> service.authorizeSecurityGroupIngress("us-east-1", groupId, List.of(good, bad)));
+        assertTrue(service.describeSecurityGroupRules("us-east-1", List.of(groupId), List.of()).stream()
+                .noneMatch(r -> !r.isEgress()), "no ingress rule from either permission");
+    }
+
+    /**
+     * Verified against a live AWS account: revoking the prefix list source leaves a CIDR
+     * permission on the same protocol and ports untouched.
+     */
+    @Test
+    void revokingAPrefixListSourceLeavesACidrOnTheSameTupleAlone() {
+        Ec2Service service = prefixListService();
+        ManagedPrefixList list = service.createManagedPrefixList("us-east-1", "corp", "IPv4", 5,
+                List.of(), List.of());
+        String groupId = service.createSecurityGroup("us-east-1", "db", "db", null).getGroupId();
+
+        IpPermission viaCidr = tcpPermission(5432);
+        viaCidr.getIpRanges().add(new IpRange("192.168.0.0/16", null));
+        IpPermission viaList = tcpPermission(5432);
+        viaList.getPrefixListIds().add(new PrefixListId(list.getPrefixListId(), null));
+        service.authorizeSecurityGroupIngress("us-east-1", groupId, List.of(viaCidr, viaList));
+
+        service.revokeSecurityGroupIngress("us-east-1", groupId, List.of(viaList));
+
+        List<IpPermission> left = service.describeSecurityGroups("us-east-1", List.of(groupId), List.of(), Map.of())
+                .getFirst().getIpPermissions();
+        assertEquals(1, left.size(), "only the prefix list permission should have been revoked");
+        assertEquals("192.168.0.0/16", left.getFirst().getIpRanges().getFirst().getCidrIp());
+    }
+
+    @Test
+    void anEgressRuleCanAlsoComeFromAPrefixList() {
+        Ec2Service service = prefixListService();
+        ManagedPrefixList list = service.createManagedPrefixList("us-east-1", "corp", "IPv4", 5,
+                List.of(), List.of());
+        String groupId = service.createSecurityGroup("us-east-1", "db", "db", null).getGroupId();
+
+        IpPermission perm = tcpPermission(443);
+        perm.getPrefixListIds().add(new PrefixListId(list.getPrefixListId(), null));
+        List<SecurityGroupRule> rules = service.authorizeSecurityGroupEgress("us-east-1", groupId, List.of(perm));
+
+        assertEquals(1, rules.size());
+        assertTrue(rules.getFirst().isEgress());
+        assertEquals(list.getPrefixListId(), rules.getFirst().getPrefixListId());
+    }
+
+    /**
+     * A caller may name the source group by name alone, which authorize resolves to a group id
+     * before storing it. Scoped revocation has to resolve the same way, or a rule survives the
+     * revoke that names it.
+     */
+    @Test
+    void revokingAGroupSourceNamedByNameOnlyStillMatchesTheStoredReference() {
+        Ec2Service service = prefixListService();
+        String sourceId = service.createSecurityGroup("us-east-1", "app", "app", null).getGroupId();
+        String targetId = service.createSecurityGroup("us-east-1", "db", "db", null).getGroupId();
+
+        IpPermission authorized = tcpPermission(5432);
+        UserIdGroupPair byName = new UserIdGroupPair();
+        byName.setGroupName("app");
+        authorized.getUserIdGroupPairs().add(byName);
+        List<SecurityGroupRule> rules =
+                service.authorizeSecurityGroupIngress("us-east-1", targetId, List.of(authorized));
+        assertEquals(sourceId, rules.getFirst().getReferencedGroupInfo().getGroupId());
+
+        IpPermission revocation = tcpPermission(5432);
+        UserIdGroupPair alsoByName = new UserIdGroupPair();
+        alsoByName.setGroupName("app");
+        revocation.getUserIdGroupPairs().add(alsoByName);
+        service.revokeSecurityGroupIngress("us-east-1", targetId, List.of(revocation));
+
+        assertTrue(service.describeSecurityGroups("us-east-1", List.of(targetId), List.of(), Map.of())
+                .getFirst().getIpPermissions().isEmpty(), "the revoked group reference must be gone");
     }
 
     /**

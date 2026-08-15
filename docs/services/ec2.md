@@ -303,6 +303,13 @@ additions, so one call can replace an entry's description by removing and re-add
 Creation is synchronous: a new list is returned as `create-complete` rather than passing
 through `create-in-progress`, since nothing about it is slow locally.
 
+A security group rule can take a prefix list as its source instead of a CIDR. Pass it as
+`IpPermissions.N.PrefixListIds.M.PrefixListId`, optionally with a `Description`; AWS emits one rule
+per source, so a permission naming both CIDRs and prefix lists expands to a rule for each. The
+resulting rule carries `prefixListId` in place of `cidrIpv4`, and `DescribeSecurityGroups` nests
+the reference under the permission as `prefixListIds`. Authorizing against a list that does not
+exist returns `InvalidPrefixListID.NotFound`, so a typo cannot leave a rule pointing at nothing.
+
 ### NAT Gateways
 
 | Action | Description |

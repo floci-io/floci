@@ -182,6 +182,24 @@ class ApiGatewayExecuteApiHostFilterTest {
     }
 
     @Test
+    void routesRegionBearingConfiguredHost() {
+        FakeApiGatewayLookup lookup = new FakeApiGatewayLookup();
+        lookup.addApi("ap-northeast-2", API_ID, "HTTP");
+        lookup.addStage("ap-northeast-2", API_ID, "$default");
+        RecordingRequest request = new RecordingRequest(
+                "abc123.execute-api.ap-northeast-2.floci:4566",
+                URI.create("http://abc123.execute-api.ap-northeast-2.floci:4566/accounts"));
+        ApiGatewayExecuteRouteContext routeContext = new ApiGatewayExecuteRouteContext();
+
+        new ApiGatewayExecuteApiHostFilter(
+                lookup, new RegionResolver(REGION, "000000000000"), routeContext, "floci")
+                .filter(request.context());
+
+        assertEquals("/execute-api/abc123/$default/accounts", request.routedUri().getRawPath());
+        assertEquals("ap-northeast-2", routeContext.httpApiRegion());
+    }
+
+    @Test
     void routesWebSocketConnectionsManagementCall() {
         FakeApiGatewayLookup lookup = new FakeApiGatewayLookup();
         lookup.addApi(REGION, API_ID, "WEBSOCKET");

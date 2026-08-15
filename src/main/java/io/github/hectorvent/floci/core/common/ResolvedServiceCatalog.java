@@ -25,6 +25,7 @@ import io.github.hectorvent.floci.services.appsync.AppSyncController;
 import io.github.hectorvent.floci.services.rdsdata.RdsDataController;
 import io.github.hectorvent.floci.services.rum.RumController;
 import io.github.hectorvent.floci.services.s3vectors.S3VectorsController;
+import io.github.hectorvent.floci.services.s3tables.S3TablesController;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -417,6 +418,11 @@ public class ResolvedServiceCatalog {
                         config.storage().services().s3vectors().flushIntervalMs(), null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
                         Set.of(), Set.of("s3vectors"), Set.of(), Set.of(S3VectorsController.class)),
+                descriptor("s3tables", "s3tables", config.services().s3tables().enabled(), true,
+                        "s3tables", storageMode(config.storage().services().s3tables().mode(), config.storage().mode()),
+                        config.storage().services().s3tables().flushIntervalMs(), null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON),
+                        Set.of(), Set.of("s3tables"), Set.of(), Set.of(S3TablesController.class)),
                 descriptor("iot", "iot", config.services().iot().enabled(), true,
                         "iot", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),

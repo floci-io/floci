@@ -30,6 +30,10 @@ public class KinesisService {
     private static final String DEFAULT_STREAM_MODE = "PROVISIONED";
     private static final int DEFAULT_INSPECTION_RECORD_LIMIT = 100;
     private static final int MAX_INSPECTION_RECORD_LIMIT = 1000;
+    // AWS default per-stream maximum record size (data blob + partition key).
+    // Raisable per stream via UpdateMaxRecordSize, which floci doesn't
+    // implement, so every stream sits at the default.
+    private static final int MAX_RECORD_SIZE_BYTES = 1_048_576;
 
     private final StorageBackend<String, KinesisStream> store;
     private final StorageBackend<String, KinesisConsumer> consumerStore;
@@ -368,8 +372,19 @@ public class KinesisService {
         return putRecordWithShardId(streamName, data, partitionKey, region).sequenceNumber();
     }
 
+    public void validateRecordSize(byte[] data, String partitionKey) {
+        int size = (data != null ? data.length : 0)
+                + (partitionKey != null ? partitionKey.getBytes(StandardCharsets.UTF_8).length : 0);
+        if (size > MAX_RECORD_SIZE_BYTES) {
+            throw new AwsException("InvalidArgumentException",
+                    "Record size (data + partition key) of " + size + " bytes exceeds the maximum of "
+                            + MAX_RECORD_SIZE_BYTES + " bytes.", 400);
+        }
+    }
+
     public PutRecordResult putRecordWithShardId(String streamName, byte[] data, String partitionKey, String region) {
         KinesisStream stream = resolveStream(streamName, region);
+        validateRecordSize(data, partitionKey);
         KinesisShard shard = selectShard(stream, partitionKey);
 
         String sequenceNumber = String.valueOf(sequenceGenerator.incrementAndGet());

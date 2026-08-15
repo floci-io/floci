@@ -8,6 +8,7 @@ import com.github.dockerjava.api.command.InspectVolumeResponse;
 import com.github.dockerjava.api.command.ListVolumesCmd;
 import com.github.dockerjava.api.command.ListVolumesResponse;
 import com.github.dockerjava.api.command.RemoveContainerCmd;
+import com.github.dockerjava.api.command.RemoveVolumeCmd;
 import com.github.dockerjava.api.command.StartContainerCmd;
 import com.github.dockerjava.api.command.StopContainerCmd;
 import com.github.dockerjava.api.command.WaitContainerCmd;
@@ -156,6 +157,66 @@ class ContainerLifecycleManagerVolumeTest {
         when(cmd.exec()).thenThrow(new DockerException("Connection refused", 500));
 
         assertFalse(manager.volumeExists("some-volume"));
+    }
+
+    @Test
+    void strictContainerCleanupPropagatesRemovalFailure() {
+        StopContainerCmd stop = mock(StopContainerCmd.class, RETURNS_SELF);
+        RemoveContainerCmd remove = mock(RemoveContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.stopContainerCmd("container-id")).thenReturn(stop);
+        when(dockerClient.removeContainerCmd("container-id")).thenReturn(remove);
+        when(remove.exec()).thenThrow(new DockerException("remove failed", 500));
+
+        IllegalStateException exception = assertThrows(IllegalStateException.class, () ->
+                manager.stopAndRemoveStrict("container-id", null));
+
+        assertEquals("Failed to remove container container-id", exception.getMessage());
+    }
+
+    @Test
+    void strictContainerCleanupAcceptsSuccessfulForcedRemovalAfterStopFailure() {
+        StopContainerCmd stop = mock(StopContainerCmd.class, RETURNS_SELF);
+        RemoveContainerCmd remove = mock(RemoveContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.stopContainerCmd("container-id")).thenReturn(stop);
+        when(stop.exec()).thenThrow(new DockerException("stop failed", 500));
+        when(dockerClient.removeContainerCmd("container-id")).thenReturn(remove);
+
+        assertDoesNotThrow(() -> manager.stopAndRemoveStrict("container-id", null));
+
+        verify(remove).exec();
+    }
+
+    @Test
+    void strictStaleContainerCleanupPropagatesRemovalFailure() {
+        RemoveContainerCmd remove = mock(RemoveContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.removeContainerCmd("stale-name")).thenReturn(remove);
+        when(remove.exec()).thenThrow(new DockerException("remove failed", 500));
+
+        IllegalStateException exception = assertThrows(IllegalStateException.class, () ->
+                manager.removeIfExistsStrict("stale-name"));
+
+        assertEquals("Failed to remove stale container stale-name", exception.getMessage());
+    }
+
+    @Test
+    void strictStaleContainerCleanupAcceptsMissingContainer() {
+        RemoveContainerCmd remove = mock(RemoveContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.removeContainerCmd("stale-name")).thenReturn(remove);
+        when(remove.exec()).thenThrow(new NotFoundException("missing"));
+
+        assertDoesNotThrow(() -> manager.removeIfExistsStrict("stale-name"));
+    }
+
+    @Test
+    void strictVolumeCleanupPropagatesRemovalFailure() {
+        RemoveVolumeCmd remove = mock(RemoveVolumeCmd.class);
+        when(dockerClient.removeVolumeCmd("volume-id")).thenReturn(remove);
+        when(remove.exec()).thenThrow(new DockerException("remove failed", 500));
+
+        IllegalStateException exception = assertThrows(IllegalStateException.class, () ->
+                manager.removeVolumeStrict("volume-id"));
+
+        assertEquals("Failed to remove volume volume-id", exception.getMessage());
     }
 
     @Test

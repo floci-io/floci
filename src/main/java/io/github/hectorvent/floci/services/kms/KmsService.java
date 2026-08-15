@@ -227,6 +227,13 @@ public class KmsService {
         return spec != null && spec.getKeyType() == KmsKeySpec.KeyType.HMAC;
     }
 
+    // AWS UpdateAlias only requires the current and new key to be "the same type (both
+    // symmetric or both asymmetric or both HMAC)" - not an exact KeySpec match, so e.g.
+    // RSA_2048 and ECC_NIST_P256 are compatible, but SYMMETRIC_DEFAULT and RSA_2048 are not.
+    private static boolean sameKeyFamily(KmsKeySpec a, KmsKeySpec b) {
+        return isHmac(a) == isHmac(b) && (a == KmsKeySpec.SYMMETRIC_DEFAULT) == (b == KmsKeySpec.SYMMETRIC_DEFAULT);
+    }
+
     private static void validateKeyUsageForSpec(KmsKeyUsage keyUsage, KmsKeySpec spec) {
         if (isHmac(spec) && KmsKeyUsage.GENERATE_VERIFY_MAC != keyUsage) {
             throw new AwsException("ValidationException",
@@ -603,6 +610,30 @@ public class KmsService {
         KmsAlias alias = new KmsAlias(aliasName, aliasArn, key.getKeyId());
         aliasStore.put(region + "::" + aliasName, alias);
         LOG.infov("Created KMS alias: {0} -> {1}", aliasName, key.getKeyId());
+    }
+
+    public void updateAlias(String aliasName, String targetKeyId, String region) {
+        String storageKey = region + "::" + aliasName;
+        KmsAlias existing = aliasStore.get(storageKey)
+                .orElseThrow(() -> new AwsException("NotFoundException", "Alias not found: " + aliasName, 404));
+
+        KmsKey currentKey = resolveKey(existing.getTargetKeyId(), region);
+        KmsKey newKey = resolveKey(targetKeyId, region); // Validate key exists and normalize to plain key ID
+
+        if ("PendingDeletion".equals(newKey.getKeyState())) {
+            throw new AwsException("KMSInvalidStateException",
+                    "KMS key " + newKey.getKeyId() + " is pending deletion.", 400);
+        }
+        if (currentKey.getKeyUsage() != newKey.getKeyUsage() || !sameKeyFamily(currentKey.getKeySpec(), newKey.getKeySpec())) {
+            throw new AwsException("ValidationException",
+                    "The replacement KMS key must have the same key usage and key type "
+                            + "(symmetric, asymmetric, or HMAC) as the alias's current target key.",
+                    400);
+        }
+
+        existing.setTargetKeyId(newKey.getKeyId());
+        aliasStore.put(storageKey, existing);
+        LOG.infov("Updated KMS alias: {0} -> {1}", aliasName, newKey.getKeyId());
     }
 
     public void deleteAlias(String aliasName, String region) {
