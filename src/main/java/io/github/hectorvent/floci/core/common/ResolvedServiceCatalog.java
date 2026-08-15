@@ -449,7 +449,22 @@ public class ResolvedServiceCatalog {
                         "ivschat", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
                         Set.of(), Set.of("ivschat"), Set.of(),
-                        Set.of(io.github.hectorvent.floci.services.ivschat.IvschatController.class))
+                        Set.of(io.github.hectorvent.floci.services.ivschat.IvschatController.class)),
+                descriptor("mediapackage", "mediapackage", config.services().mediapackage().enabled(), true,
+                        "mediapackage", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON),
+                        Set.of(), Set.of("mediapackage"), Set.of(),
+                        Set.of(io.github.hectorvent.floci.services.mediapackage.MediaPackageController.class)),
+                descriptor("mediapackagev2", "mediapackagev2", config.services().mediapackagev2().enabled(), true,
+                        "mediapackagev2", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON),
+                        Set.of(), Set.of("mediapackagev2"), Set.of(),
+                        Set.of(io.github.hectorvent.floci.services.mediapackagev2.MediaPackageV2Controller.class)),
+                descriptor("medialive", "medialive", config.services().medialive().enabled(), true,
+                        "medialive", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON),
+                        Set.of(), Set.of("medialive"), Set.of(),
+                        Set.of(io.github.hectorvent.floci.services.medialive.MediaLiveController.class))
         ));
     }
 

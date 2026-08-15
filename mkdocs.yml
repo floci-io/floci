@@ -111,6 +111,9 @@ nav:
     - Managed Prometheus (AMP): services/amp.md
     - IVS: services/ivs.md
     - IVS Chat: services/ivschat.md
+    - MediaPackage: services/mediapackage.md
+    - MediaPackage V2: services/mediapackagev2.md
+    - MediaLive: services/medialive.md
     - ACM: services/acm.md
     - ECS: services/ecs.md
     - ECR: services/ecr.md

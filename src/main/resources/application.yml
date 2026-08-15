@@ -492,3 +492,9 @@ floci:
       enabled: true
     ivschat:
       enabled: true
+    mediapackage:
+      enabled: true
+    mediapackagev2:
+      enabled: true
+    medialive:
+      enabled: true

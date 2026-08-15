@@ -601,6 +601,9 @@ public interface EmulatorConfig {
         AmpServiceConfig amp();
         IvsServiceConfig ivs();
         IvschatServiceConfig ivschat();
+        MediaPackageServiceConfig mediapackage();
+        MediaPackageV2ServiceConfig mediapackagev2();
+        MediaLiveServiceConfig medialive();
     }
 
     interface AmpServiceConfig {
@@ -614,6 +617,21 @@ public interface EmulatorConfig {
     }
 
     interface IvschatServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface MediaPackageServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface MediaPackageV2ServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface MediaLiveServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }
