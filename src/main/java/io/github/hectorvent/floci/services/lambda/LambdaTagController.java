@@ -32,14 +32,17 @@ public class LambdaTagController {
 
     private final LambdaService lambdaService;
     private final io.github.hectorvent.floci.services.lambdamicrovms.LambdaMicrovmsService microvmsService;
+    private final LambdaCapacityProviderService capacityProviderService;
     private final ObjectMapper objectMapper;
 
     @Inject
     public LambdaTagController(LambdaService lambdaService,
                                io.github.hectorvent.floci.services.lambdamicrovms.LambdaMicrovmsService microvmsService,
+                               LambdaCapacityProviderService capacityProviderService,
                                ObjectMapper objectMapper) {
         this.lambdaService = lambdaService;
         this.microvmsService = microvmsService;
+        this.capacityProviderService = capacityProviderService;
         this.objectMapper = objectMapper;
     }
 
@@ -62,6 +65,12 @@ public class LambdaTagController {
             microvmsService.listTags(arnRegion(arn), arn).forEach(mvTags::put);
             return Response.ok(mvRoot).build();
         }
+        if (LambdaCapacityProviderService.ownsArn(arn)) {
+            ObjectNode cpRoot = objectMapper.createObjectNode();
+            ObjectNode cpTags = cpRoot.putObject("Tags");
+            capacityProviderService.listTags(arnRegion(arn), arn).forEach(cpTags::put);
+            return Response.ok(cpRoot).build();
+        }
         Map<String, String> tags = lambdaService.listTags(arn);
         ObjectNode root = objectMapper.createObjectNode();
         ObjectNode tagsNode = root.putObject("Tags");
@@ -82,6 +91,8 @@ public class LambdaTagController {
             }
             if (io.github.hectorvent.floci.services.lambdamicrovms.LambdaMicrovmsService.ownsArn(arn)) {
                 microvmsService.tagResource(arnRegion(arn), arn, tags);
+            } else if (LambdaCapacityProviderService.ownsArn(arn)) {
+                capacityProviderService.tagResource(arnRegion(arn), arn, tags);
             } else {
                 lambdaService.tagResource(arn, tags);
             }
@@ -99,6 +110,8 @@ public class LambdaTagController {
                                   @QueryParam("tagKeys") List<String> tagKeys) {
         if (io.github.hectorvent.floci.services.lambdamicrovms.LambdaMicrovmsService.ownsArn(arn)) {
             microvmsService.untagResource(arnRegion(arn), arn, tagKeys);
+        } else if (LambdaCapacityProviderService.ownsArn(arn)) {
+            capacityProviderService.untagResource(arnRegion(arn), arn, tagKeys);
         } else {
             lambdaService.untagResource(arn, tagKeys);
         }
