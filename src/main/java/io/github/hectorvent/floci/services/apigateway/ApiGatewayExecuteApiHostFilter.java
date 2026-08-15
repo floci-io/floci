@@ -1,9 +1,11 @@
 package io.github.hectorvent.floci.services.apigateway;
 
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2Service;
 import jakarta.annotation.Priority;
+import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.container.ContainerRequestFilter;
@@ -12,7 +14,6 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.UriBuilder;
 import jakarta.ws.rs.ext.Provider;
-import org.eclipse.microprofile.config.ConfigProvider;
 import org.jboss.logging.Logger;
 
 import java.net.URI;
@@ -23,6 +24,7 @@ import java.util.regex.Pattern;
 @Provider
 @PreMatching
 @Priority(9)
+@ApplicationScoped
 public class ApiGatewayExecuteApiHostFilter implements ContainerRequestFilter {
 
     private static final Logger LOG = Logger.getLogger(ApiGatewayExecuteApiHostFilter.class);
@@ -39,7 +41,8 @@ public class ApiGatewayExecuteApiHostFilter implements ContainerRequestFilter {
     @Inject
     public ApiGatewayExecuteApiHostFilter(ApiGatewayV2Service apiGatewayV2Service,
                                           RegionResolver regionResolver,
-                                          ApiGatewayExecuteRouteContext routeContext) {
+                                          ApiGatewayExecuteRouteContext routeContext,
+                                          EmulatorConfig config) {
         this(new ApiGatewayLookup() {
             @Override
             public String resolveApiRegion(String preferredRegion, String apiId) {
@@ -60,7 +63,7 @@ public class ApiGatewayExecuteApiHostFilter implements ContainerRequestFilter {
             public void requireStage(String region, String apiId, String stageName) {
                 apiGatewayV2Service.getStage(region, apiId, stageName);
             }
-        }, regionResolver, routeContext, null);
+        }, regionResolver, routeContext, config.hostname().orElse("localhost"));
     }
 
     ApiGatewayExecuteApiHostFilter(ApiGatewayLookup apiGatewayLookup, RegionResolver regionResolver) {
@@ -87,7 +90,7 @@ public class ApiGatewayExecuteApiHostFilter implements ContainerRequestFilter {
             return;
         }
 
-        String apiId = extractApiId(host, baseHostname != null ? baseHostname : configuredHostname());
+        String apiId = extractApiId(host, baseHostname);
         if (apiId == null) {
             return;
         }
@@ -179,30 +182,6 @@ public class ApiGatewayExecuteApiHostFilter implements ContainerRequestFilter {
         boolean executeApiEndpointDisabled(String region, String apiId);
 
         void requireStage(String region, String apiId, String stageName);
-    }
-
-    /**
-     * Resolves the optional hostname override at request time so native images do not capture a
-     * build-time value before container-specific environment configuration is applied.
-     */
-    public static String configuredHostname() {
-        return ConfigProvider.getConfig().getOptionalValue("floci.hostname", String.class).orElse("localhost");
-    }
-
-    /**
-     * Extracts the {@code apiId} from an execute-api virtual host using the configured hostname.
-     */
-    public static String extractApiIdForConfiguredHostname(String host) {
-        return extractApiId(host, configuredHostname());
-    }
-
-    /**
-     * Extracts the {@code apiId} from an execute-api virtual host using the default local hostname.
-     *
-     * @see #extractApiId(String, String)
-     */
-    public static String extractApiId(String host) {
-        return extractApiId(host, "localhost");
     }
 
     /**
