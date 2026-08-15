@@ -5,8 +5,11 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.msk.model.ClusterState;
+import io.github.hectorvent.floci.services.msk.model.ConfigurationState;
 import io.github.hectorvent.floci.services.msk.model.MskCluster;
+import io.github.hectorvent.floci.services.msk.model.MskConfiguration;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
@@ -26,8 +29,10 @@ class MskServiceTest {
     @BeforeEach
     void setUp() {
         storageFactory = Mockito.mock(StorageFactory.class);
+        // A fresh backend per call - MskService now creates two (clusters, configurations),
+        // and a shared instance would let configuration scans see cluster entries and vice versa.
         when(storageFactory.create(Mockito.anyString(), Mockito.anyString(), Mockito.any()))
-                .thenReturn(AccountAwareStorageBackend.inMemory("000000000000"));
+                .thenAnswer(invocation -> AccountAwareStorageBackend.inMemory("000000000000"));
 
         config = Mockito.mock(EmulatorConfig.class);
         var servicesConfig = Mockito.mock(EmulatorConfig.ServicesConfig.class);
@@ -86,5 +91,74 @@ class MskServiceTest {
         MskCluster cluster = mskService.createCluster("test-cluster");
         mskService.deleteCluster(cluster.getClusterArn());
         assertTrue(mskService.listClusters().isEmpty());
+    }
+
+    @Test
+    void createConfiguration() {
+        MskConfiguration configuration = mskService.createConfiguration(
+                "test-config", "a test config", List.of("3.6.0"), "auto.create.topics.enable=true");
+
+        assertNotNull(configuration);
+        assertEquals("test-config", configuration.getName());
+        assertEquals(ConfigurationState.ACTIVE, configuration.getState());
+        assertTrue(configuration.getArn().contains("test-config"));
+        assertNotNull(configuration.getLatestRevision());
+        assertEquals(1L, configuration.getLatestRevision().getRevision());
+        assertEquals("auto.create.topics.enable=true", configuration.getServerProperties());
+    }
+
+    @Test
+    void createConfigurationRejectsMissingName() {
+        assertThrows(AwsException.class, () ->
+                mskService.createConfiguration(null, "desc", List.of("3.6.0"), "props"));
+    }
+
+    @Test
+    void createConfigurationRejectsInvalidNamePattern() {
+        assertThrows(AwsException.class, () ->
+                mskService.createConfiguration("bad name!", "desc", List.of("3.6.0"), "props"));
+    }
+
+    @Test
+    void createConfigurationRejectsMissingServerProperties() {
+        assertThrows(AwsException.class, () ->
+                mskService.createConfiguration("test-config", "desc", List.of("3.6.0"), null));
+    }
+
+    @Test
+    void createConfigurationRejectsDuplicateName() {
+        mskService.createConfiguration("test-config", "desc", List.of("3.6.0"), "props");
+        assertThrows(AwsException.class, () ->
+                mskService.createConfiguration("test-config", "desc", List.of("3.6.0"), "props"));
+    }
+
+    @Test
+    void describeConfiguration() {
+        MskConfiguration created = mskService.createConfiguration(
+                "test-config", "desc", List.of("3.6.0"), "props");
+        MskConfiguration described = mskService.describeConfiguration(created.getArn());
+        assertEquals(created.getArn(), described.getArn());
+    }
+
+    @Test
+    void describeConfigurationNotFoundThrows() {
+        assertThrows(AwsException.class, () ->
+                mskService.describeConfiguration("arn:aws:kafka:us-east-1:000000000000:configuration/missing/id"));
+    }
+
+    @Test
+    void listConfigurations() {
+        mskService.createConfiguration("config-1", "desc", List.of("3.6.0"), "props");
+        mskService.createConfiguration("config-2", "desc", List.of("3.6.0"), "props");
+        List<MskConfiguration> configurations = mskService.listConfigurations();
+        assertEquals(2, configurations.size());
+    }
+
+    @Test
+    void deleteConfiguration() {
+        MskConfiguration configuration = mskService.createConfiguration(
+                "test-config", "desc", List.of("3.6.0"), "props");
+        mskService.deleteConfiguration(configuration.getArn());
+        assertTrue(mskService.listConfigurations().isEmpty());
     }
 }
