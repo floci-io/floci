@@ -89,8 +89,9 @@ public class SesService {
     private final SesAccountService accountService;
     private final StorageBackend<String, EmailTemplate> templateStore;
     private final StorageBackend<String, ConfigurationSet> configSetStore;
-    private final StorageBackend<String, SuppressedDestination> suppressionStore;
-    private final StorageBackend<String, AccountSuppressionAttributes> accountSuppressionStore;
+    // Account suppression attributes + the per-address suppression list (two stores) extracted to
+    // SesSuppressionService. The facade delegates; its send filters read via it.
+    private final SesSuppressionService suppressionService;
     private final StorageBackend<String, AccountVdmAttributes> accountVdmStore;
     private final StorageBackend<String, DedicatedIpPool> dedicatedIpPoolStore;
     // Contact lists and contacts (two stores) extracted to SesContactService. The
@@ -119,7 +120,7 @@ public class SesService {
     public SesService(StorageFactory storageFactory, SesReceiptRuleService receiptRuleService,
                        SesAccountService accountService, SesCvetService cvetService,
                        SesPolicyService policyService, SesContactService contactService,
-                       SmtpRelay smtpRelay, ObjectMapper objectMapper,
+                       SesSuppressionService suppressionService, SmtpRelay smtpRelay, ObjectMapper objectMapper,
                        SesEventPublisher eventPublisher, EmulatorConfig config, Route53Service route53Service,
                        Clock clock) {
         this.identityStore = storageFactory.create("ses", "ses-identities.json",
@@ -131,10 +132,7 @@ public class SesService {
                 new TypeReference<Map<String, EmailTemplate>>() {});
         this.configSetStore = storageFactory.create("ses", "ses-config-sets.json",
                 new TypeReference<Map<String, ConfigurationSet>>() {});
-        this.suppressionStore = storageFactory.create("ses", "ses-suppression.json",
-                new TypeReference<Map<String, SuppressedDestination>>() {});
-        this.accountSuppressionStore = storageFactory.create("ses", "ses-account-suppression.json",
-                new TypeReference<Map<String, AccountSuppressionAttributes>>() {});
+        this.suppressionService = suppressionService;
         this.accountVdmStore = storageFactory.create("ses", "ses-account-vdm.json",
                 new TypeReference<Map<String, AccountVdmAttributes>>() {});
         this.dedicatedIpPoolStore = storageFactory.create("ses", "ses-dedicated-ip-pools.json",
@@ -157,8 +155,7 @@ public class SesService {
                SesAccountService accountService,
                StorageBackend<String, EmailTemplate> templateStore,
                StorageBackend<String, ConfigurationSet> configSetStore,
-               StorageBackend<String, SuppressedDestination> suppressionStore,
-               StorageBackend<String, AccountSuppressionAttributes> accountSuppressionStore,
+               SesSuppressionService suppressionService,
                StorageBackend<String, AccountVdmAttributes> accountVdmStore,
                StorageBackend<String, DedicatedIpPool> dedicatedIpPoolStore,
                SesContactService contactService,
@@ -168,8 +165,8 @@ public class SesService {
                SmtpRelay smtpRelay,
                ObjectMapper objectMapper,
                Clock clock) {
-        this(identityStore, emailStore, accountService, templateStore, configSetStore, suppressionStore,
-                accountSuppressionStore, accountVdmStore, dedicatedIpPoolStore, contactService, policyService,
+        this(identityStore, emailStore, accountService, templateStore, configSetStore, suppressionService,
+                accountVdmStore, dedicatedIpPoolStore, contactService, policyService,
                 receiptRuleService, cvetService, smtpRelay, objectMapper, null, clock);
     }
 
@@ -178,8 +175,7 @@ public class SesService {
                SesAccountService accountService,
                StorageBackend<String, EmailTemplate> templateStore,
                StorageBackend<String, ConfigurationSet> configSetStore,
-               StorageBackend<String, SuppressedDestination> suppressionStore,
-               StorageBackend<String, AccountSuppressionAttributes> accountSuppressionStore,
+               SesSuppressionService suppressionService,
                StorageBackend<String, AccountVdmAttributes> accountVdmStore,
                StorageBackend<String, DedicatedIpPool> dedicatedIpPoolStore,
                SesContactService contactService,
@@ -195,8 +191,7 @@ public class SesService {
         this.accountService = accountService;
         this.templateStore = templateStore;
         this.configSetStore = configSetStore;
-        this.suppressionStore = suppressionStore;
-        this.accountSuppressionStore = accountSuppressionStore;
+        this.suppressionService = suppressionService;
         this.accountVdmStore = accountVdmStore;
         this.dedicatedIpPoolStore = dedicatedIpPoolStore;
         this.contactService = contactService;
@@ -2315,132 +2310,32 @@ public class SesService {
         return new ResourceRef(parsed.region(), resource.substring(0, slash), resource.substring(slash + 1));
     }
 
-    // ──────────────────── Account-level suppression attributes ────────────────────
+    // ──────────────────── Suppression (account attributes + list) ────────────────────
+    // Storage lives in SesSuppressionService; the facade forwards, and its send
+    // filters (collectSuppressedReasons / resolveSuppressionReason) read entries back through it.
 
     public AccountSuppressionAttributes getAccountSuppressionAttributes(String region) {
-        return accountSuppressionStore.get(accountSuppressionKey(region))
-                .orElseGet(SesService::defaultAccountSuppressionAttributes);
-    }
-
-    private static AccountSuppressionAttributes defaultAccountSuppressionAttributes() {
-        // Fresh SES accounts default to auto-suppression on both BOUNCE and COMPLAINT;
-        // an explicit PUT (including an empty list) overrides this.
-        AccountSuppressionAttributes attrs = new AccountSuppressionAttributes();
-        attrs.setSuppressedReasons(new ArrayList<>(List.of("BOUNCE", "COMPLAINT")));
-        return attrs;
+        return suppressionService.getAccountSuppressionAttributes(region);
     }
 
     public void putAccountSuppressionAttributes(String region, List<String> suppressedReasons) {
-        List<String> sanitized = new ArrayList<>();
-        if (suppressedReasons != null) {
-            for (String r : suppressedReasons) {
-                validateSuppressionReason(r, "suppressedReasons", true);
-                sanitized.add(r);
-            }
-        }
-        AccountSuppressionAttributes attrs = new AccountSuppressionAttributes();
-        attrs.setSuppressedReasons(sanitized);
-        accountSuppressionStore.put(accountSuppressionKey(region), attrs);
-        LOG.infov("Updated account suppression attributes for region {0}: {1}", region, sanitized);
+        suppressionService.putAccountSuppressionAttributes(region, suppressedReasons);
     }
-
-    private static String accountSuppressionKey(String region) {
-        return "account-suppression::" + region;
-    }
-
-    // ──────────────────────────── Suppression list ────────────────────────────
 
     public void putSuppressedDestination(String region, String emailAddress, String reason) {
-        String normalized = normalizeSuppressionEmail(emailAddress);
-        validateSuppressionReason(reason, "reason", false);
-        String key = suppressionKey(region, normalized);
-        SuppressionMatch match = existingSuppressionMatch(region, emailAddress, normalized).orElse(null);
-        SuppressedDestination entry = match != null ? match.entry() : new SuppressedDestination(normalized, reason);
-        entry.setEmailAddress(normalized);
-        entry.setReason(reason);
-        entry.setLastUpdateTime(Instant.now());
-        // Write the canonical key first, then drop a legacy key it migrated from,
-        // so a failed write can't lose the entry. The legacy form was persisted by
-        // a pre-canonicalization Floci (trim-only key); migrating it avoids leaving
-        // a stuck duplicate after a re-PUT.
-        suppressionStore.put(key, entry);
-        if (match != null && !match.key().equals(key)) {
-            suppressionStore.delete(match.key());
-        }
-        LOG.infov("Suppressed destination {0} in region {1} (reason={2})", normalized, region, reason);
+        suppressionService.putSuppressedDestination(region, emailAddress, reason);
     }
 
     public SuppressedDestination getSuppressedDestination(String region, String emailAddress) {
-        String normalized = normalizeSuppressionEmail(emailAddress);
-        return existingSuppressionMatch(region, emailAddress, normalized)
-                .map(SuppressionMatch::entry)
-                .orElseThrow(() -> new AwsException("NotFoundException",
-                        "Email address " + normalized + " does not exist on your suppression list.",
-                        404));
+        return suppressionService.getSuppressedDestination(region, emailAddress);
     }
 
     public void deleteSuppressedDestination(String region, String emailAddress) {
-        String normalized = normalizeSuppressionEmail(emailAddress);
-        SuppressionMatch match = existingSuppressionMatch(region, emailAddress, normalized)
-                .orElseThrow(() -> new AwsException("NotFoundException",
-                        "Email address " + normalized + " does not exist on your suppression list.",
-                        404));
-        suppressionStore.delete(match.key());
-        LOG.infov("Removed suppression entry for {0} in region {1}", normalized, region);
-    }
-
-    /** A suppression entry together with the storage key it currently lives under. */
-    private record SuppressionMatch(String key, SuppressedDestination entry) {
-    }
-
-    /**
-     * Resolve a suppression entry by its canonical (domain-lower-cased) key, falling
-     * back to the legacy raw-trimmed key used by a pre-canonicalization Floci. Returns
-     * the entry and the key it was found under in a single read per candidate, so
-     * callers don't re-fetch the store.
-     */
-    private Optional<SuppressionMatch> existingSuppressionMatch(String region, String rawEmail, String normalized) {
-        String canonical = suppressionKey(region, normalized);
-        Optional<SuppressedDestination> hit = suppressionStore.get(canonical);
-        if (hit.isPresent()) {
-            return Optional.of(new SuppressionMatch(canonical, hit.get()));
-        }
-        String legacy = suppressionKey(region, rawEmail.trim());
-        if (!legacy.equals(canonical)) {
-            Optional<SuppressedDestination> legacyHit = suppressionStore.get(legacy);
-            if (legacyHit.isPresent()) {
-                return Optional.of(new SuppressionMatch(legacy, legacyHit.get()));
-            }
-        }
-        return Optional.empty();
+        suppressionService.deleteSuppressedDestination(region, emailAddress);
     }
 
     public List<SuppressedDestination> listSuppressedDestinations(String region, List<String> reasonFilters) {
-        Set<String> filters = new HashSet<>();
-        if (reasonFilters != null) {
-            for (String r : reasonFilters) {
-                if (r != null && !r.isBlank()) {
-                    validateSuppressionReason(r, "reasons", true);
-                    filters.add(r);
-                }
-            }
-        }
-        String prefix = "suppression::" + region + "::";
-        List<SuppressedDestination> all = new ArrayList<>(suppressionStore.scan(k -> k.startsWith(prefix)));
-        all.sort(Comparator.comparing(SuppressedDestination::getLastUpdateTime,
-                        Comparator.nullsLast(Comparator.naturalOrder()))
-                .thenComparing(SuppressedDestination::getEmailAddress,
-                        Comparator.nullsLast(Comparator.naturalOrder())));
-        if (filters.isEmpty()) {
-            return all;
-        }
-        return all.stream()
-                .filter(s -> filters.contains(s.getReason()))
-                .toList();
-    }
-
-    private static String suppressionKey(String region, String emailAddress) {
-        return "suppression::" + region + "::" + emailAddress;
+        return suppressionService.listSuppressedDestinations(region, reasonFilters);
     }
 
     /**
@@ -2468,9 +2363,7 @@ public class SesService {
             if (address == null || address.isBlank() || result.containsKey(address)) {
                 continue;
             }
-            String normalized = normalizeSuppressionEmail(address);
-            SuppressedDestination entry = existingSuppressionMatch(region, address, normalized)
-                    .map(SuppressionMatch::entry)
+            SuppressedDestination entry = suppressionService.findSuppressedDestination(region, address)
                     .orElse(null);
             if (entry != null && entry.getReason() != null
                     && reasonFilter.contains(entry.getReason())) {
@@ -2626,7 +2519,7 @@ public class SesService {
      * callers (publishSendEvents) to map the recipient to a synthetic Bounce / Complaint
      * event without consulting the store again. Both the per-address suppression entries
      * and the account-level / per-CS {@code suppressedReasons} go through
-     * {@link #validateSuppressionReason} / {@link #validateConfigSetSuppressionReason},
+     * {@link SesSuppressionService}'s reason validation / {@link #validateConfigSetSuppressionReason},
      * which enforce exact case-sensitive equality with the two canonical values, so
      * {@code entry.getReason()} is guaranteed to be canonical and downstream
      * {@code .equals("BOUNCE")} / {@code .equals("COMPLAINT")} checks are safe.
@@ -2635,12 +2528,9 @@ public class SesService {
         if (emailAddress == null || emailAddress.isBlank()) {
             return null;
         }
-        // Share the same normalization used when entries are stored
-        // (`normalizeSuppressionEmail`) so lookups can't drift apart from inserts,
-        // with the same legacy-key fallback as GET/DELETE.
-        String normalized = normalizeSuppressionEmail(emailAddress);
-        SuppressedDestination entry = existingSuppressionMatch(region, emailAddress, normalized)
-                .map(SuppressionMatch::entry)
+        // Read through the suppression service so this shares its normalization and legacy-key
+        // fallback with GET/DELETE (lookups can't drift apart from inserts).
+        SuppressedDestination entry = suppressionService.findSuppressedDestination(region, emailAddress)
                 .orElse(null);
         if (entry == null || entry.getReason() == null) {
             return null;
@@ -2652,46 +2542,6 @@ public class SesService {
         return effective.contains(entry.getReason()) ? entry.getReason() : null;
     }
 
-    private static String normalizeSuppressionEmail(String emailAddress) {
-        if (emailAddress == null || emailAddress.isBlank()) {
-            throw new AwsException("BadRequestException", "EmailAddress is required.", 400);
-        }
-        // AWS trims the EmailAddress and canonicalizes only the domain to lower
-        // case; the local-part keeps its case. Verified against real AWS SES V2
-        // (2026-06-15): `Foo@Example.COM` and `Foo@example.com` collapse to one
-        // suppression entry (`Foo@example.com`), but `Foo@x` and `foo@x` are two
-        // distinct entries. Lower-casing the whole address would wrongly merge
-        // local-part variants and alter the stored value on read-back.
-        // Locale.ROOT avoids the JVM-locale Turkish-i pitfall.
-        String trimmed = emailAddress.trim();
-        int at = trimmed.lastIndexOf('@');
-        if (at < 0) {
-            return trimmed;
-        }
-        return trimmed.substring(0, at) + "@" + trimmed.substring(at + 1).toLowerCase(Locale.ROOT);
-    }
-
-    /**
-     * Validation message used by PutAccountSuppressionAttributes,
-     * PutSuppressedDestination, and ListSuppressedDestinations — all three
-     * return the AWS "1 validation error detected: Value at '<fieldName>'
-     * failed to satisfy constraint: ..." V1-style nested message verbatim.
-     * (Verified against real AWS V2 SES on 2026-06-03.) The {@code nested}
-     * flag controls whether the inner enum constraint is wrapped in
-     * {@code Member must satisfy constraint: [...]} — PutSuppressedDestination
-     * (single Reason field) returns the unwrapped form; the two list-bearing
-     * APIs return the wrapped form.
-     */
-    private static void validateSuppressionReason(String reason, String fieldName, boolean nested) {
-        if (reason == null || (!"BOUNCE".equals(reason) && !"COMPLAINT".equals(reason))) {
-            String constraint = nested
-                    ? "Member must satisfy constraint: [Member must satisfy enum value set: [BOUNCE, COMPLAINT]]"
-                    : "Member must satisfy enum value set: [BOUNCE, COMPLAINT]";
-            throw new AwsException("BadRequestException",
-                    "1 validation error detected: Value at '" + fieldName + "' failed to satisfy constraint: "
-                            + constraint, 400);
-        }
-    }
 
     /**
      * Validation message used by PutConfigurationSetSuppressionOptions. AWS
