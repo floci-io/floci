@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.iot.model.IotAuthorizer;
 import io.github.hectorvent.floci.services.iot.model.IotCertificate;
+import io.github.hectorvent.floci.services.iot.model.IotDomainConfiguration;
 import io.github.hectorvent.floci.services.iot.model.IotJob;
 import io.github.hectorvent.floci.services.iot.model.IotJobExecution;
 import io.github.hectorvent.floci.services.iot.model.IotPolicy;
@@ -202,6 +203,59 @@ public class IotController {
         IotAuthorizer authorizer = iotService.describeDefaultAuthorizer(regionResolver.resolveRegion(headers));
         ObjectNode response = objectMapper.createObjectNode();
         response.set("authorizerDescription", buildAuthorizerDescription(authorizer));
+        return Response.ok(response).build();
+    }
+
+    @POST
+    @Path("/domainConfigurations/{domainConfigurationName}")
+    public Response createDomainConfiguration(@Context HttpHeaders headers,
+                                              @PathParam("domainConfigurationName") String domainConfigurationName,
+                                              String body) {
+        IotDomainConfiguration configuration = iotService.createDomainConfiguration(
+                domainConfigurationName, readBody(body), regionResolver.resolveRegion(headers));
+        return Response.ok(buildDomainConfigurationReference(configuration)).build();
+    }
+
+    @GET
+    @Path("/domainConfigurations/{domainConfigurationName}")
+    public Response describeDomainConfiguration(@Context HttpHeaders headers,
+                                                @PathParam("domainConfigurationName") String domainConfigurationName) {
+        IotDomainConfiguration configuration = iotService.describeDomainConfiguration(
+                domainConfigurationName, regionResolver.resolveRegion(headers));
+        return Response.ok(buildDomainConfigurationDescription(configuration)).build();
+    }
+
+    @PUT
+    @Path("/domainConfigurations/{domainConfigurationName}")
+    public Response updateDomainConfiguration(@Context HttpHeaders headers,
+                                              @PathParam("domainConfigurationName") String domainConfigurationName,
+                                              String body) {
+        IotDomainConfiguration configuration = iotService.updateDomainConfiguration(
+                domainConfigurationName, readBody(body), regionResolver.resolveRegion(headers));
+        return Response.ok(buildDomainConfigurationReference(configuration)).build();
+    }
+
+    @DELETE
+    @Path("/domainConfigurations/{domainConfigurationName}")
+    @Consumes(MediaType.WILDCARD)
+    public Response deleteDomainConfiguration(@Context HttpHeaders headers,
+                                              @PathParam("domainConfigurationName") String domainConfigurationName) {
+        iotService.deleteDomainConfiguration(domainConfigurationName, regionResolver.resolveRegion(headers));
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    @GET
+    @Path("/domainConfigurations")
+    public Response listDomainConfigurations(@Context HttpHeaders headers,
+                                             @QueryParam("serviceType") String serviceType) {
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode configurations = response.putArray("domainConfigurations");
+        for (IotDomainConfiguration configuration
+                : iotService.listDomainConfigurations(regionResolver.resolveRegion(headers), serviceType)) {
+            ObjectNode summary = buildDomainConfigurationReference(configuration);
+            summary.put("serviceType", configuration.getServiceType());
+            configurations.add(summary);
+        }
         return Response.ok(response).build();
     }
 
@@ -918,6 +972,58 @@ public class IotController {
         putEpoch(description, "creationDate", authorizer.getCreationDate());
         putEpoch(description, "lastModifiedDate", authorizer.getLastModifiedDate());
         return description;
+    }
+
+    private ObjectNode buildDomainConfigurationReference(IotDomainConfiguration configuration) {
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("domainConfigurationName", configuration.getName());
+        response.put("domainConfigurationArn", configuration.getArn());
+        return response;
+    }
+
+    private ObjectNode buildDomainConfigurationDescription(IotDomainConfiguration configuration) {
+        ObjectNode response = buildDomainConfigurationReference(configuration);
+        response.put("domainName", configuration.getDomainName());
+        ArrayNode serverCertificates = response.putArray("serverCertificates");
+        for (String certificateArn : configuration.getServerCertificateArns()) {
+            serverCertificates.addObject()
+                    .put("serverCertificateArn", certificateArn)
+                    .put("serverCertificateStatus", "VALID")
+                    .put("serverCertificateStatusDetail", "Certificate is stored by Floci and never validated");
+        }
+        if (configuration.getDefaultAuthorizerName() != null || configuration.getAllowAuthorizerOverride() != null) {
+            ObjectNode authorizerConfig = response.putObject("authorizerConfig");
+            authorizerConfig.put("defaultAuthorizerName", configuration.getDefaultAuthorizerName());
+            if (configuration.getAllowAuthorizerOverride() != null) {
+                authorizerConfig.put("allowAuthorizerOverride", configuration.getAllowAuthorizerOverride());
+            }
+        }
+        response.put("domainConfigurationStatus", configuration.getStatus());
+        response.put("serviceType", configuration.getServiceType());
+        response.put("domainType", configuration.getDomainType());
+        putEpoch(response, "lastStatusChangeDate", configuration.getLastStatusChangeDate());
+        if (configuration.getSecurityPolicy() != null) {
+            response.putObject("tlsConfig").put("securityPolicy", configuration.getSecurityPolicy());
+        }
+        ObjectNode serverCertificateConfig = response.putObject("serverCertificateConfig");
+        serverCertificateConfig.put("enableOCSPCheck", configuration.isEnableOcspCheck());
+        if (configuration.getOcspLambdaArn() != null) {
+            serverCertificateConfig.put("ocspLambdaArn", configuration.getOcspLambdaArn());
+        }
+        if (configuration.getOcspAuthorizedResponderArn() != null) {
+            serverCertificateConfig.put("ocspAuthorizedResponderArn", configuration.getOcspAuthorizedResponderArn());
+        }
+        if (configuration.getAuthenticationType() != null) {
+            response.put("authenticationType", configuration.getAuthenticationType());
+        }
+        if (configuration.getApplicationProtocol() != null) {
+            response.put("applicationProtocol", configuration.getApplicationProtocol());
+        }
+        if (configuration.getClientCertificateCallbackArn() != null) {
+            response.putObject("clientCertificateConfig")
+                    .put("clientCertificateCallbackArn", configuration.getClientCertificateCallbackArn());
+        }
+        return response;
     }
 
     private Map<String, String> parseAttributes(String body) {

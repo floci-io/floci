@@ -72,6 +72,22 @@ Behavior notes:
   invoke the authorizer Lambda and does not verify token signatures, so custom authorization is not
   enforced at the MQTT or HTTP data plane.
 
+## Domain Configurations
+
+Status: control plane implemented; no alternate endpoint is served.
+
+Supported operations: `CreateDomainConfiguration`, `DescribeDomainConfiguration`,
+`UpdateDomainConfiguration`, `DeleteDomainConfiguration`, and `ListDomainConfigurations` (with the
+`serviceType` query filter), plus `tags` on create through the shared `/tags` path.
+
+Behavior notes:
+
+- A configuration is `ENABLED` from the first read. Omitting `domainName` yields an AWS-managed
+  endpoint domain and `domainType` `AWS_MANAGED`; supplying one yields `CUSTOMER_MANAGED`.
+- `DeleteDomainConfiguration` requires the configuration to be `DISABLED` first, matching AWS.
+- Server certificates are recorded and reported as `VALID` without being fetched or validated, and
+  Floci does not actually serve the configured domain, so connecting to it is not possible.
+
 ## MQTT Broker
 
 Status: complete.
