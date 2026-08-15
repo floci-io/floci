@@ -26,6 +26,8 @@ import java.nio.file.Path;
 public class OpenSearchDomainManager {
 
     private static final Logger LOG = Logger.getLogger(OpenSearchDomainManager.class);
+    /** Sentinel for the in-container path, which publishes no host port to release. */
+    private static final int NO_HOST_PORT = -1;
     private static final int OPENSEARCH_PORT = 9200;
 
     private final ContainerBuilder containerBuilder;
@@ -119,8 +121,9 @@ public class OpenSearchDomainManager {
         // NeptuneContainerManager.start / MemoryDbContainerManager.start. This
         // domain's own container follows the same pattern below instead of the
         // name-based URL construction it used before.
+        int hostPort = NO_HOST_PORT;
         if (!containerDetector.isRunningInContainer()) {
-            int hostPort = portAllocator.allocate(
+            hostPort = portAllocator.allocate(
                     config.services().opensearch().proxyBasePort(),
                     config.services().opensearch().proxyMaxPort());
             specBuilder.withPortBinding(OPENSEARCH_PORT, hostPort);
@@ -152,7 +155,9 @@ public class OpenSearchDomainManager {
         try {
             info = lifecycleManager.createAndStart(spec);
         } catch (RuntimeException e) {
-            portAllocator.release(hostPort);
+            if (hostPort != NO_HOST_PORT) {
+                portAllocator.release(hostPort);
+            }
             throw e;
         }
         domain.setContainerId(info.containerId());
