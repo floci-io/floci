@@ -205,6 +205,58 @@ public class AmpController {
         return Response.status(202).build();
     }
 
+    // ─────────────── Workspace logging configurations ───────────────
+
+    @POST
+    @Path("/workspaces/{workspaceId}/logging")
+    public Response createLoggingConfiguration(@PathParam("workspaceId") String workspaceId,
+                                               @Context HttpHeaders headers, String body) {
+        return upsertLoggingConfiguration(workspaceId, headers, body);
+    }
+
+    @PUT
+    @Path("/workspaces/{workspaceId}/logging")
+    public Response updateLoggingConfiguration(@PathParam("workspaceId") String workspaceId,
+                                               @Context HttpHeaders headers, String body) {
+        return upsertLoggingConfiguration(workspaceId, headers, body);
+    }
+
+    private Response upsertLoggingConfiguration(String workspaceId, HttpHeaders headers, String body) {
+        String region = regionResolver.resolveRegion(headers);
+        JsonNode request = readTree(body);
+        ampService.createLoggingConfiguration(workspaceId,
+                request.path("logGroupArn").asText(null), region);
+        return Response.status(202).entity(statusResponse(ACTIVE)).build();
+    }
+
+    @GET
+    @Path("/workspaces/{workspaceId}/logging")
+    public Response describeLoggingConfiguration(@PathParam("workspaceId") String workspaceId,
+                                                 @Context HttpHeaders headers) {
+        String region = regionResolver.resolveRegion(headers);
+        PrometheusWorkspace workspace = ampService.describeLoggingConfiguration(workspaceId, region);
+
+        ObjectNode configuration = objectMapper.createObjectNode();
+        configuration.set("status", status(ACTIVE));
+        configuration.put("workspace", workspace.getWorkspaceId());
+        configuration.put("logGroupArn", workspace.getLoggingLogGroupArn());
+        configuration.put("createdAt", workspace.getLoggingCreatedAt().getEpochSecond());
+        configuration.put("modifiedAt", workspace.getLoggingModifiedAt().getEpochSecond());
+
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("loggingConfiguration", configuration);
+        return Response.ok(response).build();
+    }
+
+    @DELETE
+    @Path("/workspaces/{workspaceId}/logging")
+    public Response deleteLoggingConfiguration(@PathParam("workspaceId") String workspaceId,
+                                               @Context HttpHeaders headers) {
+        String region = regionResolver.resolveRegion(headers);
+        ampService.deleteLoggingConfiguration(workspaceId, region);
+        return Response.status(202).build();
+    }
+
     // ──────────────────────────── Scrapers ────────────────────────────
 
     @POST

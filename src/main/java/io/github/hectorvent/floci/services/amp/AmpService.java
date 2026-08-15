@@ -153,6 +153,49 @@ public class AmpService implements TagHandler {
         workspaces.put(region + "::" + workspaceId, workspace);
     }
 
+    // ─────────────── Workspace logging configurations ───────────────
+    //
+    // The workspace-level logging configuration (CloudWatch log group for
+    // rule evaluation logs) is distinct from the query logging above. The
+    // Terraform provider's workspace read probes DescribeLoggingConfiguration
+    // unconditionally, so the not-found case must be a proper
+    // ResourceNotFoundException - the fallback UnknownOperationException
+    // failed every aws_prometheus_workspace apply (choudoufu#124's aps
+    // cohort).
+
+    public PrometheusWorkspace createLoggingConfiguration(String workspaceId, String logGroupArn,
+                                                          String region) {
+        if (logGroupArn == null || logGroupArn.isBlank()) {
+            throw new AwsException("ValidationException", "logGroupArn is required", 400);
+        }
+        PrometheusWorkspace workspace = describeWorkspace(workspaceId, region);
+        Instant now = Instant.now();
+        if (workspace.getLoggingCreatedAt() == null) {
+            workspace.setLoggingCreatedAt(now);
+        }
+        workspace.setLoggingLogGroupArn(logGroupArn);
+        workspace.setLoggingModifiedAt(now);
+        workspaces.put(region + "::" + workspaceId, workspace);
+        return workspace;
+    }
+
+    public PrometheusWorkspace describeLoggingConfiguration(String workspaceId, String region) {
+        PrometheusWorkspace workspace = describeWorkspace(workspaceId, region);
+        if (workspace.getLoggingLogGroupArn() == null) {
+            throw new AwsException("ResourceNotFoundException",
+                    "Logging configuration for workspace " + workspaceId + " does not exist.", 404);
+        }
+        return workspace;
+    }
+
+    public void deleteLoggingConfiguration(String workspaceId, String region) {
+        PrometheusWorkspace workspace = describeLoggingConfiguration(workspaceId, region);
+        workspace.setLoggingLogGroupArn(null);
+        workspace.setLoggingCreatedAt(null);
+        workspace.setLoggingModifiedAt(null);
+        workspaces.put(region + "::" + workspaceId, workspace);
+    }
+
     // ──────────────────────────── Scrapers ────────────────────────────
 
     public PrometheusScraper createScraper(String alias, JsonNode scrapeConfiguration, JsonNode source,

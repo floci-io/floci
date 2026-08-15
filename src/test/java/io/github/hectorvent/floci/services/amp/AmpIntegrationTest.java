@@ -226,4 +226,57 @@ class AmpIntegrationTest {
             .statusCode(404)
             .body("__type", equalTo("ResourceNotFoundException"));
     }
+    @Test
+    @Order(20)
+    void loggingConfigurationNotFoundIsResourceNotFound() {
+        // The provider's workspace read probes DescribeLoggingConfiguration
+        // unconditionally and tolerates only ResourceNotFoundException - the
+        // fallback UnknownOperationException failed every workspace apply
+        // (choudoufu#124's aps cohort).
+        var created = given()
+            .contentType("application/json")
+            .body("{\"alias\": \"logging-probe\"}")
+        .when()
+            .post("/workspaces")
+        .then()
+            .statusCode(202)
+            .extract();
+        String workspaceId = created.path("workspaceId");
+
+        given()
+        .when()
+            .get("/workspaces/" + workspaceId + "/logging")
+        .then()
+            .statusCode(404)
+            .body("__type", equalTo("ResourceNotFoundException"));
+
+        given()
+            .contentType("application/json")
+            .body("{\"logGroupArn\": \"arn:aws:logs:us-east-1:000000000000:log-group:probe\"}")
+        .when()
+            .post("/workspaces/" + workspaceId + "/logging")
+        .then()
+            .statusCode(202);
+
+        given()
+        .when()
+            .get("/workspaces/" + workspaceId + "/logging")
+        .then()
+            .statusCode(200)
+            .body("loggingConfiguration.logGroupArn",
+                    equalTo("arn:aws:logs:us-east-1:000000000000:log-group:probe"))
+            .body("loggingConfiguration.status.statusCode", equalTo("ACTIVE"));
+
+        given()
+        .when()
+            .delete("/workspaces/" + workspaceId + "/logging")
+        .then()
+            .statusCode(202);
+
+        given()
+        .when()
+            .delete("/workspaces/" + workspaceId)
+        .then()
+            .statusCode(202);
+    }
 }

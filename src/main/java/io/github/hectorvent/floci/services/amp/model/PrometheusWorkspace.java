@@ -24,6 +24,10 @@ public class PrometheusWorkspace {
     private Instant queryLoggingCreatedAt;
     private Instant queryLoggingModifiedAt;
 
+    private String loggingLogGroupArn;
+    private Instant loggingCreatedAt;
+    private Instant loggingModifiedAt;
+
     public String getWorkspaceId() {
         return workspaceId;
     }
@@ -134,5 +138,28 @@ public class PrometheusWorkspace {
 
     public void setQueryLoggingModifiedAt(Instant queryLoggingModifiedAt) {
         this.queryLoggingModifiedAt = queryLoggingModifiedAt;
+    }
+    public String getLoggingLogGroupArn() {
+        return loggingLogGroupArn;
+    }
+
+    public void setLoggingLogGroupArn(String loggingLogGroupArn) {
+        this.loggingLogGroupArn = loggingLogGroupArn;
+    }
+
+    public Instant getLoggingCreatedAt() {
+        return loggingCreatedAt;
+    }
+
+    public void setLoggingCreatedAt(Instant loggingCreatedAt) {
+        this.loggingCreatedAt = loggingCreatedAt;
+    }
+
+    public Instant getLoggingModifiedAt() {
+        return loggingModifiedAt;
+    }
+
+    public void setLoggingModifiedAt(Instant loggingModifiedAt) {
+        this.loggingModifiedAt = loggingModifiedAt;
     }
 }
