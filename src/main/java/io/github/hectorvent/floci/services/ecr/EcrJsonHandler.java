@@ -30,11 +30,15 @@ import java.util.Map;
 public class EcrJsonHandler {
 
     private final EcrService service;
+    private final EcrRegistryPolicyService registryPolicyService;
     private final ObjectMapper objectMapper;
 
     @Inject
-    public EcrJsonHandler(EcrService service, ObjectMapper objectMapper) {
+    public EcrJsonHandler(EcrService service,
+                          EcrRegistryPolicyService registryPolicyService,
+                          ObjectMapper objectMapper) {
         this.service = service;
+        this.registryPolicyService = registryPolicyService;
         this.objectMapper = objectMapper;
     }
 
@@ -60,6 +64,9 @@ public class EcrJsonHandler {
             case "SetRepositoryPolicy" -> handleSetRepositoryPolicy(request, region);
             case "GetRepositoryPolicy" -> handleGetRepositoryPolicy(request, region);
             case "DeleteRepositoryPolicy" -> handleDeleteRepositoryPolicy(request, region);
+            case "PutRegistryPolicy" -> handlePutRegistryPolicy(request, region);
+            case "GetRegistryPolicy" -> handleGetRegistryPolicy(region);
+            case "DeleteRegistryPolicy" -> handleDeleteRegistryPolicy(region);
             default -> Response.status(400)
                     .entity(new AwsErrorResponse("UnsupportedOperation",
                             "Operation " + action + " is not supported."))
@@ -357,6 +364,26 @@ public class EcrJsonHandler {
         ObjectNode response = objectMapper.createObjectNode();
         response.put("registryId", r.getRegistryId());
         response.put("repositoryName", r.getRepositoryName());
+        return Response.ok(response).build();
+    }
+
+    private Response handlePutRegistryPolicy(JsonNode request, String region) {
+        String policyText = request.path("policyText").asText(null);
+        return registryPolicyResponse(registryPolicyService.put(region, policyText));
+    }
+
+    private Response handleGetRegistryPolicy(String region) {
+        return registryPolicyResponse(registryPolicyService.get(region));
+    }
+
+    private Response handleDeleteRegistryPolicy(String region) {
+        return registryPolicyResponse(registryPolicyService.delete(region));
+    }
+
+    private Response registryPolicyResponse(String policyText) {
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("registryId", registryPolicyService.registryId());
+        response.put("policyText", policyText);
         return Response.ok(response).build();
     }
 
