@@ -89,6 +89,19 @@ public class MediaLiveService implements TagHandler {
         return programs.scan(k -> k.startsWith(multiplexId + "/")).size();
     }
 
+    // ─────────────────── Listings (Cloud Control bridge) ──────────────────
+
+    /**
+     * All multiplexes except those in state DELETED: a deleted multiplex stays
+     * readable for the SDK's waiter (see the class doc) but must not be
+     * enumerated as live.
+     */
+    public List<MediaLiveMultiplex> listMultiplexes() {
+        return multiplexes.scan(k -> true).stream()
+                .filter(m -> !"DELETED".equals(m.getState()))
+                .toList();
+    }
+
     // ──────────────────────────── Programs ────────────────────────────
 
     public MediaLiveMultiplexProgram createProgram(String multiplexId, String programName,

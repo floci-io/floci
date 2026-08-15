@@ -58,7 +58,12 @@ public class MediaPackageService implements TagHandler {
         MediaPackageChannel channel = new MediaPackageChannel();
         channel.setId(id);
         channel.setArn(regionResolver.buildArn("mediapackage", region, "channels/" + uuid()));
-        channel.setDescription(description != null ? description : "");
+        // Null stays null, the same round-trip rule MediaPackageV2Service
+        // states: Terraform rejects a create that echoes "" for a
+        // description it never sent. (The provider's own schema defaults
+        // this field, so it is normally present - this guards the direct-SDK
+        // path.)
+        channel.setDescription(description);
         channel.setCreatedAt(Instant.now().toString());
         channel.setTags(tags != null ? new HashMap<>(tags) : new HashMap<>());
         channel.setHlsIngest(hlsIngest(region));

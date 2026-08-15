@@ -81,6 +81,25 @@ class MediaPackageV2IntegrationTest {
 
     @Test
     @Order(5)
+    void omittedDescriptionStaysNull() {
+        given()
+            .contentType("application/json")
+            .body("{\"ChannelGroupName\": \"no-desc-group\"}")
+        .when()
+            .post("/channelGroup")
+        .then()
+            .statusCode(200)
+            .body("Description", nullValue());
+
+        given()
+        .when()
+            .delete("/channelGroup/no-desc-group")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    @Order(6)
     void deleteChannelGroup() {
         given()
         .when()

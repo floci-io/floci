@@ -55,7 +55,10 @@ public class MediaPackageV2Service implements TagHandler {
         group.setArn(regionResolver.buildArn("mediapackagev2", region, "channelGroup/" + name));
         group.setEgressDomain(randomId() + ".egress." + randomId() + ".mediapackagev2." + region
                 + ".amazonaws.com");
-        group.setDescription(description != null ? description : "");
+        // Null stays null: Terraform's provider rejects a create that echoes
+        // "" for a description it never sent (".description: was null, but
+        // now cty.StringVal(\"\")" - an inconsistent-result apply error).
+        group.setDescription(description);
         group.setCreatedAt(now);
         group.setModifiedAt(now);
         group.setETag(UUID.randomUUID().toString().replace("-", ""));

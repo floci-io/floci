@@ -162,6 +162,20 @@ public class IvsService implements TagHandler {
         LOG.infov("Deleted IVS recording configuration: {0}", arn);
     }
 
+    // ─────────────────── Listings (Cloud Control bridge) ──────────────────
+
+    public List<IvsChannel> listChannels() {
+        return channels.scan(k -> true);
+    }
+
+    public List<IvsPlaybackKeyPair> listPlaybackKeyPairs() {
+        return keyPairs.scan(k -> true);
+    }
+
+    public List<IvsRecordingConfiguration> listRecordingConfigurations() {
+        return recordingConfigurations.scan(k -> true);
+    }
+
     // ──────────────────────────── Tags ────────────────────────────
 
     @Override

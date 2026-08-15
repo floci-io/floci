@@ -144,6 +144,16 @@ public class IvschatService implements TagHandler {
                 .findFirst();
     }
 
+    // ─────────────────── Listings (Cloud Control bridge) ──────────────────
+
+    public List<IvschatRoom> listRooms() {
+        return rooms.scan(k -> true);
+    }
+
+    public List<IvschatLoggingConfiguration> listLoggingConfigurations() {
+        return loggingConfigurations.scan(k -> true);
+    }
+
     // ──────────────────────────── Tags ────────────────────────────
 
     @Override

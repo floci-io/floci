@@ -83,7 +83,9 @@ public class MediaPackageV2Controller {
         node.put("CreatedAt", group.getCreatedAt());
         node.put("ModifiedAt", group.getModifiedAt());
         node.put("ETag", group.getETag());
-        node.put("Description", group.getDescription());
+        if (group.getDescription() != null) {
+            node.put("Description", group.getDescription());
+        }
         node.set(tagsKey, objectMapper.valueToTree(group.getTags()));
         return node;
     }

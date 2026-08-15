@@ -19,6 +19,10 @@ import io.github.hectorvent.floci.services.ec2.model.Vpc;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
 import io.github.hectorvent.floci.services.iam.model.IamUser;
+import io.github.hectorvent.floci.services.ivs.IvsService;
+import io.github.hectorvent.floci.services.ivschat.IvschatService;
+import io.github.hectorvent.floci.services.medialive.MediaLiveService;
+import io.github.hectorvent.floci.services.medialive.model.MediaLiveMultiplex;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.Bucket;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -40,6 +44,9 @@ public class CloudControlService {
     private final Ec2Service ec2Service;
     private final IamService iamService;
     private final CloudFormationResourceProvisioner provisioner;
+    private final IvsService ivsService;
+    private final IvschatService ivschatService;
+    private final MediaLiveService mediaLiveService;
     private final ObjectMapper mapper;
     /** How many finished request tokens to keep before evicting the oldest. */
     private static final int MAX_RETAINED_REQUESTS = 1000;
@@ -81,11 +88,15 @@ public class CloudControlService {
     @Inject
     public CloudControlService(S3Service s3Service, Ec2Service ec2Service,
                                IamService iamService, CloudFormationResourceProvisioner provisioner,
-                               ObjectMapper mapper) {
+                               IvsService ivsService, IvschatService ivschatService,
+                               MediaLiveService mediaLiveService, ObjectMapper mapper) {
         this.s3Service = s3Service;
         this.ec2Service = ec2Service;
         this.iamService = iamService;
         this.provisioner = provisioner;
+        this.ivsService = ivsService;
+        this.ivschatService = ivschatService;
+        this.mediaLiveService = mediaLiveService;
         this.mapper = mapper;
     }
 
@@ -264,6 +275,17 @@ public class CloudControlService {
             case "AWS::EC2::Instance" -> instances(region);
             case "AWS::EC2::LaunchTemplate" -> launchTemplates(region);
             case "AWS::IAM::InstanceProfile" -> instanceProfiles();
+            case "AWS::IVS::Channel" -> arnListed(ivsService.listChannels(), c -> c.getArn(),
+                    c -> c.getName(), c -> c.getTags());
+            case "AWS::IVS::PlaybackKeyPair" -> arnListed(ivsService.listPlaybackKeyPairs(),
+                    k -> k.getArn(), k -> k.getName(), k -> k.getTags());
+            case "AWS::IVS::RecordingConfiguration" -> arnListed(ivsService.listRecordingConfigurations(),
+                    r -> r.getArn(), r -> r.getName(), r -> r.getTags());
+            case "AWS::IVSChat::Room" -> arnListed(ivschatService.listRooms(),
+                    r -> r.getArn(), r -> r.getName(), r -> r.getTags());
+            case "AWS::IVSChat::LoggingConfiguration" -> arnListed(ivschatService.listLoggingConfigurations(),
+                    l -> l.getArn(), l -> null, l -> l.getTags());
+            case "AWS::MediaLive::Multiplex" -> multiplexes();
             default -> List.of();
         };
     }
@@ -436,4 +458,53 @@ public class CloudControlService {
     }
 
     public record ResourceDescription(String identifier, String properties) {}
+    /**
+     * Shared shape for the ARN-identified media types (issue choudoufu#124):
+     * identifier is the resource's ARN (each type's CFN primaryIdentifier),
+     * and Properties carries Arn, Name when the model has one, and the CFN
+     * Tags list so a Cloud Control listing is enough for a tag-reading
+     * client without a GetResource per candidate.
+     */
+    private <T> List<ResourceDescription> arnListed(List<T> items,
+            java.util.function.Function<T, String> arn,
+            java.util.function.Function<T, String> name,
+            java.util.function.Function<T, Map<String, String>> tags) {
+        List<ResourceDescription> resources = new ArrayList<>();
+        for (T item : items) {
+            ObjectNode properties = mapper.createObjectNode();
+            properties.put("Arn", arn.apply(item));
+            String n = name.apply(item);
+            if (n != null && !n.isEmpty()) {
+                properties.put("Name", n);
+            }
+            putTagsList(properties, tags.apply(item));
+            resources.add(new ResourceDescription(arn.apply(item), propertiesString(properties)));
+        }
+        return resources;
+    }
+
+    private List<ResourceDescription> multiplexes() {
+        List<ResourceDescription> resources = new ArrayList<>();
+        for (MediaLiveMultiplex m : mediaLiveService.listMultiplexes()) {
+            ObjectNode properties = mapper.createObjectNode();
+            properties.put("Id", m.getId());
+            putIfPresent(properties, "Arn", m.getArn());
+            putIfPresent(properties, "Name", m.getName());
+            putIfPresent(properties, "State", m.getState());
+            putTagsList(properties, m.getTags());
+            resources.add(new ResourceDescription(m.getId(), propertiesString(properties)));
+        }
+        return resources;
+    }
+
+    private void putTagsList(ObjectNode properties, Map<String, String> tags) {
+        var list = properties.putArray("Tags");
+        if (tags != null) {
+            tags.forEach((k, v) -> {
+                ObjectNode entry = list.addObject();
+                entry.put("Key", k);
+                entry.put("Value", v);
+            });
+        }
+    }
 }
