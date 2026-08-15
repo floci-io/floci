@@ -428,7 +428,7 @@ public class ResolvedServiceCatalog {
                         // iot-jobs-data: the IoT Jobs Data Plane (GetPendingJobExecutions,
                         // DescribeJobExecution, StartNextPendingJobExecution, UpdateJobExecution)
                         // signs under its own name while IotController serves its /things/*/jobs routes
-                        Set.of(), Set.of("iot", "execute-api", "iot-jobs-data"), Set.of(),
+                        Set.of(), Set.of("iot", "iot-jobs-data"), Set.of(),
                         Set.of(IotController.class)),
                 descriptor("iotdata", "iotdata", config.services().iotdata().enabled(), true,
                         "iot", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
@@ -477,7 +477,12 @@ public class ResolvedServiceCatalog {
                 descriptor("bedrock", "bedrock", config.services().bedrock().enabled(), true,
                         "bedrock", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
-                        Set.of(), Set.of("bedrock"), Set.of(),
+                        // The control plane and bedrock-runtime share the signing name
+                        // "bedrock", and credential-scope registration is last-write-wins.
+                        // bedrock-runtime already claims it; claiming it again here would
+                        // silently move its enablement resolution. Requests that match this
+                        // controller resolve through resourceClasses, which is checked first.
+                        Set.of(), Set.of(), Set.of(),
                         Set.of(io.github.hectorvent.floci.services.bedrock.BedrockController.class)),
                 descriptor("apprunner", "apprunner", config.services().apprunner().enabled(), true,
                         "apprunner", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
