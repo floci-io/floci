@@ -71,7 +71,7 @@ class SesServiceListManagementTest {
                 new InMemoryStorage<String, ContactList>(),
                 contactStore,
                 new InMemoryStorage<String, String>(),
-                new InMemoryStorage<String, ReceiptRuleSet>(),
+                new SesReceiptRuleService(new InMemoryStorage<String, ReceiptRuleSet>(), Clock.systemUTC()),
                 new InMemoryStorage<String, CustomVerificationEmailTemplate>(),
                 smtpRelay,
                 new ObjectMapper(),

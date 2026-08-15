@@ -50,7 +50,7 @@ class SesServiceSmtpTest {
                 new InMemoryStorage<String, ContactList>(),
                 new InMemoryStorage<String, Contact>(),
                 new InMemoryStorage<String, String>(),
-                new InMemoryStorage<String, ReceiptRuleSet>(),
+                new SesReceiptRuleService(new InMemoryStorage<String, ReceiptRuleSet>(), Clock.systemUTC()),
                 new InMemoryStorage<String, CustomVerificationEmailTemplate>(),
                 smtpRelay,
                 new ObjectMapper(),
