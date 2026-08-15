@@ -1570,19 +1570,24 @@ public class Ec2QueryHandler {
         return xmlResponse(xml.build());
     }
 
-    /** Build an AMI that satisfies a lookup's name-wildcard + owner/arch filters.
-     * Deterministic id (pattern hash) so repeated lookups resolve identically. */
-    /** Stands in for a wildcard when turning a lookup pattern into a concrete name. */
+    /** Stands in for a {@code *} when turning a lookup pattern into a concrete name. */
     private static final String SYNTH_WILDCARD_TOKEN = "20260101";
+
+    /** Stands in for a {@code ?}, which matches exactly one character. */
+    private static final String SYNTH_SINGLE_CHAR_TOKEN = "0";
 
     /** The requested value for a scalar filter, so the synthesized image satisfies it. */
     private static String firstFilterValue(Map<String, List<String>> filters, String name, String fallback) {
         return filters.getOrDefault(name, List.of()).stream()
-                .filter(v -> v != null && !v.contains("*"))
+                .filter(v -> v != null && !v.contains("*") && !v.contains("?"))
                 .findFirst()
                 .orElse(fallback);
     }
 
+    /**
+     * Builds an AMI that satisfies a lookup's name wildcard and its owner and architecture filters.
+     * The id is a hash of the pattern, so repeated lookups resolve to the same image.
+     */
     private Image synthesizeLookupImage(String namePattern, Map<String, List<String>> filters, List<String> owners) {
         Image img = new Image();
         // 17 hex chars after "ami-", deterministic from the pattern.
@@ -1591,8 +1596,11 @@ public class Ec2QueryHandler {
         img.setImageId("ami-" + id17);
         // Substitute each wildcard rather than truncating at the first one, so an infix pattern
         // like ubuntu-*-20.04-* yields a name that still satisfies it. Truncating produced
-        // "ubuntu-20260101", which does not.
-        img.setName(namePattern.replace("*", SYNTH_WILDCARD_TOKEN));
+        // "ubuntu-20260101", which does not. A ? takes exactly one character, so leaving it in
+        // place would hand back a name the requesting filter no longer matches.
+        img.setName(namePattern
+                .replace("*", SYNTH_WILDCARD_TOKEN)
+                .replace("?", SYNTH_SINGLE_CHAR_TOKEN));
         img.setState(firstFilterValue(filters, "state", "available"));
         String owner = filters.getOrDefault("owner-id", owners).stream().findFirst().orElse("137112412989");
         img.setOwnerId(owner);

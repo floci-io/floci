@@ -2616,15 +2616,25 @@ public class Ec2Service implements ContainerTeardown {
         return patterns.stream().anyMatch(pattern -> wildcardMatches(pattern, value));
     }
 
+    /**
+     * AWS filter values take two wildcards, {@code *} for any run of characters and {@code ?} for
+     * exactly one. Only {@code *} was honoured here, so a {@code ?} was matched literally and a
+     * pattern like {@code ubuntu-?} found nothing, while {@link #wildcardToRegex} a few hundred
+     * lines down already treated both.
+     */
     private boolean wildcardMatches(String pattern, String value) {
         if (pattern == null) {
             return false;
         }
-        if (!pattern.contains("*")) {
+        if (!pattern.contains("*") && !pattern.contains("?")) {
             return pattern.equals(value);
         }
         String regex = pattern.chars()
-                .mapToObj(ch -> ch == '*' ? ".*" : java.util.regex.Pattern.quote(String.valueOf((char) ch)))
+                .mapToObj(ch -> switch (ch) {
+                    case '*' -> ".*";
+                    case '?' -> ".";
+                    default -> java.util.regex.Pattern.quote(String.valueOf((char) ch));
+                })
                 .collect(Collectors.joining());
         return value.matches(regex);
     }

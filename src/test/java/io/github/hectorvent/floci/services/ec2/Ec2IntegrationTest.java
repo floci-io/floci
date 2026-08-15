@@ -2,18 +2,18 @@ package io.github.hectorvent.floci.services.ec2;
 
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.containsString;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.hamcrest.Matchers.not;
+import static org.hamcrest.Matchers.endsWith;
 import static org.hamcrest.Matchers.emptyOrNullString;
 import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.everyItem;
 import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.greaterThanOrEqualTo;
-import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.startsWith;
-import static org.hamcrest.Matchers.containsString;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -244,6 +244,30 @@ class Ec2IntegrationTest {
 
         assertThat(name, startsWith("unmatched-vendor-"));
         assertThat(name, containsString("-20.04-"));
+    }
+
+    @Test
+    @Order(9)
+    void synthesizedLookupImageSatisfiesASingleCharacterWildcard() {
+        // ? matches exactly one character in an AWS filter. Leaving it in the synthesized name
+        // handed back "unmatched-vendor-?", which the requesting filter does not match once the
+        // matcher reads ? as a wildcard rather than a literal.
+        String name = given()
+            .formParam("Action", "DescribeImages")
+            .formParam("Filter.1.Name", "name")
+            .formParam("Filter.1.Value.1", "unmatched-vendor-?-single")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeImagesResponse.imagesSet.item.size()", equalTo(1))
+            .extract().path("DescribeImagesResponse.imagesSet.item.name");
+
+        assertThat(name, not(containsString("?")));
+        assertThat(name, startsWith("unmatched-vendor-"));
+        assertThat(name, endsWith("-single"));
+        assertEquals("unmatched-vendor-".length() + 1 + "-single".length(), name.length());
     }
 
     @Test
