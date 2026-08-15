@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.bedrockagentcorecontrol;
 
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.TagHandler;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -19,12 +20,15 @@ public class BedrockAgentCoreTagHandler implements TagHandler {
 
     private final BedrockAgentCoreControlService runtimeService;
     private final BedrockAgentCoreGatewayService gatewayService;
+    private final EmulatorConfig config;
 
     @Inject
     public BedrockAgentCoreTagHandler(BedrockAgentCoreControlService runtimeService,
-                                      BedrockAgentCoreGatewayService gatewayService) {
+                                      BedrockAgentCoreGatewayService gatewayService,
+                                      EmulatorConfig config) {
         this.runtimeService = runtimeService;
         this.gatewayService = gatewayService;
+        this.config = config;
     }
 
     @Override
@@ -34,13 +38,13 @@ public class BedrockAgentCoreTagHandler implements TagHandler {
 
     @Override
     public Map<String, String> listTags(String region, String arn) {
-        return isGateway(arn) ? gatewayService.getTagsByArn(region, arn)
+        return isGateway(region, arn) ? gatewayService.getTagsByArn(region, arn)
                 : runtimeService.getTagsByArn(region, arn);
     }
 
     @Override
     public void tagResource(String region, String arn, Map<String, String> tags) {
-        if (isGateway(arn)) {
+        if (isGateway(region, arn)) {
             gatewayService.tagByArn(region, arn, tags);
         } else {
             runtimeService.tagByArn(region, arn, tags);
@@ -49,23 +53,41 @@ public class BedrockAgentCoreTagHandler implements TagHandler {
 
     @Override
     public void untagResource(String region, String arn, List<String> tagKeys) {
-        if (isGateway(arn)) {
+        if (isGateway(region, arn)) {
             gatewayService.untagByArn(region, arn, tagKeys);
         } else {
             runtimeService.untagByArn(region, arn, tagKeys);
         }
     }
 
-    private static boolean isGateway(String arn) {
+    private boolean isGateway(String region, String arn) {
         String[] parts = arn == null ? new String[0] : arn.split(":");
-        if (parts.length >= 6 && parts[5].startsWith("gateway/")) {
+        if (parts.length < 6) {
+            throw new AwsException("ValidationException",
+                    "Tagging is not supported for this AgentCore resource: " + arn, 400);
+        }
+        requireLocalIdentity(region, arn, parts);
+        if (parts[5].startsWith("gateway/")) {
             return true;
         }
-        if (parts.length >= 6 && parts[5].startsWith("agent/")) {
+        if (parts[5].startsWith("agent/")) {
             return false;
         }
         // Neither runtime nor gateway → not a taggable AgentCore resource.
         throw new AwsException("ValidationException",
                 "Tagging is not supported for this AgentCore resource: " + arn, 400);
+    }
+
+    /**
+     * Both services resolve a resource from the ARN's id suffix alone, so without this a caller
+     * could reach a local runtime or gateway through an ARN naming another account or region and
+     * read or change its tags. Reported as not found rather than a validation error, so the
+     * response does not confirm what exists behind the foreign identity.
+     */
+    private void requireLocalIdentity(String region, String arn, String[] parts) {
+        if (!region.equals(parts[3]) || !config.defaultAccountId().equals(parts[4])) {
+            throw new AwsException("ResourceNotFoundException",
+                    "AgentCore resource not found: " + arn, 404);
+        }
     }
 }

@@ -59,6 +59,22 @@ class BedrockAgentCoreTaggingIdentityIntegrationTest {
     }
 
     @Test
+    @Order(2)
+    void aForeignAccountOrRegionInTheArnDoesNotReachTheLocalResource() {
+        // Both services resolve from the id suffix alone, so without an identity check these
+        // reach the same local runtime and expose its tags through someone else's ARN.
+        String foreignAccount = runtimeArn.replace(":000000000000:", ":111111111111:");
+        String foreignRegion = runtimeArn.replace(":us-east-1:", ":eu-west-1:");
+
+        given().when().get("/tags/" + foreignAccount).then().statusCode(404);
+        given().when().get("/tags/" + foreignRegion).then().statusCode(404);
+
+        given().contentType("application/json").body("{\"tags\":{\"env\":\"stolen\"}}")
+                .when().post("/tags/" + foreignAccount)
+                .then().statusCode(404);
+    }
+
+    @Test
     @Order(3)
     void workloadIdentityCrud() {
         given().contentType("application/json").body("{\"name\":\"wid_test_1\"}")

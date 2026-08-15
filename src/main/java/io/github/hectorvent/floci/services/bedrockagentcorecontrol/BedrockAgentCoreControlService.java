@@ -325,6 +325,7 @@ public class BedrockAgentCoreControlService {
         }
         String version = agentRuntimeVersion != null ? agentRuntimeVersion
                 : String.valueOf(runtime.getLatestVersion());
+        requirePublishedVersion(runtime, version);
         AgentRuntimeEndpoint endpoint = newEndpoint(name, version, description, Instant.now());
         endpoint.setClientToken(clientToken);
         runtime.getEndpoints().add(endpoint);
@@ -343,6 +344,7 @@ public class BedrockAgentCoreControlService {
         AgentRuntime runtime = getAgentRuntime(runtimeId, region);
         AgentRuntimeEndpoint endpoint = findEndpoint(runtime, name);
         if (agentRuntimeVersion != null) {
+            requirePublishedVersion(runtime, agentRuntimeVersion);
             endpoint.setTargetVersion(agentRuntimeVersion);
             endpoint.setLiveVersion(agentRuntimeVersion);
         }
@@ -352,6 +354,19 @@ public class BedrockAgentCoreControlService {
         endpoint.setLastUpdatedAt(Instant.now());
         storage.put(key(region, runtimeId), runtime);
         return endpoint;
+    }
+
+    /**
+     * An endpoint can only target a version the runtime actually published. Storing an unknown one
+     * produced a READY endpoint whose generated runtime ARN resolves to nothing.
+     */
+    private void requirePublishedVersion(AgentRuntime runtime, String version) {
+        boolean published = runtime.getVersions().stream()
+                .anyMatch(v -> version.equals(v.getVersion()));
+        if (!published) {
+            throw new AwsException("ValidationException",
+                    "AgentCore runtime has no version " + version, 400);
+        }
     }
 
     public AgentRuntimeEndpoint deleteEndpoint(String runtimeId, String name, String clientToken, String region) {

@@ -54,6 +54,21 @@ class BedrockAgentCoreEndpointIntegrationTest {
     }
 
     @Test
+    @Order(2)
+    void createEndpointOnAnUnpublishedVersionIsRejected() {
+        // Storing the version unchecked produced a READY endpoint whose generated runtime ARN
+        // resolves to nothing.
+        given().contentType("application/json")
+                .body("{\"name\":\"ghost\",\"agentRuntimeVersion\":\"99\"}")
+                .when().put("/runtimes/" + runtimeId + "/runtime-endpoints/")
+                .then().statusCode(400);
+
+        given().contentType("application/json")
+                .when().get("/runtimes/" + runtimeId + "/runtime-endpoints/ghost/")
+                .then().statusCode(404);
+    }
+
+    @Test
     @Order(3)
     void getEndpoint() {
         given().contentType("application/json")
@@ -72,6 +87,20 @@ class BedrockAgentCoreEndpointIntegrationTest {
                 .then().statusCode(200)
                 .body("runtimeEndpoints.name", hasItem("prod"))
                 .body("runtimeEndpoints.name", hasItem("DEFAULT"));
+    }
+
+    @Test
+    @Order(5)
+    void updateEndpointToAnUnpublishedVersionIsRejected() {
+        given().contentType("application/json").body("{\"agentRuntimeVersion\":\"99\"}")
+                .when().put("/runtimes/" + runtimeId + "/runtime-endpoints/prod/")
+                .then().statusCode(400);
+
+        // The endpoint keeps the version it had rather than pointing at one that does not exist.
+        given().contentType("application/json")
+                .when().get("/runtimes/" + runtimeId + "/runtime-endpoints/prod/")
+                .then().statusCode(200)
+                .body("targetVersion", equalTo("1"));
     }
 
     @Test
