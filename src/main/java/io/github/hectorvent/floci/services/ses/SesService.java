@@ -92,7 +92,6 @@ public class SesService {
     // Account suppression attributes + the per-address suppression list (two stores) extracted to
     // SesSuppressionService. The facade delegates; its send filters read via it.
     private final SesSuppressionService suppressionService;
-    private final StorageBackend<String, AccountVdmAttributes> accountVdmStore;
     private final StorageBackend<String, DedicatedIpPool> dedicatedIpPoolStore;
     // Contact lists and contacts (two stores) extracted to SesContactService. The
     // facade delegates, and its send-path list-management orchestration calls into the service.
@@ -133,8 +132,6 @@ public class SesService {
         this.configSetStore = storageFactory.create("ses", "ses-config-sets.json",
                 new TypeReference<Map<String, ConfigurationSet>>() {});
         this.suppressionService = suppressionService;
-        this.accountVdmStore = storageFactory.create("ses", "ses-account-vdm.json",
-                new TypeReference<Map<String, AccountVdmAttributes>>() {});
         this.dedicatedIpPoolStore = storageFactory.create("ses", "ses-dedicated-ip-pools.json",
                 new TypeReference<Map<String, DedicatedIpPool>>() {});
         this.contactService = contactService;
@@ -156,7 +153,6 @@ public class SesService {
                StorageBackend<String, EmailTemplate> templateStore,
                StorageBackend<String, ConfigurationSet> configSetStore,
                SesSuppressionService suppressionService,
-               StorageBackend<String, AccountVdmAttributes> accountVdmStore,
                StorageBackend<String, DedicatedIpPool> dedicatedIpPoolStore,
                SesContactService contactService,
                SesPolicyService policyService,
@@ -166,7 +162,7 @@ public class SesService {
                ObjectMapper objectMapper,
                Clock clock) {
         this(identityStore, emailStore, accountService, templateStore, configSetStore, suppressionService,
-                accountVdmStore, dedicatedIpPoolStore, contactService, policyService,
+                dedicatedIpPoolStore, contactService, policyService,
                 receiptRuleService, cvetService, smtpRelay, objectMapper, null, clock);
     }
 
@@ -176,7 +172,6 @@ public class SesService {
                StorageBackend<String, EmailTemplate> templateStore,
                StorageBackend<String, ConfigurationSet> configSetStore,
                SesSuppressionService suppressionService,
-               StorageBackend<String, AccountVdmAttributes> accountVdmStore,
                StorageBackend<String, DedicatedIpPool> dedicatedIpPoolStore,
                SesContactService contactService,
                SesPolicyService policyService,
@@ -192,7 +187,6 @@ public class SesService {
         this.templateStore = templateStore;
         this.configSetStore = configSetStore;
         this.suppressionService = suppressionService;
-        this.accountVdmStore = accountVdmStore;
         this.dedicatedIpPoolStore = dedicatedIpPoolStore;
         this.contactService = contactService;
         this.policyService = policyService;
@@ -1128,21 +1122,12 @@ public class SesService {
         accountService.setAccountSendingEnabled(region, enabled);
     }
 
-    // VDM (Virtual Deliverability Manager) is opt-in and per region: GetAccount omits VdmAttributes
-    // entirely until PutAccountVdmAttributes is called for the region, so this returns empty when the
-    // region was never configured. The whole tuple is stored under one region key so GetAccount never
-    // observes a partially updated state.
     public Optional<AccountVdmAttributes> findAccountVdmAttributes(String region) {
-        return accountVdmStore.get(accountVdmKey(region));
+        return accountService.findAccountVdmAttributes(region);
     }
 
     public void putAccountVdmAttributes(String region, AccountVdmAttributes vdm) {
-        accountVdmStore.put(accountVdmKey(region), vdm);
-        LOG.infov("Updated account VDM attributes for region {0}: enabled={1}", region, vdm.vdmEnabled());
-    }
-
-    private static String accountVdmKey(String region) {
-        return "account-vdm::" + region;
+        accountService.putAccountVdmAttributes(region, vdm);
     }
 
     public void setConfigurationSetSendingEnabled(String configSetName, boolean enabled, String region) {

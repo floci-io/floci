@@ -61,11 +61,10 @@ class SesServiceListManagementTest {
         service = new SesService(
                 new InMemoryStorage<String, Identity>(),
                 new InMemoryStorage<String, SentEmail>(),
-                new SesAccountService(new InMemoryStorage<String, Boolean>()),
+                new SesAccountService(new InMemoryStorage<String, Boolean>(), new InMemoryStorage<String, AccountVdmAttributes>()),
                 new InMemoryStorage<String, EmailTemplate>(),
                 new InMemoryStorage<String, ConfigurationSet>(),
                 new SesSuppressionService(new InMemoryStorage<String, SuppressedDestination>(), new InMemoryStorage<String, AccountSuppressionAttributes>()),
-                new InMemoryStorage<String, AccountVdmAttributes>(),
                 new InMemoryStorage<String, DedicatedIpPool>(),
                 new SesContactService(new InMemoryStorage<String, ContactList>(), contactStore, Clock.systemUTC()),
                 new SesPolicyService(new InMemoryStorage<String, String>(), new ObjectMapper()),

@@ -41,11 +41,10 @@ class SesServiceLegacyDkimTokensTest {
         service = new SesService(
                 identityStore,
                 new InMemoryStorage<String, SentEmail>(),
-                new SesAccountService(new InMemoryStorage<String, Boolean>()),
+                new SesAccountService(new InMemoryStorage<String, Boolean>(), new InMemoryStorage<String, AccountVdmAttributes>()),
                 new InMemoryStorage<String, EmailTemplate>(),
                 new InMemoryStorage<String, ConfigurationSet>(),
                 new SesSuppressionService(new InMemoryStorage<String, SuppressedDestination>(), new InMemoryStorage<String, AccountSuppressionAttributes>()),
-                new InMemoryStorage<String, AccountVdmAttributes>(),
                 new InMemoryStorage<String, DedicatedIpPool>(),
                 new SesContactService(new InMemoryStorage<String, ContactList>(), new InMemoryStorage<String, Contact>(), Clock.systemUTC()),
                 new SesPolicyService(new InMemoryStorage<String, String>(), new ObjectMapper()),
