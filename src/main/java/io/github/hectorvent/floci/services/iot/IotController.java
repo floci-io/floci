@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.services.iot.model.IotAuthorizer;
 import io.github.hectorvent.floci.services.iot.model.IotCertificate;
 import io.github.hectorvent.floci.services.iot.model.IotJob;
 import io.github.hectorvent.floci.services.iot.model.IotJobExecution;
@@ -134,6 +135,74 @@ public class IotController {
         } catch (JsonProcessingException e) {
             throw new AwsException("InvalidRequestException", e.getMessage(), 400);
         }
+    }
+
+    @POST
+    @Path("/authorizer/{authorizerName}")
+    public Response createAuthorizer(@Context HttpHeaders headers,
+                                     @PathParam("authorizerName") String authorizerName,
+                                     String body) {
+        IotAuthorizer authorizer = iotService.createAuthorizer(authorizerName, readBody(body),
+                regionResolver.resolveRegion(headers));
+        return Response.ok(buildAuthorizerReference(authorizer)).build();
+    }
+
+    @GET
+    @Path("/authorizer/{authorizerName}")
+    public Response describeAuthorizer(@Context HttpHeaders headers,
+                                       @PathParam("authorizerName") String authorizerName) {
+        IotAuthorizer authorizer = iotService.describeAuthorizer(authorizerName, regionResolver.resolveRegion(headers));
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("authorizerDescription", buildAuthorizerDescription(authorizer));
+        return Response.ok(response).build();
+    }
+
+    @PUT
+    @Path("/authorizer/{authorizerName}")
+    public Response updateAuthorizer(@Context HttpHeaders headers,
+                                     @PathParam("authorizerName") String authorizerName,
+                                     String body) {
+        IotAuthorizer authorizer = iotService.updateAuthorizer(authorizerName, readBody(body),
+                regionResolver.resolveRegion(headers));
+        return Response.ok(buildAuthorizerReference(authorizer)).build();
+    }
+
+    @DELETE
+    @Path("/authorizer/{authorizerName}")
+    @Consumes(MediaType.WILDCARD)
+    public Response deleteAuthorizer(@Context HttpHeaders headers,
+                                     @PathParam("authorizerName") String authorizerName) {
+        iotService.deleteAuthorizer(authorizerName, regionResolver.resolveRegion(headers));
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    @GET
+    @Path("/authorizers")
+    public Response listAuthorizers(@Context HttpHeaders headers,
+                                    @QueryParam("status") String status) {
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode authorizers = response.putArray("authorizers");
+        for (IotAuthorizer authorizer : iotService.listAuthorizers(regionResolver.resolveRegion(headers), status)) {
+            authorizers.add(buildAuthorizerReference(authorizer));
+        }
+        return Response.ok(response).build();
+    }
+
+    @POST
+    @Path("/default-authorizer")
+    public Response setDefaultAuthorizer(@Context HttpHeaders headers, String body) {
+        IotAuthorizer authorizer = iotService.setDefaultAuthorizer(
+                readBody(body).path("authorizerName").asText(null), regionResolver.resolveRegion(headers));
+        return Response.ok(buildAuthorizerReference(authorizer)).build();
+    }
+
+    @GET
+    @Path("/default-authorizer")
+    public Response describeDefaultAuthorizer(@Context HttpHeaders headers) {
+        IotAuthorizer authorizer = iotService.describeDefaultAuthorizer(regionResolver.resolveRegion(headers));
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("authorizerDescription", buildAuthorizerDescription(authorizer));
+        return Response.ok(response).build();
     }
 
     @POST
@@ -821,6 +890,34 @@ public class IotController {
                                      @PathParam("ruleName") String ruleName) {
         iotService.setTopicRuleEnabled(ruleName, false, regionResolver.resolveRegion(headers));
         return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private JsonNode readBody(String body) {
+        try {
+            return objectMapper.readTree(body == null || body.isBlank() ? "{}" : body);
+        } catch (JsonProcessingException e) {
+            throw new AwsException("InvalidRequestException", e.getMessage(), 400);
+        }
+    }
+
+    private ObjectNode buildAuthorizerReference(IotAuthorizer authorizer) {
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("authorizerName", authorizer.getAuthorizerName());
+        response.put("authorizerArn", authorizer.getAuthorizerArn());
+        return response;
+    }
+
+    private ObjectNode buildAuthorizerDescription(IotAuthorizer authorizer) {
+        ObjectNode description = buildAuthorizerReference(authorizer);
+        description.put("authorizerFunctionArn", authorizer.getAuthorizerFunctionArn());
+        description.put("tokenKeyName", authorizer.getTokenKeyName());
+        description.set("tokenSigningPublicKeys", objectMapper.valueToTree(authorizer.getTokenSigningPublicKeys()));
+        description.put("status", authorizer.getStatus());
+        description.put("signingDisabled", authorizer.isSigningDisabled());
+        description.put("enableCachingForHttp", authorizer.isEnableCachingForHttp());
+        putEpoch(description, "creationDate", authorizer.getCreationDate());
+        putEpoch(description, "lastModifiedDate", authorizer.getLastModifiedDate());
+        return description;
     }
 
     private Map<String, String> parseAttributes(String body) {
