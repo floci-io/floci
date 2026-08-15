@@ -209,6 +209,7 @@ class Ec2ServicePersistenceTest {
                 load(dir, "ec2-customer-gateways.json", new TypeReference<Map<String, CustomerGateway>>() {}),
                 load(dir, "ec2-vpn-gateways.json", new TypeReference<Map<String, VpnGateway>>() {}),
                 load(dir, "ec2-capacity-reservations.json", new TypeReference<Map<String, CapacityReservation>>() {}),
+                load(dir, "ec2-snapshot-block-public-access.json", new TypeReference<Map<String, String>>() {}),
                 load(dir, "ec2-tags.json", new TypeReference<Map<String, List<Tag>>>() {}));
     }
 

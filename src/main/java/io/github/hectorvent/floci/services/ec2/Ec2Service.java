@@ -133,6 +133,9 @@ public class Ec2Service implements ContainerTeardown {
     private final StorageBackend<String, CustomerGateway> customerGateways;
     private final StorageBackend<String, VpnGateway> vpnGateways;
     private final StorageBackend<String, CapacityReservation> capacityReservations;
+    // region → SnapshotBlockPublicAccessState. Account-and-region scoped setting, not a
+    // resource, so the region is the whole key and there is nothing to tag.
+    private final StorageBackend<String, String> snapshotBlockPublicAccess;
     // resourceId → List<Tag>
     private final StorageBackend<String, List<Tag>> tags;
     private final Set<String> seededRegions = ConcurrentHashMap.newKeySet();
@@ -171,6 +174,7 @@ public class Ec2Service implements ContainerTeardown {
                 storageFactory.create("ec2", "ec2-customer-gateways.json", new TypeReference<Map<String, CustomerGateway>>() {}),
                 storageFactory.create("ec2", "ec2-vpn-gateways.json", new TypeReference<Map<String, VpnGateway>>() {}),
                 storageFactory.create("ec2", "ec2-capacity-reservations.json", new TypeReference<Map<String, CapacityReservation>>() {}),
+                storageFactory.create("ec2", "ec2-snapshot-block-public-access.json", new TypeReference<Map<String, String>>() {}),
                 storageFactory.create("ec2", "ec2-tags.json", new TypeReference<Map<String, List<Tag>>>() {}));
     }
 
@@ -201,6 +205,7 @@ public class Ec2Service implements ContainerTeardown {
                StorageBackend<String, CustomerGateway> customerGateways,
                StorageBackend<String, VpnGateway> vpnGateways,
                StorageBackend<String, CapacityReservation> capacityReservations,
+               StorageBackend<String, String> snapshotBlockPublicAccess,
                StorageBackend<String, List<Tag>> tags) {
         this.accountId = config.defaultAccountId();
         this.config = config;
@@ -231,6 +236,7 @@ public class Ec2Service implements ContainerTeardown {
         this.customerGateways = customerGateways;
         this.vpnGateways = vpnGateways;
         this.capacityReservations = capacityReservations;
+        this.snapshotBlockPublicAccess = snapshotBlockPublicAccess;
         this.tags = tags;
     }
 
@@ -4061,6 +4067,36 @@ public class Ec2Service implements ContainerTeardown {
                     "NatGateway " + natGatewayId + " was not found", 400);
         }
         return natGateway;
+    }
+
+    // ─── Snapshot block public access ──────────────────────────────────────────
+
+    /** The state AWS reports for an account and region that never enabled the setting. */
+    public static final String SNAPSHOT_BPA_UNBLOCKED = "unblocked";
+    private static final Set<String> SNAPSHOT_BPA_BLOCKING_STATES =
+            Set.of("block-all-sharing", "block-new-sharing");
+
+    public String enableSnapshotBlockPublicAccess(String region, String state) {
+        if (state == null || state.isBlank()) {
+            throw new AwsException("MissingParameter",
+                    "The request must contain the parameter State.", 400);
+        }
+        if (!SNAPSHOT_BPA_BLOCKING_STATES.contains(state)) {
+            throw new AwsException("InvalidParameterValue",
+                    "Value (" + state + ") for parameter State is invalid. Valid values are "
+                            + "block-all-sharing and block-new-sharing.", 400);
+        }
+        snapshotBlockPublicAccess.put(region, state);
+        return state;
+    }
+
+    public String disableSnapshotBlockPublicAccess(String region) {
+        snapshotBlockPublicAccess.put(region, SNAPSHOT_BPA_UNBLOCKED);
+        return SNAPSHOT_BPA_UNBLOCKED;
+    }
+
+    public String getSnapshotBlockPublicAccessState(String region) {
+        return snapshotBlockPublicAccess.get(region).orElse(SNAPSHOT_BPA_UNBLOCKED);
     }
 
     // ─── Elastic IPs ───────────────────────────────────────────────────────────

@@ -250,6 +250,20 @@ multi-value key, or a `netbios-node-type` outside `1`, `2`, `4`, `8` is rejected
 | CreateImage | Captures an instance as a new AMI. Reboots the source unless `NoReboot=true`. |
 | RegisterImage | Registers an AMI from supplied metadata and block device mappings. |
 
+### Snapshot Block Public Access
+
+| Action | Description |
+|--------|-------------|
+| EnableSnapshotBlockPublicAccess | Sets the region's snapshot sharing block to `block-all-sharing` or `block-new-sharing`. |
+| DisableSnapshotBlockPublicAccess | Returns the region to `unblocked`. |
+| GetSnapshotBlockPublicAccessState | Reads the region's current state. |
+
+This is account-and-region scoped state rather than a resource: there is no id and nothing
+to tag. An account that never enabled it reads back `unblocked`, and `managedBy` is always
+`account` because Floci has no declarative-policy layer to take the setting over.
+`EnableSnapshotBlockPublicAccess` rejects `unblocked` the way AWS does — disabling goes
+through `DisableSnapshotBlockPublicAccess`.
+
 ### Tags
 
 | Action | Description |

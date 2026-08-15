@@ -125,6 +125,9 @@ public class Ec2QueryHandler {
                 case "CreateImage" -> handleCreateImage(params, region);
                 case "RegisterImage" -> handleRegisterImage(params, region);
                 case "DescribeSnapshots" -> handleDescribeSnapshots(params, region);
+                case "EnableSnapshotBlockPublicAccess" -> handleEnableSnapshotBlockPublicAccess(params, region);
+                case "DisableSnapshotBlockPublicAccess" -> handleDisableSnapshotBlockPublicAccess(region);
+                case "GetSnapshotBlockPublicAccessState" -> handleGetSnapshotBlockPublicAccessState(region);
                 // Tags
                 case "CreateTags" -> handleCreateTags(params, region);
                 case "DeleteTags" -> handleDeleteTags(params, region);
@@ -1806,6 +1809,34 @@ public class Ec2QueryHandler {
             xml.start("item").raw(snapshotXml(snapshot)).end("item");
         }
         xml.end("snapshotSet").end("DescribeSnapshotsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    // ─── Snapshot block-public-access handlers ────────────────────────────────
+
+    private Response handleEnableSnapshotBlockPublicAccess(MultivaluedMap<String, String> p, String region) {
+        String state = service.enableSnapshotBlockPublicAccess(region, p.getFirst("State"));
+        return snapshotBlockPublicAccessResponse("EnableSnapshotBlockPublicAccess", state, null);
+    }
+
+    private Response handleDisableSnapshotBlockPublicAccess(String region) {
+        String state = service.disableSnapshotBlockPublicAccess(region);
+        return snapshotBlockPublicAccessResponse("DisableSnapshotBlockPublicAccess", state, null);
+    }
+
+    private Response handleGetSnapshotBlockPublicAccessState(String region) {
+        String state = service.getSnapshotBlockPublicAccessState(region);
+        // The emulator has no declarative-policy layer, so the account always owns the state.
+        return snapshotBlockPublicAccessResponse("GetSnapshotBlockPublicAccessState", state, "account");
+    }
+
+    private Response snapshotBlockPublicAccessResponse(String action, String state, String managedBy) {
+        XmlBuilder xml = new XmlBuilder()
+                .start(action + "Response", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .elem("state", state)
+                .elem("managedBy", managedBy)
+                .end(action + "Response");
         return xmlResponse(xml.build());
     }
 
