@@ -69,7 +69,7 @@ class Ec2VpcEndpointCfnProvisionerTest {
     @Test
     void gatewayEndpointSetsPhysicalIdAndResolvesRefs() {
         when(ec2.createVpcEndpoint(eq("us-east-1"), eq("resolved-Vpc"), eq("com.amazonaws.us-east-1.s3"),
-                eq("Gateway"), eq(List.of("resolved-Rt")), eq(List.of()), eq(List.of()), isNull(), anyList()))
+                eq("Gateway"), eq(List.of("resolved-Rt")), eq(List.of()), eq(List.of()), isNull(), isNull(), anyList()))
                 .thenReturn(endpoint("vpce-123"));
         StackResource r = resource();
         ObjectNode props = mapper.createObjectNode()
@@ -87,7 +87,7 @@ class Ec2VpcEndpointCfnProvisionerTest {
     @Test
     void privateDnsEnabledResolvesThroughEngine() {
         when(ec2.createVpcEndpoint(anyString(), anyString(), anyString(), anyString(),
-                anyList(), anyList(), anyList(), eq(Boolean.TRUE), anyList()))
+                anyList(), anyList(), anyList(), eq(Boolean.TRUE), any(), anyList()))
                 .thenReturn(endpoint("vpce-dns"));
         StackResource r = resource();
         ObjectNode props = mapper.createObjectNode()
@@ -101,13 +101,13 @@ class Ec2VpcEndpointCfnProvisionerTest {
 
         assertEquals("vpce-dns", r.getPhysicalId());
         verify(ec2).createVpcEndpoint(eq("us-east-1"), eq("vpc-1"), eq("com.amazonaws.us-east-1.ecr.api"),
-                eq("Interface"), anyList(), anyList(), anyList(), eq(Boolean.TRUE), anyList());
+                eq("Interface"), anyList(), anyList(), anyList(), eq(Boolean.TRUE), any(), anyList());
     }
 
     @Test
     void updateReplacesAndDeletesPreviousEndpoint() {
         when(ec2.createVpcEndpoint(anyString(), anyString(), anyString(), anyString(),
-                anyList(), anyList(), anyList(), any(), anyList()))
+                anyList(), anyList(), anyList(), any(), any(), anyList()))
                 .thenReturn(endpoint("vpce-new"));
         StackResource r = resource();
         r.setPhysicalId("vpce-old");

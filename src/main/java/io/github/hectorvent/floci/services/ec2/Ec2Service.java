@@ -2734,7 +2734,8 @@ public class Ec2Service implements ContainerTeardown {
 
     public VpcEndpoint createVpcEndpoint(String region, String vpcId, String serviceName, String endpointType,
                                          List<String> routeTableIds, List<String> subnetIds,
-                                         List<String> securityGroupIds, Boolean privateDnsEnabled, List<Tag> endpointTags) {
+                                         List<String> securityGroupIds, Boolean privateDnsEnabled,
+                                         String policyDocument, List<Tag> endpointTags) {
         ensureDefaultResources(region);
         getRequiredVpc(region, vpcId);
         for (String routeTableId : routeTableIds) {
@@ -2759,12 +2760,91 @@ public class Ec2Service implements ContainerTeardown {
         endpoint.setRouteTableIds(new ArrayList<>(routeTableIds));
         endpoint.setSubnetIds(new ArrayList<>(subnetIds));
         endpoint.setSecurityGroupIds(new ArrayList<>(securityGroupIds));
+        if (policyDocument != null && !policyDocument.isBlank()) {
+            endpoint.setPolicyDocument(policyDocument);
+        }
         if (endpointTags != null && !endpointTags.isEmpty()) {
             endpoint.setTags(new ArrayList<>(endpointTags));
             tags.put(endpoint.getVpcEndpointId(), new ArrayList<>(endpointTags));
         }
         vpcEndpoints.put(key(region, endpoint.getVpcEndpointId()), endpoint);
         return endpoint;
+    }
+
+    /**
+     * Applies a ModifyVpcEndpoint request. Every parameter is optional and each applies
+     * independently, so one request may move route tables and rewrite the policy.
+     *
+     * <p>The add/remove parameters are set operations. AWS accepts an id that is already
+     * associated, or a removal of one that is not, without complaint, so this is
+     * idempotent on both sides. {@code resetPolicy} returns the endpoint to the default
+     * full-access policy, modelled here as carrying no document at all.
+     */
+    public VpcEndpoint modifyVpcEndpoint(String region, String endpointId,
+                                         List<String> addRouteTableIds, List<String> removeRouteTableIds,
+                                         List<String> addSubnetIds, List<String> removeSubnetIds,
+                                         List<String> addSecurityGroupIds, List<String> removeSecurityGroupIds,
+                                         String policyDocument, Boolean resetPolicy, Boolean privateDnsEnabled) {
+        ensureDefaultResources(region);
+        // Terraform declares each aws_vpc_endpoint_route_table_association as its own
+        // resource and applies them in parallel, so several ModifyVpcEndpoint calls land
+        // on one endpoint at once. Without the lock this read-modify-write loses updates:
+        // each caller reads the same association list, adds its own id, and the last write
+        // wins -- leaving the other caller's waiter polling for an association that was
+        // silently dropped.
+        synchronized (lockFor(key(region, endpointId))) {
+            return modifyVpcEndpointLocked(region, endpointId,
+                    addRouteTableIds, removeRouteTableIds, addSubnetIds, removeSubnetIds,
+                    addSecurityGroupIds, removeSecurityGroupIds,
+                    policyDocument, resetPolicy, privateDnsEnabled);
+        }
+    }
+
+    private VpcEndpoint modifyVpcEndpointLocked(String region, String endpointId,
+                                                List<String> addRouteTableIds, List<String> removeRouteTableIds,
+                                                List<String> addSubnetIds, List<String> removeSubnetIds,
+                                                List<String> addSecurityGroupIds, List<String> removeSecurityGroupIds,
+                                                String policyDocument, Boolean resetPolicy,
+                                                Boolean privateDnsEnabled) {
+        VpcEndpoint endpoint = getRequiredVpcEndpoint(region, endpointId);
+
+        // Validate every referenced id before mutating anything, so a request naming one
+        // bad id does not leave the endpoint half-modified.
+        for (String routeTableId : addRouteTableIds) {
+            getRequiredRouteTable(region, routeTableId);
+        }
+        for (String subnetId : addSubnetIds) {
+            requireSubnet(region, subnetId);
+        }
+        for (String securityGroupId : addSecurityGroupIds) {
+            getRequiredSecurityGroup(region, securityGroupId);
+        }
+
+        applyIdChanges(endpoint.getRouteTableIds(), addRouteTableIds, removeRouteTableIds);
+        applyIdChanges(endpoint.getSubnetIds(), addSubnetIds, removeSubnetIds);
+        applyIdChanges(endpoint.getSecurityGroupIds(), addSecurityGroupIds, removeSecurityGroupIds);
+
+        if (Boolean.TRUE.equals(resetPolicy)) {
+            endpoint.setPolicyDocument(null);
+        } else if (policyDocument != null && !policyDocument.isBlank()) {
+            endpoint.setPolicyDocument(policyDocument);
+        }
+        if (privateDnsEnabled != null) {
+            endpoint.setPrivateDnsEnabled(privateDnsEnabled);
+        }
+
+        vpcEndpoints.put(key(region, endpointId), endpoint);
+        return endpoint;
+    }
+
+    /** Removals apply before additions, and an id is never added twice. */
+    private static void applyIdChanges(List<String> current, List<String> toAdd, List<String> toRemove) {
+        current.removeAll(toRemove);
+        for (String id : toAdd) {
+            if (!current.contains(id)) {
+                current.add(id);
+            }
+        }
     }
 
     public List<VpcEndpoint> describeVpcEndpoints(String region, List<String> endpointIds,

@@ -59,6 +59,7 @@ public class Ec2VpcEndpointCfnProvisioner implements CfnResourceProvisioner {
                 resolveIdList(props, "SubnetIds", ctx),
                 resolveIdList(props, "SecurityGroupIds", ctx),
                 privateDnsEnabled,
+                null,
                 List.of());
         r.setPhysicalId(endpoint.getVpcEndpointId());
         r.getAttributes().put("Id", endpoint.getVpcEndpointId());
