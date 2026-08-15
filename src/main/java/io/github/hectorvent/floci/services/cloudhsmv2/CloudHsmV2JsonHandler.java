@@ -425,6 +425,10 @@ public class CloudHsmV2JsonHandler {
 
     private Response handleCopyBackupToRegion(JsonNode request, String region) {
         String destRegion = text(request, "DestinationRegion");
+        if (destRegion == null || destRegion.isBlank()) {
+            throw new AwsException("CloudHsmInvalidRequestException",
+                    "DestinationRegion is required when copying a backup.", 400);
+        }
         String backupId = text(request, "BackupId");
         Backup backup = service.copyBackupToRegion(destRegion, backupId, region);
         ObjectNode response = objectMapper.createObjectNode();
