@@ -2,8 +2,8 @@ package io.github.hectorvent.floci.services.ec2;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
-import io.github.hectorvent.floci.core.storage.PersistentStorage;
-import io.github.hectorvent.floci.core.storage.StorageBackend;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
+import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.model.Address;
 import io.github.hectorvent.floci.services.ec2.model.Image;
 import io.github.hectorvent.floci.services.ec2.model.InternetGateway;
