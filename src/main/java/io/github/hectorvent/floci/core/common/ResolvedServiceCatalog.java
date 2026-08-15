@@ -465,7 +465,11 @@ public class ResolvedServiceCatalog {
                         "medialive", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
                         Set.of(), Set.of("medialive"), Set.of(),
-                        Set.of(io.github.hectorvent.floci.services.medialive.MediaLiveController.class))
+                        Set.of(io.github.hectorvent.floci.services.medialive.MediaLiveController.class)),
+                descriptor("sagemaker", "sagemaker", config.services().sagemaker().enabled(), true,
+                        "sagemaker", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
+                        protocols(ServiceProtocol.JSON),
+                        Set.of("SageMaker."), Set.of("sagemaker"), Set.of(), Set.of())
         ));
     }
 

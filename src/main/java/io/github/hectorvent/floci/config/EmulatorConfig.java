@@ -604,6 +604,12 @@ public interface EmulatorConfig {
         MediaPackageServiceConfig mediapackage();
         MediaPackageV2ServiceConfig mediapackagev2();
         MediaLiveServiceConfig medialive();
+        SageMakerServiceConfig sagemaker();
+    }
+
+    interface SageMakerServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
     }
 
     interface AmpServiceConfig {
