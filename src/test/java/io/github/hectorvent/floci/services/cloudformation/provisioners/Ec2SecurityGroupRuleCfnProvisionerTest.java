@@ -152,12 +152,16 @@ class Ec2SecurityGroupRuleCfnProvisionerTest {
                 .put("IpProtocol", "tcp")
                 .put("FromPort", 8080)
                 .put("ToPort", 8080)
-                .put("SourceSecurityGroupId", "sg-web");
+                .put("SourceSecurityGroupId", "sg-web")
+                .put("Description", "app from web");
 
         provisioner.provision(r, props, ctx());
 
         IpPermission perm = authorizedIngress();
         assertEquals("sg-web", perm.getUserIdGroupPairs().get(0).getGroupId());
+        // Ec2Service reads the description off the pair, so dropping it here loses the
+        // template's text from DescribeSecurityGroupRules, as it would for a cidr peer.
+        assertEquals("app from web", perm.getUserIdGroupPairs().get(0).getDescription());
     }
 
     @Test

@@ -155,6 +155,7 @@ public class Ec2SecurityGroupRuleCfnProvisioner implements CfnResourceProvisione
         if (peerGroup != null && !peerGroup.isBlank()) {
             UserIdGroupPair pair = new UserIdGroupPair();
             pair.setGroupId(peerGroup);
+            pair.setDescription(description);
             perm.getUserIdGroupPairs().add(pair);
         }
         return perm;
