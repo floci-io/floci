@@ -20,6 +20,7 @@ import org.jboss.logging.Logger;
 import java.time.Instant;
 import java.util.Collection;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -183,17 +184,20 @@ public class ElastiCacheService {
     }
 
     public ElastiCacheUser createUser(String userId, String userName, AuthMode authMode,
-                                      List<String> passwords, String accessString) {
+                                      List<String> passwords, String accessString, String engine) {
         if (users.get(userId).isPresent()) {
             throw new AwsException("UserAlreadyExistsFault",
                     "User " + userId + " already exists.", 400);
         }
 
+        // Engine is required on AWS, but Floci's CreateUser accepted requests without
+        // it, so a missing value keeps the previous implicit redis.
+        String normalizedEngine = (engine == null || engine.isBlank()) ? "redis" : normalizeEngine(engine);
         ElastiCacheUser user = new ElastiCacheUser(
                 userId, userName, authMode,
                 passwords != null ? passwords : List.of(),
                 accessString != null ? accessString : "on ~* +@all",
-                "active", Instant.now());
+                normalizedEngine, "active", Instant.now());
 
         users.put(userId, user);
         LOG.infov("ElastiCache user {0} created with authMode={1}", userId, authMode);
@@ -205,20 +209,32 @@ public class ElastiCacheService {
                 new AwsException("UserNotFoundFault", "User " + userId + " not found.", 404));
     }
 
-    public Collection<ElastiCacheUser> listUsers(String filterUserId) {
+    public Collection<ElastiCacheUser> listUsers(String filterUserId, String filterEngine) {
+        // UserId wins when both filters are sent; AWS documents no interaction between them.
         if (filterUserId != null && !filterUserId.isBlank()) {
             return users.get(filterUserId)
                     .map(List::of)
                     .orElseThrow(() -> new AwsException("UserNotFoundFault",
                             "User " + filterUserId + " not found.", 404));
         }
+        if (filterEngine != null && !filterEngine.isBlank()) {
+            return users.scan(k -> true).stream()
+                    .filter(u -> filterEngine.equalsIgnoreCase(u.getEngine()))
+                    .toList();
+        }
         return users.scan(k -> true);
     }
 
-    public ElastiCacheUser modifyUser(String userId, List<String> passwords) {
+    public ElastiCacheUser modifyUser(String userId, List<String> passwords, String engine) {
         ElastiCacheUser user = getUser(userId);
+        // Storage backends hand back the live stored object, so validate everything
+        // before the first setter — a rejected request must not leave changes behind.
+        String normalizedEngine = (engine == null || engine.isBlank()) ? null : normalizeEngine(engine);
         if (passwords != null) {
             user.setPasswords(passwords);
+        }
+        if (normalizedEngine != null) {
+            user.setEngine(normalizedEngine);
         }
         users.put(userId, user);
         return user;
@@ -265,6 +281,16 @@ public class ElastiCacheService {
                 .map(id -> users.get(id).orElse(null))
                 .filter(u -> u != null && username.equals(u.getUserName()) && u.getAuthMode() == AuthMode.PASSWORD)
                 .anyMatch(u -> u.getPasswords() != null && u.getPasswords().contains(password));
+    }
+
+    // AWS allows only redis and valkey.
+    private static String normalizeEngine(String engine) {
+        String normalized = engine.toLowerCase(Locale.ROOT);
+        if (!"redis".equals(normalized) && !"valkey".equals(normalized)) {
+            throw new AwsException("InvalidParameterValue",
+                    "Engine must be 'redis' or 'valkey'.", 400);
+        }
+        return normalized;
     }
 
     private String resolveEndpointHost() {
