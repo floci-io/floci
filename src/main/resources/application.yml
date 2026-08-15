@@ -22,7 +22,8 @@ quarkus:
   native:
     resources:
       # The Pricing service reads its bundled snapshot, EC2 reads its image
-      # catalog (ec2/image-catalog.yaml), AppSync's GraphQL parser reads its
+      # catalog (ec2/image-catalog.yaml), IAM reads its AWS managed-policy
+      # catalog (iam/managed-policies.yaml), AppSync's GraphQL parser reads its
       # message bundles, and API Gateway's Velocity engine reads its default
       # properties at runtime via
       # ClassLoader#getResourceAsStream. Quarkus's static resource analysis
@@ -32,6 +33,7 @@ quarkus:
         - pricing-snapshots/**
         - ui/*.html
         - ec2/*.yaml
+        - iam/*.yaml
         - i18n/*.properties
         - org/apache/velocity/runtime/defaults/*.properties
     additional-build-args:
@@ -56,6 +58,7 @@ quarkus:
       - --initialize-at-run-time=io.github.hectorvent.floci.services.cloudfront.CloudFrontService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.emr.EmrService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.elasticbeanstalk.ElasticBeanstalkService
+      - --initialize-at-run-time=graphql.util.IdGenerator
 
 
 floci:
@@ -135,6 +138,8 @@ floci:
         # instance metadata persist so CloudFormation-created VPC/subnet ids survive a restart (#1297).
         # mode: memory
       appsync:
+        flush-interval-ms: 5000
+      rum:
         flush-interval-ms: 5000
 
   dns:
@@ -218,6 +223,7 @@ floci:
       region-concurrency-limit: 1000
       unreserved-concurrency-min: 100
       # aws-config-path:                      # Host path to bind-mount (read-only) at /opt/aws-config for real credential discovery
+      # extra-hosts:                          # Extra /etc/hosts entries for Lambda containers, "hostname:ip" ("host-gateway" allowed as ip)
       hot-reload:
         enabled: false
     apigateway:
@@ -228,6 +234,9 @@ floci:
       enabled: true
       enforcement-enabled: false
       seed-deployer-principal: false
+      # account-alias: ""  # When set, seeds the account alias at startup so callers can read one
+                           # without creating it first. Unset means the account has no alias,
+                           # matching AWS. Example: FLOCI_SERVICES_IAM_ACCOUNT_ALIAS=my-account
     msk:
       enabled: true
       mock: false
@@ -238,6 +247,13 @@ floci:
       enabled: true
       mock: false
       default-image: "rabbitmq:3-management"
+    kinesis-analytics:
+      enabled: true
+      mock: false
+      # default-image: optional override; uncomment to pin every application to a single image
+      # (e.g. a private registry mirror). When unset, the image is chosen from the requested
+      # RuntimeEnvironment (KinesisAnalyticsRuntimes.imageFor, e.g. FLINK-1_19 -> apache/flink:1.19).
+      # default-image: "apache/flink:1.18"
     elasticache:
       enabled: true
       proxy-base-port: 6379
@@ -255,9 +271,12 @@ floci:
       mock: false                                 # FLOCI_SERVICES_RDS_MOCK — true = metadata only, no Docker (useful for CI)
       proxy-base-port: 7001
       proxy-max-port: 7099
-      default-postgres-image: "postgres:16-alpine"
-      default-mysql-image: "mysql:8.0"
-      default-mariadb-image: "mariadb:11"
+      # endpoint-host: localhost                 # Hostname clients use; enables published-port translation in Docker
+      # Omit image overrides to adapt Floci's built-in images to EngineVersion.
+      # Uncomment an override to pin that engine to an exact image.
+      # default-postgres-image: "registry.example.com/postgres:16-alpine"
+      # default-mysql-image: "registry.example.com/mysql:8.0"
+      # default-mariadb-image: "registry.example.com/mariadb:11"
     rds-data:
       enabled: true
       transaction-ttl-seconds: 180
@@ -297,6 +316,10 @@ floci:
     stepfunctions:
       enabled: true
       allow-plaintext-http: false
+    swf:
+      enabled: true
+      timeout-sweep-enabled: true
+      timeout-sweep-interval-seconds: 1
     cloudformation:
       enabled: true
     acm:
@@ -363,6 +386,13 @@ floci:
       keep-running-on-shutdown: false
     bedrock-runtime:
       enabled: true
+      backend: stub
+      proxy:
+        passthrough: false
+        # url: http://localhost:11434/v1
+        # api-key: sk-...
+        # default-model: llama3
+        # model-mapping: "anthropic.claude-3-sonnet-20240229-v1:0=claude-3-sonnet"
     eks:
       enabled: true
       mock: false
@@ -376,6 +406,18 @@ floci:
       iam-auth-webhook: true       # wire a token-auth webhook into k3s so `aws eks get-token` works
       ecr-registry-mirror: true    # inject a registries.yaml so pods can pull images pushed to Floci ECR
       disable-cni: false           # start k3s without its bundled flannel/kube-proxy so a real CNI (e.g. Cilium) can take over
+    mwaa:
+      enabled: true
+      mock: false
+      default-postgres-image: "postgres:16-alpine"
+      supported-versions: "2.10.5,2.9.3,2.8.4"
+      default-version: "2.10.5"
+      proxy-base-port: 8700
+      proxy-max-port: 8799
+      data-path: ./data/mwaa
+      keep-running-on-shutdown: false
+      dag-sync-interval-seconds: 30
+      install-requirements: true
     elbv2:
       enabled: true
       mock: false
@@ -391,6 +433,8 @@ floci:
     codepipeline:
       enabled: true
     autoscaling:
+      enabled: true
+    applicationautoscaling:
       enabled: true
     elasticbeanstalk:
       enabled: true
@@ -424,6 +468,7 @@ floci:
       enabled: true
     cloudfront:
       enabled: true
+      allowed-private-origin-hosts: []
     appsync:
       enabled: true
       schema-worker-threads: 4
@@ -438,4 +483,6 @@ floci:
         host: 0.0.0.0
         port: 1883
     iotdata:
+      enabled: true
+    rum:
       enabled: true

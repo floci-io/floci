@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.rdsdata;
 
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.services.rds.RdsService;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 import io.github.hectorvent.floci.services.rds.model.DbCluster;
@@ -19,33 +20,42 @@ class RdsDataResourceResolver {
     }
 
     DatabaseTarget resolve(String resourceArn) {
+        return resolve(resourceArn, null);
+    }
+
+    DatabaseTarget resolve(String resourceArn, String requestRegion) {
         if (resourceArn == null || resourceArn.isBlank()) {
             throw new AwsException("BadRequestException", "resourceArn is required.", 400);
         }
 
-        for (DbCluster cluster : rdsService.listDbClusters(null)) {
-            if (resourceArn.equals(cluster.getDbClusterArn())) {
-                return fromCluster(cluster);
+        try {
+            AwsArnUtils.Arn arn = AwsArnUtils.parse(resourceArn);
+            if (!"rds".equals(arn.service())) {
+                throw new IllegalArgumentException("not an RDS ARN");
             }
-        }
-        for (DbInstance instance : rdsService.listDbInstances(null)) {
-            if (resourceArn.equals(instance.getDbInstanceArn())) {
-                return fromInstance(instance);
+            if (requestRegion != null && !requestRegion.isBlank()
+                    && !requestRegion.equals(arn.region())) {
+                throw new IllegalArgumentException("RDS ARN is outside the request region");
             }
-        }
-
-        String id = identifierFromArn(resourceArn);
-        if (id != null) {
-            try {
-                return fromCluster(rdsService.getDbCluster(id));
-            } catch (AwsException ignored) {
-                // Try instances below.
+            int separator = arn.resource().indexOf(':');
+            if (separator <= 0 || separator == arn.resource().length() - 1) {
+                throw new IllegalArgumentException("invalid RDS resource");
             }
-            try {
-                return fromInstance(rdsService.getDbInstance(id));
-            } catch (AwsException ignored) {
-                // Fall through to the Data API error shape.
+            String type = arn.resource().substring(0, separator);
+            String id = arn.resource().substring(separator + 1);
+            if ("cluster".equals(type)) {
+                DbCluster cluster = rdsService.getDbCluster(id, arn.region());
+                if (resourceArn.equals(cluster.getDbClusterArn())) {
+                    return fromCluster(cluster);
+                }
+            } else if ("db".equals(type)) {
+                DbInstance instance = rdsService.getDbInstance(id, arn.region());
+                if (resourceArn.equals(instance.getDbInstanceArn())) {
+                    return fromInstance(instance);
+                }
             }
+        } catch (AwsException | IllegalArgumentException ignored) {
+            // Normalize lookup and ARN parsing failures to the RDS Data API error shape below.
         }
 
         throw new AwsException("BadRequestException",
@@ -69,18 +79,6 @@ class RdsDataResourceResolver {
                     "RDS resource runtime is not available for Data API execution.", 400);
         }
         return new DatabaseTarget(arn, engine, host, port, username, password, databaseName);
-    }
-
-    private static String identifierFromArn(String arn) {
-        int marker = arn.lastIndexOf(":cluster:");
-        if (marker >= 0) {
-            return arn.substring(marker + ":cluster:".length());
-        }
-        marker = arn.lastIndexOf(":db:");
-        if (marker >= 0) {
-            return arn.substring(marker + ":db:".length());
-        }
-        return null;
     }
 
     record DatabaseTarget(String arn, DatabaseEngine engine, String host, int port,

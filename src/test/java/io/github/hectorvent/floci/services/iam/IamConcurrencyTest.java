@@ -37,7 +37,8 @@ class IamConcurrencyTest {
         return new IamService(
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), new RegionResolver("eu-central-1", "000000000000"), false);
+                new InMemoryStorage<>(),
+                new RegionResolver("eu-central-1", "000000000000"), false);
     }
 
     /** Sets up one entity on the given service and returns the i-th concurrent mutation. */
@@ -239,6 +240,105 @@ class IamConcurrencyTest {
                 if (roles != 1 || !unexpected.isEmpty()) {
                     fail("instanceProfile.roleNames trial " + trial + ": cap violated/corrupted, roleNames="
                             + roles + " unexpectedErrors=" + unexpected.size());
+                }
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    /**
+     * Only one caller may create a provider for a given URL. Racing creates carry different
+     * client IDs, so an unguarded check-then-write would report success to several callers while
+     * storing one arbitrary payload.
+     */
+    @Test
+    void concurrentOidcProviderCreatesLeaveExactlyOneWinner() throws Exception {
+        ExecutorService pool = Executors.newFixedThreadPool(THREADS);
+        try {
+            for (int trial = 0; trial < TRIALS; trial++) {
+                IamService iam = newIamService();
+                CountDownLatch start = new CountDownLatch(1);
+                CountDownLatch done = new CountDownLatch(N);
+                List<String> winners = new CopyOnWriteArrayList<>();
+                List<String> unexpected = new CopyOnWriteArrayList<>();
+
+                for (int i = 0; i < N; i++) {
+                    String clientId = "client-" + i;
+                    pool.execute(() -> {
+                        try {
+                            start.await(10, TimeUnit.SECONDS);
+                            iam.createOpenIDConnectProvider("https://oidc.example.com/id/RACE",
+                                    List.of(clientId), List.of("thumb"), java.util.Map.of());
+                            winners.add(clientId);
+                        } catch (io.github.hectorvent.floci.core.common.AwsException e) {
+                            if (!"EntityAlreadyExists".equals(e.getErrorCode())) {
+                                unexpected.add(e.getErrorCode());
+                            }
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                        } finally {
+                            done.countDown();
+                        }
+                    });
+                }
+                start.countDown();
+                assertTrue(done.await(30, TimeUnit.SECONDS), "oidc workers stalled");
+
+                List<String> storedClientIds = iam.listOpenIDConnectProviders().getFirst().getClientIdList();
+                if (winners.size() != 1 || !storedClientIds.equals(winners) || !unexpected.isEmpty()) {
+                    fail("oidcProvider trial " + trial + ": winners=" + winners
+                            + " stored=" + storedClientIds + " unexpectedErrors=" + unexpected);
+                }
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    /**
+     * Creating a free alias replaces whatever is set, so concurrent creates of different aliases
+     * all succeed and the last write wins — that is AWS behaviour, not a race to be prevented.
+     * What must hold is that the store ends on exactly one of the requested values rather than a
+     * torn or absent one.
+     */
+    @Test
+    void concurrentAccountAliasCreatesLeaveOneRequestedValue() throws Exception {
+        ExecutorService pool = Executors.newFixedThreadPool(THREADS);
+        try {
+            for (int trial = 0; trial < TRIALS; trial++) {
+                IamService iam = newIamService();
+                CountDownLatch start = new CountDownLatch(1);
+                CountDownLatch done = new CountDownLatch(N);
+                List<String> winners = new CopyOnWriteArrayList<>();
+                List<String> unexpected = new CopyOnWriteArrayList<>();
+
+                for (int i = 0; i < N; i++) {
+                    String alias = "alias-" + i;
+                    pool.execute(() -> {
+                        try {
+                            start.await(10, TimeUnit.SECONDS);
+                            iam.createAccountAlias(alias);
+                            winners.add(alias);
+                        } catch (io.github.hectorvent.floci.core.common.AwsException e) {
+                            if (!"EntityAlreadyExists".equals(e.getErrorCode())) {
+                                unexpected.add(e.getErrorCode());
+                            }
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                        } finally {
+                            done.countDown();
+                        }
+                    });
+                }
+                start.countDown();
+                assertTrue(done.await(30, TimeUnit.SECONDS), "alias workers stalled");
+
+                String stored = iam.getAccountAlias().orElse(null);
+                if (winners.size() != N || stored == null || !winners.contains(stored)
+                        || !unexpected.isEmpty()) {
+                    fail("accountAlias trial " + trial + ": winners=" + winners.size() + "/" + N
+                            + " stored=" + stored + " unexpectedErrors=" + unexpected);
                 }
             }
         } finally {

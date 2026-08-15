@@ -652,6 +652,124 @@ class DynamoDbConformanceChangesTest {
     }
 
     // -----------------------------------------------------------------------
+    // Phase 10 — Legacy API: Expected with Exists
+    // -----------------------------------------------------------------------
+
+    @Test @Order(88)
+    @SuppressWarnings("deprecation")
+    void legacyExpectedExistsTrueComparesValue() {
+        // Version-guarded write pattern: Exists:true is paired with the version the caller
+        // last read. Both must be honoured — the attribute must exist AND still equal that value.
+        ddb.putItem(r -> r.tableName(TABLE).item(Map.of(
+                "pk", av("legacy-exp-version"), "sk", av("s"),
+                "version", AttributeValue.builder().n("5").build(),
+                "session", av("original"))));
+
+        Map<String, ExpectedAttributeValue> expectVersion5 = Map.of("version",
+                ExpectedAttributeValue.builder()
+                        .exists(true)
+                        .value(AttributeValue.builder().n("5").build())
+                        .build());
+
+        // The expectation is current → the write lands and bumps the version to 6.
+        ddb.updateItem(UpdateItemRequest.builder()
+                .tableName(TABLE)
+                .key(Map.of("pk", av("legacy-exp-version"), "sk", av("s")))
+                .attributeUpdates(Map.of("version", AttributeValueUpdate.builder()
+                        .value(AttributeValue.builder().n("6").build())
+                        .action(AttributeAction.PUT)
+                        .build()))
+                .expected(expectVersion5)
+                .build());
+
+        // The same expectation is now stale (stored version is 6) → must be rejected.
+        assertThatThrownBy(() -> ddb.updateItem(UpdateItemRequest.builder()
+                .tableName(TABLE)
+                .key(Map.of("pk", av("legacy-exp-version"), "sk", av("s")))
+                .attributeUpdates(Map.of("session", AttributeValueUpdate.builder()
+                        .action(AttributeAction.DELETE)
+                        .build()))
+                .expected(expectVersion5)
+                .build()))
+                .isInstanceOf(ConditionalCheckFailedException.class);
+
+        // PutItem and DeleteItem route through the same evaluation and must agree.
+        assertThatThrownBy(() -> ddb.putItem(r -> r
+                .tableName(TABLE)
+                .item(Map.of("pk", av("legacy-exp-version"), "sk", av("s"),
+                        "version", AttributeValue.builder().n("7").build()))
+                .expected(expectVersion5)))
+                .isInstanceOf(ConditionalCheckFailedException.class);
+
+        assertThatThrownBy(() -> ddb.deleteItem(r -> r
+                .tableName(TABLE)
+                .key(Map.of("pk", av("legacy-exp-version"), "sk", av("s")))
+                .expected(expectVersion5)))
+                .isInstanceOf(ConditionalCheckFailedException.class);
+
+        // None of the stale writes took effect.
+        GetItemResponse resp = ddb.getItem(r -> r
+                .tableName(TABLE)
+                .key(Map.of("pk", av("legacy-exp-version"), "sk", av("s"))));
+        assertThat(resp.item().get("version").n()).isEqualTo("6");
+        assertThat(resp.item().get("session").s()).isEqualTo("original");
+
+        // Exists:false still means "attribute must be absent".
+        assertThatThrownBy(() -> ddb.updateItem(UpdateItemRequest.builder()
+                .tableName(TABLE)
+                .key(Map.of("pk", av("legacy-exp-version"), "sk", av("s")))
+                .attributeUpdates(Map.of("note", AttributeValueUpdate.builder()
+                        .value(av("x")).action(AttributeAction.PUT).build()))
+                .expected(Map.of("version", ExpectedAttributeValue.builder().exists(false).build()))
+                .build()))
+                .isInstanceOf(ConditionalCheckFailedException.class);
+    }
+
+    @Test @Order(89)
+    @SuppressWarnings("deprecation")
+    void legacyExpectedRejectsInvalidExistsCombinations() {
+        // Exists:true with no Value — nothing to compare against.
+        DynamoDbException noValue = (DynamoDbException) catchThrowable(() -> ddb.updateItem(UpdateItemRequest.builder()
+                .tableName(TABLE)
+                .key(Map.of("pk", av("legacy-exp-invalid"), "sk", av("s")))
+                .attributeUpdates(Map.of("note", AttributeValueUpdate.builder()
+                        .value(av("x")).action(AttributeAction.PUT).build()))
+                .expected(Map.of("version", ExpectedAttributeValue.builder().exists(true).build()))
+                .build()));
+        assertThat(noValue).isNotNull();
+        assertThat(noValue.awsErrorDetails().errorCode()).isEqualTo("ValidationException");
+
+        // Exists:false alongside a Value — contradictory.
+        DynamoDbException falseWithValue = (DynamoDbException) catchThrowable(() -> ddb.updateItem(UpdateItemRequest.builder()
+                .tableName(TABLE)
+                .key(Map.of("pk", av("legacy-exp-invalid"), "sk", av("s")))
+                .attributeUpdates(Map.of("note", AttributeValueUpdate.builder()
+                        .value(av("x")).action(AttributeAction.PUT).build()))
+                .expected(Map.of("version", ExpectedAttributeValue.builder()
+                        .exists(false)
+                        .value(AttributeValue.builder().n("5").build())
+                        .build()))
+                .build()));
+        assertThat(falseWithValue).isNotNull();
+        assertThat(falseWithValue.awsErrorDetails().errorCode()).isEqualTo("ValidationException");
+
+        // Exists mixed with the ComparisonOperator form.
+        DynamoDbException mixedForms = (DynamoDbException) catchThrowable(() -> ddb.updateItem(UpdateItemRequest.builder()
+                .tableName(TABLE)
+                .key(Map.of("pk", av("legacy-exp-invalid"), "sk", av("s")))
+                .attributeUpdates(Map.of("note", AttributeValueUpdate.builder()
+                        .value(av("x")).action(AttributeAction.PUT).build()))
+                .expected(Map.of("version", ExpectedAttributeValue.builder()
+                        .exists(true)
+                        .comparisonOperator(ComparisonOperator.EQ)
+                        .attributeValueList(AttributeValue.builder().n("5").build())
+                        .build()))
+                .build()));
+        assertThat(mixedForms).isNotNull();
+        assertThat(mixedForms.awsErrorDetails().errorCode()).isEqualTo("ValidationException");
+    }
+
+    // -----------------------------------------------------------------------
     // Phase 11 — Enum validation fires before table lookup
     // -----------------------------------------------------------------------
 

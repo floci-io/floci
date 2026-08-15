@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.services.lambda.model.FunctionEventInvokeConfi
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.lambda.model.LambdaAlias;
+import io.github.hectorvent.floci.services.lambda.model.LambdaFileSystemConfig;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import io.github.hectorvent.floci.services.lambda.model.LambdaUrlConfig;
 import io.github.hectorvent.floci.services.lambda.model.ScalingConfig;
@@ -40,6 +41,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Pattern;
 
 /**
  * Business logic for Lambda function management and invocation.
@@ -48,6 +50,11 @@ import java.util.concurrent.ConcurrentHashMap;
 public class LambdaService {
 
     private static final Logger LOG = Logger.getLogger(LambdaService.class);
+    private static final Pattern EFS_ACCESS_POINT_ARN = Pattern.compile(
+            "^arn:aws[a-zA-Z-]*:elasticfilesystem:(?:eusc-)?[a-z]{2}"
+                    + "(?:(?:-gov)|(?:-iso(?:b)?))?-[a-z]+-\\d:"
+                    + "\\d{12}:access-point/fsap-[a-f0-9]{17}$");
+    private static final Pattern FILE_SYSTEM_LOCAL_MOUNT_PATH = Pattern.compile("^/mnt/[A-Za-z0-9._-]+$");
 
     private final LambdaFunctionStore functionStore;
     private final LambdaExecutorService executorService;
@@ -327,6 +334,11 @@ public class LambdaService {
             fn.setVpcConfig(vpc);
         }
 
+        List<LambdaFileSystemConfig> fileSystemConfigs =
+                parseFileSystemConfigs(request.get("FileSystemConfigs"));
+        validateFileSystemVpcConfig(fileSystemConfigs, fn.getVpcConfig());
+        fn.setFileSystemConfigs(fileSystemConfigs);
+
         // ImageConfig (PackageType=Image overrides)
         if (request.get("ImageConfig") instanceof Map<?, ?> ic) {
             @SuppressWarnings("unchecked")
@@ -441,7 +453,7 @@ public class LambdaService {
         fn.setRevisionId(UUID.randomUUID().toString());
 
         // Drain warm containers — they have stale code mounted
-        warmPool.drainFunction(functionName);
+        warmPool.drainEnvironment(fn);
 
         functionStore.save(region, fn);
         LOG.infov("Updated code for function: {0}", functionName);
@@ -450,6 +462,20 @@ public class LambdaService {
 
     public LambdaFunction updateFunctionConfiguration(String region, String functionName, Map<String, Object> request) {
         LambdaFunction fn = getFunction(region, functionName);
+
+        Map<String, Object> requestedVpcConfig = fn.getVpcConfig();
+        if (request.get("VpcConfig") instanceof Map<?, ?>) {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> vpc = (Map<String, Object>) request.get("VpcConfig");
+            requestedVpcConfig = new java.util.HashMap<>(vpc);
+        }
+        List<LambdaFileSystemConfig> requestedFileSystemConfigs = fn.getFileSystemConfigs();
+        if (request.containsKey("FileSystemConfigs")) {
+            requestedFileSystemConfigs = parseFileSystemConfigs(request.get("FileSystemConfigs"));
+        }
+        if (request.containsKey("VpcConfig") || request.containsKey("FileSystemConfigs")) {
+            validateFileSystemVpcConfig(requestedFileSystemConfigs, requestedVpcConfig);
+        }
 
         if (request.containsKey("Description")) {
             fn.setDescription((String) request.get("Description"));
@@ -531,10 +557,12 @@ public class LambdaService {
 
         if (request.containsKey("VpcConfig")) {
             if (request.get("VpcConfig") instanceof Map<?, ?>) {
-                @SuppressWarnings("unchecked")
-                Map<String, Object> vpc = (Map<String, Object>) request.get("VpcConfig");
-                fn.setVpcConfig(vpc);
+                fn.setVpcConfig(requestedVpcConfig);
             }
+        }
+
+        if (request.containsKey("FileSystemConfigs")) {
+            fn.setFileSystemConfigs(requestedFileSystemConfigs);
         }
 
         if (request.containsKey("ImageConfig")) {
@@ -562,7 +590,7 @@ public class LambdaService {
         fn.setRevisionId(UUID.randomUUID().toString());
 
         // Drain warm containers so the next invocation picks up the new configuration
-        warmPool.drainFunction(functionName);
+        warmPool.drainEnvironment(fn);
 
         functionStore.save(region, fn);
         LOG.infov("Updated configuration for function: {0}", functionName);
@@ -612,7 +640,9 @@ public class LambdaService {
         String name = ref.name();
         String qualifier = ref.qualifier();
         LambdaFunction fn = resolveInvokeTarget(region, name, qualifier);
-        return executorService.invoke(fn, payload, type);
+        InvokeResult result = executorService.invoke(fn, payload, type);
+        result.setExecutedVersion(fn.getVersion());
+        return result;
     }
 
     private LambdaFunction resolveInvokeTarget(String region, String name, String qualifier) {
@@ -928,6 +958,7 @@ public class LambdaService {
         functionName = fn.getFunctionName();
         int version = nextVersionNumber(region + "::" + functionName);
         LambdaFunction snapshot = new LambdaFunction();
+        snapshot.setAccountId(fn.getAccountId());
         snapshot.setFunctionName(fn.getFunctionName());
         snapshot.setVersion(String.valueOf(version));
         snapshot.setFunctionArn(fn.getFunctionArn().replace(":$LATEST", "") + ":" + version);
@@ -941,6 +972,10 @@ public class LambdaService {
         snapshot.setState(fn.getState());
         snapshot.setCodeSizeBytes(fn.getCodeSizeBytes());
         snapshot.setEnvironment(fn.getEnvironment());
+        snapshot.setVpcConfig(fn.getVpcConfig() == null
+                ? null
+                : new java.util.HashMap<>(fn.getVpcConfig()));
+        snapshot.setFileSystemConfigs(new ArrayList<>(fn.getFileSystemConfigs()));
         snapshot.setLastModified(System.currentTimeMillis());
         snapshot.setRevisionId(UUID.randomUUID().toString());
 
@@ -949,9 +984,82 @@ public class LambdaService {
         return snapshot;
     }
 
+    private static List<LambdaFileSystemConfig> parseFileSystemConfigs(Object value) {
+        if (value == null) {
+            return new ArrayList<>();
+        }
+        if (!(value instanceof List<?> configs)) {
+            throw new AwsException("InvalidParameterValueException",
+                    "FileSystemConfigs must be a list", 400);
+        }
+        if (configs.size() > 1) {
+            throw new AwsException("InvalidParameterValueException",
+                    "A Lambda function supports at most one file system configuration", 400);
+        }
+
+        List<LambdaFileSystemConfig> parsed = new ArrayList<>();
+        for (Object rawConfig : configs) {
+            if (!(rawConfig instanceof Map<?, ?> config)) {
+                throw new AwsException("InvalidParameterValueException",
+                        "Each FileSystemConfigs entry must be an object", 400);
+            }
+            Object arnValue = config.get("Arn");
+            Object mountPathValue = config.get("LocalMountPath");
+            String arn = arnValue instanceof String string ? string : null;
+            String localMountPath = mountPathValue instanceof String string ? string : null;
+            if (arn == null || arn.isBlank() || arn.length() > 256) {
+                throw new AwsException("InvalidParameterValueException",
+                        "File system Arn must be 1 to 256 characters", 400);
+            }
+            if (!EFS_ACCESS_POINT_ARN.matcher(arn).matches()) {
+                throw new AwsException("InvalidParameterValueException",
+                        "File system Arn must identify an EFS access point", 400);
+            }
+            if (localMountPath == null || localMountPath.isBlank() || localMountPath.length() > 160
+                    || !FILE_SYSTEM_LOCAL_MOUNT_PATH.matcher(localMountPath).matches()) {
+                throw new AwsException("InvalidParameterValueException",
+                        "LocalMountPath must be a directory directly under /mnt", 400);
+            }
+            parsed.add(new LambdaFileSystemConfig(arn, localMountPath));
+        }
+        return parsed;
+    }
+
+    private static void validateFileSystemVpcConfig(List<LambdaFileSystemConfig> fileSystemConfigs,
+                                                    Map<String, Object> vpcConfig) {
+        if (fileSystemConfigs == null || fileSystemConfigs.isEmpty()) {
+            return;
+        }
+        if (!hasValues(vpcConfig, "SubnetIds") || !hasValues(vpcConfig, "SecurityGroupIds")) {
+            throw new AwsException("InvalidParameterValueException",
+                    "EFS file system access requires VpcConfig with subnets and security groups", 400);
+        }
+    }
+
+    private static boolean hasValues(Map<String, Object> config, String key) {
+        return config != null
+                && config.get(key) instanceof List<?> values
+                && !values.isEmpty();
+    }
+
     public List<LambdaFunction> listVersionsByFunction(String region, String functionName) {
         LambdaFunction fn = getFunction(region, functionName); // verify function exists
         return functionStore.listVersions(region, fn.getFunctionName());
+    }
+
+    /**
+     * Deletes a single published version of a function (DeleteFunction with a numeric qualifier),
+     * leaving {@code $LATEST} and every other version untouched. Deleting an already-gone version
+     * is a no-op; a missing function is a 404.
+     */
+    public void deleteVersion(String region, String functionName, String version) {
+        if (version == null || version.isBlank() || "$LATEST".equals(version)) {
+            throw new AwsException("InvalidParameterValueException",
+                    "Version must be a published version number, got: " + version, 400);
+        }
+        LambdaFunction fn = getFunction(region, functionName); // throws 404 if not found
+        functionStore.deleteVersion(region, fn.getFunctionName(), version);
+        LOG.infov("Deleted version {0} of function {1}", version, fn.getFunctionName());
     }
 
     // ──────────────────────────── Aliases ────────────────────────────
@@ -1391,13 +1499,34 @@ public class LambdaService {
 
     // ──────────────────────────── Permissions (Policy) ────────────────────────────
 
-    public Map<String, Object> addPermission(String region, String functionName, Map<String, Object> request) {
-        LambdaFunction fn = getFunction(region, functionName);
+    /**
+     * The ARN a resource-policy statement is scoped to: the bare function ARN, or
+     * {@code <functionArn>:<qualifier>} for an alias/version-scoped permission.
+     *
+     * <p>AWS keeps a SEPARATE resource policy per qualifier, so the qualifier is part of a
+     * statement's identity — the same {@code StatementId} may exist on the function and on
+     * each alias. We derive that identity from the statement's own {@code Resource} rather
+     * than storing a parallel field, which keeps already-persisted (always unqualified)
+     * statements readable as the function's own policy (#2124).
+     */
+    private static String policyResourceArn(LambdaFunction fn, String qualifier) {
+        return qualifier == null ? fn.getFunctionArn() : fn.getFunctionArn() + ":" + qualifier;
+    }
+
+    private static boolean scopedTo(Map<String, Object> statement, String resourceArn) {
+        return resourceArn.equals(statement.get("Resource"));
+    }
+
+    public Map<String, Object> addPermission(String region, String functionName, String qualifier, Map<String, Object> request) {
+        LambdaArnUtils.ResolvedFunctionRef ref = resolveWithRegion(region, functionName, qualifier);
+        LambdaFunction fn = getFunction(region, ref.name());
+        String resourceArn = policyResourceArn(fn, ref.qualifier());
         String statementId = (String) request.get("StatementId");
         if (statementId == null || statementId.isBlank()) {
             throw new AwsException("InvalidParameterValueException", "StatementId is required", 400);
         }
         fn.getPolicies().stream()
+                .filter(s -> scopedTo(s, resourceArn))
                 .filter(s -> statementId.equals(s.get("Sid")))
                 .findFirst()
                 .ifPresent(s -> {
@@ -1421,7 +1550,7 @@ public class LambdaService {
             statement.put("Principal", principal);
         }
         statement.put("Action", action);
-        statement.put("Resource", fn.getFunctionArn());
+        statement.put("Resource", resourceArn);
         if (sourceArn != null) {
             statement.put("Condition", Map.of("ArnLike", Map.of("AWS:SourceArn", sourceArn)));
         } else if (sourceAccount != null) {
@@ -1434,22 +1563,51 @@ public class LambdaService {
         return statement;
     }
 
-    public Map<String, Object> getPolicy(String region, String functionName) {
-        LambdaFunction fn = getFunction(region, functionName);
-        if (fn.getPolicies().isEmpty()) {
+    public Map<String, Object> getPolicy(String region, String functionName, String qualifier) {
+        LambdaArnUtils.ResolvedFunctionRef ref = resolveWithRegion(region, functionName, qualifier);
+        LambdaFunction fn = getFunction(region, ref.name());
+        String resourceArn = policyResourceArn(fn, ref.qualifier());
+        List<Map<String, Object>> statements = fn.getPolicies().stream()
+                .filter(s -> scopedTo(s, resourceArn))
+                .toList();
+        if (statements.isEmpty()) {
             throw new AwsException("ResourceNotFoundException",
-                    "Function not found: " + functionName, 404);
+                    "The resource you requested does not exist.", 404);
         }
         Map<String, Object> policy = new java.util.LinkedHashMap<>();
         policy.put("Version", "2012-10-17");
         policy.put("Id", "default");
-        policy.put("Statement", fn.getPolicies());
+        policy.put("Statement", statements);
         return Map.of("policy", policy, "revisionId", fn.getRevisionId());
     }
 
-    public void removePermission(String region, String functionName, String statementId) {
+    /**
+     * Puts a previously captured policy statement back. Used to compensate when a replacement fails
+     * after the original was removed: it takes the stored statement shape rather than an
+     * AddPermission request, so what goes back is exactly what came out.
+     *
+     * <p>Scoped to the unqualified function, matching where the captured statement came from. A Sid
+     * is unique only within one resource ARN, so matching on it alone would take out an
+     * identically named statement on an alias or version and leave that one lost.
+     */
+    public void restorePermissionStatement(String region, String functionName, Map<String, Object> statement) {
         LambdaFunction fn = getFunction(region, functionName);
-        boolean removed = fn.getPolicies().removeIf(s -> statementId.equals(s.get("Sid")));
+        String statementId = (String) statement.get("Sid");
+        String resourceArn = policyResourceArn(fn, null);
+        if (statementId != null) {
+            fn.getPolicies().removeIf(s -> statementId.equals(s.get("Sid")) && scopedTo(s, resourceArn));
+        }
+        fn.getPolicies().add(statement);
+        functionStore.save(region, fn);
+        LOG.infov("Restored permission {0} on function {1}", statementId, functionName);
+    }
+
+    public void removePermission(String region, String functionName, String qualifier, String statementId) {
+        LambdaArnUtils.ResolvedFunctionRef ref = resolveWithRegion(region, functionName, qualifier);
+        LambdaFunction fn = getFunction(region, ref.name());
+        String resourceArn = policyResourceArn(fn, ref.qualifier());
+        boolean removed = fn.getPolicies()
+                .removeIf(s -> statementId.equals(s.get("Sid")) && scopedTo(s, resourceArn));
         if (!removed) {
             throw new AwsException("ResourceNotFoundException",
                     "Statement " + statementId + " not found in function " + functionName, 404);

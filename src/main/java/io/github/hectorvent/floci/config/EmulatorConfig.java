@@ -280,6 +280,7 @@ public interface EmulatorConfig {
         TaggingStorageConfig tagging();
         ElasticBeanstalkStorageConfig elasticbeanstalk();
         CloudTrailStorageConfig cloudtrail();
+        RumStorageConfig rum();
     }
 
     interface SsmStorageConfig {
@@ -488,6 +489,13 @@ public interface EmulatorConfig {
         long flushIntervalMs();
     }
 
+    interface RumStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+
     interface CodeDeployStorageConfig {
         Optional<String> mode();
 
@@ -523,6 +531,7 @@ public interface EmulatorConfig {
         IamServiceConfig iam();
         MskServiceConfig msk();
         AmazonMqServiceConfig amazonmq();
+        KinesisAnalyticsServiceConfig kinesisAnalytics();
         ElastiCacheServiceConfig elasticache();
         MemoryDbServiceConfig memorydb();
         RdsServiceConfig rds();
@@ -541,6 +550,7 @@ public interface EmulatorConfig {
         KmsServiceConfig kms();
         CognitoServiceConfig cognito();
         StepFunctionsServiceConfig stepfunctions();
+        SwfServiceConfig swf();
         CloudFormationServiceConfig cloudformation();
         AcmServiceConfig acm();
         AthenaServiceConfig athena();
@@ -555,12 +565,14 @@ public interface EmulatorConfig {
         ResourceGroupsTaggingServiceConfig tagging();
         BedrockRuntimeServiceConfig bedrockRuntime();
         EksServiceConfig eks();
+        MwaaServiceConfig mwaa();
         PipesServiceConfig pipes();
         ElbV2ServiceConfig elbv2();
         CodeBuildServiceConfig codebuild();
         CodeDeployServiceConfig codedeploy();
         CodePipelineServiceConfig codepipeline();
         AutoScalingServiceConfig autoscaling();
+        ApplicationAutoScalingServiceConfig applicationautoscaling();
         ElasticBeanstalkServiceConfig elasticbeanstalk();
         BackupServiceConfig backup();
         NeptuneServiceConfig neptune();
@@ -585,6 +597,7 @@ public interface EmulatorConfig {
         S3VectorsServiceConfig s3vectors();
         IotServiceConfig iot();
         IotDataServiceConfig iotdata();
+        RumServiceConfig rum();
     }
 
     interface IotServiceConfig {
@@ -609,6 +622,11 @@ public interface EmulatorConfig {
     }
 
     interface IotDataServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface RumServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }
@@ -674,6 +692,11 @@ public interface EmulatorConfig {
     }
 
     interface AutoScalingServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface ApplicationAutoScalingServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }
@@ -767,6 +790,13 @@ public interface EmulatorConfig {
 
         @WithDefault("false")
         boolean seedDeployerPrincipal();
+
+        /**
+         * Alias to seed for the default account at startup, so callers that read the account
+         * alias find one without creating it first. Unset means the account has no alias, which
+         * is the AWS default.
+         */
+        Optional<String> accountAlias();
     }
 
     interface MskServiceConfig {
@@ -795,6 +825,23 @@ public interface EmulatorConfig {
 
         @WithDefault("rabbitmq:3-management")
         String defaultImage();
+    }
+
+    interface KinesisAnalyticsServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        /** When true, StartApplication comes up RUNNING immediately with no backing Flink
+         *  container. Useful for tests and hosts without a Docker daemon. */
+        @WithDefault("false")
+        boolean mock();
+
+        /**
+         * Optional fixed image used for every application regardless of the requested
+         * {@code RuntimeEnvironment} (private registry mirror, pinned patch). When unset, the image
+         * is chosen from the runtime via {@code KinesisAnalyticsRuntimes.imageFor(runtimeEnvironment)}.
+         */
+        Optional<String> defaultImage();
     }
 
     interface ElastiCacheServiceConfig {
@@ -838,6 +885,10 @@ public interface EmulatorConfig {
     }
 
     interface RdsServiceConfig {
+        String DEFAULT_POSTGRES_IMAGE = "postgres:16-alpine";
+        String DEFAULT_MYSQL_IMAGE = "mysql:8.0";
+        String DEFAULT_MARIADB_IMAGE = "mariadb:11";
+
         @WithDefault("true")
         boolean enabled();
 
@@ -853,14 +904,17 @@ public interface EmulatorConfig {
         @WithDefault("7099")
         int proxyMaxPort();
 
-        @WithDefault("postgres:16-alpine")
-        String defaultPostgresImage();
+        /** Empty when Floci should adapt its built-in image to the requested engine version. */
+        Optional<String> defaultPostgresImage();
 
-        @WithDefault("mysql:8.0")
-        String defaultMysqlImage();
+        /** Empty when Floci should adapt its built-in image to the requested engine version. */
+        Optional<String> defaultMysqlImage();
 
-        @WithDefault("mariadb:11")
-        String defaultMariadbImage();
+        /** Empty when Floci should adapt its built-in image to the requested engine version. */
+        Optional<String> defaultMariadbImage();
+
+        /** Hostname advertised for RDS endpoints. Uses published Docker ports when configured. */
+        Optional<String> endpointHost();
 
         /** Docker network to attach DB containers to. Empty = default bridge. */
         Optional<String> dockerNetwork();
@@ -1034,6 +1088,26 @@ public interface EmulatorConfig {
         boolean allowPlaintextHttp();
     }
 
+    interface SwfServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        /**
+         * Run the background sweep that expires activity, decision, workflow and timer
+         * timeouts. Setting this to {@code false} leaves timeouts recorded but never
+         * fired, which is useful for tests that drive the clock themselves.
+         */
+        @WithDefault("true")
+        boolean timeoutSweepEnabled();
+
+        /**
+         * How often the timeout sweep runs. SWF timeouts are specified in whole seconds,
+         * so a 1s sweep bounds the observable lateness of an expiry at one second.
+         */
+        @WithDefault("1")
+        long timeoutSweepIntervalSeconds();
+    }
+
     interface CloudFormationServiceConfig {
         @WithDefault("true")
         boolean enabled();
@@ -1149,6 +1223,58 @@ public interface EmulatorConfig {
     interface BedrockRuntimeServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        /**
+         * Converse/InvokeModel backend: "stub" (default, hardcoded response, no
+         * external calls) or "proxy" (forwards Converse to an OpenAI-compatible
+         * /chat/completions endpoint; see {@link BedrockProxyConfig}).
+         */
+        @WithDefault("stub")
+        String backend();
+
+        BedrockProxyConfig proxy();
+    }
+
+    interface BedrockProxyConfig {
+        /**
+         * Base URL of the OpenAI-compatible backend (Ollama, OpenRouter, LiteLLM,
+         * vLLM), e.g. "http://localhost:11434/v1". Required when backend=proxy;
+         * requests are POSTed to "{url}/chat/completions".
+         */
+        Optional<String> url();
+
+        /** Sent as "Authorization: Bearer {apiKey}" when present. */
+        Optional<String> apiKey();
+
+        /**
+         * Fallback OpenAI-side model id used when no explicit mapping matches
+         * and passthrough is disabled.
+         */
+        Optional<String> defaultModel();
+
+        /**
+         * Comma-separated {@code bedrockModelId=openaiModelId} pairs, e.g.
+         * {@code "anthropic.claude-3-sonnet-20240229-v1:0=claude-3-sonnet"}.
+         * A delimited string rather than a native Map config property: Bedrock
+         * model ids contain '.' and ':', which collide with SmallRye's per-key
+         * env-var naming convention for maps.
+         */
+        Optional<String> modelMapping();
+
+        /**
+         * When true, and no explicit mapping matches, forward the raw Bedrock
+         * model id as-is instead of requiring a mapping or defaultModel.
+         */
+        @WithDefault("false")
+        boolean passthrough();
+
+        /**
+         * How long to wait for the backend to finish generating a response before
+         * failing the request with ModelTimeoutException. Larger models on
+         * CPU-backed backends (e.g. Ollama) may need more than the default.
+         */
+        @WithDefault("60")
+        int requestTimeoutSeconds();
     }
 
     interface TextractServiceConfig {
@@ -1217,6 +1343,12 @@ public interface EmulatorConfig {
 
         @WithDefault("cloudfront.net")
         String domainSuffix();
+
+        /**
+         * Exact custom-origin hostnames allowed to resolve to private or otherwise non-routable
+         * addresses. Empty by default to match CloudFront's public custom-origin boundary.
+         */
+        Optional<List<String>> allowedPrivateOriginHosts();
     }
 
     interface AppSyncServiceConfig {
@@ -1328,6 +1460,15 @@ public interface EmulatorConfig {
 
         /** Docker network to attach Lambda containers to. Empty = default bridge. */
         Optional<String> dockerNetwork();
+
+        /**
+         * Extra /etc/hosts entries added to every Lambda container, as "hostname:ip" pairs.
+         * The ip may be the literal "host-gateway" to map to the Docker host, mirroring
+         * {@code docker run --add-host hostname:host-gateway}.
+         *
+         * Env var: FLOCI_SERVICES_LAMBDA_EXTRA_HOSTS (comma-separated)
+         */
+        Optional<List<String>> extraHosts();
 
         /**
          * Concurrent executions ceiling applied per region. AWS Lambda's
@@ -1526,6 +1667,60 @@ public interface EmulatorConfig {
          */
         @WithDefault("false")
         boolean disableCni();
+    }
+
+    /**
+     * MWAA (Managed Workflows for Apache Airflow), backed by a real Apache Airflow instance
+     * (LocalExecutor) plus a dedicated Postgres metadata database, one pair of containers per
+     * environment. See {@code services/mwaa/MwaaEnvironmentManager}.
+     */
+    interface MwaaServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        /** When true, environments go straight to AVAILABLE without starting real Docker containers. */
+        @WithDefault("false")
+        boolean mock();
+
+        /** Image for the per-environment Postgres metadata database. Not shared with RDS's config knob. */
+        @WithDefault("postgres:16-alpine")
+        String defaultPostgresImage();
+
+        /** Airflow versions environments may request. Combined with the image tag
+         *  {@code apache/airflow:<version>-python3.12}. */
+        @WithDefault("2.10.5,2.9.3,2.8.4")
+        List<String> supportedVersions();
+
+        /** Airflow version used when {@code CreateEnvironment} omits {@code AirflowVersion}. */
+        @WithDefault("2.10.5")
+        String defaultVersion();
+
+        /** Base port of the web/CLI proxy port range. First environment gets this port. */
+        @WithDefault("8700")
+        int proxyBasePort();
+
+        /** Inclusive upper bound of the proxy port range. */
+        @WithDefault("8799")
+        int proxyMaxPort();
+
+        @WithDefault("./data/mwaa")
+        String dataPath();
+
+        /** Docker network to attach the Postgres/Airflow containers to. Empty = default bridge. */
+        Optional<String> dockerNetwork();
+
+        @WithDefault("false")
+        boolean keepRunningOnShutdown();
+
+        /** Poll interval for syncing DAGs (and optionally requirements) from the environment's
+         *  S3 {@code DagS3Path} into the Airflow container. */
+        @WithDefault("30")
+        int dagSyncIntervalSeconds();
+
+        /** When true, {@code RequirementsS3Path} is installed via {@code pip install -r} on create
+         *  and on every DAG-sync pass in which the requirements file's ETag changed. */
+        @WithDefault("true")
+        boolean installRequirements();
     }
 
     interface InitHooksConfig {

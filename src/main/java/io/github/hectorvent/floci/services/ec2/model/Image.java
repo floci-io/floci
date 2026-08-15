@@ -25,6 +25,12 @@ public class Image {
     private String imageOwnerAlias = "amazon";
     private String creationDate;
     private String region;
+    /**
+     * For images produced by CreateImage: the AMI the source instance was launched from. Not an
+     * EC2 field — Floci uses it to resolve the guest image to run, since a generated ami-* id is
+     * not in the catalog and would otherwise fall back to the default guest.
+     */
+    private String sourceImageId;
     private List<BlockDeviceMapping> blockDeviceMappings = new ArrayList<>();
     private List<Tag> tags = new ArrayList<>();
 
@@ -74,6 +80,9 @@ public class Image {
 
     public String getRegion() { return region; }
     public void setRegion(String region) { this.region = region; }
+
+    public String getSourceImageId() { return sourceImageId; }
+    public void setSourceImageId(String sourceImageId) { this.sourceImageId = sourceImageId; }
 
     public List<BlockDeviceMapping> getBlockDeviceMappings() { return blockDeviceMappings; }
     public void setBlockDeviceMappings(List<BlockDeviceMapping> blockDeviceMappings) { this.blockDeviceMappings = blockDeviceMappings; }
