@@ -163,17 +163,35 @@ aws logs put-retention-policy \
 | `GetMetricStatistics` | Get metric statistics (Average, Sum, etc.) |
 | `GetMetricData` | Query metrics with math expressions |
 | `PutMetricAlarm` | Create a metric alarm |
-| `DescribeAlarms` | List alarms |
-| `DeleteAlarms` | Delete alarms |
+| `PutCompositeAlarm` | Create or update a composite alarm |
+| `DescribeAlarms` | List alarms (`AlarmTypes` selects metric or composite alarms) |
+| `DeleteAlarms` | Delete metric and composite alarms |
 | `SetAlarmState` | Manually set alarm state |
+| `PutDashboard` | Create or replace a dashboard |
+| `GetDashboard` | Read a dashboard, including its exact `DashboardBody` |
+| `ListDashboards` | List dashboards, optionally filtered by name prefix |
+| `DeleteDashboards` | Delete dashboards |
+| `PutInsightRule` | Create or replace a Contributor Insights rule |
+| `DescribeInsightRules` | List Contributor Insights rules |
+| `DeleteInsightRules` | Delete Contributor Insights rules |
+| `EnableInsightRules` / `DisableInsightRules` | Move rules between `ENABLED` and `DISABLED` |
 | `PutMetricStream` | Create or update a metric stream |
 | `GetMetricStream` | Read a metric stream definition |
 | `DeleteMetricStream` | Delete a metric stream |
 | `ListMetricStreams` | List metric streams |
 | `StartMetricStreams` / `StopMetricStreams` | Move streams between `running` and `stopped` |
 
-Metric streams are stored as definitions only — Floci never delivers metrics to the
-configured Firehose delivery stream.
+`TagResource`, `UntagResource`, and `ListTagsForResource` accept metric alarm, composite
+alarm, Contributor Insights rule, and metric stream ARNs. `PutMetricAlarm`,
+`PutCompositeAlarm`, `PutInsightRule`, and `PutMetricStream` all honour `Tags` on create.
+
+Three areas are stored as definitions only:
+
+- **Metric streams** — Floci never delivers metrics to the configured Firehose delivery stream.
+- **Composite alarms** — the `AlarmRule` expression is recorded but never evaluated, so a
+  composite alarm reports `OK` from the first read and never transitions.
+- **Contributor Insights rules** — no log data is aggregated for a rule, so
+  `GetInsightRuleReport` is not implemented and returns `UnsupportedOperation`.
 
 ### Examples
 

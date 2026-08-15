@@ -35,7 +35,11 @@ class CloudWatchMetricStreamsTest {
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
-                new RegionResolver(REGION, "000000000000")
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new RegionResolver(REGION, "000000000000"),
+                MAPPER
         );
         queryHandler = new CloudWatchMetricsQueryHandler(service);
         jsonHandler = new CloudWatchMetricsJsonHandler(service, MAPPER);

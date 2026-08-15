@@ -40,7 +40,11 @@ class CloudWatchMetricsJsonHandlerTest {
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
-                new RegionResolver(REGION, "000000000000")
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new RegionResolver(REGION, "000000000000"),
+                MAPPER
         );
         handler = new CloudWatchMetricsJsonHandler(service, MAPPER);
     }

@@ -4,11 +4,16 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.cloudwatch.metrics.model.CompositeAlarm;
+import io.github.hectorvent.floci.services.cloudwatch.metrics.model.Dashboard;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.Dimension;
+import io.github.hectorvent.floci.services.cloudwatch.metrics.model.InsightRule;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricAlarm;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricDatum;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricStream;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -31,27 +36,46 @@ public class CloudWatchMetricsService {
     private final StorageBackend<String, MetricDatum> metricStore;
     private final StorageBackend<String, MetricAlarm> alarmStore;
     private final StorageBackend<String, MetricStream> metricStreamStore;
+    private final StorageBackend<String, CompositeAlarm> compositeAlarmStore;
+    private final StorageBackend<String, Dashboard> dashboardStore;
+    private final StorageBackend<String, InsightRule> insightRuleStore;
     private final RegionResolver regionResolver;
+    private final ObjectMapper objectMapper;
 
     @Inject
-    public CloudWatchMetricsService(StorageFactory storageFactory, RegionResolver regionResolver) {
-        this.metricStore = storageFactory.create("cloudwatchmetrics", "cwmetrics.json",
-                new TypeReference<Map<String, MetricDatum>>() {});
-        this.alarmStore = storageFactory.create("cloudwatchmetrics", "cwalarms.json",
-                new TypeReference<Map<String, MetricAlarm>>() {});
-        this.metricStreamStore = storageFactory.create("cloudwatchmetrics", "cwmetricstreams.json",
-                new TypeReference<Map<String, MetricStream>>() {});
-        this.regionResolver = regionResolver;
+    public CloudWatchMetricsService(StorageFactory storageFactory, RegionResolver regionResolver,
+                                    ObjectMapper objectMapper) {
+        this(storageFactory.create("cloudwatchmetrics", "cwmetrics.json",
+                        new TypeReference<Map<String, MetricDatum>>() {}),
+                storageFactory.create("cloudwatchmetrics", "cwalarms.json",
+                        new TypeReference<Map<String, MetricAlarm>>() {}),
+                storageFactory.create("cloudwatchmetrics", "cwmetricstreams.json",
+                        new TypeReference<Map<String, MetricStream>>() {}),
+                storageFactory.create("cloudwatchmetrics", "cwcompositealarms.json",
+                        new TypeReference<Map<String, CompositeAlarm>>() {}),
+                storageFactory.create("cloudwatchmetrics", "cwdashboards.json",
+                        new TypeReference<Map<String, Dashboard>>() {}),
+                storageFactory.create("cloudwatchmetrics", "cwinsightrules.json",
+                        new TypeReference<Map<String, InsightRule>>() {}),
+                regionResolver, objectMapper);
     }
 
     CloudWatchMetricsService(StorageBackend<String, MetricDatum> metricStore,
                              StorageBackend<String, MetricAlarm> alarmStore,
                              StorageBackend<String, MetricStream> metricStreamStore,
-                             RegionResolver regionResolver) {
+                             StorageBackend<String, CompositeAlarm> compositeAlarmStore,
+                             StorageBackend<String, Dashboard> dashboardStore,
+                             StorageBackend<String, InsightRule> insightRuleStore,
+                             RegionResolver regionResolver,
+                             ObjectMapper objectMapper) {
         this.metricStore = metricStore;
         this.alarmStore = alarmStore;
         this.metricStreamStore = metricStreamStore;
+        this.compositeAlarmStore = compositeAlarmStore;
+        this.dashboardStore = dashboardStore;
+        this.insightRuleStore = insightRuleStore;
         this.regionResolver = regionResolver;
+        this.objectMapper = objectMapper;
     }
 
     public void putMetricData(String namespace, List<MetricDatum> datums, String region) {
@@ -267,6 +291,7 @@ public class CloudWatchMetricsService {
     public void deleteAlarms(List<String> alarmNames, String region) {
         for (String name : alarmNames) {
             alarmStore.delete(region + "::" + name);
+            compositeAlarmStore.delete(region + "::" + name);
         }
         LOG.infov("Deleted alarms: {0} in {1}", alarmNames, region);
     }
@@ -283,6 +308,169 @@ public class CloudWatchMetricsService {
 
         alarmStore.put(key, alarm);
         LOG.infov("SetAlarmState: {0} -> {1}", alarmName, stateValue);
+    }
+
+    // ──────────────────────────── Composite Alarms ────────────────────────────
+
+    /**
+     * Creates or replaces a composite alarm. Floci never evaluates {@code AlarmRule}, so the
+     * alarm keeps the terminal {@code OK} state it is created with; a repeat put preserves the
+     * original state timestamps and the tags applied when the alarm was created.
+     */
+    public CompositeAlarm putCompositeAlarm(CompositeAlarm alarm, String region) {
+        String key = region + "::" + alarm.getAlarmName();
+        CompositeAlarm existing = compositeAlarmStore.get(key).orElse(null);
+        if (existing != null) {
+            alarm.setStateValue(existing.getStateValue());
+            alarm.setStateReason(existing.getStateReason());
+            alarm.setStateReasonData(existing.getStateReasonData());
+            alarm.setStateUpdatedTimestamp(existing.getStateUpdatedTimestamp());
+            alarm.setStateTransitionedTimestamp(existing.getStateTransitionedTimestamp());
+            if (alarm.getTags().isEmpty()) {
+                alarm.setTags(existing.getTags());
+            }
+        }
+        alarm.setAlarmArn(regionResolver.buildArn("cloudwatch", region, "alarm:" + alarm.getAlarmName()));
+        alarm.setAlarmConfigurationUpdatedTimestamp(Instant.now().getEpochSecond());
+        compositeAlarmStore.put(key, alarm);
+        LOG.infov("PutCompositeAlarm: {0} in {1}", alarm.getAlarmName(), region);
+        return alarm;
+    }
+
+    public List<CompositeAlarm> describeCompositeAlarms(List<String> alarmNames, String alarmNamePrefix, String region) {
+        List<CompositeAlarm> all = compositeAlarmStore.scan(k -> k.startsWith(region + "::"));
+        if (alarmNames != null && !alarmNames.isEmpty()) {
+            return all.stream().filter(a -> alarmNames.contains(a.getAlarmName())).toList();
+        }
+        if (alarmNamePrefix != null && !alarmNamePrefix.isBlank()) {
+            return all.stream().filter(a -> a.getAlarmName().startsWith(alarmNamePrefix)).toList();
+        }
+        return all.stream().sorted(Comparator.comparing(CompositeAlarm::getAlarmName)).toList();
+    }
+
+    // ──────────────────────────── Dashboards ────────────────────────────
+
+    /**
+     * Creates or replaces a dashboard. The body is stored byte-for-byte as it arrived so that
+     * {@code GetDashboard} hands back exactly the JSON the caller sent.
+     */
+    public Dashboard putDashboard(String dashboardName, String dashboardBody, String region) {
+        if (dashboardName == null || dashboardName.isBlank()) {
+            throw new AwsException("InvalidParameterValue", "DashboardName is required", 400);
+        }
+        if (dashboardBody == null) {
+            throw new AwsException("InvalidParameterInput", "DashboardBody is required", 400);
+        }
+        Dashboard dashboard = new Dashboard();
+        dashboard.setName(dashboardName);
+        dashboard.setBody(dashboardBody);
+        dashboard.setLastModified(Instant.now().getEpochSecond());
+        dashboard.setArn(regionResolver.buildArn("cloudwatch", "", "dashboard/" + dashboardName));
+        dashboardStore.put(region + "::" + dashboardName, dashboard);
+        LOG.infov("PutDashboard: {0} in {1}", dashboardName, region);
+        return dashboard;
+    }
+
+    public Dashboard getDashboard(String dashboardName, String region) {
+        return dashboardStore.get(region + "::" + dashboardName)
+                .orElseThrow(() -> new AwsException("ResourceNotFound",
+                        "Dashboard does not exist: " + dashboardName, 404));
+    }
+
+    public List<Dashboard> listDashboards(String dashboardNamePrefix, String region) {
+        return dashboardStore.scan(k -> k.startsWith(region + "::"))
+                .stream()
+                .filter(d -> dashboardNamePrefix == null || dashboardNamePrefix.isBlank()
+                        || d.getName().startsWith(dashboardNamePrefix))
+                .sorted(Comparator.comparing(Dashboard::getName))
+                .toList();
+    }
+
+    /** Deletes the named dashboards. CloudWatch fails the whole call when any name is unknown. */
+    public void deleteDashboards(List<String> dashboardNames, String region) {
+        if (dashboardNames == null || dashboardNames.isEmpty()) {
+            throw new AwsException("InvalidParameterValue", "DashboardNames is required", 400);
+        }
+        for (String name : dashboardNames) {
+            if (dashboardStore.get(region + "::" + name).isEmpty()) {
+                throw new AwsException("ResourceNotFound", "Dashboard does not exist: " + name, 404);
+            }
+        }
+        dashboardNames.forEach(name -> dashboardStore.delete(region + "::" + name));
+        LOG.infov("DeleteDashboards: {0} in {1}", dashboardNames, region);
+    }
+
+    // ──────────────────────────── Contributor Insight Rules ────────────────────────────
+
+    /**
+     * Creates or replaces a Contributor Insights rule. The rule is stored only: Floci never
+     * aggregates log data for it, so no report is ever produced. A rule is {@code ENABLED}
+     * from the first read unless the request asked for {@code DISABLED}.
+     */
+    public InsightRule putInsightRule(InsightRule rule, String region) {
+        if (rule.getName() == null || rule.getName().isBlank()) {
+            throw new AwsException("InvalidParameterValueException", "RuleName is required", 400);
+        }
+        if (rule.getDefinition() == null || rule.getDefinition().isBlank()) {
+            throw new AwsException("MissingRequiredParameterException", "RuleDefinition is required", 400);
+        }
+        if (rule.getState() == null || rule.getState().isBlank()) {
+            rule.setState(InsightRule.STATE_ENABLED);
+        }
+        String key = region + "::" + rule.getName();
+        InsightRule existing = insightRuleStore.get(key).orElse(null);
+        if (existing != null && rule.getTags().isEmpty()) {
+            rule.setTags(existing.getTags());
+        }
+        rule.setSchema(schemaOf(rule.getDefinition()));
+        rule.setArn(regionResolver.buildArn("cloudwatch", region, "insight-rule/" + rule.getName()));
+        insightRuleStore.put(key, rule);
+        LOG.infov("PutInsightRule: {0} in {1}", rule.getName(), region);
+        return rule;
+    }
+
+    public List<InsightRule> describeInsightRules(String region) {
+        return insightRuleStore.scan(k -> k.startsWith(region + "::"))
+                .stream()
+                .sorted(Comparator.comparing(InsightRule::getName))
+                .toList();
+    }
+
+    public InsightRule getInsightRule(String ruleName, String region) {
+        return insightRuleStore.get(region + "::" + ruleName)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "Insight rule not found: " + ruleName, 404));
+    }
+
+    public void deleteInsightRules(List<String> ruleNames, String region) {
+        ruleNames.forEach(name -> insightRuleStore.delete(region + "::" + name));
+        LOG.infov("DeleteInsightRules: {0} in {1}", ruleNames, region);
+    }
+
+    /** Moves the named rules to {@code ENABLED} or {@code DISABLED}. */
+    public void setInsightRulesState(List<String> ruleNames, boolean enabled, String region) {
+        for (String name : ruleNames) {
+            InsightRule rule = getInsightRule(name, region);
+            rule.setState(enabled ? InsightRule.STATE_ENABLED : InsightRule.STATE_DISABLED);
+            insightRuleStore.put(region + "::" + name, rule);
+        }
+    }
+
+    /**
+     * Returns the {@code Schema} block a rule definition declares, serialized as CloudWatch
+     * reports it on {@code DescribeInsightRules}. Contributor Insights defines a single schema,
+     * so a definition without one is reported as that schema at version 1.
+     */
+    private String schemaOf(String definition) {
+        try {
+            JsonNode schema = objectMapper.readTree(definition).path("Schema");
+            if (schema.isObject()) {
+                return objectMapper.writeValueAsString(schema);
+            }
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            LOG.debugv("Insight rule definition is not JSON, defaulting its schema: {0}", e.getMessage());
+        }
+        return "{\"Name\":\"CloudWatchLogRule\",\"Version\":1}";
     }
 
     // ──────────────────────────── Metric Streams ────────────────────────────
@@ -348,6 +536,18 @@ public class CloudWatchMetricsService {
         if (alarmTags != null) {
             return alarmTags;
         }
+        Map<String, String> compositeTags = findCompositeAlarmByArn(resourceArn, region)
+                .map(CompositeAlarm::getTags)
+                .orElse(null);
+        if (compositeTags != null) {
+            return compositeTags;
+        }
+        Map<String, String> ruleTags = findInsightRuleByArn(resourceArn, region)
+                .map(InsightRule::getTags)
+                .orElse(null);
+        if (ruleTags != null) {
+            return ruleTags;
+        }
         return findMetricStreamByArn(resourceArn, region)
                 .map(MetricStream::getTags)
                 .orElse(Map.of());
@@ -362,6 +562,14 @@ public class CloudWatchMetricsService {
                     alarm.getTags().putAll(tags);
                     alarmStore.put(region + "::" + alarm.getAlarmName(), alarm);
                 });
+        findCompositeAlarmByArn(resourceArn, region).ifPresent(alarm -> {
+            alarm.getTags().putAll(tags);
+            compositeAlarmStore.put(region + "::" + alarm.getAlarmName(), alarm);
+        });
+        findInsightRuleByArn(resourceArn, region).ifPresent(rule -> {
+            rule.getTags().putAll(tags);
+            insightRuleStore.put(region + "::" + rule.getName(), rule);
+        });
         findMetricStreamByArn(resourceArn, region).ifPresent(stream -> {
             stream.getTags().putAll(tags);
             metricStreamStore.put(region + "::" + stream.getName(), stream);
@@ -377,6 +585,14 @@ public class CloudWatchMetricsService {
                     tagKeys.forEach(alarm.getTags()::remove);
                     alarmStore.put(region + "::" + alarm.getAlarmName(), alarm);
                 });
+        findCompositeAlarmByArn(resourceArn, region).ifPresent(alarm -> {
+            tagKeys.forEach(alarm.getTags()::remove);
+            compositeAlarmStore.put(region + "::" + alarm.getAlarmName(), alarm);
+        });
+        findInsightRuleByArn(resourceArn, region).ifPresent(rule -> {
+            tagKeys.forEach(rule.getTags()::remove);
+            insightRuleStore.put(region + "::" + rule.getName(), rule);
+        });
         findMetricStreamByArn(resourceArn, region).ifPresent(stream -> {
             tagKeys.forEach(stream.getTags()::remove);
             metricStreamStore.put(region + "::" + stream.getName(), stream);
@@ -387,6 +603,20 @@ public class CloudWatchMetricsService {
         return metricStreamStore.scan(k -> k.startsWith(region + "::"))
                 .stream()
                 .filter(s -> resourceArn.equals(s.getArn()))
+                .findFirst();
+    }
+
+    private Optional<CompositeAlarm> findCompositeAlarmByArn(String resourceArn, String region) {
+        return compositeAlarmStore.scan(k -> k.startsWith(region + "::"))
+                .stream()
+                .filter(a -> resourceArn.equals(a.getAlarmArn()))
+                .findFirst();
+    }
+
+    private Optional<InsightRule> findInsightRuleByArn(String resourceArn, String region) {
+        return insightRuleStore.scan(k -> k.startsWith(region + "::"))
+                .stream()
+                .filter(r -> resourceArn.equals(r.getArn()))
                 .findFirst();
     }
 
