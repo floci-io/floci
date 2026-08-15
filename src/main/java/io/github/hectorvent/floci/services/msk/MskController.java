@@ -139,7 +139,7 @@ public class MskController {
         view.put("arn", configuration.getArn());
         view.put("name", configuration.getName());
         view.put("description", configuration.getDescription() != null ? configuration.getDescription() : "");
-        view.put("kafkaVersions", configuration.getKafkaVersions());
+        view.put("kafkaVersions", configuration.getKafkaVersions() != null ? configuration.getKafkaVersions() : List.of());
         view.put("state", configuration.getState());
         view.put("creationTime", configuration.getCreationTime());
         view.put("latestRevision", configuration.getLatestRevision());

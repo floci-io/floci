@@ -7,6 +7,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.hasSize;
@@ -189,5 +190,37 @@ class MskControllerIntegrationTest {
             .get("/v1/configurations/{arn}", "arn:aws:kafka:us-east-1:000000000000:configuration/missing/id")
         .then()
             .statusCode(404);
+    }
+
+    // kafkaVersions is optional on CreateConfigurationRequest. Omitting it must not leak a
+    // null into the "kafkaVersions" field of the Configuration shape returned by
+    // DescribeConfiguration/ListConfigurations, which AWS always populates as an array.
+    @Test
+    void configurationWithoutKafkaVersionsReturnsEmptyArrayNotNull() {
+        String properties = Base64.getEncoder().encodeToString("props".getBytes(StandardCharsets.UTF_8));
+        String arn = given()
+            .contentType("application/json")
+            .body("""
+                {"name": "no-versions-config", "serverProperties": "%s"}
+                """.formatted(properties))
+        .when()
+            .post("/v1/configurations")
+        .then()
+            .statusCode(200)
+            .extract().path("arn");
+
+        given()
+        .when()
+            .get("/v1/configurations/{arn}", arn)
+        .then()
+            .statusCode(200)
+            .body("kafkaVersions", empty());
+
+        given()
+        .when()
+            .get("/v1/configurations")
+        .then()
+            .statusCode(200)
+            .body("configurations.find { it.arn == '" + arn + "' }.kafkaVersions", empty());
     }
 }
