@@ -30,7 +30,11 @@ class CloudWatchMetricsTagsTest {
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
-                new RegionResolver("us-east-1", "000000000000")
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new RegionResolver("us-east-1", "000000000000"),
+                objectMapper
         );
         queryHandler = new CloudWatchMetricsQueryHandler(service);
         jsonHandler = new CloudWatchMetricsJsonHandler(service, objectMapper);

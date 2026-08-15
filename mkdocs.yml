@@ -114,6 +114,7 @@ nav:
     - MediaPackage: services/mediapackage.md
     - MediaPackage V2: services/mediapackagev2.md
     - MediaLive: services/medialive.md
+    - SageMaker: services/sagemaker.md
     - ACM: services/acm.md
     - ECS: services/ecs.md
     - ECR: services/ecr.md

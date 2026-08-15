@@ -20,6 +20,7 @@
 | `TagResource` / `UntagResource` / `ListTagsForResource` | Resource tagging |
 | `PutLifecyclePolicy` / `GetLifecyclePolicy` / `DeleteLifecyclePolicy` | Lifecycle policy round-trip (stored, not enforced) |
 | `SetRepositoryPolicy` / `GetRepositoryPolicy` / `DeleteRepositoryPolicy` | Repository policy round-trip (stored, not enforced) |
+| `PutRegistryPolicy` / `GetRegistryPolicy` / `DeleteRegistryPolicy` | Registry-wide permission policy, one document per account and region (stored, not enforced) |
 
 ### Admin Endpoints
 

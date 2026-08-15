@@ -43,6 +43,17 @@ Floci Lambda runs your function code locally inside real Docker containers - clo
 | `PutFunctionConcurrency` | Set reserved concurrent executions |
 | `GetFunctionConcurrency` | Get reserved concurrent executions |
 | `DeleteFunctionConcurrency` | Clear reserved concurrent executions |
+| `CreateCapacityProvider` | Create a capacity provider; returns `Active` immediately |
+| `GetCapacityProvider` | Get a capacity provider by name or ARN |
+| `ListCapacityProviders` | List capacity providers in the region |
+| `UpdateCapacityProvider` | Replace a capacity provider's scaling configuration |
+| `DeleteCapacityProvider` | Delete a capacity provider |
+
+Capacity providers use the `/2025-11-30` API version prefix. They are a control-plane
+record over the VPC configuration and operator role you supply — floci does not launch the
+compute instances behind one — and their `State` is `Active` as soon as the create returns,
+so SDK and Terraform waiters complete on their first poll. Capacity provider ARNs share the
+`/2017-03-31/tags/{arn}` routes with the rest of the Lambda resource families.
 
 ## Hot-Reloading via Reactive S3 Sync
 

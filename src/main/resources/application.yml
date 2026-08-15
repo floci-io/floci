@@ -506,3 +506,5 @@ floci:
       enabled: true
     medialive:
       enabled: true
+    sagemaker:
+      enabled: true

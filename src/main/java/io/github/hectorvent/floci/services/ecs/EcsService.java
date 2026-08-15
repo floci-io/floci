@@ -17,6 +17,9 @@ import io.github.hectorvent.floci.services.ecs.model.ContainerInstance;
 import io.github.hectorvent.floci.services.ecs.model.Deployment;
 import io.github.hectorvent.floci.services.ecs.model.Failure;
 import io.github.hectorvent.floci.services.ecs.model.ContainerOverride;
+import io.github.hectorvent.floci.services.ecs.model.Daemon;
+import io.github.hectorvent.floci.services.ecs.model.DaemonContainerDefinition;
+import io.github.hectorvent.floci.services.ecs.model.DaemonTaskDefinition;
 import io.github.hectorvent.floci.services.ecs.model.EcsCluster;
 import io.github.hectorvent.floci.services.ecs.model.EcsLoadBalancer;
 import io.github.hectorvent.floci.services.ecs.model.EcsServiceModel;
@@ -30,6 +33,7 @@ import io.github.hectorvent.floci.services.ecs.model.ServiceRevision;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import io.github.hectorvent.floci.services.ecs.model.TaskSet;
 import io.github.hectorvent.floci.services.ecs.model.TaskStatus;
+import io.github.hectorvent.floci.services.ecs.model.Volume;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -39,6 +43,7 @@ import org.jboss.logging.Logger;
 import java.time.Instant;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -92,6 +97,12 @@ public class EcsService implements ContainerTeardown {
     private Map<String, List<Attribute>> attributes = new ConcurrentHashMap<>();
     // name → value (account-level settings)
     private Map<String, String> accountSettings = new ConcurrentHashMap<>();
+    // family:revision → DaemonTaskDefinition
+    private Map<String, DaemonTaskDefinition> daemonTaskDefinitions = new ConcurrentHashMap<>();
+    // family → latest daemon task definition revision number
+    private Map<String, Integer> daemonLatestRevisions = new ConcurrentHashMap<>();
+    // daemonArn → Daemon
+    private Map<String, Daemon> daemons = new ConcurrentHashMap<>();
 
     @Inject
     public EcsService(RegionResolver regionResolver, EcsContainerManager containerManager,
@@ -129,6 +140,12 @@ public class EcsService implements ContainerTeardown {
                 new TypeReference<Map<String, List<Attribute>>>() {});
         this.accountSettings = storageBacked("ecs-account-settings.json",
                 new TypeReference<Map<String, String>>() {});
+        this.daemonTaskDefinitions = storageBacked("ecs-daemon-task-definitions.json",
+                new TypeReference<Map<String, DaemonTaskDefinition>>() {});
+        this.daemonLatestRevisions = storageBacked("ecs-daemon-latest-revisions.json",
+                new TypeReference<Map<String, Integer>>() {});
+        this.daemons = storageBacked("ecs-daemons.json",
+                new TypeReference<Map<String, Daemon>>() {});
     }
 
     private <V> Map<String, V> storageBacked(String fileName, TypeReference<Map<String, V>> typeReference) {
@@ -441,6 +458,148 @@ public class EcsService implements ContainerTeardown {
             deleted.add(td);
         }
         return deleted;
+    }
+
+    // ── Daemon Task Definitions ──────────────────────────────────────────────
+
+    public DaemonTaskDefinition registerDaemonTaskDefinition(String family,
+            List<DaemonContainerDefinition> containerDefs, String cpu, String memory,
+            String executionRoleArn, String taskRoleArn, String ipcMode, String pidMode,
+            List<Volume> volumes, Map<String, String> tags, String region) {
+        if (containerDefs == null || containerDefs.isEmpty()) {
+            throw new AwsException("ClientException",
+                    "Daemon task definition must have at least one container definition.", 400);
+        }
+        int revision = daemonLatestRevisions.merge(family, 1, Integer::sum);
+
+        DaemonTaskDefinition dtd = new DaemonTaskDefinition();
+        dtd.setFamily(family);
+        dtd.setRevision(revision);
+        dtd.setStatus("ACTIVE");
+        dtd.setCpu(cpu);
+        dtd.setMemory(memory);
+        dtd.setExecutionRoleArn(executionRoleArn);
+        dtd.setTaskRoleArn(taskRoleArn);
+        dtd.setIpcMode(ipcMode);
+        dtd.setPidMode(pidMode);
+        dtd.setContainerDefinitions(containerDefs);
+        dtd.setVolumes(volumes);
+        dtd.setRegisteredAt(Instant.now());
+        dtd.setDaemonTaskDefinitionArn(regionResolver.buildArn("ecs", region,
+                "daemon-task-definition/" + family + ":" + revision));
+        if (tags != null && !tags.isEmpty()) {
+            dtd.setTags(new LinkedHashMap<>(tags));
+        }
+
+        daemonTaskDefinitions.put(family + ":" + revision, dtd);
+        LOG.infov("Registered daemon task definition: {0}:{1}", family, revision);
+        return dtd;
+    }
+
+    public DaemonTaskDefinition describeDaemonTaskDefinition(String ref, String region) {
+        return resolveDaemonTaskDefinitionOrThrow(ref, region);
+    }
+
+    public DaemonTaskDefinition deleteDaemonTaskDefinition(String ref, String region) {
+        DaemonTaskDefinition dtd = resolveDaemonTaskDefinitionOrThrow(ref, region);
+        if (!"ACTIVE".equals(dtd.getStatus())) {
+            throw new AwsException("ClientException",
+                    "Daemon task definition " + ref + " must be ACTIVE to be deleted.", 400);
+        }
+        dtd.setStatus("DELETED");
+        daemonTaskDefinitions.put(dtd.getFamily() + ":" + dtd.getRevision(), dtd);
+        return dtd;
+    }
+
+    // ── Daemons ───────────────────────────────────────────────────────────────
+
+    public Daemon createDaemon(String daemonName, String clusterRef, List<String> capacityProviderArns,
+            String daemonTaskDefinitionRef, boolean enableEcsManagedTags, boolean enableExecuteCommand,
+            String propagateTags, Map<String, String> tags, String region) {
+        if (daemonName == null || daemonName.isBlank()) {
+            throw new AwsException("ClientException", "Daemon name is required.", 400);
+        }
+        if (capacityProviderArns == null || capacityProviderArns.isEmpty()) {
+            throw new AwsException("ClientException", "At least one capacity provider ARN is required.", 400);
+        }
+        EcsCluster cluster = resolveClusterOrDefault(clusterRef, region);
+        DaemonTaskDefinition dtd = resolveDaemonTaskDefinitionOrThrow(daemonTaskDefinitionRef, region);
+        if (!"ACTIVE".equals(dtd.getStatus())) {
+            throw new AwsException("ClientException",
+                    "Daemon task definition " + daemonTaskDefinitionRef + " is not ACTIVE.", 400);
+        }
+
+        String daemonArn = regionResolver.buildArn("ecs", region,
+                "daemon/" + cluster.getClusterName() + "/" + daemonName);
+        String deploymentArn = regionResolver.buildArn("ecs", region,
+                "daemon-deployment/" + UUID.randomUUID().toString().replace("-", ""));
+        String revisionArn = regionResolver.buildArn("ecs", region,
+                "daemon-revision/" + UUID.randomUUID().toString().replace("-", ""));
+        Instant now = Instant.now();
+
+        Daemon daemon = new Daemon();
+        daemon.setDaemonArn(daemonArn);
+        daemon.setDaemonName(daemonName);
+        daemon.setClusterArn(cluster.getClusterArn());
+        daemon.setStatus("ACTIVE");
+        daemon.setCapacityProviderArns(capacityProviderArns);
+        daemon.setDaemonTaskDefinitionArn(dtd.getDaemonTaskDefinitionArn());
+        daemon.setDeploymentArn(deploymentArn);
+        daemon.setRevisionArn(revisionArn);
+        daemon.setRevisionCreatedAt(now);
+        daemon.setEnableEcsManagedTags(enableEcsManagedTags);
+        daemon.setEnableExecuteCommand(enableExecuteCommand);
+        daemon.setPropagateTags(propagateTags != null ? propagateTags : "NONE");
+        daemon.setCreatedAt(now);
+        daemon.setUpdatedAt(now);
+        if (tags != null && !tags.isEmpty()) {
+            daemon.setTags(new LinkedHashMap<>(tags));
+        }
+
+        daemons.put(daemonArn, daemon);
+        LOG.infov("Created daemon: {0}", daemonArn);
+        return daemon;
+    }
+
+    public Daemon describeDaemon(String daemonArnRef) {
+        return resolveDaemonOrThrow(daemonArnRef);
+    }
+
+    public Daemon deleteDaemon(String daemonArnRef) {
+        Daemon daemon = resolveDaemonOrThrow(daemonArnRef);
+        daemons.remove(daemon.getDaemonArn());
+        daemon.setStatus("DELETE_IN_PROGRESS");
+        daemon.setUpdatedAt(Instant.now());
+        return daemon;
+    }
+
+    public List<Daemon> listDaemons(String clusterRef, List<String> capacityProviderArnFilter, String region) {
+        String clusterArn = null;
+        if (clusterRef != null && !clusterRef.isBlank()) {
+            EcsCluster cluster = resolveCluster(clusterRef, region);
+            // Fall back to the raw reference when it doesn't resolve to a known cluster, so an
+            // unmatched filter yields an empty result instead of silently listing every daemon.
+            clusterArn = cluster != null ? cluster.getClusterArn() : clusterRef;
+        }
+        final String clusterArnFilter = clusterArn;
+        return daemons.values().stream()
+                .filter(d -> clusterArnFilter == null || clusterArnFilter.equals(d.getClusterArn()))
+                .filter(d -> capacityProviderArnFilter == null || capacityProviderArnFilter.isEmpty()
+                        || (d.getCapacityProviderArns() != null
+                            && d.getCapacityProviderArns().stream().anyMatch(capacityProviderArnFilter::contains)))
+                .sorted(Comparator.comparing(Daemon::getDaemonArn))
+                .toList();
+    }
+
+    /**
+     * Resolves a daemon revision ARN for {@code DescribeDaemonRevisions}. A daemon this
+     * emulator creates has exactly one revision (see {@link Daemon}'s class doc), so this
+     * scans live daemons for a {@code revisionArn} match rather than a separate revision store.
+     */
+    public Daemon resolveDaemonByRevisionArn(String revisionArn) {
+        return daemons.values().stream()
+                .filter(d -> revisionArn.equals(d.getRevisionArn()))
+                .findFirst().orElse(null);
     }
 
     // ── Tasks ─────────────────────────────────────────────────────────────────
@@ -901,6 +1060,12 @@ public class EcsService implements ContainerTeardown {
         for (CapacityProvider cp : capacityProviders.values()) {
             if (arn.equals(cp.getCapacityProviderArn())) { return cp; }
         }
+        for (DaemonTaskDefinition dtd : daemonTaskDefinitions.values()) {
+            if (arn.equals(dtd.getDaemonTaskDefinitionArn())) { return dtd; }
+        }
+        for (Daemon d : daemons.values()) {
+            if (arn.equals(d.getDaemonArn())) { return d; }
+        }
         return null;
     }
 
@@ -911,6 +1076,8 @@ public class EcsService implements ContainerTeardown {
         else if (resource instanceof EcsServiceModel s) { s.getTags().putAll(tags); }
         else if (resource instanceof ContainerInstance ci) { ci.getTags().putAll(tags); }
         else if (resource instanceof CapacityProvider cp) { cp.getTags().putAll(tags); }
+        else if (resource instanceof DaemonTaskDefinition dtd) { dtd.getTags().putAll(tags); }
+        else if (resource instanceof Daemon d) { d.getTags().putAll(tags); }
         persistTaggedResource(resource);
     }
 
@@ -921,6 +1088,8 @@ public class EcsService implements ContainerTeardown {
         else if (resource instanceof EcsServiceModel s) { tagKeys.forEach(s.getTags()::remove); }
         else if (resource instanceof ContainerInstance ci) { tagKeys.forEach(ci.getTags()::remove); }
         else if (resource instanceof CapacityProvider cp) { tagKeys.forEach(cp.getTags()::remove); }
+        else if (resource instanceof DaemonTaskDefinition dtd) { tagKeys.forEach(dtd.getTags()::remove); }
+        else if (resource instanceof Daemon d) { tagKeys.forEach(d.getTags()::remove); }
         persistTaggedResource(resource);
     }
 
@@ -932,6 +1101,9 @@ public class EcsService implements ContainerTeardown {
             case TaskDefinition td -> persistByArn(taskDefinitions, td, TaskDefinition::getTaskDefinitionArn);
             case EcsServiceModel s -> persistByArn(services, s, EcsServiceModel::getServiceArn);
             case CapacityProvider cp -> persistByArn(capacityProviders, cp, CapacityProvider::getCapacityProviderArn);
+            case DaemonTaskDefinition dtd -> persistByArn(daemonTaskDefinitions, dtd,
+                    d -> d.getFamily() + ":" + d.getRevision());
+            case Daemon d -> persistByArn(daemons, d, Daemon::getDaemonArn);
             default -> { /* EcsTask / ContainerInstance are transient */ }
         }
     }
@@ -944,6 +1116,8 @@ public class EcsService implements ContainerTeardown {
             case EcsServiceModel s -> s.getTags();
             case ContainerInstance ci -> ci.getTags();
             case CapacityProvider cp -> cp.getTags();
+            case DaemonTaskDefinition dtd -> dtd.getTags();
+            case Daemon d -> d.getTags();
             default -> Map.of();
         };
     }
@@ -1617,6 +1791,27 @@ public class EcsService implements ContainerTeardown {
             if (td != null) { return td; }
         }
         throw new AwsException("ClientException", "Unable to describe task definition: " + ref, 400);
+    }
+
+    private DaemonTaskDefinition resolveDaemonTaskDefinitionOrThrow(String ref, String region) {
+        DaemonTaskDefinition dtd = daemonTaskDefinitions.get(ref);
+        if (dtd != null) { return dtd; }
+        dtd = daemonTaskDefinitions.values().stream()
+                .filter(d -> d.getDaemonTaskDefinitionArn().equals(ref))
+                .findFirst().orElse(null);
+        if (dtd != null) { return dtd; }
+        Integer latest = daemonLatestRevisions.get(ref);
+        if (latest != null) {
+            dtd = daemonTaskDefinitions.get(ref + ":" + latest);
+            if (dtd != null) { return dtd; }
+        }
+        throw new AwsException("ClientException", "Daemon task definition not found: " + ref, 400);
+    }
+
+    private Daemon resolveDaemonOrThrow(String daemonArnRef) {
+        Daemon daemon = daemons.get(daemonArnRef);
+        if (daemon != null) { return daemon; }
+        throw new AwsException("DaemonNotFoundException", "Daemon not found: " + daemonArnRef, 400);
     }
 
     private EcsTask resolveTask(String ref, String region) {

@@ -11,6 +11,9 @@ import io.github.hectorvent.floci.services.ecs.model.ContainerInstance;
 import io.github.hectorvent.floci.services.ecs.model.Deployment;
 import io.github.hectorvent.floci.services.ecs.model.Failure;
 import io.github.hectorvent.floci.services.ecs.model.ContainerOverride;
+import io.github.hectorvent.floci.services.ecs.model.Daemon;
+import io.github.hectorvent.floci.services.ecs.model.DaemonContainerDefinition;
+import io.github.hectorvent.floci.services.ecs.model.DaemonTaskDefinition;
 import io.github.hectorvent.floci.services.ecs.model.EcsCluster;
 import io.github.hectorvent.floci.services.ecs.model.EcsLoadBalancer;
 import io.github.hectorvent.floci.services.ecs.model.EcsServiceModel;
@@ -38,6 +41,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -72,6 +76,16 @@ public class EcsJsonHandler {
             case "ListTaskDefinitionFamilies" -> handleListTaskDefinitionFamilies(request, region);
             case "DeregisterTaskDefinition" -> handleDeregisterTaskDefinition(request, region);
             case "DeleteTaskDefinitions" -> handleDeleteTaskDefinitions(request, region);
+            // Daemon Task Definitions
+            case "RegisterDaemonTaskDefinition" -> handleRegisterDaemonTaskDefinition(request, region);
+            case "DescribeDaemonTaskDefinition" -> handleDescribeDaemonTaskDefinition(request, region);
+            case "DeleteDaemonTaskDefinition" -> handleDeleteDaemonTaskDefinition(request, region);
+            // Daemons
+            case "CreateDaemon" -> handleCreateDaemon(request, region);
+            case "DescribeDaemon" -> handleDescribeDaemon(request, region);
+            case "DeleteDaemon" -> handleDeleteDaemon(request, region);
+            case "ListDaemons" -> handleListDaemons(request, region);
+            case "DescribeDaemonRevisions" -> handleDescribeDaemonRevisions(request, region);
             // Tasks
             case "RunTask" -> handleRunTask(request, region);
             case "StartTask" -> handleStartTask(request, region);
@@ -291,6 +305,119 @@ public class EcsJsonHandler {
         deleted.forEach(td -> arr.add(taskDefinitionNode(td)));
         resp.set("taskDefinitions", arr);
         resp.set("failures", objectMapper.createArrayNode());
+        return Response.ok(resp).build();
+    }
+
+    // ── Daemon Task Definitions ──────────────────────────────────────────────
+
+    private Response handleRegisterDaemonTaskDefinition(JsonNode req, String region) {
+        String family = req.path("family").asText();
+        List<DaemonContainerDefinition> containerDefs = parseDaemonContainerDefinitions(req.path("containerDefinitions"));
+        String cpu = req.hasNonNull("cpu") ? req.path("cpu").asText() : null;
+        String memory = req.hasNonNull("memory") ? req.path("memory").asText() : null;
+        String executionRoleArn = req.hasNonNull("executionRoleArn") ? req.path("executionRoleArn").asText() : null;
+        String taskRoleArn = req.hasNonNull("taskRoleArn") ? req.path("taskRoleArn").asText() : null;
+        String ipcMode = req.hasNonNull("ipcMode") ? req.path("ipcMode").asText() : null;
+        String pidMode = req.hasNonNull("pidMode") ? req.path("pidMode").asText() : null;
+        List<Volume> volumes = parseVolumes(req.path("volumes"));
+        Map<String, String> tags = parseTagMap(req.path("tags"));
+
+        DaemonTaskDefinition dtd = service.registerDaemonTaskDefinition(family, containerDefs, cpu, memory,
+                executionRoleArn, taskRoleArn, ipcMode, pidMode, volumes, tags, region);
+
+        // RegisterDaemonTaskDefinitionOutput carries only the ARN (unlike RegisterTaskDefinition,
+        // which echoes the full object) — callers re-fetch the full shape via DescribeDaemonTaskDefinition.
+        ObjectNode resp = objectMapper.createObjectNode();
+        resp.put("daemonTaskDefinitionArn", dtd.getDaemonTaskDefinitionArn());
+        return Response.ok(resp).build();
+    }
+
+    private Response handleDescribeDaemonTaskDefinition(JsonNode req, String region) {
+        String ref = req.path("daemonTaskDefinition").asText();
+        DaemonTaskDefinition dtd = service.describeDaemonTaskDefinition(ref, region);
+        ObjectNode resp = objectMapper.createObjectNode();
+        resp.set("daemonTaskDefinition", daemonTaskDefinitionNode(dtd));
+        return Response.ok(resp).build();
+    }
+
+    private Response handleDeleteDaemonTaskDefinition(JsonNode req, String region) {
+        String ref = req.path("daemonTaskDefinition").asText();
+        DaemonTaskDefinition dtd = service.deleteDaemonTaskDefinition(ref, region);
+        ObjectNode resp = objectMapper.createObjectNode();
+        resp.put("daemonTaskDefinitionArn", dtd.getDaemonTaskDefinitionArn());
+        return Response.ok(resp).build();
+    }
+
+    // ── Daemons ───────────────────────────────────────────────────────────────
+
+    private Response handleCreateDaemon(JsonNode req, String region) {
+        String daemonName = req.path("daemonName").asText();
+        String clusterRef = req.hasNonNull("clusterArn") ? req.path("clusterArn").asText() : null;
+        List<String> capacityProviderArns = jsonArrayToList(req.path("capacityProviderArns"));
+        String daemonTaskDefinitionArn = req.path("daemonTaskDefinitionArn").asText();
+        boolean enableEcsManagedTags = req.path("enableECSManagedTags").asBoolean(false);
+        boolean enableExecuteCommand = req.path("enableExecuteCommand").asBoolean(false);
+        String propagateTags = req.hasNonNull("propagateTags") ? req.path("propagateTags").asText() : null;
+        Map<String, String> tags = parseTagMap(req.path("tags"));
+
+        Daemon daemon = service.createDaemon(daemonName, clusterRef, capacityProviderArns, daemonTaskDefinitionArn,
+                enableEcsManagedTags, enableExecuteCommand, propagateTags, tags, region);
+
+        ObjectNode resp = objectMapper.createObjectNode();
+        resp.put("createdAt", epochSeconds(daemon.getCreatedAt()));
+        resp.put("daemonArn", daemon.getDaemonArn());
+        resp.put("deploymentArn", daemon.getDeploymentArn());
+        resp.put("status", daemon.getStatus());
+        return Response.ok(resp).build();
+    }
+
+    private Response handleDescribeDaemon(JsonNode req, String region) {
+        String daemonArn = req.path("daemonArn").asText();
+        Daemon daemon = service.describeDaemon(daemonArn);
+        ObjectNode resp = objectMapper.createObjectNode();
+        resp.set("daemon", daemonDetailNode(daemon));
+        return Response.ok(resp).build();
+    }
+
+    private Response handleDeleteDaemon(JsonNode req, String region) {
+        String daemonArn = req.path("daemonArn").asText();
+        Daemon daemon = service.deleteDaemon(daemonArn);
+        ObjectNode resp = objectMapper.createObjectNode();
+        resp.put("createdAt", epochSeconds(daemon.getCreatedAt()));
+        resp.put("daemonArn", daemon.getDaemonArn());
+        resp.put("deploymentArn", daemon.getDeploymentArn());
+        resp.put("status", daemon.getStatus());
+        resp.put("updatedAt", epochSeconds(daemon.getUpdatedAt()));
+        return Response.ok(resp).build();
+    }
+
+    private Response handleListDaemons(JsonNode req, String region) {
+        String clusterRef = req.hasNonNull("clusterArn") ? req.path("clusterArn").asText() : null;
+        List<String> capacityProviderArns = jsonArrayToList(req.path("capacityProviderArns"));
+        List<Daemon> found = service.listDaemons(clusterRef,
+                capacityProviderArns.isEmpty() ? null : capacityProviderArns, region);
+        ObjectNode resp = objectMapper.createObjectNode();
+        ArrayNode arr = objectMapper.createArrayNode();
+        found.forEach(d -> arr.add(daemonSummaryNode(d)));
+        resp.set("daemonSummariesList", arr);
+        return Response.ok(resp).build();
+    }
+
+    private Response handleDescribeDaemonRevisions(JsonNode req, String region) {
+        List<String> arns = jsonArrayToList(req.path("daemonRevisionArns"));
+        ArrayNode revisions = objectMapper.createArrayNode();
+        ArrayNode failures = objectMapper.createArrayNode();
+        for (String arn : arns) {
+            Daemon daemon = service.resolveDaemonByRevisionArn(arn);
+            if (daemon == null) {
+                failures.add(failureNode(Failure.missing(arn)));
+            } else {
+                revisions.add(daemonRevisionNode(daemon));
+            }
+        }
+        ObjectNode resp = objectMapper.createObjectNode();
+        resp.set("daemonRevisions", revisions);
+        resp.set("failures", failures);
         return Response.ok(resp).build();
     }
 
@@ -1076,6 +1203,172 @@ public class EcsJsonHandler {
         return n;
     }
 
+    // ── Daemon rendering ──────────────────────────────────────────────────────
+
+    private ObjectNode daemonTaskDefinitionNode(DaemonTaskDefinition dtd) {
+        ObjectNode n = objectMapper.createObjectNode();
+        n.put("daemonTaskDefinitionArn", dtd.getDaemonTaskDefinitionArn());
+        n.put("family", dtd.getFamily());
+        n.put("revision", dtd.getRevision());
+        n.put("status", dtd.getStatus());
+        if (dtd.getCpu() != null) { n.put("cpu", dtd.getCpu()); }
+        if (dtd.getMemory() != null) { n.put("memory", dtd.getMemory()); }
+        if (dtd.getExecutionRoleArn() != null) { n.put("executionRoleArn", dtd.getExecutionRoleArn()); }
+        if (dtd.getTaskRoleArn() != null) { n.put("taskRoleArn", dtd.getTaskRoleArn()); }
+        if (dtd.getIpcMode() != null) { n.put("ipcMode", dtd.getIpcMode()); }
+        if (dtd.getPidMode() != null) { n.put("pidMode", dtd.getPidMode()); }
+        if (dtd.getRegisteredAt() != null) { n.put("registeredAt", epochSeconds(dtd.getRegisteredAt())); }
+
+        ArrayNode containers = objectMapper.createArrayNode();
+        if (dtd.getContainerDefinitions() != null) {
+            for (DaemonContainerDefinition def : dtd.getContainerDefinitions()) {
+                containers.add(daemonContainerDefinitionNode(def));
+            }
+        }
+        n.set("containerDefinitions", containers);
+
+        if (dtd.getVolumes() != null && !dtd.getVolumes().isEmpty()) {
+            ArrayNode vols = objectMapper.createArrayNode();
+            for (Volume v : dtd.getVolumes()) {
+                ObjectNode vNode = objectMapper.createObjectNode();
+                vNode.put("name", v.name());
+                if (v.hostSourcePath() != null) {
+                    ObjectNode host = objectMapper.createObjectNode();
+                    host.put("sourcePath", v.hostSourcePath());
+                    vNode.set("host", host);
+                }
+                vols.add(vNode);
+            }
+            n.set("volumes", vols);
+        }
+        if (dtd.getTags() != null && !dtd.getTags().isEmpty()) {
+            n.set("tags", tagsNode(dtd.getTags()));
+        }
+        return n;
+    }
+
+    private ObjectNode daemonContainerDefinitionNode(DaemonContainerDefinition def) {
+        ObjectNode n = objectMapper.createObjectNode();
+        n.put("image", def.getImage());
+        n.put("essential", def.isEssential());
+        if (def.getName() != null) { n.put("name", def.getName()); }
+        if (def.getCpu() != null) { n.put("cpu", def.getCpu()); }
+        if (def.getMemory() != null) { n.put("memory", def.getMemory()); }
+        if (def.getMemoryReservation() != null) { n.put("memoryReservation", def.getMemoryReservation()); }
+        if (def.getUser() != null) { n.put("user", def.getUser()); }
+        if (def.getWorkingDirectory() != null) { n.put("workingDirectory", def.getWorkingDirectory()); }
+        if (def.getPrivileged() != null) { n.put("privileged", def.getPrivileged()); }
+        if (def.getReadonlyRootFilesystem() != null) {
+            n.put("readonlyRootFilesystem", def.getReadonlyRootFilesystem());
+        }
+        if (def.getCommand() != null && !def.getCommand().isEmpty()) {
+            ArrayNode cmd = objectMapper.createArrayNode();
+            def.getCommand().forEach(cmd::add);
+            n.set("command", cmd);
+        }
+        if (def.getEntryPoint() != null && !def.getEntryPoint().isEmpty()) {
+            ArrayNode ep = objectMapper.createArrayNode();
+            def.getEntryPoint().forEach(ep::add);
+            n.set("entryPoint", ep);
+        }
+        if (def.getEnvironment() != null && !def.getEnvironment().isEmpty()) {
+            ArrayNode envArr = objectMapper.createArrayNode();
+            for (KeyValuePair kv : def.getEnvironment()) {
+                ObjectNode kvNode = objectMapper.createObjectNode();
+                kvNode.put("name", kv.name());
+                kvNode.put("value", kv.value());
+                envArr.add(kvNode);
+            }
+            n.set("environment", envArr);
+        }
+        if (def.getMountPoints() != null && !def.getMountPoints().isEmpty()) {
+            ArrayNode mps = objectMapper.createArrayNode();
+            for (MountPoint mp : def.getMountPoints()) {
+                ObjectNode mpNode = objectMapper.createObjectNode();
+                mpNode.put("sourceVolume", mp.sourceVolume());
+                mpNode.put("containerPath", mp.containerPath());
+                mpNode.put("readOnly", mp.readOnly());
+                mps.add(mpNode);
+            }
+            n.set("mountPoints", mps);
+        }
+        return n;
+    }
+
+    private ObjectNode daemonDetailNode(Daemon d) {
+        ObjectNode n = objectMapper.createObjectNode();
+        n.put("daemonArn", d.getDaemonArn());
+        n.put("clusterArn", d.getClusterArn());
+        n.put("status", d.getStatus());
+        if (d.getDeploymentArn() != null) { n.put("deploymentArn", d.getDeploymentArn()); }
+        if (d.getCreatedAt() != null) { n.put("createdAt", epochSeconds(d.getCreatedAt())); }
+        if (d.getUpdatedAt() != null) { n.put("updatedAt", epochSeconds(d.getUpdatedAt())); }
+
+        ArrayNode revisions = objectMapper.createArrayNode();
+        if (d.getRevisionArn() != null) {
+            ObjectNode revisionDetail = objectMapper.createObjectNode();
+            revisionDetail.put("arn", d.getRevisionArn());
+            revisionDetail.put("totalRunningCount", 0);
+            ArrayNode providers = objectMapper.createArrayNode();
+            if (d.getCapacityProviderArns() != null) {
+                for (String cpArn : d.getCapacityProviderArns()) {
+                    ObjectNode cpNode = objectMapper.createObjectNode();
+                    cpNode.put("arn", cpArn);
+                    cpNode.put("runningCount", 0);
+                    providers.add(cpNode);
+                }
+            }
+            revisionDetail.set("capacityProviders", providers);
+            revisions.add(revisionDetail);
+        }
+        n.set("currentRevisions", revisions);
+        return n;
+    }
+
+    private ObjectNode daemonSummaryNode(Daemon d) {
+        ObjectNode n = objectMapper.createObjectNode();
+        n.put("daemonArn", d.getDaemonArn());
+        n.put("status", d.getStatus());
+        if (d.getCreatedAt() != null) { n.put("createdAt", epochSeconds(d.getCreatedAt())); }
+        if (d.getUpdatedAt() != null) { n.put("updatedAt", epochSeconds(d.getUpdatedAt())); }
+        return n;
+    }
+
+    private ObjectNode daemonRevisionNode(Daemon d) {
+        ObjectNode n = objectMapper.createObjectNode();
+        n.put("daemonRevisionArn", d.getRevisionArn());
+        n.put("daemonArn", d.getDaemonArn());
+        n.put("clusterArn", d.getClusterArn());
+        n.put("daemonTaskDefinitionArn", d.getDaemonTaskDefinitionArn());
+        n.put("enableECSManagedTags", d.isEnableEcsManagedTags());
+        n.put("enableExecuteCommand", d.isEnableExecuteCommand());
+        n.put("propagateTags", d.getPropagateTags());
+        if (d.getRevisionCreatedAt() != null) { n.put("createdAt", epochSeconds(d.getRevisionCreatedAt())); }
+
+        ArrayNode containerImages = objectMapper.createArrayNode();
+        DaemonTaskDefinition dtd = null;
+        try {
+            dtd = service.describeDaemonTaskDefinition(d.getDaemonTaskDefinitionArn(), null);
+        } catch (RuntimeException ignored) {
+            // The referenced daemon task definition may have since been deleted; the daemon
+            // revision is still a valid, immutable snapshot, just without derived image details.
+        }
+        if (dtd != null && dtd.getContainerDefinitions() != null) {
+            for (DaemonContainerDefinition def : dtd.getContainerDefinitions()) {
+                ObjectNode imgNode = objectMapper.createObjectNode();
+                if (def.getName() != null) { imgNode.put("containerName", def.getName()); }
+                imgNode.put("image", def.getImage());
+                containerImages.add(imgNode);
+            }
+        }
+        n.set("containerImages", containerImages);
+        return n;
+    }
+
+    private double epochSeconds(Instant instant) {
+        return instant.toEpochMilli() / 1000.0;
+    }
+
     /** Renders an ECS task to its data-plane JSON shape. Reused by the Step Functions
      *  ecs:runTask integration ({@link io.github.hectorvent.floci.services.stepfunctions.AslExecutor}). */
     public ObjectNode taskNode(EcsTask t) {
@@ -1344,6 +1637,45 @@ public class EcsJsonHandler {
             if (item.has("secrets")) {
                 def.setSecrets(parseSecrets(item.path("secrets")));
             }
+            def.setMountPoints(parseMountPoints(item.path("mountPoints")));
+
+            if (item.has("command") && item.path("command").isArray()) {
+                List<String> cmd = new ArrayList<>();
+                item.path("command").forEach(c -> cmd.add(c.asText()));
+                def.setCommand(cmd);
+            }
+            if (item.has("entryPoint") && item.path("entryPoint").isArray()) {
+                List<String> ep = new ArrayList<>();
+                item.path("entryPoint").forEach(e -> ep.add(e.asText()));
+                def.setEntryPoint(ep);
+            }
+
+            result.add(def);
+        }
+        return result;
+    }
+
+    private List<DaemonContainerDefinition> parseDaemonContainerDefinitions(JsonNode node) {
+        List<DaemonContainerDefinition> result = new ArrayList<>();
+        if (!node.isArray()) {
+            return result;
+        }
+        for (JsonNode item : node) {
+            DaemonContainerDefinition def = new DaemonContainerDefinition();
+            def.setImage(item.path("image").asText());
+            if (item.hasNonNull("name")) { def.setName(item.path("name").asText()); }
+            def.setEssential(item.path("essential").asBoolean(true));
+            if (item.has("cpu")) { def.setCpu(item.path("cpu").asInt()); }
+            if (item.has("memory")) { def.setMemory(item.path("memory").asInt()); }
+            if (item.has("memoryReservation")) { def.setMemoryReservation(item.path("memoryReservation").asInt()); }
+            if (item.hasNonNull("user")) { def.setUser(item.path("user").asText()); }
+            if (item.hasNonNull("workingDirectory")) { def.setWorkingDirectory(item.path("workingDirectory").asText()); }
+            if (item.has("privileged")) { def.setPrivileged(item.path("privileged").asBoolean()); }
+            if (item.has("readonlyRootFilesystem")) {
+                def.setReadonlyRootFilesystem(item.path("readonlyRootFilesystem").asBoolean());
+            }
+
+            def.setEnvironment(parseKeyValuePairs(item.path("environment")));
             def.setMountPoints(parseMountPoints(item.path("mountPoints")));
 
             if (item.has("command") && item.path("command").isArray()) {

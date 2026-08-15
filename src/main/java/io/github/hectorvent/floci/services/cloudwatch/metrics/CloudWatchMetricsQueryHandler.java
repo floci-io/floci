@@ -3,7 +3,10 @@ package io.github.hectorvent.floci.services.cloudwatch.metrics;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsQueryResponse;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
+import io.github.hectorvent.floci.services.cloudwatch.metrics.model.CompositeAlarm;
+import io.github.hectorvent.floci.services.cloudwatch.metrics.model.Dashboard;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.Dimension;
+import io.github.hectorvent.floci.services.cloudwatch.metrics.model.InsightRule;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricAlarm;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricDatum;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricStream;
@@ -41,9 +44,19 @@ public class CloudWatchMetricsQueryHandler {
             case "GetMetricStatistics" -> handleGetMetricStatistics(params, region);
             case "GetMetricData" -> handleGetMetricData(params, region);
             case "PutMetricAlarm" -> handlePutMetricAlarm(params, region);
+            case "PutCompositeAlarm" -> handlePutCompositeAlarm(params, region);
             case "DescribeAlarms" -> handleDescribeAlarms(params, region);
             case "DeleteAlarms" -> handleDeleteAlarms(params, region);
             case "SetAlarmState" -> handleSetAlarmState(params, region);
+            case "PutDashboard" -> handlePutDashboard(params, region);
+            case "GetDashboard" -> handleGetDashboard(params, region);
+            case "ListDashboards" -> handleListDashboards(params, region);
+            case "DeleteDashboards" -> handleDeleteDashboards(params, region);
+            case "PutInsightRule" -> handlePutInsightRule(params, region);
+            case "DescribeInsightRules" -> handleDescribeInsightRules(params, region);
+            case "DeleteInsightRules" -> handleDeleteInsightRules(params, region);
+            case "EnableInsightRules" -> handleSetInsightRulesState(params, region, true);
+            case "DisableInsightRules" -> handleSetInsightRulesState(params, region, false);
             case "ListTagsForResource" -> handleListTagsForResource(params, region);
             case "TagResource" -> handleTagResource(params, region);
             case "UntagResource" -> handleUntagResource(params, region);
@@ -222,34 +235,133 @@ public class CloudWatchMetricsQueryHandler {
         return Response.ok(AwsQueryResponse.envelopeNoResult("PutMetricAlarm", null)).build();
     }
 
+    private Response handlePutCompositeAlarm(MultivaluedMap<String, String> params, String region) {
+        CompositeAlarm alarm = new CompositeAlarm();
+        alarm.setAlarmName(params.getFirst("AlarmName"));
+        alarm.setAlarmRule(params.getFirst("AlarmRule"));
+        alarm.setAlarmDescription(params.getFirst("AlarmDescription"));
+        alarm.setActionsEnabled(!"false".equals(params.getFirst("ActionsEnabled")));
+        alarm.setOkActions(parseMemberList(params, "OKActions"));
+        alarm.setAlarmActions(parseMemberList(params, "AlarmActions"));
+        alarm.setInsufficientDataActions(parseMemberList(params, "InsufficientDataActions"));
+        alarm.setActionsSuppressor(params.getFirst("ActionsSuppressor"));
+        alarm.setActionsSuppressorWaitPeriod(parseIntegerParam(params, "ActionsSuppressorWaitPeriod"));
+        alarm.setActionsSuppressorExtensionPeriod(parseIntegerParam(params, "ActionsSuppressorExtensionPeriod"));
+        alarm.setTags(parseTags(params));
+        metricsService.putCompositeAlarm(alarm, region);
+        return Response.ok(AwsQueryResponse.envelopeNoResult("PutCompositeAlarm", null)).build();
+    }
+
     private Response handleDescribeAlarms(MultivaluedMap<String, String> params, String region) {
-        List<String> alarmNames = new ArrayList<>();
-        for (int i = 1; ; i++) {
-            String name = params.getFirst("AlarmNames.member." + i);
-            if (name == null) break;
-            alarmNames.add(name);
-        }
+        List<String> alarmNames = parseMemberList(params, "AlarmNames");
         String prefix = params.getFirst("AlarmNamePrefix");
+        List<String> alarmTypes = parseMemberList(params, "AlarmTypes");
+        boolean includeMetricAlarms = alarmTypes.isEmpty() || alarmTypes.contains("MetricAlarm");
+        boolean includeCompositeAlarms = alarmTypes.contains("CompositeAlarm");
 
-        List<MetricAlarm> alarms = metricsService.describeAlarms(alarmNames, prefix, region);
-
-        var xml = new XmlBuilder().start("MetricAlarms");
-        for (MetricAlarm a : alarms) {
-            toAlarmXml(xml, a);
+        var xml = new XmlBuilder().start("CompositeAlarms");
+        if (includeCompositeAlarms) {
+            for (CompositeAlarm a : metricsService.describeCompositeAlarms(alarmNames, prefix, region)) {
+                toCompositeAlarmXml(xml, a);
+            }
+        }
+        xml.end("CompositeAlarms").start("MetricAlarms");
+        if (includeMetricAlarms) {
+            for (MetricAlarm a : metricsService.describeAlarms(alarmNames, prefix, region)) {
+                toAlarmXml(xml, a);
+            }
         }
         xml.end("MetricAlarms");
         return Response.ok(AwsQueryResponse.envelope("DescribeAlarms", null, xml.build())).build();
     }
 
     private Response handleDeleteAlarms(MultivaluedMap<String, String> params, String region) {
-        List<String> alarmNames = new ArrayList<>();
-        for (int i = 1; ; i++) {
-            String name = params.getFirst("AlarmNames.member." + i);
-            if (name == null) break;
-            alarmNames.add(name);
-        }
-        metricsService.deleteAlarms(alarmNames, region);
+        metricsService.deleteAlarms(parseMemberList(params, "AlarmNames"), region);
         return Response.ok(AwsQueryResponse.envelopeNoResult("DeleteAlarms", null)).build();
+    }
+
+    // ──────────────────────────── Dashboards ────────────────────────────
+
+    private Response handlePutDashboard(MultivaluedMap<String, String> params, String region) {
+        metricsService.putDashboard(params.getFirst("DashboardName"), params.getFirst("DashboardBody"), region);
+        String xml = new XmlBuilder()
+                .start("DashboardValidationMessages")
+                .end("DashboardValidationMessages")
+                .build();
+        return Response.ok(AwsQueryResponse.envelope("PutDashboard", null, xml)).build();
+    }
+
+    private Response handleGetDashboard(MultivaluedMap<String, String> params, String region) {
+        Dashboard dashboard = metricsService.getDashboard(params.getFirst("DashboardName"), region);
+        String xml = new XmlBuilder()
+                .elem("DashboardArn", dashboard.getArn())
+                .elem("DashboardBody", dashboard.getBody())
+                .elem("DashboardName", dashboard.getName())
+                .build();
+        return Response.ok(AwsQueryResponse.envelope("GetDashboard", null, xml)).build();
+    }
+
+    private Response handleListDashboards(MultivaluedMap<String, String> params, String region) {
+        XmlBuilder xml = new XmlBuilder().start("DashboardEntries");
+        for (Dashboard dashboard : metricsService.listDashboards(params.getFirst("DashboardNamePrefix"), region)) {
+            xml.start("member")
+                    .elem("DashboardName", dashboard.getName())
+                    .elem("DashboardArn", dashboard.getArn())
+                    .elem("LastModified", formatEpochSeconds(dashboard.getLastModified()))
+                    .elem("Size", dashboard.size())
+                    .end("member");
+        }
+        xml.end("DashboardEntries");
+        return Response.ok(AwsQueryResponse.envelope("ListDashboards", null, xml.build())).build();
+    }
+
+    private Response handleDeleteDashboards(MultivaluedMap<String, String> params, String region) {
+        metricsService.deleteDashboards(parseMemberList(params, "DashboardNames"), region);
+        return Response.ok(AwsQueryResponse.envelopeEmptyResult("DeleteDashboards", null)).build();
+    }
+
+    // ──────────────────────────── Contributor Insight Rules ────────────────────────────
+
+    private Response handlePutInsightRule(MultivaluedMap<String, String> params, String region) {
+        InsightRule rule = new InsightRule();
+        rule.setName(params.getFirst("RuleName"));
+        rule.setDefinition(params.getFirst("RuleDefinition"));
+        rule.setState(params.getFirst("RuleState"));
+        rule.setApplyOnTransformedLogs(Boolean.parseBoolean(params.getFirst("ApplyOnTransformedLogs")));
+        rule.setTags(parseTags(params));
+        metricsService.putInsightRule(rule, region);
+        return Response.ok(AwsQueryResponse.envelopeEmptyResult("PutInsightRule", null)).build();
+    }
+
+    private Response handleDescribeInsightRules(MultivaluedMap<String, String> params, String region) {
+        XmlBuilder xml = new XmlBuilder().start("InsightRules");
+        for (InsightRule rule : metricsService.describeInsightRules(region)) {
+            xml.start("member")
+                    .elem("Name", rule.getName())
+                    .elem("State", rule.getState())
+                    .elem("Schema", rule.getSchema())
+                    .elem("Definition", rule.getDefinition())
+                    .elem("ManagedRule", rule.isManagedRule())
+                    .elem("ApplyOnTransformedLogs", rule.isApplyOnTransformedLogs())
+                    .end("member");
+        }
+        xml.end("InsightRules");
+        return Response.ok(AwsQueryResponse.envelope("DescribeInsightRules", null, xml.build())).build();
+    }
+
+    private Response handleDeleteInsightRules(MultivaluedMap<String, String> params, String region) {
+        metricsService.deleteInsightRules(parseMemberList(params, "RuleNames"), region);
+        return Response.ok(AwsQueryResponse.envelope("DeleteInsightRules", null, emptyFailuresXml())).build();
+    }
+
+    private Response handleSetInsightRulesState(MultivaluedMap<String, String> params, String region, boolean enabled) {
+        metricsService.setInsightRulesState(parseMemberList(params, "RuleNames"), enabled, region);
+        String action = enabled ? "EnableInsightRules" : "DisableInsightRules";
+        return Response.ok(AwsQueryResponse.envelope(action, null, emptyFailuresXml())).build();
+    }
+
+    private String emptyFailuresXml() {
+        return new XmlBuilder().start("Failures").end("Failures").build();
     }
 
     private Response handleSetAlarmState(MultivaluedMap<String, String> params, String region) {
@@ -472,6 +584,18 @@ public class CloudWatchMetricsQueryHandler {
         return tags;
     }
 
+    private List<String> parseMemberList(MultivaluedMap<String, String> params, String prefix) {
+        List<String> values = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String value = params.getFirst(prefix + ".member." + i);
+            if (value == null) {
+                break;
+            }
+            values.add(value);
+        }
+        return values;
+    }
+
     private static String formatEpochSeconds(long epochSeconds) {
         return DateTimeFormatter.ISO_INSTANT.format(Instant.ofEpochSecond(epochSeconds));
     }
@@ -636,6 +760,38 @@ public class CloudWatchMetricsQueryHandler {
         xml.end("member");
     }
 
+    private void toCompositeAlarmXml(XmlBuilder xml, CompositeAlarm a) {
+        xml.start("member")
+                .elem("ActionsEnabled", a.isActionsEnabled());
+        xml.start("AlarmActions");
+        a.getAlarmActions().forEach(act -> xml.elem("member", act));
+        xml.end("AlarmActions")
+                .elem("AlarmArn", a.getAlarmArn())
+                .elem("AlarmConfigurationUpdatedTimestamp",
+                        formatEpochSeconds(a.getAlarmConfigurationUpdatedTimestamp()))
+                .elem("AlarmDescription", a.getAlarmDescription())
+                .elem("AlarmName", a.getAlarmName())
+                .elem("AlarmRule", a.getAlarmRule());
+        xml.start("InsufficientDataActions");
+        a.getInsufficientDataActions().forEach(act -> xml.elem("member", act));
+        xml.end("InsufficientDataActions").start("OKActions");
+        a.getOkActions().forEach(act -> xml.elem("member", act));
+        xml.end("OKActions")
+                .elem("StateReason", a.getStateReason())
+                .elem("StateReasonData", a.getStateReasonData())
+                .elem("StateUpdatedTimestamp", formatEpochSeconds(a.getStateUpdatedTimestamp()))
+                .elem("StateValue", a.getStateValue())
+                .elem("StateTransitionedTimestamp", formatEpochSeconds(a.getStateTransitionedTimestamp()))
+                .elem("ActionsSuppressor", a.getActionsSuppressor());
+        if (a.getActionsSuppressorWaitPeriod() != null) {
+            xml.elem("ActionsSuppressorWaitPeriod", a.getActionsSuppressorWaitPeriod());
+        }
+        if (a.getActionsSuppressorExtensionPeriod() != null) {
+            xml.elem("ActionsSuppressorExtensionPeriod", a.getActionsSuppressorExtensionPeriod());
+        }
+        xml.end("member");
+    }
+
     private Instant parseInstant(String value) {
         if (value == null || value.isBlank()) {
             return null;
@@ -648,6 +804,18 @@ public class CloudWatchMetricsQueryHandler {
             } catch (Exception ex) {
                 return null;
             }
+        }
+    }
+
+    private Integer parseIntegerParam(MultivaluedMap<String, String> params, String name) {
+        String value = params.getFirst(name);
+        if (value == null) {
+            return null;
+        }
+        try {
+            return Integer.valueOf(value);
+        } catch (NumberFormatException e) {
+            return null;
         }
     }
 
