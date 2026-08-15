@@ -45,6 +45,7 @@ import software.amazon.awssdk.services.sesv2.model.PutEmailIdentityDkimSigningAt
 import software.amazon.awssdk.services.sesv2.model.PutEmailIdentityMailFromAttributesRequest;
 import software.amazon.awssdk.services.sesv2.model.VerificationStatus;
 
+import java.time.Instant;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -279,6 +280,16 @@ class SesIdentityAttributesTest {
                         .build());
         assertThat(resp.dkimTokens()).hasSize(3);
         assertThat(resp.dkimTokens()).isNotEqualTo(before);
+
+        // Regression guard for the fractional-epoch wire form of LastKeyGenerationTimestamp: SES v2
+        // types it as a unix-epoch number, and AWS emits sub-second precision, so Floci serializes
+        // toEpochMilli()/1000.0 rather than getEpochSecond() (which would silently drop the millis the
+        // SDK unmarshalls happily). Assert the round-tripped timestamp keeps a sub-second component so
+        // a switch to whole-second epoch is caught here.
+        Instant lastKeyGen = sesV2.getEmailIdentity(GetEmailIdentityRequest.builder()
+                .emailIdentity(dkimDomain).build()).dkimAttributes().lastKeyGenerationTimestamp();
+        assertThat(lastKeyGen).isNotNull();
+        assertThat(lastKeyGen.getNano()).isNotZero();
     }
 
     @Test
