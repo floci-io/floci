@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.stepfunctions;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
@@ -27,6 +28,7 @@ class StepFunctionsValidateStateMachineDefinitionIntegrationTest {
     private static final String CT = "application/x-amz-json-1.0";
     private static final String TARGET = "AWSStepFunctions.ValidateStateMachineDefinition";
     private static final String LIST_TARGET = "AWSStepFunctions.ListStateMachines";
+    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
     // ASL with the inner double-quotes already JSON-escaped, so it embeds cleanly
     // inside the outer JSON request body as the value of "definition".
@@ -90,6 +92,56 @@ class StepFunctionsValidateStateMachineDefinitionIntegrationTest {
         RestAssuredJsonUtils.configureAwsContentTypes();
     }
 
+    private static Response validateDefinition(String definition) {
+        String body = OBJECT_MAPPER.createObjectNode().put("definition", definition).toString();
+        return given().contentType(CT).header("X-Amz-Target", TARGET)
+                .body(body)
+                .when().post("/");
+    }
+
+    private static String distributedMapWithResultWriter(String resultWriter) {
+        return """
+                {
+                  "StartAt":"ProcessItems",
+                  "States":{
+                    "ProcessItems":{
+                      "Type":"Map",
+                      "ItemsPath":"$.items",
+                      "ItemProcessor":{
+                        "ProcessorConfig":{"Mode":"DISTRIBUTED","ExecutionType":"STANDARD"},
+                        "StartAt":"PassItem",
+                        "States":{"PassItem":{"Type":"Pass","End":true}}
+                      },
+                      "ResultWriter":__RESULT_WRITER__,
+                      "End":true
+                    }
+                  }
+                }
+                """.replace("__RESULT_WRITER__", resultWriter);
+    }
+
+    private static String jsonataDistributedMapWithResultWriter(String resultWriter) {
+        return """
+                {
+                  "QueryLanguage":"JSONata",
+                  "StartAt":"ProcessItems",
+                  "States":{
+                    "ProcessItems":{
+                      "Type":"Map",
+                      "Items":"{% $states.input.items %}",
+                      "ItemProcessor":{
+                        "ProcessorConfig":{"Mode":"DISTRIBUTED","ExecutionType":"STANDARD"},
+                        "StartAt":"PassItem",
+                        "States":{"PassItem":{"Type":"Pass","End":true}}
+                      },
+                      "ResultWriter":__RESULT_WRITER__,
+                      "End":true
+                    }
+                  }
+                }
+                """.replace("__RESULT_WRITER__", resultWriter);
+    }
+
     @Test
     void validDefinition_returnsOK() {
         given().contentType(CT).header("X-Amz-Target", TARGET)
@@ -133,6 +185,104 @@ class StepFunctionsValidateStateMachineDefinitionIntegrationTest {
     }
 
     @Test
+    void mapCannotSpecifyBothMaxConcurrencyFields() {
+        String def = mapDefinition("", "\"MaxConcurrency\":2,"
+                + "\"MaxConcurrencyPath\":\"$.limit\",");
+
+        given().contentType(CT).header("X-Amz-Target", TARGET)
+                .body(definitionRequest(def))
+                .when().post("/")
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].location", equalTo("/States/M/MaxConcurrency"));
+    }
+
+    @Test
+    void mapMaxConcurrencyMustBeANonNegativeInteger() {
+        String def = mapDefinition("", "\"MaxConcurrency\":-1,");
+
+        given().contentType(CT).header("X-Amz-Target", TARGET)
+                .body(definitionRequest(def))
+                .when().post("/")
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].location", equalTo("/States/M/MaxConcurrency"));
+    }
+
+    @Test
+    void jsonataMapRejectsMaxConcurrencyPath() {
+        String def = mapDefinition("\"QueryLanguage\":\"JSONata\",",
+                "\"MaxConcurrencyPath\":\"$.limit\",");
+
+        given().contentType(CT).header("X-Amz-Target", TARGET)
+                .body(definitionRequest(def))
+                .when().post("/")
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].location", equalTo("/States/M/MaxConcurrencyPath"));
+    }
+
+    @Test
+    void jsonataMapAcceptsMaxConcurrencyExpression() {
+        String def = mapDefinition("\"QueryLanguage\":\"JSONata\",",
+                "\"MaxConcurrency\":\"{% $states.input.limit %}\",");
+
+        given().contentType(CT).header("X-Amz-Target", TARGET)
+                .body(definitionRequest(def))
+                .when().post("/")
+                .then().statusCode(200)
+                .body("result", equalTo("OK"))
+                .body("diagnostics", hasSize(0));
+    }
+
+    @Test
+    void nestedMapMaxConcurrencyIsValidatedAtItsStructuredPath() {
+        String def = "{\"StartAt\":\"Outer\",\"States\":{\"Outer\":{\"Type\":\"Map\","
+                + "\"ItemProcessor\":{\"StartAt\":\"Inner\",\"States\":{"
+                + "\"Inner\":{\"Type\":\"Map\",\"MaxConcurrency\":-1,"
+                + "\"ItemProcessor\":{\"StartAt\":\"P\",\"States\":{"
+                + "\"P\":{\"Type\":\"Pass\",\"End\":true}}},\"End\":true}}},"
+                + "\"End\":true}}}";
+
+        given().contentType(CT).header("X-Amz-Target", TARGET)
+                .body(definitionRequest(def))
+                .when().post("/")
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].location", equalTo(
+                        "/States/Outer/ItemProcessor/States/Inner/MaxConcurrency"));
+    }
+
+    @Test
+    void maxConcurrencyPathMustSelectASingleNode() {
+        String def = mapDefinition("", "\"MaxConcurrencyPath\":\"$.limits[*]\",");
+
+        given().contentType(CT).header("X-Amz-Target", TARGET)
+                .body(definitionRequest(def))
+                .when().post("/")
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].location", equalTo("/States/M/MaxConcurrencyPath"));
+    }
+
+    @Test
+    void maxConcurrencyLargerThanIntegerRangeIsAcceptedAndRuntimeCapped() {
+        String def = mapDefinition("", "\"MaxConcurrency\":9223372036854775807,");
+
+        given().contentType(CT).header("X-Amz-Target", TARGET)
+                .body(definitionRequest(def))
+                .when().post("/")
+                .then().statusCode(200)
+                .body("result", equalTo("OK"))
+                .body("diagnostics", hasSize(0));
+    }
+
+    @Test
     void unsupportedItemReaderResource_returnsFailWithSchemaError() {
         given().contentType(CT).header("X-Amz-Target", TARGET)
                 .body("{\"definition\":\"" + MAP_WITH_UNSUPPORTED_ITEM_READER_RESOURCE + "\"}")
@@ -156,6 +306,172 @@ class StepFunctionsValidateStateMachineDefinitionIntegrationTest {
                 .body("diagnostics[0].severity", equalTo("ERROR"))
                 .body("diagnostics[0].code", equalTo("SCHEMA_VALIDATION_FAILED"))
                 .body("diagnostics[0].location", equalTo("/States/ProcessItems/ItemReader/ReaderConfig/InputType"));
+    }
+
+    @Test
+    void validResultWriterResourceAndParameters_returnsOK() {
+        String definition = distributedMapWithResultWriter("""
+                {
+                  "Resource":"arn:aws:states:::s3:putObject",
+                  "WriterConfig":{"Transformation":"FLATTEN","OutputType":"JSONL"},
+                  "Parameters":{"Bucket.$":"$.destination.bucket","Prefix":"results"}
+                }
+                """);
+
+        validateDefinition(definition)
+                .then().statusCode(200)
+                .body("result", equalTo("OK"))
+                .body("diagnostics", hasSize(0));
+    }
+
+    @Test
+    void jsonataResultWriterAcceptsExpressionFormArguments() {
+        String definition = jsonataDistributedMapWithResultWriter("""
+                {
+                  "Resource":"arn:aws:states:::s3:putObject",
+                  "Arguments":"{% $states.input.destination %}"
+                }
+                """);
+
+        validateDefinition(definition)
+                .then().statusCode(200)
+                .body("result", equalTo("OK"))
+                .body("diagnostics", hasSize(0));
+    }
+
+    @Test
+    void jsonataResultWriterRejectsJsonpathParameters() {
+        String definition = jsonataDistributedMapWithResultWriter("""
+                {
+                  "Resource":"arn:aws:states:::s3:putObject",
+                  "Arguments":{"Bucket":"results-bucket"},
+                  "Parameters":{"Bucket":"ignored-bucket"}
+                }
+                """);
+
+        validateDefinition(definition)
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].location", equalTo(
+                        "/States/ProcessItems/ResultWriter/Parameters"));
+    }
+
+    @Test
+    void jsonpathResultWriterRejectsJsonataArguments() {
+        String definition = distributedMapWithResultWriter("""
+                {
+                  "Resource":"arn:aws:states:::s3:putObject",
+                  "Parameters":{"Bucket":"results-bucket"},
+                  "Arguments":{"Bucket":"ignored-bucket"}
+                }
+                """);
+
+        validateDefinition(definition)
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].location", equalTo(
+                        "/States/ProcessItems/ResultWriter/Arguments"));
+    }
+
+    @Test
+    void writerConfigRequiresTransformationAndOutputTypeTogether() {
+        String definition = distributedMapWithResultWriter("""
+                {"WriterConfig":{"Transformation":"COMPACT"}}
+                """);
+
+        validateDefinition(definition)
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].location", equalTo(
+                        "/States/ProcessItems/ResultWriter/WriterConfig"));
+    }
+
+    @Test
+    void writerConfigValuesMustBeStrings() {
+        String definition = distributedMapWithResultWriter("""
+                {"WriterConfig":{"Transformation":{},"OutputType":[]}}
+                """);
+
+        validateDefinition(definition)
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].location", equalTo(
+                        "/States/ProcessItems/ResultWriter/WriterConfig"));
+    }
+
+    @Test
+    void resultWriterDestinationFieldsMustBeStrings() {
+        String definition = distributedMapWithResultWriter("""
+                {
+                  "Resource":"arn:aws:states:::s3:putObject",
+                  "Parameters":{"Bucket":42,"Prefix":{}}
+                }
+                """);
+
+        validateDefinition(definition)
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(2));
+    }
+
+    @Test
+    void emptyResultWriter_returnsFailWithSchemaError() {
+        validateDefinition(distributedMapWithResultWriter("{}"))
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].location", equalTo("/States/ProcessItems/ResultWriter"));
+    }
+
+    @Test
+    void resultWriterResourceWithoutParameters_returnsFailWithSchemaError() {
+        String definition = distributedMapWithResultWriter("""
+                {"Resource":"arn:aws:states:::s3:putObject"}
+                """);
+
+        validateDefinition(definition)
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].location", equalTo("/States/ProcessItems/ResultWriter"));
+    }
+
+    @Test
+    void nullResultWriterResourceIsNotTreatedAsAbsent() {
+        String definition = distributedMapWithResultWriter("""
+                {
+                  "Resource":null,
+                  "Parameters":{"Bucket":"results-bucket"},
+                  "WriterConfig":{"Transformation":"COMPACT","OutputType":"JSON"}
+                }
+                """);
+
+        validateDefinition(definition)
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].location", equalTo(
+                        "/States/ProcessItems/ResultWriter/Resource"));
+    }
+
+    @Test
+    void unsupportedResultWriterResource_returnsFailWithSchemaError() {
+        String definition = distributedMapWithResultWriter("""
+                {
+                  "Resource":"arn:aws:states:::s3:unknownOperation",
+                  "Parameters":{"Bucket":"results-bucket"}
+                }
+                """);
+
+        validateDefinition(definition)
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].location", equalTo("/States/ProcessItems/ResultWriter/Resource"));
     }
 
     @Test
@@ -300,5 +616,22 @@ class StepFunctionsValidateStateMachineDefinitionIntegrationTest {
                 .when().post("/")
                 .then().statusCode(400)
                 .body("__type", containsString("ValidationException"));
+    }
+
+    private static String mapDefinition(String topLevelFields, String concurrencyFields) {
+        return "{" + topLevelFields
+                + "\"StartAt\":\"M\",\"States\":{\"M\":{\"Type\":\"Map\","
+                + concurrencyFields
+                + "\"ItemProcessor\":{\"StartAt\":\"P\",\"States\":{"
+                + "\"P\":{\"Type\":\"Pass\",\"End\":true}}},\"End\":true}}}";
+    }
+
+    private static String definitionRequest(String definition) {
+        String escaped = definition.replace("\\", "\\\\")
+                .replace("\"", "\\\"")
+                .replace("\n", "\\n")
+                .replace("\r", "\\r")
+                .replace("\t", "\\t");
+        return "{\"definition\":\"" + escaped + "\"}";
     }
 }

@@ -204,9 +204,14 @@ public class Ec2ContainerManager {
 
                 configureLinkLocalMetadataEndpoint(containerId, instanceId, flociHost, imdsPort);
 
-                // Set public-facing addresses
-                instance.setPublicIpAddress("127.0.0.1");
-                instance.setPublicDnsName("localhost");
+                // Set public-facing addresses only for instances whose subnet
+                // opts in via MapPublicIpOnLaunch (#1984). Private-subnet
+                // instances have no public IP/DNS, matching real EC2. The value
+                // stays the host-reachable 127.0.0.1/localhost for public ones.
+                if (instance.isAssociatePublicIp()) {
+                    instance.setPublicIpAddress("127.0.0.1");
+                    instance.setPublicDnsName("localhost");
+                }
 
                 instance.setState(InstanceState.running());
                 LOG.infov("EC2 instance {0} running in container {1} (SSH host port {2})",
@@ -217,11 +222,16 @@ public class Ec2ContainerManager {
                     portForwardManager.reconcile(instance, appPorts);
                 }
 
-                // Inject SSH public key
+                // Inject SSH public key, if one was provided
                 if (publicKey != null && !publicKey.isBlank()) {
                     injectSshKey(containerId, publicKey);
-                    startSshd(containerId, instanceId);
                 }
+                // sshd runs on every instance regardless of whether a key pair was supplied,
+                // matching real AWS AMIs (which start it as part of normal boot, independent of
+                // key-pair association) - starting it only when a key was present meant
+                // run-instances without --key-name produced a "connection refused" instead of AWS's
+                // actual behavior: a running daemon with simply nothing to authenticate against.
+                startSshd(containerId, instanceId);
 
                 // Execute UserData
                 String userData = instance.getUserData();
@@ -468,18 +478,40 @@ public class Ec2ContainerManager {
 
     private void startSshd(String containerId, String instanceId) {
         try {
-            // Install openssh-server if absent
-            execInContainer(containerId, new String[]{"sh", "-c",
+            // Install openssh-server if absent. The trailing "command -v sshd" makes the script's
+            // own exit code the source of truth for whether sshd is actually available afterward -
+            // without it, a shell if/elif chain with no matching branch (no dnf/apt-get/apk found) or
+            // whose install command itself failed (e.g. no network yet, apt lock held) still exits 0
+            // by bash convention, so every later step here would silently no-op against a daemon that
+            // was never installed while still logging success.
+            ContainerExecResult install = execInContainerForResult(containerId, new String[]{"sh", "-c",
                     "if ! command -v sshd >/dev/null 2>&1; then" +
                     "  if command -v dnf >/dev/null 2>&1; then dnf install -y openssh-server >/dev/null 2>&1;" +
                     "  elif command -v apt-get >/dev/null 2>&1; then DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-server >/dev/null 2>&1;" +
                     "  elif command -v apk >/dev/null 2>&1; then apk add --no-cache openssh >/dev/null 2>&1;" +
                     "  fi;" +
-                    "fi"}, 120);
+                    "fi;" +
+                    "command -v sshd >/dev/null 2>&1"}, 120);
+            if (install.exitCode() != 0) {
+                LOG.warnv("Could not install openssh-server for EC2 instance {0}: {1}",
+                        instanceId, install.summary());
+                return;
+            }
             // Generate host keys
-            execInContainer(containerId, new String[]{"ssh-keygen", "-A"}, 10);
-            // Start sshd without -D so it daemonizes itself and survives this exec session
-            execInContainer(containerId, new String[]{"/usr/sbin/sshd"}, 5);
+            ContainerExecResult keygen = execInContainerForResult(containerId, new String[]{"ssh-keygen", "-A"}, 10);
+            if (keygen.exitCode() != 0) {
+                LOG.warnv("Could not generate SSH host keys for EC2 instance {0}: {1}",
+                        instanceId, keygen.summary());
+                return;
+            }
+            // Start sshd without -D so it daemonizes itself and survives this exec session. Resolved
+            // via PATH (like ssh-keygen above) rather than hardcoded to /usr/sbin/sshd, since not
+            // every image installs it to that exact path.
+            ContainerExecResult start = execInContainerForResult(containerId, new String[]{"sshd"}, 5);
+            if (start.exitCode() != 0) {
+                LOG.warnv("Could not start sshd for EC2 instance {0}: {1}", instanceId, start.summary());
+                return;
+            }
             LOG.infov("Started sshd in EC2 instance {0}", instanceId);
         } catch (Exception e) {
             LOG.warnv("Could not start sshd in EC2 instance {0}: {1}", instanceId, e.getMessage());

@@ -38,6 +38,9 @@
 | DeleteRole | Deletes an IAM role from the local IAM store. |
 | ListRoles | Lists IAM roles in the local account. |
 | UpdateRole | Updates mutable IAM role fields. |
+| CreateServiceLinkedRole | Creates a role under /aws-service-role/ for a service principal. |
+| DeleteServiceLinkedRole | Deletes a service-linked role and returns a deletion task id. |
+| GetServiceLinkedRoleDeletionStatus | Returns the status of a service-linked role deletion. |
 | UpdateAssumeRolePolicy | Replaces a role's assume-role policy document. |
 | TagRole | Adds tags to an IAM role. |
 | UntagRole | Removes tags from an IAM role. |
@@ -51,6 +54,7 @@
 | GetPolicy | Returns metadata for a managed IAM policy. |
 | DeletePolicy | Deletes a managed IAM policy. |
 | ListPolicies | Lists managed IAM policies, including seeded AWS managed policies. |
+| ListEntitiesForPolicy | Lists roles, users, and groups with a direct managed-policy attachment. |
 | CreatePolicyVersion | Creates a new version of a managed policy. |
 | GetPolicyVersion | Returns a managed policy version document. |
 | DeletePolicyVersion | Deletes a non-default managed policy version. |
@@ -59,6 +63,10 @@
 | TagPolicy | Adds tags to a managed policy. |
 | UntagPolicy | Removes tags from a managed policy. |
 | ListPolicyTags | Lists tags stored for a managed policy. |
+
+`ListEntitiesForPolicy` currently returns direct permissions-policy attachments. `EntityFilter`,
+`PathPrefix`, `PolicyUsageFilter`, and pagination are not yet applied; responses return
+`IsTruncated=false`.
 
 ### Permission Boundaries
 
@@ -122,6 +130,66 @@
 | UpdateAccessKey | Updates an access key's status. |
 | DeleteAccessKey | Deletes an access key from a user. |
 
+### Account Aliases
+
+| Action | Description |
+|--------|-------------|
+| ListAccountAliases | Lists the alias set for the account, or an empty list when none is set. |
+| CreateAccountAlias | Sets the account alias. An account can hold only one. |
+| DeleteAccountAlias | Removes the account alias. |
+
+An account holds one alias, and AWS enforces that by replacement rather than rejection:
+`CreateAccountAlias` with a new value silently swaps the current one. `EntityAlreadyExists` means
+the requested name is taken — on AWS that includes names held by other accounts, since aliases are
+globally unique, but the store here is per-account so only "you already hold this one" arises.
+
+`DeleteAccountAlias` must name the current alias; a mismatch returns `NoSuchEntity`. Both verbs
+apply the same pattern constraint, so a malformed value returns `ValidationError` on either.
+Aliases are 3–63 characters of lowercase letters, digits and hyphens, may not start or end with a
+hyphen, and may not contain two hyphens in a row — AWS's documented
+`^[a-z0-9]([a-z0-9]|-(?!-)){1,61}[a-z0-9]$`. The `ValidationError` message is reproduced from AWS
+verbatim and does not itself mention the consecutive-hyphen rule.
+
+Set `FLOCI_SERVICES_IAM_ACCOUNT_ALIAS` to seed an alias at startup, for callers that expect to
+read one without creating it first. It seeds the **default account** only, so a caller signing
+with a credential that resolves to a different account still reads an empty list. Seeding is
+skipped when an alias is already stored, so under `storage.mode: persistent` a changed value has
+no effect on later starts — the skip is logged at debug with both values. `/_floci/state/reset`
+clears the alias without re-seeding it, as it does the optional deployer principal; the seed
+returns on restart.
+
+### OIDC Identity Providers
+
+| Action | Description |
+|--------|-------------|
+| CreateOpenIDConnectProvider | Creates an OIDC identity provider from an https URL. |
+| GetOpenIDConnectProvider | Returns a provider's URL, client IDs, thumbprints and tags. |
+| ListOpenIDConnectProviders | Lists the ARNs of stored OIDC providers. |
+| DeleteOpenIDConnectProvider | Deletes an OIDC identity provider. |
+| AddClientIDToOpenIDConnectProvider | Adds a client ID (audience) to a provider. |
+| RemoveClientIDFromOpenIDConnectProvider | Removes a client ID from a provider. |
+| UpdateOpenIDConnectProviderThumbprint | Replaces a provider's thumbprint list. |
+| TagOpenIDConnectProvider | Adds tags to a provider. |
+| UntagOpenIDConnectProvider | Removes tags from a provider. |
+| ListOpenIDConnectProviderTags | Lists tags stored for a provider. |
+
+A provider is identified by its URL, so the ARN is derived from it rather than from a generated
+id: `https://oidc.eks.eu-central-1.amazonaws.com/id/EXAMPLE` becomes
+`arn:aws:iam::<account>:oidc-provider/oidc.eks.eu-central-1.amazonaws.com/id/EXAMPLE`. Creating
+the same URL twice returns `EntityAlreadyExists`. As on AWS, `GetOpenIDConnectProvider` reports
+the URL **without** its scheme.
+
+The URL must begin with `https://` and is at most 255 characters. It is not normalized, matching
+AWS: a trailing slash or a difference in case produces a separate provider rather than a
+duplicate.
+
+A provider holds at most 100 client IDs (`LimitExceeded` beyond that) and 5 thumbprints
+(`InvalidInput` beyond that). Adding a client ID that is already present, and removing one that
+was never added, both succeed and change nothing, as they do on AWS.
+
+Thumbprints are stored and echoed back but never validated against the remote endpoint, since
+nothing here performs the TLS handshake they describe.
+
 ### Login Profiles
 
 | Action | Description |
@@ -135,6 +203,12 @@
 | Action | Description |
 |--------|-------------|
 | SimulatePrincipalPolicy | Evaluates requested actions and resources against the resolved principal's policies. |
+
+### Account
+
+| Action | Description |
+|--------|-------------|
+| GetAccountSummary | Returns entity counts (users, groups, roles, customer-managed policies, instance profiles) and IAM quota values. Resources Floci does not track (MFA devices, SAML/OIDC providers, server certificates) are reported as zero rather than omitted. |
 
 ## AWS Managed Policies
 
@@ -261,6 +335,33 @@ AWS_ACCESS_KEY_ID=$AKID AWS_SECRET_ACCESS_KEY=$SECRET \
   aws s3 ls
 ```
 
+## Service-linked roles
+
+`CreateServiceLinkedRole` puts a role under `/aws-service-role/<principal>/` and marks it as
+service-linked. As on AWS, a role carrying that mark is protected: `AttachRolePolicy`,
+`DetachRolePolicy`, `PutRolePolicy`, `DeleteRolePolicy`, `PutRolePermissionsBoundary`,
+`DeleteRolePermissionsBoundary`, `UpdateRole`, `UpdateAssumeRolePolicy`, `AddRoleToInstanceProfile`,
+`RemoveRoleFromInstanceProfile` and `DeleteRole` all answer `UnmodifiableEntity` and name the
+linked service to go through instead. `TagRole` and `UntagRole` are allowed, as on AWS. Within the
+IAM API `DeleteServiceLinkedRole` is the only way to remove such a role — the emulator's own
+`/_floci/state/reset` still clears it along with everything else.
+
+Three deviations to be aware of:
+
+- **The role name is derived locally and will not match AWS for most services.** AWS lets each
+  linked service choose the name, and it is not computable from the service principal —
+  `lex.amazonaws.com` yields `AWSServiceRoleForLexBots` there, where Floci derives
+  `AWSServiceRoleForLex`. Read the name back from the create response rather than hardcoding
+  it, and do not rely on a name observed locally matching the one AWS mints.
+- **Deletion is synchronous.** `DeleteServiceLinkedRole` completes before it returns, so the
+  task id it hands back is already finished and `GetServiceLinkedRoleDeletionStatus` always
+  reports `SUCCEEDED`. The `IN_PROGRESS`, `NOT_STARTED` and `FAILED` states never occur, and no
+  failure `Reason` is ever returned — a poll loop works, but its failure branch is never taken.
+- **`CreateRole` accepts the `/aws-service-role/` path, which AWS reserves.** AWS rejects that
+  prefix on `CreateRole`; Floci allows it and treats the result as an ordinary role, since the
+  service-linked mark comes from the action that minted the role rather than from its path. Such
+  a role stays fully modifiable, and `DeleteServiceLinkedRole` answers `NoSuchEntity` for it.
+
 ## Configuration
 
 | Variable | Default | Description |
@@ -268,6 +369,7 @@ AWS_ACCESS_KEY_ID=$AKID AWS_SECRET_ACCESS_KEY=$SECRET \
 | `FLOCI_SERVICES_IAM_ENABLED` | `true` | Enable or disable the service |
 | `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED` | `false` | Enforce IAM policies on all inbound requests |
 | `FLOCI_SERVICES_IAM_SEED_DEPLOYER_PRINCIPAL` | `false` | Seed the optional `floci-deployer` user and `floci` / `floci` access key |
+| `FLOCI_SERVICES_IAM_ACCOUNT_ALIAS` | _(unset)_ | Seed an account alias at startup; unset means the account has no alias |
 
 ## Examples
 

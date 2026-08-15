@@ -1,0 +1,73 @@
+name: Release Cut
+
+# One-button release from main.
+#
+# Manually dispatched: semantic-release analyzes the Conventional Commits on
+# main, bumps pom.xml (via the exec plugin running `mvn versions:set`), writes
+# CHANGELOG.md, commits those files, tags the release (tagFormat: ${version}),
+# and creates the GitHub Release. The tag push then fires release.yml exactly
+# as a manual tag push does today.
+#
+# GH_TOKEN must be a fine-grained PAT with contents:write. The default
+# GITHUB_TOKEN cannot be used: tags pushed with it do not trigger other
+# workflows (GitHub's recursion guard), so release.yml would never run.
+#
+# Maven note: the exec plugin invokes `mvn versions:set`; ubuntu-latest ships
+# a system mvn, which is sufficient for that goal.
+#
+# The toolchain is pinned: .github/release-tooling/package-lock.json is the
+# only source of the semantic-release dependency tree (npm ci --ignore-scripts),
+# so the job that holds the write PAT never resolves mutable versions.
+#
+# Required secrets: GH_TOKEN
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: 'Dry run (compute the next version and release notes without releasing)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+# Serialize release cuts: a second dispatch queues behind the first instead of
+# racing it to the same version/tag. No cancel-in-progress — never kill a
+# mid-flight release. GitHub keeps at most ONE pending run per group, so if
+# several dispatches pile up, only the latest pending one runs — intentional:
+# duplicate queued release cuts are redundant by definition (the surviving run
+# re-analyzes main and releases whatever is unreleased).
+concurrency:
+  group: release-cut
+
+jobs:
+  release:
+    name: Cut release from main
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          token: ${{ secrets.GH_TOKEN }}
+          fetch-depth: 0
+
+      - uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5.6.0
+        with:
+          java-version: '25'
+          distribution: 'temurin'
+          cache: maven
+
+      - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+        with:
+          node-version: 22
+
+      - name: Install the pinned release toolchain
+        run: npm ci --prefix .github/release-tooling --ignore-scripts
+
+      - name: Run semantic-release
+        run: ./.github/release-tooling/node_modules/.bin/semantic-release ${{ inputs.dry-run && '--dry-run' || '' }}
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}

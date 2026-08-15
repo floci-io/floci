@@ -489,6 +489,27 @@ public class KmsService {
         LOG.infov("Updated key policy for KMS key: {0} in {1}", key.getKeyId(), region);
     }
 
+    /**
+     * Lists the policy names attached to a key. KMS supports exactly one key policy, named
+     * {@code default}, so the result can never be truncated: {@code Truncated} is always false and
+     * {@code NextMarker} is omitted.
+     *
+     * <p>{@code Limit} and {@code Marker} are accepted at the wire and ignored: the handler simply
+     * never reads them, which is exactly what moto's KMS does for this operation. A single policy
+     * name fits inside any limit, so the values cannot change the response. Real AWS rejects an
+     * out-of-range {@code Limit} server-side (the model bounds LimitType to [1..1000], but SDKs do
+     * not fully enforce that client-side — botocore checks only the minimum); not re-validating it
+     * here is deliberate leniency, consistent with the emulator's general posture.
+     */
+    public Map<String, Object> listKeyPolicies(String keyId, String region) {
+        String policyName = (String) getKeyPolicy(keyId, region).get("PolicyName");
+
+        Map<String, Object> result = new HashMap<>();
+        result.put("PolicyNames", List.of(policyName));
+        result.put("Truncated", false);
+        return result;
+    }
+
     public void updateKeyDescription(String keyId, String description, String region) {
         KmsKey key = resolveKey(keyId, region);
         key.setDescription(description);
@@ -628,6 +649,7 @@ public class KmsService {
 
     public byte[] encrypt(String keyId, byte[] plaintext, Map<String, String> encryptionContext, String region) {
         KmsKey kmsKey = resolveKey(keyId, region);
+        validateKeyIsUsableForCryptoOperations(kmsKey);
 
         byte[] nonceBytes = new byte[NONCE_BYTES];
         SECURE_RANDOM.nextBytes(nonceBytes);
@@ -665,19 +687,43 @@ public class KmsService {
      * Single-pass decrypt + source-key-ARN resolution. {@link #decrypt} and
      * {@link #decryptToKeyArn} remain independent primitives — neither delegates here.
      */
-    public DecryptResult decryptAndResolveKey(byte[] ciphertext, Map<String, String> encryptionContext, String region) {
+    public DecryptResult decryptAndResolveKey(
+            byte[] ciphertext,
+            Map<String, String> encryptionContext,
+            String region,
+            String requestKeyId
+    ) {
         ParsedBlob parsed = parseBlob(ciphertext);
         if (!parsed.contextFingerprint.equals(contextFingerprint(encryptionContext))) {
             throw new AwsException("InvalidCiphertextException", "The ciphertext is invalid.", 400);
         }
         byte[] plaintext = Base64.getDecoder().decode(parsed.payload);
-        String keyArn;
-        try {
-            keyArn = resolveKey(parsed.keyId, region).getArn();
-        } catch (AwsException e) {
-            keyArn = null;
+
+        if (requestKeyId != null && !requestKeyId.isBlank()) {
+            KmsKey requestKey = resolveKey(requestKeyId, region);
+            if (!requestKey.getKeyId().equals(parsed.keyId)) {
+                throw new AwsException(
+                        "IncorrectKeyException",
+                        "The request was rejected because the specified KMS key cannot decrypt the data.",
+                        400
+                );
+            }
+            validateKeyIsUsableForCryptoOperations(requestKey);
+
+            return new DecryptResult(plaintext, requestKey.getArn());
         }
-        return new DecryptResult(plaintext, keyArn);
+
+        KmsKey key;
+        try {
+            key = resolveKey(parsed.keyId, region);
+        } catch (AwsException e) {
+            key = null;
+        }
+        if (key == null) {
+            return new DecryptResult(plaintext, null);
+        }
+        validateKeyIsUsableForCryptoOperations(key);
+        return new DecryptResult(plaintext, key.getArn());
     }
 
     public record DecryptResult(byte[] plaintext, String keyArn) {}
@@ -1070,4 +1116,22 @@ public class KmsService {
         return keyStore.get(region + "::" + id)
                 .orElseThrow(() -> new AwsException("NotFoundException", "Key not found: " + keyIdOrArn, 404));
     }
+
+    private static void validateKeyIsUsableForCryptoOperations(KmsKey key) {
+        if ("PendingDeletion".equals(key.getKeyState())) {
+            throw new AwsException(
+                    "KMSInvalidStateException",
+                    "KMS key " + key.getKeyId() + " is pending deletion.",
+                    400
+            );
+        }
+        if (!key.isEnabled()) {
+            throw new AwsException(
+                    "DisabledException",
+                    "The request was rejected because the specified KMS key is not enabled.",
+                    400
+            );
+        }
+    }
+
 }

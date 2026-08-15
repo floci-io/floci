@@ -25,6 +25,8 @@ public class IamRole {
     private List<String> attachedPolicyArns = new CopyOnWriteArrayList<>();
     private Map<String, String> inlinePolicies = new ConcurrentHashMap<>();
     private String permissionsBoundaryArn;
+    /** Set only by CreateServiceLinkedRole; the path alone cannot classify a role. */
+    private boolean serviceLinkedRole;
 
     public IamRole() {}
 
@@ -79,4 +81,7 @@ public class IamRole {
 
     public String getPermissionsBoundaryArn() { return permissionsBoundaryArn; }
     public void setPermissionsBoundaryArn(String permissionsBoundaryArn) { this.permissionsBoundaryArn = permissionsBoundaryArn; }
+
+    public boolean isServiceLinkedRole() { return serviceLinkedRole; }
+    public void setServiceLinkedRole(boolean serviceLinkedRole) { this.serviceLinkedRole = serviceLinkedRole; }
 }

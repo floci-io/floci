@@ -328,3 +328,17 @@ resource "aws_kinesis_firehose_delivery_stream" "events" {
 output "firehose_stream_arn" {
   value = aws_kinesis_firehose_delivery_stream.events.arn
 }
+
+# ── SES Receipt Rule Set ───────────────────────────────────────────────────
+# floci stores it inertly (no inbound-mail routing); the management API just round-trips.
+resource "aws_ses_receipt_rule_set" "compat" {
+  rule_set_name = "floci-compat-rule-set"
+}
+
+resource "aws_ses_active_receipt_rule_set" "compat" {
+  rule_set_name = aws_ses_receipt_rule_set.compat.rule_set_name
+}
+
+output "ses_rule_set_name" {
+  value = aws_ses_receipt_rule_set.compat.rule_set_name
+}

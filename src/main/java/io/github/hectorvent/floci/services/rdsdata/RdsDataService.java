@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.secretsmanager.model.SecretVersion;
 import io.github.hectorvent.floci.core.common.Resettable;
@@ -16,12 +17,15 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.sql.Connection;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -107,6 +111,7 @@ public class RdsDataService implements Resettable {
         String sql = requiredText(request, "sql");
         String resourceArn = requiredText(request, "resourceArn");
         requiredText(request, "secretArn");
+        Map<String, JsonNode> parameters = parseParameters(request);
         String transactionId = textOrNull(request, "transactionId");
         boolean includeMetadata = request.path("includeResultMetadata").asBoolean(false);
 
@@ -115,17 +120,18 @@ public class RdsDataService implements Resettable {
                 TransactionContext tx = transaction(transactionId);
                 synchronized (tx) {
                     requireActiveTransaction(transactionId, tx);
-                    validateTransactionIdentity(tx, request);
+                    validateTransactionIdentity(tx, request, region);
                     tx.refresh(transactionTtl);
-                    return executeOnConnection(tx.connection, sql, includeMetadata);
+                    return executeOnConnection(tx.connection, tx.engine, sql, parameters, includeMetadata);
                 }
             }
 
-            RdsDataResourceResolver.DatabaseTarget target = resourceResolver.resolve(resourceArn);
+            RdsDataResourceResolver.DatabaseTarget target =
+                    resourceResolver.resolve(resourceArn, region);
             Credentials credentials = credentials(request, target, region);
             String database = databaseName(request, target);
             try (Connection connection = connectionFactory.open(target, credentials.username(), credentials.password(), database)) {
-                return executeOnConnection(connection, sql, includeMetadata);
+                return executeOnConnection(connection, target.engine(), sql, parameters, includeMetadata);
             }
         } catch (SQLException e) {
             throw databaseError(e);
@@ -136,7 +142,8 @@ public class RdsDataService implements Resettable {
         cleanupExpiredTransactions();
         String resourceArn = requiredText(request, "resourceArn");
         requiredText(request, "secretArn");
-        RdsDataResourceResolver.DatabaseTarget target = resourceResolver.resolve(resourceArn);
+        RdsDataResourceResolver.DatabaseTarget target =
+                resourceResolver.resolve(resourceArn, region);
         Credentials credentials = credentials(request, target, region);
         String database = databaseName(request, target);
 
@@ -145,7 +152,8 @@ public class RdsDataService implements Resettable {
             connection = connectionFactory.open(target, credentials.username(), credentials.password(), database);
             connection.setAutoCommit(false);
             String transactionId = UUID.randomUUID().toString();
-            transactions.put(transactionId, new TransactionContext(transactionId, connection, target.arn(), database, transactionTtl));
+            transactions.put(transactionId, new TransactionContext(
+                    transactionId, connection, target.engine(), target.arn(), database, region, transactionTtl));
 
             ObjectNode response = objectMapper.createObjectNode();
             response.put("transactionId", transactionId);
@@ -158,14 +166,14 @@ public class RdsDataService implements Resettable {
         }
     }
 
-    public ObjectNode commitTransaction(JsonNode request) {
+    public ObjectNode commitTransaction(JsonNode request, String region) {
         String transactionId = requiredText(request, "transactionId");
         String resourceArn = requiredText(request, "resourceArn");
         requiredText(request, "secretArn");
         TransactionContext tx = transaction(transactionId);
         synchronized (tx) {
             requireActiveTransaction(transactionId, tx);
-            validateTransactionResource(tx, resourceArn);
+            validateTransactionResource(tx, resourceArn, region);
             if (!transactions.remove(transactionId, tx)) {
                 throw transactionNotFound(transactionId);
             }
@@ -182,14 +190,14 @@ public class RdsDataService implements Resettable {
         return response;
     }
 
-    public ObjectNode rollbackTransaction(JsonNode request) {
+    public ObjectNode rollbackTransaction(JsonNode request, String region) {
         String transactionId = requiredText(request, "transactionId");
         String resourceArn = requiredText(request, "resourceArn");
         requiredText(request, "secretArn");
         TransactionContext tx = transaction(transactionId);
         synchronized (tx) {
             requireActiveTransaction(transactionId, tx);
-            validateTransactionResource(tx, resourceArn);
+            validateTransactionResource(tx, resourceArn, region);
             if (!transactions.remove(transactionId, tx)) {
                 throw transactionNotFound(transactionId);
             }
@@ -206,26 +214,46 @@ public class RdsDataService implements Resettable {
         return response;
     }
 
-    private ObjectNode executeOnConnection(Connection connection, String sql, boolean includeMetadata) throws SQLException {
-        try (Statement statement = connection.createStatement()) {
-            boolean hasResultSet = statement.execute(sql);
-            ObjectNode response = objectMapper.createObjectNode();
-            if (hasResultSet) {
-                try (ResultSet rs = statement.getResultSet()) {
-                    ResultSetMetaData meta = rs.getMetaData();
-                    if (includeMetadata) {
-                        response.set("columnMetadata", columnMetadata(meta));
-                    }
-                    response.set("records", records(rs, meta));
-                }
-                response.put("numberOfRecordsUpdated", 0L);
-            } else {
-                int updateCount = statement.getUpdateCount();
-                response.set("records", objectMapper.createArrayNode());
-                response.put("numberOfRecordsUpdated", Math.max(updateCount, 0));
-            }
-            return response;
+    private ObjectNode executeOnConnection(Connection connection, DatabaseEngine engine, String sql,
+                                           Map<String, JsonNode> parameters, boolean includeMetadata)
+            throws SQLException {
+        RdsDataSqlParameters.ParsedSql parsed = RdsDataSqlParameters.parse(sql, usesBackslashEscapes(engine));
+        try (PreparedStatement statement = connection.prepareStatement(parsed.sql())) {
+            RdsDataSqlParameters.bind(statement, parsed.parameterOrder(), parameters);
+            return buildResponse(statement, statement.execute(), includeMetadata);
         }
+    }
+
+    /**
+     * Whether a backslash escapes quotes inside string literals for {@code engine}.
+     * MySQL and MariaDB honor {@code \'} by default (NO_BACKSLASH_ESCAPES disabled);
+     * PostgreSQL treats backslash literally with {@code standard_conforming_strings} on.
+     */
+    private static boolean usesBackslashEscapes(DatabaseEngine engine) {
+        return switch (engine) {
+            case MYSQL, MARIADB -> true;
+            case POSTGRES -> false;
+        };
+    }
+
+    private ObjectNode buildResponse(Statement statement, boolean hasResultSet, boolean includeMetadata)
+            throws SQLException {
+        ObjectNode response = objectMapper.createObjectNode();
+        if (hasResultSet) {
+            try (ResultSet rs = statement.getResultSet()) {
+                ResultSetMetaData meta = rs.getMetaData();
+                if (includeMetadata) {
+                    response.set("columnMetadata", columnMetadata(meta));
+                }
+                response.set("records", records(rs, meta));
+            }
+            response.put("numberOfRecordsUpdated", 0L);
+        } else {
+            int updateCount = statement.getUpdateCount();
+            response.set("records", objectMapper.createArrayNode());
+            response.put("numberOfRecordsUpdated", Math.max(updateCount, 0));
+        }
+        return response;
     }
 
     private ArrayNode columnMetadata(ResultSetMetaData meta) throws SQLException {
@@ -346,21 +374,26 @@ public class RdsDataService implements Resettable {
         }
     }
 
-    private void validateTransactionIdentity(TransactionContext tx, JsonNode request) {
-        validateTransactionResource(tx, requiredText(request, "resourceArn"));
+    private void validateTransactionIdentity(
+            TransactionContext tx, JsonNode request, String region) {
+        validateTransactionResource(tx, requiredText(request, "resourceArn"), region);
         String database = textOrNull(request, "database");
         if (database != null && !database.isBlank() && !database.equals(tx.database)) {
             throw transactionNotFound(tx.id);
         }
     }
 
-    private void validateTransactionResource(TransactionContext tx, String resourceArn) {
+    private void validateTransactionResource(
+            TransactionContext tx, String resourceArn, String region) {
+        if (region == null || region.isBlank() || !region.equals(tx.region)) {
+            throw transactionNotFound(tx.id);
+        }
         if (resourceArn.equals(tx.resourceArn)) {
             return;
         }
         RdsDataResourceResolver.DatabaseTarget target;
         try {
-            target = resourceResolver.resolve(resourceArn);
+            target = resourceResolver.resolve(resourceArn, region);
         } catch (AwsException e) {
             throw transactionNotFound(tx.id);
         }
@@ -384,17 +417,36 @@ public class RdsDataService implements Resettable {
     }
 
     private static void rejectUnsupportedOptions(JsonNode request) {
-        rejectSqlParameters(request);
         rejectFormattedRecords(request);
         rejectResultSetOptions(request);
     }
 
-    private static void rejectSqlParameters(JsonNode request) {
+    private static Map<String, JsonNode> parseParameters(JsonNode request) {
         JsonNode parameters = request.get("parameters");
-        if (parameters != null && (!parameters.isArray() || !parameters.isEmpty())) {
-            throw new AwsException("BadRequestException",
-                    "SqlParameter binding is not supported by this local RDS Data API implementation.", 400);
+        if (parameters == null || parameters.isNull()) {
+            return Map.of();
         }
+        if (!parameters.isArray()) {
+            throw new AwsException("BadRequestException",
+                    "parameters must be an array of SqlParameter values.", 400);
+        }
+        Map<String, JsonNode> byName = new LinkedHashMap<>();
+        for (JsonNode parameter : parameters) {
+            if (parameter == null || !parameter.isObject()) {
+                throw new AwsException("BadRequestException",
+                        "Each parameter must be a SqlParameter object.", 400);
+            }
+            String name = textOrNull(parameter, "name");
+            if (name == null || name.isBlank()) {
+                throw new AwsException("BadRequestException",
+                        "Each SqlParameter requires a name.", 400);
+            }
+            if (byName.putIfAbsent(name, parameter) != null) {
+                throw new AwsException("BadRequestException",
+                        "Duplicate parameter name :" + name + " in the parameter set.", 400);
+            }
+        }
+        return byName;
     }
 
     private static void rejectFormattedRecords(JsonNode request) {
@@ -438,15 +490,21 @@ public class RdsDataService implements Resettable {
     private static final class TransactionContext {
         private final String id;
         private final Connection connection;
+        private final DatabaseEngine engine;
         private final String resourceArn;
         private final String database;
+        private final String region;
         private volatile Instant expiresAt;
 
-        private TransactionContext(String id, Connection connection, String resourceArn, String database, Duration ttl) {
+        private TransactionContext(
+                String id, Connection connection, DatabaseEngine engine, String resourceArn,
+                String database, String region, Duration ttl) {
             this.id = id;
             this.connection = connection;
+            this.engine = engine;
             this.resourceArn = resourceArn;
             this.database = database;
+            this.region = region;
             refresh(ttl);
         }
 

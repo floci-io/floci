@@ -134,7 +134,7 @@ public class AwsServiceRouter {
         }
         if (resourceSpec.startsWith("path/")) {
             // Action is supplied by the rendered request body (query protocol).
-            return new IntegrationTarget(region, service, null);
+            return new IntegrationTarget(region, service, null, resourceSpec.substring("path/".length()));
         }
         return null;
     }

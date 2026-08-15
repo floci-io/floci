@@ -35,10 +35,12 @@ import org.jboss.logging.Logger;
 import java.io.Closeable;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * Manages Docker container lifecycle for ECS tasks.
@@ -89,7 +91,7 @@ public class EcsContainerManager {
         String taskId = extractTaskId(task.getTaskArn());
 
         Map<String, String> containerIds = new LinkedHashMap<>();
-        List<Closeable> logStreams = new ArrayList<>();
+        Map<String, Closeable> logStreamsByContainerId = new LinkedHashMap<>();
         List<Container> runtimeContainers = new ArrayList<>();
 
         // Task-level volumes consumed by per-container mountPoints: host volumes map their
@@ -249,7 +251,7 @@ public class EcsContainerManager {
                     dockerId, logGroup, logStream, region,
                     "ecs:" + taskDef.getFamily() + ":" + def.getName());
             if (logHandle != null) {
-                logStreams.add(logHandle);
+                logStreamsByContainerId.put(dockerId, logHandle);
             }
         }
 
@@ -258,7 +260,7 @@ public class EcsContainerManager {
         task.setDesiredStatus(TaskStatus.RUNNING.name());
         task.setStartedAt(Instant.now());
 
-        return new EcsTaskHandle(task.getTaskArn(), containerIds, logStreams);
+        return new EcsTaskHandle(task.getTaskArn(), containerIds, logStreamsByContainerId);
     }
 
     /**
@@ -276,15 +278,11 @@ public class EcsContainerManager {
         if (handle == null) {
             return;
         }
-        for (Closeable logStream : handle.getLogStreams()) {
-            try {
-                logStream.close();
-            } catch (Exception ignored) {
-            }
-        }
         for (String dockerId : handle.getContainerIds().values()) {
             lifecycleManager.stopAndRemove(dockerId, null);
         }
+        new ArrayList<>(handle.getLogStreamsByContainerId().keySet())
+                .forEach(dockerId -> finalizeLogStream(handle, dockerId));
     }
 
     /**
@@ -298,18 +296,14 @@ public class EcsContainerManager {
             return exitCodes;
         }
 
-        for (Closeable logStream : handle.getLogStreams()) {
-            try {
-                logStream.close();
-            } catch (Exception ignored) {
-            }
-        }
-
         // Phase 1: stop all containers (no-op for those already exited).
+        Set<String> terminatedContainerIds = new HashSet<>();
         for (String dockerId : handle.getContainerIds().values()) {
             try {
                 lifecycleManager.getDockerClient().stopContainerCmd(dockerId).withTimeout(5).exec();
+                terminatedContainerIds.add(dockerId);
             } catch (NotFoundException ignored) {
+                terminatedContainerIds.add(dockerId);
             } catch (Exception e) {
                 LOG.warnv("Error stopping ECS container {0}: {1}", dockerId, e.getMessage());
             }
@@ -322,12 +316,24 @@ public class EcsContainerManager {
             exitCodes.put(name, getExitCodeIfStopped(dockerId));
             try {
                 lifecycleManager.getDockerClient().removeContainerCmd(dockerId).withForce(true).exec();
+                terminatedContainerIds.add(dockerId);
             } catch (NotFoundException ignored) {
+                terminatedContainerIds.add(dockerId);
             } catch (Exception e) {
                 LOG.warnv("Error removing ECS container {0}: {1}", dockerId, e.getMessage());
             }
         }
+        // A force removal terminates Docker's follow-log transport even when the preceding stop failed.
+        // Preserve handles for any container that still may be running after both operations failed.
+        terminatedContainerIds.forEach(dockerId -> finalizeLogStream(handle, dockerId));
         return exitCodes;
+    }
+
+    private void finalizeLogStream(EcsTaskHandle handle, String dockerId) {
+        Closeable logStream = handle.removeLogStream(dockerId);
+        if (logStream != null) {
+            lifecycleManager.closeLogStreamAfterContainerStop(logStream);
+        }
     }
 
     /**
@@ -404,14 +410,16 @@ public class EcsContainerManager {
         // to the task region.
         String secretRegion = arnRegion(valueFrom, region);
         String value;
+        String jsonKey = null;
         try {
             if (valueFrom != null && valueFrom.startsWith("arn:aws:secretsmanager:")) {
-                // A plain secret ARN (or partial ARN) resolves to its full SecretString.
-                // The ECS `:json-key:version-stage:version-id` selector suffix is not yet
-                // supported: it is passed through unparsed, so a valueFrom carrying one fails
-                // to resolve and stops the task with ResourceInitializationError rather than
-                // silently returning the whole secret. See floci-io/floci#1624.
-                var secret = secretsManagerService.getSecretValue(valueFrom, null, null, secretRegion);
+                // The valueFrom may carry the ECS selector suffix
+                // (:json-key:version-stage:version-id); the parser strips it so the base ARN
+                // reaches SecretsManagerService intact, keeping its partial-ARN fallback working.
+                var selector = SecretsManagerSelector.parse(valueFrom);
+                jsonKey = selector.jsonKey();
+                var secret = secretsManagerService.getSecretValue(selector.secretId(),
+                        selector.versionId(), selector.versionStage(), secretRegion);
                 value = secret == null ? null : secret.getSecretString();
             } else {
                 String parameterName = ssmParameterName(valueFrom);
@@ -425,8 +433,16 @@ public class EcsContainerManager {
             // A Secrets Manager secret stored as SecretBinary (no SecretString) has no string
             // value to inject as an env var. Real AWS fails the task launch rather than starting
             // the container with a missing value, so surface the same ResourceInitializationError
-            // instead of emitting a literal "NAME=null".
+            // instead of emitting a literal "NAME=null". Checked before JSON extraction: the real
+            // agent nil-derefs on this input, so failing cleanly is a deliberate improvement.
             throw resourceInitializationError(valueFrom, "secret value is not a string", 400);
+        }
+        if (jsonKey != null) {
+            try {
+                value = SecretsManagerSelector.extractJsonKey(value, jsonKey);
+            } catch (AwsException e) {
+                throw resourceInitializationError(valueFrom, e.getMessage(), e.getHttpStatus());
+            }
         }
         return value;
     }
