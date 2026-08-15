@@ -73,6 +73,34 @@ public final class XmlParser {
     }
 
     /**
+     * Returns the local name of the document's root element, parsing the whole body —
+     * so trailing garbage or any well-formedness error yields {@code null}.
+     *
+     * <pre>{@code
+     * boolean valid = "AccelerateConfiguration".equals(XmlParser.rootElementName(body));
+     * }</pre>
+     */
+    public static String rootElementName(String xml) {
+        if (xml == null || xml.isEmpty()) {
+            return null;
+        }
+        String root = null;
+        try {
+            XMLStreamReader r = FACTORY.createXMLStreamReader(new StringReader(xml));
+            while (r.hasNext()) {
+                if (r.next() == XMLStreamConstants.START_ELEMENT && root == null) {
+                    root = r.getLocalName();
+                }
+            }
+            r.close();
+        } catch (Exception e) {
+            LOG.debugv("Ignoring malformed XML during parse: {0}", e.getMessage());
+            return null;
+        }
+        return root;
+    }
+
+    /**
      * Extracts the text content of every element whose local name matches {@code elementName}.
      *
      * <pre>{@code

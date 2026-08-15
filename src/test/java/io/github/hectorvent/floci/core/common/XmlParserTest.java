@@ -213,4 +213,25 @@ class XmlParserTest {
         assertTrue(filters.get(0).isEmpty());
         assertEquals("logs/", filters.get(1).get("prefix"));
     }
+
+    // --- rootElementName: root identification and well-formedness ---
+
+    @Test
+    void rootElementNameReturnsTheRootLocalName() {
+        assertEquals("AccelerateConfiguration", XmlParser.rootElementName(
+                "<AccelerateConfiguration><Status>Enabled</Status></AccelerateConfiguration>"));
+        assertEquals("AccelerateConfiguration", XmlParser.rootElementName(
+                "<ns:AccelerateConfiguration xmlns:ns=\"urn:x\"/>"));
+        assertEquals("Wrapper", XmlParser.rootElementName(
+                "<Wrapper><AccelerateConfiguration/></Wrapper>"));
+    }
+
+    @Test
+    void rootElementNameReturnsNullForBodiesThatDoNotParse() {
+        assertNull(XmlParser.rootElementName(null));
+        assertNull(XmlParser.rootElementName(""));
+        assertNull(XmlParser.rootElementName("garbage {} not xml"));
+        assertNull(XmlParser.rootElementName("<AccelerateConfiguration><Status>Enabled"));
+        assertNull(XmlParser.rootElementName("<AccelerateConfiguration/>trailing"));
+    }
 }
