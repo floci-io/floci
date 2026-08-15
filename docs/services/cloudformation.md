@@ -67,11 +67,11 @@ cross-resource references.
 | ECS | `Cluster`, `TaskDefinition`, `Service` |
 | EKS | `Cluster`, `Nodegroup` |
 | RDS | `DBInstance`, `DBCluster`, `DBSubnetGroup`, `DBParameterGroup`, `DBClusterParameterGroup` (DBInstance/DBCluster start real containers) |
-| EC2 | `VPC`, `Subnet`, `SecurityGroup`, `InternetGateway`, `RouteTable`, `SubnetRouteTableAssociation`, `Route`, `NatGateway`, `EIP`, `Instance`, `LaunchTemplate`, `VPCGatewayAttachment` |
+| EC2 | `VPC`, `Subnet`, `SecurityGroup`, `InternetGateway`, `RouteTable`, `SubnetRouteTableAssociation`, `Route`, `NatGateway`, `EIP`, `Instance`, `LaunchTemplate`, `VPCGatewayAttachment`, `FlowLog` |
 | Elastic Load Balancing v2 | `LoadBalancer`, `TargetGroup`, `Listener`, `ListenerRule` |
-| Auto Scaling | `LaunchConfiguration`, `AutoScalingGroup` |
+| Auto Scaling | `LaunchConfiguration`, `AutoScalingGroup`, `LifecycleHook` |
 | Route 53 | `HostedZone`, `RecordSet` |
-| API Gateway (v1) | `RestApi`, `Resource`, `Authorizer`, `Method`, `Deployment`, `Stage` |
+| API Gateway (v1) | `RestApi`, `Resource`, `Authorizer`, `Method`, `Deployment`, `Stage`, `Account` |
 | API Gateway v2 | `Api`, `Route`, `Integration`, `Stage`, `Deployment` |
 | Step Functions | `StateMachine` |
 | Batch | `ComputeEnvironment`, `JobQueue`, `JobDefinition` |
