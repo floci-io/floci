@@ -282,6 +282,7 @@ public interface EmulatorConfig {
         ElasticBeanstalkStorageConfig elasticbeanstalk();
         CloudTrailStorageConfig cloudtrail();
         RumStorageConfig rum();
+        GuardDutyStorageConfig guardduty();
     }
 
     interface SsmStorageConfig {
@@ -504,6 +505,13 @@ public interface EmulatorConfig {
         long flushIntervalMs();
     }
 
+    interface GuardDutyStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+
     interface CodeDeployStorageConfig {
         Optional<String> mode();
 
@@ -609,6 +617,7 @@ public interface EmulatorConfig {
         IotServiceConfig iot();
         IotDataServiceConfig iotdata();
         RumServiceConfig rum();
+        GuardDutyServiceConfig guardduty();
     }
 
     interface IotServiceConfig {
@@ -638,6 +647,11 @@ public interface EmulatorConfig {
     }
 
     interface RumServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface GuardDutyServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }
