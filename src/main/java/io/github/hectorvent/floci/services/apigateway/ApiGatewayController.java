@@ -1692,6 +1692,11 @@ public class ApiGatewayController {
         node.put("name", k.getName());
         node.put("value", k.getValue());
         node.put("enabled", k.isEnabled());
+        // Real AWS always returns both timestamps (epoch seconds). The Terraform AWS provider
+        // formats them without a nil check in resourceAPIKeyRead, so omitting either crashes
+        // the provider with a nil-pointer dereference right after CreateApiKey.
+        node.put("createdDate", k.getCreatedDate());
+        node.put("lastUpdatedDate", k.getLastUpdatedDate());
         if (k.getDescription() != null) {
             node.put("description", k.getDescription());
         }

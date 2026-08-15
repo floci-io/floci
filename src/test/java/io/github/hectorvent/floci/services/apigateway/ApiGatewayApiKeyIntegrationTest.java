@@ -38,6 +38,11 @@ class ApiGatewayApiKeyIntegrationTest {
                 .body("id", notNullValue())
                 .body("name", equalTo("k"))
                 .body("enabled", equalTo(true))
+                // Real AWS always returns both timestamps (epoch seconds); the Terraform AWS
+                // provider dereferences them without a nil check right after CreateApiKey, so
+                // omitting either crashes it (SEGV in resourceAPIKeyRead).
+                .body("createdDate", notNullValue())
+                .body("lastUpdatedDate", notNullValue())
                 .body("tags.Team", equalTo("platform"))
                 .body("tags.Project", equalTo("demo"))
                 .extract().path("id");
@@ -50,6 +55,8 @@ class ApiGatewayApiKeyIntegrationTest {
                 .then()
                 .statusCode(200)
                 .body("id", equalTo(apiKeyId))
+                .body("createdDate", notNullValue())
+                .body("lastUpdatedDate", notNullValue())
                 .body("tags.Team", equalTo("platform"))
                 .body("tags.Project", equalTo("demo"))
                 .body("value", nullValue());
