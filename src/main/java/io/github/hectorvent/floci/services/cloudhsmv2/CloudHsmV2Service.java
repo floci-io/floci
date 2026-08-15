@@ -14,7 +14,7 @@ import org.bouncycastle.asn1.x500.X500Name;
 import org.bouncycastle.cert.X509v3CertificateBuilder;
 import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter;
 import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder;
-import org.bouncycastle.jce.provider.BouncyCastleProvider;
+
 import org.bouncycastle.openssl.jcajce.JcaPEMWriter;
 import org.bouncycastle.operator.ContentSigner;
 import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
@@ -230,7 +230,7 @@ public class CloudHsmV2Service {
 
         // Verify TrustAnchor is self-signed and SignedCert is issued by TrustAnchor
         try {
-            JcaX509CertificateConverter converter = new JcaX509CertificateConverter().setProvider(new BouncyCastleProvider());
+            JcaX509CertificateConverter converter = new JcaX509CertificateConverter();
             java.security.cert.X509Certificate trustAnchorCert = converter.getCertificate(trustAnchorHolder);
             java.security.cert.X509Certificate signedCertObj = converter.getCertificate(signedCertHolder);
 
@@ -471,7 +471,7 @@ public class CloudHsmV2Service {
 
     private String generateCsr(String clusterId) {
         try {
-            KeyPairGenerator keyGen = KeyPairGenerator.getInstance("RSA", BouncyCastleProvider.PROVIDER_NAME);
+            KeyPairGenerator keyGen = KeyPairGenerator.getInstance("RSA");
             keyGen.initialize(2048, SECURE_RANDOM);
             KeyPair keyPair = keyGen.generateKeyPair();
 
@@ -481,7 +481,6 @@ public class CloudHsmV2Service {
                     new JcaPKCS10CertificationRequestBuilder(subject, keyPair.getPublic());
 
             ContentSigner signer = new JcaContentSignerBuilder("SHA256WithRSA")
-                    .setProvider(BouncyCastleProvider.PROVIDER_NAME)
                     .build(keyPair.getPrivate());
 
             PKCS10CertificationRequest csr = csrBuilder.build(signer);
@@ -498,7 +497,7 @@ public class CloudHsmV2Service {
     }
 
     private KeyPair generateKeyPair() throws Exception {
-        KeyPairGenerator keyGen = KeyPairGenerator.getInstance("RSA", BouncyCastleProvider.PROVIDER_NAME);
+        KeyPairGenerator keyGen = KeyPairGenerator.getInstance("RSA");
         keyGen.initialize(2048, SECURE_RANDOM);
         return keyGen.generateKeyPair();
     }
@@ -510,10 +509,10 @@ public class CloudHsmV2Service {
                 issuer, serial, Date.from(now), Date.from(now.plusSeconds(365L * 24 * 3600)), subject, pubKey);
 
         ContentSigner signer = new JcaContentSignerBuilder("SHA256WithRSA")
-                .setProvider(BouncyCastleProvider.PROVIDER_NAME).build(signerKey);
+                .build(signerKey);
         X509CertificateHolder holder = certBuilder.build(signer);
         X509Certificate cert = new JcaX509CertificateConverter()
-                .setProvider(BouncyCastleProvider.PROVIDER_NAME).getCertificate(holder);
+                .getCertificate(holder);
 
         StringWriter sw = new StringWriter();
         try (JcaPEMWriter pemWriter = new JcaPEMWriter(sw)) {
