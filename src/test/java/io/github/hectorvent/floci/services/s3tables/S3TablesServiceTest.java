@@ -149,4 +149,46 @@ class S3TablesServiceTest {
         AwsException exception = assertThrows(AwsException.class, action);
         assertEquals(expectedCode, exception.getErrorCode());
     }
+
+    @Test
+    void allowsOnlyOneConcurrentMetadataUpdatePerVersionToken() throws Exception {
+        String arn = createBucketWithNamespace("analytics");
+        S3Table created = createTable(arn, "analytics", "events");
+        var ready = new java.util.concurrent.CountDownLatch(2);
+        var start = new java.util.concurrent.CountDownLatch(1);
+        var executor = java.util.concurrent.Executors.newFixedThreadPool(2);
+
+        try {
+            var first = executor.submit(() -> updateMetadataWithToken(arn, created.getVersionToken(),
+                    "s3://warehouse/events/metadata/v2.json", ready, start));
+            var second = executor.submit(() -> updateMetadataWithToken(arn, created.getVersionToken(),
+                    "s3://warehouse/events/metadata/v3.json", ready, start));
+
+            assertEquals(true, ready.await(5, java.util.concurrent.TimeUnit.SECONDS));
+            start.countDown();
+            List<String> outcomes = List.of(first.get(5, java.util.concurrent.TimeUnit.SECONDS),
+                    second.get(5, java.util.concurrent.TimeUnit.SECONDS));
+
+            assertEquals(1L, outcomes.stream().filter("updated"::equals).count());
+            assertEquals(1L, outcomes.stream().filter("ConflictException"::equals).count());
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    private String updateMetadataWithToken(String arn, String token, String metadataLocation,
+                                           java.util.concurrent.CountDownLatch ready,
+                                           java.util.concurrent.CountDownLatch start) throws InterruptedException {
+        ready.countDown();
+        if (!start.await(5, java.util.concurrent.TimeUnit.SECONDS)) {
+            return "timed out";
+        }
+        try {
+            service.updateTableMetadataLocation(arn, "analytics", "events", metadataLocation, token, REGION);
+            return "updated";
+        } catch (AwsException exception) {
+            return exception.getErrorCode();
+        }
+    }
+
 }

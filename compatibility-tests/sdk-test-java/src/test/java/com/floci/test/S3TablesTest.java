@@ -32,24 +32,26 @@ class S3TablesTest {
 
     @AfterAll
     static void cleanup() {
-        if (client == null || bucketArn == null) {
+        if (client == null) {
             return;
         }
-        try {
-            client.deleteTable(DeleteTableRequest.builder()
-                    .tableBucketARN(bucketArn).namespace(NAMESPACE).name(tableName).build());
-        } catch (Exception ignored) {
-        }
-        try {
-            client.deleteNamespace(DeleteNamespaceRequest.builder()
-                    .tableBucketARN(bucketArn).namespace(NAMESPACE).build());
-        } catch (Exception ignored) {
-        }
-        try {
-            client.deleteTableBucket(DeleteTableBucketRequest.builder().tableBucketARN(bucketArn).build());
-        } catch (Exception ignored) {
+        if (bucketArn != null) {
+            cleanup("table " + tableName, () -> client.deleteTable(DeleteTableRequest.builder()
+                    .tableBucketARN(bucketArn).namespace(NAMESPACE).name(tableName).build()));
+            cleanup("namespace " + NAMESPACE, () -> client.deleteNamespace(DeleteNamespaceRequest.builder()
+                    .tableBucketARN(bucketArn).namespace(NAMESPACE).build()));
+            cleanup("table bucket " + bucketArn, () -> client.deleteTableBucket(DeleteTableBucketRequest.builder()
+                    .tableBucketARN(bucketArn).build()));
         }
         client.close();
+    }
+
+    private static void cleanup(String resource, Runnable deletion) {
+        try {
+            deletion.run();
+        } catch (Exception exception) {
+            System.err.printf("S3 Tables SDK test cleanup failed for %s: %s%n", resource, exception.getMessage());
+        }
     }
 
     @Test

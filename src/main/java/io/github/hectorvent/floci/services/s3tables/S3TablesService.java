@@ -35,7 +35,7 @@ public class S3TablesService {
         this.regionResolver = regionResolver;
     }
 
-    public TableBucket createTableBucket(String name, Object encryptionConfiguration,
+    public synchronized TableBucket createTableBucket(String name, Object encryptionConfiguration,
                                          Object storageClassConfiguration, Map<String, String> tags, String region) {
         validateBucketName(name);
         String key = storageKey(region, name);
@@ -49,7 +49,7 @@ public class S3TablesService {
         return bucket;
     }
 
-    public TableBucket getTableBucket(String tableBucketArn, String region) {
+    public synchronized TableBucket getTableBucket(String tableBucketArn, String region) {
         String name = resourceName(tableBucketArn, BUCKET_PREFIX);
         TableBucket bucket = store.get(storageKey(region, name))
                 .orElseThrow(() -> notFound("The table bucket does not exist."));
@@ -59,14 +59,14 @@ public class S3TablesService {
         return bucket;
     }
 
-    public List<TableBucket> listTableBuckets(String prefix, String region) {
+    public synchronized List<TableBucket> listTableBuckets(String prefix, String region) {
         return store.scan(key -> key.startsWith(region + "::")).stream()
                 .filter(bucket -> prefix == null || bucket.getName().startsWith(prefix))
                 .sorted(Comparator.comparing(TableBucket::getName))
                 .toList();
     }
 
-    public void deleteTableBucket(String tableBucketArn, String region) {
+    public synchronized void deleteTableBucket(String tableBucketArn, String region) {
         TableBucket bucket = getTableBucket(tableBucketArn, region);
         if (!bucket.getNamespaces().isEmpty()) {
             throw conflict("The table bucket is not empty.");
@@ -74,7 +74,7 @@ public class S3TablesService {
         store.delete(storageKey(region, bucket.getName()));
     }
 
-    public Namespace createNamespace(String tableBucketArn, List<String> namespace, String region) {
+    public synchronized Namespace createNamespace(String tableBucketArn, List<String> namespace, String region) {
         String namespaceName = namespaceName(namespace);
         TableBucket bucket = getTableBucket(tableBucketArn, region);
         if (bucket.getNamespaces().containsKey(namespaceName)) {
@@ -86,18 +86,18 @@ public class S3TablesService {
         return value;
     }
 
-    public Namespace getNamespace(String tableBucketArn, String namespaceName, String region) {
+    public synchronized Namespace getNamespace(String tableBucketArn, String namespaceName, String region) {
         return getNamespace(getTableBucket(tableBucketArn, region), namespaceName);
     }
 
-    public List<Namespace> listNamespaces(String tableBucketArn, String prefix, String region) {
+    public synchronized List<Namespace> listNamespaces(String tableBucketArn, String prefix, String region) {
         return getTableBucket(tableBucketArn, region).getNamespaces().values().stream()
                 .filter(namespace -> prefix == null || namespace.getName().startsWith(prefix))
                 .sorted(Comparator.comparing(Namespace::getName))
                 .toList();
     }
 
-    public void deleteNamespace(String tableBucketArn, String namespaceName, String region) {
+    public synchronized void deleteNamespace(String tableBucketArn, String namespaceName, String region) {
         TableBucket bucket = getTableBucket(tableBucketArn, region);
         Namespace namespace = getNamespace(bucket, namespaceName);
         if (!namespace.getTables().isEmpty()) {
@@ -107,7 +107,7 @@ public class S3TablesService {
         persist(bucket, region);
     }
 
-    public S3Table createTable(String tableBucketArn, String namespaceName, String name, String format,
+    public synchronized S3Table createTable(String tableBucketArn, String namespaceName, String name, String format,
                                Object metadata, Object encryptionConfiguration, Object storageClassConfiguration,
                                Map<String, String> tags, String region) {
         requireName(name, "Table name is required.");
@@ -127,11 +127,11 @@ public class S3TablesService {
         return table;
     }
 
-    public S3Table getTable(String tableBucketArn, String namespaceName, String name, String region) {
+    public synchronized S3Table getTable(String tableBucketArn, String namespaceName, String name, String region) {
         return getTable(getTableBucket(tableBucketArn, region), namespaceName, name);
     }
 
-    public List<S3Table> listTables(String tableBucketArn, String namespaceName, String prefix, String region) {
+    public synchronized List<S3Table> listTables(String tableBucketArn, String namespaceName, String prefix, String region) {
         TableBucket bucket = getTableBucket(tableBucketArn, region);
         List<S3Table> tables = new ArrayList<>();
         if (namespaceName == null) {
@@ -143,7 +143,7 @@ public class S3TablesService {
                 .sorted(Comparator.comparing(S3Table::getName)).toList();
     }
 
-    public void deleteTable(String tableBucketArn, String namespaceName, String name, String region) {
+    public synchronized void deleteTable(String tableBucketArn, String namespaceName, String name, String region) {
         TableBucket bucket = getTableBucket(tableBucketArn, region);
         Namespace namespace = getNamespace(bucket, namespaceName);
         getTable(bucket, namespaceName, name);
@@ -151,7 +151,7 @@ public class S3TablesService {
         persist(bucket, region);
     }
 
-    public S3Table renameTable(String tableBucketArn, String namespaceName, String name, String newNamespaceName,
+    public synchronized S3Table renameTable(String tableBucketArn, String namespaceName, String name, String newNamespaceName,
                                String newName, String versionToken, String region) {
         TableBucket bucket = getTableBucket(tableBucketArn, region);
         S3Table table = getTable(bucket, namespaceName, name);
@@ -175,7 +175,7 @@ public class S3TablesService {
         return table;
     }
 
-    public S3Table updateTableMetadataLocation(String tableBucketArn, String namespaceName, String name,
+    public synchronized S3Table updateTableMetadataLocation(String tableBucketArn, String namespaceName, String name,
                                                String metadataLocation, String versionToken, String region) {
         if (metadataLocation == null || metadataLocation.isBlank() || versionToken == null || versionToken.isBlank()) {
             throw badRequest("metadataLocation and versionToken are required.");
@@ -189,7 +189,7 @@ public class S3TablesService {
         return table;
     }
 
-    public void putTableBucketPolicy(String tableBucketArn, String resourcePolicy, String region) {
+    public synchronized void putTableBucketPolicy(String tableBucketArn, String resourcePolicy, String region) {
         if (resourcePolicy == null) {
             throw badRequest("resourcePolicy is required.");
         }
@@ -198,7 +198,7 @@ public class S3TablesService {
         persist(bucket, region);
     }
 
-    public String getTableBucketPolicy(String tableBucketArn, String region) {
+    public synchronized String getTableBucketPolicy(String tableBucketArn, String region) {
         String policy = getTableBucket(tableBucketArn, region).getResourcePolicy();
         if (policy == null) {
             throw notFound("The table bucket policy does not exist.");
@@ -206,7 +206,7 @@ public class S3TablesService {
         return policy;
     }
 
-    public void deleteTableBucketPolicy(String tableBucketArn, String region) {
+    public synchronized void deleteTableBucketPolicy(String tableBucketArn, String region) {
         TableBucket bucket = getTableBucket(tableBucketArn, region);
         if (bucket.getResourcePolicy() == null) {
             throw notFound("The table bucket policy does not exist.");
@@ -215,14 +215,14 @@ public class S3TablesService {
         persist(bucket, region);
     }
 
-    public void putTableBucketMaintenance(String tableBucketArn, String type, Object value, String region) {
+    public synchronized void putTableBucketMaintenance(String tableBucketArn, String type, Object value, String region) {
         requireName(type, "Maintenance configuration type is required.");
         TableBucket bucket = getTableBucket(tableBucketArn, region);
         bucket.getMaintenanceConfigurations().put(type, value);
         persist(bucket, region);
     }
 
-    public Object getTableBucketMaintenance(String tableBucketArn, String type, String region) {
+    public synchronized Object getTableBucketMaintenance(String tableBucketArn, String type, String region) {
         Object value = getTableBucket(tableBucketArn, region).getMaintenanceConfigurations().get(type);
         if (value == null) {
             throw notFound("The table bucket maintenance configuration does not exist.");
@@ -230,11 +230,11 @@ public class S3TablesService {
         return value;
     }
 
-    public Map<String, Object> getTableBucketMaintenanceConfigurations(String tableBucketArn, String region) {
+    public synchronized Map<String, Object> getTableBucketMaintenanceConfigurations(String tableBucketArn, String region) {
         return new LinkedHashMap<>(getTableBucket(tableBucketArn, region).getMaintenanceConfigurations());
     }
 
-    public void putTablePolicy(String tableBucketArn, String namespaceName, String name, String resourcePolicy, String region) {
+    public synchronized void putTablePolicy(String tableBucketArn, String namespaceName, String name, String resourcePolicy, String region) {
         if (resourcePolicy == null) {
             throw badRequest("resourcePolicy is required.");
         }
@@ -244,7 +244,7 @@ public class S3TablesService {
         persist(bucket, region);
     }
 
-    public String getTablePolicy(String tableBucketArn, String namespaceName, String name, String region) {
+    public synchronized String getTablePolicy(String tableBucketArn, String namespaceName, String name, String region) {
         String policy = getTable(tableBucketArn, namespaceName, name, region).getResourcePolicy();
         if (policy == null) {
             throw notFound("The table policy does not exist.");
@@ -252,7 +252,7 @@ public class S3TablesService {
         return policy;
     }
 
-    public void deleteTablePolicy(String tableBucketArn, String namespaceName, String name, String region) {
+    public synchronized void deleteTablePolicy(String tableBucketArn, String namespaceName, String name, String region) {
         TableBucket bucket = getTableBucket(tableBucketArn, region);
         S3Table table = getTable(bucket, namespaceName, name);
         if (table.getResourcePolicy() == null) {
@@ -262,7 +262,7 @@ public class S3TablesService {
         persist(bucket, region);
     }
 
-    public void putTableMaintenance(String tableBucketArn, String namespaceName, String name, String type,
+    public synchronized void putTableMaintenance(String tableBucketArn, String namespaceName, String name, String type,
                                     Object value, String region) {
         requireName(type, "Maintenance configuration type is required.");
         TableBucket bucket = getTableBucket(tableBucketArn, region);
@@ -271,7 +271,7 @@ public class S3TablesService {
         persist(bucket, region);
     }
 
-    public Object getTableMaintenance(String tableBucketArn, String namespaceName, String name, String type, String region) {
+    public synchronized Object getTableMaintenance(String tableBucketArn, String namespaceName, String name, String type, String region) {
         Object value = getTable(tableBucketArn, namespaceName, name, region).getMaintenanceConfigurations().get(type);
         if (value == null) {
             throw notFound("The table maintenance configuration does not exist.");
@@ -279,7 +279,7 @@ public class S3TablesService {
         return value;
     }
 
-    public Map<String, Object> getTableMaintenanceConfigurations(String tableBucketArn, String namespaceName,
+    public synchronized Map<String, Object> getTableMaintenanceConfigurations(String tableBucketArn, String namespaceName,
                                                                    String name, String region) {
         return new LinkedHashMap<>(getTable(tableBucketArn, namespaceName, name, region).getMaintenanceConfigurations());
     }
