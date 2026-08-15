@@ -32,6 +32,7 @@ public class OpenSearchDomainManager {
     private final ContainerDetector containerDetector;
     private final PortAllocator portAllocator;
     private final EmulatorConfig config;
+    private volatile boolean dockerUnavailableLogged;
 
     @Inject
     public OpenSearchDomainManager(ContainerBuilder containerBuilder,
@@ -44,6 +45,50 @@ public class OpenSearchDomainManager {
         this.containerDetector = containerDetector;
         this.portAllocator = portAllocator;
         this.config = config;
+    }
+
+    /**
+     * Attempts {@link #startDomain} and reports the backend as unavailable instead of propagating
+     * the failure, when the cause is that no Docker daemon is reachable from Floci — Floci running
+     * inside Docker without a mounted socket, or a stopped daemon on the host. A failure raised
+     * while the daemon <em>is</em> reachable is a genuine container problem and still propagates,
+     * so nothing changes for a Floci that can start OpenSearch containers.
+     *
+     * @return {@code true} when the container started, {@code false} when no Docker daemon is
+     *         reachable
+     */
+    public boolean tryStartDomain(Domain domain) {
+        try {
+            startDomain(domain);
+            dockerUnavailableLogged = false;
+            return true;
+        } catch (RuntimeException e) {
+            if (isDockerReachable()) {
+                throw e;
+            }
+            if (!dockerUnavailableLogged) {
+                dockerUnavailableLogged = true;
+                LOG.warnv("No Docker daemon is reachable from Floci ({0}). OpenSearch metadata "
+                        + "operations keep working and domains still report Processing=false, but "
+                        + "they have no backing search container until a daemon becomes reachable.",
+                        e.getMessage());
+            }
+            return false;
+        }
+    }
+
+    /**
+     * Probes the configured Docker endpoint, which is how a missing daemon is told apart from a
+     * container that failed for its own reasons.
+     */
+    public boolean isDockerReachable() {
+        try {
+            lifecycleManager.getDockerClient().pingCmd().exec();
+            return true;
+        } catch (Exception e) {
+            LOG.debugv("Docker daemon is not reachable: {0}", e.getMessage());
+            return false;
+        }
     }
 
     public void startDomain(Domain domain) {
@@ -86,7 +131,13 @@ public class OpenSearchDomainManager {
 
         ContainerSpec spec = specBuilder.build();
 
-        ContainerInfo info = lifecycleManager.createAndStart(spec);
+        ContainerInfo info;
+        try {
+            info = lifecycleManager.createAndStart(spec);
+        } catch (RuntimeException e) {
+            portAllocator.release(hostPort);
+            throw e;
+        }
         domain.setContainerId(info.containerId());
 
         if (containerDetector.isRunningInContainer()) {
