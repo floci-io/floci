@@ -59,7 +59,7 @@ class SesServiceSuppressionReasonTest {
                 new InMemoryStorage<String, Contact>(),
                 new InMemoryStorage<String, String>(),
                 new SesReceiptRuleService(new InMemoryStorage<String, ReceiptRuleSet>(), Clock.systemUTC()),
-                new InMemoryStorage<String, CustomVerificationEmailTemplate>(),
+                new SesCvetService(new InMemoryStorage<String, CustomVerificationEmailTemplate>()),
                 mock(SmtpRelay.class),
                 new ObjectMapper(),
                 Clock.systemUTC());

@@ -100,8 +100,9 @@ public class SesService {
     private final StorageBackend<String, String> policyStore;
     // Receipt-rule-set domain, extracted to its own service. The facade delegates.
     private final SesReceiptRuleService receiptRuleService;
-    // Custom verification email templates (key cvet::<region>::<name>), shared by the v1 and v2 APIs.
-    private final StorageBackend<String, CustomVerificationEmailTemplate> cvetStore;
+    // Custom verification email templates: storage extracted to SesCvetService. The
+    // facade keeps the identity-dependent validation and the send path; the service owns the store.
+    private final SesCvetService cvetService;
     // Guards the one-list-per-account check-then-create so concurrent creates can't both pass.
     private final Object contactListCreateLock = new Object();
     // Serializes contact create/update against contact-list deletion so a concurrent delete
@@ -110,10 +111,6 @@ public class SesService {
     // Serializes the per-identity policy count check-then-put so concurrent creates can't both pass.
     private final Object policyMutationLock = new Object();
     static final int MAX_POLICIES_PER_IDENTITY = 20;
-    // Serializes custom-verification-template create/update/delete check-then-write so concurrent
-    // creates for the same name can't both succeed and an update can't resurrect a concurrently
-    // deleted template.
-    private final Object cvetMutationLock = new Object();
     private final SmtpRelay smtpRelay;
     private final ObjectMapper objectMapper;
     private final SesEventPublisher eventPublisher;
@@ -127,7 +124,8 @@ public class SesService {
 
     @Inject
     public SesService(StorageFactory storageFactory, SesReceiptRuleService receiptRuleService,
-                       SesAccountService accountService, SmtpRelay smtpRelay, ObjectMapper objectMapper,
+                       SesAccountService accountService, SesCvetService cvetService,
+                       SmtpRelay smtpRelay, ObjectMapper objectMapper,
                        SesEventPublisher eventPublisher, EmulatorConfig config, Route53Service route53Service,
                        Clock clock) {
         this.identityStore = storageFactory.create("ses", "ses-identities.json",
@@ -154,8 +152,7 @@ public class SesService {
         this.policyStore = storageFactory.create("ses", "ses-identity-policies.json",
                 new TypeReference<Map<String, String>>() {});
         this.receiptRuleService = receiptRuleService;
-        this.cvetStore = storageFactory.create("ses", "ses-custom-verification-templates.json",
-                new TypeReference<Map<String, CustomVerificationEmailTemplate>>() {});
+        this.cvetService = cvetService;
         this.smtpRelay = smtpRelay;
         this.objectMapper = objectMapper;
         this.eventPublisher = eventPublisher;
@@ -178,13 +175,13 @@ public class SesService {
                StorageBackend<String, Contact> contactStore,
                StorageBackend<String, String> policyStore,
                SesReceiptRuleService receiptRuleService,
-               StorageBackend<String, CustomVerificationEmailTemplate> cvetStore,
+               SesCvetService cvetService,
                SmtpRelay smtpRelay,
                ObjectMapper objectMapper,
                Clock clock) {
         this(identityStore, emailStore, accountService, templateStore, configSetStore, suppressionStore,
                 accountSuppressionStore, accountVdmStore, dedicatedIpPoolStore, contactListStore, contactStore,
-                policyStore, receiptRuleService, cvetStore, smtpRelay, objectMapper, null, clock);
+                policyStore, receiptRuleService, cvetService, smtpRelay, objectMapper, null, clock);
     }
 
     SesService(StorageBackend<String, Identity> identityStore,
@@ -200,7 +197,7 @@ public class SesService {
                StorageBackend<String, Contact> contactStore,
                StorageBackend<String, String> policyStore,
                SesReceiptRuleService receiptRuleService,
-               StorageBackend<String, CustomVerificationEmailTemplate> cvetStore,
+               SesCvetService cvetService,
                SmtpRelay smtpRelay,
                ObjectMapper objectMapper,
                Route53Service route53Service,
@@ -218,7 +215,7 @@ public class SesService {
         this.contactStore = contactStore;
         this.policyStore = policyStore;
         this.receiptRuleService = receiptRuleService;
-        this.cvetStore = cvetStore;
+        this.cvetService = cvetService;
         this.smtpRelay = smtpRelay;
         this.objectMapper = objectMapper;
         this.eventPublisher = null;
@@ -1250,64 +1247,29 @@ public class SesService {
     // From-verified check against its own identity store (it does track verified identities).
 
     public void createCustomVerificationEmailTemplate(CustomVerificationEmailTemplate template, String region) {
+        // The From-verified check inside validation reaches the Identity domain, so the facade
+        // validates here before the storage service performs the create.
         validateCustomVerificationTemplate(template, region);
-        String key = cvetKey(region, template.getTemplateName());
-        // Lock only the check-then-put so concurrent creates for the same name can't both observe
-        // the key as absent; validation and logging stay outside the lock.
-        synchronized (cvetMutationLock) {
-            if (cvetStore.get(key).isPresent()) {
-                // v1-native code (verified: CustomVerificationEmailTemplateAlreadyExists / 400);
-                // remapV1Exception translates it to AlreadyExistsException / 400 for the v2 boundary.
-                throw new AwsException("CustomVerificationEmailTemplateAlreadyExists",
-                        "Custom verification email template <" + template.getTemplateName() + "> already exists", 400);
-            }
-            cvetStore.put(key, template);
-        }
-        LOG.infov("Created custom verification email template {0} in region {1}",
-                template.getTemplateName(), region);
+        cvetService.createCustomVerificationEmailTemplate(template, region);
     }
 
     public CustomVerificationEmailTemplate getCustomVerificationEmailTemplate(String templateName, String region) {
-        return cvetStore.get(cvetKey(region, templateName)).orElseThrow(() -> cvetNotFound(templateName));
+        return cvetService.getCustomVerificationEmailTemplate(templateName, region);
     }
 
     public List<CustomVerificationEmailTemplate> listCustomVerificationEmailTemplates(String region) {
-        String prefix = "cvet::" + region + "::";
-        return cvetStore.scan(k -> k.startsWith(prefix)).stream()
-                .sorted(Comparator.comparing(CustomVerificationEmailTemplate::getTemplateName,
-                        Comparator.nullsFirst(Comparator.naturalOrder())))
-                .toList();
+        return cvetService.listCustomVerificationEmailTemplates(region);
     }
 
     public void updateCustomVerificationEmailTemplate(CustomVerificationEmailTemplate template, String region) {
-        // Validate required fields (including TemplateName) before the existence check so a missing or
-        // blank name yields the required-field InvalidParameterValue rather than NotFoundException,
-        // matching createCustomVerificationEmailTemplate.
+        // Validate (including the From-verified identity check and the required-field checks) before
+        // delegating the storage update, matching createCustomVerificationEmailTemplate.
         validateCustomVerificationTemplate(template, region);
-        String key = cvetKey(region, template.getTemplateName());
-        // Guard the existence check and the put together so a concurrent delete can't slip between
-        // them and have the update resurrect the just-deleted template.
-        synchronized (cvetMutationLock) {
-            if (cvetStore.get(key).isEmpty()) {
-                throw cvetNotFound(template.getTemplateName());
-            }
-            cvetStore.put(key, template);
-        }
-        LOG.infov("Updated custom verification email template {0} in region {1}",
-                template.getTemplateName(), region);
+        cvetService.updateCustomVerificationEmailTemplate(template, region);
     }
 
     public void deleteCustomVerificationEmailTemplate(String templateName, String region) {
-        String key = cvetKey(region, templateName);
-        // Guard the check-then-delete on the same lock as create/update so the three mutations
-        // serialize against each other.
-        synchronized (cvetMutationLock) {
-            if (cvetStore.get(key).isEmpty()) {
-                throw cvetNotFound(templateName);
-            }
-            cvetStore.delete(key);
-        }
-        LOG.infov("Deleted custom verification email template {0} in region {1}", templateName, region);
+        cvetService.deleteCustomVerificationEmailTemplate(templateName, region);
     }
 
     // AWS appends this exact disclaimer to the end of every custom verification email and it cannot
@@ -1339,7 +1301,7 @@ public class SesService {
         if (templateName == null || templateName.isBlank()) {
             throw new AwsException("InvalidParameterValue", "TemplateName is required.", 400);
         }
-        CustomVerificationEmailTemplate template = cvetStore.get(cvetKey(region, templateName))
+        CustomVerificationEmailTemplate template = cvetService.find(templateName, region)
                 .orElseThrow(() -> new AwsException("CustomVerificationEmailTemplateDoesNotExist",
                         "Template <" + templateName + "> does not exist", 400));
         if (!isVerifiedSender(template.getFromEmailAddress(), region)) {
@@ -1466,17 +1428,6 @@ public class SesService {
             // so the Query API stays consistent with requireParam and v2 behavior is unchanged.
             throw new AwsException("InvalidParameterValue", name + " is required.", 400);
         }
-    }
-
-    private static AwsException cvetNotFound(String templateName) {
-        // v1-native code (verified: CustomVerificationEmailTemplateDoesNotExist / 400).
-        // SesController.remapV1Exception translates it to NotFoundException / 404 for the v2 boundary.
-        return new AwsException("CustomVerificationEmailTemplateDoesNotExist",
-                "Custom verification email template <" + templateName + "> does not exist", 400);
-    }
-
-    private static String cvetKey(String region, String templateName) {
-        return "cvet::" + region + "::" + templateName;
     }
 
     public ConfigurationSet createConfigurationSet(ConfigurationSet configSet, String region) {

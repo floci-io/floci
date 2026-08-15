@@ -63,7 +63,7 @@ class SesServiceDkimLookupCacheTest {
                 new InMemoryStorage<String, Contact>(),
                 new InMemoryStorage<String, String>(),
                 new SesReceiptRuleService(new InMemoryStorage<String, ReceiptRuleSet>(), clock),
-                new InMemoryStorage<String, CustomVerificationEmailTemplate>(),
+                new SesCvetService(new InMemoryStorage<String, CustomVerificationEmailTemplate>()),
                 mock(SmtpRelay.class),
                 new ObjectMapper(),
                 route53Service,
