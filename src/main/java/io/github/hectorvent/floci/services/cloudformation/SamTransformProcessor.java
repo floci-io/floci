@@ -259,25 +259,44 @@ class SamTransformProcessor {
         authProps.put("Name", authorizerName);
         authProps.put("AuthorizerType", "JWT");
 
+        JsonNode jwtConfig = samAuthorizer.path("JwtConfiguration");
+        if (!jwtConfig.isObject()) {
+            throw new AwsException("ValidationError",
+                    "OAuth2 Authorizer must define 'JwtConfiguration'; authorizer " + authorizerName, 400);
+        }
+
         authProps.set("IdentitySource", resolveIdentitySource(authorizerName, samAuthorizer));
 
-        JsonNode jwtConfig = samAuthorizer.path("JwtConfiguration");
-
-        if (jwtConfig.isObject()) {
-            ObjectNode jwtProps = objectMapper.createObjectNode();
-            JsonNode issuer = jwtConfig.path("issuer");
-            if (!issuer.isMissingNode()) {
-                jwtProps.set("Issuer", issuer.deepCopy());
-            }
-            JsonNode audience = jwtConfig.path("audience");
-            if (audience.isArray()) {
-                jwtProps.set("Audience", audience.deepCopy());
-            }
-            authProps.set("JwtConfiguration", jwtProps);
+        ObjectNode jwtProps = objectMapper.createObjectNode();
+        JsonNode issuer = fieldIgnoreCase(jwtConfig, "issuer");
+        if (!issuer.isMissingNode()) {
+            jwtProps.set("Issuer", issuer.deepCopy());
         }
+        JsonNode audience = fieldIgnoreCase(jwtConfig, "audience");
+        if (audience.isArray()) {
+            jwtProps.set("Audience", audience.deepCopy());
+        }
+        authProps.set("JwtConfiguration", jwtProps);
 
         authDef.set("Properties", authProps);
         return authDef;
+    }
+
+    /**
+     * SAM's {@code _get_jwt_configuration} lower-cases every key of the {@code JwtConfiguration}
+     * map before reading it ({@code {k.lower(): v for k, v in props.items()}} in
+     * samtranslator/model/apigatewayv2.py), so any casing of {@code issuer}/{@code audience} is
+     * accepted, not just the two spellings the docs happen to show.
+     */
+    private JsonNode fieldIgnoreCase(JsonNode node, String fieldName) {
+        Iterator<Map.Entry<String, JsonNode>> fields = node.fields();
+        while (fields.hasNext()) {
+            Map.Entry<String, JsonNode> field = fields.next();
+            if (field.getKey().equalsIgnoreCase(fieldName)) {
+                return field.getValue();
+            }
+        }
+        return objectMapper.missingNode();
     }
 
     /**

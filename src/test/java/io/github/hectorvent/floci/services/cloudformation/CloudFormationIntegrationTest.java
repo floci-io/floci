@@ -7164,6 +7164,155 @@ class CloudFormationIntegrationTest {
     }
 
     @Test
+    void createStack_samHttpApiAuthorizerMissingJwtConfigurationIsRejected() {
+        // _validate_jwt_authorizer checks JwtConfiguration before IdentitySource, and real SAM
+        // rejects a template missing it rather than provisioning an authorizer that would never
+        // validate a token.
+        String template = """
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Resources": {
+                "MyFunction": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "PackageType": "Zip",
+                    "Handler": "index.handler",
+                    "Runtime": "nodejs20.x",
+                    "InlineCode": "exports.handler = async () => ({ statusCode: 200, body: 'hello' });",
+                    "Events": {
+                      "HelloEvent": {
+                        "Type": "HttpApi",
+                        "Properties": {
+                          "ApiId": { "Ref": "MyHttpApi" },
+                          "Path": "/hello",
+                          "Method": "get"
+                        }
+                      }
+                    }
+                  }
+                },
+                "MyHttpApi": {
+                  "Type": "AWS::Serverless::HttpApi",
+                  "Properties": {
+                    "Auth": {
+                      "Authorizers": {
+                        "MyAuthorizer": {
+                          "IdentitySource": "$request.header.Authorization"
+                        }
+                      },
+                      "DefaultAuthorizer": "MyAuthorizer"
+                    }
+                  }
+                }
+              },
+              "Outputs": {
+                "ApiId": { "Value": { "Ref": "MyHttpApi" } }
+              }
+            }
+            """;
+
+        String stackName = "cfn-sam-httpapi-missing-jwtconfiguration-stack";
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+            .formParam("Capabilities", "CAPABILITY_IAM")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackStatus>CREATE_FAILED</StackStatus>"))
+            .body(containsString("JwtConfiguration"));
+    }
+
+    @Test
+    void createStack_samHttpApiAuthorizerJwtConfigurationKeysAreCaseInsensitive() {
+        // SAM's _get_jwt_configuration lower-cases every JwtConfiguration key before reading it, so
+        // any casing is accepted, not just lowercase-OpenAPI or uppercase-CFN. AUDIENCE and Issuer
+        // (neither the documented lowercase nor the documented uppercase spelling) exercise that a
+        // true case-insensitive fold is happening rather than a check against two hardcoded spellings.
+        String template = """
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Resources": {
+                "MyFunction": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "PackageType": "Zip",
+                    "Handler": "index.handler",
+                    "Runtime": "nodejs20.x",
+                    "InlineCode": "exports.handler = async () => ({ statusCode: 200, body: 'hello' });",
+                    "Events": {
+                      "HelloEvent": {
+                        "Type": "HttpApi",
+                        "Properties": {
+                          "ApiId": { "Ref": "MyHttpApi" },
+                          "Path": "/hello",
+                          "Method": "get"
+                        }
+                      }
+                    }
+                  }
+                },
+                "MyHttpApi": {
+                  "Type": "AWS::Serverless::HttpApi",
+                  "Properties": {
+                    "Auth": {
+                      "Authorizers": {
+                        "MyAuthorizer": {
+                          "IdentitySource": "$request.header.Authorization",
+                          "JwtConfiguration": {
+                            "Issuer": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_xxxxx",
+                            "AUDIENCE": ["my-client-id"]
+                          }
+                        }
+                      },
+                      "DefaultAuthorizer": "MyAuthorizer"
+                    }
+                  }
+                }
+              },
+              "Outputs": {
+                "ApiId": { "Value": { "Ref": "MyHttpApi" } }
+              }
+            }
+            """;
+
+        String stackName = "cfn-sam-httpapi-caseinsensitive-jwtconfig-stack";
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+            .formParam("Capabilities", "CAPABILITY_IAM")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String createXml = apigwv2DescribeStacks(stackName);
+        String apiId = apigwOutputValue(createXml, "ApiId");
+
+        getAuthorizers(apiId)
+            .body("Items.size()", equalTo(1))
+            .body("Items[0].JwtConfiguration.Issuer",
+                    equalTo("https://cognito-idp.us-east-1.amazonaws.com/us-east-1_xxxxx"))
+            .body("Items[0].JwtConfiguration.Audience", contains("my-client-id"));
+    }
+
+    @Test
     void createStack_samHttpApiPerEventAuthNoneOverridesDefaultAuthorizer() {
         // Mirrors a function with two HttpApi events on the same explicit HttpApi: one route picks
         // up Auth.DefaultAuthorizer, the other opts out via Auth: {Authorizer: NONE} (SAM's documented
