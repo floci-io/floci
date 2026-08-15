@@ -158,6 +158,19 @@ public class IamActionRegistry {
         return null;
     }
 
+    // Subresources S3Controller dispatches ahead of accelerate in its PUT and GET
+    // chains (acl and tagging are resolved above). When one rides along, that
+    // operation is what executes, so the accelerate mapping must not claim the
+    // request. Mirrors the controller's dispatch order — extend together.
+    private static final List<String> PUT_SUBRESOURCES_BEFORE_ACCELERATE = List.of(
+            "notification", "versioning", "object-lock", "website", "logging", "policy",
+            "cors", "lifecycle", "encryption", "publicAccessBlock", "ownershipControls",
+            "requestPayment");
+    private static final List<String> GET_SUBRESOURCES_BEFORE_ACCELERATE = List.of(
+            "uploads", "notification", "versioning", "versions", "location", "object-lock",
+            "website", "logging", "policy", "cors", "lifecycle", "encryption",
+            "publicAccessBlock", "ownershipControls", "requestPayment");
+
     /**
      * Resolves S3 sub-resource ops (ACL, tagging, retention, etc.) that
      * cannot be distinguished from the parent op by HTTP method + path alone.
@@ -215,6 +228,14 @@ public class IamActionRegistry {
         // everything else falls through to the standard rule table.
         if (!isBucketLevel) {
             return null;
+        }
+        List<String> dispatchedFirst = "PUT".equals(method)
+                ? PUT_SUBRESOURCES_BEFORE_ACCELERATE
+                : GET_SUBRESOURCES_BEFORE_ACCELERATE;
+        for (String subresource : dispatchedFirst) {
+            if (params.containsKey(subresource)) {
+                return null;
+            }
         }
         return switch (method) {
             case "GET" -> "s3:GetAccelerateConfiguration";

@@ -175,6 +175,30 @@ class IamActionRegistryTest {
     }
 
     @Test
+    void s3AccelerateYieldsToSubresourcesDispatchedFirst() {
+        // The controller executes the requestPayment operation for this request, so the
+        // accelerate mapping must not claim it; resolution falls back to the rule table,
+        // exactly like a plain ?requestPayment request today.
+        MultivaluedMap<String, String> withRequestPayment = new MultivaluedHashMap<>();
+        withRequestPayment.add("requestPayment", "");
+        withRequestPayment.add("accelerate", "");
+        assertEquals("s3:CreateBucket",
+                registry.resolve("s3", mockCtx("PUT", "/bucket", withRequestPayment, null, "")));
+        MultivaluedMap<String, String> withLocation = new MultivaluedHashMap<>();
+        withLocation.add("location", "");
+        withLocation.add("accelerate", "");
+        assertEquals("s3:ListBucket",
+                registry.resolve("s3", mockCtx("GET", "/bucket", withLocation, null, "")));
+        // uploads is a GET-only dispatch branch; on PUT it is inert and accelerate executes,
+        // so the mapping must still claim the request there.
+        MultivaluedMap<String, String> withUploads = new MultivaluedHashMap<>();
+        withUploads.add("uploads", "");
+        withUploads.add("accelerate", "");
+        assertEquals("s3:PutAccelerateConfiguration",
+                registry.resolve("s3", mockCtx("PUT", "/bucket", withUploads, null, "")));
+    }
+
+    @Test
     void s3AccelerateDoesNotPreemptAclOrTagging() {
         // Appending an inert ?accelerate must not downgrade a stricter resolution.
         MultivaluedMap<String, String> withAcl = new MultivaluedHashMap<>();
