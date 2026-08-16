@@ -2185,4 +2185,16 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         }
         return sb.toString();
     }
+
+    public void tagInstanceProfile(String instanceProfileName, Map<String, String> newTags) {
+        InstanceProfile profile = getInstanceProfile(instanceProfileName);
+        profile.getTags().putAll(newTags);
+        instanceProfiles.put(instanceProfileName, profile);
+    }
+
+    public void untagInstanceProfile(String instanceProfileName, List<String> tagKeys) {
+        InstanceProfile profile = getInstanceProfile(instanceProfileName);
+        tagKeys.forEach(profile.getTags()::remove);
+        instanceProfiles.put(instanceProfileName, profile);
+    }
 }
