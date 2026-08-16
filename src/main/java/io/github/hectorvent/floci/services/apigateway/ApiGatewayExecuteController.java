@@ -1379,7 +1379,8 @@ public class ApiGatewayExecuteController {
         if (integrationType == null || integrationType.isEmpty()) integrationType = "AWS_PROXY";
 
         if ("HTTP_PROXY".equalsIgnoreCase(integrationType)) {
-            return dispatchHttpProxyV2(integration, route, httpMethod, path, headers, uriInfo, body, apiId, stageName);
+            return dispatchHttpProxyV2(integration, route, httpMethod, path, headers, uriInfo, body,
+                    apiId, stageName, jwtClaims);
         }
 
         String functionName = functionNameFromUri(integration.getIntegrationUri());
@@ -1415,7 +1416,7 @@ public class ApiGatewayExecuteController {
     private Response dispatchHttpProxyV2(io.github.hectorvent.floci.services.apigatewayv2.model.Integration integration,
                                           Route route, String httpMethod, String path,
                                           HttpHeaders headers, UriInfo uriInfo, byte[] body,
-                                          String apiId, String stageName) {
+                                          String apiId, String stageName, Map<String, String> jwtClaims) {
         // CDK HttpAlbIntegration sets integrationUri to an ALB listener ARN. Resolve it
         // to the listener's bound localhost port so HttpProxyInvoker (which assumes a
         // concrete http(s) URL) can forward through the listener's data plane.
@@ -1448,14 +1449,14 @@ public class ApiGatewayExecuteController {
         }
         Map<String, String> pathParams = extractV2PathParams(route.getRouteKey(), path);
 
-        Map<String, Object> claims = Map.of();
-        if ("JWT".equalsIgnoreCase(route.getAuthorizationType())) {
-            String token = extractBearerToken(headers);
-            if (token != null) {
-                Map<String, Object> parsed = parseAllJwtClaims(token);
-                if (parsed != null) claims = parsed;
-            }
-        }
+        // Reuses the claims dispatchV2 already verified via enforceJwtAuthorizer, rather than
+        // independently re-extracting a token and re-parsing it here: extractBearerToken only
+        // reads the Authorization header, ignoring the authorizer's configured identitySource
+        // (which - see HttpApiJwtAuthorizerQuerystringTest - can be a querystring parameter). A
+        // caller passing a valid token via the configured source plus an unrelated Bearer header
+        // would otherwise have $context.authorizer.claims.* resolve from the unverified header
+        // token instead of the one the authorizer actually checked.
+        Map<String, Object> claims = jwtClaims != null ? Map.copyOf(jwtClaims) : Map.of();
 
         String sourceIp = requestHeaders.getOrDefault("X-Forwarded-For", "127.0.0.1");
         io.github.hectorvent.floci.services.apigatewayv2.proxy.RequestContext ctx =
@@ -1519,28 +1520,6 @@ public class ApiGatewayExecuteController {
         requestParameters.put("overwrite:header.Host", host);
         copy.setRequestParameters(requestParameters);
         return copy;
-    }
-
-    private static String extractBearerToken(HttpHeaders headers) {
-        String auth = headers.getHeaderString("Authorization");
-        if (auth == null) return null;
-        if (auth.startsWith("Bearer ")) return auth.substring("Bearer ".length()).trim();
-        return null;
-    }
-
-    /** Extracts ALL JWT claims as a Map<String,Object> for use as $context.authorizer.claims.X source values. */
-    private Map<String, Object> parseAllJwtClaims(String token) {
-        try {
-            String[] parts = token.split("\\.");
-            if (parts.length < 2) return null;
-            byte[] payloadBytes = Base64.getUrlDecoder().decode(padBase64(parts[1]));
-            String payload = new String(payloadBytes, StandardCharsets.UTF_8);
-            JsonNode root = objectMapper.readTree(payload);
-            return objectMapper.convertValue(root, MAP_TYPE);
-        } catch (Exception e) {
-            LOG.debugv("JWT full-claims parse error: {0}", e.getMessage());
-            return null;
-        }
     }
 
     /**
