@@ -217,6 +217,61 @@ class CloudFormationDeletionPolicyIntegrationTest {
         String resXml = cfnQuery("DescribeStackResources", stackName, null).then().statusCode(200).extract().asString();
         assertThat(resXml, not(containsString("<LogicalResourceId>KeptBucket</LogicalResourceId>")));
         assertThat(resXml, not(containsString("<LogicalResourceId>DeletedBucket</LogicalResourceId>")));
+
+        String events = describeStackEvents(stackId);
+        assertThat(events, containsString("<ResourceStatus>DELETE_SKIPPED</ResourceStatus>"));
+    }
+
+    @Test
+    void retainExceptOnCreateKeepsResourceWhenRemovedFromTemplateOnUpdate() throws InterruptedException {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String bucket1 = "cfn-reoc-update-bucket1-" + suffix;
+        String bucket2 = "cfn-reoc-update-bucket2-" + suffix;
+        String stackName = "cfn-reoc-update-stack-" + suffix;
+
+        String template1 = """
+            {
+              "Resources": {
+                "KeptBucket": {
+                  "Type": "AWS::S3::Bucket",
+                  "DeletionPolicy": "RetainExceptOnCreate",
+                  "Properties": { "BucketName": "%s" }
+                },
+                "DeletedBucket": {
+                  "Type": "AWS::S3::Bucket",
+                  "Properties": { "BucketName": "%s" }
+                }
+              }
+            }
+            """.formatted(bucket1, bucket2);
+
+        String stackId = createStack(stackName, template1);
+        try {
+            awaitStackStatus(stackId, "CREATE_COMPLETE");
+
+            String template2 = """
+                {
+                  "Resources": {
+                  }
+                }
+                """;
+
+            updateStack(stackName, template2);
+            awaitStackStatus(stackId, "UPDATE_COMPLETE");
+
+            assertBucketExists(bucket1);
+            assertBucketDeleted(bucket2);
+
+            String resXml = cfnQuery("DescribeStackResources", stackName, null).then().statusCode(200).extract().asString();
+            assertThat(resXml, not(containsString("<LogicalResourceId>KeptBucket</LogicalResourceId>")));
+            assertThat(resXml, not(containsString("<LogicalResourceId>DeletedBucket</LogicalResourceId>")));
+
+            String events = describeStackEvents(stackId);
+            assertThat(events, containsString("<ResourceStatus>DELETE_SKIPPED</ResourceStatus>"));
+        } finally {
+            deleteStack(stackName);
+            given().header("Host", bucket1 + ".localhost").when().delete("/");
+        }
     }
 
     @Test
@@ -556,6 +611,211 @@ class CloudFormationDeletionPolicyIntegrationTest {
 
         deleteStack(stackName);
         awaitStackStatus(parentStackId, "DELETE_COMPLETE");
+    }
+
+    @Test
+    void nestedStackWithMultiLevelHierarchy_deletesRecursivelyOnUpdate() throws InterruptedException {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String bucketName = "cfn-nested3-del-" + suffix;
+        given().when().put("/nested-stack-templates").then().statusCode(200);
+
+        String grandchildTemplate = """
+            {
+              "Resources": {
+                "GrandchildBucket": {
+                  "Type": "AWS::S3::Bucket",
+                  "Properties": { "BucketName": "%s" }
+                }
+              }
+            }
+            """.formatted(bucketName);
+        given().contentType("application/json").body(grandchildTemplate).when().put("/nested-stack-templates/grandchild-" + suffix + ".json");
+
+        String childTemplate = """
+            {
+              "Resources": {
+                "GrandchildStack": {
+                  "Type": "AWS::CloudFormation::Stack",
+                  "Properties": { "TemplateURL": "http://localhost/nested-stack-templates/grandchild-%s.json" }
+                }
+              }
+            }
+            """.formatted(suffix);
+        given().contentType("application/json").body(childTemplate).when().put("/nested-stack-templates/child3-" + suffix + ".json");
+
+        String rootStackName = "root3-del-" + suffix;
+        String rootTemplate = """
+            {
+              "Resources": {
+                "ChildStack": {
+                  "Type": "AWS::CloudFormation::Stack",
+                  "Properties": { "TemplateURL": "http://localhost/nested-stack-templates/child3-%s.json" }
+                }
+              }
+            }
+            """.formatted(suffix);
+
+        String rootStackId = createStack(rootStackName, rootTemplate);
+        try {
+            awaitStackStatus(rootStackId, "CREATE_COMPLETE");
+            String childStackId = getNestedStackId(rootStackId, "ChildStack", null);
+            String grandchildStackId = getNestedStackId(childStackId, "GrandchildStack", null);
+            assertBucketExists(bucketName);
+
+            String updatedRootTemplate = "{\"Resources\": {}}";
+            updateStack(rootStackName, updatedRootTemplate);
+            awaitStackStatus(rootStackId, "UPDATE_COMPLETE");
+
+            awaitStackStatus(childStackId, "DELETE_COMPLETE");
+            awaitStackStatus(grandchildStackId, "DELETE_COMPLETE");
+            assertBucketDeleted(bucketName);
+        } finally {
+            deleteStack(rootStackName);
+        }
+    }
+
+    @Test
+    void nestedStackWithMultiLevelHierarchy_propagatesDeleteFailedOnUpdate() throws InterruptedException {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String bucketName = "cfn-nested3-fail-" + suffix;
+        given().when().put("/nested-stack-templates").then().statusCode(200);
+
+        String grandchildTemplate = """
+            {
+              "Resources": {
+                "GrandchildBucket": {
+                  "Type": "AWS::S3::Bucket",
+                  "Properties": { "BucketName": "%s" }
+                }
+              }
+            }
+            """.formatted(bucketName);
+        given().contentType("application/json").body(grandchildTemplate).when().put("/nested-stack-templates/grandchild-fail-" + suffix + ".json");
+
+        String childTemplate = """
+            {
+              "Resources": {
+                "GrandchildStack": {
+                  "Type": "AWS::CloudFormation::Stack",
+                  "Properties": { "TemplateURL": "http://localhost/nested-stack-templates/grandchild-fail-%s.json" }
+                }
+              }
+            }
+            """.formatted(suffix);
+        given().contentType("application/json").body(childTemplate).when().put("/nested-stack-templates/child3-fail-" + suffix + ".json");
+
+        String rootStackName = "root3-fail-" + suffix;
+        String rootTemplate = """
+            {
+              "Resources": {
+                "ChildStack": {
+                  "Type": "AWS::CloudFormation::Stack",
+                  "Properties": { "TemplateURL": "http://localhost/nested-stack-templates/child3-fail-%s.json" }
+                }
+              }
+            }
+            """.formatted(suffix);
+
+        String rootStackId = createStack(rootStackName, rootTemplate);
+        try {
+            awaitStackStatus(rootStackId, "CREATE_COMPLETE");
+            String childStackId = getNestedStackId(rootStackId, "ChildStack", null);
+            String grandchildStackId = getNestedStackId(childStackId, "GrandchildStack", null);
+
+            // Put blocker object into grandchild's bucket
+            given().contentType("text/plain").body("keep").when().put("/" + bucketName + "/blocker.txt").then().statusCode(200);
+
+            String updatedRootTemplate = "{\"Resources\": {}}";
+            updateStack(rootStackName, updatedRootTemplate);
+            awaitStackStatus(rootStackId, "UPDATE_COMPLETE");
+            assertThat(describeStacks(rootStackId), containsString("could not be deleted during update cleanup"));
+
+            awaitStackStatus(grandchildStackId, "DELETE_FAILED");
+            awaitStackStatus(childStackId, "DELETE_FAILED");
+
+            // Clean up blocker and delete root stack
+            given().when().delete("/" + bucketName + "/blocker.txt").then().statusCode(204);
+            deleteStack(rootStackName);
+            awaitStackStatus(rootStackId, "DELETE_COMPLETE");
+            awaitStackStatus(childStackId, "DELETE_COMPLETE");
+            awaitStackStatus(grandchildStackId, "DELETE_COMPLETE");
+            assertBucketDeleted(bucketName);
+        } finally {
+            given().when().delete("/" + bucketName + "/blocker.txt");
+            deleteStack(rootStackName);
+        }
+    }
+
+    @Test
+    void updateStack_rollbackPreservesRemovedResourcesWhenNewResourceFails() throws InterruptedException {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String bucketA = "cfn-rb-keep-a-" + suffix;
+        String sfnName = "cfn-rb-sfn-" + suffix;
+        String stackName = "cfn-rb-preserve-" + suffix;
+
+        String initialTemplate = """
+            {
+              "Resources": {
+                "BucketA": {
+                  "Type": "AWS::S3::Bucket",
+                  "Properties": { "BucketName": "%s" }
+                },
+                "InitialStateMachine": {
+                  "Type": "AWS::StepFunctions::StateMachine",
+                  "Properties": {
+                    "StateMachineName": "%s",
+                    "RoleArn": "arn:aws:iam::000000000000:role/cfn-sfn-rollback-role",
+                    "DefinitionString": "{\\"StartAt\\":\\"Done\\",\\"States\\":{\\"Done\\":{\\"Type\\":\\"Pass\\",\\"Result\\":\\"marker-v1\\",\\"End\\":true}}}"
+                  }
+                }
+              }
+            }
+            """.formatted(bucketA, sfnName);
+
+        String stackId = createStack(stackName, initialTemplate);
+        try {
+            awaitStackStatus(stackId, "CREATE_COMPLETE");
+            assertBucketExists(bucketA);
+
+            // Update template: omits BucketA, updates InitialStateMachine, and adds a resource that fails creation
+            String failingUpdateTemplate = """
+                {
+                  "Resources": {
+                    "InitialStateMachine": {
+                      "Type": "AWS::StepFunctions::StateMachine",
+                      "Properties": {
+                        "StateMachineName": "%s",
+                        "RoleArn": "arn:aws:iam::000000000000:role/cfn-sfn-rollback-role",
+                        "DefinitionString": "{\\"StartAt\\":\\"Done\\",\\"States\\":{\\"Done\\":{\\"Type\\":\\"Pass\\",\\"Result\\":\\"marker-v2\\",\\"End\\":true}}}"
+                      }
+                    },
+                    "BadSecret": {
+                      "Type": "AWS::SecretsManager::Secret",
+                      "Properties": {
+                        "Name": "bad-secret-%s",
+                        "SecretString": "explicit",
+                        "GenerateSecretString": { "PasswordLength": 32 }
+                      }
+                    }
+                  }
+                }
+                """.formatted(sfnName, suffix);
+
+            updateStack(stackName, failingUpdateTemplate);
+            awaitStackStatus(stackId, "UPDATE_ROLLBACK_COMPLETE");
+
+            // BucketA was removed in the failing update template, but rollback must preserve it!
+            assertBucketExists(bucketA);
+
+            String resXml = cfnQuery("DescribeStackResources", stackName, null).then().statusCode(200).extract().asString();
+            assertThat(resXml, containsString("<LogicalResourceId>BucketA</LogicalResourceId>"));
+            assertThat(resXml, containsString("<LogicalResourceId>InitialStateMachine</LogicalResourceId>"));
+            assertThat(resXml, not(containsString("<LogicalResourceId>BadSecret</LogicalResourceId>")));
+        } finally {
+            deleteStack(stackName);
+            awaitStackStatus(stackId, "DELETE_COMPLETE");
+            assertBucketDeleted(bucketA);
+        }
     }
 
     private static String getNestedStackId(String stackName, String logicalId, String auth) {
