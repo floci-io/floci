@@ -18,6 +18,7 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.Optional;
 
 @ApplicationScoped
 public class ServiceCatalogService {
@@ -434,5 +435,1014 @@ public class ServiceCatalogService {
 
     private String id(String prefix) {
         return prefix + "-" + UUID.randomUUID().toString().replace("-", "").substring(0, 13);
+    }
+
+    public List<ObjectNode> describePortfolioShares(String portfolioId, String type) {
+        if (portfolioId == null || portfolioId.isBlank()) {
+            throw new AwsException("InvalidParametersException", "PortfolioId is required", 400);
+        }
+        require(portfolioStore, portfolioId, "portfolio");
+        String prefix = portfolioId + "|";
+        List<ObjectNode> results = new java.util.ArrayList<>();
+        for (String key : shareStore.keys()) {
+            if (!key.startsWith(prefix)) {
+                continue;
+            }
+            shareStore.get(key).ifPresent(share -> {
+                String target = key.substring(prefix.length());
+                int colon = target.indexOf(':');
+                String shareType = colon >= 0 ? target.substring(0, colon) : target;
+                String principalId = colon >= 0 ? target.substring(colon + 1) : "";
+                if (type != null && !type.equals(shareType)) {
+                    return;
+                }
+                ObjectNode result = objectMapper.createObjectNode();
+                result.put("PrincipalId", principalId);
+                result.put("Type", shareType);
+                result.put("Accepted", true);
+                result.put("ShareTagOptions", false);
+                result.put("SharePrincipals", false);
+                results.add(result);
+            });
+        }
+        return results;
+    }
+
+    public List<ObjectNode> listPortfoliosForProduct(String productId) {
+        requireProduct(productId);
+        return associationStore.scan(key -> true).stream()
+                .filter(assoc -> "PRODUCT".equals(text(assoc, "Type"))
+                        && productId.equals(text(assoc, "ProductId")))
+                .map(assoc -> text(assoc, "PortfolioId"))
+                .distinct()
+                .map(portfolioStore::get)
+                .flatMap(Optional::stream)
+                .map(ObjectNode::deepCopy)
+                .toList();
+    }
+
+    public String copyProduct(JsonNode request, String region, String accountId) {
+        String sourceArn = requireText(request, "SourceProductArn");
+        String sourceId = sourceArn.substring(sourceArn.lastIndexOf('/') + 1);
+        ObjectNode source = requireProduct(sourceId);
+        String newId = id("prod");
+        ObjectNode product = source.deepCopy();
+        product.put("Id", newId);
+        product.put("ARN", "arn:aws:catalog:" + region + ":" + accountId + ":product/" + newId);
+        product.put("CreatedTime", Instant.now().toEpochMilli() / 1000.0);
+        String targetName = text(request, "TargetProductName");
+        if (targetName != null && !targetName.isBlank()) {
+            product.put("Name", targetName);
+        }
+        productStore.put(newId, product);
+        String token = id("copy");
+        ObjectNode status = objectMapper.createObjectNode();
+        status.put("Status", "SUCCEEDED");
+        status.put("TargetProductId", newId);
+        associationStore.put(token, status);
+        return token;
+    }
+
+    // no new service method required
+
+    public void acceptPortfolioShare(String portfolioId) {
+        if (portfolioId == null || portfolioId.isBlank()) {
+            throw new AwsException("InvalidParametersException", "PortfolioId is required", 400);
+        }
+        require(portfolioStore, portfolioId, "portfolio");
+    }
+
+    public String deletePortfolioShare(JsonNode request) {
+        String portfolioId = requireText(request, "PortfolioId");
+        require(portfolioStore, portfolioId, "portfolio");
+        JsonNode orgNode = request.path("OrganizationNode");
+        String target = request.hasNonNull("AccountId")
+                ? "ACCOUNT:" + request.get("AccountId").asText()
+                : orgNode.path("Type").asText() + ":" + orgNode.path("Value").asText();
+        if (target.equals(":")) {
+            throw new AwsException("InvalidParametersException",
+                    "AccountId or OrganizationNode is required", 400);
+        }
+        String key = portfolioId + "|" + target;
+        String token = shareStore.get(key).map(share -> text(share, "PortfolioShareToken")).orElse(null);
+        shareStore.delete(key);
+        return token;
+    }
+
+    public void rejectPortfolioShare(String portfolioId) {
+        if (portfolioId == null || portfolioId.isBlank()) {
+            throw new AwsException("InvalidParametersException", "PortfolioId is required", 400);
+        }
+        require(portfolioStore, portfolioId, "portfolio");
+    }
+
+    public void associateBudgetWithResource(String budgetName, String resourceId) {
+        if (budgetName == null || budgetName.isBlank()) {
+            throw new AwsException("InvalidParametersException", "BudgetName is required", 400);
+        }
+        if (resourceId == null || resourceId.isBlank()) {
+            throw new AwsException("InvalidParametersException", "ResourceId is required", 400);
+        }
+        if (portfolioStore.get(resourceId).isEmpty()) {
+            requireProduct(resourceId);
+        }
+        String id = associationId("budget", resourceId, budgetName);
+        if (associationStore.get(id).isPresent()) {
+            throw new AwsException("DuplicateResourceException",
+                    "Budget " + budgetName + " is already associated with resource " + resourceId, 400);
+        }
+        associationStore.put(id, objectMapper.createObjectNode()
+                .put("Type", "BUDGET").put("ResourceId", resourceId).put("BudgetName", budgetName));
+    }
+
+    public void associatePrincipal(String portfolioId, String principalArn, String principalType) {
+        if (portfolioId == null || portfolioId.isBlank()) {
+            throw new AwsException("InvalidParametersException", "PortfolioId is required", 400);
+        }
+        if (principalArn == null || principalArn.isBlank()) {
+            throw new AwsException("InvalidParametersException", "PrincipalARN is required", 400);
+        }
+        if (principalType == null || principalType.isBlank()) {
+            throw new AwsException("InvalidParametersException", "PrincipalType is required", 400);
+        }
+        require(portfolioStore, portfolioId, "portfolio");
+        String id = associationId("principal", portfolioId, principalArn);
+        associationStore.put(id, objectMapper.createObjectNode()
+                .put("Type", "PRINCIPAL").put("PortfolioId", portfolioId)
+                .put("PrincipalARN", principalArn).put("PrincipalType", principalType));
+    }
+
+    public void associateServiceActionWithProvisioningArtifact(String productId, String provisioningArtifactId, String serviceActionId) {
+        if (productId == null || productId.isBlank()) {
+            throw new AwsException("InvalidParametersException", "ProductId is required", 400);
+        }
+        if (provisioningArtifactId == null || provisioningArtifactId.isBlank()) {
+            throw new AwsException("InvalidParametersException", "ProvisioningArtifactId is required", 400);
+        }
+        if (serviceActionId == null || serviceActionId.isBlank()) {
+            throw new AwsException("InvalidParametersException", "ServiceActionId is required", 400);
+        }
+        ObjectNode product = requireProduct(productId);
+        JsonNode artifactIds = product.path("ProvisioningArtifactIds");
+        boolean found = artifactIds.isArray() && java.util.stream.StreamSupport.stream(artifactIds.spliterator(), false)
+                .anyMatch(id -> provisioningArtifactId.equals(id.asText()));
+        if (!found) {
+            throw new AwsException("ResourceNotFoundException", "Unknown provisioning artifact: " + provisioningArtifactId, 400);
+        }
+        String id = associationId("service_action", productId, provisioningArtifactId + "|" + serviceActionId);
+        if (associationStore.get(id).isPresent()) {
+            throw new AwsException("DuplicateResourceException",
+                    "Service action " + serviceActionId + " is already associated with provisioning artifact " + provisioningArtifactId, 400);
+        }
+        associationStore.put(id, objectMapper.createObjectNode()
+                .put("Type", "SERVICE_ACTION")
+                .put("ProductId", productId)
+                .put("ProvisioningArtifactId", provisioningArtifactId)
+                .put("ServiceActionId", serviceActionId));
+    }
+
+    public List<ObjectNode> batchAssociateServiceActionWithProvisioningArtifact(JsonNode request) {
+        JsonNode associations = request.path("ServiceActionAssociations");
+        if (!associations.isArray() || associations.isEmpty()) {
+            throw new AwsException("InvalidParametersException", "ServiceActionAssociations is required", 400);
+        }
+        List<ObjectNode> failures = new java.util.ArrayList<>();
+        for (JsonNode assoc : associations) {
+            String productId = text(assoc, "ProductId");
+            String artifactId = text(assoc, "ProvisioningArtifactId");
+            String serviceActionId = text(assoc, "ServiceActionId");
+            if (productId == null || productId.isBlank() || artifactId == null || artifactId.isBlank()
+                    || serviceActionId == null || serviceActionId.isBlank()) {
+                failures.add(serviceActionFailure(assoc, "INVALID_PARAMETER",
+                        "ProductId, ProvisioningArtifactId, and ServiceActionId are required"));
+                continue;
+            }
+            ObjectNode product;
+            try {
+                product = requireProduct(productId);
+            } catch (AwsException e) {
+                failures.add(serviceActionFailure(assoc, "RESOURCE_NOT_FOUND", "Unknown product: " + productId));
+                continue;
+            }
+            JsonNode artifactIds = product.path("ProvisioningArtifactIds");
+            boolean artifactFound = artifactIds.isArray() && java.util.stream.StreamSupport
+                    .stream(artifactIds.spliterator(), false)
+                    .anyMatch(id -> artifactId.equals(id.asText()));
+            if (!artifactFound) {
+                failures.add(serviceActionFailure(assoc, "RESOURCE_NOT_FOUND",
+                        "Unknown provisioning artifact: " + artifactId));
+                continue;
+            }
+            String id = associationId("service_action", productId, artifactId + "|" + serviceActionId);
+            associationStore.put(id, objectMapper.createObjectNode()
+                    .put("Type", "SERVICE_ACTION").put("ProductId", productId)
+                    .put("ProvisioningArtifactId", artifactId).put("ServiceActionId", serviceActionId));
+        }
+        return failures;
+    }
+
+    private ObjectNode serviceActionFailure(JsonNode assoc, String code, String message) {
+        ObjectNode failure = objectMapper.createObjectNode();
+        failure.put("ErrorCode", code);
+        failure.put("ErrorMessage", message);
+        if (text(assoc, "ProductId") != null) {
+            failure.put("ProductId", text(assoc, "ProductId"));
+        }
+        if (text(assoc, "ProvisioningArtifactId") != null) {
+            failure.put("ProvisioningArtifactId", text(assoc, "ProvisioningArtifactId"));
+        }
+        if (text(assoc, "ServiceActionId") != null) {
+            failure.put("ServiceActionId", text(assoc, "ServiceActionId"));
+        }
+        return failure;
+    }
+
+    public List<ObjectNode> batchDisassociateServiceActionFromProvisioningArtifact(JsonNode request) {
+        JsonNode associations = request.path("ServiceActionAssociations");
+        if (!associations.isArray() || associations.isEmpty()) {
+            throw new AwsException("InvalidParametersException", "ServiceActionAssociations is required", 400);
+        }
+        List<ObjectNode> failures = new java.util.ArrayList<>();
+        for (JsonNode assoc : associations) {
+            String productId = text(assoc, "ProductId");
+            String artifactId = text(assoc, "ProvisioningArtifactId");
+            String serviceActionId = text(assoc, "ServiceActionId");
+            if (productId == null || productId.isBlank() || artifactId == null || artifactId.isBlank()
+                    || serviceActionId == null || serviceActionId.isBlank()) {
+                ObjectNode failure = objectMapper.createObjectNode();
+                failure.put("ErrorCode", "INVALID_PARAMETER");
+                failure.put("ErrorMessage", "ProductId, ProvisioningArtifactId, and ServiceActionId are required");
+                if (productId != null) failure.put("ProductId", productId);
+                if (artifactId != null) failure.put("ProvisioningArtifactId", artifactId);
+                if (serviceActionId != null) failure.put("ServiceActionId", serviceActionId);
+                failures.add(failure);
+                continue;
+            }
+            String key = associationId("service_action", productId, artifactId + "|" + serviceActionId);
+            if (associationStore.get(key).isEmpty()) {
+                ObjectNode failure = objectMapper.createObjectNode();
+                failure.put("ErrorCode", "RESOURCE_NOT_FOUND");
+                failure.put("ErrorMessage", "Service action association not found for product " + productId
+                        + ", artifact " + artifactId + ", service action " + serviceActionId);
+                failure.put("ProductId", productId);
+                failure.put("ProvisioningArtifactId", artifactId);
+                failure.put("ServiceActionId", serviceActionId);
+                failures.add(failure);
+            } else {
+                associationStore.delete(key);
+            }
+        }
+        return failures;
+    }
+
+    public ObjectNode createConstraint(JsonNode request, String region, String accountId) {
+        String portfolioId = requireText(request, "PortfolioId");
+        String productId = requireText(request, "ProductId");
+        requireText(request, "Parameters");
+        requireText(request, "Type");
+        requireText(request, "IdempotencyToken");
+        require(portfolioStore, portfolioId, "portfolio");
+        requireProduct(productId);
+        String constraintId = id("con");
+        ObjectNode constraint = objectMapper.createObjectNode();
+        constraint.put("ConstraintId", constraintId);
+        constraint.put("PortfolioId", portfolioId);
+        constraint.put("ProductId", productId);
+        constraint.put("Type", text(request, "Type"));
+        constraint.put("Owner", accountId);
+        if (request.has("Description")) {
+            constraint.put("Description", text(request, "Description"));
+        }
+        associationStore.put(constraintId, constraint);
+        return constraint.deepCopy();
+    }
+
+    public ObjectNode createProvisionedProductPlan(JsonNode request, String region, String accountId) {
+        requireText(request, "PlanName");
+        requireText(request, "PlanType");
+        String productId = requireText(request, "ProductId");
+        requireText(request, "ProvisionedProductName");
+        String artifactId = requireText(request, "ProvisioningArtifactId");
+        requireText(request, "IdempotencyToken");
+        ObjectNode product = requireProduct(productId);
+        JsonNode ids = product.path("ProvisioningArtifactIds");
+        boolean found = false;
+        for (JsonNode id : ids) {
+            if (artifactId.equals(id.asText())) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            throw new AwsException("ResourceNotFoundException",
+                    "Unknown provisioning artifact: " + artifactId, 400);
+        }
+        String planId = id("plan");
+        ObjectNode plan = objectMapper.createObjectNode();
+        plan.put("Type", "PROVISIONED_PRODUCT_PLAN");
+        plan.put("Id", planId);
+        plan.put("PlanId", planId);
+        plan.put("Name", text(request, "ProvisionedProductName"));
+        plan.put("PlanName", text(request, "PlanName"));
+        plan.put("ProductId", productId);
+        plan.put("ProvisionProductId", productId);
+        plan.put("ProvisionedProductName", text(request, "ProvisionedProductName"));
+        plan.put("ProvisioningArtifactId", artifactId);
+        plan.put("CreatedTime", Instant.now().toEpochMilli() / 1000.0);
+        associationStore.put(planId, plan);
+        return plan.deepCopy();
+    }
+
+    public ObjectNode createServiceAction(JsonNode request) {
+        requireText(request, "Name");
+        requireText(request, "DefinitionType");
+        requireText(request, "IdempotencyToken");
+        JsonNode definition = request.get("Definition");
+        if (definition == null || definition.isNull() || !definition.isObject()) {
+            throw new AwsException("InvalidParametersException", "Definition is required", 400);
+        }
+        String id = id("serv");
+        ObjectNode action = objectMapper.createObjectNode();
+        action.put("Id", id);
+        action.put("Name", text(request, "Name"));
+        action.put("DefinitionType", text(request, "DefinitionType"));
+        action.put("Description", text(request, "Description") != null ? text(request, "Description") : "");
+        action.set("Definition", definition.deepCopy());
+        action.put("Type", "SERVICE_ACTION");
+        associationStore.put(id, action);
+        return action.deepCopy();
+    }
+
+    public void deleteConstraint(String id) {
+        if (id == null || id.isBlank()) {
+            throw new AwsException("InvalidParametersException", "Id is required", 400);
+        }
+        require(associationStore, id, "constraint");
+        associationStore.delete(id);
+    }
+
+    public void deleteProvisionedProductPlan(String planId) {
+        if (planId == null || planId.isBlank()) {
+            throw new AwsException("InvalidParametersException", "PlanId is required", 400);
+        }
+        require(associationStore, planId, "provisioned product plan");
+        associationStore.delete(planId);
+    }
+
+    public void deleteProvisioningArtifact(String productId, String artifactId) {
+        if (productId == null || productId.isBlank()) {
+            throw new AwsException("InvalidParametersException", "ProductId is required", 400);
+        }
+        if (artifactId == null || artifactId.isBlank()) {
+            throw new AwsException("InvalidParametersException", "ProvisioningArtifactId is required", 400);
+        }
+        ObjectNode product = requireProduct(productId);
+        JsonNode ids = product.path("ProvisioningArtifactIds");
+        JsonNode names = product.path("ProvisioningArtifactNames");
+        int index = -1;
+        for (int i = 0; i < ids.size(); i++) {
+            if (artifactId.equals(ids.get(i).asText())) {
+                index = i;
+                break;
+            }
+        }
+        if (index < 0) {
+            throw new AwsException("ResourceNotFoundException",
+                    "Unknown provisioning artifact: " + artifactId, 400);
+        }
+        ((ArrayNode) ids).remove(index);
+        if (index < names.size()) {
+            ((ArrayNode) names).remove(index);
+        }
+        productStore.put(text(product, "Id"), product);
+    }
+
+    public void deleteServiceAction(String id) {
+        if (id == null || id.isBlank()) {
+            throw new AwsException("InvalidParametersException", "Id is required", 400);
+        }
+        require(associationStore, id, "service action");
+        associationStore.delete(id);
+    }
+
+    public ObjectNode describeConstraint(String id) {
+        if (id == null || id.isBlank()) {
+            throw new AwsException("InvalidParametersException", "Id is required", 400);
+        }
+        return require(associationStore, id, "constraint").deepCopy();
+    }
+
+    public ObjectNode describeProvisionedProduct(String id, String name) {
+        if (id != null && !id.isBlank()) {
+            return require(provisionedProductStore, id, "provisioned product").deepCopy();
+        }
+        if (name != null && !name.isBlank()) {
+            return provisionedProductStore.scan(key -> true).stream()
+                    .filter(product -> name.equals(text(product, "Name")))
+                    .findFirst().map(ObjectNode::deepCopy)
+                    .orElseThrow(() -> notFound("provisioned product", name));
+        }
+        throw new AwsException("InvalidParametersException", "Id or Name is required", 400);
+    }
+
+    public ObjectNode describeProvisionedProductPlan(String planId) {
+        if (planId == null || planId.isBlank()) {
+            throw new AwsException("InvalidParametersException", "PlanId is required", 400);
+        }
+        return require(associationStore, planId, "provisioned product plan").deepCopy();
+    }
+
+    public ObjectNode describeProvisioningParameters(JsonNode request) {
+        String productId = text(request, "ProductId");
+        String productName = text(request, "ProductName");
+        ObjectNode product;
+        if (productId != null && !productId.isBlank()) {
+            product = requireProduct(productId);
+        } else if (productName != null && !productName.isBlank()) {
+            product = productStore.scan(key -> true).stream()
+                    .filter(p -> productName.equals(text(p, "Name")))
+                    .findFirst().orElseThrow(() -> notFound("product", productName));
+        } else {
+            throw new AwsException("InvalidParametersException", "ProductId or ProductName is required", 400);
+        }
+        String artifactId = text(request, "ProvisioningArtifactId");
+        String artifactName = text(request, "ProvisioningArtifactName");
+        if (artifactId != null || artifactName != null) {
+            JsonNode ids = product.path("ProvisioningArtifactIds");
+            JsonNode names = product.path("ProvisioningArtifactNames");
+            boolean found;
+            if (artifactId != null) {
+                found = java.util.stream.StreamSupport.stream(ids.spliterator(), false)
+                        .anyMatch(id -> artifactId.equals(id.asText()));
+            } else {
+                found = java.util.stream.StreamSupport.stream(names.spliterator(), false)
+                        .anyMatch(name -> artifactName.equals(name.asText()));
+            }
+            if (!found) {
+                throw new AwsException("ResourceNotFoundException",
+                        "Unknown provisioning artifact: " + (artifactId != null ? artifactId : artifactName), 400);
+            }
+        }
+        return product.deepCopy();
+    }
+
+    public ObjectNode describeRecord(String id) {
+        if (id == null || id.isBlank()) {
+            throw new AwsException("InvalidParametersException", "Id is required", 400);
+        }
+        return associationStore.scan(key -> true).stream()
+                .filter(record -> "RECORD".equals(text(record, "Type")) && id.equals(text(record, "RecordId")))
+                .findFirst().map(ObjectNode::deepCopy)
+                .orElseThrow(() -> notFound("record", id));
+    }
+
+    public void describeServiceActionExecutionParameters(String provisionedProductId, String serviceActionId) {
+        if (provisionedProductId == null || provisionedProductId.isBlank()) {
+            throw new AwsException("InvalidParametersException", "ProvisionedProductId is required", 400);
+        }
+        if (serviceActionId == null || serviceActionId.isBlank()) {
+            throw new AwsException("InvalidParametersException", "ServiceActionId is required", 400);
+        }
+        require(provisionedProductStore, provisionedProductId, "provisioned product");
+    }
+
+    public void disassociateBudgetFromResource(String budgetName, String resourceId) {
+        if (budgetName == null || budgetName.isBlank()) {
+            throw new AwsException("InvalidParametersException", "BudgetName is required", 400);
+        }
+        if (resourceId == null || resourceId.isBlank()) {
+            throw new AwsException("InvalidParametersException", "ResourceId is required", 400);
+        }
+        if (portfolioStore.get(resourceId).isEmpty()) {
+            requireProduct(resourceId);
+        }
+        associationStore.delete(associationId("budget", resourceId, budgetName));
+    }
+
+    public void disassociatePrincipal(String portfolioId, String principalArn) {
+        if (portfolioId == null || portfolioId.isBlank()) {
+            throw new AwsException("InvalidParametersException", "PortfolioId is required", 400);
+        }
+        if (principalArn == null || principalArn.isBlank()) {
+            throw new AwsException("InvalidParametersException", "PrincipalARN is required", 400);
+        }
+        require(portfolioStore, portfolioId, "portfolio");
+        associationStore.delete(associationId("principal", portfolioId, principalArn));
+    }
+
+    public void disassociateServiceActionFromProvisioningArtifact(String productId, String provisioningArtifactId, String serviceActionId) {
+        if (productId == null || productId.isBlank()) {
+            throw new AwsException("InvalidParametersException", "ProductId is required", 400);
+        }
+        if (provisioningArtifactId == null || provisioningArtifactId.isBlank()) {
+            throw new AwsException("InvalidParametersException", "ProvisioningArtifactId is required", 400);
+        }
+        if (serviceActionId == null || serviceActionId.isBlank()) {
+            throw new AwsException("InvalidParametersException", "ServiceActionId is required", 400);
+        }
+        ObjectNode product = requireProduct(productId);
+        JsonNode artifactIds = product.path("ProvisioningArtifactIds");
+        boolean found = artifactIds.isArray() && java.util.stream.StreamSupport.stream(artifactIds.spliterator(), false)
+                .anyMatch(id -> provisioningArtifactId.equals(id.asText()));
+        if (!found) {
+            throw new AwsException("ResourceNotFoundException", "Unknown provisioning artifact: " + provisioningArtifactId, 400);
+        }
+        String id = associationId("service_action", productId, provisioningArtifactId + "|" + serviceActionId);
+        require(associationStore, id, "service action association");
+        associationStore.delete(id);
+    }
+
+    public ObjectNode executeProvisionedProductPlan(JsonNode request) {
+        String planId = requireText(request, "PlanId");
+        requireText(request, "IdempotencyToken");
+        require(associationStore, planId, "provisioned product plan");
+        ObjectNode record = objectMapper.createObjectNode();
+        record.put("RecordId", "rec-" + UUID.randomUUID().toString().replace("-", "").substring(0, 16));
+        record.put("Status", "SUCCEEDED");
+        record.put("CreatedTime", System.currentTimeMillis() / 1000.0);
+        return record;
+    }
+
+    public ObjectNode executeProvisionedProductServiceAction(JsonNode request, String region, String accountId) {
+        requireText(request, "ServiceActionId");
+        requireText(request, "ExecuteToken");
+        String provisionedProductId = requireText(request, "ProvisionedProductId");
+        ObjectNode product = provisionedProductStore.get(provisionedProductId)
+                .orElseThrow(() -> notFound("provisioned product", provisionedProductId));
+
+        String recordId = id("rec");
+        ObjectNode record = objectMapper.createObjectNode();
+        record.put("Type", "RECORD");
+        record.put("RecordId", recordId);
+        record.put("ProvisionedProductId", provisionedProductId);
+        record.put("ProvisionedProductName", text(product, "Name"));
+        record.put("ProvisionedProductType", text(product, "Type"));
+        record.put("ProductId", text(product, "ProductId"));
+        record.put("ProvisioningArtifactId", text(product, "ProvisioningArtifactId"));
+        record.put("RecordType", "UPDATE_PROVISIONED_PRODUCT");
+        record.put("Status", "SUCCEEDED");
+        record.put("CreatedTime", Instant.now().toEpochMilli() / 1000.0);
+        associationStore.put(recordId, record);
+
+        ObjectNode result = product.deepCopy();
+        result.put("RecordId", recordId);
+        return result;
+    }
+
+    public void getProvisionedProductOutputs(JsonNode request) {
+        String id = text(request, "ProvisionedProductId");
+        if (id != null && !id.isBlank()) {
+            require(provisionedProductStore, id, "provisioned product");
+            return;
+        }
+        String name = text(request, "ProvisionedProductName");
+        if (name != null && !name.isBlank()) {
+            provisionedProductStore.scan(key -> true).stream()
+                    .filter(product -> name.equals(text(product, "Name")))
+                    .findFirst().orElseThrow(() -> notFound("provisioned product", name));
+            return;
+        }
+        throw new AwsException("InvalidParametersException",
+                "ProvisionedProductId or ProvisionedProductName is required", 400);
+    }
+
+    public ObjectNode importAsProvisionedProduct(JsonNode request, String region, String accountId) {
+        String productId = requireText(request, "ProductId");
+        String provisioningArtifactId = requireText(request, "ProvisioningArtifactId");
+        String provisionedProductName = requireText(request, "ProvisionedProductName");
+        String physicalId = requireText(request, "PhysicalId");
+        requireText(request, "IdempotencyToken");
+        ObjectNode product = requireProduct(productId);
+        String provisionedId = id("pp");
+        ObjectNode provisioned = objectMapper.createObjectNode();
+        provisioned.put("Id", provisionedId);
+        provisioned.put("Arn", "arn:aws:servicecatalog:" + region + ":" + accountId
+                + ":provisionedproduct/" + provisionedId);
+        provisioned.put("Name", provisionedProductName);
+        provisioned.put("Type", "IMPORTED");
+        provisioned.put("Status", "AVAILABLE");
+        provisioned.put("PhysicalId", physicalId);
+        provisioned.put("ProductId", productId);
+        provisioned.put("ProvisioningArtifactId", provisioningArtifactId);
+        provisioned.put("CreatedTime", Instant.now().toEpochMilli() / 1000.0);
+        provisionedProductStore.put(provisionedId, provisioned);
+
+        String recordId = id("rec");
+        ObjectNode record = objectMapper.createObjectNode();
+        record.put("Type", "RECORD");
+        record.put("RecordId", recordId);
+        record.put("ProvisionedProductId", provisionedId);
+        record.put("ProvisionedProductName", provisionedProductName);
+        record.put("ProductId", productId);
+        record.put("ProvisioningArtifactId", provisioningArtifactId);
+        record.put("RecordType", "IMPORT");
+        record.put("Status", "SUCCEEDED");
+        record.put("CreatedTime", provisioned.get("CreatedTime").asDouble());
+        associationStore.put(recordId, record);
+
+        ObjectNode result = provisioned.deepCopy();
+        result.put("RecordId", recordId);
+        return result;
+    }
+
+    public List<ObjectNode> listBudgetsForResource(String resourceId) {
+        if (resourceId == null || resourceId.isBlank()) {
+            throw new AwsException("InvalidParametersException", "ResourceId is required", 400);
+        }
+        if (portfolioStore.get(resourceId).isEmpty()) {
+            requireProduct(resourceId);
+        }
+        return associationStore.scan(key -> true).stream()
+                .filter(assoc -> "BUDGET".equals(text(assoc, "Type"))
+                        && resourceId.equals(text(assoc, "ResourceId")))
+                .map(ObjectNode::deepCopy)
+                .toList();
+    }
+
+    public List<ObjectNode> listConstraintsForPortfolio(String portfolioId, String productId) {
+        if (portfolioId == null || portfolioId.isBlank()) {
+            throw new AwsException("InvalidParametersException", "PortfolioId is required", 400);
+        }
+        require(portfolioStore, portfolioId, "portfolio");
+        return associationStore.scan(key -> true).stream()
+                .filter(node -> portfolioId.equals(text(node, "PortfolioId")) && node.has("ConstraintId"))
+                .filter(node -> productId == null || productId.isBlank() || productId.equals(text(node, "ProductId")))
+                .map(ObjectNode::deepCopy)
+                .toList();
+    }
+
+    public List<String> listPortfolioAccess(String portfolioId, String organizationParentId) {
+        if (portfolioId == null || portfolioId.isBlank()) {
+            throw new AwsException("InvalidParametersException", "PortfolioId is required", 400);
+        }
+        require(portfolioStore, portfolioId, "portfolio");
+        String prefix = portfolioId + "|";
+        List<String> accountIds = new java.util.ArrayList<>();
+        for (String key : shareStore.keys()) {
+            if (!key.startsWith(prefix)) {
+                continue;
+            }
+            String target = key.substring(prefix.length());
+            int colon = target.indexOf(':');
+            String shareType = colon >= 0 ? target.substring(0, colon) : target;
+            String principalId = colon >= 0 ? target.substring(colon + 1) : "";
+            if ("ACCOUNT".equals(shareType)) {
+                accountIds.add(principalId);
+            }
+        }
+        return accountIds;
+    }
+
+    public List<ObjectNode> listPrincipalsForPortfolio(String portfolioId) {
+        if (portfolioId == null || portfolioId.isBlank()) {
+            throw new AwsException("InvalidParametersException", "PortfolioId is required", 400);
+        }
+        require(portfolioStore, portfolioId, "portfolio");
+        return associationStore.scan(key -> true).stream()
+                .filter(assoc -> "PRINCIPAL".equals(text(assoc, "Type"))
+                        && portfolioId.equals(text(assoc, "PortfolioId")))
+                .map(assoc -> {
+                    ObjectNode principal = objectMapper.createObjectNode();
+                    principal.put("PrincipalARN", text(assoc, "PrincipalARN"));
+                    principal.put("PrincipalType", text(assoc, "PrincipalType"));
+                    return principal;
+                })
+                .toList();
+    }
+
+    public List<ObjectNode> listProvisionedProductPlans(String provisionProductId) {
+        return associationStore.scan(key -> true).stream()
+                .filter(node -> "PROVISIONED_PRODUCT_PLAN".equals(text(node, "Type")))
+                .filter(plan -> provisionProductId == null || provisionProductId.isBlank()
+                        || provisionProductId.equals(text(plan, "ProvisionProductId")))
+                .map(ObjectNode::deepCopy)
+                .toList();
+    }
+
+    public List<ObjectNode> listRecordHistory() {
+        return provisionedProductStore.scan(key -> true).stream().map(ObjectNode::deepCopy).toList();
+    }
+
+    public List<ObjectNode> listResourcesForTagOption(String tagOptionId, String resourceType) {
+        if (tagOptionId == null || tagOptionId.isBlank()) {
+            throw new AwsException("InvalidParametersException", "TagOptionId is required", 400);
+        }
+        require(tagOptionStore, tagOptionId, "TagOption");
+        List<ObjectNode> results = new java.util.ArrayList<>();
+        for (String key : associationStore.keys()) {
+            associationStore.get(key).ifPresent(assoc -> {
+                if (!"TAG_OPTION".equals(text(assoc, "Type"))) {
+                    return;
+                }
+                if (!tagOptionId.equals(text(assoc, "TagOptionId"))) {
+                    return;
+                }
+                String resourceId = text(assoc, "ResourceId");
+                ObjectNode resource = portfolioStore.get(resourceId).orElse(null);
+                String type = "PORTFOLIO";
+                if (resource == null) {
+                    resource = productStore.get(resourceId).orElse(null);
+                    type = "PRODUCT";
+                }
+                if (resource == null) {
+                    return;
+                }
+                if (resourceType != null && !resourceType.isBlank() && !resourceType.equalsIgnoreCase(type)) {
+                    return;
+                }
+                ObjectNode detail = objectMapper.createObjectNode();
+                detail.put("Id", resourceId);
+                detail.put("ARN", text(resource, "ARN"));
+                String name = text(resource, "DisplayName");
+                if (name == null) {
+                    name = text(resource, "Name");
+                }
+                detail.put("Name", name);
+                detail.put("CreatedTime", resource.path("CreatedTime").asDouble(0.0));
+                String description = text(resource, "Description");
+                if (description != null) {
+                    detail.put("Description", description);
+                }
+                results.add(detail);
+            });
+        }
+        return results;
+    }
+
+    public List<ObjectNode> listStackInstancesForProvisionedProduct(String provisionedProductId) {
+        if (provisionedProductId == null || provisionedProductId.isBlank()) {
+            throw new AwsException("InvalidParametersException", "ProvisionedProductId is required", 400);
+        }
+        ObjectNode product = require(provisionedProductStore, provisionedProductId, "provisioned product");
+        ObjectNode instance = objectMapper.createObjectNode();
+        instance.put("Account", text(product, "PhysicalId"));
+        String arn = text(product, "Arn");
+        if (arn != null) {
+            String[] parts = arn.split(":");
+            if (parts.length >= 4) {
+                instance.put("Region", parts[3]);
+            }
+        }
+        instance.put("StackInstanceStatus", "CURRENT");
+        return List.of(instance);
+    }
+
+    public void notifyProvisionProductEngineWorkflowResult(JsonNode request) {
+        requireText(request, "WorkflowToken");
+        requireText(request, "RecordId");
+        String status = requireText(request, "Status");
+        if (!"SUCCEEDED".equals(status) && !"FAILED".equals(status)) {
+            throw new AwsException("InvalidParametersException",
+                    "Status must be SUCCEEDED or FAILED", 400);
+        }
+        requireText(request, "IdempotencyToken");
+    }
+
+    public void notifyTerminateProvisionedProductEngineWorkflowResult(JsonNode request) {
+        requireText(request, "WorkflowToken");
+        requireText(request, "RecordId");
+        String status = requireText(request, "Status");
+        if (!"SUCCEEDED".equals(status) && !"FAILED".equals(status)) {
+            throw new AwsException("InvalidParametersException",
+                    "Status must be SUCCEEDED or FAILED", 400);
+        }
+        requireText(request, "IdempotencyToken");
+    }
+
+    public void notifyUpdateProvisionedProductEngineWorkflowResult(JsonNode request) {
+        requireText(request, "WorkflowToken");
+        requireText(request, "RecordId");
+        String status = requireText(request, "Status");
+        if (!"SUCCEEDED".equals(status) && !"FAILED".equals(status)) {
+            throw new AwsException("InvalidParametersException",
+                    "Status must be SUCCEEDED or FAILED", 400);
+        }
+        requireText(request, "IdempotencyToken");
+    }
+
+    public List<ObjectNode> scanProvisionedProducts() {
+        return provisionedProductStore.scan(key -> true).stream().map(ObjectNode::deepCopy).toList();
+    }
+
+    public ObjectNode updateConstraint(String id, JsonNode request) {
+        if (id == null || id.isBlank()) {
+            throw new AwsException("InvalidParametersException", "Id is required", 400);
+        }
+        ObjectNode constraint = require(associationStore, id, "constraint");
+        if (request.has("Description")) {
+            constraint.put("Description", request.get("Description").asText());
+        }
+        if (request.has("Parameters")) {
+            constraint.set("Parameters", request.get("Parameters").deepCopy());
+        }
+        associationStore.put(id, constraint);
+        return constraint.deepCopy();
+    }
+
+    public ObjectNode updateProvisionedProduct(JsonNode request, String region, String accountId) {
+        requireText(request, "UpdateToken");
+        String productId = text(request, "ProvisionedProductId");
+        String productName = text(request, "ProvisionedProductName");
+        ObjectNode product;
+        if (productId == null || productId.isBlank()) {
+            if (productName == null || productName.isBlank()) {
+                throw new AwsException("InvalidParametersException",
+                        "ProvisionedProductId or ProvisionedProductName is required", 400);
+            }
+            product = provisionedProductStore.scan(key -> true).stream()
+                    .filter(p -> productName.equals(text(p, "Name")))
+                    .findFirst().orElseThrow(() -> notFound("provisioned product", productName));
+        } else {
+            product = require(provisionedProductStore, productId, "provisioned product");
+        }
+
+        String recordId = id("rec");
+        ObjectNode record = objectMapper.createObjectNode();
+        record.put("Type", "RECORD");
+        record.put("RecordId", recordId);
+        record.put("ProvisionedProductId", text(product, "Id"));
+        record.put("ProvisionedProductName", text(product, "Name"));
+        record.put("ProductId", text(product, "ProductId"));
+        record.put("ProvisioningArtifactId", text(product, "ProvisioningArtifactId"));
+        record.put("RecordType", "UPDATE_PROVISIONED_PRODUCT");
+        record.put("Status", "SUCCEEDED");
+        record.put("CreatedTime", Instant.now().toEpochMilli() / 1000.0);
+        associationStore.put(recordId, record);
+
+        ObjectNode result = product.deepCopy();
+        result.put("RecordId", recordId);
+        return result;
+    }
+
+    public ObjectNode updateProvisionedProductProperties(String provisionedProductId, JsonNode request) {
+        if (provisionedProductId == null || provisionedProductId.isBlank()) {
+            throw new AwsException("InvalidParametersException", "ProvisionedProductId is required", 400);
+        }
+        requireText(request, "IdempotencyToken");
+        JsonNode properties = request.path("ProvisionedProductProperties");
+        if (!properties.isObject() || properties.isEmpty()) {
+            throw new AwsException("InvalidParametersException", "ProvisionedProductProperties is required", 400);
+        }
+        ObjectNode product = require(provisionedProductStore, provisionedProductId, "provisioned product");
+        product.set("ProvisionedProductProperties", properties.deepCopy());
+        provisionedProductStore.put(provisionedProductId, product);
+
+        String recordId = id("rec");
+        ObjectNode record = objectMapper.createObjectNode();
+        record.put("Type", "RECORD");
+        record.put("RecordId", recordId);
+        record.put("ProvisionedProductId", provisionedProductId);
+        record.put("ProvisionedProductName", text(product, "Name"));
+        record.put("ProductId", text(product, "ProductId"));
+        record.put("ProvisioningArtifactId", text(product, "ProvisioningArtifactId"));
+        record.put("RecordType", "UPDATE_PROVISIONED_PRODUCT");
+        record.put("Status", "SUCCEEDED");
+        record.put("CreatedTime", Instant.now().toEpochMilli() / 1000.0);
+        associationStore.put(recordId, record);
+
+        ObjectNode result = product.deepCopy();
+        result.put("RecordId", recordId);
+        return result;
+    }
+
+    public List<ObjectNode> listServiceActions() {
+        return associationStore.scan(key -> true).stream()
+                .filter(node -> "SERVICE_ACTION".equals(text(node, "Type")) && node.has("Id"))
+                .map(ObjectNode::deepCopy)
+                .toList();
+    }
+
+    public ObjectNode updateServiceAction(String id, JsonNode request) {
+        if (id == null || id.isBlank()) {
+            throw new AwsException("InvalidParametersException", "Id is required", 400);
+        }
+        ObjectNode action = associationStore.scan(key -> true).stream()
+                .filter(node -> "SERVICE_ACTION".equals(text(node, "Type")) && id.equals(text(node, "Id")))
+                .findFirst().orElseThrow(() -> notFound("service action", id));
+        copyIfPresent(request, action, "Name", "Description", "Definition");
+        associationStore.put(id, action);
+        return action.deepCopy();
+    }
+
+    public ObjectNode createProvisioningArtifact(JsonNode request, String region, String accountId) {
+        String productId = requireText(request, "ProductId");
+        requireText(request, "IdempotencyToken");
+        JsonNode parameters = request.path("Parameters");
+        if (!parameters.isObject() || parameters.isEmpty()) {
+            throw new AwsException("InvalidParametersException", "Parameters is required", 400);
+        }
+        ObjectNode product = requireProduct(productId);
+        String name = text(parameters, "Name");
+        if (name == null || name.isBlank()) {
+            name = "v" + (product.path("ProvisioningArtifactIds").size() + 1);
+        }
+        String type = text(parameters, "Type");
+        if (type == null || type.isBlank()) {
+            type = "CLOUD_FORMATION_TEMPLATE";
+        }
+        String artifactId = id("pa");
+        ((ArrayNode) product.path("ProvisioningArtifactIds")).add(artifactId);
+        ((ArrayNode) product.path("ProvisioningArtifactNames")).add(name);
+        productStore.put(text(product, "Id"), product);
+        ObjectNode detail = objectMapper.createObjectNode();
+        detail.put("Id", artifactId);
+        detail.put("Name", name);
+        detail.put("Type", type);
+        detail.put("CreatedTime", Instant.now().toEpochMilli() / 1000.0);
+        detail.put("Active", true);
+        String description = text(parameters, "Description");
+        if (description != null && !description.isBlank()) {
+            detail.put("Description", description);
+        }
+        return detail;
+    }
+
+    public ObjectNode describeCopyProductStatus(String token) {
+        if (token == null || token.isBlank()) {
+            throw new AwsException("InvalidParametersException", "CopyProductToken is required", 400);
+        }
+        return associationStore.get(token).orElseThrow(() ->
+                new AwsException("ResourceNotFoundException", "Unknown copy product token: " + token, 400));
+    }
+
+    public ObjectNode terminateProvisionedProduct(JsonNode request, String region, String accountId) {
+        requireText(request, "TerminateToken");
+        String provisionedProductId = text(request, "ProvisionedProductId");
+        String provisionedProductName = text(request, "ProvisionedProductName");
+        ObjectNode product = null;
+        if (provisionedProductId != null && !provisionedProductId.isBlank()) {
+            product = provisionedProductStore.get(provisionedProductId).orElse(null);
+        }
+        if (product == null && provisionedProductName != null && !provisionedProductName.isBlank()) {
+            String identifier = provisionedProductName;
+            if (identifier.contains(":provisionedproduct/")) {
+                identifier = identifier.substring(identifier.lastIndexOf('/') + 1);
+            }
+            final String finalIdentifier = identifier;
+            product = provisionedProductStore.scan(key -> true).stream()
+                    .filter(p -> finalIdentifier.equals(text(p, "Name")) || finalIdentifier.equals(text(p, "Id")))
+                    .findFirst().orElse(null);
+        }
+        if (product == null) {
+            throw new AwsException("ResourceNotFoundException",
+                    "Unknown provisioned product: " + (provisionedProductId != null ? provisionedProductId : provisionedProductName), 400);
+        }
+        String id = text(product, "Id");
+        product.put("Status", "TERMINATED");
+        product.put("UpdatedTime", Instant.now().toEpochMilli() / 1000.0);
+        provisionedProductStore.put(id, product);
+
+        String recordId = id("rec");
+        ObjectNode record = objectMapper.createObjectNode();
+        record.put("Type", "RECORD");
+        record.put("RecordId", recordId);
+        record.put("ProvisionedProductId", id);
+        record.put("ProvisionedProductName", text(product, "Name"));
+        record.put("ProductId", text(product, "ProductId"));
+        record.put("ProvisioningArtifactId", text(product, "ProvisioningArtifactId"));
+        record.put("RecordType", "TERMINATE_PROVISIONED_PRODUCT");
+        record.put("Status", "SUCCEEDED");
+        record.put("CreatedTime", product.get("CreatedTime").asDouble());
+        record.put("UpdatedTime", product.get("UpdatedTime").asDouble());
+        associationStore.put(recordId, record);
+
+        ObjectNode result = product.deepCopy();
+        result.put("RecordId", recordId);
+        return result;
+    }
+
+    public ObjectNode updateProvisioningArtifact(String productId, String artifactId, JsonNode request) {
+        if (productId == null || productId.isBlank()) {
+            throw new AwsException("InvalidParametersException", "ProductId is required", 400);
+        }
+        if (artifactId == null || artifactId.isBlank()) {
+            throw new AwsException("InvalidParametersException", "ProvisioningArtifactId is required", 400);
+        }
+        ObjectNode product = requireProduct(productId);
+        JsonNode ids = product.path("ProvisioningArtifactIds");
+        int index = -1;
+        for (int i = 0; i < ids.size(); i++) {
+            if (artifactId.equals(ids.get(i).asText())) {
+                index = i;
+                break;
+            }
+        }
+        if (index < 0) {
+            throw new AwsException("ResourceNotFoundException",
+                    "Unknown provisioning artifact: " + artifactId, 400);
+        }
+        JsonNode names = product.path("ProvisioningArtifactNames");
+        String newName = text(request, "Name");
+        if (newName != null && !newName.isBlank()) {
+            ((ArrayNode) names).set(index, objectMapper.getNodeFactory().textNode(newName));
+            productStore.put(text(product, "Id"), product);
+        }
+        ObjectNode detail = objectMapper.createObjectNode();
+        detail.put("Id", artifactId);
+        detail.put("Name", index < names.size() ? names.get(index).asText() : "");
+        detail.put("Active", true);
+        detail.put("Type", "CLOUD_FORMATION_TEMPLATE");
+        detail.put("CreatedTime", product.path("CreatedTime").asDouble());
+        return detail;
     }
 }

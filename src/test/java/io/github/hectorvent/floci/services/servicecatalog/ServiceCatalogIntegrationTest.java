@@ -187,4 +187,117 @@ class ServiceCatalogIntegrationTest {
                 .body("ProvisionedProducts[0].Type", equalTo("CONTROL_TOWER_ACCOUNT"))
                 .body("ProvisionedProducts[0].Status", equalTo("AVAILABLE"));
     }
+
+    @Test
+    void acceptPortfolioShare_withExistingPortfolio_returnsEmptyBody() {
+        String portfolioId = given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", TARGET + "CreatePortfolio")
+                .header("Authorization", AUTH)
+                .body("{\"DisplayName\":\"ShareAccept\",\"ProviderName\":\"Vellum\"}")
+                .when().post("/").then().statusCode(200)
+                .extract().path("PortfolioDetail.Id");
+
+        given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", TARGET + "AcceptPortfolioShare")
+                .header("Authorization", AUTH)
+                .body("{\"PortfolioId\":\"" + portfolioId + "\"}")
+                .when().post("/")
+                .then().statusCode(200);
+    }
+
+    @Test
+    void acceptPortfolioShare_withoutPortfolioId_returnsAwsError() {
+        given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", TARGET + "AcceptPortfolioShare")
+                .header("Authorization", AUTH)
+                .body("{}")
+                .when().post("/")
+                .then().statusCode(400)
+                .body("__type", equalTo("InvalidParametersException"))
+                .body("message", equalTo("PortfolioId is required"));
+    }
+
+    @Test
+    void rejectPortfolioShare_withExistingPortfolio_returnsEmptyBody() {
+        String portfolioId = given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", TARGET + "CreatePortfolio")
+                .header("Authorization", AUTH)
+                .body("{\"DisplayName\":\"ShareReject\",\"ProviderName\":\"Vellum\"}")
+                .when().post("/").then().statusCode(200)
+                .extract().path("PortfolioDetail.Id");
+
+        given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", TARGET + "RejectPortfolioShare")
+                .header("Authorization", AUTH)
+                .body("{\"PortfolioId\":\"" + portfolioId + "\"}")
+                .when().post("/")
+                .then().statusCode(200);
+    }
+
+    @Test
+    void rejectPortfolioShare_withoutPortfolioId_returnsAwsError() {
+        given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", TARGET + "RejectPortfolioShare")
+                .header("Authorization", AUTH)
+                .body("{}")
+                .when().post("/")
+                .then().statusCode(400)
+                .body("__type", equalTo("InvalidParametersException"))
+                .body("message", equalTo("PortfolioId is required"));
+    }
+
+    @Test
+    void createDescribeAndDeletePortfolioShare_removesShare() {
+        String portfolioId = given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", TARGET + "CreatePortfolio")
+                .header("Authorization", AUTH)
+                .body("{\"DisplayName\":\"ShareRoundTrip\",\"ProviderName\":\"Vellum\"}")
+                .when().post("/").then().statusCode(200)
+                .extract().path("PortfolioDetail.Id");
+
+        String accountId = "123456789012";
+
+        given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", TARGET + "CreatePortfolioShare")
+                .header("Authorization", AUTH)
+                .body("{\"PortfolioId\":\"" + portfolioId + "\",\"AccountId\":\"" + accountId + "\"}")
+                .when().post("/")
+                .then().statusCode(200)
+                .body("Status", equalTo("COMPLETED"));
+
+        given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", TARGET + "DescribePortfolioShares")
+                .header("Authorization", AUTH)
+                .body("{\"PortfolioId\":\"" + portfolioId + "\",\"Type\":\"ACCOUNT\"}")
+                .when().post("/")
+                .then().statusCode(200)
+                .body("PortfolioShareDetails", hasSize(1))
+                .body("PortfolioShareDetails[0].PrincipalId", equalTo(accountId));
+
+        given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", TARGET + "DeletePortfolioShare")
+                .header("Authorization", AUTH)
+                .body("{\"PortfolioId\":\"" + portfolioId + "\",\"AccountId\":\"" + accountId + "\"}")
+                .when().post("/")
+                .then().statusCode(200);
+
+        given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", TARGET + "DescribePortfolioShares")
+                .header("Authorization", AUTH)
+                .body("{\"PortfolioId\":\"" + portfolioId + "\",\"Type\":\"ACCOUNT\"}")
+                .when().post("/")
+                .then().statusCode(200)
+                .body("PortfolioShareDetails", hasSize(0));
+    }
 }
