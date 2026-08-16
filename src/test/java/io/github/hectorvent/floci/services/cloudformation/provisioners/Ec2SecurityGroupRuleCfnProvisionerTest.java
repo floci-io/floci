@@ -318,6 +318,23 @@ class Ec2SecurityGroupRuleCfnProvisionerTest {
     }
 
     @Test
+    void aRuleNamingNoSourceAtAllIsRejected() {
+        // Exactly one, so none is as invalid as several. Accepting zero sent an IpPermission
+        // naming no peer, which the stack then reported as successfully provisioned.
+        StackResource r = resource(INGRESS, "WebIngress");
+        ObjectNode props = mapper.createObjectNode()
+                .put("GroupId", "sg-123")
+                .put("IpProtocol", "tcp")
+                .put("FromPort", 443)
+                .put("ToPort", 443);
+
+        AwsException failure = assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx()));
+
+        assertEquals("ValidationError", failure.getErrorCode());
+        verify(ec2, never()).authorizeSecurityGroupIngress(anyString(), anyString(), anyList());
+    }
+
+    @Test
     void aCidrAndAPeerGroupTogetherAreRejected() {
         StackResource r = resource(EGRESS, "WebEgress");
         ObjectNode props = mapper.createObjectNode()

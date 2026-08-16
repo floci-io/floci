@@ -134,7 +134,9 @@ public class Ec2SecurityGroupRuleCfnProvisioner implements CfnResourceProvisione
         long sources = Stream.of(cidr, cidr6, peerGroup, prefixList)
                 .filter(s -> s != null && !s.isBlank())
                 .count();
-        if (sources > 1) {
+        // Exactly one, so zero is rejected too. Letting none through sent an IpPermission naming
+        // no peer at all, which the stack then reported as successfully provisioned.
+        if (sources != 1) {
             throw new AwsException("ValidationError",
                     "A security group rule must specify exactly one of CidrIp, CidrIpv6, "
                     + "a prefix list, or a security group.", 400);
