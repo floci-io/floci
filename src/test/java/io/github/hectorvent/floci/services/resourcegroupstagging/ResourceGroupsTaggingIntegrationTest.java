@@ -130,7 +130,9 @@ class ResourceGroupsTaggingIntegrationTest {
     @Test
     @Order(6)
     void getResourcesByTagFilterKeyOnly() {
-        // Values empty → match any resource that has the key
+        // Values empty → match any resource that has the key. Asserted as "contains these three",
+        // not "is exactly three": GetResources reports the whole estate, so any other test class
+        // that tags a resource with a "Team" key legitimately widens this result.
         given()
             .header("X-Amz-Target", TARGET_PREFIX + "GetResources")
             .contentType(CONTENT_TYPE)
@@ -145,17 +147,22 @@ class ResourceGroupsTaggingIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("ResourceTagMappingList.size()", equalTo(3));
+            .body("ResourceTagMappingList.size()", greaterThanOrEqualTo(3))
+            .body("ResourceTagMappingList.ResourceARN", hasItems(ARN_INSTANCE, ARN_BUCKET, ARN_FUNCTION));
     }
 
     @Test
     @Order(7)
     void getResourcesByResourceTypeFilter() {
+        // Paired with this class's own tag filter on purpose: GetResources reports every tagged
+        // resource in the estate, including ones other services tagged through their own APIs, so
+        // "ec2:instance" alone is not a claim about this test's fixtures.
         given()
             .header("X-Amz-Target", TARGET_PREFIX + "GetResources")
             .contentType(CONTENT_TYPE)
             .body("""
-                {"ResourceTypeFilters": ["ec2:instance"]}
+                {"ResourceTypeFilters": ["ec2:instance"],
+                 "TagFilters": [{"Key": "Environment", "Values": ["prod"]}]}
                 """)
         .when()
             .post("/")
@@ -172,7 +179,8 @@ class ResourceGroupsTaggingIntegrationTest {
             .header("X-Amz-Target", TARGET_PREFIX + "GetResources")
             .contentType(CONTENT_TYPE)
             .body("""
-                {"ResourceTypeFilters": ["lambda"]}
+                {"ResourceTypeFilters": ["lambda"],
+                 "TagFilters": [{"Key": "Environment", "Values": ["staging"]}]}
                 """)
         .when()
             .post("/")

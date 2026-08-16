@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.resourcegroupstagging;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.TaggedResourceScanner;
 import io.github.hectorvent.floci.core.storage.StorageBackedMap;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.resourcegroupstagging.model.ResourceTagMapping;
@@ -19,13 +20,23 @@ import java.util.stream.Collectors;
 public class ResourceGroupsTaggingService implements Resettable {
 
     private final StorageFactory storageFactory;
+    private final TaggedResourceScanner scanner;
 
     // region::arn → ResourceTagMapping
     private Map<String, ResourceTagMapping> store = new ConcurrentHashMap<>();
 
     @Inject
-    public ResourceGroupsTaggingService(StorageFactory storageFactory) {
+    public ResourceGroupsTaggingService(StorageFactory storageFactory, TaggedResourceScanner scanner) {
         this.storageFactory = storageFactory;
+        this.scanner = scanner;
+    }
+
+    /**
+     * Constructor for unit tests that exercise only the {@code TagResources}/{@code GetResources}
+     * round-trip through this service's own store, with no estate-wide scan.
+     */
+    public ResourceGroupsTaggingService(StorageFactory storageFactory) {
+        this(storageFactory, null);
     }
 
     @PostConstruct
@@ -81,6 +92,38 @@ public class ResourceGroupsTaggingService implements Resettable {
         store.clear();
     }
 
+    // ─── The estate-wide view ──────────────────────────────────────────────────
+
+    /**
+     * Every tagged resource this API can see: the ones tagged through {@code TagResources}, which
+     * live in this service's own store, plus every resource any other service holds with tags on
+     * it, read live by {@link TaggedResourceScanner}.
+     *
+     * <p>Without the second source this API answers "no resources" for an estate full of tagged
+     * ones, because floci stores a resource's tags on that resource's own model — an EC2 volume's
+     * tags on the {@code Volume}, an IAM role's on the {@code IamRole} — and nothing wrote them
+     * here. The scan is done per call rather than cached: a stale tagging index is exactly the
+     * failure this method exists to fix.
+     *
+     * <p>On an ARN present in both, the explicitly-tagged value wins, since a {@code TagResources}
+     * call is the more recent statement of intent.
+     */
+    private Collection<ResourceTagMapping> allMappings() {
+        Map<String, ResourceTagMapping> merged = new LinkedHashMap<>();
+        if (scanner != null) {
+            scanner.scan().forEach((arn, tags) -> {
+                ResourceTagMapping mapping = new ResourceTagMapping(arn);
+                mapping.getTags().putAll(tags);
+                merged.put(arn, mapping);
+            });
+        }
+        for (ResourceTagMapping explicit : store.values()) {
+            merged.computeIfAbsent(explicit.getResourceArn(), ResourceTagMapping::new)
+                    .getTags().putAll(explicit.getTags());
+        }
+        return merged.values();
+    }
+
     // ─── GetResources ──────────────────────────────────────────────────────────
 
     public record TagFilter(String key, List<String> values) {}
@@ -93,7 +136,7 @@ public class ResourceGroupsTaggingService implements Resettable {
                                    String paginationToken,
                                    int resourcesPerPage,
                                    String region) {
-        List<ResourceTagMapping> all = store.values().stream()
+        List<ResourceTagMapping> all = allMappings().stream()
                 .filter(m -> {
                     // Derive the region from the ARN (arn:aws:svc:region:acct:type/id)
                     String[] parts = m.getResourceArn().split(":", 6);
@@ -161,7 +204,7 @@ public class ResourceGroupsTaggingService implements Resettable {
     // ─── GetTagKeys ────────────────────────────────────────────────────────────
 
     public PageResult getTagKeys(String paginationToken, int maxResults, String region) {
-        List<String> keys = store.values().stream()
+        List<String> keys = allMappings().stream()
                 .filter(m -> {
                     String[] parts = m.getResourceArn().split(":", 6);
                     if (parts.length >= 4) {
@@ -189,7 +232,7 @@ public class ResourceGroupsTaggingService implements Resettable {
     // ─── GetTagValues ──────────────────────────────────────────────────────────
 
     public PageResult getTagValues(String tagKey, String paginationToken, int maxResults, String region) {
-        List<String> values = store.values().stream()
+        List<String> values = allMappings().stream()
                 .filter(m -> {
                     String[] parts = m.getResourceArn().split(":", 6);
                     if (parts.length >= 4) {

@@ -2630,7 +2630,7 @@ public class Ec2Service implements ContainerTeardown {
         ensureDefaultResources(region);
         for (String resourceId : resourceIds) {
             synchronized (lockFor(key(region, resourceId))) {
-                List<Tag> existing = new ArrayList<>(tags.get(resourceId).orElse(List.of()));
+                List<Tag> existing = effectiveTags(region, resourceId);
                 for (Tag tag : tagList) {
                     existing.removeIf(t -> t.getKey().equals(tag.getKey()));
                     existing.add(tag);
@@ -2646,9 +2646,8 @@ public class Ec2Service implements ContainerTeardown {
         ensureDefaultResources(region);
         for (String resourceId : resourceIds) {
             synchronized (lockFor(key(region, resourceId))) {
-                List<Tag> stored = tags.get(resourceId).orElse(null);
-                if (stored != null) {
-                    List<Tag> existing = new ArrayList<>(stored);
+                List<Tag> existing = effectiveTags(region, resourceId);
+                if (!existing.isEmpty()) {
                     for (Tag tag : tagList) {
                         existing.removeIf(t -> t.getKey().equals(tag.getKey())
                                 && (tag.getValue() == null || tag.getValue().equals(t.getValue())));
@@ -2660,39 +2659,95 @@ public class Ec2Service implements ContainerTeardown {
         }
     }
 
+    /**
+     * One taggable model store, paired with the setter that writes tags onto its model. Kept as a
+     * list rather than an if-chain so that adding a taggable EC2 store is a one-line registration
+     * and cannot be half-done: {@code CreateTags} on a store missing from this list used to
+     * update {@code ec2-tags.json} and silently leave the model's own tag list untouched, so
+     * {@code DescribeVolumes} kept reporting the create-time tags forever.
+     */
+    private record TagTarget<T>(StorageBackend<String, T> store,
+                                java.util.function.Function<T, List<Tag>> getter,
+                                java.util.function.BiConsumer<T, List<Tag>> setter) {
+        boolean apply(String storeKey, List<Tag> tagList) {
+            T resource = store.get(storeKey).orElse(null);
+            if (resource == null) {
+                return false;
+            }
+            setter.accept(resource, new ArrayList<>(tagList));
+            store.put(storeKey, resource);
+            return true;
+        }
+
+        List<Tag> read(String storeKey) {
+            T resource = store.get(storeKey).orElse(null);
+            if (resource == null) {
+                return null;
+            }
+            List<Tag> current = getter.apply(resource);
+            return current == null ? List.of() : current;
+        }
+
+        /** Every key in this store, so a caller can enumerate taggable resources across stores. */
+        java.util.Set<String> keys() {
+            return store.keys();
+        }
+    }
+
+    private List<TagTarget<?>> tagTargets() {
+        return List.of(
+                new TagTarget<>(instances, Instance::getTags, Instance::setTags),
+                new TagTarget<>(vpcs, Vpc::getTags, Vpc::setTags),
+                new TagTarget<>(subnets, Subnet::getTags, Subnet::setTags),
+                new TagTarget<>(securityGroups, SecurityGroup::getTags, SecurityGroup::setTags),
+                new TagTarget<>(securityGroupRules, SecurityGroupRule::getTags, SecurityGroupRule::setTags),
+                new TagTarget<>(internetGateways, InternetGateway::getTags, InternetGateway::setTags),
+                new TagTarget<>(routeTables, RouteTable::getTags, RouteTable::setTags),
+                new TagTarget<>(keyPairs, KeyPair::getTags, KeyPair::setTags),
+                new TagTarget<>(launchTemplates, LaunchTemplate::getTags, LaunchTemplate::setTags),
+                new TagTarget<>(vpcEndpoints, VpcEndpoint::getTags, VpcEndpoint::setTags),
+                new TagTarget<>(natGateways, NatGateway::getTags, NatGateway::setTags),
+                new TagTarget<>(networkAcls, NetworkAcl::getTags, NetworkAcl::setTags),
+                new TagTarget<>(addresses, Address::getTags, Address::setTags),
+                new TagTarget<>(managedPrefixLists, ManagedPrefixList::getTags, ManagedPrefixList::setTags),
+                new TagTarget<>(volumes, Volume::getTags, Volume::setTags),
+                new TagTarget<>(snapshots, Snapshot::getTags, Snapshot::setTags),
+                new TagTarget<>(registeredImages, Image::getTags, Image::setTags),
+                new TagTarget<>(spotInstanceRequests, SpotInstanceRequest::getTags, SpotInstanceRequest::setTags));
+    }
+
     private void updateResourceTags(String region, String resourceId, List<Tag> tagList) {
         String storeKey = key(region, resourceId);
-        Instance inst = instances.get(storeKey).orElse(null);
-        if (inst != null) { inst.setTags(new ArrayList<>(tagList)); instances.put(storeKey, inst); return; }
-        Vpc vpc = vpcs.get(storeKey).orElse(null);
-        if (vpc != null) { vpc.setTags(new ArrayList<>(tagList)); vpcs.put(storeKey, vpc); return; }
-        Subnet subnet = subnets.get(storeKey).orElse(null);
-        if (subnet != null) { subnet.setTags(new ArrayList<>(tagList)); subnets.put(storeKey, subnet); return; }
-        SecurityGroup sg = securityGroups.get(storeKey).orElse(null);
-        if (sg != null) { sg.setTags(new ArrayList<>(tagList)); securityGroups.put(storeKey, sg); return; }
-        SecurityGroupRule sgRule = securityGroupRules.get(storeKey).orElse(null);
-        if (sgRule != null) { sgRule.setTags(new ArrayList<>(tagList)); securityGroupRules.put(storeKey, sgRule); return; }
-        InternetGateway igw = internetGateways.get(storeKey).orElse(null);
-        if (igw != null) { igw.setTags(new ArrayList<>(tagList)); internetGateways.put(storeKey, igw); return; }
-        RouteTable rt = routeTables.get(storeKey).orElse(null);
-        if (rt != null) { rt.setTags(new ArrayList<>(tagList)); routeTables.put(storeKey, rt); return; }
-        KeyPair kp = keyPairs.get(storeKey).orElse(null);
-        if (kp != null) { kp.setTags(new ArrayList<>(tagList)); keyPairs.put(storeKey, kp); return; }
-        LaunchTemplate lt = launchTemplates.get(storeKey).orElse(null);
-        if (lt != null) { lt.setTags(new ArrayList<>(tagList)); launchTemplates.put(storeKey, lt); return; }
-        VpcEndpoint endpoint = vpcEndpoints.get(storeKey).orElse(null);
-        if (endpoint != null) { endpoint.setTags(new ArrayList<>(tagList)); vpcEndpoints.put(storeKey, endpoint); return; }
-        NatGateway natGateway = natGateways.get(storeKey).orElse(null);
-        if (natGateway != null) { natGateway.setTags(new ArrayList<>(tagList)); natGateways.put(storeKey, natGateway); return; }
-        NetworkAcl networkAcl = networkAcls.get(storeKey).orElse(null);
-        if (networkAcl != null) { networkAcl.setTags(new ArrayList<>(tagList)); networkAcls.put(storeKey, networkAcl); return; }
-        Address address = addresses.get(storeKey).orElse(null);
-        if (address != null) { address.setTags(new ArrayList<>(tagList)); addresses.put(storeKey, address); return; }
-        ManagedPrefixList prefixList = managedPrefixLists.get(storeKey).orElse(null);
-        if (prefixList != null) {
-            prefixList.setTags(new ArrayList<>(tagList));
-            managedPrefixLists.put(storeKey, prefixList);
+        for (TagTarget<?> target : tagTargets()) {
+            if (target.apply(storeKey, tagList)) {
+                return;
+            }
         }
+    }
+
+    /**
+     * The tags currently on a resource, from both places EC2 keeps them: the {@code ec2-tags.json}
+     * side-store that {@code CreateTags} writes, and the resource model itself, which is where
+     * tags supplied inline on a create ({@code TagSpecification}) land. They are unioned rather
+     * than one being preferred, because either can hold tags the other has never seen — which is
+     * why {@code CreateTags} on a volume used to drop the tags it was created with.
+     */
+    private List<Tag> effectiveTags(String region, String resourceId) {
+        Map<String, String> merged = new LinkedHashMap<>();
+        for (Tag tag : tags.get(resourceId).orElse(List.of())) {
+            merged.put(tag.getKey(), tag.getValue());
+        }
+        String storeKey = key(region, resourceId);
+        for (TagTarget<?> target : tagTargets()) {
+            List<Tag> modelTags = target.read(storeKey);
+            if (modelTags != null) {
+                modelTags.forEach(t -> merged.put(t.getKey(), t.getValue()));
+                break;
+            }
+        }
+        List<Tag> result = new ArrayList<>();
+        merged.forEach((k, v) -> result.add(new Tag(k, v)));
+        return result;
     }
 
     public List<Map<String, String>> describeTags(String region, Map<String, List<String>> filters) {
@@ -2702,8 +2757,22 @@ public class Ec2Service implements ContainerTeardown {
         List<String> filterKeys          = filters != null ? filters.get("key")            : null;
         List<String> filterValues        = filters != null ? filters.get("value")          : null;
 
+        // Both places EC2 keeps tags have to be enumerated: the CreateTags side-store, and the
+        // resource models, which are the only home for tags supplied inline on a create. A
+        // volume created with TagSpecifications is absent from the side-store entirely, and used
+        // to be invisible to DescribeTags for its whole life.
+        java.util.Set<String> resourceIds = new java.util.LinkedHashSet<>(tags.keys());
+        String regionPrefix = region + "::";
+        for (TagTarget<?> target : tagTargets()) {
+            for (String storeKey : target.keys()) {
+                if (storeKey.startsWith(regionPrefix)) {
+                    resourceIds.add(storeKey.substring(regionPrefix.length()));
+                }
+            }
+        }
+
         List<Map<String, String>> result = new ArrayList<>();
-        for (String resourceId : new ArrayList<>(tags.keys())) {
+        for (String resourceId : resourceIds) {
             String resourceType = inferResourceType(resourceId);
 
             if (filterResourceIds != null && !filterResourceIds.contains(resourceId)) {
@@ -2712,7 +2781,7 @@ public class Ec2Service implements ContainerTeardown {
             if (filterResourceTypes != null && !filterResourceTypes.contains(resourceType)) {
                 continue;
             }
-            for (Tag tag : tags.get(resourceId).orElse(List.of())) {
+            for (Tag tag : effectiveTags(region, resourceId)) {
                 if (filterKeys != null && !filterKeys.contains(tag.getKey())) {
                     continue;
                 }
@@ -2731,19 +2800,7 @@ public class Ec2Service implements ContainerTeardown {
     }
 
     private String inferResourceType(String resourceId) {
-        if (resourceId.startsWith("i-")) return "instance";
-        if (resourceId.startsWith("vpc-")) return "vpc";
-        if (resourceId.startsWith("subnet-")) return "subnet";
-        if (resourceId.startsWith("sg-")) return "security-group";
-        if (resourceId.startsWith("igw-")) return "internet-gateway";
-        if (resourceId.startsWith("rtb-")) return "route-table";
-        if (resourceId.startsWith("key-")) return "key-pair";
-        if (resourceId.startsWith("eipalloc-")) return "elastic-ip";
-        if (resourceId.startsWith("lt-")) return "launch-template";
-        if (resourceId.startsWith("vpce-")) return "vpc-endpoint";
-        if (resourceId.startsWith("nat-")) return "natgateway";
-        if (resourceId.startsWith("pl-")) return "prefix-list";
-        return "unknown";
+        return Ec2ResourceIds.resourceType(resourceId);
     }
 
     // ─── Internet Gateways ─────────────────────────────────────────────────────
