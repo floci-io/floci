@@ -49,9 +49,13 @@ class Ec2FlowLogCfnProvisionerTest {
         return r;
     }
 
+    /** Shaped like something createFlowLog stored, which defaults these three when omitted. */
     private FlowLog flowLog(String id) {
         FlowLog fl = new FlowLog();
         fl.setFlowLogId(id);
+        fl.setResourceType("VPC");
+        fl.setTrafficType("ALL");
+        fl.setLogDestinationType("s3");
         return fl;
     }
 
@@ -90,8 +94,12 @@ class Ec2FlowLogCfnProvisionerTest {
     void updateReusesTheFlowLogThisStackAlreadyCreated() {
         StackResource r = resource();
         r.setPhysicalId("fl-0abc");
+        // Stamped with what a create from this template would have stored, so the re-apply is a
+        // genuine no-op rather than reading as an added ResourceId.
+        FlowLog existing = flowLog("fl-0abc");
+        existing.setResourceId("vpc-123");
         when(flowLogs.describeFlowLogs("us-east-1", List.of("fl-0abc")))
-                .thenReturn(List.of(flowLog("fl-0abc")));
+                .thenReturn(List.of(existing));
 
         provisioner.provision(r, mapper.createObjectNode().put("ResourceId", "vpc-123"), ctx());
 
@@ -134,6 +142,40 @@ class Ec2FlowLogCfnProvisionerTest {
                 mapper.createObjectNode().put("ResourceId", "vpc-123"), ctx()));
         assertEquals("ValidationError", e.getErrorCode());
         verify(flowLogs, never()).createFlowLog(anyString(), any(), any(), any(), any(), any(), any(), anyInt());
+    }
+
+    @Test
+    void reapplyingATemplateThatOmitsDefaultedPropertiesIsANoOp() {
+        // createFlowLog stores VPC, ALL and s3 when the template omits them, so a re-apply reads
+        // null against those defaults. Comparing raw values made an unchanged stack update fail.
+        StackResource r = resource();
+        r.setPhysicalId("fl-0abc");
+        FlowLog existing = flowLog("fl-0abc");
+        existing.setResourceId("vpc-123");
+        existing.setResourceType("VPC");
+        existing.setTrafficType("ALL");
+        existing.setLogDestinationType("s3");
+        when(flowLogs.describeFlowLogs("us-east-1", List.of("fl-0abc"))).thenReturn(List.of(existing));
+
+        provisioner.provision(r, mapper.createObjectNode().put("ResourceId", "vpc-123"), ctx());
+
+        assertEquals("fl-0abc", r.getPhysicalId());
+        verify(flowLogs, never()).createFlowLog(anyString(), any(), any(), any(), any(), any(), any(), anyInt());
+    }
+
+    @Test
+    void addingAPropertyTheLogNeverHadReportsAnUnsupportedReplacement() {
+        // The stored null used to short-circuit the comparison, so the new value was ignored and
+        // the stack reported complete while the log kept no format at all.
+        StackResource r = resource();
+        r.setPhysicalId("fl-0abc");
+        FlowLog existing = flowLog("fl-0abc");
+        existing.setResourceId("vpc-123");
+        when(flowLogs.describeFlowLogs("us-east-1", List.of("fl-0abc"))).thenReturn(List.of(existing));
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r,
+                mapper.createObjectNode().put("ResourceId", "vpc-123").put("LogFormat", "${srcaddr}"), ctx()));
+        assertEquals("ValidationError", e.getErrorCode());
     }
 
     @Test

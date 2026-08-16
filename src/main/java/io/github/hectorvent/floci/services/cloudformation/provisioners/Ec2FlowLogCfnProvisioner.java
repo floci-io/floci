@@ -9,6 +9,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
 
 /**
@@ -20,6 +21,11 @@ public class Ec2FlowLogCfnProvisioner implements CfnResourceProvisioner {
 
     /** AWS's default when MaxAggregationInterval is omitted (10 minutes). */
     private static final int DEFAULT_MAX_AGGREGATION_INTERVAL = 600;
+
+    /** The defaults createFlowLog applies when the template omits these, kept in step with it. */
+    private static final String DEFAULT_RESOURCE_TYPE = "VPC";
+    private static final String DEFAULT_TRAFFIC_TYPE = "ALL";
+    private static final String DEFAULT_LOG_DESTINATION_TYPE = "s3";
 
     private final FlowLogService flowLogService;
 
@@ -71,11 +77,19 @@ public class Ec2FlowLogCfnProvisioner implements CfnResourceProvisioner {
      * configuration no longer matches the template.
      */
     private void requireUnchanged(FlowLog existing, JsonNode props, ProvisionContext ctx) {
-        rejectIfChanged("ResourceId", existing.getResourceId(), ctx.resolveOptional(props, "ResourceId"));
-        rejectIfChanged("ResourceType", existing.getResourceType(), ctx.resolveOptional(props, "ResourceType"));
-        rejectIfChanged("TrafficType", existing.getTrafficType(), ctx.resolveOptional(props, "TrafficType"));
+        // Compared as effective values on both sides. createFlowLog defaults ResourceType,
+        // TrafficType and LogDestinationType when the template omits them, so a re-apply of an
+        // unchanged template reads null here against a stored default. Defaulting the requested
+        // side the same way keeps a no-op update a no-op, while a genuine add, drop or change
+        // still differs. The other three have no create-time default and stay null on both sides.
+        rejectIfChanged("ResourceId", existing.getResourceId(),
+                ctx.resolveOptional(props, "ResourceId"));
+        rejectIfChanged("ResourceType", existing.getResourceType(),
+                orDefault(ctx.resolveOptional(props, "ResourceType"), DEFAULT_RESOURCE_TYPE));
+        rejectIfChanged("TrafficType", existing.getTrafficType(),
+                orDefault(ctx.resolveOptional(props, "TrafficType"), DEFAULT_TRAFFIC_TYPE));
         rejectIfChanged("LogDestinationType", existing.getLogDestinationType(),
-                ctx.resolveOptional(props, "LogDestinationType"));
+                orDefault(ctx.resolveOptional(props, "LogDestinationType"), DEFAULT_LOG_DESTINATION_TYPE));
         rejectIfChanged("LogDestination", existing.getLogDestination(),
                 ctx.resolveOptional(props, "LogDestination"));
         rejectIfChanged("LogFormat", existing.getLogFormat(), ctx.resolveOptional(props, "LogFormat"));
@@ -88,13 +102,18 @@ public class Ec2FlowLogCfnProvisioner implements CfnResourceProvisioner {
         }
     }
 
+    private static String orDefault(String requested, String fallback) {
+        return requested == null || requested.isBlank() ? fallback : requested;
+    }
+
     /**
-     * A property the stored log never captured is left alone, since an absent stored value is not
-     * evidence of a different one. Dropping a property the template used to declare is a change
-     * though, so the effective value is compared rather than skipping a blank request.
+     * Both sides are the effective value, so an absent one means genuinely absent rather than
+     * unknown. Adding a property, dropping one, and altering one all read as changes.
      */
     private void rejectIfChanged(String property, String existing, String requested) {
-        if (existing == null || existing.isBlank() || requested != null && requested.equals(existing)) {
+        String a = existing == null || existing.isBlank() ? null : existing;
+        String b = requested == null || requested.isBlank() ? null : requested;
+        if (Objects.equals(a, b)) {
             return;
         }
         throw new AwsException("ValidationError",
