@@ -294,6 +294,23 @@ class Ec2IntegrationTest {
 
     @Test
     @Order(9)
+    void amazonOwnerScopeFindsTheSeededAmazonLinuxImages() {
+        // The catalog matches on its own owner metadata, and the two Amazon Linux entries carried
+        // none, so Owner.1=amazon omitted them however the registered-image matcher read the alias.
+        given()
+            .formParam("Action", "DescribeImages")
+            .formParam("Owner.1", "amazon")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("amzn2-ami-hvm"))
+            .body(containsString("al2023-ami"));
+    }
+
+    @Test
+    @Order(9)
     void synthesizedLookupImageResolvesTheAmazonOwnerAlias() {
         // imageOwnerId is always an account id in AWS. Writing the alias through left the image
         // owned by the literal "amazon", and the owner check accepted it by string equality.
