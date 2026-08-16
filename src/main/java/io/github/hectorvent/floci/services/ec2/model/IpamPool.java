@@ -21,6 +21,10 @@ public class IpamPool {
     private String addressFamily;
     private String description;
     private String state;
+    private boolean autoImport;
+    private Integer allocationMinNetmaskLength;
+    private Integer allocationMaxNetmaskLength;
+    private Integer allocationDefaultNetmaskLength;
     private List<IpamPoolCidr> provisionedCidrs = new ArrayList<>();
     private List<IpamPoolAllocation> allocations = new ArrayList<>();
     private List<Tag> tags = new ArrayList<>();
@@ -59,6 +63,24 @@ public class IpamPool {
 
     public String getState() { return state; }
     public void setState(String state) { this.state = state; }
+
+    public boolean isAutoImport() { return autoImport; }
+    public void setAutoImport(boolean autoImport) { this.autoImport = autoImport; }
+
+    public Integer getAllocationMinNetmaskLength() { return allocationMinNetmaskLength; }
+    public void setAllocationMinNetmaskLength(Integer allocationMinNetmaskLength) {
+        this.allocationMinNetmaskLength = allocationMinNetmaskLength;
+    }
+
+    public Integer getAllocationMaxNetmaskLength() { return allocationMaxNetmaskLength; }
+    public void setAllocationMaxNetmaskLength(Integer allocationMaxNetmaskLength) {
+        this.allocationMaxNetmaskLength = allocationMaxNetmaskLength;
+    }
+
+    public Integer getAllocationDefaultNetmaskLength() { return allocationDefaultNetmaskLength; }
+    public void setAllocationDefaultNetmaskLength(Integer allocationDefaultNetmaskLength) {
+        this.allocationDefaultNetmaskLength = allocationDefaultNetmaskLength;
+    }
 
     public List<IpamPoolCidr> getProvisionedCidrs() { return provisionedCidrs; }
     public void setProvisionedCidrs(List<IpamPoolCidr> provisionedCidrs) { this.provisionedCidrs = provisionedCidrs; }

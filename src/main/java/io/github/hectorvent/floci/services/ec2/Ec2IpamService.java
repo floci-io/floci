@@ -315,6 +315,33 @@ public class Ec2IpamService {
         return pool;
     }
 
+    public IpamPool modifyIpamPool(String region, String ipamPoolId, String description,
+                                   Boolean autoImport, Integer allocationMinNetmaskLength,
+                                   Integer allocationMaxNetmaskLength, Integer allocationDefaultNetmaskLength,
+                                   boolean clearAllocationDefaultNetmaskLength) {
+        OwnedPool ownedPool = requireOwnedPool(region, ipamPoolId);
+        IpamPool pool = ownedPool.pool();
+        if (description != null) {
+            pool.setDescription(description);
+        }
+        if (autoImport != null) {
+            pool.setAutoImport(autoImport);
+        }
+        if (allocationMinNetmaskLength != null) {
+            pool.setAllocationMinNetmaskLength(allocationMinNetmaskLength);
+        }
+        if (allocationMaxNetmaskLength != null) {
+            pool.setAllocationMaxNetmaskLength(allocationMaxNetmaskLength);
+        }
+        if (clearAllocationDefaultNetmaskLength) {
+            pool.setAllocationDefaultNetmaskLength(null);
+        } else if (allocationDefaultNetmaskLength != null) {
+            pool.setAllocationDefaultNetmaskLength(allocationDefaultNetmaskLength);
+        }
+        savePool(ownedPool);
+        return pool;
+    }
+
     private String ipamIdOfScope(String ipamScopeId) {
         if (ipamScopeId == null) {
             return null;

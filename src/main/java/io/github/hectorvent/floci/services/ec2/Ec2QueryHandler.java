@@ -235,6 +235,7 @@ public class Ec2QueryHandler {
                 case "CreateIpamPool" -> handleCreateIpamPool(params, region);
                 case "DescribeIpamPools" -> handleDescribeIpamPools(params, region);
                 case "DeleteIpamPool" -> handleDeleteIpamPool(params, region);
+                case "ModifyIpamPool" -> handleModifyIpamPool(params, region);
                 case "AssociateIpamByoasn" -> handleAssociateIpamByoasn(params, region);
                 case "DescribeIpamByoasn" -> handleDescribeIpamByoasn(params, region);
                 case "DisassociateIpamByoasn" -> handleDisassociateIpamByoasn(params, region);
@@ -1314,6 +1315,28 @@ public class Ec2QueryHandler {
         return xmlResponse(xml.build());
     }
 
+    private Response handleModifyIpamPool(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
+        IpamPool pool = ipamService.modifyIpamPool(
+                region,
+                p.getFirst("IpamPoolId"),
+                p.getFirst("Description"),
+                p.getFirst("AutoImport") == null ? null : Boolean.parseBoolean(p.getFirst("AutoImport")),
+                p.getFirst("AllocationMinNetmaskLength") == null
+                        ? null : Integer.parseInt(p.getFirst("AllocationMinNetmaskLength")),
+                p.getFirst("AllocationMaxNetmaskLength") == null
+                        ? null : Integer.parseInt(p.getFirst("AllocationMaxNetmaskLength")),
+                p.getFirst("AllocationDefaultNetmaskLength") == null
+                        ? null : Integer.parseInt(p.getFirst("AllocationDefaultNetmaskLength")),
+                Boolean.parseBoolean(p.getFirst("ClearAllocationDefaultNetmaskLength")));
+        XmlBuilder xml = new XmlBuilder()
+                .start("ModifyIpamPoolResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString());
+        writeIpamPool(xml, "ipamPool", pool);
+        xml.end("ModifyIpamPoolResponse");
+        return xmlResponse(xml.build());
+    }
+
     private Response handleProvisionIpamPoolCidr(MultivaluedMap<String, String> p, String region) {
         IpamPoolCidr cidr = ipamService.provisionIpamPoolCidr(region,
                 p.getFirst("IpamPoolId"), p.getFirst("Cidr"));
@@ -1417,12 +1440,22 @@ public class Ec2QueryHandler {
                 .elem("ownerId", pool.getOwnerId())
                 .elem("locale", pool.getLocale())
                 .elem("addressFamily", pool.getAddressFamily())
-                .elem("state", pool.getState());
+                .elem("state", pool.getState())
+                .elem("autoImport", String.valueOf(pool.isAutoImport()));
         if (pool.getSourceIpamPoolId() != null) {
             xml.elem("sourceIpamPoolId", pool.getSourceIpamPoolId());
         }
         if (pool.getDescription() != null) {
             xml.elem("description", pool.getDescription());
+        }
+        if (pool.getAllocationMinNetmaskLength() != null) {
+            xml.elem("allocationMinNetmaskLength", String.valueOf(pool.getAllocationMinNetmaskLength()));
+        }
+        if (pool.getAllocationMaxNetmaskLength() != null) {
+            xml.elem("allocationMaxNetmaskLength", String.valueOf(pool.getAllocationMaxNetmaskLength()));
+        }
+        if (pool.getAllocationDefaultNetmaskLength() != null) {
+            xml.elem("allocationDefaultNetmaskLength", String.valueOf(pool.getAllocationDefaultNetmaskLength()));
         }
         xml.end(wrapper);
     }
