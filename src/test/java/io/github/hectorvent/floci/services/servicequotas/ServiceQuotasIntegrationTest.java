@@ -219,9 +219,13 @@ class ServiceQuotasIntegrationTest {
 
     @Test
     void unknownAction_returnsUnknownOperation() {
+        // Deliberately a name AWS will never define. This test previously used
+        // RequestServiceQuotaIncrease, which then became supported and silently
+        // inverted the test's premise. A synthetic name keeps the assertion honest
+        // no matter which real operations get implemented later.
         given()
             .contentType(CONTENT_TYPE)
-            .header("X-Amz-Target", "ServiceQuotasV20190624.RequestServiceQuotaIncrease")
+            .header("X-Amz-Target", "ServiceQuotasV20190624.ThisOperationDoesNotExist")
             .header("Authorization", AUTH_HEADER)
             .body("{}")
         .when()

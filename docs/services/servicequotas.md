@@ -11,8 +11,9 @@ them — CodeBuild's `L-2DC20C30` ("Concurrently running builds") and Lambda's `
 values are deliberately generous (5000) so local pipelines that gate on quota headroom, such
 as AWS Landing Zone Accelerator, never stall on a limit the emulator does not enforce.
 
-Applied quotas and AWS default quotas return the same data, and quota values are static:
-`RequestServiceQuotaIncrease` and the other write operations are not implemented.
+Applied quotas and AWS default quotas return the same data, and quota values are static.
+`RequestServiceQuotaIncrease` is accepted and validated but does not change any quota value —
+see Limitations.
 
 ## Supported Actions
 
@@ -23,7 +24,27 @@ Applied quotas and AWS default quotas return the same data, and quota values are
 | `GetServiceQuota` | Returns one quota by service and quota code, else `NoSuchResourceException` |
 | `GetAWSDefaultServiceQuota` | Same as GetServiceQuota; defaults equal applied values |
 | `ListAWSDefaultServiceQuotas` | Same as ListServiceQuotas; defaults equal applied values |
+| `RequestServiceQuotaIncrease` | Validates and echoes an increase request as `PENDING`; not persisted, quota unchanged |
 <!-- floci:actions:end -->
+
+## Limitations
+
+- **Quota increase requests are not persisted.** `RequestServiceQuotaIncrease` validates its
+  input, resolves the quota, and returns a well-formed `RequestedQuota`, but keeps no state.
+  The request is observable only in the response that creates it.
+- **`Status` is always `PENDING` and never advances.** Nothing processes requests, so no
+  request ever reaches `APPROVED`, `CASE_OPENED`, or `DENIED`. `PENDING` is what real AWS
+  returns on creation, so a caller that only reads the creation response sees faithful data;
+  a caller that polls for completion will wait forever.
+- **A requested increase does not change the quota.** `GetServiceQuota` continues to return
+  the catalog value after a successful increase request. Quota values remain static by design
+  so pipelines never stall on an unenforced limit.
+- `GetRequestedServiceQuotaChange` and `ListRequestedServiceQuotaChangeHistory` are not
+  implemented — there is no request store for them to read.
+- `CaseId` is never returned; no support case is opened. `SupportCaseAllowed` in the request is
+  accepted and ignored, as the emulator has no case-opening path either way.
+- The quota-increase template operations (`PutServiceQuotaIncreaseRequestIntoTemplate` and
+  related) are not implemented.
 
 ## Configuration
 

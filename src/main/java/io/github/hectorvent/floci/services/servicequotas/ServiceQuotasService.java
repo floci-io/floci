@@ -13,6 +13,7 @@ import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.zip.CRC32;
+import java.time.Instant;
 
 /**
  * Service Quotas emulation backed by a generated in-memory catalog.
@@ -178,5 +179,60 @@ public class ServiceQuotasService {
     }
 
     private record Page(List<QuotaDefinition> items, String nextToken) {
+    }
+
+    public ObjectNode requestServiceQuotaIncrease(String serviceCode, String quotaCode, Double desiredValue,
+                                                  String contextId, String region, String accountId) {
+        requireServiceCode(serviceCode);
+        if (quotaCode == null || quotaCode.isEmpty()) {
+            throw new AwsException("IllegalArgumentException",
+                    "Invalid input: QuotaCode must not be empty.", 400);
+        }
+        if (desiredValue == null) {
+            throw new AwsException("IllegalArgumentException",
+                    "Invalid input: DesiredValue must not be null.", 400);
+        }
+        if (desiredValue < 0 || desiredValue > 10000000000.0) {
+            throw new AwsException("IllegalArgumentException",
+                    "Invalid input: DesiredValue must be between 0 and 10000000000.", 400);
+        }
+        QuotaDefinition quota = quotasFor(serviceCode).stream()
+                .filter(q -> q.quotaCode().equals(quotaCode))
+                .findFirst()
+                .orElseThrow(() -> new AwsException("NoSuchResourceException",
+                        "The request failed because the specified service quota does not exist.", 400));
+
+        CRC32 crc = new CRC32();
+        crc.update((serviceCode + "/" + quotaCode).getBytes(StandardCharsets.UTF_8));
+        String id = "%08X".formatted(crc.getValue());
+
+        long now = Instant.now().getEpochSecond();
+
+        ObjectNode requestedQuota = objectMapper.createObjectNode();
+        requestedQuota.put("Id", id);
+        requestedQuota.put("ServiceCode", serviceCode);
+        requestedQuota.put("ServiceName", SERVICE_NAMES.getOrDefault(serviceCode, serviceCode));
+        requestedQuota.put("QuotaCode", quotaCode);
+        requestedQuota.put("QuotaName", quota.quotaName());
+        requestedQuota.put("QuotaArn", "arn:aws:servicequotas:" + region + ":" + accountId + ":"
+                + serviceCode + "/" + quotaCode);
+        requestedQuota.put("DesiredValue", desiredValue);
+        requestedQuota.put("Status", "PENDING");
+        requestedQuota.put("Requester", "floci-emulator");
+        requestedQuota.put("Unit", "None");
+        requestedQuota.put("GlobalQuota", false);
+        requestedQuota.put("QuotaRequestedAtLevel", "ACCOUNT");
+        requestedQuota.put("Created", now);
+        requestedQuota.put("LastUpdated", now);
+        if (contextId != null) {
+            ObjectNode context = objectMapper.createObjectNode();
+            context.put("ContextId", contextId);
+            context.put("ContextScope", "RESOURCE");
+            requestedQuota.set("QuotaContext", context);
+        }
+
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("RequestedQuota", requestedQuota);
+        return response;
     }
 }

@@ -32,6 +32,7 @@ public class ServiceQuotasJsonHandler {
             case "GetServiceQuota" -> handleGetServiceQuota(request, region, accountId);
             case "GetAWSDefaultServiceQuota" -> handleGetServiceQuota(request, region, accountId);
             case "ListAWSDefaultServiceQuotas" -> handleListServiceQuotas(request, region, accountId);
+            case "RequestServiceQuotaIncrease" -> handleRequestServiceQuotaIncrease(request, region, accountId);
             default -> Response.status(400)
                     .entity(new AwsErrorResponse("UnknownOperationException",
                             "Unknown operation: ServiceQuotasV20190624." + action))
@@ -63,5 +64,19 @@ public class ServiceQuotasJsonHandler {
     private static Integer integerOrNull(JsonNode node, String field) {
         JsonNode value = node == null ? null : node.get(field);
         return (value != null && value.isNumber()) ? value.asInt() : null;
+    }
+
+    private Response handleRequestServiceQuotaIncrease(JsonNode request, String region, String accountId) {
+        return Response.ok(service.requestServiceQuotaIncrease(
+                stringOrNull(request, "ServiceCode"),
+                stringOrNull(request, "QuotaCode"),
+                doubleOrNull(request, "DesiredValue"),
+                stringOrNull(request, "ContextId"),
+                region, accountId)).build();
+    }
+
+    private static Double doubleOrNull(JsonNode node, String field) {
+        JsonNode value = node == null ? null : node.get(field);
+        return (value != null && value.isNumber()) ? value.asDouble() : null;
     }
 }
