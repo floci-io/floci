@@ -3936,8 +3936,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         KeyPair kp = new KeyPair();
         kp.setKeyPairId(keyPairId);
         kp.setKeyName(keyName);
-        kp.setKeyFingerprint("00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00");
-        kp.setKeyMaterial("-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA0Z3VS5JJcds3xHn/ygWep4Ib/ue7YiKbCIZgYpYDe0+FAKE\n-----END RSA PRIVATE KEY-----");
+        Ec2KeyMaterial.Generated generated = Ec2KeyMaterial.generateRsa();
+        kp.setKeyFingerprint(generated.fingerprint());
+        kp.setKeyMaterial(generated.privateKeyPem());
+        // The public half is what RunInstances injects into the guest's authorized_keys.
+        // Without storing it, a key pair created here could never authenticate anything.
+        kp.setPublicKey(generated.openSshPublicKey());
         kp.setRegion(region);
         keyPairs.put(key(region, keyPairId), kp);
         return kp;
@@ -3997,7 +4001,13 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         KeyPair kp = new KeyPair();
         kp.setKeyPairId(keyPairId);
         kp.setKeyName(keyName);
-        kp.setKeyFingerprint("00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00");
+        // A per-key fingerprint, not a constant: callers compare it to detect that the key
+        // under a given name has been replaced. Falls back to the old placeholder only when
+        // the material does not parse, rather than reporting a digest of garbage.
+        String fingerprint = Ec2KeyMaterial.fingerprintOf(publicKeyMaterial);
+        kp.setKeyFingerprint(fingerprint != null
+                ? fingerprint
+                : "00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00");
         kp.setPublicKey(publicKeyMaterial);
         kp.setRegion(region);
         keyPairs.put(key(region, keyPairId), kp);
