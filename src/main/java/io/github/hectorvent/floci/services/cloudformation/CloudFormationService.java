@@ -727,7 +727,7 @@ public class CloudFormationService {
 
             if (!isCreate) {
                 updateCommitted = true;
-                if (hasReplacementUpdates(stack)) {
+                if (hasReplacementUpdates(stack) || hasRemovedOrConditionFalseResources(stack, resources, conditions)) {
                     stack.setStatus("UPDATE_COMPLETE_CLEANUP_IN_PROGRESS");
                     stack.setLastUpdatedTime(now());
                     addEvent(stack, stack.getStackName(), stack.getStackId(),
@@ -912,6 +912,34 @@ public class CloudFormationService {
                 .anyMatch(provisioner::hasReplacementUpdate);
     }
 
+    private boolean hasRemovedOrConditionFalseResources(Stack stack, JsonNode resources, Map<String, Boolean> conditions) {
+        if (!resources.isObject()) {
+            return false;
+        }
+        for (StackResource resource : stack.getResources().values()) {
+            JsonNode resDef = resources.get(resource.getLogicalId());
+            if (resDef == null) {
+                return true;
+            }
+            String condition = resDef.path("Condition").asText(null);
+            if (condition != null && !conditions.getOrDefault(condition, false)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void deleteResourcePhysically(StackResource resource, String region) throws Exception {
+        if ("AWS::CloudFormation::Stack".equals(resource.getResourceType())) {
+            Future<?> future = deleteStack(resource.getPhysicalId(), region, regionResolver.getAccountId());
+            if (future != null) {
+                future.get();
+            }
+        } else {
+            provisioner.delete(resource, region);
+        }
+    }
+
     private void rollbackFailedUpdate(
             Stack stack,
             String region,
@@ -977,7 +1005,7 @@ public class CloudFormationService {
                         addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
                                 resource.getResourceType(), "DELETE_IN_PROGRESS",
                                 "Resource creation cancelled during update rollback");
-                        provisioner.delete(resource, region);
+                        deleteResourcePhysically(resource, region);
                     }
                     addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
                             resource.getResourceType(), "DELETE_COMPLETE",
@@ -1120,7 +1148,7 @@ public class CloudFormationService {
             addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
                     resource.getResourceType(), "DELETE_IN_PROGRESS", null);
             try {
-                provisioner.delete(resource, region);
+                deleteResourcePhysically(resource, region);
                 resource.setStatus("DELETE_COMPLETE");
                 addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
                         resource.getResourceType(), "DELETE_COMPLETE", null);
@@ -1173,7 +1201,7 @@ public class CloudFormationService {
             addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
                     resource.getResourceType(), "DELETE_IN_PROGRESS", null);
             try {
-                provisioner.delete(resource, region);
+                deleteResourcePhysically(resource, region);
                 addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
                         resource.getResourceType(), "DELETE_COMPLETE", null);
                 stack.getResources().remove(resource.getLogicalId());
@@ -1221,7 +1249,7 @@ public class CloudFormationService {
                 addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
                         resource.getResourceType(), "DELETE_IN_PROGRESS", null);
                 try {
-                    provisioner.delete(resource, region);
+                    deleteResourcePhysically(resource, region);
                     resource.setStatus("DELETE_COMPLETE");
                     addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
                             resource.getResourceType(), "DELETE_COMPLETE", null);

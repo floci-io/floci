@@ -20,6 +20,9 @@ import static org.junit.jupiter.api.Assertions.fail;
 @QuarkusTest
 class CloudFormationDeletionPolicyIntegrationTest {
 
+    private static final String CUSTOM_AUTH =
+            "AWS4-HMAC-SHA256 Credential=111122223333/20260205/eu-west-1/cloudformation/aws4_request";
+
     @Test
     void retainKeepsANonEmptyBucketAndTheStackStillCompletesTheDelete() throws InterruptedException {
         String suffix = Long.toString(System.nanoTime(), 36);
@@ -171,9 +174,132 @@ class CloudFormationDeletionPolicyIntegrationTest {
         assertBucketDeleted(unrecognized);
     }
 
+    @Test
+    void retainKeepsResourceWhenRemovedFromTemplateOnUpdate() throws InterruptedException {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String bucket1 = "cfn-update-remove-bucket1-" + suffix;
+        String bucket2 = "cfn-update-remove-bucket2-" + suffix;
+        String stackName = "cfn-update-remove-stack-" + suffix;
+
+        String template1 = """
+            {
+              "Resources": {
+                "KeptBucket": {
+                  "Type": "AWS::S3::Bucket",
+                  "DeletionPolicy": "Retain",
+                  "Properties": { "BucketName": "%s" }
+                },
+                "DeletedBucket": {
+                  "Type": "AWS::S3::Bucket",
+                  "Properties": { "BucketName": "%s" }
+                }
+              }
+            }
+            """.formatted(bucket1, bucket2);
+
+        String stackId = createStack(stackName, template1);
+        awaitStackStatus(stackId, "CREATE_COMPLETE");
+
+        String template2 = """
+            {
+              "Resources": {
+              }
+            }
+            """;
+
+        updateStack(stackName, template2);
+        awaitStackStatus(stackId, "UPDATE_COMPLETE");
+
+        assertBucketExists(bucket1);
+        assertBucketDeleted(bucket2);
+    }
+
+    @Test
+    void nestedStackIsPhysicallyDeletedWhenRemovedFromTemplateOnUpdate() throws InterruptedException {
+        given().header("Authorization", CUSTOM_AUTH).when().put("/nested-stack-templates").then().statusCode(200);
+        String childTemplate = "{\"Resources\": {\"Queue\": {\"Type\": \"AWS::SQS::Queue\"}}}";
+        given()
+            .header("Authorization", CUSTOM_AUTH)
+            .contentType("application/json")
+            .body(childTemplate)
+        .when()
+            .put("/nested-stack-templates/child-update.json")
+        .then()
+            .statusCode(200);
+
+        String stackName = "parent-stack-" + System.nanoTime();
+        String template1 = """
+            {
+              "Resources": {
+                "ChildStack": {
+                  "Type": "AWS::CloudFormation::Stack",
+                  "Properties": { "TemplateURL": "http://localhost/nested-stack-templates/child-update.json" }
+                }
+              }
+            }
+            """;
+
+        String parentStackId = createStack(stackName, template1, CUSTOM_AUTH);
+        awaitStackStatus(parentStackId, "CREATE_COMPLETE", CUSTOM_AUTH);
+
+        String nestedStackId = getNestedStackId(parentStackId, "ChildStack", CUSTOM_AUTH);
+        assertThat(nestedStackId, containsString("111122223333"));
+        assertThat(nestedStackId, containsString("eu-west-1"));
+
+        String template2 = "{\"Resources\": {}}";
+        updateStack(stackName, template2, CUSTOM_AUTH);
+        awaitStackStatus(parentStackId, "UPDATE_COMPLETE", CUSTOM_AUTH);
+
+        awaitStackStatus(nestedStackId, "DELETE_COMPLETE", CUSTOM_AUTH);
+    }
+
+    @Test
+    void nestedStackIsRetainedWhenRemovedFromTemplateOnUpdateWithRetainPolicy() throws InterruptedException {
+        given().when().put("/nested-stack-templates").then().statusCode(200);
+        String childTemplate = "{\"Resources\": {\"Queue\": {\"Type\": \"AWS::SQS::Queue\"}}}";
+        given().contentType("application/json").body(childTemplate).when().put("/nested-stack-templates/child-retain.json");
+
+        String stackName = "parent-retain-" + System.nanoTime();
+        String template1 = """
+            {
+              "Resources": {
+                "ChildStack": {
+                  "Type": "AWS::CloudFormation::Stack",
+                  "DeletionPolicy": "Retain",
+                  "Properties": { "TemplateURL": "http://localhost/nested-stack-templates/child-retain.json" }
+                }
+              }
+            }
+            """;
+
+        String parentStackId = createStack(stackName, template1, null);
+        awaitStackStatus(parentStackId, "CREATE_COMPLETE", null);
+        String nestedStackId = getNestedStackId(parentStackId, "ChildStack", null);
+
+        String template2 = "{\"Resources\": {}}";
+        updateStack(stackName, template2, null);
+        awaitStackStatus(parentStackId, "UPDATE_COMPLETE", null);
+
+        awaitStackStatus(nestedStackId, "CREATE_COMPLETE", null);
+    }
+
+    private static String getNestedStackId(String stackName, String logicalId, String auth) {
+        String xml = cfnQuery("DescribeStackResources", stackName, auth).then().statusCode(200).extract().asString();
+        int logIdx = xml.indexOf("<LogicalResourceId>" + logicalId + "</LogicalResourceId>");
+        if (logIdx == -1) fail("Logical resource " + logicalId + " not found");
+        int physStart = xml.indexOf("<PhysicalResourceId>", logIdx) + "<PhysicalResourceId>".length();
+        int physEnd = xml.indexOf("</PhysicalResourceId>", physStart);
+        return xml.substring(physStart, physEnd);
+    }
+
     private static String createStack(String stackName, String template) {
-        String xml = given()
-            .contentType("application/x-www-form-urlencoded")
+        return createStack(stackName, template, null);
+    }
+
+    private static String createStack(String stackName, String template, String auth) {
+        var req = given().contentType("application/x-www-form-urlencoded");
+        if (auth != null) req.header("Authorization", auth);
+        String xml = req
             .formParam("Action", "CreateStack")
             .formParam("StackName", stackName)
             .formParam("TemplateBody", template)
@@ -198,12 +324,32 @@ class CloudFormationDeletionPolicyIntegrationTest {
             .statusCode(200);
     }
 
+    private static void updateStack(String stackName, String template) {
+        updateStack(stackName, template, null);
+    }
+
+    private static void updateStack(String stackName, String template, String auth) {
+        var req = given().contentType("application/x-www-form-urlencoded");
+        if (auth != null) req.header("Authorization", auth);
+        req.formParam("Action", "UpdateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
     /** DeleteStack runs asynchronously, and a deleted stack stays describable by its stack ID. */
     private static void awaitStackStatus(String stackId, String status) throws InterruptedException {
+        awaitStackStatus(stackId, status, null);
+    }
+
+    private static void awaitStackStatus(String stackId, String status, String auth) throws InterruptedException {
         String xml = "";
         long deadline = System.currentTimeMillis() + 10_000;
         while (System.currentTimeMillis() < deadline) {
-            xml = describeStacks(stackId);
+            xml = describeStacks(stackId, auth);
             if (xml.contains("<StackStatus>" + status + "</StackStatus>")) {
                 return;
             }
@@ -213,20 +359,25 @@ class CloudFormationDeletionPolicyIntegrationTest {
     }
 
     private static String describeStacks(String stackId) {
-        return cfnQuery("DescribeStacks", stackId).then().statusCode(200).extract().asString();
+        return describeStacks(stackId, null);
+    }
+
+    private static String describeStacks(String stackId, String auth) {
+        return cfnQuery("DescribeStacks", stackId, auth).then().statusCode(200).extract().asString();
     }
 
     private static String describeStackEvents(String stackId) {
-        return cfnQuery("DescribeStackEvents", stackId).then().statusCode(200).extract().asString();
+        return cfnQuery("DescribeStackEvents", stackId, null).then().statusCode(200).extract().asString();
     }
 
     private static Response cfnQuery(String action, String stackId) {
-        return given()
-            .contentType("application/x-www-form-urlencoded")
-            .formParam("Action", action)
-            .formParam("StackName", stackId)
-        .when()
-            .post("/");
+        return cfnQuery(action, stackId, null);
+    }
+
+    private static Response cfnQuery(String action, String stackId, String auth) {
+        var req = given().contentType("application/x-www-form-urlencoded");
+        if (auth != null) req.header("Authorization", auth);
+        return req.formParam("Action", action).formParam("StackName", stackId).when().post("/");
     }
 
     private static void assertBucketExists(String bucket) {
