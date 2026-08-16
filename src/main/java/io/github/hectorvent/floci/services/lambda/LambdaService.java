@@ -996,6 +996,9 @@ public class LambdaService {
         snapshot.setLayers(fn.getLayers());
         snapshot.setArchitectures(fn.getArchitectures());
         snapshot.setEphemeralStorageSize(fn.getEphemeralStorageSize());
+        snapshot.setTracingMode(fn.getTracingMode());
+        snapshot.setDeadLetterTargetArn(fn.getDeadLetterTargetArn());
+        snapshot.setKmsKeyArn(fn.getKmsKeyArn());
 
         functionStore.save(region, snapshot);
         LOG.infov("Published version {0} for function {1}", version, functionName);

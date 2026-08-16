@@ -132,7 +132,7 @@ class LambdaVersionIntegrationTest {
     }
 
     @Test
-    @Order(6)
+    @Order(7)
     void invokeLatest_baselineRunsTheCode() throws Exception {
         // Baseline for the case below. Every other test in this file uses a function with no code
         // at all, so none of them can invoke; this pins that the zip, runtime and harness are
@@ -158,7 +158,7 @@ class LambdaVersionIntegrationTest {
     }
 
     @Test
-    @Order(7)
+    @Order(8)
     void invokePublishedVersion_runsTheVersionsCode() throws Exception {
         // A published version is only useful if it can be invoked, and nothing in this file
         // exercised that. publishVersion copies 14 fields onto the snapshot but no code location
@@ -193,6 +193,66 @@ class LambdaVersionIntegrationTest {
                 // the version actually returned.
                 .body("ok", equalTo(true))
                 .header("X-Amz-Function-Error", nullValue());
+        } finally {
+            given().delete(BASE_PATH + "/functions/" + fnName);
+        }
+    }
+
+    @Test
+    @Order(9)
+    void publishVersion_copiesObservabilityAndEncryptionConfig() {
+        // A published version is an immutable snapshot of configuration too, not only code.
+        // TracingConfig, DeadLetterConfig and KMSKeyArn are all surfaced wherever a function's
+        // configuration is serialized (LambdaController:625-637) but were dropped by the
+        // hand-enumerated field copy the same way the code location was, before that copy was
+        // extended to include them.
+        //
+        // Verified through ListVersionsByFunction rather than GetFunction/GetFunctionConfiguration
+        // with a :1 qualifier: those two both resolve through LambdaService.getFunction(region,
+        // functionName), which hardcodes "$LATEST" in its storage lookup and never reads the
+        // qualifier at all (LambdaFunctionStore.get(region, functionName) -> get(..., "$LATEST")),
+        // so they cannot distinguish version 1's stored config from $LATEST's. That is a separate,
+        // pre-existing gap, tracked apart from this fix. ListVersionsByFunction is genuinely
+        // version-aware: it serializes each stored version object directly.
+        String fnName = "version-config-snapshot";
+        given()
+            .contentType("application/json")
+            .body(String.format("""
+                {
+                    "FunctionName": "%s",
+                    "Runtime": "nodejs20.x",
+                    "Role": "arn:aws:iam::000000000000:role/lambda-role",
+                    "Handler": "index.handler",
+                    "TracingConfig": {"Mode": "Active"},
+                    "DeadLetterConfig": {"TargetArn": "arn:aws:sqs:us-east-1:000000000000:dlq"},
+                    "KMSKeyArn": "arn:aws:kms:us-east-1:000000000000:key/test-key"
+                }
+                """, fnName))
+        .when()
+            .post(BASE_PATH + "/functions")
+        .then()
+            .statusCode(201);
+
+        try {
+            given()
+                .contentType("application/json")
+                .body("{}")
+            .when()
+                .post(BASE_PATH + "/functions/" + fnName + "/versions")
+            .then()
+                .statusCode(201)
+                .body("Version", equalTo("1"));
+
+            given()
+            .when()
+                .get(BASE_PATH + "/functions/" + fnName + "/versions")
+            .then()
+                .statusCode(200)
+                .body("Versions.find { it.Version == '1' }.TracingConfig.Mode", equalTo("Active"))
+                .body("Versions.find { it.Version == '1' }.DeadLetterConfig.TargetArn",
+                        equalTo("arn:aws:sqs:us-east-1:000000000000:dlq"))
+                .body("Versions.find { it.Version == '1' }.KMSKeyArn",
+                        equalTo("arn:aws:kms:us-east-1:000000000000:key/test-key"));
         } finally {
             given().delete(BASE_PATH + "/functions/" + fnName);
         }
