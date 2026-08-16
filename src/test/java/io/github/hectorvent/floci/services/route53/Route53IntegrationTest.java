@@ -32,7 +32,7 @@ class Route53IntegrationTest {
                   <CallerReference>ref-001</CallerReference>
                   <HostedZoneConfig>
                     <Comment>test zone</Comment>
-                    <PrivateZone>false</PrivateZone>
+                    <PrivateZone>true</PrivateZone>
                   </HostedZoneConfig>
                 </CreateHostedZoneRequest>
                 """;
@@ -48,8 +48,10 @@ class Route53IntegrationTest {
                 .body("CreateHostedZoneResponse.HostedZone.Name", equalTo("example.com."))
                 .body("CreateHostedZoneResponse.HostedZone.Id", startsWith("/hostedzone/Z"))
                 .body("CreateHostedZoneResponse.HostedZone.ResourceRecordSetCount", equalTo("2"))
+                .body("CreateHostedZoneResponse.HostedZone.Config.PrivateZone", equalTo("false"))
                 .body("CreateHostedZoneResponse.ChangeInfo.Status", equalTo("INSYNC"))
                 .body("CreateHostedZoneResponse.ChangeInfo.Id", startsWith("/change/C"))
+                .body(not(containsString("<VPC>")))
                 .body(containsString("ns-1.awsdns-01.org"))
                 .extract().header("Location");
 
@@ -67,7 +69,59 @@ class Route53IntegrationTest {
                 .contentType(XML)
                 .body("GetHostedZoneResponse.HostedZone.Id", equalTo("/hostedzone/" + zoneId))
                 .body("GetHostedZoneResponse.HostedZone.Name", equalTo("example.com."))
+                .body("GetHostedZoneResponse.HostedZone.Config.PrivateZone", equalTo("false"))
+                .body(not(containsString("<VPCs>")))
                 .body(containsString("ns-1.awsdns-01.org"));
+    }
+
+    @Test
+    @Order(3)
+    void createHostedZone_withVpcReturnsPrivateZoneAndAssociation() {
+        String body = """
+                <?xml version="1.0" encoding="UTF-8"?>
+                <CreateHostedZoneRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
+                  <Name>private.example.com</Name>
+                  <CallerReference>ref-private-001</CallerReference>
+                  <VPC>
+                    <VPCId>vpc-12345678</VPCId>
+                    <VPCRegion>us-west-2</VPCRegion>
+                  </VPC>
+                  <HostedZoneConfig>
+                    <Comment>private test zone</Comment>
+                  </HostedZoneConfig>
+                </CreateHostedZoneRequest>
+                """;
+
+        String locationHeader = given()
+                .contentType(XML)
+                .body(body)
+                .when().post("/2013-04-01/hostedzone")
+                .then()
+                .statusCode(201)
+                .contentType(XML)
+                .body("CreateHostedZoneResponse.HostedZone.Config.PrivateZone", equalTo("true"))
+                .body("CreateHostedZoneResponse.VPC.VPCId", equalTo("vpc-12345678"))
+                .body("CreateHostedZoneResponse.VPC.VPCRegion", equalTo("us-west-2"))
+                .extract().header("Location");
+
+        String privateZoneId = locationHeader.substring(locationHeader.lastIndexOf('/') + 1);
+
+        try {
+            given()
+                    .when().get("/2013-04-01/hostedzone/" + privateZoneId)
+                    .then()
+                    .statusCode(200)
+                    .contentType(XML)
+                    .body("GetHostedZoneResponse.HostedZone.Config.PrivateZone", equalTo("true"))
+                    .body("GetHostedZoneResponse.VPCs.VPC.size()", equalTo(1))
+                    .body("GetHostedZoneResponse.VPCs.VPC.VPCId", equalTo("vpc-12345678"))
+                    .body("GetHostedZoneResponse.VPCs.VPC.VPCRegion", equalTo("us-west-2"));
+        } finally {
+            given()
+                    .when().delete("/2013-04-01/hostedzone/" + privateZoneId)
+                    .then()
+                    .statusCode(200);
+        }
     }
 
     @Test

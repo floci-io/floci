@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.route53.model.HealthCheckConfig;
 import io.github.hectorvent.floci.services.route53.model.HostedZone;
 import io.github.hectorvent.floci.services.route53.model.ResourceRecord;
 import io.github.hectorvent.floci.services.route53.model.ResourceRecordSet;
+import io.github.hectorvent.floci.services.route53.model.VpcAssociation;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -63,7 +64,7 @@ public class Route53Service {
     // ── Hosted Zones ──────────────────────────────────────────────────────────
 
     public synchronized CreateZoneResult createHostedZone(String name, String callerReference,
-                                                           String comment, boolean privateZone) {
+                                                           String comment, VpcAssociation vpcAssociation) {
         String normalizedName = normalizeName(name);
 
         for (HostedZone existing : zoneStore.scan(k -> true)) {
@@ -74,7 +75,7 @@ public class Route53Service {
         }
 
         String id = generateZoneId();
-        HostedZone zone = new HostedZone(id, normalizedName, callerReference, comment, privateZone);
+        HostedZone zone = new HostedZone(id, normalizedName, callerReference, comment, vpcAssociation);
         zoneStore.put(id, zone);
         recordStore.put(id, buildDefaultRecords(normalizedName));
         ChangeInfo change = newChange(null);
