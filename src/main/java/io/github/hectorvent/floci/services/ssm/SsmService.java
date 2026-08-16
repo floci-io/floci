@@ -417,6 +417,15 @@ public class SsmService implements ResourceProvider {
         historyStore.put(storageKey, history);
     }
 
+    public void deleteDocument(String name, String region) {
+        String storageKey = regionKey(region, name);
+        if (!documentStore.get(storageKey).isPresent()) {
+            throw new AwsException("InvalidDocument",
+                    "Document " + name + " does not exist.", 400);
+        }
+        documentStore.delete(storageKey);
+    }
+
     // ─── Resource Explorer 2 ───────────────────────────────────────────────────
 
     @Override

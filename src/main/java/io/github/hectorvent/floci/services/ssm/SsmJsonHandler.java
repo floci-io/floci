@@ -66,6 +66,8 @@ public class SsmJsonHandler {
             case "GetDefaultPatchBaseline" -> handleGetDefaultPatchBaseline(request, region);
             // Documents
             case "GetDocument" -> handleGetDocument(request, region);
+            case "DescribeDocument" -> handleDescribeDocument(request, region);
+            case "DeleteDocument" -> handleDeleteDocument(request, region);
             case "CreateDocument" -> handleCreateDocument(request, region);
             case "UpdateDocument" -> handleUpdateDocument(request, region);
             // Document share permissions
@@ -579,5 +581,29 @@ public class SsmJsonHandler {
         if (info.getLastPingDateTime() != null) node.put("LastPingDateTime", info.getLastPingDateTime().toEpochMilli() / 1000.0);
         if (info.getRegistrationDate() != null) node.put("RegistrationDate", info.getRegistrationDate().toEpochMilli() / 1000.0);
         return node;
+    }
+
+    private Response handleDescribeDocument(JsonNode request, String region) {
+        String name = request.path("Name").asText();
+        SsmDocument document = ssmService.getDocument(name, region);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        ObjectNode documentNode = objectMapper.createObjectNode();
+        documentNode.put("Name", document.getName());
+        documentNode.put("DocumentType", document.getDocumentType());
+        documentNode.put("DocumentVersion", String.valueOf(document.getDocumentVersion()));
+        documentNode.put("Content", document.getContent());
+        documentNode.put("Status", document.getStatus());
+        if (document.getCreatedDate() != null) {
+            documentNode.put("CreatedDate", document.getCreatedDate().toString());
+        }
+        response.set("Document", documentNode);
+        return Response.ok(response).build();
+    }
+
+    private Response handleDeleteDocument(JsonNode request, String region) {
+        String name = request.path("Name").asText();
+        ssmService.deleteDocument(name, region);
+        return Response.ok(objectMapper.createObjectNode()).build();
     }
 }
