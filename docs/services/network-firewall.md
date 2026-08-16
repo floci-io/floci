@@ -17,3 +17,10 @@ subnets. Floci does not run a packet-inspection data plane.
 | `CreateFirewall`, `DescribeFirewall`, `DeleteFirewall`, `ListFirewalls` | Persistent firewall lifecycle and ready endpoint attachments |
 | Firewall protection, description, subnet, Availability Zone, and analysis update operations | Update the stored firewall configuration |
 | `UpdateLoggingConfiguration`, `DescribeLoggingConfiguration` | Persistent logging configuration |
+| `AssociateFirewallPolicy` | Sets `Firewall.FirewallPolicyArn` on the stored firewall |
+
+## Limitations
+
+- **`AssociateFirewallPolicy` does not validate `FirewallPolicyChangeProtection`.**
+  AWS rejects the call when the firewall has policy-change protection enabled; Floci
+  applies the new `FirewallPolicyArn` unconditionally.

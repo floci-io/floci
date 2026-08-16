@@ -425,4 +425,20 @@ public class NetworkFirewallService {
             throw new IllegalStateException("SHA-256 unavailable", e);
         }
     }
+
+    public ObjectNode associateFirewallPolicy(JsonNode request, String region, String accountId) {
+        String policyArn = requiredText(request, "FirewallPolicyArn");
+        String arn = textOrNull(request, "FirewallArn");
+        String name = textOrNull(request, "FirewallName");
+        ObjectNode firewall = require(firewalls, arn, name, "Firewall", "FirewallArn", "FirewallName");
+        require(firewallPolicies, policyArn, null, "FirewallPolicy", "ResourceArn", "ResourceName");
+        String firewallArn = firewall.path("FirewallArn").asText();
+        firewall.put("FirewallPolicyArn", policyArn);
+        firewalls.put(firewallArn, firewall);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("FirewallArn", firewallArn);
+        response.put("FirewallName", firewall.path("FirewallName").asText());
+        response.put("FirewallPolicyArn", policyArn);
+        return response;
+    }
 }

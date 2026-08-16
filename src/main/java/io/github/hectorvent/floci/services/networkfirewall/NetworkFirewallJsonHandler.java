@@ -49,6 +49,7 @@ public class NetworkFirewallJsonHandler {
             case "UpdateLoggingConfiguration" -> ok(service.putLoggingConfiguration(request));
             case "DescribeLoggingConfiguration" -> ok(service.describeLoggingConfiguration(
                     textOrNull(request, "FirewallArn"), textOrNull(request, "FirewallName")));
+            case "AssociateFirewallPolicy" -> ok(service.associateFirewallPolicy(request, region, accountId));
             default -> Response.status(400)
                     .entity(new AwsErrorResponse("UnknownOperationException",
                             "Unknown operation: NetworkFirewall_20201112." + action))

@@ -115,4 +115,62 @@ class NetworkFirewallIntegrationTest {
             .body("RuleGroups[0].Arn", equalTo(arn))
             .body("RuleGroups[0].Name", equalTo("vellum-domain-allow-list"));
     }
+
+    @Test
+    void associateFirewallPolicy_thenDescribeFirewall_showsNewPolicyArn() {
+        String firewallArn = "arn:aws:network-firewall:us-east-1:723679240095:firewall/AssocTestFirewall";
+        String initialPolicyArn = "arn:aws:network-firewall:us-east-1:723679240095:"
+                + "firewall-policy/AssocTestFirewall-initial-policy";
+        String newPolicyArn = "arn:aws:network-firewall:us-east-1:723679240095:"
+                + "firewall-policy/AssocTestFirewall-new-policy";
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET_PREFIX + "CreateFirewall")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"FirewallName\":\"AssocTestFirewall\","
+                    + "\"FirewallPolicyArn\":\"" + initialPolicyArn + "\","
+                    + "\"VpcId\":\"vpc-assoctest0000000000\","
+                    + "\"SubnetMappings\":[{\"SubnetId\":\"subnet-22222222222222222\"}]}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET_PREFIX + "CreateFirewallPolicy")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"FirewallPolicyName\":\"AssocTestFirewall-new-policy\","
+                    + "\"FirewallPolicy\":{\"StatelessDefaultActions\":[\"aws:pass\"],"
+                    + "\"StatelessFragmentDefaultActions\":[\"aws:pass\"]}}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("FirewallPolicyResponse.FirewallPolicyArn", equalTo(newPolicyArn));
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET_PREFIX + "AssociateFirewallPolicy")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"FirewallArn\":\"" + firewallArn + "\","
+                    + "\"FirewallPolicyArn\":\"" + newPolicyArn + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("FirewallPolicyArn", equalTo(newPolicyArn));
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET_PREFIX + "DescribeFirewall")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"FirewallArn\":\"" + firewallArn + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Firewall.FirewallPolicyArn", equalTo(newPolicyArn));
+    }
 }
