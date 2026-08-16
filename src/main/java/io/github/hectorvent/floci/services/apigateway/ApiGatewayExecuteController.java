@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.services.apigateway.model.Stage;
 import io.github.hectorvent.floci.services.apigateway.model.UsagePlan;
 import io.github.hectorvent.floci.services.apigateway.model.UsagePlanKey;
 import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2Service;
+import io.github.hectorvent.floci.services.apigatewayv2.JwtSignatureVerifier;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Authorizer;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Route;
 import io.github.hectorvent.floci.services.apigatewayv2.websocket.ConnectionInfo;
@@ -92,6 +93,7 @@ public class ApiGatewayExecuteController {
     private final ElbV2Service elbV2Service;
     private final SqsQueryHandler sqsQueryHandler;
     private final ApiGatewayExecuteRouteContext routeContext;
+    private final JwtSignatureVerifier jwtSignatureVerifier;
 
     @Inject
     public ApiGatewayExecuteController(ApiGatewayService apiGatewayService, ApiGatewayV2Service apiGatewayV2Service,
@@ -101,7 +103,8 @@ public class ApiGatewayExecuteController {
                                        WebSocketConnectionManager webSocketConnectionManager,
                                        ElbV2Service elbV2Service,
                                        SqsQueryHandler sqsQueryHandler,
-                                       ApiGatewayExecuteRouteContext routeContext) {
+                                       ApiGatewayExecuteRouteContext routeContext,
+                                       JwtSignatureVerifier jwtSignatureVerifier) {
         this.apiGatewayService = apiGatewayService;
         this.apiGatewayV2Service = apiGatewayV2Service;
         this.lambdaService = lambdaService;
@@ -113,6 +116,7 @@ public class ApiGatewayExecuteController {
         this.elbV2Service = elbV2Service;
         this.sqsQueryHandler = sqsQueryHandler;
         this.routeContext = routeContext;
+        this.jwtSignatureVerifier = jwtSignatureVerifier;
     }
 
     /** Matches an ELBv2 listener ARN (ALB {@code app/} or NLB {@code net/}); group 1 = region. */
@@ -1591,6 +1595,22 @@ public class ApiGatewayExecuteController {
 
         String token = extractToken(authorizer, headers, uriInfo);
         if (token == null) {
+            return new JwtAuthorizerResult(Response.status(401)
+                    .entity(jsonMessage("Unauthorized"))
+                    .type(MediaType.APPLICATION_JSON).build(), null);
+        }
+
+        // Signature verification happens before anything in the payload is trusted (including the
+        // exp/iss/aud checks below) - a claim from an unverified token proves nothing about who
+        // sent it. Mirrors what real API Gateway's JWT authorizer does against the issuer's real
+        // JWKS; failure here (bad signature, unreachable issuer, unsupported alg) is a 401 the same
+        // as any other rejection, not a fallback to unverified acceptance.
+        String configuredIssuer = authorizer.getJwtConfiguration() != null
+                ? authorizer.getJwtConfiguration().issuer() : null;
+        try {
+            jwtSignatureVerifier.verify(token, configuredIssuer);
+        } catch (JwtSignatureVerifier.JwtVerificationException e) {
+            LOG.debugv("JWT signature verification failed for API {0}: {1}", apiId, e.getMessage());
             return new JwtAuthorizerResult(Response.status(401)
                     .entity(jsonMessage("Unauthorized"))
                     .type(MediaType.APPLICATION_JSON).build(), null);
