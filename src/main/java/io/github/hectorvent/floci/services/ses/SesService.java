@@ -84,7 +84,9 @@ public class SesService {
     private static final SecureRandom BOUNDARY_RANDOM = new SecureRandom();
 
     private final StorageBackend<String, Identity> identityStore;
-    private final StorageBackend<String, SentEmail> emailStore;
+    // Sent-email records extracted to SesSentEmailService. The send path records finished emails via
+    // it; send-statistics and inspection read back through it.
+    private final SesSentEmailService sentEmailService;
     // Account-level settings, extracted to its own service. The facade delegates.
     private final SesAccountService accountService;
     // Email templates extracted to SesTemplateService. The facade delegates; the templated-send path
@@ -123,13 +125,13 @@ public class SesService {
                        SesAccountService accountService, SesCvetService cvetService,
                        SesPolicyService policyService, SesContactService contactService,
                        SesSuppressionService suppressionService, SesDedicatedIpService dedicatedIpService,
-                       SesTemplateService templateService, SmtpRelay smtpRelay, ObjectMapper objectMapper,
+                       SesTemplateService templateService, SesSentEmailService sentEmailService,
+                       SmtpRelay smtpRelay, ObjectMapper objectMapper,
                        SesEventPublisher eventPublisher, EmulatorConfig config, Route53Service route53Service,
                        Clock clock) {
         this.identityStore = storageFactory.create("ses", "ses-identities.json",
                 new TypeReference<Map<String, Identity>>() {});
-        this.emailStore = storageFactory.create("ses", "ses-emails.json",
-                new TypeReference<Map<String, SentEmail>>() {});
+        this.sentEmailService = sentEmailService;
         this.accountService = accountService;
         this.templateService = templateService;
         this.configSetStore = storageFactory.create("ses", "ses-config-sets.json",
@@ -150,7 +152,7 @@ public class SesService {
     }
 
     SesService(StorageBackend<String, Identity> identityStore,
-               StorageBackend<String, SentEmail> emailStore,
+               SesSentEmailService sentEmailService,
                SesAccountService accountService,
                SesTemplateService templateService,
                StorageBackend<String, ConfigurationSet> configSetStore,
@@ -163,13 +165,13 @@ public class SesService {
                SmtpRelay smtpRelay,
                ObjectMapper objectMapper,
                Clock clock) {
-        this(identityStore, emailStore, accountService, templateService, configSetStore, suppressionService,
+        this(identityStore, sentEmailService, accountService, templateService, configSetStore, suppressionService,
                 dedicatedIpService, contactService, policyService,
                 receiptRuleService, cvetService, smtpRelay, objectMapper, null, clock);
     }
 
     SesService(StorageBackend<String, Identity> identityStore,
-               StorageBackend<String, SentEmail> emailStore,
+               SesSentEmailService sentEmailService,
                SesAccountService accountService,
                SesTemplateService templateService,
                StorageBackend<String, ConfigurationSet> configSetStore,
@@ -184,7 +186,7 @@ public class SesService {
                Route53Service route53Service,
                Clock clock) {
         this.identityStore = identityStore;
-        this.emailStore = emailStore;
+        this.sentEmailService = sentEmailService;
         this.accountService = accountService;
         this.templateService = templateService;
         this.configSetStore = configSetStore;
@@ -334,7 +336,7 @@ public class SesService {
         if (additionalHeaders != null && !additionalHeaders.isEmpty()) {
             email.setHeaders(additionalHeaders);
         }
-        emailStore.put("email::" + region + "::" + messageId, email);
+        sentEmailService.record(region, messageId, email);
 
         List<String> relayedTo = filterUnsuppressed(toAddresses, suppressedReasons);
         List<String> relayedCc = filterUnsuppressed(ccAddresses, suppressedReasons);
@@ -406,7 +408,7 @@ public class SesService {
 
         String messageId = UUID.randomUUID().toString();
         SentEmail email = new SentEmail(messageId, region, effectiveSource, effectiveDestinations, rawMessage);
-        emailStore.put("email::" + region + "::" + messageId, email);
+        sentEmailService.record(region, messageId, email);
 
         List<String> relayedDestinations = filterUnsuppressed(effectiveDestinations, suppressedReasons);
         if (!relayedDestinations.isEmpty()) {
@@ -622,8 +624,7 @@ public class SesService {
     }
 
     public long getSentEmailCount(String region) {
-        String prefix = "email::" + region + "::";
-        return emailStore.scan(k -> k.startsWith(prefix)).size();
+        return sentEmailService.countInRegion(region);
     }
 
     public void setIdentityNotificationTopic(String identityValue, String notificationType,
@@ -1108,12 +1109,11 @@ public class SesService {
     }
 
     public List<SentEmail> getEmails() {
-        return emailStore.scan(k -> k.startsWith("email::"));
+        return sentEmailService.listAll();
     }
 
     public void clearEmails() {
-        emailStore.clear();
-        LOG.info("Cleared all SES emails");
+        sentEmailService.clear();
     }
 
     public boolean isAccountSendingEnabled(String region) {
@@ -1252,7 +1252,7 @@ public class SesService {
         SentEmail email = new SentEmail(messageId, region, template.getFromEmailAddress(),
                 List.of(emailAddress), List.of(), List.of(), List.of(),
                 template.getTemplateSubject(), null, renderedHtml);
-        emailStore.put("email::" + region + "::" + messageId, email);
+        sentEmailService.record(region, messageId, email);
         smtpRelay.relay(template.getFromEmailAddress(), List.of(emailAddress), List.of(), List.of(),
                 List.of(), template.getTemplateSubject(), null, renderedHtml, List.of());
         LOG.infov("SES custom verification email sent: to={0}, template={1}, messageId={2}",

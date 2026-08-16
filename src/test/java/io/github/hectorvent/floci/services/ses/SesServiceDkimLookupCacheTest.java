@@ -51,7 +51,7 @@ class SesServiceDkimLookupCacheTest {
         clock.reset();
         service = new SesService(
                 identityStore,
-                new InMemoryStorage<String, SentEmail>(),
+                new SesSentEmailService(new InMemoryStorage<String, SentEmail>()),
                 new SesAccountService(new InMemoryStorage<String, Boolean>(), new InMemoryStorage<String, AccountVdmAttributes>()),
                 new SesTemplateService(new InMemoryStorage<String, EmailTemplate>()),
                 new InMemoryStorage<String, ConfigurationSet>(),

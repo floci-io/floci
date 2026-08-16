@@ -39,7 +39,7 @@ class SesServiceSmtpTest {
         emailStore = new InMemoryStorage<>();
         service = new SesService(
                 new InMemoryStorage<String, Identity>(),
-                emailStore,
+                new SesSentEmailService(emailStore),
                 new SesAccountService(new InMemoryStorage<String, Boolean>(), new InMemoryStorage<String, AccountVdmAttributes>()),
                 new SesTemplateService(new InMemoryStorage<String, EmailTemplate>()),
                 new InMemoryStorage<String, ConfigurationSet>(),
