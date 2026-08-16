@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.msk;
 
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.services.msk.model.ListResult;
 import io.github.hectorvent.floci.services.msk.model.MskCluster;
 import io.github.hectorvent.floci.services.msk.model.MskConfiguration;
 import jakarta.inject.Inject;
@@ -110,11 +111,20 @@ public class MskController {
 
     @GET
     @Path("/v1/configurations")
-    public Response listConfigurations() {
-        var configurations = mskService.listConfigurations().stream()
+    public Response listConfigurations(@QueryParam("maxResults") String maxResultsParam,
+                                        @QueryParam("nextToken") String nextToken) {
+        ListResult<MskConfiguration> result = mskService.listConfigurations(
+                parseMaxResults(maxResultsParam), nextToken);
+        var configurations = result.items().stream()
                 .map(this::toConfigurationView)
                 .toList();
-        return Response.ok(Map.of("configurations", configurations)).build();
+
+        Map<String, Object> response = new HashMap<>();
+        response.put("configurations", configurations);
+        if (result.nextToken() != null) {
+            response.put("nextToken", result.nextToken());
+        }
+        return Response.ok(response).build();
     }
 
     @GET
@@ -154,6 +164,20 @@ public class MskController {
             return new String(Base64.getDecoder().decode(serverPropertiesB64), StandardCharsets.UTF_8);
         } catch (IllegalArgumentException e) {
             throw new AwsException("BadRequestException", "serverProperties must be base64-encoded.", 400);
+        }
+    }
+
+    // Bound as String rather than @QueryParam Integer: RESTEasy Reactive's default handling
+    // of a non-numeric value for an Integer-typed @QueryParam is a 404, not a 400 - the
+    // request never reaches this method at all in that case, so it must be parsed here.
+    private int parseMaxResults(String value) {
+        if (value == null || value.isBlank()) {
+            return 0;
+        }
+        try {
+            return Integer.parseInt(value);
+        } catch (NumberFormatException e) {
+            throw new AwsException("BadRequestException", "maxResults must be an integer.", 400);
         }
     }
 

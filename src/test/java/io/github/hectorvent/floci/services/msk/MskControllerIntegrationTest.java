@@ -5,12 +5,15 @@ import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
+import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.not;
+import static org.hamcrest.Matchers.notNullValue;
 
 @QuarkusTest
 class MskControllerIntegrationTest {
@@ -222,5 +225,66 @@ class MskControllerIntegrationTest {
         .then()
             .statusCode(200)
             .body("configurations.find { it.arn == '" + arn + "' }.kafkaVersions", empty());
+    }
+
+    @Test
+    void listConfigurationsPaginatesWithMaxResultsAndNextToken() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String properties = Base64.getEncoder().encodeToString("props".getBytes(StandardCharsets.UTF_8));
+
+        given().contentType("application/json")
+            .body("""
+                {"name": "page-a-%s", "serverProperties": "%s"}
+                """.formatted(suffix, properties))
+            .when().post("/v1/configurations")
+            .then().statusCode(200);
+
+        given().contentType("application/json")
+            .body("""
+                {"name": "page-b-%s", "serverProperties": "%s"}
+                """.formatted(suffix, properties))
+            .when().post("/v1/configurations")
+            .then().statusCode(200);
+
+        var page1 = given()
+            .when().get("/v1/configurations?maxResults=1")
+            .then().statusCode(200)
+            .body("configurations", hasSize(1))
+            .body("nextToken", notNullValue())
+            .extract().jsonPath();
+
+        String page1Arn = page1.getString("configurations[0].arn");
+        String token = page1.getString("nextToken");
+
+        given()
+            .when().get("/v1/configurations?maxResults=1&nextToken=" + token)
+            .then().statusCode(200)
+            .body("configurations", hasSize(1))
+            .body("configurations[0].arn", not(equalTo(page1Arn)));
+    }
+
+    @Test
+    void listConfigurationsRejectsMaxResultsAboveLimit() {
+        given()
+            .when().get("/v1/configurations?maxResults=101")
+            .then().statusCode(400);
+    }
+
+    // maxResults is bound as a raw String and parsed by hand rather than @QueryParam
+    // Integer specifically because a non-numeric value for an Integer-typed @QueryParam
+    // fails RESTEasy Reactive's own conversion before the method body runs, and its
+    // default handling for that is a 404, not an AWS-shaped 400.
+    @Test
+    void listConfigurationsRejectsNonNumericMaxResults() {
+        given()
+            .when().get("/v1/configurations?maxResults=abc")
+            .then().statusCode(400);
+    }
+
+    @Test
+    void listConfigurationsRejectsInvalidNextToken() {
+        given()
+            .when().get("/v1/configurations?nextToken=not-a-valid-token!!")
+            .then().statusCode(400);
     }
 }

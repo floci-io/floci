@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.msk.model.ClusterState;
 import io.github.hectorvent.floci.services.msk.model.ConfigurationState;
+import io.github.hectorvent.floci.services.msk.model.ListResult;
 import io.github.hectorvent.floci.services.msk.model.MskCluster;
 import io.github.hectorvent.floci.services.msk.model.MskConfiguration;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -152,8 +153,33 @@ class MskServiceTest {
     void listConfigurations() {
         mskService.createConfiguration("config-1", "desc", List.of("3.6.0"), "props");
         mskService.createConfiguration("config-2", "desc", List.of("3.6.0"), "props");
-        List<MskConfiguration> configurations = mskService.listConfigurations();
+        List<MskConfiguration> configurations = mskService.listConfigurations(0, null).items();
         assertEquals(2, configurations.size());
+    }
+
+    @Test
+    void listConfigurationsPaginatesWithMaxResultsAndNextToken() {
+        mskService.createConfiguration("config-1", "desc", List.of("3.6.0"), "props");
+        mskService.createConfiguration("config-2", "desc", List.of("3.6.0"), "props");
+        mskService.createConfiguration("config-3", "desc", List.of("3.6.0"), "props");
+
+        ListResult<MskConfiguration> firstPage = mskService.listConfigurations(2, null);
+        assertEquals(2, firstPage.items().size());
+        assertNotNull(firstPage.nextToken());
+
+        ListResult<MskConfiguration> secondPage = mskService.listConfigurations(2, firstPage.nextToken());
+        assertEquals(1, secondPage.items().size());
+        assertNull(secondPage.nextToken());
+    }
+
+    @Test
+    void listConfigurationsRejectsMaxResultsAboveLimit() {
+        assertThrows(AwsException.class, () -> mskService.listConfigurations(101, null));
+    }
+
+    @Test
+    void listConfigurationsRejectsInvalidNextToken() {
+        assertThrows(AwsException.class, () -> mskService.listConfigurations(0, "not-a-valid-token!!"));
     }
 
     @Test
@@ -161,7 +187,7 @@ class MskServiceTest {
         MskConfiguration configuration = mskService.createConfiguration(
                 "test-config", "desc", List.of("3.6.0"), "props");
         mskService.deleteConfiguration(configuration.getArn());
-        assertTrue(mskService.listConfigurations().isEmpty());
+        assertTrue(mskService.listConfigurations(0, null).items().isEmpty());
     }
 
     // StorageBackend persists this model via plain Jackson serialization (PersistentStorage,
