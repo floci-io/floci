@@ -80,6 +80,27 @@ public class FirehoseJsonHandler {
                 firehoseService.updateDestination(name, currentVersionId, destinationId, update);
                 yield Response.ok(Map.of()).build();
             }
+            case "StartDeliveryStreamEncryption" -> {
+                String name = getDeliveryStreamName(request);
+                JsonNode input = request.get("DeliveryStreamEncryptionConfigurationInput");
+                String keyType = null;
+                String keyArn = null;
+                if (input != null && !input.isNull()) {
+                    keyType = input.has("KeyType") && !input.get("KeyType").isNull()
+                            ? input.get("KeyType").asText() : null;
+                    keyArn = input.has("KeyARN") && !input.get("KeyARN").isNull()
+                            ? input.get("KeyARN").asText() : null;
+                    if (keyType == null || keyType.isBlank()) {
+                        throw new AwsException("InvalidArgumentException", "KeyType is required.", 400);
+                    }
+                }
+                firehoseService.startDeliveryStreamEncryption(name, keyType, keyArn);
+                yield Response.ok(Map.of()).build();
+            }
+            case "StopDeliveryStreamEncryption" -> {
+                firehoseService.stopDeliveryStreamEncryption(getDeliveryStreamName(request));
+                yield Response.ok(Map.of()).build();
+            }
             case "DescribeDeliveryStream" -> {
                 String name = getDeliveryStreamName(request);
                 var desc = firehoseService.describeDeliveryStream(name);

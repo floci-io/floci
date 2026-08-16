@@ -193,6 +193,36 @@ public class FirehoseService {
         LOG.infov("Updated destination {0} of Firehose delivery stream {1}", destinationId, name);
     }
 
+    public void startDeliveryStreamEncryption(String name, String keyType, String keyArn) {
+        DeliveryStreamDescription stream = describeDeliveryStream(name);
+        String effectiveKeyType = keyType == null ? "AWS_OWNED_CMK" : keyType;
+        if (!effectiveKeyType.equals("AWS_OWNED_CMK") && !effectiveKeyType.equals("CUSTOMER_MANAGED_CMK")) {
+            throw new AwsException("InvalidArgumentException",
+                    "KeyType must be AWS_OWNED_CMK or CUSTOMER_MANAGED_CMK.", 400);
+        }
+        if (effectiveKeyType.equals("CUSTOMER_MANAGED_CMK") && (keyArn == null || keyArn.isBlank())) {
+            throw new AwsException("InvalidArgumentException",
+                    "KeyARN is required for CUSTOMER_MANAGED_CMK.", 400);
+        }
+        stream.setDeliveryStreamEncryptionConfiguration(
+                new DeliveryStreamDescription.DeliveryStreamEncryptionConfiguration(
+                        effectiveKeyType,
+                        effectiveKeyType.equals("CUSTOMER_MANAGED_CMK") ? keyArn : null,
+                        "ENABLED"));
+        streamStore.put(name, stream);
+    }
+
+    public void stopDeliveryStreamEncryption(String name) {
+        DeliveryStreamDescription stream = describeDeliveryStream(name);
+        DeliveryStreamDescription.DeliveryStreamEncryptionConfiguration current =
+                stream.getDeliveryStreamEncryptionConfiguration();
+        String keyType = current == null ? "AWS_OWNED_CMK" : current.getKeyType();
+        stream.setDeliveryStreamEncryptionConfiguration(
+                new DeliveryStreamDescription.DeliveryStreamEncryptionConfiguration(
+                        keyType, null, "DISABLED"));
+        streamStore.put(name, stream);
+    }
+
     // A corrupt persisted version can only reach here when the caller echoed it
     // (the equality check above passed), so self-heal instead of failing with a 500
     // or blaming the client.
