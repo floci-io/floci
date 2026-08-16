@@ -15,6 +15,7 @@ import com.github.dockerjava.api.command.WaitContainerCmd;
 import com.github.dockerjava.api.exception.DockerException;
 import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.core.command.WaitContainerResultCallback;
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.lambda.launcher.ImageCacheService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -46,11 +47,15 @@ class ContainerLifecycleManagerVolumeTest {
     @Mock
     private PortAllocator portAllocator;
 
+    @Mock
+    private EmulatorConfig config;
+
     private ContainerLifecycleManager manager;
 
     @BeforeEach
     void setUp() {
-        manager = new ContainerLifecycleManager(dockerClient, imageCacheService, containerDetector, portAllocator);
+        manager = new ContainerLifecycleManager(
+                dockerClient, imageCacheService, containerDetector, portAllocator, config);
     }
 
     @Test
