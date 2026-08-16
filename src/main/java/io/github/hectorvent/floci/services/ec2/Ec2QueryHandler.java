@@ -87,6 +87,7 @@ public class Ec2QueryHandler {
                 case "DescribeVpcEndpoints" -> handleDescribeVpcEndpoints(params, region);
                 case "ModifyVpcEndpoint" -> handleModifyVpcEndpoint(params, region);
                 case "DeleteVpcEndpoints" -> handleDeleteVpcEndpoints(params, region);
+                case "ModifyVpcEndpoint" -> handleModifyVpcEndpoint(params, region);
                 // Flow Logs
                 case "CreateFlowLogs" -> handleCreateFlowLogs(params, region);
                 case "DescribeFlowLogs" -> handleDescribeFlowLogs(params, region);
@@ -144,6 +145,7 @@ public class Ec2QueryHandler {
                 // Security Groups
                 case "CreateSecurityGroup" -> handleCreateSecurityGroup(params, region);
                 case "DescribeSecurityGroups" -> handleDescribeSecurityGroups(params, region);
+                case "GetSecurityGroupsForVpc" -> handleGetSecurityGroupsForVpc(params, region);
                 case "DeleteSecurityGroup" -> handleDeleteSecurityGroup(params, region);
                 case "AuthorizeSecurityGroupIngress" -> handleAuthorizeSecurityGroupIngress(params, region);
                 case "AuthorizeSecurityGroupEgress" -> handleAuthorizeSecurityGroupEgress(params, region);
@@ -2231,6 +2233,27 @@ public class Ec2QueryHandler {
         return xmlResponse(xml.build());
     }
 
+    private Response handleModifyVpcEndpoint(MultivaluedMap<String, String> p, String region) {
+        service.modifyVpcEndpoint(
+                region,
+                p.getFirst("VpcEndpointId"),
+                p.getFirst("PolicyDocument"),
+                Boolean.parseBoolean(p.getFirst("ResetPolicy")),
+                getList(p, "AddRouteTableId"),
+                getList(p, "RemoveRouteTableId"),
+                getList(p, "AddSubnetId"),
+                getList(p, "RemoveSubnetId"),
+                getList(p, "AddSecurityGroupId"),
+                getList(p, "RemoveSecurityGroupId"),
+                p.getFirst("PrivateDnsEnabled") == null ? null : Boolean.parseBoolean(p.getFirst("PrivateDnsEnabled")));
+        XmlBuilder xml = new XmlBuilder()
+                .start("ModifyVpcEndpointResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .elem("return", "true")
+                .end("ModifyVpcEndpointResponse");
+        return xmlResponse(xml.build());
+    }
+
     private Response handleCreateDefaultVpc(MultivaluedMap<String, String> p, String region) {
         Vpc vpc = service.createDefaultVpc(region);
         XmlBuilder xml = new XmlBuilder()
@@ -2347,6 +2370,28 @@ public class Ec2QueryHandler {
             xml.start("item").raw(sgXml(sg)).end("item");
         }
         xml.end("securityGroupInfo").end("DescribeSecurityGroupsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleGetSecurityGroupsForVpc(MultivaluedMap<String, String> p, String region) {
+        String vpcId = p.getFirst("VpcId");
+        Map<String, List<String>> filters = getFilters(p);
+        List<SecurityGroup> sgs = service.getSecurityGroupsForVpc(region, vpcId, filters);
+        XmlBuilder xml = new XmlBuilder()
+                .start("GetSecurityGroupsForVpcResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("securityGroupForVpcSet");
+        for (SecurityGroup sg : sgs) {
+            xml.start("item")
+                    .elem("groupId", sg.getGroupId())
+                    .elem("groupName", sg.getGroupName())
+                    .elem("description", sg.getDescription())
+                    .elem("ownerId", sg.getOwnerId())
+                    .elem("primaryVpcId", sg.getVpcId())
+                    .raw(tagSetXml(sg.getTags()))
+                    .end("item");
+        }
+        xml.end("securityGroupForVpcSet").end("GetSecurityGroupsForVpcResponse");
         return xmlResponse(xml.build());
     }
 
@@ -3862,6 +3907,9 @@ public class Ec2QueryHandler {
                 .elem("privateDnsEnabled", String.valueOf(endpoint.isPrivateDnsEnabled()));
         if (endpoint.getCreationTimestamp() != null) {
             xml.elem("creationTimestamp", ISO_FMT.format(endpoint.getCreationTimestamp()));
+        }
+        if (endpoint.getPolicyDocument() != null) {
+            xml.elem("policyDocument", endpoint.getPolicyDocument());
         }
         xml.start("routeTableIdSet");
         for (String routeTableId : endpoint.getRouteTableIds()) {
