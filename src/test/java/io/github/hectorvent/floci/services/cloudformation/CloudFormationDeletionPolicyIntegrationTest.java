@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.fail;
 
 /**
@@ -212,6 +213,10 @@ class CloudFormationDeletionPolicyIntegrationTest {
 
         assertBucketExists(bucket1);
         assertBucketDeleted(bucket2);
+
+        String resXml = cfnQuery("DescribeStackResources", stackName, null).then().statusCode(200).extract().asString();
+        assertThat(resXml, not(containsString("<LogicalResourceId>KeptBucket</LogicalResourceId>")));
+        assertThat(resXml, not(containsString("<LogicalResourceId>DeletedBucket</LogicalResourceId>")));
     }
 
     @Test
@@ -281,6 +286,276 @@ class CloudFormationDeletionPolicyIntegrationTest {
         awaitStackStatus(parentStackId, "UPDATE_COMPLETE", null);
 
         awaitStackStatus(nestedStackId, "CREATE_COMPLETE", null);
+
+        String resXml = cfnQuery("DescribeStackResources", stackName, null).then().statusCode(200).extract().asString();
+        assertThat(resXml, not(containsString("<LogicalResourceId>ChildStack</LogicalResourceId>")));
+    }
+
+    @Test
+    void nestedStackWithNonEmptyBucketFailsDeletionOnUpdate_leavesChildAsDeleteFailedAndTracksInParent() throws InterruptedException {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String bucketName = "cfn-nested-orphan-" + suffix;
+        given().when().put("/nested-stack-templates").then().statusCode(200);
+        String childTemplate = """
+            {
+              "Resources": {
+                "ChildBucket": {
+                  "Type": "AWS::S3::Bucket",
+                  "Properties": { "BucketName": "%s" }
+                }
+              }
+            }
+            """.formatted(bucketName);
+        given().contentType("application/json").body(childTemplate).when().put("/nested-stack-templates/child-orphan-" + suffix + ".json");
+
+        String stackName = "parent-orphan-" + suffix;
+        String template1 = """
+            {
+              "Resources": {
+                "ChildStack": {
+                  "Type": "AWS::CloudFormation::Stack",
+                  "Properties": { "TemplateURL": "http://localhost/nested-stack-templates/child-orphan-%s.json" }
+                }
+              }
+            }
+            """.formatted(suffix);
+
+        String parentStackId = createStack(stackName, template1);
+        awaitStackStatus(parentStackId, "CREATE_COMPLETE");
+        String nestedStackId = getNestedStackId(parentStackId, "ChildStack", null);
+
+        // Put an object in the nested bucket so nested stack deletion will fail
+        given().contentType("text/plain").body("keep").when().put("/" + bucketName + "/object.txt").then().statusCode(200);
+
+        String template2 = "{\"Resources\": {}}";
+        updateStack(stackName, template2);
+        awaitStackStatus(parentStackId, "UPDATE_COMPLETE");
+        assertThat(describeStacks(parentStackId), containsString("could not be deleted during update cleanup"));
+
+        // Nested stack resource stays in parent as DELETE_FAILED
+        String resXml = cfnQuery("DescribeStackResources", stackName, null).then().statusCode(200).extract().asString();
+        assertThat(resXml, containsString("<LogicalResourceId>ChildStack</LogicalResourceId>"));
+        assertThat(resXml, containsString("<ResourceStatus>DELETE_FAILED</ResourceStatus>"));
+
+        // Child stack itself is DELETE_FAILED
+        awaitStackStatus(nestedStackId, "DELETE_FAILED");
+
+        // Clean up bucket and delete parent stack to verify clean recovery
+        given().when().delete("/" + bucketName + "/object.txt").then().statusCode(204);
+        deleteStack(stackName);
+        awaitStackStatus(parentStackId, "DELETE_COMPLETE");
+        awaitStackStatus(nestedStackId, "DELETE_COMPLETE");
+        assertBucketDeleted(bucketName);
+    }
+
+    @Test
+    void deleteStack_withNestedStack_deletesChildStackAndPhysicalResources() throws InterruptedException {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String bucketName = "cfn-nested-del-" + suffix;
+        given().when().put("/nested-stack-templates").then().statusCode(200);
+        String childTemplate = """
+            {
+              "Resources": {
+                "ChildBucket": {
+                  "Type": "AWS::S3::Bucket",
+                  "Properties": { "BucketName": "%s" }
+                }
+              }
+            }
+            """.formatted(bucketName);
+        given().contentType("application/json").body(childTemplate).when().put("/nested-stack-templates/child-del-" + suffix + ".json");
+
+        String stackName = "parent-del-" + suffix;
+        String template = """
+            {
+              "Resources": {
+                "ChildStack": {
+                  "Type": "AWS::CloudFormation::Stack",
+                  "Properties": { "TemplateURL": "http://localhost/nested-stack-templates/child-del-%s.json" }
+                }
+              }
+            }
+            """.formatted(suffix);
+
+        String parentStackId = createStack(stackName, template);
+        awaitStackStatus(parentStackId, "CREATE_COMPLETE");
+        String nestedStackId = getNestedStackId(parentStackId, "ChildStack", null);
+        assertBucketExists(bucketName);
+
+        deleteStack(stackName);
+        awaitStackStatus(parentStackId, "DELETE_COMPLETE");
+        awaitStackStatus(nestedStackId, "DELETE_COMPLETE");
+        assertBucketDeleted(bucketName);
+    }
+
+    @Test
+    void deleteStack_withNestedStackContainingNonEmptyBucket_failsAndLeavesBothStacksInDeleteFailed() throws InterruptedException {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String bucketName = "cfn-nested-delfail-" + suffix;
+        given().when().put("/nested-stack-templates").then().statusCode(200);
+        String childTemplate = """
+            {
+              "Resources": {
+                "ChildBucket": {
+                  "Type": "AWS::S3::Bucket",
+                  "Properties": { "BucketName": "%s" }
+                }
+              }
+            }
+            """.formatted(bucketName);
+        given().contentType("application/json").body(childTemplate).when().put("/nested-stack-templates/child-delfail-" + suffix + ".json");
+
+        String stackName = "parent-delfail-" + suffix;
+        String template = """
+            {
+              "Resources": {
+                "ChildStack": {
+                  "Type": "AWS::CloudFormation::Stack",
+                  "Properties": { "TemplateURL": "http://localhost/nested-stack-templates/child-delfail-%s.json" }
+                }
+              }
+            }
+            """.formatted(suffix);
+
+        String parentStackId = createStack(stackName, template);
+        awaitStackStatus(parentStackId, "CREATE_COMPLETE");
+        String nestedStackId = getNestedStackId(parentStackId, "ChildStack", null);
+
+        // Put object in child bucket
+        given().contentType("text/plain").body("blocker").when().put("/" + bucketName + "/object.txt").then().statusCode(200);
+
+        deleteStack(stackName);
+        awaitStackStatus(parentStackId, "DELETE_FAILED");
+        awaitStackStatus(nestedStackId, "DELETE_FAILED");
+        assertBucketExists(bucketName);
+
+        // Clean up object and retry DeleteStack
+        given().when().delete("/" + bucketName + "/object.txt").then().statusCode(204);
+        deleteStack(stackName);
+        awaitStackStatus(parentStackId, "DELETE_COMPLETE");
+        awaitStackStatus(nestedStackId, "DELETE_COMPLETE");
+        assertBucketDeleted(bucketName);
+    }
+
+    @Test
+    void createStack_rollbackWithNestedStack_deletesChildStackAndResources() throws InterruptedException {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String bucketName = "cfn-nested-createrb-" + suffix;
+        given().when().put("/nested-stack-templates").then().statusCode(200);
+        String childTemplate = """
+            {
+              "Resources": {
+                "ChildBucket": {
+                  "Type": "AWS::S3::Bucket",
+                  "Properties": { "BucketName": "%s" }
+                }
+              }
+            }
+            """.formatted(bucketName);
+        given().contentType("application/json").body(childTemplate).when().put("/nested-stack-templates/child-createrb-" + suffix + ".json");
+
+        String stackName = "parent-createrb-" + suffix;
+        String template = """
+            {
+              "Resources": {
+                "ChildStack": {
+                  "Type": "AWS::CloudFormation::Stack",
+                  "Properties": { "TemplateURL": "http://localhost/nested-stack-templates/child-createrb-%s.json" }
+                },
+                "BadSecret": {
+                  "Type": "AWS::SecretsManager::Secret",
+                  "DependsOn": "ChildStack",
+                  "Properties": {
+                    "Name": "bad-secret-%s",
+                    "SecretString": "explicit",
+                    "GenerateSecretString": { "PasswordLength": 32 }
+                  }
+                }
+              }
+            }
+            """.formatted(suffix, suffix);
+
+        String parentStackId = createStack(stackName, template);
+        assertThat(describeStacks(parentStackId), containsString("<StackStatus>ROLLBACK_COMPLETE</StackStatus>"));
+        assertBucketDeleted(bucketName);
+    }
+
+    @Test
+    void updateStack_rollbackWithNestedStack_deletesNewlyAddedChildStack() throws InterruptedException {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String bucketName = "cfn-nested-updaterb-" + suffix;
+        given().when().put("/nested-stack-templates").then().statusCode(200);
+        String childTemplate = """
+            {
+              "Resources": {
+                "ChildBucket": {
+                  "Type": "AWS::S3::Bucket",
+                  "Properties": { "BucketName": "%s" }
+                }
+              }
+            }
+            """.formatted(bucketName);
+        given().contentType("application/json").body(childTemplate).when().put("/nested-stack-templates/child-updaterb-" + suffix + ".json");
+
+        String stackName = "parent-updaterb-" + suffix;
+        String sfnName = "initial-sfn-" + suffix;
+        String initialTemplate = """
+            {
+              "Resources": {
+                "InitialStateMachine": {
+                  "Type": "AWS::StepFunctions::StateMachine",
+                  "Properties": {
+                    "StateMachineName": "%s",
+                    "RoleArn": "arn:aws:iam::000000000000:role/cfn-sfn-rollback-role",
+                    "DefinitionString": "{\\"StartAt\\":\\"Done\\",\\"States\\":{\\"Done\\":{\\"Type\\":\\"Pass\\",\\"Result\\":\\"marker-v1\\",\\"End\\":true}}}"
+                  }
+                }
+              }
+            }
+            """.formatted(sfnName);
+
+        String parentStackId = createStack(stackName, initialTemplate);
+        awaitStackStatus(parentStackId, "CREATE_COMPLETE");
+
+        String failingUpdateTemplate = """
+            {
+              "Resources": {
+                "InitialStateMachine": {
+                  "Type": "AWS::StepFunctions::StateMachine",
+                  "Properties": {
+                    "StateMachineName": "%s",
+                    "RoleArn": "arn:aws:iam::000000000000:role/cfn-sfn-rollback-role",
+                    "DefinitionString": "{\\"StartAt\\":\\"Done\\",\\"States\\":{\\"Done\\":{\\"Type\\":\\"Pass\\",\\"Result\\":\\"marker-v2\\",\\"End\\":true}}}"
+                  }
+                },
+                "ChildStack": {
+                  "Type": "AWS::CloudFormation::Stack",
+                  "Properties": { "TemplateURL": "http://localhost/nested-stack-templates/child-updaterb-%s.json" }
+                },
+                "BadSecret": {
+                  "Type": "AWS::SecretsManager::Secret",
+                  "DependsOn": "ChildStack",
+                  "Properties": {
+                    "Name": "bad-secret-update-%s",
+                    "SecretString": "explicit",
+                    "GenerateSecretString": { "PasswordLength": 32 }
+                  }
+                }
+              }
+            }
+            """.formatted(sfnName, suffix, suffix);
+
+        updateStack(stackName, failingUpdateTemplate);
+        awaitStackStatus(parentStackId, "UPDATE_ROLLBACK_COMPLETE");
+        assertBucketDeleted(bucketName);
+
+        String resXml = cfnQuery("DescribeStackResources", stackName, null).then().statusCode(200).extract().asString();
+        assertThat(resXml, containsString("<LogicalResourceId>InitialStateMachine</LogicalResourceId>"));
+        assertThat(resXml, not(containsString("<LogicalResourceId>ChildStack</LogicalResourceId>")));
+        assertThat(resXml, not(containsString("<LogicalResourceId>BadSecret</LogicalResourceId>")));
+
+        deleteStack(stackName);
+        awaitStackStatus(parentStackId, "DELETE_COMPLETE");
     }
 
     private static String getNestedStackId(String stackName, String logicalId, String auth) {
