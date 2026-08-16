@@ -22,7 +22,8 @@ public class Ec2ArnSynthesizer implements ArnSynthesizer {
     private static final String KEY_SEPARATOR = "::";
 
     @Override
-    public Optional<String> synthesize(String serviceName, String logicalKey, String accountId, JsonNode node) {
+    public Optional<String> synthesize(String serviceName, String storeName, String logicalKey,
+                                       String accountId, JsonNode node) {
         if (!"ec2".equals(serviceName) || logicalKey == null) {
             return Optional.empty();
         }

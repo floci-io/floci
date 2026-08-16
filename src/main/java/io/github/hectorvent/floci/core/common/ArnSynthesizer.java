@@ -29,11 +29,15 @@ public interface ArnSynthesizer {
      * Attempts to build the ARN for one stored model.
      *
      * @param serviceName the service name the store was created under ({@code "ec2"}, {@code "iam"}, …)
+     * @param storeName   the store's file name ({@code "s3-buckets.json"}), so a synthesizer can
+     *                    target one store of a service that owns several — {@code s3-buckets.json}
+     *                    and {@code s3-objects.json} need different ARN shapes
      * @param logicalKey  the storage key with the account prefix stripped, as the owning service
      *                    wrote it (EC2 uses {@code <region>::<id>})
      * @param accountId   the account the entry is stored under
      * @param node        the model serialized to a JSON tree
      * @return the resource's ARN, or empty when this synthesizer does not handle it
      */
-    Optional<String> synthesize(String serviceName, String logicalKey, String accountId, JsonNode node);
+    Optional<String> synthesize(String serviceName, String storeName, String logicalKey,
+                                String accountId, JsonNode node);
 }

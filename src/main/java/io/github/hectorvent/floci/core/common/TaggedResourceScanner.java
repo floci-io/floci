@@ -135,7 +135,7 @@ public class TaggedResourceScanner {
                     LOG.debugv("Skipping unserializable entry in {0}: {1}", owned.fileName(), e.toString());
                     continue;
                 }
-                collect(byArn, owned.serviceName(), logicalKey, accountId,
+                collect(byArn, owned.serviceName(), owned.fileName(), logicalKey, accountId,
                         value.getClass().getSimpleName(), node, 0);
             }
         }
@@ -159,6 +159,7 @@ public class TaggedResourceScanner {
 
     private void collect(Map<String, Map<String, String>> byArn,
                          String serviceName,
+                         String storeName,
                          String logicalKey,
                          String accountId,
                          String typeHint,
@@ -169,7 +170,7 @@ public class TaggedResourceScanner {
         }
         if (node.isArray()) {
             for (JsonNode element : node) {
-                collect(byArn, serviceName, logicalKey, accountId, typeHint, element, depth + 1);
+                collect(byArn, serviceName, storeName, logicalKey, accountId, typeHint, element, depth + 1);
             }
             return;
         }
@@ -181,7 +182,7 @@ public class TaggedResourceScanner {
         if (!tags.isEmpty()) {
             String arn = resolveArn(node, typeHint);
             if (arn == null) {
-                arn = synthesize(serviceName, logicalKey, accountId, node);
+                arn = synthesize(serviceName, storeName, logicalKey, accountId, node);
             }
             if (arn != null) {
                 byArn.computeIfAbsent(arn, k -> new LinkedHashMap<>()).putAll(tags);
@@ -196,15 +197,17 @@ public class TaggedResourceScanner {
             Map.Entry<String, JsonNode> field = fields.next();
             JsonNode child = field.getValue();
             if (child.isContainerNode()) {
-                collect(byArn, serviceName, logicalKey, accountId, field.getKey(), child, depth + 1);
+                collect(byArn, serviceName, storeName, logicalKey, accountId, field.getKey(), child, depth + 1);
             }
         }
     }
 
-    private String synthesize(String serviceName, String logicalKey, String accountId, JsonNode node) {
+    private String synthesize(String serviceName, String storeName, String logicalKey,
+                              String accountId, JsonNode node) {
         for (ArnSynthesizer synthesizer : synthesizers) {
             try {
-                String arn = synthesizer.synthesize(serviceName, logicalKey, accountId, node).orElse(null);
+                String arn = synthesizer.synthesize(serviceName, storeName, logicalKey, accountId, node)
+                        .orElse(null);
                 if (arn != null) {
                     return arn;
                 }
