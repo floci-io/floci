@@ -320,6 +320,10 @@ public class S3Controller {
                 s3Service.putBucketRequestPayment(bucket, new String(body, StandardCharsets.UTF_8));
                 return Response.ok().build();
             }
+            if (hasQueryParam(uriInfo, "accelerate")) {
+                s3Service.putBucketAccelerateConfiguration(bucket, new String(body, StandardCharsets.UTF_8));
+                return Response.ok().build();
+            }
 
             String locationConstraint = null;
             if (body != null && body.length > 0) {
@@ -402,6 +406,12 @@ public class S3Controller {
                 // no-op that always returns 204, matching real S3. Crucially it must be
                 // handled here so it does NOT fall through to deleting the whole bucket.
                 return Response.noContent().build();
+            }
+            if (hasQueryParam(uriInfo, "accelerate")) {
+                // AWS defines no DELETE for the accelerate subresource; reject it here so
+                // it does NOT fall through to deleting the whole bucket.
+                throw new AwsException("MethodNotAllowed",
+                        "The specified method is not allowed against this resource.", 405);
             }
             s3Service.deleteBucket(bucket);
             return Response.noContent().build();
@@ -504,6 +514,10 @@ public class S3Controller {
                 s3Service.authorizeBucketRead(bucket, "s3:GetBucketRequestPayment", authorization);
                 return Response.ok(s3Service.getBucketRequestPayment(bucket)).build();
             }
+            if (hasQueryParam(uriInfo, "accelerate")) {
+                s3Service.authorizeBucketRead(bucket, "s3:GetAccelerateConfiguration", authorization);
+                return Response.ok(s3Service.getBucketAccelerateConfiguration(bucket)).build();
+            }
 
             // --- S3 static-website index resolution (site root) ---
             // A website endpoint has no S3 REST API, so it serves the index document for the site root
@@ -603,19 +617,28 @@ public class S3Controller {
                               byte[] body) {
         try {
             key = extractObjectKey(uriInfo, bucket);
+            S3Service.RequestAuthorization authorization = S3RequestAuthorizationParser.parseIfRequired(
+                    s3Service.isAuthEnforced(), httpHeaders, uriInfo);
 
             if (hasQueryParam(uriInfo, "tagging")) {
+                s3Service.authorizeObjectWrite(bucket, key, "s3:PutObjectTagging", authorization);
                 return handlePutObjectTagging(bucket, key, body);
             }
             if (hasQueryParam(uriInfo, "retention")) {
+                s3Service.authorizeObjectWrite(bucket, key, "s3:PutObjectRetention", authorization);
+                if ("true".equalsIgnoreCase(httpHeaders.getHeaderString("x-amz-bypass-governance-retention"))) {
+                    s3Service.authorizeObjectWrite(bucket, key, "s3:BypassGovernanceRetention", authorization);
+                }
                 return handlePutObjectRetention(bucket, key,
                         uriInfo.getQueryParameters().getFirst("versionId"), httpHeaders, body);
             }
             if (hasQueryParam(uriInfo, "legal-hold")) {
+                s3Service.authorizeObjectWrite(bucket, key, "s3:PutObjectLegalHold", authorization);
                 return handlePutObjectLegalHold(bucket, key,
                         uriInfo.getQueryParameters().getFirst("versionId"), body);
             }
             if (hasQueryParam(uriInfo, "acl")) {
+                s3Service.authorizeObjectWrite(bucket, key, "s3:PutObjectAcl", authorization);
                 s3Service.putObjectAcl(bucket, key, uriInfo.getQueryParameters().getFirst("versionId"),
                         new String(body, StandardCharsets.UTF_8),
                         httpHeaders.getHeaderString("x-amz-acl"),
@@ -628,6 +651,7 @@ public class S3Controller {
             }
 
             if (uploadId != null && partNumber != null) {
+                s3Service.authorizeObjectWrite(bucket, key, "s3:PutObject", authorization);
                 if (copySource != null && !copySource.isEmpty()) {
                     return handleUploadPartCopy(copySource, bucket, key, uploadId, partNumber, httpHeaders);
                 }
@@ -645,6 +669,7 @@ public class S3Controller {
             }
 
             if (copySource != null && !copySource.isEmpty()) {
+                s3Service.authorizeObjectWrite(bucket, key, "s3:PutObject", authorization);
                 return handleCopyObject(copySource, bucket, key, contentType, httpHeaders);
             }
 
@@ -666,6 +691,7 @@ public class S3Controller {
             String sseCustomerKey = httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key");
             String sseCustomerKeyMd5 = httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key-MD5");
             String cannedAcl = httpHeaders.getHeaderString("x-amz-acl");
+            s3Service.authorizePutObject(bucket, key, authorization);
             S3Object obj = s3Service.putObject(bucket, key, data, contentType, extractUserMetadata(httpHeaders),
                     new PutObjectOptions()
                             .withStorageClass(httpHeaders.getHeaderString("x-amz-storage-class"))
@@ -1089,17 +1115,25 @@ public class S3Controller {
                                  @Context HttpHeaders httpHeaders) {
         try {
             key = extractObjectKey(uriInfo, bucket);
+            S3Service.RequestAuthorization authorization = S3RequestAuthorizationParser.parseIfRequired(
+                    s3Service.isAuthEnforced(), httpHeaders, uriInfo);
 
             if (hasQueryParam(uriInfo, "tagging")) {
+                s3Service.authorizeObjectWrite(bucket, key, "s3:DeleteObjectTagging", authorization);
                 s3Service.deleteObjectTagging(bucket, key);
                 return Response.noContent().build();
             }
             if (uploadId != null) {
+                s3Service.authorizeObjectWrite(bucket, key, "s3:AbortMultipartUpload", authorization);
                 s3Service.abortMultipartUpload(bucket, key, uploadId);
                 return Response.noContent().build();
             }
             boolean bypass = "true".equalsIgnoreCase(
                     httpHeaders.getHeaderString("x-amz-bypass-governance-retention"));
+            s3Service.authorizeDeleteObject(bucket, key, versionId, authorization);
+            if (bypass) {
+                s3Service.authorizeObjectWrite(bucket, key, "s3:BypassGovernanceRetention", authorization);
+            }
             S3Object result = s3Service.deleteObject(bucket, key, versionId, bypass);
             var resp = Response.noContent();
             if (result != null) {
@@ -1123,11 +1157,12 @@ public class S3Controller {
     @Produces(MediaType.APPLICATION_XML)
     public Response handleBucketPost(@PathParam("bucket") String bucket,
                                       @HeaderParam("Content-Type") String contentType,
+                                      @Context HttpHeaders httpHeaders,
                                       @Context UriInfo uriInfo,
                                       byte[] body) {
         try {
             if (hasQueryParam(uriInfo, "delete")) {
-                return handleDeleteObjects(bucket, body);
+                return handleDeleteObjects(bucket, body, httpHeaders, uriInfo);
             }
             if (contentType != null && contentType.startsWith("multipart/form-data")) {
                 return handlePresignedPost(bucket, contentType, body);
@@ -1154,8 +1189,11 @@ public class S3Controller {
                                          byte[] body) {
         try {
             key = extractObjectKey(uriInfo, bucket);
+            S3Service.RequestAuthorization authorization = S3RequestAuthorizationParser.parseIfRequired(
+                    s3Service.isAuthEnforced(), httpHeaders, uriInfo);
 
             if (hasQueryParam(uriInfo, "uploads")) {
+                s3Service.authorizeObjectWrite(bucket, key, "s3:PutObject", authorization);
                 MultipartUpload upload = s3Service.initiateMultipartUpload(bucket, key, contentType,
                         extractUserMetadata(httpHeaders),
                         httpHeaders.getHeaderString("x-amz-storage-class"),
@@ -1181,13 +1219,12 @@ public class S3Controller {
             }
 
             if (hasQueryParam(uriInfo, "restore")) {
+                s3Service.authorizeObjectWrite(bucket, key, "s3:RestoreObject", authorization);
                 s3Service.restoreObject(bucket, key, versionId, new String(body, StandardCharsets.UTF_8));
                 return Response.accepted().build();
             }
 
             if (hasQueryParam(uriInfo, "select")) {
-                S3Service.RequestAuthorization authorization = S3RequestAuthorizationParser.parseIfRequired(
-                        s3Service.isAuthEnforced(), httpHeaders, uriInfo);
                 s3Service.authorizeGetObject(bucket, key, versionId, authorization);
                 S3Object obj = s3Service.getObject(bucket, key, versionId);
                 byte[] result = s3SelectService.select(obj, new String(body, StandardCharsets.UTF_8));
@@ -1197,6 +1234,7 @@ public class S3Controller {
             }
 
             if (uploadId != null) {
+                s3Service.authorizeObjectWrite(bucket, key, "s3:PutObject", authorization);
                 List<Integer> partNumbers = parseCompleteMultipartBody(new String(body));
                 Response preconditionResponse = checkWritePreconditions(bucket, key, ifMatch, ifNoneMatch);
                 if (preconditionResponse != null) {
@@ -1236,7 +1274,7 @@ public class S3Controller {
         }
     }
 
-    private Response handleDeleteObjects(String bucket, byte[] body) {
+    private Response handleDeleteObjects(String bucket, byte[] body, HttpHeaders httpHeaders, UriInfo uriInfo) {
         String xml = new String(body, StandardCharsets.UTF_8);
         List<String> keys = XmlParser.extractAll(xml, "Key");
         if (keys.isEmpty()) {
@@ -1244,7 +1282,22 @@ public class S3Controller {
                     "The XML you provided was not well-formed.", 400);
         }
         boolean quiet = XmlParser.containsValue(xml, "Quiet", "true");
-        S3Service.DeleteObjectsResult result = s3Service.deleteObjects(bucket, keys);
+
+        S3Service.RequestAuthorization authorization = S3RequestAuthorizationParser.parseIfRequired(
+                s3Service.isAuthEnforced(), httpHeaders, uriInfo);
+        s3Service.authorizeSignedRequest(authorization);
+        List<String> authorizedKeys = new ArrayList<>();
+        List<S3Service.DeleteError> authorizationErrors = new ArrayList<>();
+        for (String key : keys) {
+            try {
+                s3Service.authorizeObjectWrite(bucket, key, "s3:DeleteObject", authorization);
+                authorizedKeys.add(key);
+            } catch (AwsException e) {
+                authorizationErrors.add(new S3Service.DeleteError(key, e.getErrorCode(), e.getMessage()));
+            }
+        }
+
+        S3Service.DeleteObjectsResult result = s3Service.deleteObjects(bucket, authorizedKeys);
 
         XmlBuilder builder = new XmlBuilder()
                 .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
@@ -1260,6 +1313,13 @@ public class S3Controller {
                 }
                 builder.end("Deleted");
             }
+        }
+        for (S3Service.DeleteError e : authorizationErrors) {
+            builder.start("Error")
+                   .elem("Key", e.key())
+                   .elem("Code", e.code())
+                   .elem("Message", e.message())
+                   .end("Error");
         }
         for (S3Service.DeleteError e : result.errors()) {
             builder.start("Error")

@@ -158,6 +158,7 @@ public class ElastiCacheQueryHandler {
         String userName = params.getFirst("UserName");
         String accessString = params.getFirst("AccessString");
         String authModeType = params.getFirst("AuthenticationMode.Type");
+        String engine = params.getFirst("Engine");
 
         if (userId == null || userId.isBlank()) {
             return AwsQueryResponse.error("InvalidParameterValue", "UserId is required.", AwsNamespaces.EC, 400);
@@ -178,7 +179,7 @@ public class ElastiCacheQueryHandler {
         }
 
         try {
-            ElastiCacheUser user = service.createUser(userId, userName, authMode, passwords, accessString);
+            ElastiCacheUser user = service.createUser(userId, userName, authMode, passwords, accessString, engine);
             return Response.ok(AwsQueryResponse.envelope("CreateUser", AwsNamespaces.EC, userXml(user))).build();
         } catch (AwsException e) {
             return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.EC, e.getHttpStatus());
@@ -187,8 +188,9 @@ public class ElastiCacheQueryHandler {
 
     private Response handleDescribeUsers(MultivaluedMap<String, String> params) {
         String filterId = params.getFirst("UserId");
+        String filterEngine = params.getFirst("Engine");
         try {
-            Collection<ElastiCacheUser> users = service.listUsers(filterId);
+            Collection<ElastiCacheUser> users = service.listUsers(filterId, filterEngine);
             var xml = new XmlBuilder().start("Users");
             for (ElastiCacheUser u : users) {
                 xml.start("member").raw(userXml(u)).end("member");
@@ -202,12 +204,13 @@ public class ElastiCacheQueryHandler {
 
     private Response handleModifyUser(MultivaluedMap<String, String> params) {
         String userId = params.getFirst("UserId");
+        String engine = params.getFirst("Engine");
         if (userId == null || userId.isBlank()) {
             return AwsQueryResponse.error("InvalidParameterValue", "UserId is required.", AwsNamespaces.EC, 400);
         }
         List<String> passwords = extractMemberList(params, "AuthenticationMode.Passwords.member.");
         try {
-            ElastiCacheUser user = service.modifyUser(userId, passwords.isEmpty() ? null : passwords);
+            ElastiCacheUser user = service.modifyUser(userId, passwords.isEmpty() ? null : passwords, engine);
             return Response.ok(AwsQueryResponse.envelope("ModifyUser", AwsNamespaces.EC, userXml(user))).build();
         } catch (AwsException e) {
             return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.EC, e.getHttpStatus());
@@ -384,7 +387,8 @@ public class ElastiCacheQueryHandler {
                   .elem("Type", authType)
                   .elem("PasswordCount", (long) pwCount)
                 .end("Authentication")
-                .elem("Engine", "redis")
+                .elem("Engine", u.getEngine())
+                // MinimumEngineVersion: the only value AWS documents; no valkey-specific one is published.
                 .elem("MinimumEngineVersion", "6.0")
                 .start("UserGroupIds").end("UserGroupIds")
                 .elem("ARN", AwsArnUtils.Arn.of("elasticache", regionResolver.getDefaultRegion(), regionResolver.getAccountId(), "user:" + u.getUserId()).toString())

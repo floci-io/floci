@@ -201,6 +201,24 @@ public class S3VectorsController {
     ) {}
 
     @RegisterForReflection
+    public record ListVectorsRequest(
+            String vectorBucketName,
+            String indexName,
+            String indexArn,
+            Integer maxResults,
+            String nextToken,
+            Boolean returnData,
+            Boolean returnMetadata
+    ) {}
+
+    @RegisterForReflection
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record ListVectorsResponse(
+            List<VectorGetResponseRepresentation> vectors,
+            String nextToken
+    ) {}
+
+    @RegisterForReflection
     public record DeleteVectorsRequest(
             String vectorBucketName,
             String indexName,
@@ -368,6 +386,28 @@ public class S3VectorsController {
                 .toList();
 
         return Response.ok(new GetVectorsResponse(reps)).build();
+    }
+
+    @POST
+    @Path("/ListVectors")
+    public Response listVectors(@Context HttpHeaders headers, ListVectorsRequest request) {
+        String region = regionResolver.resolveRegion(headers);
+        int maxResults = request.maxResults() != null ? request.maxResults() : 0;
+        S3VectorsService.ListVectorsResult result = service.listVectors(
+                request.vectorBucketName(), request.indexName(), request.indexArn(), maxResults, request.nextToken(), region);
+
+        boolean returnData = request.returnData() != null && request.returnData();
+        boolean returnMetadata = request.returnMetadata() != null && request.returnMetadata();
+
+        List<VectorGetResponseRepresentation> reps = result.vectors().stream()
+                .map(v -> {
+                    VectorDataRepresentation data = returnData ? new VectorDataRepresentation(v.getData()) : null;
+                    Map<String, Object> metadata = returnMetadata ? v.getMetadata() : null;
+                    return new VectorGetResponseRepresentation(v.getKey(), data, metadata);
+                })
+                .toList();
+
+        return Response.ok(new ListVectorsResponse(reps, result.nextToken())).build();
     }
 
     @POST

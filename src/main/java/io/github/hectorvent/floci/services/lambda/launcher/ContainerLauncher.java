@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.common.docker.LaunchedContainerAwsEnv;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
+import io.github.hectorvent.floci.services.iam.model.SessionCreds;
 import io.github.hectorvent.floci.services.lambda.LambdaLayerService;
 import io.github.hectorvent.floci.services.lambda.model.ContainerState;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
@@ -90,6 +91,7 @@ public class ContainerLauncher {
     private final EcrRegistryManager ecrRegistryManager;
     private final LambdaLayerService layerService;
     private final LaunchedContainerAwsEnv awsEnv;
+    private final LambdaExecutionRoleCredentials executionRoleCredentials;
 
     /** Matches an AWS-shaped ECR image URI: {@code <account>.dkr.ecr.<region>.amazonaws.com/<repo>[:tag]}. */
     private static final java.util.regex.Pattern AWS_ECR_URI =
@@ -105,7 +107,8 @@ public class ContainerLauncher {
                              EmulatorConfig config,
                              EcrRegistryManager ecrRegistryManager,
                              LambdaLayerService layerService,
-                             LaunchedContainerAwsEnv awsEnv) {
+                             LaunchedContainerAwsEnv awsEnv,
+                             LambdaExecutionRoleCredentials executionRoleCredentials) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.logStreamer = logStreamer;
@@ -116,6 +119,7 @@ public class ContainerLauncher {
         this.ecrRegistryManager = ecrRegistryManager;
         this.layerService = layerService;
         this.awsEnv = awsEnv;
+        this.executionRoleCredentials = executionRoleCredentials;
     }
 
     @PostConstruct
@@ -156,14 +160,24 @@ public class ContainerLauncher {
 
         // For Zip functions, verify code exists before allocating any resources.
         // Hot-reload functions use a bind-mount; the Docker daemon validates the path at start.
-        if (!fn.isHotReload()) {
-            if (fn.getCodeLocalPath() != null) {
-                Path codePath = Path.of(fn.getCodeLocalPath());
-                if (!Files.exists(codePath)) {
-                    throw new RuntimeException("Code directory not found for function '"
-                            + fn.getFunctionName() + "': " + fn.getCodeLocalPath()
-                            + " (function may have been deleted or updated)");
-                }
+        // Image functions carry an imageUri rather than a local path.
+        if (!fn.isHotReload() && !"Image".equals(fn.getPackageType())) {
+            if (fn.getCodeLocalPath() == null) {
+                // A null path used to skip validation entirely, which made the one state that
+                // always means "no code" the one state never checked: the container started
+                // empty, the runtime logged an ImportModuleError nobody saw, and the caller
+                // waited out the whole function timeout. Failing here surfaces a dropped code
+                // field at its cause instead of as a timeout somewhere else (#1987).
+                throw new RuntimeException("No code location for function '"
+                        + fn.getFunctionName() + "'"
+                        + ("$LATEST".equals(fn.getVersion()) ? "" : " version " + fn.getVersion())
+                        + " (function has no deployed code)");
+            }
+            Path codePath = Path.of(fn.getCodeLocalPath());
+            if (!Files.exists(codePath)) {
+                throw new RuntimeException("Code directory not found for function '"
+                        + fn.getFunctionName() + "': " + fn.getCodeLocalPath()
+                        + " (function may have been deleted or updated)");
             }
         }
 
@@ -183,6 +197,7 @@ public class ContainerLauncher {
         // must be visible in the catch block below to release its in-flight reference on any
         // failure path, not just the one where useCodeVolume's block itself throws.
         String reservedCodeVolume = null;
+        Optional<SessionCreds> roleCredentials = Optional.empty();
         try {
 
         // Resolve image
@@ -225,16 +240,25 @@ public class ContainerLauncher {
         if (fn.getHandler() != null && !fn.getHandler().isBlank()) {
             env.add("_HANDLER=" + fn.getHandler());
         }
-        // Region, credentials and the Floci endpoint the SDK should target — the same baseline
-        // Floci gives every launched container. When the host ~/.aws is mounted (awsConfigPath)
-        // the SDK discovers credentials from /opt/aws-config instead of the placeholders.
+        // Region, credentials and the Floci endpoint the SDK should target: the same baseline
+        // Floci gives every launched container. When the host ~/.aws is mounted (awsConfigPath),
+        // the SDK discovers credentials from /opt/aws-config instead of injected credentials.
         Optional<String> awsConfigPath = config.services().lambda().awsConfigPath()
                 .filter(s -> !s.isBlank());
+        if (awsConfigPath.isEmpty()) {
+            roleCredentials = executionRoleCredentials.forFunction(fn);
+        }
         env.addAll(awsEnv.sdkBaselineEnv(lambdaRegion,
-                awsConfigPath.isPresent() ? Optional.of("/opt/aws-config") : Optional.empty()));
+                awsConfigPath.isPresent() ? Optional.of("/opt/aws-config") : Optional.empty(),
+                roleCredentials));
         env.addAll(flociCaEnv(flociCaCert));
         if (fn.getEnvironment() != null) {
-            fn.getEnvironment().forEach((k, v) -> env.add(k + "=" + v));
+            boolean hasExecutionRoleCredentials = roleCredentials.isPresent();
+            fn.getEnvironment().forEach((k, v) -> {
+                if (!hasExecutionRoleCredentials || !isAwsCredentialVariable(k)) {
+                    env.add(k + "=" + v);
+                }
+            });
         }
 
         ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
@@ -415,7 +439,10 @@ public class ContainerLauncher {
         // invocations without a slow extension is strictly better than failing the launch.
         awaitExtensionReadiness(runtimeApiServer, fn.getFunctionName());
 
-        ContainerHandle handle = new ContainerHandle(containerId, fn.getFunctionName(), runtimeApiServer, ContainerState.WARM, fn.isHotReload());
+        ContainerHandle handle = new ContainerHandle(
+                containerId, fn.getFunctionName(), runtimeApiServer, ContainerState.WARM, fn.isHotReload(),
+                roleCredentials.map(SessionCreds::accessKeyId).orElse(null),
+                LambdaExecutionRoleCredentials.sessionAccountId(fn));
 
         // Attach log streaming
         Closeable logHandle = logStreamer.attach(
@@ -433,13 +460,27 @@ public class ContainerLauncher {
             LOG.errorv("Container launch failed for function {0}; cleaning up: {1}",
                     fn.getFunctionName(), e.getMessage());
             if (containerId != null) {
-                try { lifecycleManager.stopAndRemove(containerId, null); } catch (Exception ignore) { /* best effort */ }
+                try {
+                    lifecycleManager.stopAndRemove(containerId, null);
+                } catch (Exception cleanupError) {
+                    LOG.warnv(cleanupError, "Could not remove failed Lambda container {0}", containerId);
+                }
+            }
+            if (roleCredentials.isPresent()) {
+                executionRoleCredentials.unregister(
+                        LambdaExecutionRoleCredentials.sessionAccountId(fn),
+                        roleCredentials.get().accessKeyId());
             }
             // No-op if create() already succeeded and released this above (reservedCodeVolume is
             // null by then); otherwise the failure happened before Docker ever saw the volume, so
             // its in-flight reference must be released here or cleanup would wait on it forever.
             releaseCodeVolumeReference(reservedCodeVolume);
-            try { runtimeApiServerFactory.release(runtimeApiServer); } catch (Exception ignore) { /* best effort */ }
+            try {
+                runtimeApiServerFactory.release(runtimeApiServer);
+            } catch (Exception cleanupError) {
+                LOG.warnv(cleanupError, "Could not release Runtime API server for function {0}",
+                        fn.getFunctionName());
+            }
             throw e;
         }
     }
@@ -483,8 +524,23 @@ public class ContainerLauncher {
             LOG.warnv(e, "RuntimeApiServer did not close cleanly for container {0}",
                     handle.getContainerId());
         } finally {
-            runtimeApiServerFactory.release(server);
+            try {
+                runtimeApiServerFactory.release(server);
+            } finally {
+                // The session is only reachable while the container is alive, so it is retired
+                // here rather than on the launch path's failure branch alone. Runs even if the
+                // release above throws, otherwise a failed release strands the registration and
+                // its credentials stay authorizable for the rest of the process lifetime.
+                executionRoleCredentials.unregister(
+                        handle.getExecutionRoleSessionAccountId(), handle.getExecutionRoleAccessKeyId());
+            }
         }
+    }
+
+    private static boolean isAwsCredentialVariable(String name) {
+        return "AWS_ACCESS_KEY_ID".equals(name)
+                || "AWS_SECRET_ACCESS_KEY".equals(name)
+                || "AWS_SESSION_TOKEN".equals(name);
     }
 
     /**

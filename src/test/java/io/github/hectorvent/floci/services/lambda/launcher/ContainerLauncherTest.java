@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.common.docker.LaunchedContainerAwsEnv;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
+import io.github.hectorvent.floci.services.iam.model.SessionCreds;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFileSystemConfig;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import io.github.hectorvent.floci.services.lambda.runtime.RuntimeApiServer;
@@ -47,6 +48,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -75,6 +77,7 @@ class ContainerLauncherTest {
     @Mock EmbeddedDnsServer embeddedDnsServer;
     @Mock RuntimeApiServer runtimeApiServer;
     @Mock DockerClient dockerClient;
+    @Mock LambdaExecutionRoleCredentials executionRoleCredentials;
 
     @TempDir
     Path tempDir;
@@ -124,11 +127,16 @@ class ContainerLauncherTest {
         LaunchedContainerAwsEnv awsEnv = new LaunchedContainerAwsEnv(reachableEndpoint);
         launcher = new ContainerLauncher(containerBuilder, lifecycleManager, logStreamer, imageResolver,
                 runtimeApiServerFactory, dockerHostResolver, config, ecrRegistryManager,
-                mock(io.github.hectorvent.floci.services.lambda.LambdaLayerService.class), awsEnv);
+                mock(io.github.hectorvent.floci.services.lambda.LambdaLayerService.class), awsEnv,
+                executionRoleCredentials);
 
         when(runtimeApiServerFactory.create()).thenReturn(runtimeApiServer);
         when(runtimeApiServer.getPort()).thenReturn(9000);
+        lenient().when(runtimeApiServer.stop()).thenReturn(CompletableFuture.completedFuture(null));
+        // stop() quiesces then close()s; the unregister assertions below run past that call.
+        lenient().when(runtimeApiServer.close()).thenReturn(CompletableFuture.completedFuture(null));
         when(dockerHostResolver.resolve()).thenReturn("127.0.0.1");
+        lenient().when(executionRoleCredentials.forFunction(any())).thenReturn(Optional.empty());
 
         // lenient: the failure-path test (populate fails before any container is created) never
         // reaches these, but every success-path test does — they must not trip strict-stubs.
@@ -377,47 +385,35 @@ class ContainerLauncherTest {
     }
 
     @Test
-    void launchFunction_userEnvironmentOverridesDefaultCredentials() throws Exception {
+    void launchFunction_executionRoleCredentialsOverrideUserCredentialEnvironment() throws Exception {
         Path codePath = Files.createDirectory(tempDir.resolve("creds-override"));
 
         LambdaFunction fn = new LambdaFunction();
         fn.setFunctionName("override-fn");
+        fn.setAccountId("000000000000");
         fn.setRuntime("nodejs20.x");
         fn.setHandler("index.handler");
         fn.setCodeLocalPath(codePath.toString());
         fn.setEnvironment(Map.of(
                 "AWS_ACCESS_KEY_ID", "user-key",
-                "AWS_SECRET_ACCESS_KEY", "user-secret"));
+                "AWS_SECRET_ACCESS_KEY", "user-secret",
+                "AWS_SESSION_TOKEN", "user-token"));
+        when(executionRoleCredentials.forFunction(fn)).thenReturn(Optional.of(
+                new SessionCreds("ASIAROLEKEY", "role-secret", "role-token")));
 
         launcher.launch(fn);
 
         List<String> env = captureRealContainerSpec().env();
-        // Docker honours the last occurrence of a duplicate Env entry, so user
-        // overrides must appear after the Floci defaults.
-        int defaultKeyIdx = -1;
-        int userKeyIdx = -1;
-        int defaultSecretIdx = -1;
-        int userSecretIdx = -1;
-        for (int i = 0; i < env.size(); i++) {
-            if (env.get(i).startsWith("AWS_ACCESS_KEY_ID=") && userKeyIdx < 0 && !env.get(i).equals("AWS_ACCESS_KEY_ID=user-key")) {
-                defaultKeyIdx = i;
-            }
-            if (env.get(i).equals("AWS_ACCESS_KEY_ID=user-key")) userKeyIdx = i;
-            if (env.get(i).startsWith("AWS_SECRET_ACCESS_KEY=") && userSecretIdx < 0 && !env.get(i).equals("AWS_SECRET_ACCESS_KEY=user-secret")) {
-                defaultSecretIdx = i;
-            }
-            if (env.get(i).equals("AWS_SECRET_ACCESS_KEY=user-secret")) userSecretIdx = i;
-        }
-        assertTrue(defaultKeyIdx >= 0, "default AWS_ACCESS_KEY_ID still present");
-        assertTrue(userKeyIdx > defaultKeyIdx,
-                "user AWS_ACCESS_KEY_ID must appear after the default");
-        assertTrue(defaultSecretIdx >= 0, "default AWS_SECRET_ACCESS_KEY still present");
-        assertTrue(userSecretIdx > defaultSecretIdx,
-                "user AWS_SECRET_ACCESS_KEY must appear after the default");
-
-        // AWS_SESSION_TOKEN was not overridden so the default remains.
+        assertTrue(env.contains("AWS_ACCESS_KEY_ID=ASIAROLEKEY"));
+        assertTrue(env.contains("AWS_SECRET_ACCESS_KEY=role-secret"));
+        assertTrue(env.contains("AWS_SESSION_TOKEN=role-token"));
+        assertTrue(env.stream().noneMatch("AWS_ACCESS_KEY_ID=user-key"::equals));
+        assertTrue(env.stream().noneMatch("AWS_SECRET_ACCESS_KEY=user-secret"::equals));
+        assertTrue(env.stream().noneMatch("AWS_SESSION_TOKEN=user-token"::equals));
+        assertEquals(1, env.stream().filter(e -> e.startsWith("AWS_ACCESS_KEY_ID=")).count());
+        assertEquals(1, env.stream().filter(e -> e.startsWith("AWS_SECRET_ACCESS_KEY=")).count());
         assertEquals(1, env.stream().filter(e -> e.startsWith("AWS_SESSION_TOKEN=")).count(),
-                "AWS_SESSION_TOKEN should retain its default exactly once");
+                "execution-role session token should appear exactly once");
     }
 
     @Test
@@ -534,6 +530,91 @@ class ContainerLauncherTest {
                 "AWS_SECRET_ACCESS_KEY should not be injected when awsConfigPath is set");
         assertTrue(env.stream().noneMatch(e -> e.startsWith("AWS_SESSION_TOKEN=")),
                 "AWS_SESSION_TOKEN should not be injected when awsConfigPath is set");
+        verify(executionRoleCredentials, never()).forFunction(any());
+    }
+
+    @Test
+    void stopUnregistersExecutionRoleSession() throws Exception {
+        Path codePath = Files.createDirectory(tempDir.resolve("role-session-stop"));
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("role-session-stop-fn");
+        fn.setAccountId("222233334444");
+        fn.setRuntime("nodejs20.x");
+        fn.setHandler("index.handler");
+        fn.setCodeLocalPath(codePath.toString());
+        when(executionRoleCredentials.forFunction(fn)).thenReturn(Optional.of(
+                new SessionCreds("ASIASTOPSESSION", "role-secret", "role-token")));
+
+        ContainerHandle handle = launcher.launch(fn);
+        launcher.stop(handle);
+
+        verify(executionRoleCredentials).unregister("222233334444", "ASIASTOPSESSION");
+    }
+
+    @Test
+    void launchFailureUnregistersExecutionRoleSession() throws Exception {
+        Path codePath = Files.createDirectory(tempDir.resolve("role-session-failure"));
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("role-session-failure-fn");
+        fn.setAccountId("222233334444");
+        fn.setRuntime("nodejs20.x");
+        fn.setHandler("index.handler");
+        fn.setCodeLocalPath(codePath.toString());
+        when(executionRoleCredentials.forFunction(fn)).thenReturn(Optional.of(
+                new SessionCreds("ASIAFAILEDSESSION", "role-secret", "role-token")));
+        doThrow(new RuntimeException("create failed")).when(lifecycleManager).create(any());
+
+        assertThrows(RuntimeException.class, () -> launcher.launch(fn));
+
+        verify(executionRoleCredentials).unregister("222233334444", "ASIAFAILEDSESSION");
+    }
+
+    @Test
+    void publishedVersionUnregistersUnderTheAccountItRegisteredWith() throws Exception {
+        // A published version has no accountId, so both the handle stamp and the revoke must take
+        // the account from the function ARN. Reading the field directly revokes under null and
+        // leaks a live, non-expiring session for the life of the process.
+        Path codePath = Files.createDirectory(tempDir.resolve("role-session-version"));
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("role-session-version-fn");
+        fn.setVersion("1");
+        fn.setFunctionArn(
+                "arn:aws:lambda:us-east-1:222233334444:function:role-session-version-fn:1");
+        fn.setRuntime("nodejs20.x");
+        fn.setHandler("index.handler");
+        fn.setCodeLocalPath(codePath.toString());
+        when(executionRoleCredentials.forFunction(fn)).thenReturn(Optional.of(
+                new SessionCreds("ASIAVERSIONSESSION", "role-secret", "role-token")));
+
+        ContainerHandle handle = launcher.launch(fn);
+        assertEquals("222233334444", handle.getExecutionRoleSessionAccountId());
+
+        launcher.stop(handle);
+
+        verify(executionRoleCredentials).unregister("222233334444", "ASIAVERSIONSESSION");
+    }
+
+    @Test
+    void publishedVersionLaunchFailureUnregistersUnderTheArnAccount() throws Exception {
+        // The launch-failure path recomputes the account rather than reading it back off a handle
+        // (there is no handle yet), so it needs the same ARN fallback. Reading the field here
+        // revokes under null and leaks the session that forFunction just registered.
+        Path codePath = Files.createDirectory(tempDir.resolve("role-session-version-failure"));
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("role-session-version-failure-fn");
+        fn.setVersion("2");
+        fn.setFunctionArn(
+                "arn:aws:lambda:us-east-1:222233334444:function:role-session-version-failure-fn:2");
+        fn.setRuntime("nodejs20.x");
+        fn.setHandler("index.handler");
+        fn.setCodeLocalPath(codePath.toString());
+        when(executionRoleCredentials.forFunction(fn)).thenReturn(Optional.of(
+                new SessionCreds("ASIAVERSIONFAILURE", "role-secret", "role-token")));
+        doThrow(new RuntimeException("create failed")).when(lifecycleManager).create(any());
+
+        assertThrows(RuntimeException.class, () -> launcher.launch(fn));
+
+        verify(executionRoleCredentials).unregister("222233334444", "ASIAVERSIONFAILURE");
     }
 
     @Test
@@ -1283,7 +1364,8 @@ class ContainerLauncherTest {
                 imageResolver, runtimeApiServerFactory, dockerHostResolver, config,
                 ecrRegistryManager,
                 mock(io.github.hectorvent.floci.services.lambda.LambdaLayerService.class),
-                new LaunchedContainerAwsEnv(reachableEndpoint));
+                new LaunchedContainerAwsEnv(reachableEndpoint),
+                executionRoleCredentials);
 
         stubExtensionDiscovery("otel-collector");
         // Feed a real stdout frame through whatever callback the launcher hands to execStartCmd.

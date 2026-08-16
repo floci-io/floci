@@ -979,6 +979,27 @@ public class LambdaService {
         snapshot.setLastModified(System.currentTimeMillis());
         snapshot.setRevisionId(UUID.randomUUID().toString());
 
+        // Everything that determines what actually runs. Without these the snapshot describes a
+        // function with no code: a version-qualified invoke resolves to it, launches a container
+        // with nothing in it, and hangs to the function timeout instead of failing (#1987). A
+        // published version is an immutable snapshot of code plus configuration, so it carries the
+        // code location for every package type, not only Zip.
+        snapshot.setCodeLocalPath(fn.getCodeLocalPath());
+        snapshot.setCodeSha256(fn.getCodeSha256());
+        snapshot.setS3Bucket(fn.getS3Bucket());
+        snapshot.setS3Key(fn.getS3Key());
+        snapshot.setHotReloadHostPath(fn.getHotReloadHostPath());
+        snapshot.setImageUri(fn.getImageUri());
+        snapshot.setImageConfigCommand(fn.getImageConfigCommand());
+        snapshot.setImageConfigEntryPoint(fn.getImageConfigEntryPoint());
+        snapshot.setImageConfigWorkingDirectory(fn.getImageConfigWorkingDirectory());
+        snapshot.setLayers(fn.getLayers());
+        snapshot.setArchitectures(fn.getArchitectures());
+        snapshot.setEphemeralStorageSize(fn.getEphemeralStorageSize());
+        snapshot.setTracingMode(fn.getTracingMode());
+        snapshot.setDeadLetterTargetArn(fn.getDeadLetterTargetArn());
+        snapshot.setKmsKeyArn(fn.getKmsKeyArn());
+
         functionStore.save(region, snapshot);
         LOG.infov("Published version {0} for function {1}", version, functionName);
         return snapshot;

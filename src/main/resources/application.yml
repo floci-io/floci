@@ -59,6 +59,7 @@ quarkus:
       - --initialize-at-run-time=io.github.hectorvent.floci.services.emr.EmrService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.elasticbeanstalk.ElasticBeanstalkService
       - --initialize-at-run-time=graphql.util.IdGenerator
+      - --initialize-at-run-time=io.github.hectorvent.floci.services.lambda.launcher.LambdaExecutionRoleCredentials
 
 
 floci:
@@ -115,6 +116,8 @@ floci:
       codepipeline:
         flush-interval-ms: 5000
       s3vectors:
+        flush-interval-ms: 5000
+      s3tables:
         flush-interval-ms: 5000
       ecs:
         flush-interval-ms: 5000
@@ -361,6 +364,7 @@ floci:
       max-published-ports-per-instance: 20
       socat-image: alpine/socat
       mock: false
+      aws-faithful-private-ip: false
     ecs:
       enabled: true
       mock: false
@@ -474,6 +478,8 @@ floci:
       schema-worker-threads: 4
       schema-worker-shutdown-timeout-seconds: 30
     s3vectors:
+      enabled: true
+    s3tables:
       enabled: true
     iot:
       enabled: true

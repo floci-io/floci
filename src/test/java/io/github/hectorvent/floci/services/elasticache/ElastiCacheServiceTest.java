@@ -66,9 +66,9 @@ class ElastiCacheServiceTest {
         service.createReplicationGroup("grp", "test", AuthMode.PASSWORD, null);
 
         service.createUser("default-user-id", "default", AuthMode.PASSWORD,
-                List.of("default-pass"), "on ~* +@all");
+                List.of("default-pass"), "on ~* +@all", null);
         service.createUser("other-user-id", "other", AuthMode.PASSWORD,
-                List.of("other-pass"), "on ~* +@all");
+                List.of("other-pass"), "on ~* +@all", null);
 
         service.modifyReplicationGroup("grp",
                 List.of("default-user-id", "other-user-id"), null);
@@ -86,7 +86,7 @@ class ElastiCacheServiceTest {
         service.createReplicationGroup("grp", "test", AuthMode.PASSWORD, null);
 
         service.createUser("other-user-id", "other", AuthMode.PASSWORD,
-                List.of("other-pass"), "on ~* +@all");
+                List.of("other-pass"), "on ~* +@all", null);
 
         service.modifyReplicationGroup("grp", List.of("other-user-id"), null);
 

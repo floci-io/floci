@@ -143,7 +143,29 @@ public class CloudFormationService {
                                      String templateBody, String templateUrl,
                                      Map<String, String> parameters, List<String> capabilities,
                                      Map<String, String> tags, String region) {
+        return createChangeSet(stackName, changeSetName, changeSetType, templateBody, templateUrl,
+                parameters, capabilities, tags, region, regionResolver.getAccountId());
+    }
+
+    /**
+     * Creates a change set whose condition-dependency preflight is evaluated in {@code accountId}'s
+     * context. This matters for StackSet deployments: {@code createChangeSet} runs in the
+     * administrator request scope, but the instance is executed in the target account, so a
+     * condition using {@code AWS::AccountId} must be preflighted against the same target account the
+     * execution will use. Otherwise a resource that is active in the target account is wrongly seen
+     * as excluded and its dependents fail with a spurious "Unresolved resource dependencies" error.
+     * This parameter changes only the preflight context; change-set and stack identifiers created here
+     * remain scoped to the caller account, and the execution account is supplied separately.
+     */
+    public ChangeSet createChangeSet(String stackName, String changeSetName, String changeSetType,
+                                     String templateBody, String templateUrl,
+                                     Map<String, String> parameters, List<String> capabilities,
+                                     Map<String, String> tags, String region, String accountId) {
         String resolvedTemplate = resolveTemplate(templateBody, templateUrl);
+
+        // Reject an unresolvable condition dependency graph up front, before any stack state is
+        // created, so CreateStack/UpdateStack fail synchronously the way real CloudFormation does.
+        validateConditionDependencies(resolvedTemplate, parameters, region, accountId);
 
         // Detect first creation atomically: the mapping function runs at most once per key, so the
         // flag is only set for the thread that actually creates the stack (no double-recording under
@@ -715,19 +737,21 @@ public class CloudFormationService {
                     // resources are deleted during replacement cleanup.
                     persistStack(stack);
                 }
+                // Both cleanup paths feed the single final status/reason writer.
                 List<UpdateCleanupFailure> cleanupFailures =
-                        finishCommittedResourceCleanup(stack);
+                        new ArrayList<>(deleteInactiveConditionResources(
+                                stack, resources, conditions, region));
+                cleanupFailures.addAll(finishCommittedResourceCleanup(stack));
                 finishCommittedStackUpdate(stack, cleanupFailures);
                 return;
             }
 
-            String completeStatus = isCreate ? "CREATE_COMPLETE" : "UPDATE_COMPLETE";
-            stack.setStatus(completeStatus);
+            stack.setStatus("CREATE_COMPLETE");
             stack.setLastUpdatedTime(now());
             addEvent(stack, stack.getStackName(), stack.getStackId(),
-                    "AWS::CloudFormation::Stack", completeStatus, null);
+                    "AWS::CloudFormation::Stack", "CREATE_COMPLETE", null);
             persistStack(stack);
-            LOG.infov("Stack {0} execution complete: {1}", stack.getStackName(), completeStatus);
+            LOG.infov("Stack {0} execution complete: CREATE_COMPLETE", stack.getStackName());
 
         } catch (Exception e) {
             if (!isCreate && updateCommitted) {
@@ -1114,6 +1138,69 @@ public class CloudFormationService {
         return failedResources;
     }
 
+    /**
+     * Removes resources that were provisioned by an earlier execution but whose resource-level
+     * {@code Condition} is false in the current template. Physical deletion honors the resource's
+     * deletion policy. A failed physical deletion leaves the resource in the underlying service and
+     * keeps it under stack management as {@code DELETE_FAILED}, so a later {@code DeleteStack} or
+     * {@code UpdateStack} can retry the cleanup instead of orphaning the backing resource.
+     * Resources removed from the template entirely are outside this condition-specific cleanup.
+     *
+     * @return one {@link UpdateCleanupFailure} per resource whose physical deletion failed
+     */
+    private List<UpdateCleanupFailure> deleteInactiveConditionResources(Stack stack, JsonNode resources,
+                                                           Map<String, Boolean> conditions, String region) {
+        if (!resources.isObject()) {
+            return List.of();
+        }
+
+        List<UpdateCleanupFailure> failures = new ArrayList<>();
+        List<StackResource> ordered = new ArrayList<>(stack.getResources().values());
+        Collections.reverse(ordered);
+        for (StackResource resource : ordered) {
+            JsonNode resDef = resources.get(resource.getLogicalId());
+            if (resDef == null) {
+                continue;
+            }
+            String condition = resDef.path("Condition").asText(null);
+            if (condition == null || conditions.getOrDefault(condition, false)) {
+                continue;
+            }
+
+            if (resource.getPhysicalId() == null || skipRetainedResource(stack, resource, false)) {
+                stack.getResources().remove(resource.getLogicalId());
+                continue;
+            }
+
+            addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
+                    resource.getResourceType(), "DELETE_IN_PROGRESS", null);
+            try {
+                provisioner.delete(resource, region);
+                addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
+                        resource.getResourceType(), "DELETE_COMPLETE", null);
+                stack.getResources().remove(resource.getLogicalId());
+            } catch (Exception e) {
+                String reason = e.getMessage() != null
+                        ? e.getMessage()
+                        : "Resource deletion failed during update cleanup";
+                failures.add(new UpdateCleanupFailure(
+                        resource.getLogicalId(), resource.getPhysicalId(), reason));
+                // Keep the resource under stack management as DELETE_FAILED. Removing it here would
+                // drop it from DescribeStackResources while the backing resource still exists,
+                // orphaning it and preventing a later DeleteStack/UpdateStack from retrying cleanup.
+                resource.setStatus("DELETE_FAILED");
+                resource.setStatusReason(reason);
+                addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
+                        resource.getResourceType(), "DELETE_FAILED", reason);
+                LOG.warnv("Failed to delete condition-disabled {0} ({1}) in stack {2}: {3}",
+                        resource.getResourceType(), resource.getPhysicalId(),
+                        stack.getStackName(), reason);
+            }
+        }
+
+        return failures;
+    }
+
     private void deleteStackResources(Stack stack, String region) {
         try {
             List<StackResource> resources = new ArrayList<>(stack.getResources().values());
@@ -1220,6 +1307,54 @@ public class CloudFormationService {
         condNode.fields().forEachRemaining(e ->
                 conditions.put(e.getKey(), evaluateCondition(e.getValue(), params, conditions, region, accountId)));
         return conditions;
+    }
+
+    /**
+     * Fails a create/update before any stack state is mutated when a resource that will be created
+     * depends on a resource excluded by a false condition. Real CloudFormation rejects such a
+     * template synchronously ("Template format error: Unresolved resource dependencies [...]")
+     * rather than silently skipping the dependent, so mirror that instead of dropping the resource.
+     * Malformed or SAM templates are left for the execution path, which surfaces their own errors.
+     */
+    private void validateConditionDependencies(String templateBody, Map<String, String> params,
+                                               String region, String accountId) {
+        JsonNode template;
+        try {
+            template = parseTemplate(templateBody);
+        } catch (Exception e) {
+            LOG.debugv("Skipping condition-dependency validation; template did not parse: {0}",
+                    e.getMessage());
+            return;
+        }
+        if (samTransformProcessor.hasSamTransform(template)) {
+            return;
+        }
+        JsonNode resources = template.path("Resources");
+        if (!resources.isObject()) {
+            return;
+        }
+
+        Map<String, String> resolvedParams = resolveDefaultParameters(template, params);
+        Map<String, Boolean> conditions =
+                resolveConditions(template, resolvedParams, null, region, accountId);
+
+        Set<String> allIds = new LinkedHashSet<>();
+        resources.fieldNames().forEachRemaining(allIds::add);
+        Set<String> activeIds = new LinkedHashSet<>();
+        Map<String, Set<String>> dependencies = new HashMap<>();
+        for (String logicalId : allIds) {
+            JsonNode resDef = resources.get(logicalId);
+            String condition = resDef.path("Condition").asText(null);
+            if (condition == null || conditions.getOrDefault(condition, false)) {
+                activeIds.add(logicalId);
+            }
+            dependencies.put(logicalId, collectResourceDependencies(resDef, allIds, conditions));
+        }
+
+        Set<String> unresolved = unresolvedConditionDependencies(activeIds, allIds, dependencies);
+        if (!unresolved.isEmpty()) {
+            throw unresolvedDependenciesError(unresolved);
+        }
     }
 
     private boolean evaluateCondition(JsonNode expr, Map<String, String> params,
@@ -1560,31 +1695,29 @@ public class CloudFormationService {
         resources.fieldNames().forEachRemaining(allIds::add);
 
         Map<String, Set<String>> dependencies = new HashMap<>();
+        Set<String> activeIds = new LinkedHashSet<>();
         for (String logicalId : allIds) {
             JsonNode resDef = resources.get(logicalId);
-
             String condition = resDef.path("Condition").asText(null);
-            if (condition != null && !conditions.getOrDefault(condition, false)) {
-                continue;
+            if (condition == null || conditions.getOrDefault(condition, false)) {
+                activeIds.add(logicalId);
             }
-
-            Set<String> deps = new LinkedHashSet<>();
-            collectDependencies(resDef.path("Properties"), allIds, deps);
-
-            JsonNode dependsOn = resDef.path("DependsOn");
-            if (dependsOn.isTextual()) {
-                deps.add(dependsOn.asText());
-            } else if (dependsOn.isArray()) {
-                for (JsonNode d : dependsOn) {
-                    deps.add(d.asText());
-                }
-            }
-
-            dependencies.put(logicalId, deps);
+            dependencies.put(logicalId, collectResourceDependencies(resDef, allIds, conditions));
         }
 
+        // AWS rejects a template whose created resources depend on a resource excluded by a false
+        // condition rather than silently skipping the dependent (verified against real
+        // CloudFormation: CreateStack fails synchronously with "Unresolved resource dependencies").
+        // Fn::If-guarded references are safe because collectDependencies only walks the selected
+        // branch, so a false-branch reference is never recorded as a dependency.
+        Set<String> unresolved = unresolvedConditionDependencies(activeIds, allIds, dependencies);
+        if (!unresolved.isEmpty()) {
+            throw unresolvedDependenciesError(unresolved);
+        }
+        dependencies.keySet().retainAll(activeIds);
+
         Map<String, Integer> inDegree = new HashMap<>();
-        for (String id : allIds) {
+        for (String id : activeIds) {
             inDegree.put(id, 0);
         }
         for (var entry : dependencies.entrySet()) {
@@ -1596,7 +1729,7 @@ public class CloudFormationService {
         }
 
         Deque<String> queue = new ArrayDeque<>();
-        for (String id : allIds) {
+        for (String id : activeIds) {
             if (inDegree.get(id) == 0) {
                 queue.add(id);
             }
@@ -1617,7 +1750,7 @@ public class CloudFormationService {
             }
         }
 
-        for (String id : allIds) {
+        for (String id : activeIds) {
             if (!sorted.contains(id)) {
                 sorted.add(id);
             }
@@ -1628,7 +1761,53 @@ public class CloudFormationService {
 
     private static final Pattern SUB_VAR_PATTERN = Pattern.compile("\\$\\{([^}]+)}");
 
-    private void collectDependencies(JsonNode node, Set<String> allIds, Set<String> deps) {
+    /**
+     * Collects the logical IDs this resource depends on, both through its {@code Properties}
+     * (Ref/GetAtt/Fn::Sub, and the selected branch of Fn::If) and its explicit {@code DependsOn}.
+     */
+    private Set<String> collectResourceDependencies(JsonNode resDef, Set<String> allIds,
+                                                    Map<String, Boolean> conditions) {
+        Set<String> deps = new LinkedHashSet<>();
+        collectDependencies(resDef.path("Properties"), allIds, deps, conditions);
+
+        JsonNode dependsOn = resDef.path("DependsOn");
+        if (dependsOn.isTextual()) {
+            deps.add(dependsOn.asText());
+        } else if (dependsOn.isArray()) {
+            for (JsonNode d : dependsOn) {
+                deps.add(d.asText());
+            }
+        }
+        return deps;
+    }
+
+    /**
+     * Returns the logical IDs of resources that are excluded by a false condition yet are still
+     * depended upon by a resource that will be created. An empty set means the dependency graph is
+     * resolvable for the current condition values.
+     */
+    private Set<String> unresolvedConditionDependencies(Set<String> activeIds, Set<String> allIds,
+                                                        Map<String, Set<String>> dependencies) {
+        Set<String> unresolved = new LinkedHashSet<>();
+        for (String logicalId : activeIds) {
+            for (String dependency : dependencies.get(logicalId)) {
+                if (allIds.contains(dependency) && !activeIds.contains(dependency)) {
+                    unresolved.add(dependency);
+                }
+            }
+        }
+        return unresolved;
+    }
+
+    private AwsException unresolvedDependenciesError(Set<String> unresolved) {
+        return new AwsException("ValidationError",
+                "Template format error: Unresolved resource dependencies ["
+                        + String.join(", ", unresolved)
+                        + "] in the Resources block of the template", 400);
+    }
+
+    private void collectDependencies(JsonNode node, Set<String> allIds, Set<String> deps,
+                                     Map<String, Boolean> conditions) {
         if (node == null || node.isNull() || node.isMissingNode()) {
             return;
         }
@@ -1653,19 +1832,28 @@ public class CloudFormationService {
                 }
                 return;
             }
+            if (node.has("Fn::If")) {
+                JsonNode fnIf = node.get("Fn::If");
+                if (fnIf.isArray() && fnIf.size() == 3) {
+                    boolean condition = conditions.getOrDefault(fnIf.get(0).asText(), false);
+                    collectDependencies(fnIf.get(condition ? 1 : 2), allIds, deps, conditions);
+                    return;
+                }
+            }
             if (node.has("Fn::Sub")) {
-                collectSubDependencies(node.get("Fn::Sub"), allIds, deps);
+                collectSubDependencies(node.get("Fn::Sub"), allIds, deps, conditions);
                 return;
             }
-            node.fields().forEachRemaining(e -> collectDependencies(e.getValue(), allIds, deps));
+            node.fields().forEachRemaining(e -> collectDependencies(e.getValue(), allIds, deps, conditions));
         } else if (node.isArray()) {
             for (JsonNode item : node) {
-                collectDependencies(item, allIds, deps);
+                collectDependencies(item, allIds, deps, conditions);
             }
         }
     }
 
-    private void collectSubDependencies(JsonNode sub, Set<String> allIds, Set<String> deps) {
+    private void collectSubDependencies(JsonNode sub, Set<String> allIds, Set<String> deps,
+                                        Map<String, Boolean> conditions) {
         String template;
         Set<String> explicitVars = new HashSet<>();
 
@@ -1675,7 +1863,7 @@ public class CloudFormationService {
             template = sub.get(0).asText();
             if (sub.size() >= 2 && sub.get(1).isObject()) {
                 sub.get(1).fieldNames().forEachRemaining(explicitVars::add);
-                collectDependencies(sub.get(1), allIds, deps);
+                collectDependencies(sub.get(1), allIds, deps, conditions);
             }
         } else {
             return;

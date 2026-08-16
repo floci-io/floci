@@ -114,6 +114,10 @@ record S3AclPolicy(List<S3AclPolicy.Grant> grants) {
             return grantee.isAllUsersGroup() && permission.allowsRead();
         }
 
+        boolean allowsPublicWrite() {
+            return grantee.isAllUsersGroup() && permission.allowsWrite();
+        }
+
         boolean allowsCanonicalUserRead(String canonicalUserId) {
             return grantee.isCanonicalUser(canonicalUserId) && permission.allowsRead();
         }
@@ -150,6 +154,10 @@ record S3AclPolicy(List<S3AclPolicy.Grant> grants) {
 
         boolean allowsRead() {
             return this == READ || this == FULL_CONTROL;
+        }
+
+        boolean allowsWrite() {
+            return this == WRITE || this == FULL_CONTROL;
         }
     }
 
