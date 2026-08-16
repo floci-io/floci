@@ -41,7 +41,7 @@ class SesServiceSmtpTest {
                 new InMemoryStorage<String, Identity>(),
                 emailStore,
                 new SesAccountService(new InMemoryStorage<String, Boolean>(), new InMemoryStorage<String, AccountVdmAttributes>()),
-                new InMemoryStorage<String, EmailTemplate>(),
+                new SesTemplateService(new InMemoryStorage<String, EmailTemplate>()),
                 new InMemoryStorage<String, ConfigurationSet>(),
                 new SesSuppressionService(new InMemoryStorage<String, SuppressedDestination>(), new InMemoryStorage<String, AccountSuppressionAttributes>()),
                 new SesDedicatedIpService(new InMemoryStorage<String, DedicatedIpPool>()),

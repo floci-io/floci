@@ -87,7 +87,9 @@ public class SesService {
     private final StorageBackend<String, SentEmail> emailStore;
     // Account-level settings, extracted to its own service. The facade delegates.
     private final SesAccountService accountService;
-    private final StorageBackend<String, EmailTemplate> templateStore;
+    // Email templates extracted to SesTemplateService. The facade delegates; the templated-send path
+    // reads via it, and ARN-dispatched tagging reads/writes via its find/save.
+    private final SesTemplateService templateService;
     private final StorageBackend<String, ConfigurationSet> configSetStore;
     // Account suppression attributes + the per-address suppression list (two stores) extracted to
     // SesSuppressionService. The facade delegates; its send filters read via it.
@@ -121,7 +123,7 @@ public class SesService {
                        SesAccountService accountService, SesCvetService cvetService,
                        SesPolicyService policyService, SesContactService contactService,
                        SesSuppressionService suppressionService, SesDedicatedIpService dedicatedIpService,
-                       SmtpRelay smtpRelay, ObjectMapper objectMapper,
+                       SesTemplateService templateService, SmtpRelay smtpRelay, ObjectMapper objectMapper,
                        SesEventPublisher eventPublisher, EmulatorConfig config, Route53Service route53Service,
                        Clock clock) {
         this.identityStore = storageFactory.create("ses", "ses-identities.json",
@@ -129,8 +131,7 @@ public class SesService {
         this.emailStore = storageFactory.create("ses", "ses-emails.json",
                 new TypeReference<Map<String, SentEmail>>() {});
         this.accountService = accountService;
-        this.templateStore = storageFactory.create("ses", "ses-templates.json",
-                new TypeReference<Map<String, EmailTemplate>>() {});
+        this.templateService = templateService;
         this.configSetStore = storageFactory.create("ses", "ses-config-sets.json",
                 new TypeReference<Map<String, ConfigurationSet>>() {});
         this.suppressionService = suppressionService;
@@ -151,7 +152,7 @@ public class SesService {
     SesService(StorageBackend<String, Identity> identityStore,
                StorageBackend<String, SentEmail> emailStore,
                SesAccountService accountService,
-               StorageBackend<String, EmailTemplate> templateStore,
+               SesTemplateService templateService,
                StorageBackend<String, ConfigurationSet> configSetStore,
                SesSuppressionService suppressionService,
                SesDedicatedIpService dedicatedIpService,
@@ -162,7 +163,7 @@ public class SesService {
                SmtpRelay smtpRelay,
                ObjectMapper objectMapper,
                Clock clock) {
-        this(identityStore, emailStore, accountService, templateStore, configSetStore, suppressionService,
+        this(identityStore, emailStore, accountService, templateService, configSetStore, suppressionService,
                 dedicatedIpService, contactService, policyService,
                 receiptRuleService, cvetService, smtpRelay, objectMapper, null, clock);
     }
@@ -170,7 +171,7 @@ public class SesService {
     SesService(StorageBackend<String, Identity> identityStore,
                StorageBackend<String, SentEmail> emailStore,
                SesAccountService accountService,
-               StorageBackend<String, EmailTemplate> templateStore,
+               SesTemplateService templateService,
                StorageBackend<String, ConfigurationSet> configSetStore,
                SesSuppressionService suppressionService,
                SesDedicatedIpService dedicatedIpService,
@@ -185,7 +186,7 @@ public class SesService {
         this.identityStore = identityStore;
         this.emailStore = emailStore;
         this.accountService = accountService;
-        this.templateStore = templateStore;
+        this.templateService = templateService;
         this.configSetStore = configSetStore;
         this.suppressionService = suppressionService;
         this.dedicatedIpService = dedicatedIpService;
@@ -1141,65 +1142,27 @@ public class SesService {
 
     // ──────────────────────────── Templates ────────────────────────────
 
+    // Email templates live in SesTemplateService; the facade forwards. The templated-send path below
+    // reads them back through getTemplate, and ARN-dispatched tagging through find/save.
+
     public EmailTemplate createTemplate(EmailTemplate template, String region) {
-        validateTemplate(template);
-        if (template.getTags() != null) {
-            for (Tag tag : template.getTags()) {
-                validateTag(tag);
-            }
-        }
-        String key = templateKey(region, template.getTemplateName());
-        if (templateStore.get(key).isPresent()) {
-            throw new AwsException("AlreadyExists",
-                    "Template " + template.getTemplateName() + " already exists.", 400);
-        }
-        Instant now = Instant.now();
-        template.setCreatedTimestamp(now);
-        template.setLastUpdatedTimestamp(now);
-        templateStore.put(key, template);
-        LOG.infov("Created SES template: {0} in region {1}", template.getTemplateName(), region);
-        return template;
+        return templateService.createTemplate(template, region);
     }
 
     public EmailTemplate getTemplate(String templateName, String region) {
-        return templateStore.get(templateKey(region, templateName))
-                .orElseThrow(() -> new AwsException("TemplateDoesNotExist",
-                        "Template " + templateName + " does not exist.", 400));
+        return templateService.getTemplate(templateName, region);
     }
 
     public EmailTemplate updateTemplate(EmailTemplate template, String region) {
-        validateTemplate(template);
-        String key = templateKey(region, template.getTemplateName());
-        EmailTemplate existing = templateStore.get(key)
-                .orElseThrow(() -> new AwsException("TemplateDoesNotExist",
-                        "Template " + template.getTemplateName() + " does not exist.", 400));
-        template.setCreatedTimestamp(existing.getCreatedTimestamp());
-        template.setLastUpdatedTimestamp(Instant.now());
-        // Tags are managed exclusively via Tag/UntagResource — preserve them on update.
-        template.setTags(existing.getTags());
-        templateStore.put(key, template);
-        LOG.infov("Updated SES template: {0} in region {1}", template.getTemplateName(), region);
-        return template;
+        return templateService.updateTemplate(template, region);
     }
 
     public void deleteTemplate(String templateName, String region) {
-        String key = templateKey(region, templateName);
-        if (templateStore.get(key).isEmpty()) {
-            throw new AwsException("TemplateDoesNotExist",
-                    "Template " + templateName + " does not exist.", 400);
-        }
-        templateStore.delete(key);
-        LOG.infov("Deleted SES template: {0} in region {1}", templateName, region);
+        templateService.deleteTemplate(templateName, region);
     }
 
     public List<EmailTemplate> listTemplates(String region) {
-        String prefix = "template::" + region + "::";
-        List<EmailTemplate> all = new ArrayList<>(templateStore.scan(k -> k.startsWith(prefix)));
-        all.sort(Comparator.comparing(EmailTemplate::getCreatedTimestamp,
-                        Comparator.nullsLast(Comparator.naturalOrder()))
-                .thenComparing(EmailTemplate::getTemplateName,
-                        Comparator.nullsLast(Comparator.naturalOrder())));
-        return all;
+        return templateService.listTemplates(region);
     }
 
     // ──────────── Custom verification email templates (v1 + v2 shared store) ────────────
@@ -2154,19 +2117,18 @@ public class SesService {
     }
 
     private List<Tag> listEmailTemplateTags(String name, String region) {
-        EmailTemplate template = templateStore.get(templateKey(region, name))
+        EmailTemplate template = templateService.find(name, region)
                 .orElseThrow(() -> new AwsException("NotFoundException",
                         "No Template present with name: " + name, 404));
         return new ArrayList<>(template.getTags());
     }
 
     private void tagEmailTemplate(String name, String region, List<Tag> newTags) {
-        String key = templateKey(region, name);
-        EmailTemplate template = templateStore.get(key)
+        EmailTemplate template = templateService.find(name, region)
                 .orElseThrow(() -> new AwsException("NotFoundException",
                         "No Template present with name: " + name, 404));
         template.setTags(mergeTags(template.getTags(), newTags));
-        templateStore.put(key, template);
+        templateService.save(template, region);
         LOG.infov("Tagged SES template: {0} (region {1}, +{2} tags)", name, region, newTags.size());
     }
 
@@ -2227,13 +2189,12 @@ public class SesService {
     }
 
     private void untagEmailTemplate(String name, String region, List<String> tagKeys) {
-        String key = templateKey(region, name);
-        EmailTemplate template = templateStore.get(key)
+        EmailTemplate template = templateService.find(name, region)
                 .orElseThrow(() -> new AwsException("NotFoundException",
                         "No Template present with name: " + name, 404));
         Set<String> toRemove = new HashSet<>(tagKeys);
         template.getTags().removeIf(t -> toRemove.contains(t.key()));
-        templateStore.put(key, template);
+        templateService.save(template, region);
         LOG.infov("Untagged SES template: {0} (region {1}, -{2} keys)", name, region, tagKeys.size());
     }
 
@@ -2867,36 +2828,6 @@ public class SesService {
         }
         matcher.appendTail(out);
         return out.toString();
-    }
-
-    private static void validateTemplate(EmailTemplate template) {
-        if (template == null) {
-            throw new AwsException("InvalidTemplate", "Template is required.", 400);
-        }
-        validateTemplateName(template.getTemplateName());
-        boolean hasSubject = template.getSubject() != null && !template.getSubject().isBlank();
-        boolean hasText = template.getTextPart() != null && !template.getTextPart().isBlank();
-        boolean hasHtml = template.getHtmlPart() != null && !template.getHtmlPart().isBlank();
-        if (!hasSubject && !hasText && !hasHtml) {
-            throw new AwsException("InvalidTemplate",
-                    "Template must have at least a subject, text, or html part.", 400);
-        }
-    }
-
-    private static void validateTemplateName(String templateName) {
-        if (templateName == null || templateName.isBlank()) {
-            throw new AwsException("InvalidTemplate", "TemplateName is required.", 400);
-        }
-        if (Character.isWhitespace(templateName.charAt(0))
-                || Character.isWhitespace(templateName.charAt(templateName.length() - 1))) {
-            throw new AwsException("InvalidTemplate",
-                    "TemplateName must not contain leading or trailing whitespace.", 400);
-        }
-    }
-
-    private static String templateKey(String region, String templateName) {
-        validateTemplateName(templateName);
-        return "template::" + region + "::" + templateName;
     }
 
     /**

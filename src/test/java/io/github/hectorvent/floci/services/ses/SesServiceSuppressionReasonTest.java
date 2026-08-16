@@ -49,7 +49,7 @@ class SesServiceSuppressionReasonTest {
                 new InMemoryStorage<String, Identity>(),
                 new InMemoryStorage<String, SentEmail>(),
                 new SesAccountService(new InMemoryStorage<String, Boolean>(), new InMemoryStorage<String, AccountVdmAttributes>()),
-                new InMemoryStorage<String, EmailTemplate>(),
+                new SesTemplateService(new InMemoryStorage<String, EmailTemplate>()),
                 new InMemoryStorage<String, ConfigurationSet>(),
                 new SesSuppressionService(suppressionStore, accountSuppressionStore),
                 new SesDedicatedIpService(new InMemoryStorage<String, DedicatedIpPool>()),
