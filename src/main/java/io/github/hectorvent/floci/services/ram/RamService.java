@@ -1,9 +1,11 @@
 package io.github.hectorvent.floci.services.ram;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.ram.model.PrincipalAssociation;
 import io.github.hectorvent.floci.services.ram.model.ResourceShare;
 import io.github.hectorvent.floci.services.ram.model.SharedResource;
 import jakarta.annotation.PostConstruct;
@@ -11,8 +13,12 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -106,6 +112,105 @@ public class RamService {
             }
         }
         return result;
+    }
+
+    public ResourceShare deleteResourceShare(String resourceShareArn) {
+        ResourceShare deleted = requireShare(resourceShareArn).withStatus("DELETED");
+        putForOwner(deleted);
+        return deleted;
+    }
+
+    public ResourceShare updateResourceShare(String resourceShareArn, String name,
+                                             Boolean allowExternalPrincipals) {
+        ResourceShare share = requireShare(resourceShareArn);
+        if (name != null) {
+            share = share.withName(name);
+        }
+        if (allowExternalPrincipals != null) {
+            share = share.withAllowExternalPrincipals(allowExternalPrincipals);
+        }
+        putForOwner(share);
+        return share;
+    }
+
+    public ResourceShare associateResourceShare(String resourceShareArn,
+                                                List<String> resourceArns, List<String> principals) {
+        ResourceShare share = requireShare(resourceShareArn);
+        ResourceShare updated = share.withPrincipalsAndResources(
+                mergeDistinct(share.getPrincipals(), principals),
+                mergeDistinct(share.getResourceArns(), resourceArns));
+        putForOwner(updated);
+        return updated;
+    }
+
+    public ResourceShare disassociateResourceShare(String resourceShareArn,
+                                                    List<String> resourceArns, List<String> principals) {
+        ResourceShare share = requireShare(resourceShareArn);
+        ResourceShare updated = share.withPrincipalsAndResources(
+                withoutAll(share.getPrincipals(), principals),
+                withoutAll(share.getResourceArns(), resourceArns));
+        putForOwner(updated);
+        return updated;
+    }
+
+    /**
+     * @param resourceOwner {@code SELF} or {@code OTHER-ACCOUNTS}, same visibility rule as
+     *                      {@link #getResourceShares}
+     */
+    public List<PrincipalAssociation> listPrincipals(String callerAccountId, String resourceOwner,
+                                                      List<String> resourceShareArns) {
+        List<PrincipalAssociation> result = new ArrayList<>();
+        for (ResourceShare share : allShares()) {
+            if (!isVisible(share, callerAccountId, resourceOwner)) {
+                continue;
+            }
+            if (!resourceShareArns.isEmpty() && !resourceShareArns.contains(share.getResourceShareArn())) {
+                continue;
+            }
+            for (String principal : share.getPrincipals()) {
+                result.add(new PrincipalAssociation(principal, share.getResourceShareArn(),
+                        share.getCreationTime(), share.getCreationTime(), false));
+            }
+        }
+        return result;
+    }
+
+    public void tagResource(String resourceShareArn, Map<String, String> newTags) {
+        ResourceShare share = requireShare(resourceShareArn);
+        Map<String, String> merged = new LinkedHashMap<>(share.getTags());
+        merged.putAll(newTags);
+        putForOwner(share.withTags(merged));
+    }
+
+    public void untagResource(String resourceShareArn, List<String> tagKeys) {
+        ResourceShare share = requireShare(resourceShareArn);
+        Map<String, String> remaining = new LinkedHashMap<>(share.getTags());
+        tagKeys.forEach(remaining::remove);
+        putForOwner(share.withTags(remaining));
+    }
+
+    private ResourceShare requireShare(String resourceShareArn) {
+        return findShare(resourceShareArn)
+                .orElseThrow(() -> new AwsException("UnknownResourceException",
+                        "ResourceShare " + resourceShareArn + " does not exist.", 400));
+    }
+
+    private Optional<ResourceShare> findShare(String resourceShareArn) {
+        return allShares().stream()
+                .filter(share -> share.getResourceShareArn().equals(resourceShareArn))
+                .findFirst();
+    }
+
+    private static List<String> mergeDistinct(List<String> existing, List<String> additions) {
+        Set<String> merged = new LinkedHashSet<>(existing);
+        merged.addAll(additions);
+        return List.copyOf(merged);
+    }
+
+    private static List<String> withoutAll(List<String> existing, List<String> removals) {
+        List<String> remaining = new ArrayList<>(existing);
+        remaining.removeAll(removals);
+        return List.copyOf(remaining);
     }
 
     private void putForOwner(ResourceShare share) {

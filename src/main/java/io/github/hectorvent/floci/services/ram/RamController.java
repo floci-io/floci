@@ -5,13 +5,16 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.services.ram.model.PrincipalAssociation;
 import io.github.hectorvent.floci.services.ram.model.ResourceShare;
 import io.github.hectorvent.floci.services.ram.model.SharedResource;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
+import jakarta.ws.rs.DELETE;
 import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
@@ -20,7 +23,9 @@ import jakarta.ws.rs.core.Response;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * AWS Resource Access Manager (Smithy restJson1).
@@ -91,6 +96,109 @@ public class RamController {
         return Response.ok(response).build();
     }
 
+    @DELETE
+    @Path("/deleteresourceshare")
+    @Consumes(MediaType.WILDCARD)
+    public Response deleteResourceShare(@QueryParam("resourceShareArn") String resourceShareArn) {
+        service.deleteResourceShare(resourceShareArn);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("returnValue", true);
+        return Response.ok(response).build();
+    }
+
+    @POST
+    @Path("/updateresourceshare")
+    @Consumes(MediaType.WILDCARD)
+    public Response updateResourceShare(String body) {
+        JsonNode request = readTree(body);
+        ResourceShare updated = service.updateResourceShare(
+                request.path("resourceShareArn").asText(),
+                request.hasNonNull("name") ? request.path("name").asText() : null,
+                request.hasNonNull("allowExternalPrincipals")
+                        ? request.path("allowExternalPrincipals").asBoolean() : null);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("resourceShare", shareNode(updated));
+        return Response.ok(response).build();
+    }
+
+    @POST
+    @Path("/associateresourceshare")
+    @Consumes(MediaType.WILDCARD)
+    public Response associateResourceShare(String body) {
+        JsonNode request = readTree(body);
+        String resourceShareArn = request.path("resourceShareArn").asText();
+        List<String> resourceArns = stringList(request.path("resourceArns"));
+        List<String> principals = stringList(request.path("principals"));
+        ResourceShare updated = service.associateResourceShare(resourceShareArn, resourceArns, principals);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("resourceShareAssociations",
+                associationArray(updated, resourceArns, principals, "ASSOCIATED"));
+        return Response.ok(response).build();
+    }
+
+    @POST
+    @Path("/disassociateresourceshare")
+    @Consumes(MediaType.WILDCARD)
+    public Response disassociateResourceShare(String body) {
+        JsonNode request = readTree(body);
+        String resourceShareArn = request.path("resourceShareArn").asText();
+        List<String> resourceArns = stringList(request.path("resourceArns"));
+        List<String> principals = stringList(request.path("principals"));
+        ResourceShare updated = service.disassociateResourceShare(resourceShareArn, resourceArns, principals);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("resourceShareAssociations",
+                associationArray(updated, resourceArns, principals, "DISASSOCIATED"));
+        return Response.ok(response).build();
+    }
+
+    @POST
+    @Path("/listprincipals")
+    @Consumes(MediaType.WILDCARD)
+    public Response listPrincipals(String body) {
+        JsonNode request = readTree(body);
+        String resourceOwner = request.path("resourceOwner").asText("SELF");
+        List<PrincipalAssociation> principals = service.listPrincipals(
+                regionResolver.getAccountId(), resourceOwner, stringList(request.path("resourceShareArns")));
+
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode array = objectMapper.createArrayNode();
+        for (PrincipalAssociation principal : principals) {
+            ObjectNode node = objectMapper.createObjectNode();
+            node.put("id", principal.id());
+            node.put("resourceShareArn", principal.resourceShareArn());
+            node.put("creationTime", principal.creationTime().toEpochMilli() / 1000.0);
+            node.put("lastUpdatedTime", principal.lastUpdatedTime().toEpochMilli() / 1000.0);
+            node.put("external", principal.external());
+            array.add(node);
+        }
+        response.set("principals", array);
+        return Response.ok(response).build();
+    }
+
+    @POST
+    @Path("/tagresource")
+    @Consumes(MediaType.WILDCARD)
+    public Response tagResource(String body) {
+        JsonNode request = readTree(body);
+        Map<String, String> tags = new LinkedHashMap<>();
+        request.path("tags").forEach(tag -> tags.put(tag.path("key").asText(), tag.path("value").asText()));
+        service.tagResource(request.path("resourceShareArn").asText(), tags);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    @POST
+    @Path("/untagresource")
+    @Consumes(MediaType.WILDCARD)
+    public Response untagResource(String body) {
+        JsonNode request = readTree(body);
+        service.untagResource(request.path("resourceShareArn").asText(), stringList(request.path("tagKeys")));
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
     @POST
     @Path("/getresourceshareinvitations")
     @Consumes(MediaType.WILDCARD)
@@ -132,6 +240,42 @@ public class RamController {
         node.put("status", share.getStatus());
         node.put("creationTime", share.getCreationTime().toEpochMilli() / 1000.0);
         node.put("lastUpdatedTime", share.getCreationTime().toEpochMilli() / 1000.0);
+        ArrayNode tags = objectMapper.createArrayNode();
+        share.getTags().forEach((key, value) -> {
+            ObjectNode tag = objectMapper.createObjectNode();
+            tag.put("key", key);
+            tag.put("value", value);
+            tags.add(tag);
+        });
+        node.set("tags", tags);
+        return node;
+    }
+
+    /** One row per associated/disassociated resourceArn and principal, per the real RAM shape. */
+    private ArrayNode associationArray(ResourceShare share, List<String> resourceArns,
+                                       List<String> principals, String status) {
+        ArrayNode array = objectMapper.createArrayNode();
+        double now = share.getCreationTime().toEpochMilli() / 1000.0;
+        for (String resourceArn : resourceArns) {
+            array.add(associationNode(share, resourceArn, "RESOURCE", status, now));
+        }
+        for (String principal : principals) {
+            array.add(associationNode(share, principal, "PRINCIPAL", status, now));
+        }
+        return array;
+    }
+
+    private ObjectNode associationNode(ResourceShare share, String associatedEntity,
+                                       String associationType, String status, double time) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("resourceShareArn", share.getResourceShareArn());
+        node.put("resourceShareName", share.getName());
+        node.put("associatedEntity", associatedEntity);
+        node.put("associationType", associationType);
+        node.put("status", status);
+        node.put("creationTime", time);
+        node.put("lastUpdatedTime", time);
+        node.put("external", false);
         return node;
     }
 
