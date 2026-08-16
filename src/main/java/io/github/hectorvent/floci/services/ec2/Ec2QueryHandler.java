@@ -1667,8 +1667,14 @@ public class Ec2QueryHandler {
         // When a wildcard name filter matches no seeded AMI, synthesize one that
         // satisfies it, so the lookup resolves — the exact id is a runtime detail.
         if (images.isEmpty() && imageIds.isEmpty() && filters.containsKey("name")) {
-            String namePattern = filters.get("name").stream().findFirst().orElse("");
-            if (namePattern.contains("*") || namePattern.contains("?")) {
+            // A filter's values are an OR, so the wildcard is whichever value carries one rather
+            // than whichever comes first. Taking the first outright meant an exact value ahead of
+            // a wildcard skipped synthesis and the lookup got nothing.
+            String namePattern = filters.get("name").stream()
+                    .filter(v -> v != null && (v.contains("*") || v.contains("?")))
+                    .findFirst()
+                    .orElse(null);
+            if (namePattern != null) {
                 Image synthesized = synthesizeLookupImage(namePattern, filters, owners);
                 // Only hand it back if it satisfies everything that was asked for. Returning an
                 // AMI that violates the request is worse than the empty result the lookup would

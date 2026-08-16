@@ -294,6 +294,27 @@ class Ec2IntegrationTest {
 
     @Test
     @Order(9)
+    void aWildcardBehindAnExactNameValueStillSynthesizes() {
+        // A filter's values are an OR. Taking the first value outright picked the exact one, the
+        // wildcard check failed, and the lookup got an empty set it could have satisfied.
+        String name = given()
+            .formParam("Action", "DescribeImages")
+            .formParam("Filter.1.Name", "name")
+            .formParam("Filter.1.Value.1", "unmatched-exact-name-no-wildcard")
+            .formParam("Filter.1.Value.2", "unmatched-second-value-*")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeImagesResponse.imagesSet.item.size()", equalTo(1))
+            .extract().path("DescribeImagesResponse.imagesSet.item.name");
+
+        assertThat(name, startsWith("unmatched-second-value-"));
+    }
+
+    @Test
+    @Order(9)
     void amazonOwnerScopeFindsTheSeededAmazonLinuxImages() {
         // The catalog matches on its own owner metadata, and the two Amazon Linux entries carried
         // none, so Owner.1=amazon omitted them however the registered-image matcher read the alias.
