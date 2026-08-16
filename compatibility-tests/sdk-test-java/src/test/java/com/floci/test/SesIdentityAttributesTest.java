@@ -267,7 +267,7 @@ class SesIdentityAttributesTest {
 
     @Test
     @Order(23)
-    void putEmailIdentityDkimSigningAttributes_regeneratesTokensOnKeyLengthChange() {
+    void putEmailIdentityDkimSigningAttributes_regeneratesTokensOnKeyLengthChange() throws InterruptedException {
         List<String> before = sesV2.getEmailIdentity(GetEmailIdentityRequest.builder()
                 .emailIdentity(dkimDomain).build()).dkimAttributes().tokens();
 
@@ -291,12 +291,14 @@ class SesIdentityAttributesTest {
         assertThat(lastKeyGen).isNotNull();
         // The timestamp comes from an uncontrolled server clock; toEpochMilli()/1000.0 yields
         // millisecond precision, so getNano() is a multiple of 1e6 and is zero only when the instant
-        // lands on a whole millisecond-of-second (~0.1%) — a boundary where whole-second epoch would
-        // also round-trip and the guard is blind. Regenerate the key (alternating length so a fresh
-        // key is minted each time) until a sub-second component appears, keeping the check meaningful
-        // without the rare flake.
+        // lands on a whole second (~0.1%) — a boundary where whole-second epoch would also round-trip
+        // and the guard is blind. Regenerate the key (alternating length so a fresh key is minted each
+        // time) until a sub-second component appears, keeping the check meaningful without the rare
+        // flake. The wait before each retry forces the next regeneration into a later millisecond, so
+        // the samples are independent and can't all collapse onto one zero-nanosecond instant.
         DkimSigningKeyLength[] lengths = {DkimSigningKeyLength.RSA_2048_BIT, DkimSigningKeyLength.RSA_1024_BIT};
         for (int attempt = 0; lastKeyGen.getNano() == 0 && attempt < 5; attempt++) {
+            Thread.sleep(2);
             sesV2.putEmailIdentityDkimSigningAttributes(PutEmailIdentityDkimSigningAttributesRequest.builder()
                     .emailIdentity(dkimDomain)
                     .signingAttributesOrigin(DkimSigningAttributesOrigin.AWS_SES)
