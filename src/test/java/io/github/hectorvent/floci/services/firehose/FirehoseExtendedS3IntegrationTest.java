@@ -8,9 +8,13 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.notNullValue;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -319,5 +323,143 @@ class FirehoseExtendedS3IntegrationTest {
         .then()
             .statusCode(400)
             .body("__type", equalTo("InvalidArgumentException"));
+    }
+
+    // Delivery-plane coverage: flushed objects follow the AWS key format
+    // <evaluated prefix><stream>-<version>-<yyyy-MM-dd-HH-mm-ss>-<uuid> observed
+    // on real AWS (https://github.com/floci-io/floci/issues/1857).
+
+    private static final String SUFFIX_REGEX =
+            "-1-\\d{4}-\\d{2}-\\d{2}-\\d{2}-\\d{2}-\\d{2}-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
+    private static final String TIME_PREFIX_REGEX = "\\d{4}/\\d{2}/\\d{2}/\\d{2}/";
+
+    @Test
+    @Order(11)
+    void deliveryWithoutPrefixUsesAwsDefaultTimePrefix() {
+        String stream = "delivery-default-stream";
+        String bucket = "extended-s3-delivery-default";
+        createDeliveryStream(stream, bucket, "");
+        putFiveRecords(stream);
+
+        String key = firstDeliveredKey(bucket, "");
+        assertTrue(key.matches(TIME_PREFIX_REGEX + stream + SUFFIX_REGEX), key);
+    }
+
+    @Test
+    @Order(12)
+    void deliveryAppendsTimePrefixToStaticPrefix() {
+        String stream = "delivery-static-stream";
+        String bucket = "extended-s3-delivery-static";
+        createDeliveryStream(stream, bucket, ", \"Prefix\": \"events/data/\"");
+        putFiveRecords(stream);
+
+        String key = firstDeliveredKey(bucket, "events/data/");
+        assertTrue(key.matches("events/data/" + TIME_PREFIX_REGEX + stream + SUFFIX_REGEX), key);
+    }
+
+    @Test
+    @Order(13)
+    void deliveryConcatenatesTimePrefixWithoutInsertingSlash() {
+        String stream = "delivery-noslash-stream";
+        String bucket = "extended-s3-delivery-noslash";
+        createDeliveryStream(stream, bucket, ", \"Prefix\": \"legacy\"");
+        putFiveRecords(stream);
+
+        String key = firstDeliveredKey(bucket, "legacy");
+        assertTrue(key.matches("legacy" + TIME_PREFIX_REGEX + stream + SUFFIX_REGEX), key);
+    }
+
+    @Test
+    @Order(14)
+    void deliveryEvaluatesTimestampExpressionWithoutAppendingDefault() {
+        String stream = "delivery-expr-stream";
+        String bucket = "extended-s3-delivery-expr";
+        createDeliveryStream(stream, bucket, ", \"Prefix\": \"data/!{timestamp:yyyy/MM/dd}/\"");
+        putFiveRecords(stream);
+
+        String key = firstDeliveredKey(bucket, "data/");
+        assertTrue(key.matches("data/\\d{4}/\\d{2}/\\d{2}/" + stream + SUFFIX_REGEX), key);
+    }
+
+    @Test
+    @Order(15)
+    void deliveryEvaluatesRandomStringExpressionWithoutAppendingDefault() {
+        String stream = "delivery-rand-stream";
+        String bucket = "extended-s3-delivery-rand";
+        createDeliveryStream(stream, bucket, ", \"Prefix\": \"rand/!{firehose:random-string}/\"");
+        putFiveRecords(stream);
+
+        String key = firstDeliveredKey(bucket, "rand/");
+        assertTrue(key.matches("rand/[A-Za-z0-9]{11}/" + stream + SUFFIX_REGEX), key);
+    }
+
+    @Test
+    @Order(16)
+    void customTimeZoneIsEchoedAndDeliveryKeepsAwsKeyShape() {
+        String stream = "delivery-tz-stream";
+        String bucket = "extended-s3-delivery-tz";
+        createDeliveryStream(stream, bucket,
+                ", \"Prefix\": \"events/\", \"CustomTimeZone\": \"Europe/Madrid\"");
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET_PREFIX + "DescribeDeliveryStream")
+            .body("{ \"DeliveryStreamName\": \"" + stream + "\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DeliveryStreamDescription.Destinations[0].ExtendedS3DestinationDescription.CustomTimeZone",
+                    equalTo("Europe/Madrid"));
+
+        putFiveRecords(stream);
+        String key = firstDeliveredKey(bucket, "events/");
+        assertTrue(key.matches("events/" + TIME_PREFIX_REGEX + stream + SUFFIX_REGEX), key);
+    }
+
+    private void createDeliveryStream(String streamName, String bucket, String extraDestinationJson) {
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET_PREFIX + "CreateDeliveryStream")
+            .body("""
+                    {
+                      "DeliveryStreamName": "%s",
+                      "ExtendedS3DestinationConfiguration": {
+                        "RoleARN": "%s",
+                        "BucketARN": "arn:aws:s3:::%s"%s
+                      }
+                    }
+                    """.formatted(streamName, ROLE_ARN, bucket, extraDestinationJson))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    /** Five records reach DEFAULT_FLUSH_COUNT, so the batch triggers the automatic flush. */
+    private void putFiveRecords(String streamName) {
+        String data = Base64.getEncoder().encodeToString("{\"id\": 1}".getBytes(StandardCharsets.UTF_8));
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET_PREFIX + "PutRecordBatch")
+            .body("""
+                    {
+                      "DeliveryStreamName": "%s",
+                      "Records": [
+                        {"Data": "%s"}, {"Data": "%s"}, {"Data": "%s"}, {"Data": "%s"}, {"Data": "%s"}
+                      ]
+                    }
+                    """.formatted(streamName, data, data, data, data, data))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("FailedPutCount", equalTo(0));
+    }
+
+    private String firstDeliveredKey(String bucket, String listPrefix) {
+        return given().when().get("/" + bucket + "?prefix=" + listPrefix)
+                .then().statusCode(200)
+                .extract().xmlPath().getString("ListBucketResult.Contents[0].Key");
     }
 }

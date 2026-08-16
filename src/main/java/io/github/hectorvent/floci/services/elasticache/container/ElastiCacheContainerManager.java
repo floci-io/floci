@@ -72,7 +72,7 @@ public class ElastiCacheContainerManager {
     public ElastiCacheContainerHandle start(String groupId, String image) {
         LOG.infov("Starting ElastiCache backend container for group: {0}", groupId);
 
-        String containerName = ContainerStorageHelper.resourceName(config, "valkey", null, groupId);
+        String containerName = containerName(groupId);
 
         // Remove any stale container with the same name
         lifecycleManager.removeIfExists(containerName);
@@ -182,6 +182,28 @@ public class ElastiCacheContainerManager {
         }
         activeContainers.remove(handle.getGroupId());
         lifecycleManager.stopAndRemove(handle.getContainerId(), handle.getLogStream());
+    }
+
+    /**
+     * Stops and removes the backend container for a group by id, if one exists.
+     * Used by the service's provisioning rollback: {@link #start} registers the container in
+     * {@code activeContainers} <em>before</em> {@link #waitForBackendReady}, so a readiness
+     * timeout throws without ever returning the handle to the caller. In that case rollback
+     * can't go through {@link #stop} (it has no handle), so it cleans up by id instead. Falls
+     * back to the deterministic container name to catch a container that failed before it was
+     * registered. Idempotent — a no-op when nothing is running for the id.
+     */
+    public void stopByGroupId(String groupId) {
+        ElastiCacheContainerHandle handle = activeContainers.get(groupId);
+        if (handle != null) {
+            stop(handle);
+            return;
+        }
+        lifecycleManager.removeIfExists(containerName(groupId));
+    }
+
+    private String containerName(String groupId) {
+        return ContainerStorageHelper.resourceName(config, "valkey", null, groupId);
     }
 
     public void stopAll() {

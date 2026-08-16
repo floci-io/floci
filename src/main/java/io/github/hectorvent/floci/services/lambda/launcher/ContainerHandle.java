@@ -44,6 +44,18 @@ public class ContainerHandle {
     public void touchLastUsed() { this.lastUsedMs = System.currentTimeMillis(); }
     public ContainerState getState() { return state; }
     public void setState(ContainerState state) { this.state = state; }
+
     public Closeable getLogStream() { return logStream; }
     public void setLogStream(Closeable logStream) { this.logStream = logStream; }
+
+    /**
+     * True once an extension in this container reported an init or exit error. Real AWS treats
+     * both as fatal to the execution environment, so {@code WarmPool} must retire the container
+     * instead of pooling or reusing it. Read from the container's {@code RuntimeApiServer}, which
+     * is where extensions report the error; a handle with no runtime server (test fixtures) is
+     * never faulted.
+     */
+    public boolean isFaulted() {
+        return runtimeApiServer != null && runtimeApiServer.isFaulted();
+    }
 }

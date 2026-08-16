@@ -170,7 +170,8 @@ class SsmIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("Parameters.size()", equalTo(2));
+            .body("Parameters.size()", equalTo(2))
+            .body("InvalidParameters", contains("/missing"));
     }
 
     @Test
@@ -230,7 +231,8 @@ class SsmIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("DeletedParameters.size()", equalTo(2));
+            .body("DeletedParameters.size()", equalTo(2))
+            .body("InvalidParameters", contains("/missing"));
     }
 
     // ── Issue #956: DescribePatchBaselines / GetDefaultPatchBaseline (AWS-owned predefined) ──

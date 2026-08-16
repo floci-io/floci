@@ -58,6 +58,7 @@ public class KmsJsonHandler {
             case "GenerateMac" -> handleGenerateMac(request, region);
             case "VerifyMac" -> handleVerifyMac(request, region);
             case "CreateAlias" -> handleCreateAlias(request, region);
+            case "UpdateAlias" -> handleUpdateAlias(request, region);
             case "DeleteAlias" -> handleDeleteAlias(request, region);
             case "ListAliases" -> handleListAliases(request, region);
             case "ScheduleKeyDeletion" -> handleScheduleKeyDeletion(request, region);
@@ -67,6 +68,7 @@ public class KmsJsonHandler {
             case "ListResourceTags" -> handleListResourceTags(request, region);
             case "GetKeyPolicy" -> handleGetKeyPolicy(request, region);
             case "PutKeyPolicy" -> handlePutKeyPolicy(request, region);
+            case "ListKeyPolicies" -> handleListKeyPolicies(request, region);
             case "UpdateKeyDescription" -> handleUpdateKeyDescription(request, region);
             case "GetKeyRotationStatus" -> handleGetKeyRotationStatus(request, region);
             case "EnableKeyRotation" -> handleEnableKeyRotation(request, region);
@@ -260,7 +262,9 @@ public class KmsJsonHandler {
     private Response handleDecrypt(JsonNode request, String region) {
         byte[] ciphertext = decodeBlob(request, "CiphertextBlob");
         Map<String, String> context = readEncryptionContext(request.path("EncryptionContext"));
-        KmsService.DecryptResult result = service.decryptAndResolveKey(ciphertext, context, region);
+        String requestKeyId = request.path("KeyId").asText(null);
+
+        KmsService.DecryptResult result = service.decryptAndResolveKey(ciphertext, context, region, requestKeyId);
 
         ObjectNode response = objectMapper.createObjectNode();
         response.put("Plaintext", Base64.getEncoder().encodeToString(result.plaintext()));
@@ -305,7 +309,8 @@ public class KmsJsonHandler {
         Map<String, String> sourceContext = readEncryptionContext(request.path("SourceEncryptionContext"));
         Map<String, String> destContext = readEncryptionContext(request.path("DestinationEncryptionContext"));
 
-        KmsService.DecryptResult source = service.decryptAndResolveKey(ciphertext, sourceContext, region);
+        String sourceKeyId = request.path("SourceKeyId").asText(null);
+        KmsService.DecryptResult source = service.decryptAndResolveKey(ciphertext, sourceContext, region, sourceKeyId);
         byte[] newCiphertext = service.encrypt(destKeyId, source.plaintext(), destContext, region);
 
         ObjectNode response = objectMapper.createObjectNode();
@@ -386,6 +391,11 @@ public class KmsJsonHandler {
 
     private Response handleCreateAlias(JsonNode request, String region) {
         service.createAlias(request.path("AliasName").asText(), request.path("TargetKeyId").asText(), region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleUpdateAlias(JsonNode request, String region) {
+        service.updateAlias(request.path("AliasName").asText(), request.path("TargetKeyId").asText(), region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
@@ -472,6 +482,14 @@ public class KmsJsonHandler {
                 request.path("Policy").asText(),
                 region);
         return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleListKeyPolicies(JsonNode request, String region) {
+        // Limit and Marker are accepted by simply not being read; see the service javadoc.
+        Map<String, Object> result = service.listKeyPolicies(
+                requiredText(request, "KeyId"),
+                region);
+        return Response.ok(objectMapper.valueToTree(result)).build();
     }
 
     private Response handleUpdateKeyDescription(JsonNode request, String region) {

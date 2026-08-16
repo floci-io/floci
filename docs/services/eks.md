@@ -146,6 +146,93 @@ services:
       FLOCI_SERVICES_EKS_MOCK: "true"
 ```
 
+## IRSA (IAM Roles for Service Accounts)
+
+Every cluster gets an OIDC identity provider, so the full IRSA flow (trust policy, service-account token, `sts:AssumeRoleWithWebIdentity`) works end to end without mocked or hardcoded tokens.
+
+`CreateCluster` generates an RSA-2048 signing keypair and an AWS-shaped issuer URL, returned by `DescribeCluster`:
+
+```json
+{
+  "cluster": {
+    "name": "my-cluster",
+    "identity": { "oidc": { "issuer": "https://oidc.eks.us-east-1.amazonaws.com/id/3F8A…" } }
+  }
+}
+```
+
+The issuer URL is a faithful string for building trust policies, but it is not fetched: Floci's STS resolves the signing key in-process. The private key is held in storage separate from the cluster model and is never returned by any API.
+
+### Minting a service-account token
+
+Real EKS has the kubelet project a token into the pod. Floci has no kubelet, so a local-dev harness requests one and writes it to the file named by `AWS_WEB_IDENTITY_TOKEN_FILE`. Signing happens server-side, so the private key never leaves Floci.
+
+```bash
+curl -sX POST http://localhost:4566/_floci/eks/clusters/my-cluster/oidc-token \
+  -H 'Content-Type: application/json' \
+  -d '{"namespace":"my-namespace","serviceAccount":"my-service-account"}'
+```
+
+```json
+{
+  "token": "eyJhbGciOiJSUzI1NiIs…",
+  "issuer": "https://oidc.eks.us-east-1.amazonaws.com/id/3F8A…",
+  "subject": "system:serviceaccount:my-namespace:my-service-account",
+  "audience": "sts.amazonaws.com"
+}
+```
+
+`audience` (default `sts.amazonaws.com`) and `expirySeconds` (default 24h, max 7d) are optional.
+This is Floci plumbing under `_floci/…`, not an AWS API.
+
+### Trust policy
+
+Note that the OIDC provider ARN and the condition keys use the issuer with the scheme stripped `oidc.eks.<region>.amazonaws.com/id/<id>`, which is how the AWS console, `eksctl`, and Terraform all render it.
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Principal": {
+      "Federated": "arn:aws:iam::000000000000:oidc-provider/<oidcProvider>"
+    },
+    "Action": "sts:AssumeRoleWithWebIdentity",
+    "Condition": {
+      "StringEquals": {
+        "<oidcProvider>:sub": "system:serviceaccount:<namespace>:<serviceAccount>",
+        "<oidcProvider>:aud": "sts.amazonaws.com"
+      }
+    }
+  }]
+}
+```
+
+### What STS validates
+
+When `sts:AssumeRoleWithWebIdentity` receives a token whose `iss` names an issuer Floci hosts, it enforces all of:
+
+- the RS256 signature, against that cluster's public key
+- `iss` matches the cluster's issuer exactly
+- `aud` contains `sts.amazonaws.com`
+- `exp` / `nbf`, with 60s of clock-skew tolerance
+- the role's trust policy: `Principal.Federated` and the `Condition` block, comparing `oidc:sub` / `oidc:aud` with exact, case-sensitive equality
+
+The response then carries the token's real claims in `SubjectFromWebIdentityToken`, `Provider`, and `Audience`. Failures return `InvalidIdentityToken` (400) for a bad token or `AccessDenied` (403) when the trust policy does not permit the subject.
+
+A token whose issuer Floci does not host is treated as opaque and accepted, since Floci cannot adjudicate a third-party provider. Validation is therefore automatic for Floci-issued tokens and requires no configuration flag.
+
+### OIDC discovery endpoints
+
+Served for fidelity and debugging, nothing in the IRSA flow dereferences them:
+
+| Route | Description |
+|---|---|
+| `GET /_floci/eks/clusters/<name>/oidc/.well-known/openid-configuration` | OIDC discovery document |
+| `GET /_floci/eks/clusters/<name>/oidc/keys` | JWKS containing the cluster's public key |
+
+These live under `_floci/…` rather than at the AWS-shaped issuer path, which Floci's embedded DNS does not resolve and which would collide with S3's path-style routing.
+
 ## ARN Format
 
 ```

@@ -128,4 +128,37 @@ public class EksController {
         FargateProfile profile = eksService.deleteFargateProfile(name, fargateProfileName);
         return Response.ok(Map.of("fargateProfile", profile)).build();
     }
+
+    // Read-only sub-resource lists for resources the emulator does not model. Explicit routes
+    // so S3's path-style catch-all (@Path("/{bucket}/{key: .+}")) cannot swallow them
+    // (issue #1754, same family as #1137): validate the cluster, then return the documented
+    // empty list under each operation's model-exact result key.
+
+    @GET
+    @Path("/clusters/{name}/access-entries")
+    public Response listAccessEntries(@PathParam("name") String name) {
+        eksService.describeCluster(name);
+        return Response.ok(Map.of("accessEntries", List.of())).build();
+    }
+
+    @GET
+    @Path("/clusters/{name}/addons")
+    public Response listAddons(@PathParam("name") String name) {
+        eksService.describeCluster(name);
+        return Response.ok(Map.of("addons", List.of())).build();
+    }
+
+    @GET
+    @Path("/clusters/{name}/identity-provider-configs")
+    public Response listIdentityProviderConfigs(@PathParam("name") String name) {
+        eksService.describeCluster(name);
+        return Response.ok(Map.of("identityProviderConfigs", List.of())).build();
+    }
+
+    @GET
+    @Path("/clusters/{name}/pod-identity-associations")
+    public Response listPodIdentityAssociations(@PathParam("name") String name) {
+        eksService.describeCluster(name);
+        return Response.ok(Map.of("associations", List.of())).build();
+    }
 }

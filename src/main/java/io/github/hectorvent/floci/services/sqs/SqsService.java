@@ -479,8 +479,10 @@ public class SqsService implements Resettable {
             return message;
         }
 
-        // Standard queue
+        // Standard queue. MessageGroupId is retained for ReceiveMessage to
+        // return (fair queues); it has no effect on standard-queue delivery.
         Message message = new Message(body);
+        message.setMessageGroupId(messageGroupId);
         message.setAwsTraceHeader(awsTraceHeader);
         if (effectiveDelaySeconds > 0) {
             message.setVisibleAt(Instant.now().plusSeconds(effectiveDelaySeconds));

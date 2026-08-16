@@ -100,6 +100,8 @@ Quick summary:
 - [ ] New or updated integration test added
 - [ ] Commit messages follow Conventional Commits
 
+Please keep at most **5 open PRs** at a time — a bot leaves an advisory note (label `over-pr-limit`) on PRs opened beyond that. See [CONTRIBUTING.md](https://github.com/floci-io/floci/blob/main/CONTRIBUTING.md#pull-request-guidelines) for details.
+
 ## Reporting Security Issues
 
 Do **not** open public issues for security vulnerabilities. Use [GitHub private vulnerability reporting](https://docs.github.com/en/code-security/security-advisories/guidance-on-reporting-and-writing/privately-reporting-a-security-vulnerability) instead.

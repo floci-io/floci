@@ -10,7 +10,7 @@ import static org.hamcrest.Matchers.equalTo;
 class RdsDataControllerIntegrationTest {
 
     @Test
-    void executeRejectsSqlParametersWithJsonDataApiError() {
+    void executeRejectsMalformedSqlParametersWithJsonDataApiError() {
         given()
             .contentType("application/json")
             .body("""
@@ -19,7 +19,7 @@ class RdsDataControllerIntegrationTest {
                   "secretArn": "arn:aws:secretsmanager:us-east-1:000000000000:secret:missing",
                   "database": "app",
                   "sql": "select 1",
-                  "parameters": [{"name": "id", "value": {"longValue": 1}}]
+                  "parameters": {"name": "id", "value": {"longValue": 1}}
                 }
                 """)
         .when()

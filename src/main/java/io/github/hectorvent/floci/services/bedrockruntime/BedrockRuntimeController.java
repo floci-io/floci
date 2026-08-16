@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.smallrye.common.annotation.Blocking;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.POST;
@@ -41,6 +42,7 @@ public class BedrockRuntimeController {
     }
 
     @POST
+    @Blocking
     @Path("/{modelId:.+}/converse")
     public Response converse(@PathParam("modelId") String modelId, String body) {
         if (modelId == null || modelId.isBlank()) {
@@ -62,12 +64,13 @@ public class BedrockRuntimeController {
                     "messages is required and must be a non-empty array.", 400);
         }
 
-        ObjectNode response = service.buildConverseResponse(modelId);
+        ObjectNode response = service.buildConverseResponse(modelId, (ObjectNode) request);
         LOG.debugv("Bedrock Converse: modelId={0}, messages={1}", modelId, messages.size());
         return Response.ok(response).build();
     }
 
     @POST
+    @Blocking
     @Path("/{modelId:.+}/invoke")
     @Consumes(MediaType.WILDCARD)
     public Response invokeModel(@PathParam("modelId") String modelId, byte[] body) {
@@ -75,7 +78,7 @@ public class BedrockRuntimeController {
             throw new AwsException("ValidationException", "modelId is required.", 400);
         }
         // Bedrock InvokeModel bodies are model-specific opaque blobs; do not parse.
-        byte[] response = service.buildInvokeModelResponse(modelId);
+        byte[] response = service.buildInvokeModelResponse(modelId, body);
         LOG.debugv("Bedrock InvokeModel: modelId={0}, bodyBytes={1}",
                 modelId, body == null ? 0 : body.length);
         return Response.ok(response, MediaType.APPLICATION_JSON).build();
@@ -86,7 +89,7 @@ public class BedrockRuntimeController {
     @Consumes(MediaType.WILDCARD)
     public Response invokeModelWithResponseStream(@PathParam("modelId") String modelId) {
         throw new AwsException("UnsupportedOperationException",
-                "InvokeModelWithResponseStream is not supported by the Floci stub. "
+                "InvokeModelWithResponseStream is not supported by Floci yet. "
                         + "Use InvokeModel or Converse instead.", 501);
     }
 
@@ -95,7 +98,7 @@ public class BedrockRuntimeController {
     @Consumes(MediaType.WILDCARD)
     public Response converseStream(@PathParam("modelId") String modelId) {
         throw new AwsException("UnsupportedOperationException",
-                "ConverseStream is not supported by the Floci stub. "
+                "ConverseStream is not supported by Floci yet. "
                         + "Use Converse instead.", 501);
     }
 }

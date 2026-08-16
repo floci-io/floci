@@ -195,6 +195,7 @@ These AWS Lambda operations have no handler in Floci. Calls will return `404` or
 | `FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ENABLED` | `false` | Enable bind-mount hot-reload via `S3Bucket=hot-reload` |
 | `FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ALLOWED_PATHS` | *(unset)* | Comma-separated allowlist of host paths that may be bind-mounted |
 | `FLOCI_SERVICES_LAMBDA_DOCKER_NETWORK` | *(unset)* | Docker network to attach Lambda containers to (overrides `FLOCI_SERVICES_DOCKER_NETWORK`) |
+| `FLOCI_SERVICES_LAMBDA_EXTRA_HOSTS` | *(unset)* | Comma-separated `hostname:ip` entries added to each Lambda container's `/etc/hosts`; `ip` may be `host-gateway`, mirroring `docker run --add-host` |
 | `FLOCI_SERVICES_LAMBDA_DOCKER_HOST_OVERRIDE` | *(unset)* | Explicit host/IP that spawned Lambda containers use to reach Floci's Runtime API, bypassing auto-detection |
 
 ### Runtime API host override
@@ -253,6 +254,20 @@ use it as their DNS resolver. The embedded DNS server:
 No extra configuration or `cap_add` is needed — Docker containers have
 `CAP_NET_BIND_SERVICE` in their default capability set, so Floci (running as a
 non-root user) can bind UDP/53 without any changes to your Compose file.
+
+### File system configs
+
+`FileSystemConfigs` accepts one EFS access point and mounts it under the
+requested `/mnt/...` path for local Lambda containers. As on AWS, the function
+must include VPC subnet and security group configuration. The mounted path uses
+the same shared-volume initialization settings as ECS EFS volumes under
+`floci.storage.efs`.
+
+This configuration is supported through the Lambda API, `AWS::Lambda::Function`
+resources, and `AWS::Serverless::Function` resources.
+
+S3 Files access points are not currently emulated and are rejected instead of
+being mounted as an empty local volume.
 
 !!! note "Resolving public hostnames from Lambda"
     A Lambda whose handler reaches a public host (`fetch()`/HTTPS to e.g.

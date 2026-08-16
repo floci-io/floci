@@ -67,9 +67,16 @@ class DataLakeTest {
                         .build())
                 .build());
 
-        // 3. Firehose Stream
+        // 3. Firehose Stream delivering under the Glue table location. The static
+        // prefix gets yyyy/MM/dd/HH/ appended like real Firehose, which stays
+        // inside the table location since Athena reads it recursively.
         firehose.createDeliveryStream(software.amazon.awssdk.services.firehose.model.CreateDeliveryStreamRequest.builder()
                 .deliveryStreamName(STREAM_NAME)
+                .extendedS3DestinationConfiguration(software.amazon.awssdk.services.firehose.model.ExtendedS3DestinationConfiguration.builder()
+                        .bucketARN("arn:aws:s3:::floci-firehose-results")
+                        .roleARN("arn:aws:iam::000000000000:role/datalake-firehose-role")
+                        .prefix(STREAM_NAME + "/")
+                        .build())
                 .build());
     }
 

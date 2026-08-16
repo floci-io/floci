@@ -202,10 +202,10 @@ Floci seeds the following resources on first use in each region so Terraform, th
 | CreateSecurityGroup | Creates a security group in a VPC. |
 | DescribeSecurityGroups | Lists or returns stored security groups. |
 | DeleteSecurityGroup | Deletes a security group from the local EC2 store. |
-| AuthorizeSecurityGroupIngress | Adds inbound permissions to a security group. |
-| AuthorizeSecurityGroupEgress | Adds outbound permissions to a security group. |
-| RevokeSecurityGroupIngress | Removes inbound permissions from a security group. |
-| RevokeSecurityGroupEgress | Removes outbound permissions from a security group. |
+| AuthorizeSecurityGroupIngress | Adds inbound permissions. Sources may be IPv4 ranges, IPv6 ranges, or another security group (`UserIdGroupPairs`, sent on the wire as `Groups`); prefix list sources are not stored. One rule is stored per source, each carrying its own description. |
+| AuthorizeSecurityGroupEgress | Adds outbound permissions, with the same source types as the inbound call. |
+| RevokeSecurityGroupIngress | Removes inbound permissions. Matches on protocol and port range only, so it removes every permission on that port regardless of source. |
+| RevokeSecurityGroupEgress | Removes outbound permissions, matched the same way as the inbound call. |
 | DescribeSecurityGroupRules | Lists stored security group rules. |
 | ModifySecurityGroupRules | Updates supported fields on security group rules. |
 | UpdateSecurityGroupRuleDescriptionsIngress | Updates descriptions on matching inbound security group rules. |
@@ -225,6 +225,8 @@ Floci seeds the following resources on first use in each region so Terraform, th
 | Action | Description |
 |--------|-------------|
 | DescribeImages | Returns AMI metadata known to the local EC2 service. |
+| CreateImage | Captures an instance as a new AMI. Reboots the source unless `NoReboot=true`. |
+| RegisterImage | Registers an AMI from supplied metadata and block device mappings. |
 
 ### Tags
 
@@ -254,6 +256,7 @@ Floci seeds the following resources on first use in each region so Terraform, th
 | AssociateRouteTable | Associates a route table with a subnet. |
 | DisassociateRouteTable | Removes a route table association. |
 | CreateRoute | Adds a route to a route table. |
+| ReplaceRoute | Replaces the target of an existing route. |
 | DeleteRoute | Removes a route from a route table. |
 
 ### Network ACLs
@@ -273,6 +276,69 @@ Floci seeds the following resources on first use in each region so Terraform, th
 | Action | Description |
 |--------|-------------|
 | DescribePrefixLists | Returns prefix lists known to the local EC2 service. |
+| CreateManagedPrefixList | Creates a customer-managed prefix list with its initial entries. |
+| DescribeManagedPrefixLists | Lists customer-managed and AWS-managed prefix lists. |
+| GetManagedPrefixListEntries | Returns the entries of a prefix list, optionally at an earlier version. |
+| ModifyManagedPrefixList | Adds or removes entries, renames the list, or raises its entry limit. |
+| DeleteManagedPrefixList | Deletes a customer-managed prefix list. |
+
+Two AWS-managed prefix lists exist in every region without being created —
+`com.amazonaws.<region>.s3` (`pl-63a5400a`) and `com.amazonaws.<region>.dynamodb`
+(`pl-02cd2c6b`) — matching the gateway endpoint services on AWS. They are owned by `AWS`,
+read-only, and served by both `DescribePrefixLists` and `DescribeManagedPrefixLists`;
+modifying or deleting one returns `UnsupportedOperation`.
+
+A customer-managed list may not take a name AWS reserves for its own: `com.amazonaws.`,
+`com.amazon.` or `com.aws.`, each including the trailing dot. `CreateManagedPrefixList`
+rejects those with `InvalidParameterValue`; a name that merely resembles one, such as
+`com.amazonaws-internal`, is allowed.
+
+Entries are versioned. A prefix list starts at version 1, and each `ModifyManagedPrefixList`
+that adds or removes entries stores a new version and bumps the counter, so
+`GetManagedPrefixListEntries` can serve an earlier `TargetVersion`. Renaming the list or
+changing `MaxEntries` does not create a version. Passing `CurrentVersion` makes the
+modification conditional: a stale value returns `PrefixListVersionMismatch`. Removals are applied before
+additions, so one call can replace an entry's description by removing and re-adding the CIDR.
+
+Creation is synchronous: a new list is returned as `create-complete` rather than passing
+through `create-in-progress`, since nothing about it is slow locally.
+
+A security group rule can take a prefix list as its source instead of a CIDR. Pass it as
+`IpPermissions.N.PrefixListIds.M.PrefixListId`, optionally with a `Description`; AWS emits one rule
+per source, so a permission naming both CIDRs and prefix lists expands to a rule for each. The
+resulting rule carries `prefixListId` in place of `cidrIpv4`, and `DescribeSecurityGroups` nests
+the reference under the permission as `prefixListIds`. Authorizing against a list that does not
+exist returns `InvalidPrefixListID.NotFound`, so a typo cannot leave a rule pointing at nothing.
+
+### Transit Gateways
+
+| Action | Description |
+|--------|-------------|
+| CreateTransitGateway | Creates a transit gateway, applying AWS's option defaults and minting its default route table. |
+| DescribeTransitGateways | Lists or returns stored transit gateways. |
+| ModifyTransitGateway | Updates a transit gateway's description, options and CIDR blocks. |
+| DeleteTransitGateway | Deletes a transit gateway and the default route table created with it. |
+
+Transit gateway metadata only: nothing routes packets, and the value is in ids that later
+resources can reference and describes that round-trip so plans converge.
+
+Options left out of `CreateTransitGateway` take the same defaults AWS applies — `amazonSideAsn`
+64512, `dnsSupport`, `vpnEcmpSupport`, `defaultRouteTableAssociation` and
+`defaultRouteTablePropagation` enabled, and `autoAcceptSharedAttachments`,
+`securityGroupReferencingSupport` and `multicastSupport` disabled. `transitGatewayCidrBlocks` is
+omitted from the response entirely when no blocks are set, rather than sent empty.
+
+Creating a gateway with either default-route-table option enabled also creates the route table
+AWS creates, and reports its id as `associationDefaultRouteTableId` and
+`propagationDefaultRouteTableId`. Both name the same table. Disabling both leaves the ids absent.
+The actions that operate on transit gateway route tables directly — creating them, associating
+attachments, enabling propagation — are not implemented yet, and neither are attachments.
+
+State is reported settled rather than transitional: AWS returns a new gateway as `pending` and
+reaches `available` roughly a minute later, and reports `deleting` before `deleted`. Nothing here
+is slow, so callers see `available` and `deleted` immediately. `ModifyTransitGateway` and
+`DeleteTransitGateway` echo the gateway without its `tagSet`, matching AWS; `CreateTransitGateway`
+and `DescribeTransitGateways` include it.
 
 ### NAT Gateways
 
@@ -354,6 +420,7 @@ Launch templates store versioned launch data. New template versions can be creat
 | `FLOCI_SERVICES_EC2_MAX_PUBLISHED_PORTS_PER_INSTANCE` | `20` | Max published ports per instance; also the widest single-rule span published |
 | `FLOCI_SERVICES_EC2_SOCAT_IMAGE` | `alpine/socat` | Image used for the port-forwarding sidecar |
 | `FLOCI_SERVICES_EC2_MOCK` | `false` | Skip Docker; instances jump directly to final state (useful for tests) |
+| `FLOCI_SERVICES_EC2_AWS_FAITHFUL_PRIVATE_IP` | `false` | Report the CFN/subnet-allocated private IP instead of the container bridge IP; routing and IMDS are unaffected |
 
 ## Requirements
 

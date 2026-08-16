@@ -82,6 +82,18 @@ class LambdaVersionIntegrationTest {
 
     @Test
     @Order(4)
+    void invokePublishedVersionReturnsExecutedVersion() {
+        given()
+            .header("X-Amz-Invocation-Type", "DryRun")
+        .when()
+            .post(BASE_PATH + "/functions/" + FUNCTION_NAME + ":1/invocations")
+        .then()
+            .statusCode(204)
+            .header("X-Amz-Executed-Version", equalTo("1"));
+    }
+
+    @Test
+    @Order(5)
     void listVersionsByFunction() {
         given()
         .when()
@@ -95,7 +107,7 @@ class LambdaVersionIntegrationTest {
     }
 
     @Test
-    @Order(5)
+    @Order(6)
     void deleteFunctionDeletesAllVersions() {
         // Delete function
         given()

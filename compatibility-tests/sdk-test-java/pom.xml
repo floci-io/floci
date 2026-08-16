@@ -134,6 +134,10 @@
         </dependency>
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
+            <artifactId>swf</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
             <artifactId>iam</artifactId>
         </dependency>
         <dependency>
@@ -143,6 +147,10 @@
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>mq</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>kinesisanalyticsv2</artifactId>
         </dependency>
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
@@ -240,6 +248,11 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>cloudwatch</artifactId>
         </dependency>
+        <!-- CloudWatch RUM client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>rum</artifactId>
+        </dependency>
         <!-- Secrets Manager client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
@@ -279,6 +292,16 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>pipes</artifactId>
         </dependency>
+        <!-- Bedrock AgentCore control-plane client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>bedrockagentcorecontrol</artifactId>
+        </dependency>
+        <!-- Bedrock AgentCore data-plane client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>bedrockagentcore</artifactId>
+        </dependency>
         <!-- AWS IoT client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
@@ -317,6 +340,10 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>cloudformation</artifactId>
         </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>cloudfront</artifactId>
+        </dependency>
         <!-- CodeBuild client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
@@ -351,6 +378,11 @@
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>s3vectors</artifactId>
+        </dependency>
+        <!-- S3 Tables client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>s3tables</artifactId>
         </dependency>
         <!-- AppConfig and AppConfigData clients -->
         <dependency>

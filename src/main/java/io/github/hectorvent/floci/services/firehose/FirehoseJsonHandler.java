@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.firehose;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.KinesisStreamSource;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.S3Destination;
 import io.github.hectorvent.floci.services.firehose.model.Record;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -26,10 +27,22 @@ public class FirehoseJsonHandler {
         this.mapper = mapper;
     }
 
+    private String getDeliveryStreamName(JsonNode request) {
+        if (request == null || !request.has("DeliveryStreamName") || request.get("DeliveryStreamName").isNull()) {
+            throw new AwsException("InvalidArgumentException", "Delivery stream name must not be null or empty.", 400);
+        }
+        String name = request.get("DeliveryStreamName").asText();
+        if (name.isEmpty() || name.length() > 64 || !name.matches("[a-zA-Z0-9_.-]+")) {
+            throw new AwsException("InvalidArgumentException",
+                    "Delivery stream name must be between 1 and 64 characters and contain only letters, numbers, underscores, hyphens, or periods.", 400);
+        }
+        return name;
+    }
+
     public Response handle(String action, JsonNode request, String region) throws Exception {
         return switch (action) {
             case "CreateDeliveryStream" -> {
-                String name = request.get("DeliveryStreamName").asText();
+                String name = getDeliveryStreamName(request);
                 S3Destination s3 = null;
                 if (request.has("S3DestinationConfiguration")) {
                     s3 = mapper.treeToValue(request.get("S3DestinationConfiguration"), S3Destination.class);
@@ -44,13 +57,16 @@ public class FirehoseJsonHandler {
                 }
                 String deliveryStreamType = request.has("DeliveryStreamType")
                         ? request.get("DeliveryStreamType").asText() : null;
-                String arn = firehoseService.createDeliveryStream(name, s3, tags, deliveryStreamType);
+                KinesisStreamSource source = request.has("KinesisStreamSourceConfiguration")
+                        ? mapper.treeToValue(request.get("KinesisStreamSourceConfiguration"), KinesisStreamSource.class)
+                        : null;
+                String arn = firehoseService.createDeliveryStream(name, s3, tags, deliveryStreamType, source);
                 yield Response.ok(Map.of("DeliveryStreamARN", arn)).build();
             }
             case "UpdateDestination" -> {
-                String name = request.get("DeliveryStreamName").asText();
-                String currentVersionId = request.get("CurrentDeliveryStreamVersionId").asText();
-                String destinationId = request.get("DestinationId").asText();
+                String name = getDeliveryStreamName(request);
+                String currentVersionId = request.has("CurrentDeliveryStreamVersionId") ? request.get("CurrentDeliveryStreamVersionId").asText() : "";
+                String destinationId = request.has("DestinationId") ? request.get("DestinationId").asText() : "";
                 S3Destination update = null;
                 if (request.has("ExtendedS3DestinationUpdate")) {
                     update = mapper.treeToValue(request.get("ExtendedS3DestinationUpdate"), S3Destination.class);
@@ -61,7 +77,7 @@ public class FirehoseJsonHandler {
                 yield Response.ok(Map.of()).build();
             }
             case "DescribeDeliveryStream" -> {
-                String name = request.get("DeliveryStreamName").asText();
+                String name = getDeliveryStreamName(request);
                 var desc = firehoseService.describeDeliveryStream(name);
                 yield Response.ok(Map.of("DeliveryStreamDescription", desc)).build();
             }
@@ -71,18 +87,18 @@ public class FirehoseJsonHandler {
                         "HasMoreDeliveryStreams", false)).build();
             }
             case "DeleteDeliveryStream" -> {
-                String name = request.get("DeliveryStreamName").asText();
+                String name = getDeliveryStreamName(request);
                 firehoseService.deleteDeliveryStream(name);
                 yield Response.ok(Map.of()).build();
             }
             case "PutRecord" -> {
-                String name = request.get("DeliveryStreamName").asText();
+                String name = getDeliveryStreamName(request);
                 Record record = mapper.treeToValue(request.get("Record"), Record.class);
                 firehoseService.putRecord(name, record);
                 yield Response.ok(Map.of("RecordId", UUID.randomUUID().toString())).build();
             }
             case "PutRecordBatch" -> {
-                String name = request.get("DeliveryStreamName").asText();
+                String name = getDeliveryStreamName(request);
                 List<Record> records = new ArrayList<>();
                 for (JsonNode recordNode : request.get("Records")) {
                     records.add(mapper.treeToValue(recordNode, Record.class));
@@ -94,7 +110,7 @@ public class FirehoseJsonHandler {
                 yield Response.ok(Map.of("FailedPutCount", 0, "RequestResponses", responses)).build();
             }
             case "TagDeliveryStream" -> {
-                String name = request.get("DeliveryStreamName").asText();
+                String name = getDeliveryStreamName(request);
                 List<io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.Tag> tags = new ArrayList<>();
                 if (request.has("Tags")) {
                     for (JsonNode tNode : request.get("Tags")) {
@@ -105,7 +121,7 @@ public class FirehoseJsonHandler {
                 yield Response.ok(Map.of()).build();
             }
             case "UntagDeliveryStream" -> {
-                String name = request.get("DeliveryStreamName").asText();
+                String name = getDeliveryStreamName(request);
                 List<String> keys = new ArrayList<>();
                 if (request.has("TagKeys")) {
                     for (JsonNode kNode : request.get("TagKeys")) {
@@ -116,10 +132,10 @@ public class FirehoseJsonHandler {
                 yield Response.ok(Map.of()).build();
             }
             case "ListTagsForDeliveryStream" -> {
-                String name = request.get("DeliveryStreamName").asText();
+                String name = getDeliveryStreamName(request);
                 String exclusiveStartTagKey = request.has("ExclusiveStartTagKey") ? request.get("ExclusiveStartTagKey").asText() : null;
                 Integer limit = request.has("Limit") ? request.get("Limit").asInt() : null;
-                
+
                 List<io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.Tag> tags = firehoseService.listTagsForDeliveryStream(name, exclusiveStartTagKey, limit);
                 boolean hasMore = false;
                 var allTags = firehoseService.describeDeliveryStream(name).getTags();

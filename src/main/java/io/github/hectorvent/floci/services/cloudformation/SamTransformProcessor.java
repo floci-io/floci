@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsException;
 import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
@@ -73,6 +74,11 @@ class SamTransformProcessor {
         // Collect implicit-API routes from function Api events before the functions are expanded.
         List<ApiRoute> apiRoutes = collectApiRoutes(samLogicalIds, resources);
 
+        // Collect explicit HttpApi routes (Function Events of Type HttpApi bound to an
+        // AWS::Serverless::HttpApi via ApiId: {Ref: <logicalId>}) before either side is expanded,
+        // so expansion order between the Function and the HttpApi resource doesn't matter.
+        List<HttpApiRoute> httpApiRoutes = collectHttpApiRoutes(samLogicalIds, resources);
+
         for (String logicalId : samLogicalIds) {
             JsonNode resDef = resources.get(logicalId);
             String type = resDef.path("Type").asText();
@@ -85,6 +91,9 @@ class SamTransformProcessor {
                         expandServerlessSimpleTable(logicalId, mergeGlobals(globals, "SimpleTable", properties), expandedResources);
                 case "AWS::Serverless::Api" ->
                         expandServerlessApi(logicalId, mergeGlobals(globals, "Api", properties), expandedResources);
+                case "AWS::Serverless::HttpApi" ->
+                        expandServerlessHttpApi(logicalId, mergeGlobals(globals, "HttpApi", properties),
+                                httpApiRoutes, expandedResources);
                 default -> LOG.debugv("Unsupported SAM resource type: {0} ({1})", type, logicalId);
             }
         }
@@ -137,6 +146,232 @@ class SamTransformProcessor {
             }
         }
         return routes;
+    }
+
+    /**
+     * @param noAuthorizer true when this event declares {@code Auth: {Authorizer: NONE}},
+     *                     overriding the API's {@code DefaultAuthorizer} for this route specifically
+     *                     (SAM's documented per-event opt-out of the default authorizer).
+     */
+    private record HttpApiRoute(String functionLogicalId, String apiLogicalId, String path, String httpMethod,
+                                boolean noAuthorizer) {}
+
+    /**
+     * Collects HttpApi-typed Function events bound to an explicit {@code AWS::Serverless::HttpApi}
+     * via {@code ApiId: {Ref: <logicalId>}}. Events with no {@code ApiId} (SAM's implicit HttpApi,
+     * auto-created rather than declared as its own resource) are intentionally not handled here —
+     * that is a separate expansion path, mirroring how {@link #collectApiRoutes} and
+     * {@link #generateImplicitApi} are already split out from {@link #expandServerlessApi}'s
+     * explicit-REST-API handling.
+     */
+    private List<HttpApiRoute> collectHttpApiRoutes(List<String> samLogicalIds, JsonNode resources) {
+        List<HttpApiRoute> routes = new ArrayList<>();
+        for (String logicalId : samLogicalIds) {
+            JsonNode resDef = resources.get(logicalId);
+            if (!"AWS::Serverless::Function".equals(resDef.path("Type").asText())) {
+                continue;
+            }
+            JsonNode events = resDef.path("Properties").path("Events");
+            if (!events.isObject()) {
+                continue;
+            }
+            Iterator<Map.Entry<String, JsonNode>> it = events.fields();
+            while (it.hasNext()) {
+                JsonNode ev = it.next().getValue();
+                if (!"HttpApi".equals(ev.path("Type").asText())) {
+                    continue;
+                }
+                JsonNode p = ev.path("Properties");
+                String apiLogicalId = p.path("ApiId").path("Ref").asText(null);
+                if (apiLogicalId == null) {
+                    continue; // no explicit ApiId (implicit HttpApi) — not handled by this path
+                }
+                JsonNode pathNode = p.path("Path");
+                if (!pathNode.isTextual()) {
+                    continue; // needs a literal path; skip intrinsics (Ref/Fn::Sub)
+                }
+                JsonNode methodNode = p.path("Method");
+                String method = methodNode.isTextual() ? methodNode.asText() : "ANY";
+                boolean noAuthorizer = "NONE".equals(p.path("Auth").path("Authorizer").asText(null));
+                routes.add(new HttpApiRoute(logicalId, apiLogicalId, pathNode.asText(), method, noAuthorizer));
+            }
+        }
+        return routes;
+    }
+
+    private void expandServerlessHttpApi(String logicalId, JsonNode properties,
+                                         List<HttpApiRoute> allRoutes, ObjectNode resources) {
+        resources.remove(logicalId);
+
+        ObjectNode apiDef = objectMapper.createObjectNode();
+        apiDef.put("Type", "AWS::ApiGatewayV2::Api");
+        ObjectNode apiProps = objectMapper.createObjectNode();
+        JsonNode name = properties.path("Name");
+        apiProps.set("Name", !name.isMissingNode() ? name.deepCopy() : objectMapper.getNodeFactory().textNode(logicalId));
+        apiProps.put("ProtocolType", "HTTP");
+        copyIfPresent(properties, "Description", apiProps);
+        apiDef.set("Properties", apiProps);
+        resources.set(logicalId, apiDef);
+
+        // Auth.Authorizers -> one AWS::ApiGatewayV2::Authorizer per entry, keyed by SAM authorizer
+        // name so routes referencing Auth.DefaultAuthorizer (the only form handled here — per-route
+        // Auth overrides are not expanded) can resolve the logical id to Ref.
+        Map<String, String> authorizerLogicalIdsByName = new java.util.LinkedHashMap<>();
+        JsonNode auth = properties.path("Auth");
+        JsonNode authorizers = auth.path("Authorizers");
+        if (authorizers.isObject()) {
+            Iterator<Map.Entry<String, JsonNode>> it = authorizers.fields();
+            while (it.hasNext()) {
+                Map.Entry<String, JsonNode> entry = it.next();
+                String authorizerName = entry.getKey();
+                String authorizerLogicalId = uniqueId(logicalId + sanitize(authorizerName) + "Authorizer", resources);
+                resources.set(authorizerLogicalId, buildHttpApiAuthorizer(logicalId, authorizerName, entry.getValue()));
+                authorizerLogicalIdsByName.put(authorizerName, authorizerLogicalId);
+            }
+        }
+        String defaultAuthorizerName = auth.path("DefaultAuthorizer").asText(null);
+        String defaultAuthorizerLogicalId = defaultAuthorizerName != null
+                ? authorizerLogicalIdsByName.get(defaultAuthorizerName) : null;
+
+        String stageLogicalId = uniqueId(logicalId + "ApiDefaultStage", resources);
+        ObjectNode stageDef = objectMapper.createObjectNode();
+        stageDef.put("Type", "AWS::ApiGatewayV2::Stage");
+        ObjectNode stageProps = objectMapper.createObjectNode();
+        stageProps.set("ApiId", ref(logicalId));
+        stageProps.put("StageName", "$default");
+        stageProps.put("AutoDeploy", true);
+        stageDef.set("Properties", stageProps);
+        resources.set(stageLogicalId, stageDef);
+
+        for (HttpApiRoute route : allRoutes) {
+            if (!logicalId.equals(route.apiLogicalId())) {
+                continue;
+            }
+            expandHttpApiRoute(logicalId, route, defaultAuthorizerLogicalId, resources);
+        }
+    }
+
+    private ObjectNode buildHttpApiAuthorizer(String apiLogicalId, String authorizerName, JsonNode samAuthorizer) {
+        ObjectNode authDef = objectMapper.createObjectNode();
+        authDef.put("Type", "AWS::ApiGatewayV2::Authorizer");
+        ObjectNode authProps = objectMapper.createObjectNode();
+        authProps.set("ApiId", ref(apiLogicalId));
+        authProps.put("Name", authorizerName);
+        authProps.put("AuthorizerType", "JWT");
+
+        JsonNode jwtConfig = samAuthorizer.path("JwtConfiguration");
+        if (!jwtConfig.isObject()) {
+            throw new AwsException("ValidationError",
+                    "OAuth2 Authorizer must define 'JwtConfiguration'; authorizer " + authorizerName, 400);
+        }
+
+        authProps.set("IdentitySource", resolveIdentitySource(authorizerName, samAuthorizer));
+
+        ObjectNode jwtProps = objectMapper.createObjectNode();
+        JsonNode issuer = fieldIgnoreCase(jwtConfig, "issuer");
+        if (!issuer.isMissingNode()) {
+            jwtProps.set("Issuer", issuer.deepCopy());
+        }
+        JsonNode audience = fieldIgnoreCase(jwtConfig, "audience");
+        if (audience.isArray()) {
+            jwtProps.set("Audience", audience.deepCopy());
+        }
+        authProps.set("JwtConfiguration", jwtProps);
+
+        authDef.set("Properties", authProps);
+        return authDef;
+    }
+
+    /**
+     * SAM's {@code _get_jwt_configuration} lower-cases every key of the {@code JwtConfiguration}
+     * map before reading it ({@code {k.lower(): v for k, v in props.items()}} in
+     * samtranslator/model/apigatewayv2.py), so any casing of {@code issuer}/{@code audience} is
+     * accepted, not just the two spellings the docs happen to show.
+     */
+    private JsonNode fieldIgnoreCase(JsonNode node, String fieldName) {
+        Iterator<Map.Entry<String, JsonNode>> fields = node.fields();
+        while (fields.hasNext()) {
+            Map.Entry<String, JsonNode> field = fields.next();
+            if (field.getKey().equalsIgnoreCase(fieldName)) {
+                return field.getValue();
+            }
+        }
+        return objectMapper.missingNode();
+    }
+
+    /**
+     * Resolves the SAM authorizer's {@code IdentitySource}, accepting either the documented array
+     * form or a single scalar string — mirroring
+     * {@code CloudFormationResourceProvisioner.resolveIdentitySource}, since the raw
+     * {@code AWS::ApiGatewayV2::Authorizer} resource this expands to accepts both. SAM itself
+     * rejects a JWT authorizer with no {@code IdentitySource} ({@code _validate_jwt_authorizer} in
+     * samtranslator/model/apigatewayv2.py), so an absent or empty value is a template error here
+     * too.
+     */
+    private ArrayNode resolveIdentitySource(String authorizerName, JsonNode samAuthorizer) {
+        ArrayNode identitySource = objectMapper.createArrayNode();
+        JsonNode raw = samAuthorizer.path("IdentitySource");
+        if (raw.isTextual()) {
+            identitySource.add(raw.asText());
+        } else if (raw.isArray() && !raw.isEmpty()) {
+            raw.forEach(v -> identitySource.add(v.asText()));
+        } else {
+            throw new AwsException("ValidationError",
+                    "OAuth2 Authorizer must define 'IdentitySource'; authorizer " + authorizerName, 400);
+        }
+        return identitySource;
+    }
+
+    private void expandHttpApiRoute(String apiLogicalId, HttpApiRoute route,
+                                    String defaultAuthorizerLogicalId, ObjectNode resources) {
+        String integrationLogicalId = uniqueId(
+                apiLogicalId + "Integration" + sanitize(route.functionLogicalId()), resources);
+        ObjectNode integDef = objectMapper.createObjectNode();
+        integDef.put("Type", "AWS::ApiGatewayV2::Integration");
+        ObjectNode integProps = objectMapper.createObjectNode();
+        integProps.set("ApiId", ref(apiLogicalId));
+        integProps.put("IntegrationType", "AWS_PROXY");
+        integProps.set("IntegrationUri", lambdaInvokeUri(route.functionLogicalId()));
+        integProps.put("PayloadFormatVersion", "2.0");
+        integDef.set("Properties", integProps);
+        resources.set(integrationLogicalId, integDef);
+
+        String routeKey = route.httpMethod().toUpperCase() + " " + route.path();
+        String routeLogicalId = uniqueId(
+                apiLogicalId + "Route" + sanitize(route.functionLogicalId()) + sanitize(route.path()), resources);
+        ObjectNode routeDef = objectMapper.createObjectNode();
+        routeDef.put("Type", "AWS::ApiGatewayV2::Route");
+        ObjectNode routeProps = objectMapper.createObjectNode();
+        routeProps.set("ApiId", ref(apiLogicalId));
+        routeProps.put("RouteKey", routeKey);
+        if (defaultAuthorizerLogicalId != null && !route.noAuthorizer()) {
+            routeProps.put("AuthorizationType", "JWT");
+            routeProps.set("AuthorizerId", ref(defaultAuthorizerLogicalId));
+        } else {
+            routeProps.put("AuthorizationType", "NONE");
+        }
+        ObjectNode join = objectMapper.createObjectNode();
+        ArrayNode joinArgs = objectMapper.createArrayNode();
+        joinArgs.add("/");
+        ArrayNode joinValues = objectMapper.createArrayNode();
+        joinValues.add("integrations");
+        joinValues.add(ref(integrationLogicalId));
+        joinArgs.add(joinValues);
+        join.set("Fn::Join", joinArgs);
+        routeProps.set("Target", join);
+        routeDef.set("Properties", routeProps);
+        resources.set(routeLogicalId, routeDef);
+
+        String permissionLogicalId = uniqueId(
+                route.functionLogicalId() + "HttpApiPermission" + sanitize(apiLogicalId), resources);
+        ObjectNode perm = objectMapper.createObjectNode();
+        perm.put("Type", "AWS::Lambda::Permission");
+        ObjectNode permProps = objectMapper.createObjectNode();
+        permProps.set("FunctionName", ref(route.functionLogicalId()));
+        permProps.put("Action", "lambda:InvokeFunction");
+        permProps.put("Principal", "apigateway.amazonaws.com");
+        perm.set("Properties", permProps);
+        resources.set(permissionLogicalId, perm);
     }
 
     private void generateImplicitApi(List<ApiRoute> routes, JsonNode globals, ObjectNode resources) {
@@ -361,6 +596,8 @@ class SamTransformProcessor {
         ObjectNode lambdaResource = createLambdaFunction(logicalId, roleLogicalId, properties, hasExplicitRole);
         resources.set(logicalId, lambdaResource);
 
+        expandAutoPublishAlias(logicalId, properties, resources);
+
         JsonNode events = properties.path("Events");
         if (events.isObject()) {
             Iterator<Map.Entry<String, JsonNode>> eventFields = events.fields();
@@ -369,6 +606,61 @@ class SamTransformProcessor {
                 expandFunctionEvent(logicalId, entry.getKey(), entry.getValue(), resources);
             }
         }
+    }
+
+    /**
+     * Expands {@code AutoPublishAlias} into the {@code AWS::Lambda::Version} +
+     * {@code AWS::Lambda::Alias} pair real SAM generates, so an alias-qualified invoke
+     * ({@code <function>:production}) resolves instead of failing with "Alias not found".
+     * Without this the property is silently dropped and the deploy still reports
+     * CREATE_COMPLETE, so the failure only surfaces later, at invoke time.
+     *
+     * <p>The alias name is normally a literal, but SAM also allows an intrinsic (e.g.
+     * {@code !Ref StageName}). The node is passed through to {@code Name} either way so the
+     * template engine resolves it at provision time; only the generated logical id needs a
+     * literal, and it drops the suffix when the value isn't textual.
+     *
+     * <p>The {@code Ref}s on {@code FunctionName} give {@code topologicalSort} the edges it needs
+     * — function → version and function → alias — so no explicit {@code DependsOn} is needed.
+     * There is no version → alias edge while {@code FunctionVersion} is the literal
+     * {@code $LATEST}; none is required, since the alias does not reference the version. It
+     * returns with the {@code Fn::GetAtt} form once #1987 lands.
+     */
+    private void expandAutoPublishAlias(String functionLogicalId, JsonNode properties, ObjectNode resources) {
+        JsonNode aliasName = properties.path("AutoPublishAlias");
+        if (aliasName.isMissingNode() || aliasName.isNull()
+                || (aliasName.isTextual() && aliasName.asText().isBlank())) {
+            return;
+        }
+
+        String versionId = uniqueId(functionLogicalId + "Version", resources);
+        ObjectNode versionDef = objectMapper.createObjectNode();
+        versionDef.put("Type", "AWS::Lambda::Version");
+        ObjectNode versionProps = objectMapper.createObjectNode();
+        versionProps.set("FunctionName", ref(functionLogicalId));
+        versionDef.set("Properties", versionProps);
+        resources.set(versionId, versionDef);
+
+        // Alias names may legally contain '-' and '_', neither of which is valid in a
+        // CloudFormation logical id, so the suffix goes through the same sanitize() every other
+        // derived id in this file uses.
+        String aliasSuffix = aliasName.isTextual() ? sanitize(aliasName.asText()) : "";
+        String aliasId = uniqueId(functionLogicalId + "Alias" + aliasSuffix, resources);
+        ObjectNode aliasDef = objectMapper.createObjectNode();
+        aliasDef.put("Type", "AWS::Lambda::Alias");
+        ObjectNode aliasProps = objectMapper.createObjectNode();
+        aliasProps.set("FunctionName", ref(functionLogicalId));
+        aliasProps.set("Name", aliasName.deepCopy());
+        // Real SAM points the alias at the published version (Fn::GetAtt <Version>.Version).
+        // Floci cannot invoke a published version: the snapshot carries no code path, so a
+        // version-qualified invoke times out on a cold start (#1987) and silently runs $LATEST's
+        // code when a warm container happens to exist (#1988). Aiming the alias there would break
+        // the alias-qualified invoke this expansion exists to enable, so point it at $LATEST — the
+        // alias resolves and runs the function's code, which is the behavior callers depend on.
+        // Switch to the GetAtt form once #1987 lands.
+        aliasProps.put("FunctionVersion", "$LATEST");
+        aliasDef.set("Properties", aliasProps);
+        resources.set(aliasId, aliasDef);
     }
 
     private ObjectNode createExecutionRole(JsonNode properties) {
@@ -443,6 +735,8 @@ class SamTransformProcessor {
         copyIfPresent(properties, "Architectures", lambdaProps);
         copyIfPresent(properties, "ReservedConcurrentExecutions", lambdaProps);
         copyIfPresent(properties, "EphemeralStorage", lambdaProps);
+        copyIfPresent(properties, "VpcConfig", lambdaProps);
+        copyIfPresent(properties, "FileSystemConfigs", lambdaProps);
 
         JsonNode tracing = properties.path("Tracing");
         if (!tracing.isMissingNode()) {
@@ -510,6 +804,9 @@ class SamTransformProcessor {
                     expandEventSourceMapping(functionLogicalId, eventName, eventProps, resources);
             case "Api" ->
                     LOG.debugv("SAM Api event for {0}.{1} — handled by Api resource",
+                            functionLogicalId, eventName);
+            case "HttpApi" ->
+                    LOG.debugv("SAM HttpApi event for {0}.{1} — handled by HttpApi resource",
                             functionLogicalId, eventName);
             default ->
                     LOG.debugv("SAM event type {0} for {1}.{2} not expanded",

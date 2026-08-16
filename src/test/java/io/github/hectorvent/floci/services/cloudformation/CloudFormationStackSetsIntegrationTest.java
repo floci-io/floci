@@ -35,6 +35,24 @@ class CloudFormationStackSetsIntegrationTest {
             """.formatted(queueName);
     }
 
+    /**
+     * A template whose {@code ConditionalQueue} is created only in {@code conditionAccount} (via an
+     * {@code AWS::AccountId} condition) and whose {@code DependentQueue} depends on it. Deploying it
+     * into {@code conditionAccount} must succeed; deploying it elsewhere must fail preflight because
+     * the dependent then references a condition-excluded resource.
+     */
+    private static String conditionalDependentTemplate(String conditionAccount, String conditionalQueue,
+                                                       String dependentQueue) {
+        return """
+            {"Conditions":{"IsTarget":{"Fn::Equals":[{"Ref":"AWS::AccountId"},"%s"]}},
+             "Resources":{
+               "ConditionalQueue":{"Type":"AWS::SQS::Queue","Condition":"IsTarget",
+                 "Properties":{"QueueName":"%s"}},
+               "DependentQueue":{"Type":"AWS::SQS::Queue","DependsOn":"ConditionalQueue",
+                 "Properties":{"QueueName":"%s"}}}}
+            """.formatted(conditionAccount, conditionalQueue, dependentQueue);
+    }
+
     private void assertQueueVisible(String account, String queueName) {
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -484,5 +502,173 @@ class CloudFormationStackSetsIntegrationTest {
         .when().post("/")
         .then().statusCode(200)
             .body(containsString("<Status>FAILED</Status>"));
+    }
+
+    @Test
+    void stackSetConditionPreflightUsesTargetAccountOnCreateInstances() {
+        // Regression: condition-dependency preflight for a StackSet instance must run in the target
+        // account, not the administrator account. Here ConditionalQueue is active only in ACCOUNT_B
+        // (via AWS::AccountId) and DependentQueue depends on it. createChangeSet runs in the admin
+        // request scope, so evaluating the condition against the admin account would wrongly treat
+        // ConditionalQueue as excluded and fail the dependent with "Unresolved resource dependencies".
+        String setName = "cond-create-" + UUID.randomUUID().toString().substring(0, 8);
+        String conditional = "cond-q-" + UUID.randomUUID().toString().substring(0, 8);
+        String dependent = "dep-q-" + UUID.randomUUID().toString().substring(0, 8);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStackSet")
+            .formParam("StackSetName", setName)
+            .formParam("TemplateBody", conditionalDependentTemplate(ACCOUNT_B, conditional, dependent))
+            .header("Authorization", auth(ADMIN, "cloudformation"))
+        .when().post("/")
+        .then().statusCode(200).body(containsString("<StackSetId>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStackInstances")
+            .formParam("StackSetName", setName)
+            .formParam("Accounts.member.1", ACCOUNT_B)
+            .formParam("Regions.member.1", REGION)
+            .header("Authorization", auth(ADMIN, "cloudformation"))
+        .when().post("/")
+        .then().statusCode(200).body(containsString("<OperationId>"));
+
+        // Both resources materialize in the target account because the condition is true there.
+        assertQueueVisible(ACCOUNT_B, conditional);
+        assertQueueVisible(ACCOUNT_B, dependent);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackInstance")
+            .formParam("StackSetName", setName)
+            .formParam("StackInstanceAccount", ACCOUNT_B)
+            .formParam("StackInstanceRegion", REGION)
+            .header("Authorization", auth(ADMIN, "cloudformation"))
+        .when().post("/")
+        .then().statusCode(200)
+            .body(containsString("<DetailedStatus>SUCCEEDED</DetailedStatus>"));
+    }
+
+    @Test
+    void stackSetConditionPreflightUsesTargetAccountOnUpdateStackSet() {
+        // UpdateStackSet re-applies through the same deployInstance path, so the target-account
+        // preflight must hold there too.
+        String setName = "cond-update-" + UUID.randomUUID().toString().substring(0, 8);
+        String initialQueue = "init-q-" + UUID.randomUUID().toString().substring(0, 8);
+        String conditional = "cond-u-" + UUID.randomUUID().toString().substring(0, 8);
+        String dependent = "dep-u-" + UUID.randomUUID().toString().substring(0, 8);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStackSet")
+            .formParam("StackSetName", setName)
+            .formParam("TemplateBody", queueTemplate(initialQueue))
+            .header("Authorization", auth(ADMIN, "cloudformation"))
+        .when().post("/")
+        .then().statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStackInstances")
+            .formParam("StackSetName", setName)
+            .formParam("Accounts.member.1", ACCOUNT_B)
+            .formParam("Regions.member.1", REGION)
+            .header("Authorization", auth(ADMIN, "cloudformation"))
+        .when().post("/")
+        .then().statusCode(200);
+        assertQueueVisible(ACCOUNT_B, initialQueue);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateStackSet")
+            .formParam("StackSetName", setName)
+            .formParam("TemplateBody", conditionalDependentTemplate(ACCOUNT_B, conditional, dependent))
+            .header("Authorization", auth(ADMIN, "cloudformation"))
+        .when().post("/")
+        .then().statusCode(200).body(containsString("<OperationId>"));
+
+        // The updated template's condition is true in the target account, so both resources exist.
+        assertQueueVisible(ACCOUNT_B, conditional);
+        assertQueueVisible(ACCOUNT_B, dependent);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ListStackSetOperations")
+            .formParam("StackSetName", setName)
+            .header("Authorization", auth(ADMIN, "cloudformation"))
+        .when().post("/")
+        .then().statusCode(200)
+            .body(containsString("<Action>UPDATE</Action>"))
+            .body(containsString("<Status>SUCCEEDED</Status>"));
+    }
+
+    @Test
+    void stackSetConditionPreflightFailsWhenTargetAccountExcludesDependency() {
+        // The mirror image: when the condition is false in the target account, the dependent
+        // references a condition-excluded resource, so preflight must reject the instance in the
+        // target account's context (HTTP 400 ValidationError), not silently succeed.
+        String setName = "cond-neg-" + UUID.randomUUID().toString().substring(0, 8);
+        String conditional = "cond-n-" + UUID.randomUUID().toString().substring(0, 8);
+        String dependent = "dep-n-" + UUID.randomUUID().toString().substring(0, 8);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStackSet")
+            .formParam("StackSetName", setName)
+            // Condition is true only in ACCOUNT_B, but we deploy into ACCOUNT_C.
+            .formParam("TemplateBody", conditionalDependentTemplate(ACCOUNT_B, conditional, dependent))
+            .header("Authorization", auth(ADMIN, "cloudformation"))
+        .when().post("/")
+        .then().statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStackInstances")
+            .formParam("StackSetName", setName)
+            .formParam("Accounts.member.1", ACCOUNT_C)
+            .formParam("Regions.member.1", REGION)
+            .header("Authorization", auth(ADMIN, "cloudformation"))
+        .when().post("/")
+        .then().statusCode(400)
+            .body(containsString("ValidationError"))
+            .body(containsString("Unresolved resource dependencies"))
+            .body(containsString("ConditionalQueue"));
+
+        // Nothing was provisioned in the excluded target account.
+        assertQueueAbsent(ACCOUNT_C, conditional);
+        assertQueueAbsent(ACCOUNT_C, dependent);
+    }
+
+    @Test
+    void createStackInstancesRejectsInvalidAccountBeforeDeployment() {
+        String setName = "invalid-account-" + UUID.randomUUID().toString().substring(0, 8);
+        String queue = "invalid-account-q-" + UUID.randomUUID().toString().substring(0, 8);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStackSet")
+            .formParam("StackSetName", setName)
+            .formParam("TemplateBody", queueTemplate(queue))
+            .header("Authorization", auth(ADMIN, "cloudformation"))
+        .when().post("/")
+        .then().statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStackInstances")
+            .formParam("StackSetName", setName)
+            .formParam("Accounts.member.1", ACCOUNT_B)
+            .formParam("Accounts.member.2", "")
+            .formParam("Regions.member.1", REGION)
+            .header("Authorization", auth(ADMIN, "cloudformation"))
+        .when().post("/")
+        .then().statusCode(400)
+            .body(containsString("ValidationError"))
+            .body(containsString("Value &apos;[" + ACCOUNT_B + ", ]&apos; at &apos;accounts&apos;"))
+            .body(containsString("^[0-9]{12}$"));
+
+        // AWS validates every account before deploying any instance in the request.
+        assertQueueAbsent(ACCOUNT_B, queue);
     }
 }

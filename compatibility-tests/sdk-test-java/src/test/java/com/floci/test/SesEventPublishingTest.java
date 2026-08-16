@@ -198,6 +198,7 @@ class SesEventPublishingTest {
                         .s3DestinationConfiguration(S3DestinationConfiguration.builder()
                                 .bucketARN("arn:aws:s3:::" + firehoseBucket)
                                 .roleARN("arn:aws:iam::000000000000:role/sdk-evt-fh-role")
+                                .prefix(firehoseStreamName + "/")
                                 .build())
                         .build())
                 .deliveryStreamARN();

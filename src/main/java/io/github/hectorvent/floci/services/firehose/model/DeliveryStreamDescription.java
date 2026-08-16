@@ -34,11 +34,18 @@ public class DeliveryStreamDescription {
     private Instant lastUpdateTimestamp;
     @JsonProperty("Destinations")
     private List<Destination> destinations;
+    @JsonProperty("Source")
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private Source source;
     @JsonProperty("Tags")
     private List<Tag> tags = new ArrayList<>();
 
     public DeliveryStreamDescription() {}
     public DeliveryStreamDescription(String name, String arn, S3Destination s3) {
+        this(name, arn, s3, null);
+    }
+
+    public DeliveryStreamDescription(String name, String arn, S3Destination s3, KinesisStreamSource kinesisStreamSource) {
         this.deliveryStreamName = name;
         this.deliveryStreamARN = arn;
         this.deliveryStreamStatus = DeliveryStreamStatus.ACTIVE;
@@ -47,6 +54,9 @@ public class DeliveryStreamDescription {
             s3.applyDefaults();
         }
         this.destinations = List.of(new Destination(s3));
+        if (kinesisStreamSource != null) {
+            this.source = new Source(kinesisStreamSource);
+        }
     }
 
     public String getDeliveryStreamName() { return deliveryStreamName; }
@@ -70,6 +80,54 @@ public class DeliveryStreamDescription {
     public void setLastUpdateTimestamp(Instant lastUpdateTimestamp) { this.lastUpdateTimestamp = lastUpdateTimestamp; }
     public List<Destination> getDestinations() { return destinations; }
     public void setDestinations(List<Destination> destinations) { this.destinations = destinations; }
+    public Source getSource() { return source; }
+    public void setSource(Source source) { this.source = source; }
+
+    @RegisterForReflection
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public static class Source {
+        @JsonProperty("KinesisStreamSourceDescription")
+        private KinesisStreamSource kinesisStreamSourceDescription;
+
+        public Source() {}
+
+        public Source(KinesisStreamSource kinesisStreamSourceDescription) {
+            this.kinesisStreamSourceDescription = kinesisStreamSourceDescription;
+            if (kinesisStreamSourceDescription.getDeliveryStartTimestamp() == null) {
+                kinesisStreamSourceDescription.setDeliveryStartTimestamp(Instant.now());
+            }
+        }
+
+        public KinesisStreamSource getKinesisStreamSourceDescription() { return kinesisStreamSourceDescription; }
+        public void setKinesisStreamSourceDescription(KinesisStreamSource kinesisStreamSourceDescription) {
+            this.kinesisStreamSourceDescription = kinesisStreamSourceDescription;
+        }
+    }
+
+    @RegisterForReflection
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public static class KinesisStreamSource {
+        @JsonProperty("KinesisStreamARN")
+        private String kinesisStreamArn;
+        @JsonProperty("RoleARN")
+        private String roleArn;
+        @JsonProperty("DeliveryStartTimestamp")
+        @JsonFormat(shape = JsonFormat.Shape.NUMBER)
+        private Instant deliveryStartTimestamp;
+
+        public KinesisStreamSource() {}
+
+        public String getKinesisStreamArn() { return kinesisStreamArn; }
+        public void setKinesisStreamArn(String kinesisStreamArn) { this.kinesisStreamArn = kinesisStreamArn; }
+        public String getRoleArn() { return roleArn; }
+        public void setRoleArn(String roleArn) { this.roleArn = roleArn; }
+        public Instant getDeliveryStartTimestamp() { return deliveryStartTimestamp; }
+        public void setDeliveryStartTimestamp(Instant deliveryStartTimestamp) {
+            this.deliveryStartTimestamp = deliveryStartTimestamp;
+        }
+    }
 
     /** Convenience: returns the first S3 destination, or null if none. */
     public S3Destination s3Destination() {
@@ -126,6 +184,8 @@ public class DeliveryStreamDescription {
         private String errorOutputPrefix;
         @JsonProperty("CompressionFormat")
         private String compressionFormat;
+        @JsonProperty("CustomTimeZone")
+        private String customTimeZone;
         @JsonProperty("BufferingHints")
         private BufferingHints bufferingHints;
         @JsonProperty("EncryptionConfiguration")
@@ -142,6 +202,8 @@ public class DeliveryStreamDescription {
         public void setErrorOutputPrefix(String errorOutputPrefix) { this.errorOutputPrefix = errorOutputPrefix; }
         public String getCompressionFormat() { return compressionFormat; }
         public void setCompressionFormat(String compressionFormat) { this.compressionFormat = compressionFormat; }
+        public String getCustomTimeZone() { return customTimeZone; }
+        public void setCustomTimeZone(String customTimeZone) { this.customTimeZone = customTimeZone; }
         public BufferingHints getBufferingHints() { return bufferingHints; }
         public void setBufferingHints(BufferingHints bufferingHints) { this.bufferingHints = bufferingHints; }
         public EncryptionConfiguration getEncryptionConfiguration() { return encryptionConfiguration; }

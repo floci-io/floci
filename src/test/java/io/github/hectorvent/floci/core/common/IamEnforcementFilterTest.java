@@ -21,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
@@ -46,6 +47,7 @@ class IamEnforcementFilterTest {
     private ResourceArnBuilder arnBuilder;
     private RequestContext requestContext;
     private IamConditionContextResolver conditionContextResolver;
+    private ResolvedServiceCatalog catalog;
 
     @BeforeEach
     void setUp() {
@@ -59,11 +61,23 @@ class IamEnforcementFilterTest {
         arnBuilder = mock(ResourceArnBuilder.class);
         requestContext = new RequestContext();
         conditionContextResolver = mock(IamConditionContextResolver.class);
+        catalog = mock(ResolvedServiceCatalog.class);
 
         when(config.services()).thenReturn(services);
         when(services.iam()).thenReturn(iamConfig);
         when(iamConfig.enforcementEnabled()).thenReturn(true);
         when(config.defaultRegion()).thenReturn("us-east-1");
+        // Default: scopes are already canonical. Alias handling is asserted explicitly below.
+        when(catalog.canonicalCredentialScope(anyString())).thenAnswer(inv -> inv.getArgument(0));
+    }
+
+    private IamEnforcementFilter newFilter() {
+        return new IamEnforcementFilter(
+                config, accountResolver, iamService, evaluator, actionRegistry, arnBuilder,
+                requestContext, conditionContextResolver,
+                mock(CloudTrailService.class),
+                mock(io.quarkus.vertx.http.runtime.CurrentVertxRequest.class),
+                catalog);
     }
 
     @Test
@@ -97,10 +111,7 @@ class IamEnforcementFilterTest {
         when(conditionContextResolver.resolve("lambda", "lambda:InvokeFunction", containerRequest))
                 .thenReturn(null);
 
-        IamEnforcementFilter filter = new IamEnforcementFilter(
-                config, accountResolver, iamService, evaluator, actionRegistry, arnBuilder,
-                requestContext, conditionContextResolver,
-                mock(CloudTrailService.class), mock(io.quarkus.vertx.http.runtime.CurrentVertxRequest.class));
+        IamEnforcementFilter filter = newFilter();
 
         filter.filter(containerRequest);
 
@@ -132,15 +143,48 @@ class IamEnforcementFilterTest {
         when(evaluator.evaluate(any(), isNull(), eq("s3:ListBucket"), eq("arn:aws:s3:::bucket"), eq(conditions)))
                 .thenReturn(IamPolicyEvaluator.Decision.ALLOW);
 
-        IamEnforcementFilter filter = new IamEnforcementFilter(
-                config, accountResolver, iamService, evaluator, actionRegistry, arnBuilder,
-                requestContext, conditionContextResolver,
-                mock(CloudTrailService.class), mock(io.quarkus.vertx.http.runtime.CurrentVertxRequest.class));
+        IamEnforcementFilter filter = newFilter();
 
         filter.filter(containerRequest);
 
         verify(evaluator).evaluate(any(), isNull(), eq("s3:ListBucket"),
                 eq("arn:aws:s3:::bucket"), eq(conditions));
+    }
+
+    @Test
+    void aliasScopeIsEnforcedUnderItsCanonicalName() {
+        // S3 Express clients sign with the s3express scope. Everything keyed by scope — action
+        // rules, ARN building, condition keys — knows only "s3", so without normalisation the
+        // action resolves to null and the filter allows the request through unchecked.
+        ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
+
+        String auth = "AWS4-HMAC-SHA256 Credential=ASIASESSION/20260726/us-east-1/s3express/aws4_request, "
+                + "SignedHeaders=host, Signature=abc";
+        requestContext.setAccountId("222233334444");
+        requestContext.setRegion("us-east-1");
+
+        when(catalog.canonicalCredentialScope("s3express")).thenReturn("s3");
+        when(accountResolver.extractAccessKeyId(auth)).thenReturn("ASIASESSION");
+        when(containerRequest.getHeaderString("Authorization")).thenReturn(auth);
+        when(actionRegistry.resolve("s3", containerRequest)).thenReturn("s3:GetObject");
+        when(iamService.resolveCallerContext("ASIASESSION"))
+                .thenReturn(CallerContext.of(List.of("""
+                        {"Version":"2012-10-17","Statement":[
+                          {"Effect":"Allow","Action":"s3:PutObject","Resource":"*"}
+                        ]}""")));
+        when(arnBuilder.build(eq("s3"), eq(containerRequest), anyString(), anyString()))
+                .thenReturn("arn:aws:s3:::bucket/key");
+        when(evaluator.evaluate(any(), any(), any(), any(), any()))
+                .thenReturn(IamPolicyEvaluator.Decision.DENY);
+
+        newFilter().filter(containerRequest);
+
+        // Everything keyed by scope must see the canonical name, not the alias.
+        verify(actionRegistry).resolve("s3", containerRequest);
+        verify(arnBuilder).build(eq("s3"), eq(containerRequest), anyString(), anyString());
+        verify(conditionContextResolver).resolve("s3", "s3:GetObject", containerRequest);
+        // The policy above grants only s3:PutObject, so a GetObject signed as s3express is denied.
+        verify(containerRequest).abortWith(any(Response.class));
     }
 
     @Test

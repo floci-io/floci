@@ -46,6 +46,9 @@ public class SentEmail {
     @JsonProperty("RawData")
     private String rawData;
 
+    @JsonProperty("Headers")
+    private List<MessageHeader> headers;
+
     @JsonProperty("SentAt")
     private Instant sentAt;
 
@@ -112,6 +115,9 @@ public class SentEmail {
 
     public String getRawData() { return rawData; }
     public void setRawData(String rawData) { this.rawData = rawData; }
+
+    public List<MessageHeader> getHeaders() { return headers; }
+    public void setHeaders(List<MessageHeader> headers) { this.headers = headers; }
 
     public boolean isRaw() { return rawData != null; }
 
