@@ -3007,6 +3007,15 @@ public class Ec2Service implements ContainerTeardown {
         return matchesRegisteredImageFilters(image, filters);
     }
 
+    /**
+     * Whether an image satisfies a DescribeImages owner scope. Exposed alongside
+     * {@link #imageMatchesFilters} so a synthesized lookup image faces the whole request that
+     * produced it, since {@code Owner.N} is carried outside the filter set.
+     */
+    public boolean imageMatchesOwners(Image image, List<String> owners) {
+        return matchesImageOwners(image, owners);
+    }
+
     private boolean matchesRegisteredImageFilters(Image image, Map<String, List<String>> filters) {
         if (filters == null || filters.isEmpty()) {
             return true;

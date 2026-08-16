@@ -272,6 +272,48 @@ class Ec2IntegrationTest {
 
     @Test
     @Order(9)
+    void synthesizedLookupImageResolvesTheSelfOwnerAlias() {
+        // Owner.N takes aliases. Writing "self" through verbatim produced an image owned by the
+        // literal string, which no owner scope resolves to, and the guard never re-checked the
+        // owner because it only looked at Filter.N.
+        String owner = given()
+            .formParam("Action", "DescribeImages")
+            .formParam("Owner.1", "self")
+            .formParam("Filter.1.Name", "name")
+            .formParam("Filter.1.Value.1", "unmatched-self-owned-*")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeImagesResponse.imagesSet.item.size()", equalTo(1))
+            .extract().path("DescribeImagesResponse.imagesSet.item.imageOwnerId");
+
+        assertEquals("000000000000", owner);
+    }
+
+    @Test
+    @Order(9)
+    void synthesizedLookupImageIsWithheldFromAnOwnerScopeItCannotSatisfy() {
+        // A foreign owner scope cannot be satisfied by anything we synthesize, so the lookup gets
+        // the empty result rather than an AMI that contradicts the request.
+        given()
+            .formParam("Action", "DescribeImages")
+            .formParam("Owner.1", "999999999999")
+            .formParam("Filter.1.Name", "name")
+            .formParam("Filter.1.Value.1", "unmatched-foreign-owner-*")
+            .formParam("Filter.2.Name", "owner-id")
+            .formParam("Filter.2.Value.1", "137112412989")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(not(containsString("<imageId>")));
+    }
+
+    @Test
+    @Order(9)
     void synthesizedLookupImageHonorsOtherRequestedFilters() {
         given()
             .formParam("Action", "DescribeImages")

@@ -1672,8 +1672,10 @@ public class Ec2QueryHandler {
                 Image synthesized = synthesizeLookupImage(namePattern, filters, owners);
                 // Only hand it back if it satisfies everything that was asked for. Returning an
                 // AMI that violates the request is worse than the empty result the lookup would
-                // otherwise get, and the caller cannot tell the difference.
-                if (service.imageMatchesFilters(synthesized, filters)) {
+                // otherwise get, and the caller cannot tell the difference. Owner.N is carried
+                // outside the filter set, so it has to be checked separately.
+                if (service.imageMatchesFilters(synthesized, filters)
+                        && service.imageMatchesOwners(synthesized, owners)) {
                     images = List.of(synthesized);
                 }
             }
@@ -1712,6 +1714,20 @@ public class Ec2QueryHandler {
     /** Stands in for a {@code ?}, which matches exactly one character. */
     private static final String SYNTH_SINGLE_CHAR_TOKEN = "0";
 
+    /** AWS's own account for the Amazon-owned AMIs, and the default when no owner is requested. */
+    private static final String AMAZON_OWNER_ID = "137112412989";
+
+    /**
+     * The owner the synthesized image should carry. {@code Owner.N} takes aliases, and writing one
+     * through verbatim produced an image owned by the literal {@code "self"}, which no owner scope
+     * resolves to. {@code self} is the caller's own account, so it becomes the account id.
+     */
+    private String resolveSynthOwner(Map<String, List<String>> filters, List<String> owners) {
+        String requested = filters.getOrDefault("owner-id", owners == null ? List.of() : owners)
+                .stream().findFirst().orElse(AMAZON_OWNER_ID);
+        return "self".equals(requested) ? config.defaultAccountId() : requested;
+    }
+
     /** The requested value for a scalar filter, so the synthesized image satisfies it. */
     private static String firstFilterValue(Map<String, List<String>> filters, String name, String fallback) {
         return filters.getOrDefault(name, List.of()).stream()
@@ -1738,8 +1754,7 @@ public class Ec2QueryHandler {
                 .replace("*", SYNTH_WILDCARD_TOKEN)
                 .replace("?", SYNTH_SINGLE_CHAR_TOKEN));
         img.setState(firstFilterValue(filters, "state", "available"));
-        String owner = filters.getOrDefault("owner-id", owners).stream().findFirst().orElse("137112412989");
-        img.setOwnerId(owner);
+        img.setOwnerId(resolveSynthOwner(filters, owners));
         img.setImageOwnerAlias(firstFilterValue(filters, "owner-alias", "amazon"));
         img.setPublic(true);
         img.setArchitecture(firstFilterValue(filters, "architecture", "x86_64"));
