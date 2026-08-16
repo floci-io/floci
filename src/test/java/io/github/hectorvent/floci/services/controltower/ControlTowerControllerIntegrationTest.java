@@ -58,7 +58,7 @@ class ControlTowerControllerIntegrationTest {
                 .body("{\"version\":\"4.0\",\"tags\":{\"Environment\":\"test\"},"
                         + "\"manifest\":{\"accessManagement\":{\"enabled\":true}}}")
                 .when()
-                .post("/create-landing-zone")
+                .post("/create-landingzone")
                 .then()
                 .statusCode(200)
                 .body("arn", containsString(":landingzone/"))

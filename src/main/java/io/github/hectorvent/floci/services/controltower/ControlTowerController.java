@@ -134,7 +134,7 @@ public class ControlTowerController {
     }
 
     @POST
-    @Path("/create-landing-zone")
+    @Path("/create-landingzone")
     public Response createLandingZone(@Context HttpHeaders headers, String body) {
         ControlTowerService.CreateLandingZoneResult result = service.createLandingZone(
                 requestContext.getAccountId(), regionResolver.resolveRegion(headers), parse(body));
