@@ -170,6 +170,22 @@ class RdsQueryHandlerTest {
     }
 
     @Test
+    void describeDbClusters_engineElementEchoesTheAuroraIdentifier() {
+        // Same contract as the instance case: DBCluster.Engine must match what CreateDBCluster
+        // was given ("aurora-mysql"), not floci's internal MYSQL family used for the container.
+        DbCluster cluster = makeCluster("mycluster");
+        cluster.setEngine(io.github.hectorvent.floci.services.rds.model.DatabaseEngine.MYSQL);
+        cluster.setEngineIdentifier("aurora-mysql");
+        when(service.listDbClusters(null)).thenReturn(List.of(cluster));
+
+        Response response = handler.handle("DescribeDBClusters", params());
+
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<Engine>aurora-mysql</Engine>"),
+                "Engine must echo the requested aurora-mysql identifier, not the internal mysql family: " + body);
+    }
+
+    @Test
     void describeDbClusters_filterByFiltersParam() {
         when(service.listDbClusters("mycluster")).thenReturn(List.of());
 
@@ -248,6 +264,30 @@ class RdsQueryHandlerTest {
         verify(service).createDbInstance("mydb", "postgres", "16.3",
                 null, null, null, "db.t3.micro", 20, false, null, null, null, null, false, false, null,
                 java.util.Map.of("example:ClusterId", "cluster-a", "Name", "mydb"), List.of(), null);
+    }
+
+    @Test
+    void dbInstanceXml_echoesTheAuroraEngineIdentifierNotTheInternalFamily() {
+        // AWS's DBInstance.Engine reflects exactly what CreateDBInstance was given
+        // (e.g. "aurora-mysql" for an Aurora MySQL cluster instance), not floci's internal
+        // DatabaseEngine family (MYSQL) that only picks the backing container/protocol.
+        DbInstance instance = makeInstance("member1");
+        instance.setEngine(io.github.hectorvent.floci.services.rds.model.DatabaseEngine.MYSQL);
+        instance.setEngineIdentifier("aurora-mysql");
+        when(service.createDbInstance(eq("member1"), eq("aurora-mysql"), any(), any(), any(), any(), any(),
+                anyInt(), anyBoolean(), any(), any(), eq("cluster1"), any(), anyBoolean(), anyBoolean(), any(),
+                any(), any(), isNull()))
+                .thenReturn(instance);
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBInstanceIdentifier", "member1");
+        p.add("Engine", "aurora-mysql");
+        p.add("DBClusterIdentifier", "cluster1");
+        Response response = handler.handle("CreateDBInstance", p);
+
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<Engine>aurora-mysql</Engine>"),
+                "Engine must echo the requested aurora-mysql identifier, not the internal mysql family: " + body);
     }
 
     @Test

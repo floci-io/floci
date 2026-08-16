@@ -210,6 +210,31 @@ class RdsServiceTest {
     }
 
     @Test
+    void engineIdentifierEchoesTheAuroraAliasNotTheInternalFamily() {
+        // AWS's DescribeDBClusters/DescribeDBInstances.Engine always matches the Engine value
+        // the caller supplied to Create*. floci's internal DatabaseEngine enum collapses
+        // "aurora-mysql" into the MYSQL family (it shares a MySQL-compatible container with
+        // plain "mysql"), but that collapse must stay internal - the wire response has to keep
+        // reporting "aurora-mysql".
+        DbCluster cluster = rdsService.createDbCluster("cluster1", "aurora-mysql", "3.05.2",
+                "admin", "password", "dbname", false, null, null, null, false);
+        assertEquals(DatabaseEngine.MYSQL, cluster.getEngine());
+        assertEquals("aurora-mysql", cluster.getEngineIdentifier());
+
+        DbInstance member = rdsService.createDbInstance("member1", "aurora-mysql", "3.05.2",
+                "admin", "password", "dbname", "db.t3.medium",
+                20, false, null, null, "cluster1", null, false);
+        assertEquals(DatabaseEngine.MYSQL, member.getEngine());
+        assertEquals("aurora-mysql", member.getEngineIdentifier());
+
+        // A plain (non-aliased) engine still round-trips as itself.
+        DbInstance standalone = rdsService.createDbInstance("standalone", "mariadb", "11",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null);
+        assertEquals("mariadb", standalone.getEngineIdentifier());
+    }
+
+    @Test
     void dbInstanceEndpointUsesResolvedProxyHost() {
         DockerHostResolver dockerHostResolver = mock(DockerHostResolver.class);
         when(dockerHostResolver.resolve()).thenReturn("floci.local");
