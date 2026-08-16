@@ -28,8 +28,10 @@ The seeded manifest always includes a `securityRoles` object. LZA's `makeManifes
 | `UpdateLandingZone` | `POST /update-landingzone` | Reconciliation sink — stores the supplied manifest/version/remediation types and returns an operation id |
 | `GetLandingZoneOperation` | `POST /get-landingzone-operation` | Reports `SUCCEEDED` for any operation id, including ones not in the in-memory ledger (restart-safe) |
 | `ListBaselines` | `POST /list-baselines` | Static 4-entry catalog: `AWSControlTowerBaseline`, `IdentityCenterBaseline`, `AuditBaseline`, `LogArchiveBaseline`, with region-stamped arns |
-| `ListEnabledBaselines` | `POST /list-enabled-baselines` | Stored enabled baselines plus the synthetic IdentityCenter auto-enable entry (see above) |
+| `ListEnabledBaselines` | `POST /list-enabled-baselines` | Supports packet-defined baseline/target/status filters and `maxResults`/`nextToken` pagination. Child resources are not materialized; `includeChildren` returns configured parent resources only. |
+| `GetEnabledBaseline` | `POST /get-enabled-baseline` | Returns an enabled baseline by ARN, including status, parameters, and optional parent/drift details; unknown ARNs return `ResourceNotFoundException` |
 | `EnableBaseline` | `POST /enable-baseline` | Stores an enabled baseline keyed by target (OU or landing zone); re-enabling a target replaces rather than duplicates |
+| `ResetEnabledBaseline` | `POST /reset-enabled-baseline` | Re-applies an enabled baseline by ARN; updates the `lastOperationIdentifier` and returns an operation id |
 | `GetBaselineOperation` | `POST /get-baseline-operation` | Reports `SUCCEEDED` for any operation id, including ones not in the ledger |
 
 Note the landing-zone URIs spell "landingzone" as one word (`/list-landingzones`, `/get-landingzone`, `/update-landingzone`, `/get-landingzone-operation`) — this matches the exact literals LZA's SDK sends.

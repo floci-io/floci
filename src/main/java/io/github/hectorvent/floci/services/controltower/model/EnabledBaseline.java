@@ -17,6 +17,9 @@ public class EnabledBaseline {
     private String targetIdentifier;
     private String status;
     private JsonNode parameters;
+    private String parentIdentifier;
+    private String driftStatus;
+    private String lastOperationIdentifier;
 
     public EnabledBaseline() {
     }
@@ -82,6 +85,30 @@ public class EnabledBaseline {
 
     public void setParameters(JsonNode parameters) {
         this.parameters = copy(parameters);
+    }
+
+    public String getParentIdentifier() {
+        return parentIdentifier;
+    }
+
+    public void setParentIdentifier(String parentIdentifier) {
+        this.parentIdentifier = parentIdentifier;
+    }
+
+    public String getDriftStatus() {
+        return driftStatus;
+    }
+
+    public void setDriftStatus(String driftStatus) {
+        this.driftStatus = driftStatus;
+    }
+
+    public String getLastOperationIdentifier() {
+        return lastOperationIdentifier;
+    }
+
+    public void setLastOperationIdentifier(String lastOperationIdentifier) {
+        this.lastOperationIdentifier = lastOperationIdentifier;
     }
 
     private static JsonNode copy(JsonNode value) {

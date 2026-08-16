@@ -138,14 +138,29 @@ public class ControlTowerController {
     @POST
     @Path("/list-enabled-baselines")
     @Consumes(MediaType.WILDCARD)
-    public Response listEnabledBaselines(@Context HttpHeaders headers) {
-        List<EnabledBaseline> enabledBaselines = service.listEnabledBaselines(
-                requestContext.getAccountId(), regionResolver.resolveRegion(headers));
+    public Response listEnabledBaselines(@Context HttpHeaders headers, String body) {
+        ControlTowerService.ListEnabledBaselinesResult result = service.listEnabledBaselines(
+                requestContext.getAccountId(), regionResolver.resolveRegion(headers), parse(body));
         ObjectNode response = objectMapper.createObjectNode();
         var array = response.putArray("enabledBaselines");
-        for (EnabledBaseline entry : enabledBaselines) {
+        for (EnabledBaseline entry : result.enabledBaselines()) {
             array.add(enabledBaselineNode(entry));
         }
+        if (result.nextToken() != null) {
+            response.put("nextToken", result.nextToken());
+        }
+        return Response.ok(response).build();
+    }
+
+    @POST
+    @Path("/get-enabled-baseline")
+    public Response getEnabledBaseline(@Context HttpHeaders headers, String body) {
+        JsonNode request = parse(body);
+        String identifier = requireText(request, "enabledBaselineIdentifier");
+        EnabledBaseline entry = service.getEnabledBaseline(
+                requestContext.getAccountId(), regionResolver.resolveRegion(headers), identifier);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("enabledBaselineDetails", enabledBaselineDetailsNode(entry));
         return Response.ok(response).build();
     }
 
@@ -158,6 +173,18 @@ public class ControlTowerController {
         ObjectNode response = objectMapper.createObjectNode();
         response.put("operationIdentifier", result.operationIdentifier());
         response.put("arn", result.arn());
+        return Response.ok(response).build();
+    }
+
+    @POST
+    @Path("/reset-enabled-baseline")
+    public Response resetEnabledBaseline(@Context HttpHeaders headers, String body) {
+        JsonNode request = parse(body);
+        String identifier = requireText(request, "enabledBaselineIdentifier");
+        String opId = service.resetEnabledBaseline(
+                requestContext.getAccountId(), regionResolver.resolveRegion(headers), identifier);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("operationIdentifier", opId);
         return Response.ok(response).build();
     }
 
@@ -197,8 +224,35 @@ public class ControlTowerController {
         node.put("targetIdentifier", entry.getTargetIdentifier());
         ObjectNode statusSummary = objectMapper.createObjectNode();
         statusSummary.put("status", entry.getStatus());
+        if (entry.getLastOperationIdentifier() != null) {
+            statusSummary.put("lastOperationIdentifier", entry.getLastOperationIdentifier());
+        }
         node.set("statusSummary", statusSummary);
+        if (entry.getParentIdentifier() != null) {
+            node.put("parentIdentifier", entry.getParentIdentifier());
+        }
+        if (entry.getDriftStatus() != null) {
+            node.set("driftStatusSummary", driftStatusNode(entry));
+        }
         return node;
+    }
+
+    private ObjectNode enabledBaselineDetailsNode(EnabledBaseline entry) {
+        ObjectNode node = enabledBaselineNode(entry);
+        if (entry.getParameters() != null) {
+            node.set("parameters", entry.getParameters());
+        }
+        return node;
+    }
+
+    private ObjectNode driftStatusNode(EnabledBaseline entry) {
+        ObjectNode inheritance = objectMapper.createObjectNode();
+        inheritance.put("status", entry.getDriftStatus());
+        ObjectNode types = objectMapper.createObjectNode();
+        types.set("inheritance", inheritance);
+        ObjectNode summary = objectMapper.createObjectNode();
+        summary.set("types", types);
+        return summary;
     }
 
     private ObjectNode operationDetailsNode(String operationIdentifier, String operationType) {

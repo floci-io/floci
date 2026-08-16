@@ -222,4 +222,100 @@ class ControlTowerServiceTest {
         assertEquals("ValidationException", error.getErrorCode());
         assertEquals(400, error.getHttpStatus());
     }
+
+    @Test
+    void getEnabledBaselineFindsSyntheticIdentityCenterAndReportsMissingResource() {
+        String identityCenterArn = service.listBaselines(REGION).stream()
+                .filter(b -> "IdentityCenterBaseline".equals(b.get("name").asText()))
+                .findFirst().orElseThrow().get("arn").asText();
+        EnabledBaseline synthetic = service.listEnabledBaselines(ACCOUNT, REGION).stream()
+                .filter(e -> identityCenterArn.equals(e.getBaselineIdentifier()))
+                .findFirst().orElseThrow();
+
+        assertEquals(synthetic.getArn(), service.getEnabledBaseline(ACCOUNT, REGION, synthetic.getArn()).getArn());
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.getEnabledBaseline(ACCOUNT, REGION, "arn:aws:controltower:us-east-1:000000000101:enabledbaseline/missing"));
+        assertEquals("ResourceNotFoundException", error.getErrorCode());
+        assertEquals(404, error.getHttpStatus());
+    }
+
+    @Test
+    void listEnabledBaselinesAppliesFilterAndPagination() throws Exception {
+        String baselineArn = service.listBaselines(REGION).stream()
+                .filter(b -> "AWSControlTowerBaseline".equals(b.get("name").asText()))
+                .findFirst().orElseThrow().get("arn").asText();
+        for (int i = 0; i < 6; i++) {
+            JsonNode request = objectMapper.readTree("""
+                    {"baselineIdentifier":"%s","baselineVersion":"5.0",
+                     "targetIdentifier":"arn:aws:organizations::000000000101:ou/o-floci0001/ou-page-%08d"}
+                    """.formatted(baselineArn, i));
+            service.enableBaseline(ACCOUNT, REGION, request);
+        }
+
+        JsonNode listRequest = objectMapper.readTree("""
+                {"filter":{"baselineIdentifiers":["%s"]},"maxResults":5}
+                """.formatted(baselineArn));
+        ControlTowerService.ListEnabledBaselinesResult first =
+                service.listEnabledBaselines(ACCOUNT, REGION, listRequest);
+        assertEquals(5, first.enabledBaselines().size());
+        assertNotNull(first.nextToken());
+
+        JsonNode secondRequest = objectMapper.readTree("""
+                {"filter":{"baselineIdentifiers":["%s"]},"maxResults":5,"nextToken":"%s"}
+                """.formatted(baselineArn, first.nextToken()));
+        ControlTowerService.ListEnabledBaselinesResult second =
+                service.listEnabledBaselines(ACCOUNT, REGION, secondRequest);
+        assertEquals(1, second.enabledBaselines().size());
+        assertNull(second.nextToken());
+    }
+
+    @Test
+    void resetEnabledBaselineReturnsOperationIdentifierForValidBaseline() throws Exception {
+        String baselineArn = service.listBaselines(REGION).stream()
+                .filter(b -> "AWSControlTowerBaseline".equals(b.get("name").asText()))
+                .findFirst().orElseThrow().get("arn").asText();
+        String ouArn = "arn:aws:organizations::000000000101:ou/o-floci0001/ou-reset-00000001";
+
+        JsonNode enableRequest = objectMapper.readTree("""
+                {"baselineIdentifier":"%s","baselineVersion":"5.0","targetIdentifier":"%s"}
+                """.formatted(baselineArn, ouArn));
+        service.enableBaseline(ACCOUNT, REGION, enableRequest);
+
+        EnabledBaseline enabled = service.listEnabledBaselines(ACCOUNT, REGION).stream()
+                .filter(e -> ouArn.equals(e.getTargetIdentifier()))
+                .findFirst().orElseThrow();
+
+        String opId = service.resetEnabledBaseline(ACCOUNT, REGION, enabled.getArn());
+        assertNotNull(opId);
+        assertFalse(opId.isBlank());
+        assertEquals("BASELINE_RESET", service.getBaselineOperationType(opId));
+    }
+
+    @Test
+    void resetEnabledBaselineThrowsResourceNotFoundForMissingBaseline() {
+        AwsException error = assertThrows(
+                AwsException.class,
+                () -> service.resetEnabledBaseline(ACCOUNT, REGION,
+                        "arn:aws:controltower:us-east-1:000000000101:enabledbaseline/missing"));
+        assertEquals("ResourceNotFoundException", error.getErrorCode());
+        assertEquals(404, error.getHttpStatus());
+    }
+
+    @Test
+    void resetEnabledBaselineThrowsValidationExceptionForInvalidArn() {
+        AwsException error = assertThrows(
+                AwsException.class,
+                () -> service.resetEnabledBaseline(ACCOUNT, REGION, "not-an-arn"));
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+    }
+
+    @Test
+    void resetEnabledBaselineThrowsValidationExceptionForNullIdentifier() {
+        AwsException error = assertThrows(
+                AwsException.class,
+                () -> service.resetEnabledBaseline(ACCOUNT, REGION, null));
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+    }
 }

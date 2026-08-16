@@ -15,7 +15,11 @@ import jakarta.inject.Inject;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.HashSet;
 import java.util.Optional;
+import java.util.Set;
+import java.util.Comparator;
+import java.util.stream.Collectors;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -40,6 +44,7 @@ public class ControlTowerService {
     static final String OP_SUCCEEDED = "SUCCEEDED";
     private static final String OP_TYPE_UPDATE = "UPDATE";
     private static final String OP_TYPE_BASELINE_ENABLED = "BASELINE_ENABLED";
+    private static final String OP_TYPE_BASELINE_RESET = "BASELINE_RESET";
     private static final String IDENTITY_CENTER_BASELINE_NAME = "IdentityCenterBaseline";
     private static final String IDENTITY_CENTER_BASELINE_ID = "LN25R72TTG6IGPTQ";
     private static final String IDENTITY_CENTER_ENABLED_BASELINE_ID = "FLOCIIDCBASELINE1";
@@ -140,6 +145,12 @@ public class ControlTowerService {
     }
 
     public synchronized List<EnabledBaseline> listEnabledBaselines(String accountId, String region) {
+        return listEnabledBaselines(accountId, region, JsonNodeFactory.instance.objectNode()).enabledBaselines();
+    }
+
+    public synchronized ListEnabledBaselinesResult listEnabledBaselines(
+            String accountId, String region, JsonNode request) {
+        requireObject(request, "Request body");
         String prefix = region + "::";
         List<EnabledBaseline> stored = enabledBaselineStore.scan(key -> key.startsWith(prefix));
 
@@ -148,7 +159,54 @@ public class ControlTowerService {
             result.add(syntheticIdentityCenterBaseline(accountId, region));
         }
         result.addAll(stored);
-        return result;
+        result.sort(Comparator.comparing(EnabledBaseline::getArn, Comparator.nullsFirst(String::compareTo)));
+
+        JsonNode filter = request.get("filter");
+        if (filter != null && !filter.isNull()) {
+            requireObject(filter, "filter");
+            Set<String> baselines = readStringSet(filter, "baselineIdentifiers", 5);
+            Set<String> targets = readStringSet(filter, "targetIdentifiers", 5);
+            Set<String> parents = readStringSet(filter, "parentIdentifiers", 5);
+            Set<String> statuses = readStringSet(filter, "statuses", 1);
+            Set<String> driftStatuses = readStringSet(filter, "inheritanceDriftStatuses", 1);
+            validateEnumValues(statuses, Set.of("SUCCEEDED", "FAILED", "UNDER_CHANGE"), "statuses");
+            validateEnumValues(driftStatuses, Set.of("IN_SYNC", "DRIFTED"), "inheritanceDriftStatuses");
+            result.removeIf(entry -> (!baselines.isEmpty() && !baselines.contains(entry.getBaselineIdentifier()))
+                    || (!targets.isEmpty() && !targets.contains(entry.getTargetIdentifier()))
+                    || (!parents.isEmpty() && !parents.contains(entry.getParentIdentifier()))
+                    || (!statuses.isEmpty() && !statuses.contains(entry.getStatus()))
+                    || (!driftStatuses.isEmpty() && !driftStatuses.contains(
+                            Optional.ofNullable(entry.getDriftStatus()).orElse("IN_SYNC"))));
+        }
+
+        boolean includeChildren = readOptionalBoolean(request, "includeChildren");
+        if (includeChildren) {
+            // Child enabled baselines are not materialized by Floci; the response therefore
+            // contains only the parent resources represented by the configured stores.
+        }
+        int maxResults = readMaxResults(request);
+        int offset = readNextToken(request);
+        if (offset > result.size()) {
+            throw validation("nextToken is invalid.");
+        }
+        int end = Math.min(result.size(), offset + maxResults);
+        String nextToken = end < result.size() ? String.valueOf(end) : null;
+        return new ListEnabledBaselinesResult(new ArrayList<>(result.subList(offset, end)), nextToken);
+    }
+
+    public synchronized EnabledBaseline getEnabledBaseline(String accountId, String region, String identifier) {
+        if (identifier == null || identifier.isBlank() || !isArn(identifier)) {
+            throw validation("enabledBaselineIdentifier must be a string.");
+        }
+        return listEnabledBaselines(accountId, region).stream()
+                .filter(entry -> identifier.equals(entry.getArn()))
+                .findFirst()
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "The request references a resource that does not exist.", 404));
+    }
+
+    private boolean isIdentityCenterBaseline(String arn) {
+        return arn != null && arn.endsWith(":enabledbaseline/" + IDENTITY_CENTER_ENABLED_BASELINE_ID);
     }
 
     public synchronized EnableBaselineResult enableBaseline(String accountId, String region, JsonNode request) {
@@ -161,13 +219,27 @@ public class ControlTowerService {
         String key = region + "::" + targetIdentifier;
         String arn = "arn:aws:controltower:" + region + ":" + accountId
                 + ":enabledbaseline/" + shortId();
+        String opId = UUID.randomUUID().toString();
         EnabledBaseline value = new EnabledBaseline(
                 arn, baselineIdentifier, baselineVersion, targetIdentifier, OP_SUCCEEDED, parameters);
+        value.setLastOperationIdentifier(opId);
         enabledBaselineStore.put(key, value);
 
-        String opId = UUID.randomUUID().toString();
         operations.put(opId, OP_TYPE_BASELINE_ENABLED);
         return new EnableBaselineResult(opId, arn);
+    }
+
+    public synchronized String resetEnabledBaseline(String accountId, String region, String enabledBaselineIdentifier) {
+        if (enabledBaselineIdentifier == null || enabledBaselineIdentifier.isBlank() || !isArn(enabledBaselineIdentifier)) {
+            throw validation("enabledBaselineIdentifier must be a string.");
+        }
+        EnabledBaseline baseline = getEnabledBaseline(accountId, region, enabledBaselineIdentifier);
+        String opId = UUID.randomUUID().toString();
+        baseline.setLastOperationIdentifier(opId);
+        String key = region + "::" + baseline.getTargetIdentifier();
+        enabledBaselineStore.put(key, baseline);
+        operations.put(opId, OP_TYPE_BASELINE_RESET);
+        return opId;
     }
 
     public String getBaselineOperationType(String operationIdentifier) {
@@ -203,6 +275,75 @@ public class ControlTowerService {
 
     private static String shortId() {
         return UUID.randomUUID().toString().replace("-", "").substring(0, 12);
+    }
+
+    private static Set<String> readStringSet(JsonNode parent, String field, int maxSize) {
+        JsonNode value = parent.get(field);
+        if (value == null || value.isNull()) {
+            return Set.of();
+        }
+        if (!value.isArray() || value.size() == 0 || value.size() > maxSize) {
+            throw validation(field + " must contain between 1 and " + maxSize + " items.");
+        }
+        Set<String> result = new HashSet<>();
+        for (JsonNode item : value) {
+            if (!item.isTextual() || item.textValue().isBlank()) {
+                throw validation(field + " must contain strings.");
+            }
+            if ((field.endsWith("Identifiers") || "baselineIdentifiers".equals(field))
+                    && !isArn(item.textValue())) {
+                throw validation(field + " must contain ARN values.");
+            }
+            result.add(item.textValue());
+        }
+        return result;
+    }
+
+    private static boolean readOptionalBoolean(JsonNode parent, String field) {
+        JsonNode value = parent.get(field);
+        if (value == null || value.isNull()) {
+            return false;
+        }
+        if (!value.isBoolean()) {
+            throw validation(field + " must be a boolean.");
+        }
+        return value.booleanValue();
+    }
+
+    private static void validateEnumValues(Set<String> values, Set<String> allowed, String field) {
+        if (values.stream().anyMatch(value -> !allowed.contains(value))) {
+            throw validation(field + " contains an invalid value.");
+        }
+    }
+
+    private static int readMaxResults(JsonNode request) {
+        JsonNode value = request.get("maxResults");
+        if (value == null || value.isNull()) {
+            return 100;
+        }
+        if (!value.isIntegralNumber() || value.intValue() < 5 || value.intValue() > 100) {
+            throw validation("maxResults must be between 5 and 100.");
+        }
+        return value.intValue();
+    }
+
+    private static int readNextToken(JsonNode request) {
+        JsonNode value = request.get("nextToken");
+        if (value == null || value.isNull()) {
+            return 0;
+        }
+        if (!value.isTextual() || value.textValue().isBlank()) {
+            throw validation("nextToken must be a non-empty string.");
+        }
+        try {
+            return Integer.parseInt(value.textValue());
+        } catch (NumberFormatException e) {
+            throw validation("nextToken is invalid.");
+        }
+    }
+
+    private static boolean isArn(String value) {
+        return value.length() >= 20 && value.matches("^arn:aws[0-9a-zA-Z_\\-:\\/]+$");
     }
 
     private static List<String> readRemediationTypes(JsonNode request) {
@@ -242,6 +383,9 @@ public class ControlTowerService {
     }
 
     public record EnableBaselineResult(String operationIdentifier, String arn) {
+    }
+
+    public record ListEnabledBaselinesResult(List<EnabledBaseline> enabledBaselines, String nextToken) {
     }
 
     private record BaselineCatalogEntry(String name, String id, String description) {
