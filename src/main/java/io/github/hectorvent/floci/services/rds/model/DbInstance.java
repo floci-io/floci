@@ -23,6 +23,7 @@ public class DbInstance {
     private DbEndpoint endpoint;
     private boolean iamDatabaseAuthenticationEnabled;
     private String parameterGroupName;
+    private String optionGroupName;
     private String dbSubnetGroupName;
     private String dbClusterIdentifier;
     private String vpcId;
@@ -109,6 +110,9 @@ public class DbInstance {
 
     public String getParameterGroupName() { return parameterGroupName; }
     public void setParameterGroupName(String parameterGroupName) { this.parameterGroupName = parameterGroupName; }
+
+    public String getOptionGroupName() { return optionGroupName; }
+    public void setOptionGroupName(String optionGroupName) { this.optionGroupName = optionGroupName; }
 
     public String getDbSubnetGroupName() { return dbSubnetGroupName; }
     public void setDbSubnetGroupName(String dbSubnetGroupName) { this.dbSubnetGroupName = dbSubnetGroupName; }

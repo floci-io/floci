@@ -37,6 +37,10 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | `DeleteDBClusterParameterGroup` | - |
 | `ModifyDBClusterParameterGroup` | - |
 | `DescribeDBClusterParameters` | - |
+| `CreateOptionGroup` | Create an option group |
+| `DescribeOptionGroups` | List option groups, including the implicit `default:` groups |
+| `ModifyOptionGroup` | Add, update, or remove options in an option group |
+| `DeleteOptionGroup` | Delete an option group |
 | `DescribeDBSnapshots` | - |
 | `DescribeDBProxies` | List DB proxies |
 | `CreateDBProxy` | Create a DB proxy |
@@ -178,6 +182,55 @@ mysql -h 127.0.0.1 -P 7002 -u root -psecret123
 | `mariadb` | `mariadb:11` |
 
 Override the image per-instance with the `--engine-version` flag or globally via environment variables.
+
+## Option Groups
+
+Option groups are metadata: Floci stores the options you add, returns them on the wire, and
+attaches a group to a DB instance, but it does not install the underlying engine feature in the
+container.
+
+As on AWS, every engine has an implicit `default:<engine>-<major version>` group that
+`DescribeOptionGroups` returns even when you have created none. Floci ships the defaults for the
+engines it can run (`postgres 13`–`18`, `mysql 8.0`/`8.4`, `mariadb 10.11`/`11.2`/`11.4`), so an
+instance created without `--option-group-name` reports the matching default. Default groups can't
+be modified, deleted, or tagged.
+
+`CreateOptionGroup` accepts any `EngineName` AWS accepts — including `oracle-*`, `sqlserver-*`,
+and `db2-*` — so a Terraform `aws_db_option_group` for an engine Floci cannot start still applies.
+Attaching one to a DB instance requires the group's engine and major engine version to match the
+instance, as on AWS: a `mysql 8.0` group can't be attached to a `mysql 8.4` instance. A mismatch
+fails with `InvalidParameterCombination`.
+
+```bash
+aws rds create-option-group \
+  --option-group-name my-og \
+  --engine-name mysql \
+  --major-engine-version 8.0 \
+  --option-group-description "MySQL options" \
+  --endpoint-url $AWS_ENDPOINT_URL
+
+aws rds modify-option-group \
+  --option-group-name my-og \
+  --options OptionName=MEMCACHED,Port=11211 \
+  --apply-immediately \
+  --endpoint-url $AWS_ENDPOINT_URL
+
+aws rds describe-option-groups \
+  --engine-name mysql \
+  --endpoint-url $AWS_ENDPOINT_URL
+```
+
+Deleting a group that is still attached to a DB instance fails with
+`InvalidOptionGroupStateFault`, matching AWS.
+
+Known gaps, all deliberate:
+
+| Behavior | Status |
+|---|---|
+| `CopyOptionGroup`, `DescribeOptionGroupOptions` | Not implemented — separate actions, not part of option group CRUD |
+| `OptionGroupQuotaExceededFault` (AWS caps an account at 20 groups) | Not enforced — capping a local emulator would only get in a test's way |
+| `OptionSetting` metadata (`DataType`, `ApplyType`, `AllowedValues`, `DefaultValue`, `Description`) | Omitted — it would require the per-engine option catalog `DescribeOptionGroupOptions` serves |
+| `MaxRecords` / `Marker` pagination | Every group is returned in one page, as with every other RDS list action |
 
 ## Persistence
 

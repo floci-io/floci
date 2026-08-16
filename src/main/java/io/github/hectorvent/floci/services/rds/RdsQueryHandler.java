@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsQueryResponse;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
+import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 import io.github.hectorvent.floci.services.rds.model.DbCluster;
 import io.github.hectorvent.floci.services.rds.model.DbClusterParameterGroup;
 import io.github.hectorvent.floci.services.rds.model.DbEndpoint;
@@ -16,6 +17,8 @@ import io.github.hectorvent.floci.services.rds.model.DbProxyAuth;
 import io.github.hectorvent.floci.services.rds.model.DbProxyTarget;
 import io.github.hectorvent.floci.services.rds.model.DbProxyTargetGroup;
 import io.github.hectorvent.floci.services.rds.model.DbSubnetGroup;
+import io.github.hectorvent.floci.services.rds.model.OptionGroup;
+import io.github.hectorvent.floci.services.rds.model.OptionGroupOption;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.MultivaluedMap;
@@ -77,6 +80,10 @@ public class RdsQueryHandler {
                 case "DeleteDBClusterParameterGroup" -> handleDeleteDbClusterParameterGroup(params, region);
                 case "ModifyDBClusterParameterGroup" -> handleModifyDbClusterParameterGroup(params, region);
                 case "DescribeDBClusterParameters" -> handleDescribeDbClusterParameters(params, region);
+                case "CreateOptionGroup" -> handleCreateOptionGroup(params, region);
+                case "DescribeOptionGroups" -> handleDescribeOptionGroups(params, region);
+                case "ModifyOptionGroup" -> handleModifyOptionGroup(params, region);
+                case "DeleteOptionGroup" -> handleDeleteOptionGroup(params, region);
                 case "DescribeDBSnapshots" -> handleDescribeDbSnapshots(params);
                 case "DescribeDBProxies" -> handleDescribeDbProxies(params, region);
                 case "CreateDBProxy" -> handleCreateDbProxy(params, region);
@@ -121,6 +128,7 @@ public class RdsQueryHandler {
         int allocatedStorage = allocatedStorageStr != null ? parseIntSafe(allocatedStorageStr, 20) : 20;
         boolean iamEnabled = "true".equalsIgnoreCase(params.getFirst("EnableIAMDatabaseAuthentication"));
         String paramGroupName = params.getFirst("DBParameterGroupName");
+        String optionGroupName = params.getFirst("OptionGroupName");
         String dbSubnetGroupName = params.getFirst("DBSubnetGroupName");
         String dbClusterIdentifier = params.getFirst("DBClusterIdentifier");
         boolean manageMasterUserPassword = "true".equalsIgnoreCase(params.getFirst("ManageMasterUserPassword"));
@@ -141,7 +149,8 @@ public class RdsQueryHandler {
             DbInstance instance = service.createDbInstance(id, engine, engineVersion, masterUsername,
                     masterPassword, dbName, dbInstanceClass, allocatedStorage, iamEnabled,
                     paramGroupName, dbSubnetGroupName, dbClusterIdentifier, availabilityZone, multiAz,
-                    manageMasterUserPassword, masterUserSecretKmsKeyId, tags, vpcSecurityGroupIds, region);
+                    manageMasterUserPassword, masterUserSecretKmsKeyId, tags, vpcSecurityGroupIds,
+                    optionGroupName, region);
             String result = dbInstanceXml(instance);
             return Response.ok(AwsQueryResponse.envelope("CreateDBInstance", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {
@@ -210,11 +219,12 @@ public class RdsQueryHandler {
         String iamStr = params.getFirst("EnableIAMDatabaseAuthentication");
         Boolean iamEnabled = iamStr != null ? Boolean.parseBoolean(iamStr) : null;
         String dbSubnetGroupName = params.getFirst("DBSubnetGroupName");
+        String optionGroupName = params.getFirst("OptionGroupName");
         try {
             List<String> vpcSecurityGroupIds = vpcSecurityGroupIds(params);
             DbInstance instance = service.modifyDbInstance(
                     id, newPassword, iamEnabled, dbSubnetGroupName,
-                    vpcSecurityGroupIds, region);
+                    vpcSecurityGroupIds, optionGroupName, region);
             String result = dbInstanceXml(instance);
             return Response.ok(AwsQueryResponse.envelope("ModifyDBInstance", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {
@@ -655,6 +665,139 @@ public class RdsQueryHandler {
         }
     }
 
+    // ── Option Groups ─────────────────────────────────────────────────────────
+
+    private Response handleCreateOptionGroup(
+            MultivaluedMap<String, String> params, String region) {
+        String name = params.getFirst("OptionGroupName");
+        String engineName = params.getFirst("EngineName");
+        String majorEngineVersion = params.getFirst("MajorEngineVersion");
+        String description = params.getFirst("OptionGroupDescription");
+        Response missing = firstMissingParam(
+                "OptionGroupName", name,
+                "EngineName", engineName,
+                "MajorEngineVersion", majorEngineVersion,
+                "OptionGroupDescription", description);
+        if (missing != null) {
+            return missing;
+        }
+        OptionGroup group = service.createOptionGroup(
+                name, engineName, majorEngineVersion, description, parseTags(params), region);
+        return Response.ok(AwsQueryResponse.envelope(
+                "CreateOptionGroup", AwsNamespaces.RDS, optionGroupXml(group))).build();
+    }
+
+    private Response handleDescribeOptionGroups(
+            MultivaluedMap<String, String> params, String region) {
+        Collection<OptionGroup> result = service.listOptionGroups(
+                params.getFirst("OptionGroupName"),
+                params.getFirst("EngineName"),
+                params.getFirst("MajorEngineVersion"),
+                region);
+        XmlBuilder xml = new XmlBuilder().start("OptionGroupsList");
+        for (OptionGroup group : result) {
+            xml.start("OptionGroup").raw(optionGroupInnerXml(group)).end("OptionGroup");
+        }
+        xml.end("OptionGroupsList").start("Marker").end("Marker");
+        return Response.ok(AwsQueryResponse.envelope(
+                "DescribeOptionGroups", AwsNamespaces.RDS, xml.build())).build();
+    }
+
+    private Response handleModifyOptionGroup(
+            MultivaluedMap<String, String> params, String region) {
+        String name = params.getFirst("OptionGroupName");
+        if (name == null || name.isBlank()) {
+            return AwsQueryResponse.error("InvalidParameterValue",
+                    "OptionGroupName is required.", AwsNamespaces.RDS, 400);
+        }
+        OptionGroup group = service.modifyOptionGroup(name,
+                parseOptionConfigurations(params),
+                memberList(params, "OptionsToRemove"),
+                region);
+        return Response.ok(AwsQueryResponse.envelope(
+                "ModifyOptionGroup", AwsNamespaces.RDS, optionGroupXml(group))).build();
+    }
+
+    private Response handleDeleteOptionGroup(
+            MultivaluedMap<String, String> params, String region) {
+        String name = params.getFirst("OptionGroupName");
+        if (name == null || name.isBlank()) {
+            return AwsQueryResponse.error("InvalidParameterValue",
+                    "OptionGroupName is required.", AwsNamespaces.RDS, 400);
+        }
+        service.deleteOptionGroup(name, region);
+        return Response.ok(AwsQueryResponse.envelopeNoResult(
+                "DeleteOptionGroup", AwsNamespaces.RDS)).build();
+    }
+
+    /**
+     * Returns an {@code InvalidParameterValue} response for the first blank value in the given
+     * name/value pairs, or {@code null} when they are all present.
+     */
+    private static Response firstMissingParam(String... nameValuePairs) {
+        for (int i = 0; i < nameValuePairs.length; i += 2) {
+            String value = nameValuePairs[i + 1];
+            if (value == null || value.isBlank()) {
+                return AwsQueryResponse.error("InvalidParameterValue",
+                        nameValuePairs[i] + " is required.", AwsNamespaces.RDS, 400);
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Parses {@code OptionsToInclude.OptionConfiguration.N.*} (and the legacy
+     * {@code OptionsToInclude.member.N.*} encoding older SDKs emit).
+     */
+    private static List<OptionGroupOption> parseOptionConfigurations(
+            MultivaluedMap<String, String> params) {
+        List<OptionGroupOption> options = new java.util.ArrayList<>();
+        for (String prefix : List.of("OptionsToInclude.OptionConfiguration",
+                "OptionsToInclude.member")) {
+            for (int n = 1; ; n++) {
+                String base = prefix + "." + n + ".";
+                String optionName = params.getFirst(base + "OptionName");
+                if (optionName == null) {
+                    break;
+                }
+                OptionGroupOption option = new OptionGroupOption(optionName);
+                option.setOptionVersion(params.getFirst(base + "OptionVersion"));
+                String port = params.getFirst(base + "Port");
+                if (port != null && !port.isBlank()) {
+                    try {
+                        option.setPort(Integer.parseInt(port.trim()));
+                    } catch (NumberFormatException e) {
+                        throw new AwsException("InvalidParameterValue",
+                                "Port must be an integer for option " + optionName + ".", 400);
+                    }
+                }
+                option.setOptionSettings(parseOptionSettings(params, base));
+                option.setVpcSecurityGroupMemberships(
+                        memberList(params, base + "VpcSecurityGroupMemberships"));
+                option.setDbSecurityGroupMemberships(
+                        memberList(params, base + "DBSecurityGroupMemberships"));
+                options.add(option);
+            }
+        }
+        return options;
+    }
+
+    private static Map<String, String> parseOptionSettings(
+            MultivaluedMap<String, String> params, String optionPrefix) {
+        Map<String, String> settings = new LinkedHashMap<>();
+        for (String prefix : List.of("OptionSettings.OptionSetting", "OptionSettings.member")) {
+            for (int n = 1; ; n++) {
+                String settingName = params.getFirst(optionPrefix + prefix + "." + n + ".Name");
+                if (settingName == null) {
+                    break;
+                }
+                settings.put(settingName,
+                        params.getFirst(optionPrefix + prefix + "." + n + ".Value"));
+            }
+        }
+        return settings;
+    }
+
     // ── Snapshots & Proxies (not modeled — empty lists) ───────────────────────
 
     private Response handleDescribeDbSnapshots(MultivaluedMap<String, String> params) {
@@ -998,6 +1141,7 @@ public class RdsQueryHandler {
            .elem("PreferredBackupWindow", "04:00-06:00")
            .raw(vpcSecurityGroupsXml(i))
            .raw(dbParameterGroupsXml(i))
+           .raw(optionGroupMembershipsXml(i))
            .raw(dbSubnetGroupXml(dbSubnetGroupForInstance(i)))
            .elem("DbiResourceId", i.getDbiResourceId())
            .elem("DBInstanceArn", i.getDbInstanceArn());
@@ -1230,6 +1374,96 @@ public class RdsQueryHandler {
                 .build();
     }
 
+    private String optionGroupXml(OptionGroup g) {
+        return new XmlBuilder().start("OptionGroup").raw(optionGroupInnerXml(g)).end("OptionGroup").build();
+    }
+
+    private String optionGroupInnerXml(OptionGroup g) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("OptionGroupName", g.getOptionGroupName())
+                .elem("OptionGroupDescription", g.getOptionGroupDescription())
+                .elem("EngineName", g.getEngineName())
+                .elem("MajorEngineVersion", g.getMajorEngineVersion())
+                .start("Options");
+        for (OptionGroupOption option : g.getOptions()) {
+            xml.start("Option").raw(optionInnerXml(option)).end("Option");
+        }
+        return xml.end("Options")
+                .elem("AllowsVpcAndNonVpcInstanceMemberships",
+                        g.isAllowsVpcAndNonVpcInstanceMemberships())
+                .elem("OptionGroupArn", g.getOptionGroupArn())
+                .build();
+    }
+
+    private String optionInnerXml(OptionGroupOption o) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("OptionName", o.getOptionName())
+                .elem("OptionDescription", o.getOptionDescription())
+                .elem("OptionVersion", o.getOptionVersion());
+        if (o.getPort() != null) {
+            xml.elem("Port", o.getPort().longValue());
+        }
+        xml.elem("Persistent", o.isPersistent())
+           .elem("Permanent", o.isPermanent())
+           .start("OptionSettings");
+        for (Map.Entry<String, String> setting : o.getOptionSettings().entrySet()) {
+            xml.start("OptionSetting")
+               .elem("Name", setting.getKey())
+               .elem("Value", setting.getValue())
+               .elem("IsModifiable", true)
+               .elem("IsCollection", false)
+               .end("OptionSetting");
+        }
+        xml.end("OptionSettings").start("VpcSecurityGroupMemberships");
+        for (String securityGroupId : o.getVpcSecurityGroupMemberships()) {
+            xml.start("VpcSecurityGroupMembership")
+               .elem("VpcSecurityGroupId", securityGroupId)
+               .elem("Status", "active")
+               .end("VpcSecurityGroupMembership");
+        }
+        xml.end("VpcSecurityGroupMemberships").start("DBSecurityGroupMemberships");
+        for (String securityGroupName : o.getDbSecurityGroupMemberships()) {
+            xml.start("DBSecurityGroup")
+               .elem("DBSecurityGroupName", securityGroupName)
+               .elem("Status", "authorized")
+               .end("DBSecurityGroup");
+        }
+        return xml.end("DBSecurityGroupMemberships").build();
+    }
+
+    private static String optionGroupMembershipsXml(DbInstance instance) {
+        return new XmlBuilder().start("OptionGroupMemberships")
+                .start("OptionGroupMembership")
+                  .elem("OptionGroupName", instanceOptionGroupName(instance))
+                  .elem("Status", "in-sync")
+                .end("OptionGroupMembership")
+                .end("OptionGroupMemberships")
+                .build();
+    }
+
+    private static String instanceOptionGroupName(DbInstance instance) {
+        String name = instance.getOptionGroupName();
+        if (name != null && !name.isBlank()) {
+            return name;
+        }
+        String engine = instance.getEngine() != null
+                ? instance.getEngine().name().toLowerCase()
+                : "unknown";
+        String majorVersion = optionGroupMajorVersion(instance);
+        return majorVersion.isEmpty()
+                ? "default:" + engine
+                : RdsService.defaultOptionGroupName(engine, majorVersion);
+    }
+
+    private static String optionGroupMajorVersion(DbInstance instance) {
+        String engineVersion = instance.getEngineVersion();
+        if ((engineVersion == null || engineVersion.isBlank()) && instance.getEngine() != null) {
+            engineVersion = defaultEngineVersion(instance.getEngine().name());
+        }
+        String engine = instance.getEngine() == null ? null : instance.getEngine().name();
+        return RdsService.optionGroupMajorVersion(engine, engineVersion);
+    }
+
     private String clusterParamGroupXml(DbClusterParameterGroup g) {
         return new XmlBuilder().start("DBClusterParameterGroup").raw(clusterParamGroupInnerXml(g)).end("DBClusterParameterGroup").build();
     }
@@ -1308,7 +1542,18 @@ public class RdsQueryHandler {
         return switch (baseName) {
             case "SubnetIds" -> quoted + "(\\.member|\\.SubnetIdentifier)?\\.\\d+";
             case "VpcSecurityGroupIds" -> quoted + "(\\.member|\\.VpcSecurityGroupId)?\\.\\d+";
-            default -> quoted + "(\\.member)?\\.\\d+";
+            case "OptionsToRemove" -> quoted + "(\\.member|\\.OptionName)?\\.\\d+";
+            default -> {
+                // Option configurations nest their membership lists under an indexed prefix,
+                // so the alternate member names have to be matched on the suffix.
+                if (baseName.endsWith("VpcSecurityGroupMemberships")) {
+                    yield quoted + "(\\.member|\\.VpcSecurityGroupId)?\\.\\d+";
+                }
+                if (baseName.endsWith("DBSecurityGroupMemberships")) {
+                    yield quoted + "(\\.member|\\.DBSecurityGroupName)?\\.\\d+";
+                }
+                yield quoted + "(\\.member)?\\.\\d+";
+            }
         };
     }
 

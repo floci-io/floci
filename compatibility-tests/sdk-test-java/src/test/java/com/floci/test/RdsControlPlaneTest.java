@@ -13,15 +13,24 @@ import software.amazon.awssdk.services.rds.RdsClient;
 import software.amazon.awssdk.services.rds.model.ConnectionPoolConfigurationInfo;
 import software.amazon.awssdk.services.rds.model.CreateDbProxyResponse;
 import software.amazon.awssdk.services.rds.model.CreateDbSubnetGroupResponse;
+import software.amazon.awssdk.services.rds.model.CreateOptionGroupResponse;
 import software.amazon.awssdk.services.rds.model.DBProxyTarget;
 import software.amazon.awssdk.services.rds.model.DescribeDbSubnetGroupsResponse;
+import software.amazon.awssdk.services.rds.model.DescribeOptionGroupsResponse;
 import software.amazon.awssdk.services.rds.model.DescribeOrderableDbInstanceOptionsResponse;
+import software.amazon.awssdk.services.rds.model.InvalidOptionGroupStateException;
+import software.amazon.awssdk.services.rds.model.ModifyOptionGroupResponse;
+import software.amazon.awssdk.services.rds.model.OptionConfiguration;
+import software.amazon.awssdk.services.rds.model.OptionGroupNotFoundException;
+import software.amazon.awssdk.services.rds.model.OptionSetting;
 
 import java.util.List;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.tuple;
 
 @DisplayName("RDS Control Plane")
 class RdsControlPlaneTest {
@@ -364,6 +373,152 @@ class RdsControlPlaneTest {
                 .credentialsProvider(StaticCredentialsProvider.create(
                         AwsBasicCredentials.create("test", "test")))
                 .build();
+    }
+
+    @Test
+    void sdkRoundTripsOptionGroupCrudAndItsOptions() {
+        String optionGroupName = TestFixtures.uniqueName("rds-og");
+        try {
+            CreateOptionGroupResponse created = rds.createOptionGroup(b -> b
+                    .optionGroupName(optionGroupName)
+                    .engineName("mysql")
+                    .majorEngineVersion("8.0")
+                    .optionGroupDescription("SDK option group shape"));
+
+            assertThat(created.optionGroup().optionGroupName()).isEqualTo(optionGroupName);
+            assertThat(created.optionGroup().engineName()).isEqualTo("mysql");
+            assertThat(created.optionGroup().majorEngineVersion()).isEqualTo("8.0");
+            assertThat(created.optionGroup().optionGroupArn())
+                    .endsWith(":og:" + optionGroupName);
+            assertThat(created.optionGroup().allowsVpcAndNonVpcInstanceMemberships()).isTrue();
+            assertThat(created.optionGroup().options()).isEmpty();
+
+            ModifyOptionGroupResponse modified = rds.modifyOptionGroup(b -> b
+                    .optionGroupName(optionGroupName)
+                    .applyImmediately(true)
+                    .optionsToInclude(OptionConfiguration.builder()
+                            .optionName("MEMCACHED")
+                            .port(11211)
+                            .optionSettings(OptionSetting.builder()
+                                    .name("BACKLOG_QUEUE_LIMIT")
+                                    .value("1024")
+                                    .build())
+                            .vpcSecurityGroupMemberships("sg-00000000")
+                            .build()));
+
+            assertThat(modified.optionGroup().options()).singleElement().satisfies(option -> {
+                assertThat(option.optionName()).isEqualTo("MEMCACHED");
+                assertThat(option.port()).isEqualTo(11211);
+                assertThat(option.optionSettings())
+                        .extracting("name", "value")
+                        .containsExactly(tuple("BACKLOG_QUEUE_LIMIT", "1024"));
+                assertThat(option.vpcSecurityGroupMemberships())
+                        .extracting("vpcSecurityGroupId")
+                        .containsExactly("sg-00000000");
+            });
+
+            DescribeOptionGroupsResponse described = rds.describeOptionGroups(b -> b
+                    .optionGroupName(optionGroupName));
+            assertThat(described.optionGroupsList()).singleElement().satisfies(group ->
+                    assertThat(group.options()).extracting("optionName")
+                            .containsExactly("MEMCACHED"));
+
+            rds.modifyOptionGroup(b -> b
+                    .optionGroupName(optionGroupName)
+                    .optionsToRemove("MEMCACHED"));
+            assertThat(rds.describeOptionGroups(b -> b.optionGroupName(optionGroupName))
+                    .optionGroupsList()).singleElement()
+                    .satisfies(group -> assertThat(group.options()).isEmpty());
+
+            rds.deleteOptionGroup(b -> b.optionGroupName(optionGroupName));
+            assertThatThrownBy(() -> rds.describeOptionGroups(b -> b
+                    .optionGroupName(optionGroupName)))
+                    .isInstanceOf(OptionGroupNotFoundException.class);
+        } finally {
+            deleteOptionGroup(rds, optionGroupName);
+        }
+    }
+
+    @Test
+    void sdkDescribesImplicitDefaultOptionGroups() {
+        DescribeOptionGroupsResponse all = rds.describeOptionGroups();
+        assertThat(all.optionGroupsList()).extracting("optionGroupName")
+                .contains("default:mysql-8-0", "default:postgres-16");
+
+        DescribeOptionGroupsResponse filtered = rds.describeOptionGroups(b -> b
+                .engineName("mysql")
+                .majorEngineVersion("8.0"));
+        assertThat(filtered.optionGroupsList()).isNotEmpty();
+        assertThat(filtered.optionGroupsList())
+                .allSatisfy(group -> assertThat(group.engineName()).isEqualTo("mysql"));
+
+        assertThatThrownBy(() -> rds.deleteOptionGroup(b -> b
+                .optionGroupName("default:mysql-8-0")))
+                .isInstanceOf(InvalidOptionGroupStateException.class);
+    }
+
+    @Test
+    void sdkFaultsDeletingAnOptionGroupStillAttachedToAnInstance() {
+        String optionGroupName = TestFixtures.uniqueName("rds-og-attached");
+        String instanceName = TestFixtures.uniqueName("rds-db-og");
+        try {
+            rds.createOptionGroup(b -> b
+                    .optionGroupName(optionGroupName)
+                    .engineName("postgres")
+                    .majorEngineVersion("16")
+                    .optionGroupDescription("attached to an instance"));
+
+            var instance = rds.createDBInstance(b -> b
+                    .dbInstanceIdentifier(instanceName)
+                    .engine("postgres")
+                    .engineVersion("16.3")
+                    .masterUsername("admin")
+                    .masterUserPassword("og-secret")
+                    .dbName("app")
+                    .dbInstanceClass("db.t3.micro")
+                    .allocatedStorage(20)
+                    .optionGroupName(optionGroupName));
+
+            assertThat(instance.dbInstance().optionGroupMemberships())
+                    .singleElement()
+                    .satisfies(membership -> {
+                        assertThat(membership.optionGroupName()).isEqualTo(optionGroupName);
+                        assertThat(membership.status()).isEqualTo("in-sync");
+                    });
+
+            assertThatThrownBy(() -> rds.deleteOptionGroup(b -> b
+                    .optionGroupName(optionGroupName)))
+                    .isInstanceOf(InvalidOptionGroupStateException.class);
+
+            deleteDbInstance(rds, instanceName);
+            rds.deleteOptionGroup(b -> b.optionGroupName(optionGroupName));
+        } finally {
+            deleteDbInstance(rds, instanceName);
+            deleteOptionGroup(rds, optionGroupName);
+        }
+    }
+
+    @Test
+    void sdkReportsTheDefaultOptionGroupForAnUnattachedInstance() {
+        String instanceName = TestFixtures.uniqueName("rds-db-default-og");
+        try {
+            var instance = createDbInstance(rds, instanceName, "default-og-secret");
+
+            assertThat(instance.dbInstance().optionGroupMemberships())
+                    .singleElement()
+                    .satisfies(membership -> assertThat(membership.optionGroupName())
+                            .isEqualTo("default:postgres-16"));
+        } finally {
+            deleteDbInstance(rds, instanceName);
+        }
+    }
+
+    private static void deleteOptionGroup(RdsClient client, String name) {
+        try {
+            client.deleteOptionGroup(b -> b.optionGroupName(name));
+        } catch (Exception e) {
+            LOG.log(Level.FINE, "RDS option group already absent during cleanup " + name, e);
+        }
     }
 
     private static void deleteProxy(RdsClient client, String name) {
