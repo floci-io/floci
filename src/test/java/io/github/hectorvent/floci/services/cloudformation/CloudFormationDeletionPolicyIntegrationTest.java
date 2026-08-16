@@ -300,17 +300,21 @@ class CloudFormationDeletionPolicyIntegrationTest {
             """;
 
         String parentStackId = createStack(stackName, template1, CUSTOM_AUTH);
-        awaitStackStatus(parentStackId, "CREATE_COMPLETE", CUSTOM_AUTH);
+        try {
+            awaitStackStatus(parentStackId, "CREATE_COMPLETE", CUSTOM_AUTH);
 
-        String nestedStackId = getNestedStackId(parentStackId, "ChildStack", CUSTOM_AUTH);
-        assertThat(nestedStackId, containsString("111122223333"));
-        assertThat(nestedStackId, containsString("eu-west-1"));
+            String nestedStackId = getNestedStackId(parentStackId, "ChildStack", CUSTOM_AUTH);
+            assertThat(nestedStackId, containsString("111122223333"));
+            assertThat(nestedStackId, containsString("eu-west-1"));
 
-        String template2 = "{\"Resources\": {}}";
-        updateStack(stackName, template2, CUSTOM_AUTH);
-        awaitStackStatus(parentStackId, "UPDATE_COMPLETE", CUSTOM_AUTH);
+            String template2 = "{\"Resources\": {}}";
+            updateStack(stackName, template2, CUSTOM_AUTH);
+            awaitStackStatus(parentStackId, "UPDATE_COMPLETE", CUSTOM_AUTH);
 
-        awaitStackStatus(nestedStackId, "DELETE_COMPLETE", CUSTOM_AUTH);
+            awaitStackStatus(nestedStackId, "DELETE_COMPLETE", CUSTOM_AUTH);
+        } finally {
+            deleteStack(stackName);
+        }
     }
 
     @Test
@@ -333,17 +337,25 @@ class CloudFormationDeletionPolicyIntegrationTest {
             """;
 
         String parentStackId = createStack(stackName, template1, null);
-        awaitStackStatus(parentStackId, "CREATE_COMPLETE", null);
-        String nestedStackId = getNestedStackId(parentStackId, "ChildStack", null);
+        String nestedStackId = null;
+        try {
+            awaitStackStatus(parentStackId, "CREATE_COMPLETE", null);
+            nestedStackId = getNestedStackId(parentStackId, "ChildStack", null);
 
-        String template2 = "{\"Resources\": {}}";
-        updateStack(stackName, template2, null);
-        awaitStackStatus(parentStackId, "UPDATE_COMPLETE", null);
+            String template2 = "{\"Resources\": {}}";
+            updateStack(stackName, template2, null);
+            awaitStackStatus(parentStackId, "UPDATE_COMPLETE", null);
 
-        awaitStackStatus(nestedStackId, "CREATE_COMPLETE", null);
+            awaitStackStatus(nestedStackId, "CREATE_COMPLETE", null);
 
-        String resXml = cfnQuery("DescribeStackResources", stackName, null).then().statusCode(200).extract().asString();
-        assertThat(resXml, not(containsString("<LogicalResourceId>ChildStack</LogicalResourceId>")));
+            String resXml = cfnQuery("DescribeStackResources", stackName, null).then().statusCode(200).extract().asString();
+            assertThat(resXml, not(containsString("<LogicalResourceId>ChildStack</LogicalResourceId>")));
+        } finally {
+            deleteStack(stackName);
+            if (nestedStackId != null) {
+                deleteStack(nestedStackId);
+            }
+        }
     }
 
     @Test
@@ -376,31 +388,36 @@ class CloudFormationDeletionPolicyIntegrationTest {
             """.formatted(suffix);
 
         String parentStackId = createStack(stackName, template1);
-        awaitStackStatus(parentStackId, "CREATE_COMPLETE");
-        String nestedStackId = getNestedStackId(parentStackId, "ChildStack", null);
+        try {
+            awaitStackStatus(parentStackId, "CREATE_COMPLETE");
+            String nestedStackId = getNestedStackId(parentStackId, "ChildStack", null);
 
-        // Put an object in the nested bucket so nested stack deletion will fail
-        given().contentType("text/plain").body("keep").when().put("/" + bucketName + "/object.txt").then().statusCode(200);
+            // Put an object in the nested bucket so nested stack deletion will fail
+            given().contentType("text/plain").body("keep").when().put("/" + bucketName + "/object.txt").then().statusCode(200);
 
-        String template2 = "{\"Resources\": {}}";
-        updateStack(stackName, template2);
-        awaitStackStatus(parentStackId, "UPDATE_COMPLETE");
-        assertThat(describeStacks(parentStackId), containsString("could not be deleted during update cleanup"));
+            String template2 = "{\"Resources\": {}}";
+            updateStack(stackName, template2);
+            awaitStackStatus(parentStackId, "UPDATE_COMPLETE");
+            assertThat(describeStacks(parentStackId), containsString("could not be deleted during update cleanup"));
 
-        // Nested stack resource stays in parent as DELETE_FAILED
-        String resXml = cfnQuery("DescribeStackResources", stackName, null).then().statusCode(200).extract().asString();
-        assertThat(resXml, containsString("<LogicalResourceId>ChildStack</LogicalResourceId>"));
-        assertThat(resXml, containsString("<ResourceStatus>DELETE_FAILED</ResourceStatus>"));
+            // Nested stack resource stays in parent as DELETE_FAILED
+            String resXml = cfnQuery("DescribeStackResources", stackName, null).then().statusCode(200).extract().asString();
+            assertThat(resXml, containsString("<LogicalResourceId>ChildStack</LogicalResourceId>"));
+            assertThat(resXml, containsString("<ResourceStatus>DELETE_FAILED</ResourceStatus>"));
 
-        // Child stack itself is DELETE_FAILED
-        awaitStackStatus(nestedStackId, "DELETE_FAILED");
+            // Child stack itself is DELETE_FAILED
+            awaitStackStatus(nestedStackId, "DELETE_FAILED");
 
-        // Clean up bucket and delete parent stack to verify clean recovery
-        given().when().delete("/" + bucketName + "/object.txt").then().statusCode(204);
-        deleteStack(stackName);
-        awaitStackStatus(parentStackId, "DELETE_COMPLETE");
-        awaitStackStatus(nestedStackId, "DELETE_COMPLETE");
-        assertBucketDeleted(bucketName);
+            // Clean up bucket and delete parent stack to verify clean recovery
+            given().when().delete("/" + bucketName + "/object.txt").then().statusCode(204);
+            deleteStack(stackName);
+            awaitStackStatus(parentStackId, "DELETE_COMPLETE");
+            awaitStackStatus(nestedStackId, "DELETE_COMPLETE");
+            assertBucketDeleted(bucketName);
+        } finally {
+            given().when().delete("/" + bucketName + "/object.txt");
+            deleteStack(stackName);
+        }
     }
 
     @Test
@@ -433,14 +450,18 @@ class CloudFormationDeletionPolicyIntegrationTest {
             """.formatted(suffix);
 
         String parentStackId = createStack(stackName, template);
-        awaitStackStatus(parentStackId, "CREATE_COMPLETE");
-        String nestedStackId = getNestedStackId(parentStackId, "ChildStack", null);
-        assertBucketExists(bucketName);
+        try {
+            awaitStackStatus(parentStackId, "CREATE_COMPLETE");
+            String nestedStackId = getNestedStackId(parentStackId, "ChildStack", null);
+            assertBucketExists(bucketName);
 
-        deleteStack(stackName);
-        awaitStackStatus(parentStackId, "DELETE_COMPLETE");
-        awaitStackStatus(nestedStackId, "DELETE_COMPLETE");
-        assertBucketDeleted(bucketName);
+            deleteStack(stackName);
+            awaitStackStatus(parentStackId, "DELETE_COMPLETE");
+            awaitStackStatus(nestedStackId, "DELETE_COMPLETE");
+            assertBucketDeleted(bucketName);
+        } finally {
+            deleteStack(stackName);
+        }
     }
 
     @Test
@@ -473,23 +494,28 @@ class CloudFormationDeletionPolicyIntegrationTest {
             """.formatted(suffix);
 
         String parentStackId = createStack(stackName, template);
-        awaitStackStatus(parentStackId, "CREATE_COMPLETE");
-        String nestedStackId = getNestedStackId(parentStackId, "ChildStack", null);
+        try {
+            awaitStackStatus(parentStackId, "CREATE_COMPLETE");
+            String nestedStackId = getNestedStackId(parentStackId, "ChildStack", null);
 
-        // Put object in child bucket
-        given().contentType("text/plain").body("blocker").when().put("/" + bucketName + "/object.txt").then().statusCode(200);
+            // Put object in child bucket
+            given().contentType("text/plain").body("blocker").when().put("/" + bucketName + "/object.txt").then().statusCode(200);
 
-        deleteStack(stackName);
-        awaitStackStatus(parentStackId, "DELETE_FAILED");
-        awaitStackStatus(nestedStackId, "DELETE_FAILED");
-        assertBucketExists(bucketName);
+            deleteStack(stackName);
+            awaitStackStatus(parentStackId, "DELETE_FAILED");
+            awaitStackStatus(nestedStackId, "DELETE_FAILED");
+            assertBucketExists(bucketName);
 
-        // Clean up object and retry DeleteStack
-        given().when().delete("/" + bucketName + "/object.txt").then().statusCode(204);
-        deleteStack(stackName);
-        awaitStackStatus(parentStackId, "DELETE_COMPLETE");
-        awaitStackStatus(nestedStackId, "DELETE_COMPLETE");
-        assertBucketDeleted(bucketName);
+            // Clean up object and retry DeleteStack
+            given().when().delete("/" + bucketName + "/object.txt").then().statusCode(204);
+            deleteStack(stackName);
+            awaitStackStatus(parentStackId, "DELETE_COMPLETE");
+            awaitStackStatus(nestedStackId, "DELETE_COMPLETE");
+            assertBucketDeleted(bucketName);
+        } finally {
+            given().when().delete("/" + bucketName + "/object.txt");
+            deleteStack(stackName);
+        }
     }
 
     @Test
@@ -531,8 +557,12 @@ class CloudFormationDeletionPolicyIntegrationTest {
             """.formatted(suffix, suffix);
 
         String parentStackId = createStack(stackName, template);
-        assertThat(describeStacks(parentStackId), containsString("<StackStatus>ROLLBACK_COMPLETE</StackStatus>"));
-        assertBucketDeleted(bucketName);
+        try {
+            assertThat(describeStacks(parentStackId), containsString("<StackStatus>ROLLBACK_COMPLETE</StackStatus>"));
+            assertBucketDeleted(bucketName);
+        } finally {
+            deleteStack(stackName);
+        }
     }
 
     @Test
@@ -570,47 +600,51 @@ class CloudFormationDeletionPolicyIntegrationTest {
             """.formatted(sfnName);
 
         String parentStackId = createStack(stackName, initialTemplate);
-        awaitStackStatus(parentStackId, "CREATE_COMPLETE");
+        try {
+            awaitStackStatus(parentStackId, "CREATE_COMPLETE");
 
-        String failingUpdateTemplate = """
-            {
-              "Resources": {
-                "InitialStateMachine": {
-                  "Type": "AWS::StepFunctions::StateMachine",
-                  "Properties": {
-                    "StateMachineName": "%s",
-                    "RoleArn": "arn:aws:iam::000000000000:role/cfn-sfn-rollback-role",
-                    "DefinitionString": "{\\"StartAt\\":\\"Done\\",\\"States\\":{\\"Done\\":{\\"Type\\":\\"Pass\\",\\"Result\\":\\"marker-v2\\",\\"End\\":true}}}"
-                  }
-                },
-                "ChildStack": {
-                  "Type": "AWS::CloudFormation::Stack",
-                  "Properties": { "TemplateURL": "http://localhost/nested-stack-templates/child-updaterb-%s.json" }
-                },
-                "BadSecret": {
-                  "Type": "AWS::SecretsManager::Secret",
-                  "DependsOn": "ChildStack",
-                  "Properties": {
-                    "Name": "bad-secret-update-%s",
-                    "SecretString": "explicit",
-                    "GenerateSecretString": { "PasswordLength": 32 }
+            String failingUpdateTemplate = """
+                {
+                  "Resources": {
+                    "InitialStateMachine": {
+                      "Type": "AWS::StepFunctions::StateMachine",
+                      "Properties": {
+                        "StateMachineName": "%s",
+                        "RoleArn": "arn:aws:iam::000000000000:role/cfn-sfn-rollback-role",
+                        "DefinitionString": "{\\"StartAt\\":\\"Done\\",\\"States\\":{\\"Done\\":{\\"Type\\":\\"Pass\\",\\"Result\\":\\"marker-v2\\",\\"End\\":true}}}"
+                      }
+                    },
+                    "ChildStack": {
+                      "Type": "AWS::CloudFormation::Stack",
+                      "Properties": { "TemplateURL": "http://localhost/nested-stack-templates/child-updaterb-%s.json" }
+                    },
+                    "BadSecret": {
+                      "Type": "AWS::SecretsManager::Secret",
+                      "DependsOn": "ChildStack",
+                      "Properties": {
+                        "Name": "bad-secret-update-%s",
+                        "SecretString": "explicit",
+                        "GenerateSecretString": { "PasswordLength": 32 }
+                      }
+                    }
                   }
                 }
-              }
-            }
-            """.formatted(sfnName, suffix, suffix);
+                """.formatted(sfnName, suffix, suffix);
 
-        updateStack(stackName, failingUpdateTemplate);
-        awaitStackStatus(parentStackId, "UPDATE_ROLLBACK_COMPLETE");
-        assertBucketDeleted(bucketName);
+            updateStack(stackName, failingUpdateTemplate);
+            awaitStackStatus(parentStackId, "UPDATE_ROLLBACK_COMPLETE");
+            assertBucketDeleted(bucketName);
 
-        String resXml = cfnQuery("DescribeStackResources", stackName, null).then().statusCode(200).extract().asString();
-        assertThat(resXml, containsString("<LogicalResourceId>InitialStateMachine</LogicalResourceId>"));
-        assertThat(resXml, not(containsString("<LogicalResourceId>ChildStack</LogicalResourceId>")));
-        assertThat(resXml, not(containsString("<LogicalResourceId>BadSecret</LogicalResourceId>")));
+            String resXml = cfnQuery("DescribeStackResources", stackName, null).then().statusCode(200).extract().asString();
+            assertThat(resXml, containsString("<LogicalResourceId>InitialStateMachine</LogicalResourceId>"));
+            assertThat(resXml, not(containsString("<LogicalResourceId>ChildStack</LogicalResourceId>")));
+            assertThat(resXml, not(containsString("<LogicalResourceId>BadSecret</LogicalResourceId>")));
 
-        deleteStack(stackName);
-        awaitStackStatus(parentStackId, "DELETE_COMPLETE");
+            deleteStack(stackName);
+            awaitStackStatus(parentStackId, "DELETE_COMPLETE");
+        } finally {
+            deleteStack(stackName);
+        }
     }
 
     @Test
@@ -821,7 +855,9 @@ class CloudFormationDeletionPolicyIntegrationTest {
     private static String getNestedStackId(String stackName, String logicalId, String auth) {
         String xml = cfnQuery("DescribeStackResources", stackName, auth).then().statusCode(200).extract().asString();
         int logIdx = xml.indexOf("<LogicalResourceId>" + logicalId + "</LogicalResourceId>");
-        if (logIdx == -1) fail("Logical resource " + logicalId + " not found");
+        if (logIdx == -1) {
+            fail("Logical resource " + logicalId + " not found");
+        }
         int physStart = xml.indexOf("<PhysicalResourceId>", logIdx) + "<PhysicalResourceId>".length();
         int physEnd = xml.indexOf("</PhysicalResourceId>", physStart);
         return xml.substring(physStart, physEnd);
@@ -833,7 +869,9 @@ class CloudFormationDeletionPolicyIntegrationTest {
 
     private static String createStack(String stackName, String template, String auth) {
         var req = given().contentType("application/x-www-form-urlencoded");
-        if (auth != null) req.header("Authorization", auth);
+        if (auth != null) {
+            req.header("Authorization", auth);
+        }
         String xml = req
             .formParam("Action", "CreateStack")
             .formParam("StackName", stackName)
@@ -865,7 +903,9 @@ class CloudFormationDeletionPolicyIntegrationTest {
 
     private static void updateStack(String stackName, String template, String auth) {
         var req = given().contentType("application/x-www-form-urlencoded");
-        if (auth != null) req.header("Authorization", auth);
+        if (auth != null) {
+            req.header("Authorization", auth);
+        }
         req.formParam("Action", "UpdateStack")
             .formParam("StackName", stackName)
             .formParam("TemplateBody", template)
@@ -911,7 +951,9 @@ class CloudFormationDeletionPolicyIntegrationTest {
 
     private static Response cfnQuery(String action, String stackId, String auth) {
         var req = given().contentType("application/x-www-form-urlencoded");
-        if (auth != null) req.header("Authorization", auth);
+        if (auth != null) {
+            req.header("Authorization", auth);
+        }
         return req.formParam("Action", action).formParam("StackName", stackId).when().post("/");
     }
 

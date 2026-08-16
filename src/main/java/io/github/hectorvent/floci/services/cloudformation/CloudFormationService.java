@@ -936,6 +936,9 @@ public class CloudFormationService {
             if (future != null) {
                 try {
                     future.get();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw e;
                 } catch (ExecutionException e) {
                     Throwable cause = e.getCause();
                     if (cause instanceof Exception ex) {
@@ -1293,6 +1296,7 @@ public class CloudFormationService {
                 stack.setStatusReason(reason);
                 addEvent(stack, stack.getStackName(), stack.getStackId(),
                         "AWS::CloudFormation::Stack", "DELETE_FAILED", reason);
+                persistStack(stack);
                 LOG.errorv("Stack {0} delete failed: {1}", stack.getStackName(), reason);
                 throw new IllegalStateException(reason);
             }
@@ -1312,6 +1316,7 @@ public class CloudFormationService {
             LOG.errorv("Stack {0} delete failed: {1}", stack.getStackName(), e.getMessage());
             stack.setStatus("DELETE_FAILED");
             stack.setStatusReason(e.getMessage());
+            persistStack(stack);
             throw (e instanceof RuntimeException re ? re : new RuntimeException(e));
         }
     }
