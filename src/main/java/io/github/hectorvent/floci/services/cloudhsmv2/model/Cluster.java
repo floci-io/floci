@@ -26,6 +26,7 @@ public class Cluster {
     private Certificates certificates;
     private List<Hsm> hsms = new ArrayList<>();
     private List<String> subnetIds = new ArrayList<>();
+    private Map<String, String> subnetMapping = new LinkedHashMap<>();
     private String securityGroup;
     private Instant createTimestamp;
     private Map<String, String> tagList = new LinkedHashMap<>();
@@ -105,6 +106,14 @@ public class Cluster {
 
     public void setSubnetIds(List<String> subnetIds) {
         this.subnetIds = subnetIds != null ? subnetIds : new ArrayList<>();
+    }
+
+    public Map<String, String> getSubnetMapping() {
+        return subnetMapping;
+    }
+
+    public void setSubnetMapping(Map<String, String> subnetMapping) {
+        this.subnetMapping = subnetMapping != null ? subnetMapping : new LinkedHashMap<>();
     }
 
     public String getSecurityGroup() {

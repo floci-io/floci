@@ -256,16 +256,10 @@ public class CloudHsmV2JsonHandler {
             node.set("BackupRetentionPolicy", brp);
         }
 
-        // SubnetMapping - derive from SubnetIds for response
-        if (cluster.getSubnetIds() != null && !cluster.getSubnetIds().isEmpty()) {
+        // SubnetMapping
+        if (cluster.getSubnetMapping() != null && !cluster.getSubnetMapping().isEmpty()) {
             ObjectNode subnetNode = objectMapper.createObjectNode();
-            List<String> subnetIds = cluster.getSubnetIds();
-            // Map each subnet to an availability zone
-            for (int i = 0; i < subnetIds.size(); i++) {
-                String regionPrefix = region != null ? region : "us-east-1";
-                String az = regionPrefix + (char) ('a' + i);
-                subnetNode.put(az, subnetIds.get(i));
-            }
+            cluster.getSubnetMapping().forEach(subnetNode::put);
             node.set("SubnetMapping", subnetNode);
         }
 

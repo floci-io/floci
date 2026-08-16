@@ -41,6 +41,9 @@ import java.util.stream.Collectors;
 import java.time.Instant;
 import java.util.*;
 
+import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.ec2.model.Subnet;
+
 /**
  * CloudHSM v2 service implementation for the local emulator.
  *
@@ -60,18 +63,21 @@ public class CloudHsmV2Service {
     private final SecureRandom SECURE_RANDOM = new SecureRandom();
     private final StorageBackend<String, Cluster> clusters;
     private final StorageBackend<String, Backup> backups;
+    private final Ec2Service ec2Service;
 
     @Inject
-    public CloudHsmV2Service(StorageFactory storageFactory) {
+    public CloudHsmV2Service(StorageFactory storageFactory, Ec2Service ec2Service) {
         this.clusters = storageFactory.create("cloudhsmv2", "cloudhsmv2-clusters.json",
                 new TypeReference<Map<String, Cluster>>() {});
         this.backups = storageFactory.create("cloudhsmv2", "cloudhsmv2-backups.json",
                 new TypeReference<Map<String, Backup>>() {});
+        this.ec2Service = ec2Service;
     }
 
-    CloudHsmV2Service(StorageBackend<String, Cluster> clusters, StorageBackend<String, Backup> backups) {
+    CloudHsmV2Service(StorageBackend<String, Cluster> clusters, StorageBackend<String, Backup> backups, Ec2Service ec2Service) {
         this.clusters = clusters;
         this.backups = backups;
+        this.ec2Service = ec2Service;
     }
 
     // ──────────────────────────── CreateCluster ────────────────────────────
@@ -87,7 +93,7 @@ public class CloudHsmV2Service {
             throw new AwsException("CloudHsmInvalidRequestException",
                     "HsmType is required.", 400);
         }
-        if (!hsmType.equals("hsm1.medium") && !hsmType.equals("hsm2m.medium")) {
+        if (!hsmType.matches("^((p|)hsm[0-9][a-z.]*\\.[a-zA-Z]+)$")) {
             throw new AwsException("CloudHsmInvalidRequestException",
                     "HsmType " + hsmType + " is not valid.", 400);
         }
@@ -116,6 +122,25 @@ public class CloudHsmV2Service {
         cluster.setHsmType(hsmType);
         cluster.setVpcId("vpc-" + generateShortId());
         cluster.setSubnetIds(new ArrayList<>(SubnetIds));
+        Map<String, String> subnetMapping = new LinkedHashMap<>();
+        if (ec2Service != null) {
+            List<Subnet> subnets = ec2Service.describeSubnets(region, SubnetIds, Collections.emptyMap());
+            for (int i = 0; i < SubnetIds.size(); i++) {
+                String subId = SubnetIds.get(i);
+                final int index = i;
+                String az = subnets.stream()
+                        .filter(s -> s.getSubnetId().equals(subId))
+                        .map(Subnet::getAvailabilityZone)
+                        .findFirst()
+                        .orElseGet(() -> region + (char) ('a' + index));
+                subnetMapping.put(az, subId);
+            }
+        } else {
+            for (int i = 0; i < SubnetIds.size(); i++) {
+                subnetMapping.put(region + (char) ('a' + i), SubnetIds.get(i));
+            }
+        }
+        cluster.setSubnetMapping(subnetMapping);
         cluster.setSourceBackupId(sourceBackupId);
         cluster.setSecurityGroup("sg-" + generateShortId());
         cluster.setCreateTimestamp(Instant.now());
@@ -298,15 +323,7 @@ public class CloudHsmV2Service {
                     "AvailabilityZone is required.", 400);
         }
 
-        List<String> subnetIds = cluster.getSubnetIds();
-        String regionPrefix = region != null ? region : "us-east-1";
-        String subnetId = null;
-        for (int i = 0; i < subnetIds.size(); i++) {
-            if ((regionPrefix + (char) ('a' + i)).equals(availabilityZone)) {
-                subnetId = subnetIds.get(i);
-                break;
-            }
-        }
+        String subnetId = cluster.getSubnetMapping().get(availabilityZone);
         if (subnetId == null) {
             throw new AwsException("CloudHsmInvalidRequestException",
                     "AvailabilityZone " + availabilityZone + " is not mapped to a subnet in this cluster.", 400);
@@ -361,9 +378,15 @@ public class CloudHsmV2Service {
 
     public Hsm deleteHsm(String clusterId, String hsmId, String eniId, String eniIp, String region) {
         int count = 0;
-        if (hsmId != null && !hsmId.isEmpty()) count++;
-        if (eniId != null && !eniId.isEmpty()) count++;
-        if (eniIp != null && !eniIp.isEmpty()) count++;
+        if (hsmId != null && !hsmId.isEmpty()) {
+            count++;
+        }
+        if (eniId != null && !eniId.isEmpty()) {
+            count++;
+        }
+        if (eniIp != null && !eniIp.isEmpty()) {
+            count++;
+        }
 
         if (count != 1) {
             throw new AwsException("CloudHsmInvalidRequestException",
@@ -396,13 +419,16 @@ public class CloudHsmV2Service {
         }
 
         clusters.put(regionKey(region, clusterId), cluster);
-        LOG.infov("Deleted HSM {0} from cluster {1}", hsmId, clusterId);
+        LOG.infov("Deleted HSM {0} from cluster {1}", target.getHsmId(), clusterId);
         return target;
     }
 
     // ──────────────────────────── TagResource ────────────────────────────
 
     public void tagResource(String resourceId, Map<String, String> tags, String region) {
+        if (resourceId == null || resourceId.isBlank()) {
+            throw new AwsException("CloudHsmInvalidRequestException", "ResourceId is required.", 400);
+        }
         if (tags == null || tags.isEmpty() || tags.size() > 50) {
             throw new AwsException("CloudHsmInvalidRequestException", "TagList must have length between 1 and 50", 400);
         }
@@ -422,6 +448,9 @@ public class CloudHsmV2Service {
     }
 
     public void untagResource(String resourceId, List<String> tagKeys, String region) {
+        if (resourceId == null || resourceId.isBlank()) {
+            throw new AwsException("CloudHsmInvalidRequestException", "ResourceId is required.", 400);
+        }
         if (tagKeys == null || tagKeys.isEmpty() || tagKeys.size() > 50) {
             throw new AwsException("CloudHsmInvalidRequestException", "TagKeyList must have length between 1 and 50", 400);
         }
@@ -437,6 +466,9 @@ public class CloudHsmV2Service {
     }
 
     public Map<String, String> listTags(String resourceId, String region) {
+        if (resourceId == null || resourceId.isBlank()) {
+            throw new AwsException("CloudHsmInvalidRequestException", "ResourceId is required.", 400);
+        }
         if (resourceId.startsWith("backup-")) {
             return new LinkedHashMap<>(getBackup(resourceId, region).getTagList());
         } else {
@@ -726,7 +758,7 @@ public class CloudHsmV2Service {
 
     public Cluster modifyCluster(String clusterId, String hsmType, BackupRetentionPolicy backupRetentionPolicy, String region) {
         Cluster cluster = getCluster(clusterId, region);
-        if (hsmType != null && !hsmType.matches("^hsm[1-9][a-z]?\\.medium$")) {
+        if (hsmType != null && !hsmType.matches("^((p|)hsm[0-9][a-z.]*\\.[a-zA-Z]+)$")) {
             throw new AwsException("CloudHsmInvalidRequestException", "HsmType " + hsmType + " is not valid.", 400);
         }
         if (hsmType != null) {
