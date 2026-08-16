@@ -119,6 +119,24 @@ class Ec2FlowLogCfnProvisionerTest {
     }
 
     @Test
+    void droppingACreateOnlyPropertyReportsAnUnsupportedReplacement() {
+        StackResource r = resource();
+        r.setPhysicalId("fl-0abc");
+        FlowLog existing = flowLog("fl-0abc");
+        existing.setResourceId("vpc-123");
+        existing.setLogFormat("${srcaddr}");
+        existing.setMaxAggregationInterval(60);
+        when(flowLogs.describeFlowLogs("us-east-1", List.of("fl-0abc"))).thenReturn(List.of(existing));
+
+        // Removing a property the template used to declare is as much a change as altering it.
+        // Skipping the blank request left the stack complete while the log kept the old format.
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r,
+                mapper.createObjectNode().put("ResourceId", "vpc-123"), ctx()));
+        assertEquals("ValidationError", e.getErrorCode());
+        verify(flowLogs, never()).createFlowLog(anyString(), any(), any(), any(), any(), any(), any(), anyInt());
+    }
+
+    @Test
     void updateRecreatesAFlowLogRemovedOutOfBand() {
         StackResource r = resource();
         r.setPhysicalId("fl-gone");

@@ -79,20 +79,22 @@ public class Ec2FlowLogCfnProvisioner implements CfnResourceProvisioner {
         rejectIfChanged("LogDestination", existing.getLogDestination(),
                 ctx.resolveOptional(props, "LogDestination"));
         rejectIfChanged("LogFormat", existing.getLogFormat(), ctx.resolveOptional(props, "LogFormat"));
-        if (props != null && props.hasNonNull("MaxAggregationInterval")
-                && props.get("MaxAggregationInterval").asInt() != existing.getMaxAggregationInterval()) {
+        int requestedInterval = props != null && props.hasNonNull("MaxAggregationInterval")
+                ? props.get("MaxAggregationInterval").asInt()
+                : DEFAULT_MAX_AGGREGATION_INTERVAL;
+        if (requestedInterval != existing.getMaxAggregationInterval()) {
             throw new AwsException("ValidationError",
                     "Updating MaxAggregationInterval requires resource replacement, which is not supported.", 400);
         }
     }
 
     /**
-     * A property the template stops declaring is left alone rather than treated as a change, and so
-     * is one the stored log never captured, since an absent value is not evidence of a different one.
+     * A property the stored log never captured is left alone, since an absent stored value is not
+     * evidence of a different one. Dropping a property the template used to declare is a change
+     * though, so the effective value is compared rather than skipping a blank request.
      */
     private void rejectIfChanged(String property, String existing, String requested) {
-        if (existing == null || existing.isBlank()
-                || requested == null || requested.isBlank() || requested.equals(existing)) {
+        if (existing == null || existing.isBlank() || requested != null && requested.equals(existing)) {
             return;
         }
         throw new AwsException("ValidationError",
