@@ -38,13 +38,13 @@ public class CloudHsmV2Test {
                 .networkType(NetworkType.IPV4)
                 .backupRetentionPolicy(b -> b.type("DAYS").value("30"))
         );
-        
+
         Cluster cluster = createClusterResponse.cluster();
         assertThat(cluster.clusterId()).startsWith("cluster-");
         assertThat(cluster.hsmType()).isEqualTo("hsm1.medium");
         assertThat(cluster.stateAsString()).isEqualTo("UNINITIALIZED");
         assertThat(cluster.certificates().clusterCsr()).isNotBlank();
-        
+
         String clusterId = cluster.clusterId();
 
         // 2. Initialize Cluster
@@ -61,20 +61,20 @@ public class CloudHsmV2Test {
                 .signedCert(signedCert)
                 .trustAnchor(trustAnchor)
         );
-        
+
         assertThat(initResp.stateAsString()).isEqualTo("INITIALIZED");
-        
+
         // 3. Create HSM
         CreateHsmResponse hsmResp = client.createHsm(r -> r
                 .clusterId(clusterId)
                 .availabilityZone("us-east-1a")
                 .ipAddress("10.0.1.5")
         );
-        
+
         Hsm hsm = hsmResp.hsm();
         assertThat(hsm.hsmId()).startsWith("hsm-");
         assertThat(hsm.stateAsString()).isEqualTo("ACTIVE");
-        
+
         String hsmId = hsm.hsmId();
 
         // 4. Describe Clusters
@@ -103,7 +103,7 @@ public class CloudHsmV2Test {
                 .clusterId(clusterId)
         );
         assertThat(delCluster.cluster().stateAsString()).isEqualTo("DELETE_IN_PROGRESS");
-        
+
         // 8. Delete Backup
         DeleteBackupResponse delBackup = client.deleteBackup(r -> r
                 .backupId(backupId)
@@ -127,16 +127,16 @@ public class CloudHsmV2Test {
         String trustAnchor = certs[1];
 
         client.initializeCluster(r -> r.clusterId(clusterId).signedCert(signedCert).trustAnchor(trustAnchor));
-        
+
         Hsm hsm = client.createHsm(r -> r.clusterId(clusterId).availabilityZone("us-east-1b")).hsm();
-        
+
         // Test exactly one selector rule
         assertThatThrownBy(() -> client.deleteHsm(r -> r
                 .clusterId(clusterId)
                 .hsmId(hsm.hsmId())
                 .eniId(hsm.eniId())
         )).hasMessageContaining("Exactly one of HsmId, EniId, or EniIp must be specified");
-        
+
         // Test successful delete with EniId
         DeleteHsmResponse delResp = client.deleteHsm(r -> r
                 .clusterId(clusterId)
