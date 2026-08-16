@@ -1717,15 +1717,24 @@ public class Ec2QueryHandler {
     /** AWS's own account for the Amazon-owned AMIs, and the default when no owner is requested. */
     private static final String AMAZON_OWNER_ID = "137112412989";
 
+    /** The account behind the {@code aws-marketplace} owner alias. */
+    private static final String AWS_MARKETPLACE_OWNER_ID = "679593333241";
+
     /**
-     * The owner the synthesized image should carry. {@code Owner.N} takes aliases, and writing one
-     * through verbatim produced an image owned by the literal {@code "self"}, which no owner scope
-     * resolves to. {@code self} is the caller's own account, so it becomes the account id.
+     * The owner the synthesized image should carry. {@code Owner.N} takes the aliases {@code self},
+     * {@code amazon} and {@code aws-marketplace} as well as bare account ids, and an alias written
+     * through verbatim produced an image owned by the literal string. AWS always reports an account
+     * id in {@code imageOwnerId}, so each alias resolves to the account it names.
      */
     private String resolveSynthOwner(Map<String, List<String>> filters, List<String> owners) {
         String requested = filters.getOrDefault("owner-id", owners == null ? List.of() : owners)
                 .stream().findFirst().orElse(AMAZON_OWNER_ID);
-        return "self".equals(requested) ? config.defaultAccountId() : requested;
+        return switch (requested) {
+            case "self" -> config.defaultAccountId();
+            case "amazon" -> AMAZON_OWNER_ID;
+            case "aws-marketplace" -> AWS_MARKETPLACE_OWNER_ID;
+            default -> requested;
+        };
     }
 
     /** The requested value for a scalar filter, so the synthesized image satisfies it. */

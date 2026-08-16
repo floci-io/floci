@@ -294,6 +294,27 @@ class Ec2IntegrationTest {
 
     @Test
     @Order(9)
+    void synthesizedLookupImageResolvesTheAmazonOwnerAlias() {
+        // imageOwnerId is always an account id in AWS. Writing the alias through left the image
+        // owned by the literal "amazon", and the owner check accepted it by string equality.
+        String owner = given()
+            .formParam("Action", "DescribeImages")
+            .formParam("Owner.1", "amazon")
+            .formParam("Filter.1.Name", "name")
+            .formParam("Filter.1.Value.1", "unmatched-amazon-owned-*")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeImagesResponse.imagesSet.item.size()", equalTo(1))
+            .extract().path("DescribeImagesResponse.imagesSet.item.imageOwnerId");
+
+        assertEquals("137112412989", owner);
+    }
+
+    @Test
+    @Order(9)
     void synthesizedLookupImageIsWithheldFromAnOwnerScopeItCannotSatisfy() {
         // A foreign owner scope cannot be satisfied by anything we synthesize, so the lookup gets
         // the empty result rather than an AMI that contradicts the request.

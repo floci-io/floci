@@ -96,6 +96,9 @@ public class Ec2Service implements ContainerTeardown {
             .withZone(ZoneOffset.UTC);
     private static final int DEFAULT_ROOT_VOLUME_SIZE_GIB = 8;
     private static final String DEFAULT_ROOT_VOLUME_TYPE = "gp3";
+    /** The accounts behind the two non-self owner aliases DescribeImages accepts. */
+    private static final String AMAZON_OWNER_ID = "137112412989";
+    private static final String AWS_MARKETPLACE_OWNER_ID = "679593333241";
     // The ASN AWS assigns when CreateTransitGateway omits Options.AmazonSideAsn.
     private static final long DEFAULT_AMAZON_SIDE_ASN = 64512L;
     private static final Pattern TRANSIT_GATEWAY_ID_PATTERN = Pattern.compile("^tgw-[0-9a-f]{8}([0-9a-f]{9})?$");
@@ -2993,10 +2996,21 @@ public class Ec2Service implements ContainerTeardown {
         return imageIds == null || imageIds.isEmpty() || imageIds.contains(image.getImageId());
     }
 
+    /**
+     * {@code Owner.N} takes the aliases {@code self}, {@code amazon} and {@code aws-marketplace}
+     * beside bare account ids, while {@code imageOwnerId} is always an account id. Only
+     * {@code self} was translated, so an alias matched nothing unless an image happened to be
+     * owned by the literal string.
+     */
     private boolean matchesImageOwners(Image image, List<String> owners) {
-        return owners == null || owners.isEmpty()
-                || owners.contains(image.getOwnerId())
-                || (owners.contains("self") && accountId.equals(image.getOwnerId()));
+        if (owners == null || owners.isEmpty()) {
+            return true;
+        }
+        String ownerId = image.getOwnerId();
+        return owners.contains(ownerId)
+                || (owners.contains("self") && accountId.equals(ownerId))
+                || (owners.contains("amazon") && AMAZON_OWNER_ID.equals(ownerId))
+                || (owners.contains("aws-marketplace") && AWS_MARKETPLACE_OWNER_ID.equals(ownerId));
     }
 
     /**
