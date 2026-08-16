@@ -50,6 +50,8 @@ public class AutoScalingQueryHandler {
                 case "DeleteTags"                   -> handleDeleteTags(p, region);
                 // Instances
                 case "DescribeAutoScalingInstances" -> handleDescribeAutoScalingInstances(p, region);
+                case "SetInstanceProtection"         -> handleSetInstanceProtection(p, region);
+                case "SetInstanceHealth"              -> handleSetInstanceHealth(p, region);
                 case "AttachInstances"              -> handleAttachInstances(p, region);
                 case "DetachInstances"              -> handleDetachInstances(p, region);
                 case "TerminateInstanceInAutoScalingGroup" -> handleTerminateInstance(p, region);
@@ -470,6 +472,29 @@ public class AutoScalingQueryHandler {
                 .raw(AwsQueryResponse.responseMetadata())
                 .end("DescribeAutoScalingInstancesResponse");
         return ok(xml.build());
+    }
+
+    private Response handleSetInstanceProtection(MultivaluedMap<String, String> p, String region) {
+        String groupName = p.getFirst("AutoScalingGroupName");
+        List<String> instanceIds = memberList(p, "InstanceIds");
+        boolean protectedFromScaleIn = Boolean.parseBoolean(p.getFirst("ProtectedFromScaleIn"));
+        service.setInstanceProtection(region, groupName, instanceIds, protectedFromScaleIn);
+        return ok(new XmlBuilder()
+                .start("SetInstanceProtectionResponse", NS)
+                .raw(AwsQueryResponse.responseMetadata())
+                .end("SetInstanceProtectionResponse")
+                .build());
+    }
+
+    private Response handleSetInstanceHealth(MultivaluedMap<String, String> p, String region) {
+        String instanceId = p.getFirst("InstanceId");
+        String healthStatus = p.getFirst("HealthStatus");
+        service.setInstanceHealth(region, instanceId, healthStatus);
+        return ok(new XmlBuilder()
+                .start("SetInstanceHealthResponse", NS)
+                .raw(AwsQueryResponse.responseMetadata())
+                .end("SetInstanceHealthResponse")
+                .build());
     }
 
     private static void appendInstanceLaunchTemplateXml(XmlBuilder xml, AsgInstance inst) {

@@ -371,6 +371,47 @@ public class AutoScalingService {
         return all;
     }
 
+    public void setInstanceProtection(String region, String groupName, List<String> instanceIds,
+                                      boolean protectedFromScaleIn) {
+        AutoScalingGroup asg = requireGroup(region, groupName);
+        if (instanceIds == null || instanceIds.isEmpty()) {
+            throw new AwsException("ValidationError", "At least one instance ID is required.", 400);
+        }
+        Set<String> requested = new HashSet<>(instanceIds);
+        List<AsgInstance> matches = asg.getInstances().stream()
+                .filter(instance -> requested.contains(instance.getInstanceId()))
+                .toList();
+        if (matches.size() != requested.size()) {
+            Set<String> found = matches.stream().map(AsgInstance::getInstanceId).collect(Collectors.toSet());
+            String missing = requested.stream().filter(id -> !found.contains(id)).findFirst().orElse("unknown");
+            throw new AwsException("ValidationError",
+                    "Instance '" + missing + "' is not part of Auto Scaling group '" + groupName + "'.", 400);
+        }
+        matches.forEach(instance -> instance.setProtectedFromScaleIn(protectedFromScaleIn));
+        groups.put(asgKey(region, groupName), asg);
+    }
+
+    public void setInstanceHealth(String region, String instanceId, String healthStatus) {
+        if (!"Healthy".equals(healthStatus) && !"Unhealthy".equals(healthStatus)) {
+            throw new AwsException("ValidationError",
+                    "HealthStatus must be Healthy or Unhealthy.", 400);
+        }
+        AutoScalingGroup asg = groups.values().stream()
+                .filter(group -> region.equals(group.getRegion()))
+                .filter(group -> group.getInstances().stream()
+                        .anyMatch(instance -> instanceId != null && instanceId.equals(instance.getInstanceId())))
+                .findFirst()
+                .orElseThrow(() -> new AwsException("ValidationError",
+                        "Instance '" + instanceId + "' not found in any Auto Scaling group.", 400));
+        asg.getInstances().stream()
+                .filter(instance -> instanceId.equals(instance.getInstanceId()))
+                .findFirst()
+                .orElseThrow(() -> new AwsException("ValidationError",
+                        "Instance '" + instanceId + "' not found in Auto Scaling group.", 400))
+                .setHealthStatus(healthStatus);
+        groups.put(asgKey(region, asg.getAutoScalingGroupName()), asg);
+    }
+
     public void attachInstances(String region, String name, List<String> instanceIds) {
         AutoScalingGroup asg = requireGroup(region, name);
         for (String id : instanceIds) {
