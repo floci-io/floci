@@ -739,7 +739,7 @@ public class CloudFormationService {
                 }
                 // Both cleanup paths feed the single final status/reason writer.
                 List<UpdateCleanupFailure> cleanupFailures =
-                        new ArrayList<>(deleteInactiveConditionResources(
+                        new ArrayList<>(deleteRemovedOrConditionFalseResources(
                                 stack, resources, conditions, region));
                 cleanupFailures.addAll(finishCommittedResourceCleanup(stack));
                 finishCommittedStackUpdate(stack, cleanupFailures);
@@ -1140,15 +1140,14 @@ public class CloudFormationService {
 
     /**
      * Removes resources that were provisioned by an earlier execution but whose resource-level
-     * {@code Condition} is false in the current template. Physical deletion honors the resource's
-     * deletion policy. A failed physical deletion leaves the resource in the underlying service and
-     * keeps it under stack management as {@code DELETE_FAILED}, so a later {@code DeleteStack} or
-     * {@code UpdateStack} can retry the cleanup instead of orphaning the backing resource.
-     * Resources removed from the template entirely are outside this condition-specific cleanup.
+     * {@code Condition} is false in the current template, or that were removed from the template entirely.
+     * Physical deletion honors the resource's deletion policy. A failed physical deletion leaves the resource
+     * in the underlying service and keeps it under stack management as {@code DELETE_FAILED}, so a later
+     * {@code DeleteStack} or {@code UpdateStack} can retry the cleanup instead of orphaning the backing resource.
      *
      * @return one {@link UpdateCleanupFailure} per resource whose physical deletion failed
      */
-    private List<UpdateCleanupFailure> deleteInactiveConditionResources(Stack stack, JsonNode resources,
+    private List<UpdateCleanupFailure> deleteRemovedOrConditionFalseResources(Stack stack, JsonNode resources,
                                                            Map<String, Boolean> conditions, String region) {
         if (!resources.isObject()) {
             return List.of();
@@ -1159,12 +1158,11 @@ public class CloudFormationService {
         Collections.reverse(ordered);
         for (StackResource resource : ordered) {
             JsonNode resDef = resources.get(resource.getLogicalId());
-            if (resDef == null) {
-                continue;
-            }
-            String condition = resDef.path("Condition").asText(null);
-            if (condition == null || conditions.getOrDefault(condition, false)) {
-                continue;
+            if (resDef != null) {
+                String condition = resDef.path("Condition").asText(null);
+                if (condition == null || conditions.getOrDefault(condition, false)) {
+                    continue;
+                }
             }
 
             if (resource.getPhysicalId() == null || skipRetainedResource(stack, resource, false)) {

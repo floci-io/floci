@@ -927,6 +927,71 @@ class CloudFormationResourceConditionIntegrationTest {
         }
     }
 
+    @Test
+    void updateStack_deletesResourceWhenRemovedFromTemplate() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-rem-update-" + suffix;
+        String queueName = "removed-update-" + suffix;
+
+        String initialTemplate = """
+                {
+                  "Resources": {
+                    "OptionalQueue": {
+                      "Type": "AWS::SQS::Queue",
+                      "Properties": { "QueueName": "%s" }
+                    }
+                  }
+                }
+                """.formatted(queueName);
+        String updatedTemplate = """
+                {
+                  "Resources": {
+                    "DummyQueue": {
+                      "Type": "AWS::SQS::Queue",
+                      "Properties": { "QueueName": "dummy-%s" }
+                    }
+                  }
+                }
+                """.formatted(suffix);
+
+        createStack(stackName, initialTemplate);
+        try {
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "GetQueueUrl")
+                .formParam("QueueName", queueName)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString(queueName));
+
+            updateStack(stackName, updatedTemplate);
+
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "GetQueueUrl")
+                .formParam("QueueName", queueName)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("AWS.SimpleQueueService.NonExistentQueue"));
+
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DescribeStackResources")
+                .formParam("StackName", stackName)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(not(containsString("<LogicalResourceId>OptionalQueue</LogicalResourceId>")));
+        } finally {
+            deleteStack(stackName);
+        }
+    }
+
     private static void createStack(String stackName, String template) {
         given()
             .contentType("application/x-www-form-urlencoded")
