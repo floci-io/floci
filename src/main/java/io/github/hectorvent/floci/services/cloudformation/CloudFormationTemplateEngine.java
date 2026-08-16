@@ -145,6 +145,26 @@ public class CloudFormationTemplateEngine {
         return node;
     }
 
+    /**
+     * Resolves a node that must be stored as a JSON document (SNS/SQS RedrivePolicy and
+     * FilterPolicy, Step Functions definitions, IAM policy documents) to its string form.
+     * <p>
+     * resolveNode collapses intrinsics such as Fn::Join into a {@link TextNode}. Calling
+     * {@code toString()} on that node re-quotes and re-escapes the already-serialized JSON
+     * (e.g. CDK's Fn::Join-spliced RedrivePolicy), so the value is double-encoded and the
+     * downstream service can no longer parse it. Unwrapping textual results preserves the
+     * literal JSON while non-textual nodes (plain objects) keep the normal serialization.
+     *
+     * @see <a href="https://github.com/floci-io/floci/issues/2317">#2317</a>
+     */
+    public String resolveJsonAttribute(JsonNode node) {
+        JsonNode resolved = resolveNode(node);
+        if (resolved == null || resolved.isNull() || resolved.isMissingNode()) {
+            return null;
+        }
+        return resolved.isTextual() ? resolved.asText() : resolved.toString();
+    }
+
     private String resolveRef(String name) {
         // Pseudo-parameters
         return switch (name) {

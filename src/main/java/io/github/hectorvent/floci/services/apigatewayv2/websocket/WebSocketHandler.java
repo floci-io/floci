@@ -2,8 +2,10 @@ package io.github.hectorvent.floci.services.apigatewayv2.websocket;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.services.apigateway.ApiGatewayExecuteApiHostFilter;
 import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2Service;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Api;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Integration;
@@ -45,6 +47,7 @@ public class WebSocketHandler {
     private final WebSocketIntegrationInvoker integrationInvoker;
     private final WebSocketAuthorizerService authorizerService;
     private final RegionResolver regionResolver;
+    private final String baseHostname;
     private final ObjectMapper objectMapper;
     private final io.vertx.core.Vertx vertx;
 
@@ -56,6 +59,7 @@ public class WebSocketHandler {
                             WebSocketIntegrationInvoker integrationInvoker,
                             WebSocketAuthorizerService authorizerService,
                             RegionResolver regionResolver,
+                            EmulatorConfig config,
                             ObjectMapper objectMapper,
                             io.vertx.core.Vertx vertx) {
         this.apiGatewayV2Service = apiGatewayV2Service;
@@ -65,6 +69,7 @@ public class WebSocketHandler {
         this.integrationInvoker = integrationInvoker;
         this.authorizerService = authorizerService;
         this.regionResolver = regionResolver;
+        this.baseHostname = config.hostname().orElse("localhost");
         this.objectMapper = objectMapper;
         this.vertx = vertx;
     }
@@ -97,7 +102,7 @@ public class WebSocketHandler {
      */
     private void handleSubdomainWebSocketUpgrade(RoutingContext ctx) {
         String host = resolveRequestHost(ctx);
-        String apiId = io.github.hectorvent.floci.services.apigateway.ApiGatewayExecuteApiHostFilter.extractApiId(host);
+        String apiId = ApiGatewayExecuteApiHostFilter.extractApiId(host, baseHostname);
         if (apiId == null) {
             ctx.next();
             return;

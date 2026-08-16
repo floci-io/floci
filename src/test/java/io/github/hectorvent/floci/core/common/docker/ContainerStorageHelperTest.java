@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Path;
+import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -43,6 +44,22 @@ class ContainerStorageHelperTest {
 
         assertEquals(Path.of("/tmp/floci/rds/db1"), ContainerStorageHelper.hostResourcePath(config, "rds", "db1"));
         assertEquals("floci-rds-db1", ContainerStorageHelper.resourceName(config, "rds", null, "db1"));
+        assertEquals(
+                Map.of("floci", "true", "floci_emulator", "floci-aws"),
+                ContainerStorageHelper.defaultLabels(config));
+    }
+
+    @Test
+    void defaultLabelsIdentifyThisEmulator() {
+        assertEquals(
+                Map.of("floci", "true", "floci_emulator", "floci-aws"),
+                ContainerStorageHelper.defaultLabels(config("")));
+        assertEquals(
+                Map.of("floci", "true", "floci_emulator", "floci-aws", "floci_namespace", "run-one"),
+                ContainerStorageHelper.defaultLabels(config(" run/one ")));
+        assertEquals(
+                Map.of("floci", "true", "floci_emulator", "floci-aws"),
+                ContainerStorageHelper.defaultLabels(null));
     }
 
     private static EmulatorConfig config(String namespace) {

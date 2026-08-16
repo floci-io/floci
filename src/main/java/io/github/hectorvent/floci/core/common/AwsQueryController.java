@@ -392,6 +392,8 @@ public class AwsQueryController {
             "GetAccountSendingEnabled", "ListVerifiedEmailAddresses", "DeleteVerifiedEmailAddress",
             "SetIdentityNotificationTopic", "GetIdentityNotificationAttributes",
             "SetIdentityFeedbackForwardingEnabled",
+            "SetIdentityDkimEnabled",
+            "VerifyDomainDkim",
             "SetIdentityHeadersInNotificationsEnabled",
             "SetIdentityMailFromDomain", "GetIdentityMailFromDomainAttributes",
             "GetIdentityDkimAttributes",

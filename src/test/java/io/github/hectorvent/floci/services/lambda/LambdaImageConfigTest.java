@@ -25,6 +25,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.io.TempDir;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -251,7 +252,8 @@ class LambdaImageConfigTest {
             LaunchedContainerAwsEnv awsEnv = new LaunchedContainerAwsEnv(reachableEndpoint);
             launcher = new ContainerLauncher(containerBuilder, lifecycleManager, logStreamer, imageResolver,
                     runtimeApiServerFactory, dockerHostResolver, config, ecrRegistryManager,
-                    mock(io.github.hectorvent.floci.services.lambda.LambdaLayerService.class), awsEnv);
+                    mock(io.github.hectorvent.floci.services.lambda.LambdaLayerService.class), awsEnv,
+                    mock(io.github.hectorvent.floci.services.lambda.launcher.LambdaExecutionRoleCredentials.class));
 
             when(runtimeApiServerFactory.create()).thenReturn(runtimeApiServer);
             when(runtimeApiServer.getPort()).thenReturn(9000);
@@ -349,12 +351,16 @@ class LambdaImageConfigTest {
         }
 
         @Test
-        void zipFunctionStillUsesHandlerAsCmd() throws Exception {
+        void zipFunctionStillUsesHandlerAsCmd(@TempDir Path codeDir) throws Exception {
             LambdaFunction fn = new LambdaFunction();
             fn.setFunctionName("zip-fn");
             fn.setRuntime("nodejs20.x");
             fn.setHandler("index.handler");
             fn.setPackageType("Zip");
+            // A Zip function needs a code location — launch() now rejects one without it instead
+            // of starting an empty container. This test covers cmd construction, so any real
+            // directory will do.
+            fn.setCodeLocalPath(codeDir.toString());
             when(imageResolver.resolve("nodejs20.x")).thenReturn("public.ecr.aws/lambda/nodejs:20");
 
             launcher.launch(fn);

@@ -295,3 +295,55 @@ setup() {
     assert_failure
     assert_output --partial "NoSuchEntity"
 }
+
+# Tags are stored and readable via ListRoleTags, but the provider reads them off the
+# GetRole response. Omitting them there made every tagged role read back untagged.
+@test "Terraform: GetRole returns the role's tags" {
+    run aws_cmd iam get-role --role-name floci-compat-tagged-role \
+        --query "Role.Tags[?Key=='Environment'].Value" --output text
+    assert_success
+    assert_output "compat"
+}
+
+@test "Terraform: GetPolicy returns the policy's tags" {
+    policy_arn=$(aws_cmd iam list-policies --scope Local \
+        --query "Policies[?PolicyName=='floci-compat-tagged-policy'].Arn" --output text)
+    run aws_cmd iam get-policy --policy-arn "$policy_arn" \
+        --query "Policy.Tags[?Key=='Environment'].Value" --output text
+    assert_success
+    assert_output "compat"
+}
+
+# The other half of the contract: IAM's listing operations deliberately return a subset
+# of attributes. ListRoles "does not return the following attributes, even though they
+# are an attribute of the returned object: PermissionsBoundary, RoleLastUsed, Tags".
+# Emitting them here would deviate from AWS in the opposite direction.
+@test "Terraform: ListRoles omits tags even for a tagged role" {
+    run aws_cmd iam list-roles \
+        --query "Roles[?RoleName=='floci-compat-tagged-role'].Tags" --output text
+    assert_success
+    refute_output --partial "compat"
+}
+
+@test "Terraform: ListPolicies omits tags and description even for a tagged policy" {
+    run aws_cmd iam list-policies --scope Local \
+        --query "Policies[?PolicyName=='floci-compat-tagged-policy'].[Tags,Description]" \
+        --output text
+    assert_success
+    refute_output --partial "compat"
+    refute_output --partial "round trip"
+}
+
+# The assertion that actually matters for the drift class: tags that do not survive the
+# round trip apply cleanly and then re-plan dirty forever.
+@test "Terraform: re-planning the tagged IAM resources reports no changes" {
+    cd "$TF_DIR"
+    run terraform plan -var="endpoint=${FLOCI_ENDPOINT}" -input=false -no-color -detailed-exitcode \
+        -target=aws_iam_role.tagged \
+        -target=aws_iam_policy.tagged
+    if [ "$status" -eq 2 ]; then
+        echo "# drift detected on re-plan:" >&3
+        echo "$output" >&3
+    fi
+    [ "$status" -eq 0 ]
+}

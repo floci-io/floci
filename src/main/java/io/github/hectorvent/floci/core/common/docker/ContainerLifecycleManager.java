@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.core.common.docker;
 
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.lambda.launcher.ImageCacheService;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.CreateContainerCmd;
@@ -45,6 +46,7 @@ public class ContainerLifecycleManager {
     private final ImageCacheService imageCacheService;
     private final ContainerDetector containerDetector;
     private final PortAllocator portAllocator;
+    private final EmulatorConfig config;
 
     /** Volumes whose shared-ownership root has already been initialised this process (run-once guard). */
     private final ConcurrentHashMap<String, Boolean> initializedSharedVolumes = new ConcurrentHashMap<>();
@@ -53,11 +55,13 @@ public class ContainerLifecycleManager {
     public ContainerLifecycleManager(DockerClient dockerClient,
                                      ImageCacheService imageCacheService,
                                      ContainerDetector containerDetector,
-                                     PortAllocator portAllocator) {
+                                     PortAllocator portAllocator,
+                                     EmulatorConfig config) {
         this.dockerClient = dockerClient;
         this.imageCacheService = imageCacheService;
         this.containerDetector = containerDetector;
         this.portAllocator = portAllocator;
+        this.config = config;
     }
 
     /**
@@ -123,6 +127,7 @@ public class ContainerLifecycleManager {
                     .toArray(ExposedPort[]::new);
             createCmd.withExposedPorts(exposed);
         }
+        createCmd.withLabels(mergedLabels(spec.labels()));
 
         CreateContainerResponse response = createCmd.exec();
         String containerId = response.getId();
@@ -267,17 +272,31 @@ public class ContainerLifecycleManager {
 
     /**
      * Creates a named volume if it does not already exist. Idempotent — safe to call on every
-     * container start. Labels the volume {@code floci=true} so
-     * {@code docker volume prune --filter label=floci} works.
+     * container start. Labels the volume {@code floci=true} and
+     * {@code floci_emulator=floci-aws} (plus {@code floci_namespace} when configured) so both
+     * {@code docker volume prune --filter label=floci=true} (all emulators) and
+     * {@code --filter label=floci_emulator=floci-aws} (this emulator only) work.
      */
     public void ensureVolume(String volumeName) {
         if (!volumeExists(volumeName)) {
             dockerClient.createVolumeCmd()
                     .withName(volumeName)
-                    .withLabels(Map.of("floci", "true"))
+                    .withLabels(ContainerStorageHelper.defaultLabels(config))
                     .exec();
             LOG.debugv("Created volume {0}", volumeName);
         }
+    }
+
+    /**
+     * Default emulator labels overlaid with the spec's labels; a per-spec label
+     * wins on key conflicts.
+     */
+    private Map<String, String> mergedLabels(Map<String, String> specLabels) {
+        Map<String, String> labels = ContainerStorageHelper.defaultLabels(config);
+        if (specLabels != null) {
+            labels.putAll(specLabels);
+        }
+        return labels;
     }
 
     /**
@@ -358,6 +377,7 @@ public class ContainerLifecycleManager {
         CreateContainerResponse created = dockerClient.createContainerCmd(image)
                 .withHostConfig(hostConfig)
                 .withCmd("sh", "-c", script.toString())
+                .withLabels(ContainerStorageHelper.defaultLabels(config))
                 .exec();
         String helperId = created.getId();
         try {

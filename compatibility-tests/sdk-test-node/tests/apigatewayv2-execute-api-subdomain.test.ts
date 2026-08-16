@@ -59,6 +59,12 @@ function builtinSuffixHost(apiId: string): string {
   return `${apiId}.execute-api.localhost.floci.io${port}`;
 }
 
+function configuredHostnameHost(apiId: string, region: string): string {
+  const endpoint = new URL(ENDPOINT);
+  const port = endpoint.port ? `:${endpoint.port}` : '';
+  return `${apiId}.execute-api.${region}.${endpoint.hostname}${port}`;
+}
+
 /**
  * A Management API client that presents an execute-api Host header while still connecting to the
  * real test endpoint. A build-step middleware overrides the `Host` header (before SigV4 signing)
@@ -181,6 +187,21 @@ describe('API Gateway v2 execute-api subdomain routing', () => {
 
     await expect(
       mgmt.send(new PostToConnectionCommand({ ConnectionId: 'does-not-exist', Data: Buffer.from('hi') }))
+    ).rejects.toMatchObject({ name: 'GoneException' });
+  });
+
+  it('routes @connections through the region-bearing configured hostname (not S3)', async () => {
+    const region = 'ap-northeast-2';
+    const stage = 'prod';
+    const apiId = await createWsApiWithStage('configured-host-conn', region, stage);
+    const host = configuredHostnameHost(apiId, region);
+    const mgmt = managementClientForHost(host, stage, region);
+
+    // The Node compatibility container connects to the Compose service at floci:4566, while
+    // FLOCI_HOSTNAME=floci. Present the AWS-shaped region-bearing virtual host through the SDK's
+    // signed Host header so this proves configured-host routing without wildcard DNS.
+    await expect(
+      mgmt.send(new GetConnectionCommand({ ConnectionId: 'does-not-exist' }))
     ).rejects.toMatchObject({ name: 'GoneException' });
   });
 

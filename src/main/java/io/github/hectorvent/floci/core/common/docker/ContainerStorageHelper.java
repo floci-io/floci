@@ -6,6 +6,8 @@ import org.jboss.logging.Logger;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 /**
  * Central helper for child-container volume management across RDS, OpenSearch, MSK, and ECR.
@@ -21,6 +23,8 @@ import java.nio.file.Path;
 public final class ContainerStorageHelper {
 
     private static final Logger LOG = Logger.getLogger(ContainerStorageHelper.class);
+
+    static final String CLOUD = "aws";
 
     private ContainerStorageHelper() {}
 
@@ -46,6 +50,23 @@ public final class ContainerStorageHelper {
             return "floci-" + namespace + "-" + baseName.substring("floci-".length());
         }
         return "floci-" + namespace + "-" + baseName;
+    }
+
+    /**
+     * Labels applied to every emulator-created container and volume:
+     * {@code floci=true} (umbrella across all Floci emulators),
+     * {@code floci_emulator=floci-aws} (per-emulator discriminator), and
+     * {@code floci_namespace} when a resource namespace is configured.
+     */
+    public static Map<String, String> defaultLabels(EmulatorConfig config) {
+        Map<String, String> labels = new LinkedHashMap<>();
+        labels.put("floci", "true");
+        labels.put("floci_emulator", "floci-" + CLOUD);
+        String namespace = resourceNamespace(config);
+        if (!namespace.isBlank()) {
+            labels.put("floci_namespace", namespace);
+        }
+        return labels;
     }
 
     public static Path hostResourcePath(EmulatorConfig config, String service, String resourceId) {
