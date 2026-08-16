@@ -67,6 +67,38 @@ class BuildV2ProxyEventJwtClaimsTest {
     }
 
     @Test
+    void populatesAuthorizerJwtScopesFromSpaceDelimitedScopeClaim() throws Exception {
+        Map<String, String> claims = new LinkedHashMap<>();
+        claims.put("sub", "user_01ABC");
+        claims.put("scope", "read:things  write:things");
+
+        String json = controller.buildV2ProxyEvent(
+                "POST", "/v1/things", "$default",
+                "abc123", "us-east-2", "$default", headers, uriInfo, null, "req-4", claims);
+        JsonNode event = new ObjectMapper().readTree(json);
+
+        JsonNode scopes = event.at("/requestContext/authorizer/jwt/scopes");
+        assertTrue(scopes.isArray(), "requestContext.authorizer.jwt.scopes must be an array");
+        assertEquals(2, scopes.size());
+        assertEquals("read:things", scopes.get(0).asText());
+        assertEquals("write:things", scopes.get(1).asText());
+    }
+
+    @Test
+    void omitsScopesWhenScopeClaimAbsent() throws Exception {
+        Map<String, String> claims = new LinkedHashMap<>();
+        claims.put("sub", "user_01ABC");
+
+        String json = controller.buildV2ProxyEvent(
+                "POST", "/v1/things", "$default",
+                "abc123", "us-east-2", "$default", headers, uriInfo, null, "req-5", claims);
+        JsonNode event = new ObjectMapper().readTree(json);
+
+        assertFalse(event.at("/requestContext/authorizer/jwt").has("scopes"),
+                "scopes must be absent when the token has no scope claim");
+    }
+
+    @Test
     void omitsAuthorizerNodeWhenClaimsAreNull() throws Exception {
         String json = controller.buildV2ProxyEvent(
                 "GET", "/v1/things", "$default",

@@ -1985,8 +1985,9 @@ public class ApiGatewayExecuteController {
 
     // jwtClaims is non-null only when the route's authorizer is JWT-type and verification
     // succeeded (see dispatchV2/enforceJwtAuthorizer) - null means either no authorizer on this
-    // route (Auth: NONE) or a CUSTOM/REQUEST authorizer, which populates requestContext.authorizer
-    // differently (see buildV1ProxyEvent's principalId/context handling, not this method).
+    // route (Auth: NONE) or a CUSTOM/REQUEST authorizer. Unlike the v1/REST CUSTOM-authorizer
+    // path (buildV1ProxyEvent's principalId/context handling), a v2 CUSTOM/REQUEST authorizer's
+    // response context is not currently threaded into requestContext.authorizer here at all.
     String buildV2ProxyEvent(String httpMethod, String path, String routeKey,
                                      String apiId, String region, String stageName,
                                      HttpHeaders headers, UriInfo uriInfo,
@@ -2038,15 +2039,25 @@ public class ApiGatewayExecuteController {
         http.put("userAgent", headers.getHeaderString("User-Agent") != null
                 ? headers.getHeaderString("User-Agent") : "");
 
-        // Matches AWS's real HTTP API JWT authorizer shape - requestContext.authorizer.jwt.claims,
-        // not the v1/REST CUSTOM-authorizer shape (requestContext.authorizer.principalId/<claim>)
-        // built elsewhere in this class. Previously enforceJwtAuthorizer's verified claims were
-        // discarded instead of reaching here, so this node was never present at all.
+        // Matches AWS's real HTTP API JWT authorizer shape - requestContext.authorizer.jwt.claims
+        // (+ jwt.scopes, split from the standard OAuth2 space-delimited scope claim - AWS does
+        // this splitting itself, callers never see a raw "scope" string), not the v1/REST
+        // CUSTOM-authorizer shape (requestContext.authorizer.principalId/<claim>) built elsewhere
+        // in this class. Previously enforceJwtAuthorizer's verified claims were discarded instead
+        // of reaching here, so this node was never present at all.
         if (jwtClaims != null && !jwtClaims.isEmpty()) {
             ObjectNode authorizerNode = ctx.putObject("authorizer");
             ObjectNode jwtNode = authorizerNode.putObject("jwt");
             ObjectNode claimsNode = jwtNode.putObject("claims");
             jwtClaims.forEach(claimsNode::put);
+
+            String scopeClaim = jwtClaims.get("scope");
+            if (scopeClaim != null && !scopeClaim.isBlank()) {
+                ArrayNode scopesNode = jwtNode.putArray("scopes");
+                for (String scope : scopeClaim.trim().split("\\s+")) {
+                    scopesNode.add(scope);
+                }
+            }
         }
 
         if (body != null && body.length > 0) {
