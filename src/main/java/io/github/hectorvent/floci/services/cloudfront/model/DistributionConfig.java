@@ -26,6 +26,11 @@ public class DistributionConfig {
     private Map<String, Object> logging;
     private String continuousDeploymentPolicyId;
     private boolean staging;
+    // Only for multi-tenant distributions (ConnectionMode=tenant-only); unlike Restrictions
+    // and Logging, TenantConfig is a genuinely optional DistributionConfig member per the
+    // CloudFront API model, so it stays null (and is omitted from responses) for any
+    // distribution that never set it.
+    private Map<String, Object> tenantConfig;
 
     public DistributionConfig() {}
 
@@ -82,4 +87,7 @@ public class DistributionConfig {
 
     public boolean isStaging() { return staging; }
     public void setStaging(boolean staging) { this.staging = staging; }
+
+    public Map<String, Object> getTenantConfig() { return tenantConfig; }
+    public void setTenantConfig(Map<String, Object> tenantConfig) { this.tenantConfig = tenantConfig; }
 }

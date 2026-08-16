@@ -297,6 +297,7 @@ public class RdsService implements Resettable {
         }
 
         DatabaseEngine engine = resolveEngine(engineParam);
+        String engineIdentifier = normalizeEngineIdentifier(engineParam, engine);
         if (dbSubnetGroupName != null && !dbSubnetGroupName.isBlank() && !"default".equalsIgnoreCase(dbSubnetGroupName)) {
             getDbSubnetGroup(dbSubnetGroupName);
         }
@@ -370,6 +371,7 @@ public class RdsService implements Resettable {
         DbInstance instance = new DbInstance(id, engine, engineVersion, masterUsername, masterPassword,
                 dbName, dbInstanceClass, allocatedStorage, DbInstanceStatus.AVAILABLE,
                 endpoint, iamEnabled, paramGroupName, dbClusterIdentifier, Instant.now(), proxyPort);
+        instance.setEngineIdentifier(engineIdentifier);
         instance.setDbSubnetGroupName(dbSubnetGroupName);
         instance.setContainerId(containerId);
         instance.setContainerHost(containerHost);
@@ -849,6 +851,7 @@ public class RdsService implements Resettable {
         }
 
         DatabaseEngine engine = resolveEngine(engineParam);
+        String engineIdentifier = normalizeEngineIdentifier(engineParam, engine);
         validateClusterParameterGroup(paramGroupName, engineParam, engineVersion);
         PlacementResolution placement = resolvePlacement(dbSubnetGroupName, availabilityZone, multiAz, effectiveRegion);
 
@@ -860,6 +863,7 @@ public class RdsService implements Resettable {
         DbCluster cluster = new DbCluster(id, engine, engineVersion, masterUsername, masterPassword,
                 databaseName, DbInstanceStatus.AVAILABLE, endpoint, endpoint,
                 iamEnabled, new ArrayList<>(), paramGroupName, Instant.now(), proxyPort);
+        cluster.setEngineIdentifier(engineIdentifier);
         if (!mock) {
             String image = imageForEngine(engine, engineVersion);
             String clusterVolumeId = String.format("%06x", new SecureRandom().nextInt(0xFFFFFF));
@@ -1232,6 +1236,18 @@ public class RdsService implements Resettable {
             case "mariadb" -> DatabaseEngine.MARIADB;
             default -> throw new AwsException("InvalidParameterValue", invalidParameterValueMessage(), 400);
         };
+    }
+
+    // resolveEngine() collapses AWS's distinct engine identifiers (e.g. "aurora-mysql",
+    // "aurora", "mysql") into the internal family used to pick a container image/protocol
+    // handler. AWS's own API always echoes back the exact Engine value the caller supplied
+    // (DescribeDBInstances/DescribeDBClusters.Engine matches CreateDBInstance/CreateDBCluster's
+    // Engine verbatim) — a cluster instance created with Engine=aurora-mysql must still report
+    // aurora-mysql, not the internal "mysql" family it happens to share a container with.
+    private static String normalizeEngineIdentifier(String engineParam, DatabaseEngine resolved) {
+        return engineParam != null && !engineParam.isBlank()
+                ? engineParam.toLowerCase()
+                : resolved.name().toLowerCase();
     }
 
     private String imageForEngine(DatabaseEngine engine, String engineVersion) {

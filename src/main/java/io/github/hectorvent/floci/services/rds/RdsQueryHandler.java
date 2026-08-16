@@ -654,13 +654,15 @@ public class RdsQueryHandler {
 
     private String dbInstanceInnerXml(DbInstance i) {
         DbEndpoint ep = i.getEndpoint();
-        String engineStr = i.getEngine() != null ? i.getEngine().name() : "";
+        String engineStr = i.getEngineIdentifier() != null
+                ? i.getEngineIdentifier()
+                : (i.getEngine() != null ? i.getEngine().name().toLowerCase() : "");
         String statusStr = i.getStatus() != null ? statusLabel(i.getStatus()) : "available";
 
         XmlBuilder xml = new XmlBuilder()
                 .elem("DBInstanceIdentifier", i.getDbInstanceIdentifier())
                 .elem("DBInstanceStatus", statusStr)
-                .elem("Engine", engineStr.toLowerCase())
+                .elem("Engine", engineStr)
                 .elem("EngineVersion", i.getEngineVersion())
                 .elem("MasterUsername", i.getMasterUsername());
         if (i.getDbName() != null && !i.getDbName().isBlank()) {
@@ -744,9 +746,9 @@ public class RdsQueryHandler {
             return name;
         }
 
-        String engine = instance.getEngine() != null
-                ? instance.getEngine().name().toLowerCase()
-                : "unknown";
+        String engine = instance.getEngineIdentifier() != null
+                ? instance.getEngineIdentifier()
+                : (instance.getEngine() != null ? instance.getEngine().name().toLowerCase() : "unknown");
         return "default." + engine + dbEngineMajorVersion(instance);
     }
 
@@ -784,13 +786,15 @@ public class RdsQueryHandler {
     private String dbClusterInnerXml(DbCluster c) {
         DbEndpoint ep = c.getEndpoint();
         DbEndpoint readerEp = c.getReaderEndpoint();
-        String engineStr = c.getEngine() != null ? c.getEngine().name() : "";
+        String engineStr = c.getEngineIdentifier() != null
+                ? c.getEngineIdentifier()
+                : (c.getEngine() != null ? c.getEngine().name().toLowerCase() : "");
         String statusStr = c.getStatus() != null ? statusLabel(c.getStatus()) : "available";
 
         XmlBuilder xml = new XmlBuilder()
                 .elem("DBClusterIdentifier", c.getDbClusterIdentifier())
                 .elem("Status", statusStr)
-                .elem("Engine", engineStr.toLowerCase())
+                .elem("Engine", engineStr)
                 .elem("EngineVersion", c.getEngineVersion())
                 .elem("MasterUsername", c.getMasterUsername());
         if (c.getDatabaseName() != null && !c.getDatabaseName().isBlank()) {

@@ -1766,8 +1766,46 @@ public class CloudFrontController {
         xml.elem("IsIPV6Enabled", cfg.isIPV6Enabled());
         xml.elem("ContinuousDeploymentPolicyId", cfg.getContinuousDeploymentPolicyId());
         xml.elem("Staging", cfg.isStaging());
+        xml.raw(xmlTenantConfig(cfg.getTenantConfig()));
 
         return xml.build();
+    }
+
+    /**
+     * {@code <TenantConfig>…} — unlike {@link #xmlRestrictions} and {@link #xmlLogging},
+     * omitted entirely when the distribution never set one. TenantConfig is a genuinely
+     * optional DistributionConfig member (not required, no CloudFront-side default), so a
+     * standard distribution's response must not gain one just because floci renders a fixed
+     * element order for every config.
+     */
+    private String xmlTenantConfig(Map<String, Object> tenantConfig) {
+        if (tenantConfig == null) {
+            return "";
+        }
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> definitions =
+                (List<Map<String, Object>>) tenantConfig.getOrDefault("ParameterDefinitions", List.of());
+        XmlBuilder xml = new XmlBuilder().start("TenantConfig").start("ParameterDefinitions");
+        for (Map<String, Object> definition : definitions) {
+            xml.start("member").elem("Name", str(definition, "Name", ""));
+            @SuppressWarnings("unchecked")
+            Map<String, Object> stringSchema = (Map<String, Object>) definition.get("StringSchema");
+            if (stringSchema != null) {
+                xml.start("Definition").start("StringSchema");
+                String comment = str(stringSchema, "Comment", null);
+                if (comment != null) {
+                    xml.elem("Comment", comment);
+                }
+                String defaultValue = str(stringSchema, "DefaultValue", null);
+                if (defaultValue != null) {
+                    xml.elem("DefaultValue", defaultValue);
+                }
+                xml.elem("Required", "true".equalsIgnoreCase(str(stringSchema, "Required", "false")));
+                xml.end("StringSchema").end("Definition");
+            }
+            xml.end("member");
+        }
+        return xml.end("ParameterDefinitions").end("TenantConfig").build();
     }
 
     /** {@code <Restrictions><GeoRestriction>…} — always emitted, as CloudFront does. */
@@ -2389,6 +2427,7 @@ public class CloudFrontController {
         cfg.setGeoRestriction(parseGeoRestriction(node));
         cfg.setLogging(parseLogging(node));
         cfg.setCustomErrorResponses(parseCustomErrorResponses(node));
+        cfg.setTenantConfig(parseTenantConfig(node));
 
         return cfg;
     }
@@ -2620,6 +2659,46 @@ public class CloudFrontController {
         result.put("IncludeCookies", node.text("IncludeCookies", "false"));
         result.put("Bucket", node.text("Bucket", ""));
         result.put("Prefix", node.text("Prefix", ""));
+        return result;
+    }
+
+    /**
+     * {@code <TenantConfig><ParameterDefinitions><member>…} — the parameter schema for a
+     * multi-tenant distribution template. Wire shape confirmed against aws-sdk-go-v2's
+     * generated CloudFront (de)serializers: ParameterDefinitions is an unflattened,
+     * un-renamed list, so its items serialize under the smithy-xml default {@code <member>}
+     * wrapper, not a CloudFront-style {@code Quantity}/{@code Items} pair.
+     */
+    private Map<String, Object> parseTenantConfig(CloudFrontXml.Node config) {
+        CloudFrontXml.Node node = config.child("TenantConfig");
+        if (node == null) {
+            return null;
+        }
+        List<Map<String, Object>> definitions = new ArrayList<>();
+        CloudFrontXml.Node paramDefs = node.child("ParameterDefinitions");
+        if (paramDefs != null) {
+            for (CloudFrontXml.Node member : paramDefs.children("member")) {
+                Map<String, Object> definition = new LinkedHashMap<>();
+                definition.put("Name", member.text("Name", null));
+                CloudFrontXml.Node schemaWrapper = member.path("Definition", "StringSchema");
+                if (schemaWrapper != null) {
+                    Map<String, Object> stringSchema = new LinkedHashMap<>();
+                    stringSchema.put("Required", schemaWrapper.bool("Required", false));
+                    String comment = schemaWrapper.text("Comment", null);
+                    if (comment != null) {
+                        stringSchema.put("Comment", comment);
+                    }
+                    String defaultValue = schemaWrapper.text("DefaultValue", null);
+                    if (defaultValue != null) {
+                        stringSchema.put("DefaultValue", defaultValue);
+                    }
+                    definition.put("StringSchema", stringSchema);
+                }
+                definitions.add(definition);
+            }
+        }
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("ParameterDefinitions", definitions);
         return result;
     }
 

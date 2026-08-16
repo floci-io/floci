@@ -135,16 +135,23 @@ public class AwsJsonCborController {
      * schema-less it cannot consult the Smithy model, so it matches field names by their
      * conventional suffix: AWS timestamp members end in {@code "Timestamp"} (e.g.
      * GetMetricStatistics' scalar {@code Timestamp}, or alarm fields such as
-     * {@code StateUpdatedTimestamp}), and list-of-timestamp members end in
+     * {@code StateUpdatedTimestamp}), list-of-timestamp members end in
      * {@code "Timestamps"} (e.g. CloudWatch GetMetricData's
-     * {@code MetricDataResults[].Timestamps}). The flag is propagated into array elements,
-     * so both scalar timestamps and timestamp lists are tagged.
+     * {@code MetricDataResults[].Timestamps}), and {@code "Date"} (e.g. CloudWatch
+     * GetMetricStream's {@code CreationDate}/{@code LastUpdateDate}, or PutAlarmMuteRule's
+     * {@code StartDate}/{@code ExpireDate}) — all three are Timestamp-shaped in every
+     * operation reachable through this controller (checked against the DynamoDB, SQS, SNS,
+     * Kinesis, Step Functions and CloudWatch service models: no field ending in
+     * {@code "Date"} on any of them is a non-Timestamp shape).
      * <p>
-     * This is a pragmatic heuristic; a shape carrying a differently-named time value would
-     * need to be driven from the Smithy model instead.
+     * This is a pragmatic heuristic, not a complete one: it still misses other conventional
+     * timestamp suffixes this controller's services also use (bare {@code "Time"}, DynamoDB's
+     * {@code "DateTime"}, SNS/Kinesis's {@code "At"}, Step Functions' lowercase
+     * {@code timestamp}/{@code *Date}) — those would need to be driven from the Smithy model
+     * instead of guessed from field names, and are unrelated to the bug this fixes.
      */
     private static boolean isTimestampField(String fieldName) {
-        return fieldName.endsWith("Timestamp") || fieldName.endsWith("Timestamps");
+        return fieldName.endsWith("Timestamp") || fieldName.endsWith("Timestamps") || fieldName.endsWith("Date");
     }
 
     /**

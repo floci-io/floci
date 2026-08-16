@@ -333,4 +333,125 @@ class CloudFrontIntegrationTest {
                 .statusCode(200)
                 .body(not(containsString("<Tag>")));
     }
+
+    /**
+     * TenantConfig is a genuinely optional DistributionConfig member (unlike Restrictions and
+     * Logging, which CloudFront always returns with a default). A multi-tenant distribution's
+     * ParameterDefinitions must round-trip through Create/Get; a distribution that never set
+     * one — every earlier test in this class — must not gain one just because floci renders a
+     * fixed response element order.
+     */
+    @Test
+    @Order(8)
+    void tenantConfigRoundTripsOnlyWhenTheDistributionSetOne() {
+        String tenantConfigXml = """
+                <TenantConfig>
+                  <ParameterDefinitions>
+                    <member>
+                      <Name>siteTitle</Name>
+                      <Definition>
+                        <StringSchema>
+                          <Required>true</Required>
+                          <Comment>Shown in the page header</Comment>
+                          <DefaultValue>Acme</DefaultValue>
+                        </StringSchema>
+                      </Definition>
+                    </member>
+                    <member>
+                      <Name>theme</Name>
+                      <Definition>
+                        <StringSchema>
+                          <Required>false</Required>
+                        </StringSchema>
+                      </Definition>
+                    </member>
+                  </ParameterDefinitions>
+                </TenantConfig>
+                """;
+        String body = createBody("integration-tenant")
+                .replace("</DistributionConfig>", tenantConfigXml + "</DistributionConfig>");
+
+        String created = given()
+                .contentType(XML)
+                .body(body)
+        .when()
+                .post(API + "/distribution?WithTags")
+        .then()
+                .statusCode(201)
+                .extract().body().asString();
+
+        XmlPath xml = new XmlPath(created);
+        String tenantId = xml.getString("Distribution.Id");
+        String config = "Distribution.DistributionConfig.TenantConfig.ParameterDefinitions.member";
+        assertEquals(List.of("siteTitle", "theme"), xml.getList(config + ".Name"));
+        assertEquals(List.of("true", "false"), xml.getList(config + ".Definition.StringSchema.Required"));
+        assertEquals("Shown in the page header",
+                xml.getString(config + "[0].Definition.StringSchema.Comment"));
+        assertEquals("Acme", xml.getString(config + "[0].Definition.StringSchema.DefaultValue"));
+
+        // A sibling distribution that never sets TenantConfig must not have one synthesized
+        // into its response, the way Restrictions and Logging always are.
+        String plainId = given()
+                .contentType(XML)
+                .body(createBody("integration-tenant-plain")
+                        .replace("cdn.example.test", "cdn-plain.example.test"))
+        .when()
+                .post(API + "/distribution?WithTags")
+        .then()
+                .statusCode(201)
+                .extract().path("Distribution.Id");
+        String plain = given()
+        .when()
+                .get(API + "/distribution/" + plainId)
+        .then()
+                .statusCode(200)
+                .extract().body().asString();
+        assertTrue(!plain.contains("<TenantConfig>"),
+                "a distribution that never set TenantConfig must not gain one: " + plain);
+        String plainEtag = given()
+        .when()
+                .get(API + "/distribution/" + plainId + "/config")
+        .then()
+                .statusCode(200)
+                .extract().header("ETag");
+        String plainUpdatedEtag = given()
+                .contentType(XML)
+                .header("If-Match", plainEtag)
+                .body(configBody("integration-tenant-plain", false)
+                        .replace("cdn.example.test", "cdn-plain.example.test"))
+        .when()
+                .put(API + "/distribution/" + plainId + "/config")
+        .then()
+                .statusCode(200)
+                .extract().header("ETag");
+        given()
+                .header("If-Match", plainUpdatedEtag)
+        .when()
+                .delete(API + "/distribution/" + plainId)
+        .then()
+                .statusCode(204);
+
+        String etag = given()
+        .when()
+                .get(API + "/distribution/" + tenantId + "/config")
+        .then()
+                .statusCode(200)
+                .extract().header("ETag");
+        String updatedEtag = given()
+                .contentType(XML)
+                .header("If-Match", etag)
+                .body(configBody("integration-tenant", false)
+                        .replace("</DistributionConfig>", tenantConfigXml + "</DistributionConfig>"))
+        .when()
+                .put(API + "/distribution/" + tenantId + "/config")
+        .then()
+                .statusCode(200)
+                .extract().header("ETag");
+        given()
+                .header("If-Match", updatedEtag)
+        .when()
+                .delete(API + "/distribution/" + tenantId)
+        .then()
+                .statusCode(204);
+    }
 }

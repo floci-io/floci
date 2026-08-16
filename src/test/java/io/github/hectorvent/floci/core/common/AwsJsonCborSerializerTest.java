@@ -106,6 +106,24 @@ class AwsJsonCborSerializerTest {
     }
 
     @Test
+    void dateSuffixedTimestampFieldsAreTagged() throws Exception {
+        // Regression guard for CloudWatch GetMetricStream: CreationDate/LastUpdateDate are
+        // Timestamp-shaped per the CloudWatch model but don't end in "Timestamp", so an
+        // untagged encoding used to fail aws-sdk-go-v2's CBOR decoder with "expected tag for
+        // timestamp, got major type 0".
+        JsonNode node = jsonMapper.readTree(
+                "{\"CreationDate\": 1700000000, \"LastUpdateDate\": 1700000060, \"Name\": \"probe\"}");
+
+        byte[] cbor = AwsJsonCborController.nodeToSmithyCbor(node);
+
+        assertEquals(2, countTag1(cbor), "both *Date-suffixed fields must be tagged");
+        JsonNode decoded = cborMapper.readTree(cbor);
+        assertEquals(1700000000L, decoded.path("CreationDate").asLong());
+        assertEquals(1700000060L, decoded.path("LastUpdateDate").asLong());
+        assertEquals("probe", decoded.path("Name").asText());
+    }
+
+    @Test
     void fractionalTimestampIsTaggedAsFloat() throws Exception {
         // A non-integral timestamp is a valid tag(1) floating-point value (RFC 8949 3.4.2).
         JsonNode node = jsonMapper.readTree("{\"Timestamp\": 1700000000.5}");

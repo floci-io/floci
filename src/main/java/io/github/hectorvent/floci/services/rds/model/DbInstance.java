@@ -13,6 +13,11 @@ public class DbInstance {
 
     private String dbInstanceIdentifier;
     private DatabaseEngine engine;
+    // The AWS-facing engine identifier as requested (e.g. "aurora-mysql", "aurora-postgresql",
+    // "mysql", "postgres", "mariadb"). `engine` above collapses these into an internal family
+    // used only to pick a backing container image/protocol; AWS's DBInstance.Engine field must
+    // echo back exactly what was requested, not the collapsed family.
+    private String engineIdentifier;
     private String engineVersion;
     private String masterUsername;
     private String masterPassword;
@@ -76,6 +81,9 @@ public class DbInstance {
 
     public DatabaseEngine getEngine() { return engine; }
     public void setEngine(DatabaseEngine engine) { this.engine = engine; }
+
+    public String getEngineIdentifier() { return engineIdentifier; }
+    public void setEngineIdentifier(String engineIdentifier) { this.engineIdentifier = engineIdentifier; }
 
     public String getEngineVersion() { return engineVersion; }
     public void setEngineVersion(String engineVersion) { this.engineVersion = engineVersion; }

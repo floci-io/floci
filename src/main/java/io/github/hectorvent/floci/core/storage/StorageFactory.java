@@ -29,6 +29,10 @@ public class StorageFactory {
     private final EmulatorConfig config;
     private final ServiceConfigAccess serviceConfigAccess;
     private final List<StorageBackend<?, ?>> allBackends = new ArrayList<>();
+    // Same backends as allBackends, paired with the service name that first asked for them.
+    // Cross-cutting readers (Resource Groups Tagging's estate-wide scan) need to know which
+    // service owns a store; the backend itself carries no such label.
+    private final List<OwnedBackend> ownedBackends = new ArrayList<>();
     // A file path identifies one logical store: callers sharing a path are expected to agree on
     // its value type and storage mode. The first create() wins; repeat calls reuse that backend.
     private final Map<Path, StorageBackend<?, ?>> backendsByPath = new HashMap<>();
@@ -98,8 +102,21 @@ public class StorageFactory {
         AccountAwareStorageBackend<V> backend = new AccountAwareStorageBackend<>(
                 inner, requestContextInstance, config.defaultAccountId());
         allBackends.add(backend);
+        ownedBackends.add(new OwnedBackend(serviceName, fileName, backend));
         backendsByPath.put(filePath, backend);
         return backend;
+    }
+
+    /** A storage backend together with the service name and file name it was created under. */
+    public record OwnedBackend(String serviceName, String fileName, AccountAwareStorageBackend<?> backend) {}
+
+    /**
+     * Every backend created so far, labelled with its owning service. Used by the Resource Groups
+     * Tagging estate-wide scan, which has to read resource state it does not own; the list is a
+     * snapshot, so a service that registers a store later will not appear until the next call.
+     */
+    public synchronized List<OwnedBackend> ownedBackends() {
+        return List.copyOf(ownedBackends);
     }
 
     /** Load all storage backends from disk. */
