@@ -105,14 +105,14 @@ public class ConfigServiceJsonHandler {
                 req.path("ResourceType").asText(null),
                 req.path("ResourceId").asText(null),
                 extractStringList(req, "ComplianceTypes"),
-                extractLimit(req), extractNextToken(req));
+                extractLimit(req, "Limit"), extractNextToken(req));
         return Response.ok(pagedResponse("ComplianceByResources", page)).build();
     }
 
     private Response describeConfigRuleEvaluationStatus(JsonNode req, String region) {
         var page = service.describeConfigRuleEvaluationStatus(region,
                 extractStringList(req, "ConfigRuleNames"),
-                extractLimit(req), extractNextToken(req));
+                extractLimit(req, "Limit"), extractNextToken(req));
         return Response.ok(pagedResponse("ConfigRulesEvaluationStatus", page)).build();
     }
 
@@ -156,7 +156,7 @@ public class ConfigServiceJsonHandler {
         var page = service.getComplianceDetailsByConfigRule(region,
                 req.path("ConfigRuleName").asText(null),
                 extractStringList(req, "ComplianceTypes"),
-                extractLimit(req), extractNextToken(req));
+                extractLimit(req, "Limit"), extractNextToken(req));
         return Response.ok(pagedResponse("EvaluationResults", page)).build();
     }
 
@@ -288,14 +288,14 @@ public class ConfigServiceJsonHandler {
     private Response describeConformancePacks(JsonNode req, String region) {
         var page = service.describeConformancePacksPaged(region,
                 extractStringList(req, "ConformancePackNames"),
-                extractLimit(req), extractNextToken(req));
+                extractLimit(req, "Limit"), extractNextToken(req));
         return Response.ok(pagedResponse("ConformancePackDetails", page)).build();
     }
 
     private Response describeConformancePackStatus(JsonNode req, String region) {
         var page = service.describeConformancePackStatus(region,
                 extractStringList(req, "ConformancePackNames"),
-                extractLimit(req), extractNextToken(req));
+                extractLimit(req, "Limit"), extractNextToken(req));
         return Response.ok(pagedResponse("ConformancePackStatusDetails", page)).build();
     }
 
@@ -338,7 +338,11 @@ public class ConfigServiceJsonHandler {
     }
 
     private Integer extractLimit(JsonNode req) {
-        return req.hasNonNull("Limit") ? req.path("Limit").asInt() : null;
+        return extractLimit(req, "MaxResults");
+    }
+
+    private Integer extractLimit(JsonNode req, String fieldName) {
+        return req.hasNonNull(fieldName) ? req.path(fieldName).asInt() : null;
     }
 
     private String extractNextToken(JsonNode req) {
