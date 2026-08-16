@@ -122,6 +122,14 @@ public class LambdaFunctionStore implements Resettable {
         });
     }
 
+    /** Deletes one published version, leaving {@code $LATEST} and the other versions in place. */
+    public void deleteVersion(String region, String functionName, String version) {
+        get(region, functionName, version).ifPresent(fn -> {
+            deindexFunction(fn);
+            backend.delete(regionKey(region, functionName, version));
+        });
+    }
+
     private static String regionKey(String region, String functionName, String version) {
         return "lambda::" + region + "::" + functionName + "::" + (version != null ? version : "$LATEST");
     }

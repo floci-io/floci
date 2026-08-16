@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import org.junit.jupiter.api.Test;
 
 import java.util.HashMap;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -121,7 +122,9 @@ class LambdaVersionAliasCfnProvisionerTest {
         // stack in ROLLBACK.
         when(lambda.createAlias(any(), any(), any(), any(), any(), any()))
                 .thenThrow(new AwsException("ResourceConflictException", "Alias already exists: production", 409));
-        when(lambda.updateAlias(eq("us-east-1"), eq("my-fn"), eq("production"), eq("4"), isNull(), isNull()))
+        // A template that declares no RoutingConfig means the alias carries no weights, so the
+        // update clears them with an empty map rather than keeping whatever was there.
+        when(lambda.updateAlias(eq("us-east-1"), eq("my-fn"), eq("production"), eq("4"), isNull(), eq(Map.of())))
                 .thenReturn(alias("4"));
 
         ObjectNode props = mapper.createObjectNode();
@@ -132,7 +135,7 @@ class LambdaVersionAliasCfnProvisionerTest {
 
         provisioner.provision(r, props, ctx());
 
-        verify(lambda).updateAlias(eq("us-east-1"), eq("my-fn"), eq("production"), eq("4"), isNull(), isNull());
+        verify(lambda).updateAlias(eq("us-east-1"), eq("my-fn"), eq("production"), eq("4"), isNull(), eq(Map.of()));
         assertEquals(ALIAS_ARN, r.getPhysicalId());
     }
 

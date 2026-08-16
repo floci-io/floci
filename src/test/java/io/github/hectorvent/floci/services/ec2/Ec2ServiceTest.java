@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager
 import io.github.hectorvent.floci.services.ec2.model.BlockDeviceMapping;
 import io.github.hectorvent.floci.services.ec2.model.EbsBlockDevice;
 import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
+import io.github.hectorvent.floci.services.ec2.model.Image;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.IpPermission;
 import io.github.hectorvent.floci.services.ec2.model.Ipv6Range;
@@ -16,12 +17,20 @@ import io.github.hectorvent.floci.services.ec2.model.SecurityGroupRule;
 import io.github.hectorvent.floci.services.ec2.model.UserIdGroupPair;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
 import io.github.hectorvent.floci.services.ec2.model.ManagedPrefixList;
+import io.github.hectorvent.floci.services.ec2.model.SecurityGroupRule;
+import io.github.hectorvent.floci.services.ec2.model.PrefixListId;
+import io.github.hectorvent.floci.services.ec2.model.IpPermission;
+import io.github.hectorvent.floci.services.ec2.model.IpRange;
 import io.github.hectorvent.floci.services.ec2.model.PrefixListEntry;
 import io.github.hectorvent.floci.services.ec2.model.NetworkInterface;
 import io.github.hectorvent.floci.services.ec2.model.Reservation;
 import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
 import io.github.hectorvent.floci.services.ec2.model.Snapshot;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
+import io.github.hectorvent.floci.services.ec2.model.TransitGateway;
+import io.github.hectorvent.floci.services.ec2.model.TransitGatewayOptions;
+import io.github.hectorvent.floci.services.ec2.model.TransitGatewayRouteTable;
+import io.github.hectorvent.floci.services.ec2.model.UserIdGroupPair;
 import io.github.hectorvent.floci.services.ec2.model.VpcEndpoint;
 import io.github.hectorvent.floci.services.ec2.model.Volume;
 import io.github.hectorvent.floci.services.ec2.model.VolumeAttachment;
@@ -30,12 +39,20 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
@@ -483,6 +500,133 @@ class Ec2ServiceTest {
 
         assertEquals(1, snapshots.size());
         assertEquals("snap-owned", snapshots.getFirst().getSnapshotId());
+    }
+
+    @Test
+    void createImageRebootsTheSourceInstanceUnlessNoRebootIsSet() {
+        Ec2ContainerManager containerManager = mock(Ec2ContainerManager.class);
+        Ec2Service service = liveService(containerManager, mock(AmiImageResolver.class));
+        String instanceId = runOne(service, "ami-src");
+
+        service.createImage("us-east-1", instanceId, "with-reboot", null, false);
+        verify(containerManager).reboot(argThat(i -> instanceId.equals(i.getInstanceId())));
+
+        service.createImage("us-east-1", instanceId, "without-reboot", null, true);
+        // Still one: NoReboot=true opted the second call out.
+        verify(containerManager, times(1)).reboot(argThat(i -> instanceId.equals(i.getInstanceId())));
+    }
+
+    @Test
+    void runInstancesOnACreatedImageResolvesTheSourceGuest() {
+        AmiImageResolver resolver = mock(AmiImageResolver.class);
+        Ec2Service service = liveService(mock(Ec2ContainerManager.class), resolver);
+        String instanceId = runOne(service, "ami-src");
+
+        String createdAmi = service.createImage("us-east-1", instanceId, "captured", null, true)
+                .getImageId();
+        String chainedAmi = service.createImage("us-east-1", runOne(service, createdAmi),
+                "captured-again", null, true).getImageId();
+
+        runOne(service, createdAmi);
+        runOne(service, chainedAmi);
+
+        // Every launch resolves through to the catalog id; the generated ami-* ids are
+        // unknown to the resolver and would otherwise fall back to the default guest.
+        verify(resolver, times(4)).resolveImage("ami-src");
+        verify(resolver, never()).resolveImage(createdAmi);
+        verify(resolver, never()).resolveImage(chainedAmi);
+    }
+
+    @Test
+    void createImageOnACatalogSourceCarriesItsRootDevice() {
+        Ec2ImageCatalog catalog = mock(Ec2ImageCatalog.class);
+        Ec2ImageCatalog.CatalogImage source = new Ec2ImageCatalog.CatalogImage();
+        source.imageId = "ami-src";
+        source.architecture = "x86_64";
+        source.rootDeviceType = "ebs";
+        source.rootDeviceName = "/dev/xvda";
+        when(catalog.findByIdOrAlias("ami-src")).thenReturn(Optional.of(source));
+        Ec2Service service = liveService(mock(Ec2ContainerManager.class), mock(AmiImageResolver.class), catalog);
+        String instanceId = runOne(service, "ami-src");
+
+        Image image = service.createImage("us-east-1", instanceId, "captured", null, true);
+
+        assertEquals("/dev/xvda", image.getRootDeviceName());
+        assertEquals(1, image.getBlockDeviceMappings().size());
+        BlockDeviceMapping root = image.getBlockDeviceMappings().getFirst();
+        assertEquals("/dev/xvda", root.getDeviceName());
+        assertNotNull(root.getEbs().getSnapshotId());
+
+        // The rebuilt root describes the volume RunInstances actually created for the
+        // source, so DescribeImages does not report a type the instance never had.
+        assertEquals("gp3", root.getEbs().getVolumeType());
+        assertEquals(8, root.getEbs().getVolumeSize());
+
+        // The mapping's snapshot is registered, so DescribeSnapshots can resolve it.
+        List<Snapshot> snapshots = service.describeSnapshots("us-east-1",
+                List.of(root.getEbs().getSnapshotId()), null, null);
+        assertEquals(1, snapshots.size());
+    }
+
+    @Test
+    void createImageTakesItsOwnSnapshotRatherThanTheSourceAmisOne() {
+        Ec2Service service = liveService(mock(Ec2ContainerManager.class), mock(AmiImageResolver.class));
+        Image source = service.registerImage("us-east-1", "source-image", null, null, "/dev/sda1",
+                List.of(blockDeviceMapping("snap-source", 16)));
+
+        Image image = service.createImage("us-east-1", runOne(service, source.getImageId()),
+                "captured", null, true);
+
+        BlockDeviceMapping captured = image.getBlockDeviceMappings().getFirst();
+        assertEquals("/dev/sda1", captured.getDeviceName());
+        assertEquals(16, captured.getEbs().getVolumeSize());
+        assertNotEquals("snap-source", captured.getEbs().getSnapshotId());
+
+        // Both snapshots exist, so deleting one image does not strand the other.
+        assertEquals(2, service.describeSnapshots("us-east-1", List.of(), List.of(), Map.of()).size());
+    }
+
+    @Test
+    void createImageCapturesAVolumeAttachedAfterLaunch() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        Image sourceAmi = service.registerImage("us-east-1", "source-image", null, null, "/dev/sda1",
+                List.of(blockDeviceMapping("snap-source", 8)));
+        Instance inst = service.runInstances("us-east-1", sourceAmi.getImageId(), "t3.micro", 1, 1,
+                null, List.of(), null, null, List.of(), null, null).getInstances().getFirst();
+        inst.setState(InstanceState.running());
+        Volume data = service.createVolume("us-east-1", inst.getPlacement().getAvailabilityZone(),
+                "gp3", 50, false, 0, null, null, List.of());
+        service.attachVolume("us-east-1", data.getVolumeId(), inst.getInstanceId(), "/dev/sdf");
+
+        Image image = service.createImage("us-east-1", inst.getInstanceId(), "captured", null, true);
+
+        // The root device the source AMI describes, plus the volume attached after launch.
+        assertEquals(2, image.getBlockDeviceMappings().size());
+        BlockDeviceMapping attached = image.getBlockDeviceMappings().stream()
+                .filter(m -> "/dev/sdf".equals(m.getDeviceName()))
+                .findFirst().orElseThrow();
+        assertEquals(50, attached.getEbs().getVolumeSize());
+        assertEquals("gp3", attached.getEbs().getVolumeType());
+        assertNotNull(attached.getEbs().getSnapshotId());
+    }
+
+    private static String runOne(Ec2Service service, String imageId) {
+        return service.runInstances("us-east-1", imageId, "t3.micro", 1, 1, null,
+                List.of(), null, null, List.of(), null, null)
+                .getInstances().getFirst().getInstanceId();
+    }
+
+    /** mock=false so the container-manager and resolver interactions actually happen. */
+    private static Ec2Service liveService(Ec2ContainerManager containerManager, AmiImageResolver resolver) {
+        return liveService(containerManager, resolver, mock(Ec2ImageCatalog.class));
+    }
+
+    private static Ec2Service liveService(Ec2ContainerManager containerManager, AmiImageResolver resolver,
+                                          Ec2ImageCatalog catalog) {
+        return new Ec2Service(mockConfig(false), containerManager, mock(Ec2PortForwardManager.class),
+                resolver, catalog, new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
     }
 
     private static BlockDeviceMapping blockDeviceMapping(String snapshotId, int volumeSize) {
@@ -1031,6 +1175,596 @@ class Ec2ServiceTest {
         service.deleteTags("us-east-1", List.of(created.getPrefixListId()), List.of(new Tag("env", null)));
         assertTrue(service.describeManagedPrefixLists("us-east-1", List.of(created.getPrefixListId()), Map.of())
                 .getFirst().getTags().isEmpty());
+    }
+
+    // =========================================================================
+    // Security group rules sourced from a prefix list
+    // =========================================================================
+
+    private static IpPermission tcpPermission(int port) {
+        IpPermission perm = new IpPermission();
+        perm.setIpProtocol("tcp");
+        perm.setFromPort(port);
+        perm.setToPort(port);
+        return perm;
+    }
+
+    @Test
+    void authorizeIngressFromAPrefixListCreatesARuleCarryingIt() {
+        Ec2Service service = prefixListService();
+        ManagedPrefixList list = service.createManagedPrefixList("us-east-1", "corp", "IPv4", 5,
+                List.of(new PrefixListEntry("10.0.0.0/8", null)), List.of());
+        String groupId = service.createSecurityGroup("us-east-1", "db", "db", null).getGroupId();
+
+        IpPermission perm = tcpPermission(5432);
+        perm.getPrefixListIds().add(new PrefixListId(list.getPrefixListId(), "from-corp"));
+        List<SecurityGroupRule> rules = service.authorizeSecurityGroupIngress("us-east-1", groupId, List.of(perm));
+
+        assertEquals(1, rules.size());
+        SecurityGroupRule rule = rules.getFirst();
+        assertEquals(list.getPrefixListId(), rule.getPrefixListId());
+        assertEquals("from-corp", rule.getDescription());
+        assertNull(rule.getCidrIpv4(), "a prefix list rule carries no CIDR");
+        assertFalse(rule.isEgress());
+        assertEquals(5432, rule.getFromPort());
+    }
+
+    @Test
+    void authorizeAgainstAnUnknownPrefixListIsRejected() {
+        Ec2Service service = prefixListService();
+        String groupId = service.createSecurityGroup("us-east-1", "db", "db", null).getGroupId();
+
+        IpPermission perm = tcpPermission(5432);
+        perm.getPrefixListIds().add(new PrefixListId("pl-doesnotexist", null));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.authorizeSecurityGroupIngress("us-east-1", groupId, List.of(perm)));
+        assertEquals("InvalidPrefixListID.NotFound", error.getErrorCode());
+        // The rejected rule must not have been stored. The group still holds its default
+        // allow-all egress rule, so the check is for an ingress rule rather than for none.
+        assertTrue(service.describeSecurityGroupRules("us-east-1", List.of(groupId), List.of()).stream()
+                .noneMatch(r -> !r.isEgress() || r.getPrefixListId() != null));
+    }
+
+    /** AWS emits one rule per source, so a permission naming both expands to two. */
+    @Test
+    void aPermissionNamingBothACidrAndAPrefixListYieldsARuleForEach() {
+        Ec2Service service = prefixListService();
+        ManagedPrefixList list = service.createManagedPrefixList("us-east-1", "corp", "IPv4", 5,
+                List.of(), List.of());
+        String groupId = service.createSecurityGroup("us-east-1", "db", "db", null).getGroupId();
+
+        IpPermission perm = tcpPermission(443);
+        perm.getIpRanges().add(new IpRange("10.1.0.0/16", "direct"));
+        perm.getPrefixListIds().add(new PrefixListId(list.getPrefixListId(), "via-list"));
+        List<SecurityGroupRule> rules = service.authorizeSecurityGroupIngress("us-east-1", groupId, List.of(perm));
+
+        assertEquals(2, rules.size());
+        assertEquals(1, rules.stream().filter(r -> "10.1.0.0/16".equals(r.getCidrIpv4())).count());
+        assertEquals(1, rules.stream().filter(r -> list.getPrefixListId().equals(r.getPrefixListId())).count());
+    }
+
+    /**
+     * Verified against a live AWS account: a permission naming a valid CIDR alongside an unknown
+     * prefix list persists neither, so the whole call has to resolve before anything is written.
+     */
+    @Test
+    void anUnknownPrefixListLeavesNoPartialRuleFromTheSamePermission() {
+        Ec2Service service = prefixListService();
+        String groupId = service.createSecurityGroup("us-east-1", "db", "db", null).getGroupId();
+
+        IpPermission perm = tcpPermission(5432);
+        perm.getIpRanges().add(new IpRange("10.9.0.0/16", "direct"));
+        perm.getPrefixListIds().add(new PrefixListId("pl-doesnotexist", null));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.authorizeSecurityGroupIngress("us-east-1", groupId, List.of(perm)));
+        assertEquals("InvalidPrefixListID.NotFound", error.getErrorCode());
+        assertTrue(service.describeSecurityGroupRules("us-east-1", List.of(groupId), List.of()).stream()
+                .noneMatch(r -> !r.isEgress()), "the CIDR rule must not survive the rejection");
+    }
+
+    /** A later bad permission must not leave an earlier good one applied either. */
+    @Test
+    void anUnknownPrefixListInASecondPermissionLeavesTheFirstUnapplied() {
+        Ec2Service service = prefixListService();
+        String groupId = service.createSecurityGroup("us-east-1", "db", "db", null).getGroupId();
+
+        IpPermission good = tcpPermission(443);
+        good.getIpRanges().add(new IpRange("10.1.0.0/16", null));
+        IpPermission bad = tcpPermission(5432);
+        bad.getPrefixListIds().add(new PrefixListId("pl-doesnotexist", null));
+
+        assertThrows(AwsException.class,
+                () -> service.authorizeSecurityGroupIngress("us-east-1", groupId, List.of(good, bad)));
+        assertTrue(service.describeSecurityGroupRules("us-east-1", List.of(groupId), List.of()).stream()
+                .noneMatch(r -> !r.isEgress()), "no ingress rule from either permission");
+    }
+
+    /**
+     * Verified against a live AWS account: revoking the prefix list source leaves a CIDR
+     * permission on the same protocol and ports untouched.
+     */
+    @Test
+    void revokingAPrefixListSourceLeavesACidrOnTheSameTupleAlone() {
+        Ec2Service service = prefixListService();
+        ManagedPrefixList list = service.createManagedPrefixList("us-east-1", "corp", "IPv4", 5,
+                List.of(), List.of());
+        String groupId = service.createSecurityGroup("us-east-1", "db", "db", null).getGroupId();
+
+        IpPermission viaCidr = tcpPermission(5432);
+        viaCidr.getIpRanges().add(new IpRange("192.168.0.0/16", null));
+        IpPermission viaList = tcpPermission(5432);
+        viaList.getPrefixListIds().add(new PrefixListId(list.getPrefixListId(), null));
+        service.authorizeSecurityGroupIngress("us-east-1", groupId, List.of(viaCidr, viaList));
+
+        service.revokeSecurityGroupIngress("us-east-1", groupId, List.of(viaList));
+
+        List<IpPermission> left = service.describeSecurityGroups("us-east-1", List.of(groupId), List.of(), Map.of())
+                .getFirst().getIpPermissions();
+        assertEquals(1, left.size(), "only the prefix list permission should have been revoked");
+        assertEquals("192.168.0.0/16", left.getFirst().getIpRanges().getFirst().getCidrIp());
+    }
+
+    @Test
+    void anEgressRuleCanAlsoComeFromAPrefixList() {
+        Ec2Service service = prefixListService();
+        ManagedPrefixList list = service.createManagedPrefixList("us-east-1", "corp", "IPv4", 5,
+                List.of(), List.of());
+        String groupId = service.createSecurityGroup("us-east-1", "db", "db", null).getGroupId();
+
+        IpPermission perm = tcpPermission(443);
+        perm.getPrefixListIds().add(new PrefixListId(list.getPrefixListId(), null));
+        List<SecurityGroupRule> rules = service.authorizeSecurityGroupEgress("us-east-1", groupId, List.of(perm));
+
+        assertEquals(1, rules.size());
+        assertTrue(rules.getFirst().isEgress());
+        assertEquals(list.getPrefixListId(), rules.getFirst().getPrefixListId());
+    }
+
+    /**
+     * A caller may name the source group by name alone, which authorize resolves to a group id
+     * before storing it. Scoped revocation has to resolve the same way, or a rule survives the
+     * revoke that names it.
+     */
+    @Test
+    void revokingAGroupSourceNamedByNameOnlyStillMatchesTheStoredReference() {
+        Ec2Service service = prefixListService();
+        String sourceId = service.createSecurityGroup("us-east-1", "app", "app", null).getGroupId();
+        String targetId = service.createSecurityGroup("us-east-1", "db", "db", null).getGroupId();
+
+        IpPermission authorized = tcpPermission(5432);
+        UserIdGroupPair byName = new UserIdGroupPair();
+        byName.setGroupName("app");
+        authorized.getUserIdGroupPairs().add(byName);
+        List<SecurityGroupRule> rules =
+                service.authorizeSecurityGroupIngress("us-east-1", targetId, List.of(authorized));
+        assertEquals(sourceId, rules.getFirst().getReferencedGroupInfo().getGroupId());
+
+        IpPermission revocation = tcpPermission(5432);
+        UserIdGroupPair alsoByName = new UserIdGroupPair();
+        alsoByName.setGroupName("app");
+        revocation.getUserIdGroupPairs().add(alsoByName);
+        service.revokeSecurityGroupIngress("us-east-1", targetId, List.of(revocation));
+
+        assertTrue(service.describeSecurityGroups("us-east-1", List.of(targetId), List.of(), Map.of())
+                .getFirst().getIpPermissions().isEmpty(), "the revoked group reference must be gone");
+    }
+
+    /**
+     * A rule's tags already reach the store and the rule itself; only DescribeTags mistyped them,
+     * so a resource-type filter never matched.
+     */
+    @Test
+    void tagsOnASecurityGroupRuleAreTypedAsSecurityGroupRule() {
+        Ec2Service service = prefixListService();
+        String groupId = service.createSecurityGroup("us-east-1", "db", "db", null).getGroupId();
+        IpPermission perm = new IpPermission();
+        perm.setIpProtocol("tcp");
+        perm.setFromPort(443);
+        perm.setToPort(443);
+        perm.getIpRanges().add(new IpRange("10.0.0.0/8", null));
+        String ruleId = service.authorizeSecurityGroupIngress("us-east-1", groupId, List.of(perm))
+                .getFirst().getSecurityGroupRuleId();
+
+        service.createTags("us-east-1", List.of(ruleId), List.of(new Tag("env", "prod")));
+
+        assertEquals("security-group-rule", service.describeTags("us-east-1",
+                Map.of("resource-id", List.of(ruleId))).getFirst().get("resourceType"));
+        assertEquals(1, service.describeTags("us-east-1",
+                Map.of("resource-type", List.of("security-group-rule"))).size());
+
+        // Tag the group as well, so the sg- classification is genuinely exercised rather than
+        // read off an empty result.
+        service.createTags("us-east-1", List.of(groupId), List.of(new Tag("env", "prod")));
+        assertEquals("security-group", service.describeTags("us-east-1",
+                Map.of("resource-id", List.of(groupId))).getFirst().get("resourceType"));
+        assertEquals(1, service.describeTags("us-east-1",
+                Map.of("resource-type", List.of("security-group"))).size());
+    }
+
+    // =========================================================================
+    // Transit gateways
+    // =========================================================================
+
+    /**
+     * Every default here was read off a live AWS account rather than the documentation, including
+     * the one that is easy to assume the other way: {@code securityGroupReferencingSupport} is
+     * {@code disable} on a new gateway.
+     */
+    @Test
+    void createTransitGatewayAppliesTheDefaultsAwsApplies() {
+        Ec2Service service = prefixListService();
+
+        TransitGateway gateway = service.createTransitGateway("us-east-1", "hub", null, List.of());
+
+        assertTrue(gateway.getTransitGatewayId().startsWith("tgw-"));
+        assertEquals("arn:aws:ec2:us-east-1:000000000000:transit-gateway/" + gateway.getTransitGatewayId(),
+                gateway.getTransitGatewayArn());
+        assertEquals("available", gateway.getState());
+        assertEquals("000000000000", gateway.getOwnerId());
+        assertEquals("hub", gateway.getDescription());
+
+        TransitGatewayOptions options = gateway.getOptions();
+        assertEquals(64512L, options.getAmazonSideAsn());
+        assertEquals("disable", options.getAutoAcceptSharedAttachments());
+        assertEquals("enable", options.getDefaultRouteTableAssociation());
+        assertEquals("enable", options.getDefaultRouteTablePropagation());
+        assertEquals("enable", options.getVpnEcmpSupport());
+        assertEquals("enable", options.getDnsSupport());
+        assertEquals("disable", options.getSecurityGroupReferencingSupport());
+        assertEquals("disable", options.getMulticastSupport());
+        assertTrue(options.getTransitGatewayCidrBlocks().isEmpty());
+    }
+
+    /**
+     * AWS mints the default route table during creation, so both ids are already on the create
+     * response and both name the same table.
+     */
+    @Test
+    void createTransitGatewayMintsTheDefaultRouteTableAndReportsItsId() {
+        Ec2Service service = prefixListService();
+
+        TransitGatewayOptions options =
+                service.createTransitGateway("us-east-1", null, null, List.of()).getOptions();
+
+        assertNotNull(options.getAssociationDefaultRouteTableId());
+        assertTrue(options.getAssociationDefaultRouteTableId().startsWith("tgw-rtb-"));
+        assertEquals(options.getAssociationDefaultRouteTableId(), options.getPropagationDefaultRouteTableId(),
+                "association and propagation point at the same default table");
+    }
+
+    @Test
+    void aGatewayThatOptsOutOfBothDefaultsGetsNoRouteTable() {
+        Ec2Service service = prefixListService();
+        TransitGatewayOptions requested = new TransitGatewayOptions();
+        requested.setDefaultRouteTableAssociation("disable");
+        requested.setDefaultRouteTablePropagation("disable");
+
+        TransitGatewayOptions options =
+                service.createTransitGateway("us-east-1", null, requested, List.of()).getOptions();
+
+        assertNull(options.getAssociationDefaultRouteTableId());
+        assertNull(options.getPropagationDefaultRouteTableId());
+    }
+
+    @Test
+    void requestedOptionsOverrideTheDefaults() {
+        Ec2Service service = prefixListService();
+        TransitGatewayOptions requested = new TransitGatewayOptions();
+        requested.setAmazonSideAsn(65001L);
+        requested.setDnsSupport("disable");
+        requested.setAutoAcceptSharedAttachments("enable");
+
+        TransitGatewayOptions options =
+                service.createTransitGateway("us-east-1", null, requested, List.of()).getOptions();
+
+        assertEquals(65001L, options.getAmazonSideAsn());
+        assertEquals("disable", options.getDnsSupport());
+        assertEquals("enable", options.getAutoAcceptSharedAttachments());
+        // Untouched options keep their defaults.
+        assertEquals("enable", options.getVpnEcmpSupport());
+    }
+
+    @Test
+    void describeTransitGatewaysFiltersAndRejectsUnknownIds() {
+        Ec2Service service = prefixListService();
+        TransitGateway gateway = service.createTransitGateway("us-east-1", "hub", null,
+                List.of(new Tag("env", "prod")));
+        service.createTransitGateway("us-east-1", "spoke", null, List.of());
+
+        assertEquals(2, service.describeTransitGateways("us-east-1", List.of(), Map.of()).size());
+        assertEquals(1, service.describeTransitGateways("us-east-1", List.of(),
+                Map.of("tag:env", List.of("prod"))).size());
+        assertEquals(gateway.getTransitGatewayId(), service.describeTransitGateways("us-east-1",
+                List.of(gateway.getTransitGatewayId()), Map.of()).getFirst().getTransitGatewayId());
+        // Another region cannot see it.
+        assertTrue(service.describeTransitGateways("eu-west-1", List.of(), Map.of()).isEmpty());
+
+        AwsException notFound = assertThrows(AwsException.class, () -> service.describeTransitGateways(
+                "us-east-1", List.of("tgw-0123456789abcdef0"), Map.of()));
+        assertEquals("InvalidTransitGatewayID.NotFound", notFound.getErrorCode());
+
+        AwsException malformed = assertThrows(AwsException.class, () -> service.describeTransitGateways(
+                "us-east-1", List.of("tgw-nope"), Map.of()));
+        assertEquals("InvalidTransitGatewayID.Malformed", malformed.getErrorCode());
+    }
+
+    @Test
+    void modifyTransitGatewayUpdatesDescriptionOptionsAndCidrBlocks() {
+        Ec2Service service = prefixListService();
+        String id = service.createTransitGateway("us-east-1", "before", null, List.of()).getTransitGatewayId();
+        TransitGatewayOptions changes = new TransitGatewayOptions();
+        changes.setDnsSupport("disable");
+
+        TransitGateway modified = service.modifyTransitGateway("us-east-1", id, "after", changes,
+                List.of("10.100.0.0/16", "10.101.0.0/16"), List.of());
+
+        assertEquals("after", modified.getDescription());
+        assertEquals("disable", modified.getOptions().getDnsSupport());
+        assertEquals(List.of("10.100.0.0/16", "10.101.0.0/16"),
+                modified.getOptions().getTransitGatewayCidrBlocks());
+
+        TransitGateway shrunk = service.modifyTransitGateway("us-east-1", id, null, null,
+                List.of(), List.of("10.100.0.0/16"));
+        assertEquals(List.of("10.101.0.0/16"), shrunk.getOptions().getTransitGatewayCidrBlocks());
+        assertEquals("after", shrunk.getDescription(), "a null description leaves the stored one alone");
+    }
+
+    /**
+     * The flag and its route table id have to move together. Verified against a live account: AWS
+     * refuses to enable association or propagation without being told which existing table to use,
+     * refuses an id alongside a disable, and reports an unknown table as
+     * {@code InvalidRouteTableID.NotFound}. Without this a gateway could report the option enabled
+     * while carrying no id at all.
+     */
+    @Test
+    void enablingADefaultRouteTableOptionRequiresAnExistingRouteTable() {
+        Ec2Service service = prefixListService();
+        TransitGatewayOptions createdWithout = new TransitGatewayOptions();
+        createdWithout.setDefaultRouteTableAssociation("disable");
+        createdWithout.setDefaultRouteTablePropagation("disable");
+        String id = service.createTransitGateway("us-east-1", null, createdWithout, List.of())
+                .getTransitGatewayId();
+
+        TransitGatewayOptions enableOnly = new TransitGatewayOptions();
+        enableOnly.setDefaultRouteTableAssociation("enable");
+        AwsException noId = assertThrows(AwsException.class, () -> service.modifyTransitGateway(
+                "us-east-1", id, null, enableOnly, List.of(), List.of()));
+        assertEquals("InvalidParameterCombination", noId.getErrorCode());
+
+        TransitGatewayOptions propagationOnly = new TransitGatewayOptions();
+        propagationOnly.setDefaultRouteTablePropagation("enable");
+        assertEquals("InvalidParameterCombination", assertThrows(AwsException.class,
+                () -> service.modifyTransitGateway("us-east-1", id, null, propagationOnly,
+                        List.of(), List.of())).getErrorCode());
+
+        TransitGatewayOptions disableWithId = new TransitGatewayOptions();
+        disableWithId.setDefaultRouteTableAssociation("disable");
+        disableWithId.setAssociationDefaultRouteTableId("tgw-rtb-0123456789abcdef0");
+        assertEquals("InvalidParameterCombination", assertThrows(AwsException.class,
+                () -> service.modifyTransitGateway("us-east-1", id, null, disableWithId,
+                        List.of(), List.of())).getErrorCode());
+
+        TransitGatewayOptions unknownTable = new TransitGatewayOptions();
+        unknownTable.setDefaultRouteTableAssociation("enable");
+        unknownTable.setAssociationDefaultRouteTableId("tgw-rtb-0123456789abcdef0");
+        assertEquals("InvalidRouteTableID.NotFound", assertThrows(AwsException.class,
+                () -> service.modifyTransitGateway("us-east-1", id, null, unknownTable,
+                        List.of(), List.of())).getErrorCode());
+
+        // The rejected calls left the gateway as it was, rather than half-applied.
+        TransitGatewayOptions after = service.describeTransitGateways("us-east-1", List.of(id), Map.of())
+                .getFirst().getOptions();
+        assertEquals("disable", after.getDefaultRouteTableAssociation());
+        assertNull(after.getAssociationDefaultRouteTableId());
+    }
+
+    /**
+     * Verified against a live account: a route table belonging to another gateway is rejected
+     * under the same code as one that exists nowhere, with the gateway named in the message.
+     * Without the ownership check the foreign table's own default markers would be rewritten.
+     */
+    @Test
+    void aRouteTableBelongingToAnotherGatewayIsRejected() {
+        AccountAwareStorageBackend<TransitGatewayRouteTable> routeTables =
+                AccountAwareStorageBackend.inMemory("000000000000");
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory(Map.of("ec2-transit-gateway-route-tables.json", routeTables)));
+        TransitGatewayOptions defaultsOff = new TransitGatewayOptions();
+        defaultsOff.setDefaultRouteTableAssociation("disable");
+        defaultsOff.setDefaultRouteTablePropagation("disable");
+        String borrower = service.createTransitGateway("us-east-1", "borrower", defaultsOff, List.of())
+                .getTransitGatewayId();
+        TransitGateway owner = service.createTransitGateway("us-east-1", "owner", null, List.of());
+        String ownersRouteTable = owner.getOptions().getAssociationDefaultRouteTableId();
+
+        TransitGatewayOptions changes = new TransitGatewayOptions();
+        changes.setDefaultRouteTableAssociation("enable");
+        changes.setAssociationDefaultRouteTableId(ownersRouteTable);
+
+        AwsException error = assertThrows(AwsException.class, () -> service.modifyTransitGateway(
+                "us-east-1", borrower, null, changes, List.of(), List.of()));
+        assertEquals("InvalidRouteTableID.NotFound", error.getErrorCode());
+        assertTrue(error.getMessage().contains(borrower),
+                "the message names the gateway the table is missing from");
+
+        // The owner's table kept its markers, and the borrower stayed disabled.
+        TransitGatewayRouteTable stored = routeTables.get("us-east-1::" + ownersRouteTable).orElseThrow();
+        assertTrue(stored.isDefaultAssociationRouteTable());
+        assertNull(service.describeTransitGateways("us-east-1", List.of(borrower), Map.of())
+                .getFirst().getOptions().getAssociationDefaultRouteTableId());
+    }
+
+    /**
+     * The whole flag/id contract, as observed on a live account. The pair is judged against the
+     * gateway as it stands rather than against the request alone, which is what makes an id on its
+     * own legal while the option is enabled and a conflict while it is disabled.
+     */
+    @Test
+    void aRouteTableIdOnItsOwnFollowsTheStoredFlag() {
+        Ec2Service service = prefixListService();
+        TransitGateway gateway = service.createTransitGateway("us-east-1", "hub", null, List.of());
+        String id = gateway.getTransitGatewayId();
+        String routeTableId = gateway.getOptions().getAssociationDefaultRouteTableId();
+
+        // Enabled: an id on its own is accepted, and enable on its own keeps the stored table.
+        TransitGatewayOptions idOnly = new TransitGatewayOptions();
+        idOnly.setAssociationDefaultRouteTableId(routeTableId);
+        assertEquals(routeTableId, service.modifyTransitGateway("us-east-1", id, null, idOnly,
+                List.of(), List.of()).getOptions().getAssociationDefaultRouteTableId());
+
+        TransitGatewayOptions flagOnly = new TransitGatewayOptions();
+        flagOnly.setDefaultRouteTableAssociation("enable");
+        assertEquals(routeTableId, service.modifyTransitGateway("us-east-1", id, null, flagOnly,
+                List.of(), List.of()).getOptions().getAssociationDefaultRouteTableId(),
+                "enable on its own keeps the table already named");
+
+        // Disabled: the same id-only request now conflicts, and the message quotes the stored flag.
+        TransitGatewayOptions disable = new TransitGatewayOptions();
+        disable.setDefaultRouteTableAssociation("disable");
+        service.modifyTransitGateway("us-east-1", id, null, disable, List.of(), List.of());
+
+        AwsException conflict = assertThrows(AwsException.class, () -> service.modifyTransitGateway(
+                "us-east-1", id, null, idOnly, List.of(), List.of()));
+        assertEquals("InvalidParameterCombination", conflict.getErrorCode());
+        assertTrue(conflict.getMessage().startsWith("disable DefaultRouteTableAssociation"),
+                "the stored flag is what the message reports, got: " + conflict.getMessage());
+
+        // A disabled option paired with an unknown table reports the combination, not the lookup.
+        TransitGatewayOptions unknownIdOnly = new TransitGatewayOptions();
+        unknownIdOnly.setAssociationDefaultRouteTableId("tgw-rtb-0123456789abcdef0");
+        assertEquals("InvalidParameterCombination", assertThrows(AwsException.class,
+                () -> service.modifyTransitGateway("us-east-1", id, null, unknownIdOnly,
+                        List.of(), List.of())).getErrorCode());
+
+        // And enable on its own is a conflict once there is no table left to keep.
+        assertEquals("InvalidParameterCombination", assertThrows(AwsException.class,
+                () -> service.modifyTransitGateway("us-east-1", id, null, flagOnly,
+                        List.of(), List.of())).getErrorCode());
+    }
+
+    /** Removals apply before additions, so a CIDR added and removed in one call survives. */
+    @Test
+    void aCidrBlockAddedAndRemovedInOneCallSurvives() {
+        Ec2Service service = prefixListService();
+        String id = service.createTransitGateway("us-east-1", null, null, List.of()).getTransitGatewayId();
+
+        TransitGatewayOptions after = service.modifyTransitGateway("us-east-1", id, null, null,
+                List.of("10.200.0.0/16"), List.of("10.200.0.0/16")).getOptions();
+
+        assertEquals(List.of("10.200.0.0/16"), after.getTransitGatewayCidrBlocks());
+    }
+
+    /** Repointing the default route table at the gateway's own table is accepted. */
+    @Test
+    void aDefaultRouteTableOptionCanBeSetWhenItsRouteTableIsNamed() {
+        Ec2Service service = prefixListService();
+        TransitGateway gateway = service.createTransitGateway("us-east-1", null, null, List.of());
+        String routeTableId = gateway.getOptions().getAssociationDefaultRouteTableId();
+
+        TransitGatewayOptions changes = new TransitGatewayOptions();
+        changes.setDefaultRouteTableAssociation("enable");
+        changes.setAssociationDefaultRouteTableId(routeTableId);
+
+        TransitGatewayOptions after = service.modifyTransitGateway("us-east-1",
+                gateway.getTransitGatewayId(), null, changes, List.of(), List.of()).getOptions();
+
+        assertEquals("enable", after.getDefaultRouteTableAssociation());
+        assertEquals(routeTableId, after.getAssociationDefaultRouteTableId());
+    }
+
+    /**
+     * Verified against a live account: disabling one default drops its id from the options
+     * entirely and clears that marker on the route table, while the other default keeps both its
+     * id and its marker, and the table itself survives.
+     */
+    @Test
+    void disablingADefaultDropsItsIdAndClearsOnlyThatMarker() {
+        AccountAwareStorageBackend<TransitGatewayRouteTable> routeTables =
+                AccountAwareStorageBackend.inMemory("000000000000");
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory(Map.of("ec2-transit-gateway-route-tables.json", routeTables)));
+        TransitGateway gateway = service.createTransitGateway("us-east-1", "hub", null, List.of());
+        String routeTableId = gateway.getOptions().getAssociationDefaultRouteTableId();
+
+        TransitGatewayOptions changes = new TransitGatewayOptions();
+        changes.setDefaultRouteTableAssociation("disable");
+        TransitGatewayOptions after = service.modifyTransitGateway("us-east-1",
+                gateway.getTransitGatewayId(), null, changes, List.of(), List.of()).getOptions();
+
+        assertEquals("disable", after.getDefaultRouteTableAssociation());
+        assertNull(after.getAssociationDefaultRouteTableId(), "the id goes with the flag");
+        assertEquals("enable", after.getDefaultRouteTablePropagation());
+        assertEquals(routeTableId, after.getPropagationDefaultRouteTableId(),
+                "the other default is untouched");
+
+        TransitGatewayRouteTable stored = routeTables.scan(k -> true).getFirst();
+        assertFalse(stored.isDefaultAssociationRouteTable(), "association marker cleared");
+        assertTrue(stored.isDefaultPropagationRouteTable(), "propagation marker kept");
+        assertEquals(routeTableId, stored.getTransitGatewayRouteTableId(), "the table itself survives");
+    }
+
+    @Test
+    void deleteTransitGatewayRemovesTheGatewayAndItsDefaultRouteTable() {
+        AccountAwareStorageBackend<TransitGatewayRouteTable> routeTables =
+                AccountAwareStorageBackend.inMemory("000000000000");
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory(Map.of("ec2-transit-gateway-route-tables.json", routeTables)));
+        String id = service.createTransitGateway("us-east-1", "hub", null, List.of()).getTransitGatewayId();
+        assertEquals(1, routeTables.scan(k -> true).size(), "creation mints the default route table");
+
+        TransitGateway deleted = service.deleteTransitGateway("us-east-1", id);
+
+        assertEquals("deleted", deleted.getState());
+        assertTrue(routeTables.scan(k -> true).isEmpty(), "the default route table goes with the gateway");
+        AwsException gone = assertThrows(AwsException.class,
+                () -> service.describeTransitGateways("us-east-1", List.of(id), Map.of()));
+        assertEquals("InvalidTransitGatewayID.NotFound", gone.getErrorCode());
+    }
+
+    /**
+     * A provider changes tags after creation with CreateTags and DeleteTags rather than resending
+     * a TagSpecification, then re-reads them from DescribeTransitGateways. Those have to be the
+     * same tags, or the resource never converges.
+     */
+    @Test
+    void tagsChangedAfterCreationAreVisibleOnDescribe() {
+        Ec2Service service = prefixListService();
+        String id = service.createTransitGateway("us-east-1", "hub", null,
+                List.of(new Tag("Name", "hub"))).getTransitGatewayId();
+
+        service.createTags("us-east-1", List.of(id), List.of(new Tag("env", "prod")));
+
+        List<Tag> afterCreate = service.describeTransitGateways("us-east-1", List.of(id), Map.of())
+                .getFirst().getTags();
+        assertEquals(2, afterCreate.size(), "describe serves the tags CreateTags stored");
+        assertTrue(afterCreate.stream().anyMatch(t -> "env".equals(t.getKey()) && "prod".equals(t.getValue())));
+
+        service.deleteTags("us-east-1", List.of(id), List.of(new Tag("env", null)));
+
+        List<Tag> afterDelete = service.describeTransitGateways("us-east-1", List.of(id), Map.of())
+                .getFirst().getTags();
+        assertEquals(1, afterDelete.size());
+        assertEquals("Name", afterDelete.getFirst().getKey());
+    }
+
+    @Test
+    void tagsOnATransitGatewayAreTypedAsTransitGateway() {
+        Ec2Service service = prefixListService();
+        String id = service.createTransitGateway("us-east-1", "hub", null,
+                List.of(new Tag("env", "prod"))).getTransitGatewayId();
+
+        assertEquals("transit-gateway", service.describeTags("us-east-1",
+                Map.of("resource-id", List.of(id))).getFirst().get("resourceType"));
+        assertEquals(1, service.describeTags("us-east-1",
+                Map.of("resource-type", List.of("transit-gateway"))).size());
     }
 
     private static EmulatorConfig mockConfig(boolean ec2Mock) {

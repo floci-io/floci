@@ -292,6 +292,16 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>pipes</artifactId>
         </dependency>
+        <!-- Bedrock AgentCore control-plane client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>bedrockagentcorecontrol</artifactId>
+        </dependency>
+        <!-- Bedrock AgentCore data-plane client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>bedrockagentcore</artifactId>
+        </dependency>
         <!-- AWS IoT client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
@@ -368,6 +378,11 @@
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>s3vectors</artifactId>
+        </dependency>
+        <!-- S3 Tables client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>s3tables</artifactId>
         </dependency>
         <!-- AppConfig and AppConfigData clients -->
         <dependency>

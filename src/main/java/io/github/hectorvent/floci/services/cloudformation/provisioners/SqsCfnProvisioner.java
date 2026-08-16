@@ -50,17 +50,42 @@ public class SqsCfnProvisioner implements CfnResourceProvisioner {
     }
 
     private void provisionQueue(StackResource r, JsonNode props, ProvisionContext ctx) {
+        String fifoFlag = props != null && props.has("FifoQueue")
+                ? ctx.engine().resolve(props.get("FifoQueue"))
+                : null;
+        boolean fifo = "true".equalsIgnoreCase(fifoFlag);
         String queueName = ctx.resolveOptional(props, "QueueName");
         if (queueName == null || queueName.isBlank()) {
-            queueName = ctx.generatePhysicalName(r.getLogicalId(), 80, false);
+            // Like real CloudFormation, generated names of FIFO queues must end in .fifo
+            // (SqsService rejects FifoQueue=true otherwise). Keep within the 80-char limit.
+            queueName = fifo
+                    ? ctx.generatePhysicalName(r.getLogicalId(), 75, false) + ".fifo"
+                    : ctx.generatePhysicalName(r.getLogicalId(), 80, false);
         }
         Map<String, String> attrs = new HashMap<>();
         if (props != null) {
+            if (fifoFlag != null) {
+                attrs.put("FifoQueue", fifoFlag);
+            }
             if (props.has("VisibilityTimeout")) {
                 attrs.put("VisibilityTimeout", ctx.engine().resolve(props.get("VisibilityTimeout")));
             }
             if (props.has("ContentBasedDeduplication")) {
                 attrs.put("ContentBasedDeduplication", ctx.engine().resolve(props.get("ContentBasedDeduplication")));
+            }
+            if (props.has("DeduplicationScope")) {
+                attrs.put("DeduplicationScope", ctx.engine().resolve(props.get("DeduplicationScope")));
+            }
+            if (props.has("FifoThroughputLimit")) {
+                attrs.put("FifoThroughputLimit", ctx.engine().resolve(props.get("FifoThroughputLimit")));
+            }
+            if (props.has("RedrivePolicy") && !props.path("RedrivePolicy").isNull()) {
+                // Usually a JSON object in the template (deadLetterTargetArn is an Fn::GetAtt);
+                // resolveNode resolves intrinsics in place and SqsService expects the JSON string.
+                // CDK commonly emits RedrivePolicy as an already-serialized string via Fn::Join,
+                // which resolveNode collapses to a TextNode — unwrap it instead of calling
+                // toString(), which would JSON-re-encode (quote/escape) the string a second time.
+                attrs.put("RedrivePolicy", ctx.engine().resolveJsonAttribute(props.path("RedrivePolicy")));
             }
         }
         Queue queue = sqsService.createQueue(queueName, attrs, ctx.region());

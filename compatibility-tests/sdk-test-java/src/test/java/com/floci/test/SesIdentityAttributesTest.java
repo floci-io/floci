@@ -11,25 +11,37 @@ import org.junit.jupiter.api.TestMethodOrder;
 import software.amazon.awssdk.awscore.exception.AwsServiceException;
 import software.amazon.awssdk.services.ses.SesClient;
 import software.amazon.awssdk.services.ses.model.DeleteIdentityRequest;
+import software.amazon.awssdk.services.ses.model.GetIdentityDkimAttributesRequest;
 import software.amazon.awssdk.services.ses.model.GetIdentityMailFromDomainAttributesRequest;
 import software.amazon.awssdk.services.ses.model.GetIdentityMailFromDomainAttributesResponse;
 import software.amazon.awssdk.services.ses.model.GetIdentityNotificationAttributesRequest;
 import software.amazon.awssdk.services.ses.model.GetIdentityNotificationAttributesResponse;
+import software.amazon.awssdk.services.ses.model.IdentityDkimAttributes;
 import software.amazon.awssdk.services.ses.model.IdentityMailFromDomainAttributes;
 import software.amazon.awssdk.services.ses.model.IdentityNotificationAttributes;
+import software.amazon.awssdk.services.ses.model.SetIdentityDkimEnabledRequest;
 import software.amazon.awssdk.services.ses.model.SetIdentityFeedbackForwardingEnabledRequest;
 import software.amazon.awssdk.services.ses.model.SetIdentityHeadersInNotificationsEnabledRequest;
 import software.amazon.awssdk.services.ses.model.SetIdentityMailFromDomainRequest;
+import software.amazon.awssdk.services.ses.model.VerifyDomainDkimRequest;
 import software.amazon.awssdk.services.ses.model.VerifyDomainIdentityRequest;
 
 import software.amazon.awssdk.services.sesv2.SesV2Client;
 import software.amazon.awssdk.services.sesv2.model.BadRequestException;
 import software.amazon.awssdk.services.sesv2.model.CreateEmailIdentityRequest;
 import software.amazon.awssdk.services.sesv2.model.DeleteEmailIdentityRequest;
+import software.amazon.awssdk.services.sesv2.model.DkimAttributes;
+import software.amazon.awssdk.services.sesv2.model.DkimSigningAttributes;
+import software.amazon.awssdk.services.sesv2.model.DkimStatus;
+import software.amazon.awssdk.services.sesv2.model.DkimSigningAttributesOrigin;
+import software.amazon.awssdk.services.sesv2.model.DkimSigningKeyLength;
 import software.amazon.awssdk.services.sesv2.model.GetEmailIdentityRequest;
 import software.amazon.awssdk.services.sesv2.model.GetEmailIdentityResponse;
 import software.amazon.awssdk.services.sesv2.model.IdentityInfo;
 import software.amazon.awssdk.services.sesv2.model.ListEmailIdentitiesRequest;
+import software.amazon.awssdk.services.sesv2.model.NotFoundException;
+import software.amazon.awssdk.services.sesv2.model.PutEmailIdentityDkimSigningAttributesRequest;
+import software.amazon.awssdk.services.sesv2.model.PutEmailIdentityDkimSigningAttributesResponse;
 import software.amazon.awssdk.services.sesv2.model.PutEmailIdentityMailFromAttributesRequest;
 import software.amazon.awssdk.services.sesv2.model.VerificationStatus;
 
@@ -46,6 +58,13 @@ class SesIdentityAttributesTest {
     private static SesV2Client sesV2;
     private static String v1Domain;
     private static String v2Domain;
+    // DKIM tests use their own identities so their token regeneration / status resets don't interfere
+    // with the ordered MAIL FROM / notification tests above.
+    private static String dkimDomain;
+    // A separate domain that is DKIM-verified (Success) via Route53, plus an email under it, to check
+    // that an email inherits its parent domain's *verified* DKIM.
+    private static String verifiedDkimDomain;
+    private static String verifiedDkimEmail;
 
     @BeforeAll
     static void setup() {
@@ -54,6 +73,9 @@ class SesIdentityAttributesTest {
         String suffix = TestFixtures.uniqueName();
         v1Domain = suffix + ".v1-attrs.example.com";
         v2Domain = suffix + ".v2-attrs.example.com";
+        dkimDomain = suffix + ".dkim-attrs.example.com";
+        verifiedDkimDomain = suffix + ".dkim-verified.example.com";
+        verifiedDkimEmail = "user@" + verifiedDkimDomain;
     }
 
     @AfterAll
@@ -62,13 +84,17 @@ class SesIdentityAttributesTest {
             try {
                 sesV1.deleteIdentity(DeleteIdentityRequest.builder().identity(v1Domain).build());
             } catch (Exception ignored) {}
+            try {
+                sesV1.deleteIdentity(DeleteIdentityRequest.builder().identity(dkimDomain).build());
+            } catch (Exception ignored) {}
             sesV1.close();
         }
         if (sesV2 != null) {
-            try {
-                sesV2.deleteEmailIdentity(DeleteEmailIdentityRequest.builder()
-                        .emailIdentity(v2Domain).build());
-            } catch (Exception ignored) {}
+            for (String id : new String[] {v2Domain, verifiedDkimEmail, verifiedDkimDomain}) {
+                try {
+                    sesV2.deleteEmailIdentity(DeleteEmailIdentityRequest.builder().emailIdentity(id).build());
+                } catch (Exception ignored) {}
+            }
             sesV2.close();
         }
     }
@@ -197,5 +223,92 @@ class SesIdentityAttributesTest {
             sesV2.deleteEmailIdentity(DeleteEmailIdentityRequest.builder().emailIdentity(email).build());
             sesV2.deleteEmailIdentity(DeleteEmailIdentityRequest.builder().emailIdentity(domain).build());
         }
+    }
+
+    // ───────────────────────── DKIM ─────────────────────────
+
+    @Test
+    @Order(20)
+    void verifyDomainDkim_returnsStableTokens() {
+        sesV1.verifyDomainIdentity(VerifyDomainIdentityRequest.builder().domain(dkimDomain).build());
+
+        List<String> first = sesV1.verifyDomainDkim(
+                VerifyDomainDkimRequest.builder().domain(dkimDomain).build()).dkimTokens();
+        assertThat(first).hasSize(3);
+
+        List<String> second = sesV1.verifyDomainDkim(
+                VerifyDomainDkimRequest.builder().domain(dkimDomain).build()).dkimTokens();
+        assertThat(second).isEqualTo(first);
+    }
+
+    @Test
+    @Order(21)
+    void setIdentityDkimEnabled_togglesFlag() {
+        sesV1.setIdentityDkimEnabled(SetIdentityDkimEnabledRequest.builder()
+                .identity(dkimDomain).dkimEnabled(false).build());
+
+        IdentityDkimAttributes attrs = sesV1.getIdentityDkimAttributes(
+                GetIdentityDkimAttributesRequest.builder().identities(dkimDomain).build())
+                .dkimAttributes().get(dkimDomain);
+        assertThat(attrs.dkimEnabled()).isFalse();
+
+        sesV1.setIdentityDkimEnabled(SetIdentityDkimEnabledRequest.builder()
+                .identity(dkimDomain).dkimEnabled(true).build());
+    }
+
+    @Test
+    @Order(22)
+    void setIdentityDkimEnabled_unknownIdentity_throws() {
+        assertThatThrownBy(() -> sesV1.setIdentityDkimEnabled(SetIdentityDkimEnabledRequest.builder()
+                .identity("unknown." + dkimDomain).dkimEnabled(true).build()))
+                .isInstanceOf(AwsServiceException.class);
+    }
+
+    @Test
+    @Order(23)
+    void putEmailIdentityDkimSigningAttributes_regeneratesTokensOnKeyLengthChange() {
+        List<String> before = sesV2.getEmailIdentity(GetEmailIdentityRequest.builder()
+                .emailIdentity(dkimDomain).build()).dkimAttributes().tokens();
+
+        PutEmailIdentityDkimSigningAttributesResponse resp = sesV2.putEmailIdentityDkimSigningAttributes(
+                PutEmailIdentityDkimSigningAttributesRequest.builder()
+                        .emailIdentity(dkimDomain)
+                        .signingAttributesOrigin(DkimSigningAttributesOrigin.AWS_SES)
+                        .signingAttributes(DkimSigningAttributes.builder()
+                                .nextSigningKeyLength(DkimSigningKeyLength.RSA_1024_BIT).build())
+                        .build());
+        assertThat(resp.dkimTokens()).hasSize(3);
+        assertThat(resp.dkimTokens()).isNotEqualTo(before);
+    }
+
+    @Test
+    @Order(24)
+    void putEmailIdentityDkimSigningAttributes_unknownIdentity_throwsNotFound() {
+        assertThatThrownBy(() -> sesV2.putEmailIdentityDkimSigningAttributes(
+                PutEmailIdentityDkimSigningAttributesRequest.builder()
+                        .emailIdentity("ghost." + dkimDomain)
+                        .signingAttributesOrigin(DkimSigningAttributesOrigin.AWS_SES)
+                        .build()))
+                .isInstanceOf(NotFoundException.class);
+    }
+
+    @Test
+    @Order(25)
+    void emailIdentity_inheritsVerifiedParentDomainDkim() {
+        // Bring the parent domain to DKIM Success via Route53 so the email inherits SUCCESS (not Pending).
+        TestFixtures.verifySesDomainIdentityViaRoute53(sesV2, verifiedDkimDomain);
+        DkimAttributes domainDkim = sesV2.getEmailIdentity(GetEmailIdentityRequest.builder()
+                .emailIdentity(verifiedDkimDomain).build()).dkimAttributes();
+        assertThat(domainDkim.status()).isEqualTo(DkimStatus.SUCCESS);
+
+        sesV2.createEmailIdentity(CreateEmailIdentityRequest.builder()
+                .emailIdentity(verifiedDkimEmail).build());
+        DkimAttributes emailDkim = sesV2.getEmailIdentity(GetEmailIdentityRequest.builder()
+                .emailIdentity(verifiedDkimEmail).build()).dkimAttributes();
+
+        // The email carries no DKIM of its own; it mirrors the verified domain's status and tokens.
+        assertThat(emailDkim.signingEnabled()).isTrue();
+        assertThat(emailDkim.status()).isEqualTo(DkimStatus.SUCCESS);
+        assertThat(emailDkim.tokens()).isEqualTo(domainDkim.tokens());
     }
 }

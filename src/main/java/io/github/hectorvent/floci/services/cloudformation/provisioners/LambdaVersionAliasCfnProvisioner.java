@@ -11,6 +11,8 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -83,6 +85,16 @@ public class LambdaVersionAliasCfnProvisioner implements CfnResourceProvisioner 
         }
         String description = ctx.resolveOptional(props, "Description");
 
+        // Version resources are immutable in CloudFormation. An update re-invokes provision with
+        // the prior physical id, and publishing again would mint a new version and repoint every
+        // Ref to it, so the version this resource already published is kept while it still exists.
+        String previous = r.getPhysicalId();
+        if (previous != null && existingVersionIsCurrent(ctx.region(), functionName, previous)) {
+            r.getAttributes().put("Version", previous.substring(previous.lastIndexOf(':') + 1));
+            r.getAttributes().put("FunctionArn", previous);
+            return;
+        }
+
         LambdaFunction version = lambdaService.publishVersion(ctx.region(), functionName, description);
 
         // Matches real CloudFormation: Ref returns the qualified ARN, GetAtt Version the version
@@ -90,6 +102,26 @@ public class LambdaVersionAliasCfnProvisioner implements CfnResourceProvisioner 
         r.setPhysicalId(version.getFunctionArn());
         r.getAttributes().put("Version", version.getVersion());
         r.getAttributes().put("FunctionArn", version.getFunctionArn());
+    }
+
+    /** True when {@code physicalId} names a still-published version of the function in the template. */
+    private boolean existingVersionIsCurrent(String region, String functionName, String physicalId) {
+        int sep = physicalId.lastIndexOf(':');
+        if (sep <= 0) {
+            return false;
+        }
+        String version = physicalId.substring(sep + 1);
+        String baseArn = physicalId.substring(0, sep);
+        try {
+            LambdaFunction fn = lambdaService.getFunction(region, functionName);
+            if (!baseArn.equals(fn.getFunctionArn().replace(":$LATEST", ""))) {
+                return false; // the FunctionName property now points at a different function
+            }
+            return lambdaService.listVersionsByFunction(region, functionName).stream()
+                    .anyMatch(v -> version.equals(v.getVersion()));
+        } catch (AwsException e) {
+            return false;
+        }
     }
 
     private void provisionAlias(StackResource r, JsonNode props, ProvisionContext ctx) {
@@ -102,12 +134,12 @@ public class LambdaVersionAliasCfnProvisioner implements CfnResourceProvisioner 
         String functionVersion = ctx.resolveOptional(props, "FunctionVersion");
         String description = ctx.resolveOptional(props, "Description");
 
-        // RoutingConfig is not carried over yet — the alias APIs support it, but nothing in the
-        // SAM expansion emits it, so wiring it here would be untested surface.
+        Map<String, Double> routingConfig = parseRoutingConfig(props, ctx);
+
         LambdaAlias alias;
         try {
             alias = lambdaService.createAlias(ctx.region(), functionName, aliasName,
-                    functionVersion, description, null);
+                    functionVersion, description, routingConfig);
         } catch (AwsException e) {
             // An alias surviving from a prior deploy makes create conflict; converge on it rather
             // than failing the stack, so a redeploy is idempotent.
@@ -115,11 +147,32 @@ public class LambdaVersionAliasCfnProvisioner implements CfnResourceProvisioner 
                 throw e;
             }
             LOG.debugv("Alias {0} exists on {1}, updating instead", aliasName, functionName);
+            // An absent RoutingConfig clears any previous weights, since an empty map clears in
+            // LambdaService#updateAlias while null keeps what is there.
             alias = lambdaService.updateAlias(ctx.region(), functionName, aliasName,
-                    functionVersion, description, null);
+                    functionVersion, description, routingConfig != null ? routingConfig : Map.of());
         }
 
         r.setPhysicalId(alias.getAliasArn());
         r.getAttributes().put("AliasArn", alias.getAliasArn());
+    }
+
+    /**
+     * Parses the CloudFormation {@code RoutingConfig.AdditionalVersionWeights} list
+     * ({@code [{FunctionVersion, FunctionWeight}]}) into the service's version-to-weight map.
+     */
+    private Map<String, Double> parseRoutingConfig(JsonNode props, ProvisionContext ctx) {
+        if (props == null || !props.has("RoutingConfig") || props.get("RoutingConfig").isNull()) {
+            return null;
+        }
+        Map<String, Double> routing = new LinkedHashMap<>();
+        JsonNode weights = props.get("RoutingConfig").path("AdditionalVersionWeights");
+        if (weights.isArray()) {
+            for (JsonNode weight : weights) {
+                String version = ctx.engine().resolve(weight.get("FunctionVersion"));
+                routing.put(version, Double.parseDouble(ctx.engine().resolve(weight.get("FunctionWeight"))));
+            }
+        }
+        return routing;
     }
 }
