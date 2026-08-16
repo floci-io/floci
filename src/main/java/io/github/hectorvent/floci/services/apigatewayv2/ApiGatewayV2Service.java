@@ -230,6 +230,13 @@ public class ApiGatewayV2Service {
         return api;
     }
 
+    /** Removes the optional HTTP API CORS configuration. */
+    public void deleteCorsConfiguration(String region, String apiId) {
+        Api api = getApi(region, apiId);
+        api.setCorsConfiguration(null);
+        apiStore.put(apiKey(region, apiId), api);
+    }
+
     private static boolean booleanValue(Object value) {
         return value != null && Boolean.parseBoolean(String.valueOf(value));
     }
