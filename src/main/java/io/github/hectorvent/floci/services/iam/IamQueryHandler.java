@@ -92,6 +92,7 @@ public class IamQueryHandler {
             // Groups
             case "CreateGroup" -> handleCreateGroup(params);
             case "GetGroup" -> handleGetGroup(params);
+            case "UpdateGroup" -> handleUpdateGroup(params);
             case "DeleteGroup" -> handleDeleteGroup(params);
             case "ListGroups" -> handleListGroups(params);
             case "AddUserToGroup" -> handleAddUserToGroup(params);
@@ -582,6 +583,12 @@ public class IamQueryHandler {
         }
         xml.end("Users").elem("IsTruncated", false);
         return Response.ok(AwsQueryResponse.envelope("GetGroup", AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    private Response handleUpdateGroup(MultivaluedMap<String, String> params) {
+        iamService.updateGroup(getParam(params, "GroupName"),
+                getParam(params, "NewGroupName"), getParam(params, "NewPath"));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("UpdateGroup", AwsNamespaces.IAM)).build();
     }
 
     private Response handleDeleteGroup(MultivaluedMap<String, String> params) {

@@ -41,6 +41,7 @@ type.
 |--------|-------------|
 | CreateGroup | Creates an IAM group. |
 | GetGroup | Returns an IAM group and its users. |
+| UpdateGroup | Renames a group and/or changes its path; ARN and stored users move with it. |
 | DeleteGroup | Deletes an IAM group from the local IAM store. |
 | ListGroups | Lists IAM groups in the local account. |
 | AddUserToGroup | Adds a user to an IAM group. |

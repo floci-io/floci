@@ -442,6 +442,27 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                         "The group with name " + groupName + " cannot be found.", 404));
     }
 
+    public void updateGroup(String groupName, String newGroupName, String newPath) {
+        IamGroup group = getGroup(groupName);
+        if (newGroupName != null && !newGroupName.equals(groupName)) {
+            if (groups.get(newGroupName).isPresent()) {
+                throw new AwsException("EntityAlreadyExists",
+                        "Group with name " + newGroupName + " already exists.", 409);
+            }
+            groups.delete(groupName);
+            group.setGroupName(newGroupName);
+            if (newPath != null) group.setPath(normalizePath(newPath));
+            group.setArn(iamArn("group", group.getPath(), newGroupName));
+            groups.put(newGroupName, group);
+        } else {
+            if (newPath != null) {
+                group.setPath(normalizePath(newPath));
+                group.setArn(iamArn("group", group.getPath(), groupName));
+            }
+            groups.put(groupName, group);
+        }
+    }
+
     public void deleteGroup(String groupName) {
         IamGroup group = getGroup(groupName);
         if (!group.getAttachedPolicyArns().isEmpty() || !group.getInlinePolicies().isEmpty()) {
