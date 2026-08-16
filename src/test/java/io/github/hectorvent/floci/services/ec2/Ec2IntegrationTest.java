@@ -292,6 +292,74 @@ class Ec2IntegrationTest {
         assertEquals("000000000000", owner);
     }
 
+    /**
+     * Owner scope, then the id and alias the synthesized image must report together. A null
+     * expectedAlias means AWS reports no alias for that account, so the element is asserted
+     * absent from the body rather than compared as a value.
+     */
+    private void assertSynthesizedOwnership(String ownerScope, String expectedId, String expectedAlias) {
+        var response = given()
+            .formParam("Action", "DescribeImages")
+            .formParam("Owner.1", ownerScope)
+            .formParam("Filter.1.Name", "name")
+            .formParam("Filter.1.Value.1", "unmatched-coherence-" + ownerScope + "-*")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeImagesResponse.imagesSet.item.size()", equalTo(1))
+            .extract();
+
+        assertEquals(expectedId, response.path("DescribeImagesResponse.imagesSet.item.imageOwnerId"),
+                "imageOwnerId for Owner.1=" + ownerScope);
+        if (expectedAlias == null) {
+            assertThat("imageOwnerAlias for Owner.1=" + ownerScope,
+                    response.asString(), not(containsString("<imageOwnerAlias>")));
+        } else {
+            assertEquals(expectedAlias,
+                    response.path("DescribeImagesResponse.imagesSet.item.imageOwnerAlias").toString(),
+                    "imageOwnerAlias for Owner.1=" + ownerScope);
+        }
+    }
+
+    @Test
+    @Order(9)
+    void synthesizedOwnershipIsSelfConsistentAcrossOwnerScopes() {
+        // Every earlier round here fixed one field and left the one beside it, so this asserts the
+        // pair together. An id resolved from the scope with an alias defaulted to amazon reports
+        // ownership that contradicts itself.
+        assertSynthesizedOwnership("self", "000000000000", null);
+        assertSynthesizedOwnership("amazon", "137112412989", "amazon");
+        assertSynthesizedOwnership("aws-marketplace", "679593333241", "aws-marketplace");
+        assertSynthesizedOwnership("099720109477", "099720109477", null);
+    }
+
+    @Test
+    @Order(9)
+    void anOwnerAliasFilterAloneStillAgreesWithTheOwnerId() {
+        // The mirror of the above. Filtering on the alias with no Owner.N left the id at the
+        // Amazon default, so the image reported aws-marketplace beside Amazon's account.
+        var response = given()
+            .formParam("Action", "DescribeImages")
+            .formParam("Filter.1.Name", "name")
+            .formParam("Filter.1.Value.1", "unmatched-alias-filter-only-*")
+            .formParam("Filter.2.Name", "owner-alias")
+            .formParam("Filter.2.Value.1", "aws-marketplace")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeImagesResponse.imagesSet.item.size()", equalTo(1))
+            .extract();
+
+        assertEquals("679593333241",
+                response.path("DescribeImagesResponse.imagesSet.item.imageOwnerId"));
+        assertEquals("aws-marketplace",
+                response.path("DescribeImagesResponse.imagesSet.item.imageOwnerAlias").toString());
+    }
+
     @Test
     @Order(9)
     void aWildcardBehindAnExactNameValueStillSynthesizes() {

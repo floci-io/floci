@@ -1733,13 +1733,31 @@ public class Ec2QueryHandler {
      * id in {@code imageOwnerId}, so each alias resolves to the account it names.
      */
     private String resolveSynthOwner(Map<String, List<String>> filters, List<String> owners) {
+        // An owner-alias filter names an account just as much as Owner.N does, so it is consulted
+        // before the default. Without that, filtering on owner-alias alone produced an image
+        // carrying that alias beside the default Amazon account id, contradicting itself the same
+        // way an unresolved alias did in the other direction.
         String requested = filters.getOrDefault("owner-id", owners == null ? List.of() : owners)
-                .stream().findFirst().orElse(AMAZON_OWNER_ID);
+                .stream().findFirst()
+                .orElseGet(() -> firstFilterValue(filters, "owner-alias", AMAZON_OWNER_ID));
         return switch (requested) {
             case "self" -> config.defaultAccountId();
             case "amazon" -> AMAZON_OWNER_ID;
             case "aws-marketplace" -> AWS_MARKETPLACE_OWNER_ID;
             default -> requested;
+        };
+    }
+
+    /**
+     * The alias that belongs to a resolved owner account, or null when the account has none. AWS
+     * only sets imageOwnerAlias for its own published images, so defaulting it to amazon reported
+     * ownership contradicting the owner id whenever the scope named anything else.
+     */
+    private static String aliasForOwner(String ownerId) {
+        return switch (ownerId) {
+            case AMAZON_OWNER_ID -> "amazon";
+            case AWS_MARKETPLACE_OWNER_ID -> "aws-marketplace";
+            default -> null;
         };
     }
 
@@ -1769,8 +1787,9 @@ public class Ec2QueryHandler {
                 .replace("*", SYNTH_WILDCARD_TOKEN)
                 .replace("?", SYNTH_SINGLE_CHAR_TOKEN));
         img.setState(firstFilterValue(filters, "state", "available"));
-        img.setOwnerId(resolveSynthOwner(filters, owners));
-        img.setImageOwnerAlias(firstFilterValue(filters, "owner-alias", "amazon"));
+        String ownerId = resolveSynthOwner(filters, owners);
+        img.setOwnerId(ownerId);
+        img.setImageOwnerAlias(firstFilterValue(filters, "owner-alias", aliasForOwner(ownerId)));
         img.setPublic(true);
         img.setArchitecture(firstFilterValue(filters, "architecture", "x86_64"));
         img.setRootDeviceType(firstFilterValue(filters, "root-device-type", "ebs"));
