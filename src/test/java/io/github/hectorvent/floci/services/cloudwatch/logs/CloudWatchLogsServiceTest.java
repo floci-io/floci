@@ -270,6 +270,83 @@ class CloudWatchLogsServiceTest {
     }
 
     @Test
+    void describeLogStreamsRejectsMalformedNextToken() {
+        // A garbage token must fail loudly: silently restarting from the first page makes
+        // custom pagination loops duplicate results or never progress.
+        service.createLogGroup("/app/logs", null, null, REGION);
+        service.createLogStream("/app/logs", "stream-1", REGION);
+
+        AwsException e = assertThrows(AwsException.class, () ->
+                service.describeLogStreams("/app/logs", null, null, false, 0, "not-a-token", REGION));
+        assertEquals("InvalidParameterException", e.getErrorCode());
+    }
+
+    @Test
+    void describeLogStreamsRejectsTokenFromDifferentOrdering() {
+        service.createLogGroup("/app/logs", null, null, REGION);
+        service.createLogStream("/app/logs", "stream-1", REGION);
+        service.createLogStream("/app/logs", "stream-2", REGION);
+
+        String nameOrderToken = service
+                .describeLogStreams("/app/logs", null, null, false, 1, null, REGION)
+                .nextToken();
+        assertNotNull(nameOrderToken);
+
+        AwsException e = assertThrows(AwsException.class, () ->
+                service.describeLogStreams("/app/logs", null, "LastEventTime", true, 1, nameOrderToken, REGION));
+        assertEquals("InvalidParameterException", e.getErrorCode());
+    }
+
+    @Test
+    void describeLogStreamsPaginationDoesNotSkipAfterDeletionBetweenPages() {
+        // A positional offset applied to the re-scanned collection would skip stream-3 here:
+        // deleting already-returned stream-1 shifts everything left by one. The cursor keeps
+        // the resume point anchored to the last returned stream instead.
+        service.createLogGroup("/app/logs", null, null, REGION);
+        for (int i = 1; i <= 4; i++) {
+            service.createLogStream("/app/logs", "stream-" + i, REGION);
+        }
+
+        var page1 = service.describeLogStreams("/app/logs", null, null, false, 2, null, REGION);
+        assertEquals(List.of("stream-1", "stream-2"),
+                page1.logStreams().stream().map(LogStream::getLogStreamName).toList());
+
+        service.deleteLogStream("/app/logs", "stream-1", REGION);
+
+        var page2 = service.describeLogStreams("/app/logs", null, null, false, 2, page1.nextToken(), REGION);
+        assertEquals(List.of("stream-3", "stream-4"),
+                page2.logStreams().stream().map(LogStream::getLogStreamName).toList());
+        assertNull(page2.nextToken());
+    }
+
+    @Test
+    void describeLogStreamsLastEventTimePaginationDoesNotRepeatReorderedStreams() {
+        // PutLogEvents to an already-returned stream between pages moves it even further
+        // ahead in descending order. A positional offset would then re-serve the stream at
+        // the boundary; the cursor never returns anything at-or-before the last seen key.
+        service.createLogGroup("/app/logs", null, null, REGION);
+        service.createLogStream("/app/logs", "a", REGION);
+        service.createLogStream("/app/logs", "b", REGION);
+        service.createLogStream("/app/logs", "c", REGION);
+        service.createLogStream("/app/logs", "d", REGION);
+        service.putLogEvents("/app/logs", "a", List.of(Map.of("timestamp", 1000L, "message", "x")), REGION);
+        service.putLogEvents("/app/logs", "b", List.of(Map.of("timestamp", 2000L, "message", "x")), REGION);
+        service.putLogEvents("/app/logs", "c", List.of(Map.of("timestamp", 3000L, "message", "x")), REGION);
+        service.putLogEvents("/app/logs", "d", List.of(Map.of("timestamp", 4000L, "message", "x")), REGION);
+
+        var page1 = service.describeLogStreams("/app/logs", null, "LastEventTime", true, 2, null, REGION);
+        assertEquals(List.of("d", "c"),
+                page1.logStreams().stream().map(LogStream::getLogStreamName).toList());
+
+        service.putLogEvents("/app/logs", "d", List.of(Map.of("timestamp", 5000L, "message", "x")), REGION);
+
+        var page2 = service.describeLogStreams("/app/logs", null, "LastEventTime", true, 2, page1.nextToken(), REGION);
+        assertEquals(List.of("b", "a"),
+                page2.logStreams().stream().map(LogStream::getLogStreamName).toList());
+        assertNull(page2.nextToken());
+    }
+
+    @Test
     void describeLogStreamsRejectsLastEventTimeWithPrefix() {
         service.createLogGroup("/app/logs", null, null, REGION);
         AwsException e = assertThrows(AwsException.class, () ->

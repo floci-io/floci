@@ -15,7 +15,9 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -344,26 +346,74 @@ public class CloudWatchLogsService {
         });
         // Streams that never received events have no lastEventTimestamp; sort them oldest,
         // with the name as tie-break so the order stays deterministic.
-        Comparator<LogStream> comparator = byLastEventTime
+        Comparator<LogStream> base = byLastEventTime
                 ? Comparator.comparingLong((LogStream s) ->
                                 s.getLastEventTimestamp() == null ? Long.MIN_VALUE : s.getLastEventTimestamp())
                         .thenComparing(LogStream::getLogStreamName)
                 : Comparator.comparing(LogStream::getLogStreamName);
-        result.sort(descending ? comparator.reversed() : comparator);
+        Comparator<LogStream> order = descending ? base.reversed() : base;
+        result.sort(order);
 
-        int maxResults = Math.min(limit > 0 ? limit : 50, 50);
-        int offset = 0;
+        // The token is a cursor on the sort key of the last stream returned, not a positional
+        // offset: streams created, deleted or reordered between page requests must not shift
+        // the resume point, or callers see duplicates and gaps. Names are unique per group and
+        // the comparator tie-breaks on name, so "strictly after the cursor" is well-defined.
+        int start = 0;
         if (nextToken != null && !nextToken.isBlank()) {
-            try {
-                offset = Integer.parseInt(nextToken);
-            } catch (NumberFormatException e) {
-                offset = 0;
+            LogStream cursor = decodeStreamCursor(nextToken, byLastEventTime, descending);
+            while (start < result.size() && order.compare(result.get(start), cursor) <= 0) {
+                start++;
             }
         }
-        int start = Math.min(offset, result.size());
+        int maxResults = Math.min(limit > 0 ? limit : 50, 50);
         int end = Math.min(start + maxResults, result.size());
-        String token = end < result.size() ? String.valueOf(end) : null;
+        String token = end < result.size()
+                ? encodeStreamCursor(result.get(end - 1), byLastEventTime, descending)
+                : null;
         return new DescribeLogStreamsResult(result.subList(start, end), token);
+    }
+
+    // Cursor format (base64 of "v1:<order>:<direction>:<lastEventTimestamp|->:<name>").
+    // ':' cannot appear in a log stream name, and the name comes last, so the split is safe.
+    // The ordering fields are embedded so a token replayed against a query with different
+    // orderBy/descending arguments is rejected instead of resuming at a meaningless position.
+
+    private static String encodeStreamCursor(LogStream last, boolean byLastEventTime, boolean descending) {
+        String raw = "v1:" + (byLastEventTime ? "ts" : "name") + ":" + (descending ? "desc" : "asc") + ":"
+                + (last.getLastEventTimestamp() == null ? "-" : last.getLastEventTimestamp()) + ":"
+                + last.getLogStreamName();
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(raw.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static LogStream decodeStreamCursor(String nextToken, boolean byLastEventTime, boolean descending) {
+        String[] parts;
+        try {
+            String raw = new String(Base64.getUrlDecoder().decode(nextToken), StandardCharsets.UTF_8);
+            parts = raw.split(":", 5);
+        } catch (IllegalArgumentException e) {
+            throw invalidNextToken();
+        }
+        if (parts.length != 5
+                || !"v1".equals(parts[0])
+                || !(byLastEventTime ? "ts" : "name").equals(parts[1])
+                || !(descending ? "desc" : "asc").equals(parts[2])
+                || parts[4].isEmpty()) {
+            throw invalidNextToken();
+        }
+        LogStream cursor = new LogStream();
+        cursor.setLogStreamName(parts[4]);
+        if (!"-".equals(parts[3])) {
+            try {
+                cursor.setLastEventTimestamp(Long.parseLong(parts[3]));
+            } catch (NumberFormatException e) {
+                throw invalidNextToken();
+            }
+        }
+        return cursor;
+    }
+
+    private static AwsException invalidNextToken() {
+        return new AwsException("InvalidParameterException", "The specified nextToken is invalid.", 400);
     }
 
     // ──────────────────────────── Log Events ────────────────────────────
@@ -503,9 +553,6 @@ public class CloudWatchLogsService {
         return index;
     }
 
-    private AwsException invalidNextToken() {
-        return new AwsException("InvalidParameterException", "The specified nextToken is invalid.", 400);
-    }
     /**
      * A FilterLogEvents match paired with the stream that emitted it. FilterLogEvents is the
      * cross-stream API, so the stream is what lets a caller attribute a hit; GetLogEvents needs
