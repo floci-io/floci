@@ -2,16 +2,18 @@ package io.github.hectorvent.floci.services.ec2;
 
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.containsString;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.hamcrest.Matchers.not;
+import static org.hamcrest.Matchers.endsWith;
 import static org.hamcrest.Matchers.emptyOrNullString;
 import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.everyItem;
 import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.greaterThanOrEqualTo;
-import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.nullValue;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.startsWith;
-import static org.hamcrest.Matchers.containsString;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -221,6 +223,257 @@ class Ec2IntegrationTest {
             .body("DescribeImagesResponse.imagesSet.item.size()", equalTo(1))
             .body("DescribeImagesResponse.imagesSet.item.imageId", equalTo("ami-0abcdef1234567892"))
             .body("DescribeImagesResponse.imagesSet.item.architecture", equalTo("x86_64"));
+    }
+
+    @Test
+    @Order(9)
+    void synthesizedLookupImageSatisfiesAnInfixWildcardName() {
+        // Truncating at the first wildcard produced "unmatched-vendor-20260101", which does not
+        // satisfy the pattern the caller asked for.
+        String name = given()
+            .formParam("Action", "DescribeImages")
+            .formParam("Filter.1.Name", "name")
+            .formParam("Filter.1.Value.1", "unmatched-vendor-*-20.04-*")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeImagesResponse.imagesSet.item.size()", equalTo(1))
+            .extract().path("DescribeImagesResponse.imagesSet.item.name");
+
+        assertThat(name, startsWith("unmatched-vendor-"));
+        assertThat(name, containsString("-20.04-"));
+    }
+
+    @Test
+    @Order(9)
+    void synthesizedLookupImageSatisfiesASingleCharacterWildcard() {
+        // ? matches exactly one character in an AWS filter. Leaving it in the synthesized name
+        // handed back "unmatched-vendor-?", which the requesting filter does not match once the
+        // matcher reads ? as a wildcard rather than a literal.
+        String name = given()
+            .formParam("Action", "DescribeImages")
+            .formParam("Filter.1.Name", "name")
+            .formParam("Filter.1.Value.1", "unmatched-vendor-?-single")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeImagesResponse.imagesSet.item.size()", equalTo(1))
+            .extract().path("DescribeImagesResponse.imagesSet.item.name");
+
+        assertThat(name, not(containsString("?")));
+        assertThat(name, startsWith("unmatched-vendor-"));
+        assertThat(name, endsWith("-single"));
+        assertEquals("unmatched-vendor-".length() + 1 + "-single".length(), name.length());
+    }
+
+    @Test
+    @Order(9)
+    void synthesizedLookupImageResolvesTheSelfOwnerAlias() {
+        // Owner.N takes aliases. Writing "self" through verbatim produced an image owned by the
+        // literal string, which no owner scope resolves to, and the guard never re-checked the
+        // owner because it only looked at Filter.N.
+        String owner = given()
+            .formParam("Action", "DescribeImages")
+            .formParam("Owner.1", "self")
+            .formParam("Filter.1.Name", "name")
+            .formParam("Filter.1.Value.1", "unmatched-self-owned-*")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeImagesResponse.imagesSet.item.size()", equalTo(1))
+            .extract().path("DescribeImagesResponse.imagesSet.item.imageOwnerId");
+
+        assertEquals("000000000000", owner);
+    }
+
+    /**
+     * Owner scope, then the id and alias the synthesized image must report together. A null
+     * expectedAlias means AWS reports no alias for that account, so the element is asserted
+     * absent from the body rather than compared as a value.
+     */
+    private void assertSynthesizedOwnership(String ownerScope, String expectedId, String expectedAlias) {
+        var response = given()
+            .formParam("Action", "DescribeImages")
+            .formParam("Owner.1", ownerScope)
+            .formParam("Filter.1.Name", "name")
+            .formParam("Filter.1.Value.1", "unmatched-coherence-" + ownerScope + "-*")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeImagesResponse.imagesSet.item.size()", equalTo(1))
+            .extract();
+
+        assertEquals(expectedId, response.path("DescribeImagesResponse.imagesSet.item.imageOwnerId"),
+                "imageOwnerId for Owner.1=" + ownerScope);
+        if (expectedAlias == null) {
+            assertThat("imageOwnerAlias for Owner.1=" + ownerScope,
+                    response.asString(), not(containsString("<imageOwnerAlias>")));
+        } else {
+            assertEquals(expectedAlias,
+                    response.path("DescribeImagesResponse.imagesSet.item.imageOwnerAlias").toString(),
+                    "imageOwnerAlias for Owner.1=" + ownerScope);
+        }
+    }
+
+    @Test
+    @Order(9)
+    void synthesizedOwnershipIsSelfConsistentAcrossOwnerScopes() {
+        // Every earlier round here fixed one field and left the one beside it, so this asserts the
+        // pair together. An id resolved from the scope with an alias defaulted to amazon reports
+        // ownership that contradicts itself.
+        assertSynthesizedOwnership("self", "000000000000", null);
+        assertSynthesizedOwnership("amazon", "137112412989", "amazon");
+        assertSynthesizedOwnership("aws-marketplace", "679593333241", "aws-marketplace");
+        assertSynthesizedOwnership("099720109477", "099720109477", null);
+    }
+
+    @Test
+    @Order(9)
+    void anOwnerAliasFilterAloneStillAgreesWithTheOwnerId() {
+        // The mirror of the above. Filtering on the alias with no Owner.N left the id at the
+        // Amazon default, so the image reported aws-marketplace beside Amazon's account.
+        var response = given()
+            .formParam("Action", "DescribeImages")
+            .formParam("Filter.1.Name", "name")
+            .formParam("Filter.1.Value.1", "unmatched-alias-filter-only-*")
+            .formParam("Filter.2.Name", "owner-alias")
+            .formParam("Filter.2.Value.1", "aws-marketplace")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeImagesResponse.imagesSet.item.size()", equalTo(1))
+            .extract();
+
+        assertEquals("679593333241",
+                response.path("DescribeImagesResponse.imagesSet.item.imageOwnerId"));
+        assertEquals("aws-marketplace",
+                response.path("DescribeImagesResponse.imagesSet.item.imageOwnerAlias").toString());
+    }
+
+    @Test
+    @Order(9)
+    void aWildcardBehindAnExactNameValueStillSynthesizes() {
+        // A filter's values are an OR. Taking the first value outright picked the exact one, the
+        // wildcard check failed, and the lookup got an empty set it could have satisfied.
+        String name = given()
+            .formParam("Action", "DescribeImages")
+            .formParam("Filter.1.Name", "name")
+            .formParam("Filter.1.Value.1", "unmatched-exact-name-no-wildcard")
+            .formParam("Filter.1.Value.2", "unmatched-second-value-*")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeImagesResponse.imagesSet.item.size()", equalTo(1))
+            .extract().path("DescribeImagesResponse.imagesSet.item.name");
+
+        assertThat(name, startsWith("unmatched-second-value-"));
+    }
+
+    @Test
+    @Order(9)
+    void amazonOwnerScopeFindsTheSeededAmazonLinuxImages() {
+        // The catalog matches on its own owner metadata, and the two Amazon Linux entries carried
+        // none, so Owner.1=amazon omitted them however the registered-image matcher read the alias.
+        given()
+            .formParam("Action", "DescribeImages")
+            .formParam("Owner.1", "amazon")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("amzn2-ami-hvm"))
+            .body(containsString("al2023-ami"));
+    }
+
+    @Test
+    @Order(9)
+    void synthesizedLookupImageResolvesTheAmazonOwnerAlias() {
+        // imageOwnerId is always an account id in AWS. Writing the alias through left the image
+        // owned by the literal "amazon", and the owner check accepted it by string equality.
+        String owner = given()
+            .formParam("Action", "DescribeImages")
+            .formParam("Owner.1", "amazon")
+            .formParam("Filter.1.Name", "name")
+            .formParam("Filter.1.Value.1", "unmatched-amazon-owned-*")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeImagesResponse.imagesSet.item.size()", equalTo(1))
+            .extract().path("DescribeImagesResponse.imagesSet.item.imageOwnerId");
+
+        assertEquals("137112412989", owner);
+    }
+
+    @Test
+    @Order(9)
+    void synthesizedLookupImageIsWithheldFromAnOwnerScopeItCannotSatisfy() {
+        // A foreign owner scope cannot be satisfied by anything we synthesize, so the lookup gets
+        // the empty result rather than an AMI that contradicts the request.
+        given()
+            .formParam("Action", "DescribeImages")
+            .formParam("Owner.1", "999999999999")
+            .formParam("Filter.1.Name", "name")
+            .formParam("Filter.1.Value.1", "unmatched-foreign-owner-*")
+            .formParam("Filter.2.Name", "owner-id")
+            .formParam("Filter.2.Value.1", "137112412989")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(not(containsString("<imageId>")));
+    }
+
+    @Test
+    @Order(9)
+    void synthesizedLookupImageHonorsOtherRequestedFilters() {
+        given()
+            .formParam("Action", "DescribeImages")
+            .formParam("Filter.1.Name", "name")
+            .formParam("Filter.1.Value.1", "unmatched-vendor-arm-*")
+            .formParam("Filter.2.Name", "architecture")
+            .formParam("Filter.2.Value.1", "arm64")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeImagesResponse.imagesSet.item.size()", equalTo(1))
+            .body("DescribeImagesResponse.imagesSet.item.architecture", equalTo("arm64"));
+    }
+
+    @Test
+    @Order(9)
+    void synthesizedLookupImageIsWithheldWhenItCannotSatisfyTheRequest() {
+        // The synthesized description is fixed, so a description filter it cannot meet must yield
+        // an empty result rather than an AMI that violates the request.
+        given()
+            .formParam("Action", "DescribeImages")
+            .formParam("Filter.1.Name", "name")
+            .formParam("Filter.1.Value.1", "unmatched-vendor-none-*")
+            .formParam("Filter.2.Name", "description")
+            .formParam("Filter.2.Value.1", "a description no synthesized image carries")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(not(containsString("<imageId>")));
     }
 
     @Test

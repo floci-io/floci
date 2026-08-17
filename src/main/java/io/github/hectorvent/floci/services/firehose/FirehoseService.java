@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.firehose;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -11,37 +12,114 @@ import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescript
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.S3Destination;
 import io.github.hectorvent.floci.services.firehose.model.Record;
 import io.github.hectorvent.floci.services.s3.S3Service;
+import io.quarkus.runtime.ShutdownDelayInitiatedEvent;
+import io.quarkus.runtime.StartupEvent;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
+import java.time.Instant;
 import java.time.ZoneId;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 @ApplicationScoped
 public class FirehoseService {
 
     private static final Logger LOG = Logger.getLogger(FirehoseService.class);
     private static final String DEFAULT_BUCKET = "floci-firehose-results";
-    private static final int DEFAULT_FLUSH_COUNT = 5;
+    private static final int DEFAULT_BUFFERING_INTERVAL_SECONDS = 300;
+    private static final int DEFAULT_BUFFERING_SIZE_MBS = 5;
 
     private final StorageBackend<String, DeliveryStreamDescription> streamStore;
     private final Map<String, List<byte[]>> buffers = new ConcurrentHashMap<>();
+    private final Map<String, Instant> bufferSince = new ConcurrentHashMap<>();
     private final S3Service s3Service;
     private final RegionResolver regionResolver;
     private final Clock clock;
+    private final long tickIntervalSeconds;
+    private final int flushRecordCount;
+    private final boolean flusherEnabled;
+    private final ScheduledExecutorService flushExecutor;
 
     @Inject
     public FirehoseService(StorageFactory storageFactory, S3Service s3Service, RegionResolver regionResolver,
-                           Clock clock) {
+                           Clock clock, EmulatorConfig config) {
         this.streamStore = storageFactory.create("firehose", "streams.json",
                 new TypeReference<Map<String, DeliveryStreamDescription>>() {});
         this.s3Service = s3Service;
         this.regionResolver = regionResolver;
         this.clock = clock;
+        this.tickIntervalSeconds = Math.max(1, config.services().firehose().tickIntervalSeconds());
+        this.flushRecordCount = Math.max(0, config.services().firehose().flushRecordCount());
+        this.flusherEnabled = config.services().firehose().enabled();
+        this.flushExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "firehose-buffer-flusher");
+            t.setDaemon(true);
+            return t;
+        });
+    }
+
+    void onStart(@Observes StartupEvent ignored) {
+        if (!flusherEnabled) {
+            LOG.info("Firehose buffer flusher disabled by configuration");
+            return;
+        }
+        flushExecutor.scheduleAtFixedRate(this::tickSafely, tickIntervalSeconds, tickIntervalSeconds, TimeUnit.SECONDS);
+        LOG.infov("Firehose buffer flusher started (tick every {0}s)", tickIntervalSeconds);
+    }
+
+    // ShutdownDelayInitiatedEvent fires before every ShutdownEvent observer, so this
+    // drain lands the pending records in S3 while EmulatorLifecycle.onStop can still
+    // persist them to disk via storageFactory.flushAll().
+    void onPreShutdown(@Observes ShutdownDelayInitiatedEvent ignored) {
+        flushExecutor.shutdownNow();
+        buffers.keySet().forEach(this::flush);
+    }
+
+    void tickSafely() {
+        try {
+            flushDueBuffers(clock.instant());
+        } catch (Throwable t) {
+            LOG.warnv("Firehose buffer flush tick failed: {0}", t.getMessage());
+        }
+    }
+
+    void flushDueBuffers(Instant now) {
+        for (Map.Entry<String, List<byte[]>> entry : buffers.entrySet()) {
+            if (entry.getValue().isEmpty()) {
+                continue;
+            }
+            String streamName = entry.getKey();
+            try {
+                DeliveryStreamDescription stream = describeDeliveryStream(streamName);
+                Instant since = bufferSince.putIfAbsent(streamName, now);
+                if (since == null) {
+                    since = now;
+                }
+                if (!now.isBefore(since.plusSeconds(bufferingIntervalSeconds(stream)))) {
+                    flush(streamName, stream);
+                }
+            } catch (Exception e) {
+                LOG.warnv("Firehose buffer flush failed for stream {0}: {1}", streamName, e.getMessage());
+            }
+        }
+    }
+
+    private static int bufferingIntervalSeconds(DeliveryStreamDescription stream) {
+        S3Destination s3 = stream.s3Destination();
+        // describeDeliveryStream already applied defaults, so hints only miss
+        // when the stream has no S3 destination at all (default-bucket delivery).
+        if (s3 == null || s3.getBufferingHints() == null || s3.getBufferingHints().getIntervalInSeconds() == null) {
+            return DEFAULT_BUFFERING_INTERVAL_SECONDS;
+        }
+        return s3.getBufferingHints().getIntervalInSeconds();
     }
 
     public String createDeliveryStream(String name, S3Destination s3Config) {
@@ -219,7 +297,11 @@ public class FirehoseService {
     public void deleteDeliveryStream(String name) {
         describeDeliveryStream(name);
         streamStore.delete(name);
+        // Pending records are discarded, not flushed: verified against real AWS
+        // (2026-07-13, eu-west-1) — 3 records buffered under a 300s/5MB hint never
+        // reached the bucket after DeleteDeliveryStream completed.
         buffers.remove(name);
+        bufferSince.remove(name);
         LOG.infov("Deleted Firehose delivery stream: {0}", name);
     }
 
@@ -229,25 +311,39 @@ public class FirehoseService {
     }
 
     public void putRecord(String streamName, Record record) {
-        DeliveryStreamDescription stream = describeDeliveryStream(streamName);
-        buffers.computeIfAbsent(streamName, k -> Collections.synchronizedList(new ArrayList<>()))
-               .add(record.getData());
-
-        if (buffers.get(streamName).size() >= DEFAULT_FLUSH_COUNT) {
-            flush(streamName, stream);
-        }
+        putRecordBatch(streamName, List.of(record));
     }
 
     public void putRecordBatch(String streamName, List<Record> records) {
         DeliveryStreamDescription stream = describeDeliveryStream(streamName);
         List<byte[]> buffer = buffers.computeIfAbsent(
                 streamName, k -> Collections.synchronizedList(new ArrayList<>()));
-        for (Record r : records) {
-            buffer.add(r.getData());
+        long bufferedBytes = 0;
+        int bufferedCount;
+        // Records and their buffering-start timestamp move together under the
+        // buffer lock so the flusher never sees one without the other.
+        synchronized (buffer) {
+            for (Record r : records) {
+                buffer.add(r.getData());
+            }
+            bufferSince.putIfAbsent(streamName, clock.instant());
+            bufferedCount = buffer.size();
+            for (byte[] data : buffer) {
+                bufferedBytes += data.length;
+            }
         }
-        if (buffer.size() >= DEFAULT_FLUSH_COUNT) {
+        if ((flushRecordCount > 0 && bufferedCount >= flushRecordCount)
+                || bufferedBytes >= bufferingSizeLimitBytes(stream)) {
             flush(streamName, stream);
         }
+    }
+
+    private static long bufferingSizeLimitBytes(DeliveryStreamDescription stream) {
+        S3Destination s3 = stream.s3Destination();
+        int sizeInMBs = (s3 == null || s3.getBufferingHints() == null || s3.getBufferingHints().getSizeInMBs() == null)
+                ? DEFAULT_BUFFERING_SIZE_MBS
+                : s3.getBufferingHints().getSizeInMBs();
+        return sizeInMBs * 1024L * 1024L;
     }
 
     public void flush(String streamName) {
@@ -264,6 +360,11 @@ public class FirehoseService {
         synchronized (buffer) {
             toFlush = new ArrayList<>(buffer);
             buffer.clear();
+            bufferSince.remove(streamName);
+        }
+        if (toFlush.isEmpty()) {
+            // Lost the race against a concurrent flush; nothing left to deliver.
+            return;
         }
 
         try {

@@ -7,6 +7,8 @@ images:
     dockerImage: public.ecr.aws/amazonlinux/amazonlinux:2
     name: amzn2-ami-hvm-2.0.20230404.0-x86_64-gp2
     description: Amazon Linux 2 AMI
+    ownerId: "137112412989"
+    imageOwnerAlias: amazon
     architecture: x86_64
     creationDate: "2023-04-04T00:00:00.000Z"
 
@@ -16,6 +18,8 @@ images:
     dockerImage: public.ecr.aws/amazonlinux/amazonlinux:2023
     name: al2023-ami-2023.0.20230315.0-kernel-6.1-x86_64
     description: Amazon Linux 2023 AMI
+    ownerId: "137112412989"
+    imageOwnerAlias: amazon
     architecture: x86_64
     creationDate: "2023-03-15T00:00:00.000Z"
 

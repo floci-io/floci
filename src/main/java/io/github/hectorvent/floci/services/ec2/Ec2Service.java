@@ -96,6 +96,9 @@ public class Ec2Service implements ContainerTeardown {
             .withZone(ZoneOffset.UTC);
     private static final int DEFAULT_ROOT_VOLUME_SIZE_GIB = 8;
     private static final String DEFAULT_ROOT_VOLUME_TYPE = "gp3";
+    /** The accounts behind the two non-self owner aliases DescribeImages accepts. */
+    private static final String AMAZON_OWNER_ID = "137112412989";
+    private static final String AWS_MARKETPLACE_OWNER_ID = "679593333241";
     // The ASN AWS assigns when CreateTransitGateway omits Options.AmazonSideAsn.
     private static final long DEFAULT_AMAZON_SIDE_ASN = 64512L;
     private static final Pattern TRANSIT_GATEWAY_ID_PATTERN = Pattern.compile("^tgw-[0-9a-f]{8}([0-9a-f]{9})?$");
@@ -3095,10 +3098,38 @@ public class Ec2Service implements ContainerTeardown {
         return imageIds == null || imageIds.isEmpty() || imageIds.contains(image.getImageId());
     }
 
+    /**
+     * {@code Owner.N} takes the aliases {@code self}, {@code amazon} and {@code aws-marketplace}
+     * beside bare account ids, while {@code imageOwnerId} is always an account id. Only
+     * {@code self} was translated, so an alias matched nothing unless an image happened to be
+     * owned by the literal string.
+     */
     private boolean matchesImageOwners(Image image, List<String> owners) {
-        return owners == null || owners.isEmpty()
-                || owners.contains(image.getOwnerId())
-                || (owners.contains("self") && accountId.equals(image.getOwnerId()));
+        if (owners == null || owners.isEmpty()) {
+            return true;
+        }
+        String ownerId = image.getOwnerId();
+        return owners.contains(ownerId)
+                || (owners.contains("self") && accountId.equals(ownerId))
+                || (owners.contains("amazon") && AMAZON_OWNER_ID.equals(ownerId))
+                || (owners.contains("aws-marketplace") && AWS_MARKETPLACE_OWNER_ID.equals(ownerId));
+    }
+
+    /**
+     * Whether an image satisfies a DescribeImages filter set. Exposed so a synthesized lookup image
+     * can be checked against the request that produced it before being returned.
+     */
+    public boolean imageMatchesFilters(Image image, Map<String, List<String>> filters) {
+        return matchesRegisteredImageFilters(image, filters);
+    }
+
+    /**
+     * Whether an image satisfies a DescribeImages owner scope. Exposed alongside
+     * {@link #imageMatchesFilters} so a synthesized lookup image faces the whole request that
+     * produced it, since {@code Owner.N} is carried outside the filter set.
+     */
+    public boolean imageMatchesOwners(Image image, List<String> owners) {
+        return matchesImageOwners(image, owners);
     }
 
     private boolean matchesRegisteredImageFilters(Image image, Map<String, List<String>> filters) {
@@ -3195,15 +3226,25 @@ public class Ec2Service implements ContainerTeardown {
         return patterns.stream().anyMatch(pattern -> wildcardMatches(pattern, value));
     }
 
+    /**
+     * AWS filter values take two wildcards, {@code *} for any run of characters and {@code ?} for
+     * exactly one. Only {@code *} was honoured here, so a {@code ?} was matched literally and a
+     * pattern like {@code ubuntu-?} found nothing, while {@link #wildcardToRegex} a few hundred
+     * lines down already treated both.
+     */
     private boolean wildcardMatches(String pattern, String value) {
         if (pattern == null) {
             return false;
         }
-        if (!pattern.contains("*")) {
+        if (!pattern.contains("*") && !pattern.contains("?")) {
             return pattern.equals(value);
         }
         String regex = pattern.chars()
-                .mapToObj(ch -> ch == '*' ? ".*" : java.util.regex.Pattern.quote(String.valueOf((char) ch)))
+                .mapToObj(ch -> switch (ch) {
+                    case '*' -> ".*";
+                    case '?' -> ".";
+                    default -> java.util.regex.Pattern.quote(String.valueOf((char) ch));
+                })
                 .collect(Collectors.joining());
         return value.matches(regex);
     }

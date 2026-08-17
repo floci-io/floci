@@ -16,8 +16,8 @@
         <maven.compiler.source>17</maven.compiler.source>
         <maven.compiler.target>17</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <aws.sdk.version>2.44.14</aws.sdk.version>
-        <awsjavasdk.version>2.44.14</awsjavasdk.version>
+        <aws.sdk.version>2.52.0</aws.sdk.version>
+        <awsjavasdk.version>2.52.0</awsjavasdk.version>
         <jackson.version>2.18.8</jackson.version>
         <kafka.clients.version>3.9.2</kafka.clients.version>
         <netty.version>4.1.135.Final</netty.version>

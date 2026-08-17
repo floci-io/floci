@@ -45,6 +45,7 @@ import software.amazon.awssdk.services.sesv2.model.PutEmailIdentityDkimSigningAt
 import software.amazon.awssdk.services.sesv2.model.PutEmailIdentityMailFromAttributesRequest;
 import software.amazon.awssdk.services.sesv2.model.VerificationStatus;
 
+import java.time.Instant;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -266,7 +267,7 @@ class SesIdentityAttributesTest {
 
     @Test
     @Order(23)
-    void putEmailIdentityDkimSigningAttributes_regeneratesTokensOnKeyLengthChange() {
+    void putEmailIdentityDkimSigningAttributes_regeneratesTokensOnKeyLengthChange() throws InterruptedException {
         List<String> before = sesV2.getEmailIdentity(GetEmailIdentityRequest.builder()
                 .emailIdentity(dkimDomain).build()).dkimAttributes().tokens();
 
@@ -279,6 +280,37 @@ class SesIdentityAttributesTest {
                         .build());
         assertThat(resp.dkimTokens()).hasSize(3);
         assertThat(resp.dkimTokens()).isNotEqualTo(before);
+
+        // Regression guard for the fractional-epoch wire form of LastKeyGenerationTimestamp: SES v2
+        // types it as a unix-epoch number, and AWS emits sub-second precision, so Floci serializes
+        // toEpochMilli()/1000.0 rather than getEpochSecond() (which would silently drop the millis the
+        // SDK unmarshalls happily). Assert the round-tripped timestamp keeps a sub-second component so
+        // a switch to whole-second epoch is caught here.
+        Instant lastKeyGen = sesV2.getEmailIdentity(GetEmailIdentityRequest.builder()
+                .emailIdentity(dkimDomain).build()).dkimAttributes().lastKeyGenerationTimestamp();
+        assertThat(lastKeyGen).isNotNull();
+        // The timestamp comes from an uncontrolled server clock; toEpochMilli()/1000.0 yields
+        // millisecond precision, so getNano() is a multiple of 1e6 and is zero only when the instant
+        // lands on a whole second (~0.1%) — a boundary where whole-second epoch would also round-trip
+        // and the guard is blind. Regenerate the key (alternating length so a fresh key is minted each
+        // time) until a sub-second component appears, keeping the check meaningful without the rare
+        // flake. The wait before each retry forces the next regeneration into a later millisecond, so
+        // the samples are independent and can't all collapse onto one zero-nanosecond instant.
+        DkimSigningKeyLength[] lengths = {DkimSigningKeyLength.RSA_2048_BIT, DkimSigningKeyLength.RSA_1024_BIT};
+        for (int attempt = 0; lastKeyGen.getNano() == 0 && attempt < 5; attempt++) {
+            Thread.sleep(2);
+            sesV2.putEmailIdentityDkimSigningAttributes(PutEmailIdentityDkimSigningAttributesRequest.builder()
+                    .emailIdentity(dkimDomain)
+                    .signingAttributesOrigin(DkimSigningAttributesOrigin.AWS_SES)
+                    .signingAttributes(DkimSigningAttributes.builder()
+                            .nextSigningKeyLength(lengths[attempt % 2]).build())
+                    .build());
+            lastKeyGen = sesV2.getEmailIdentity(GetEmailIdentityRequest.builder()
+                    .emailIdentity(dkimDomain).build()).dkimAttributes().lastKeyGenerationTimestamp();
+        }
+        assertThat(lastKeyGen.getNano())
+                .as("LastKeyGenerationTimestamp must retain sub-second precision (fractional epoch), not whole seconds")
+                .isNotZero();
     }
 
     @Test

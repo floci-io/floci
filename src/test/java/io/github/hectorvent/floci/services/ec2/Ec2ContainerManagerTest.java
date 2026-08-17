@@ -410,7 +410,7 @@ class Ec2ContainerManagerTest {
 
         awaitUntil(() -> "running".equals(instance.getState().getName()), Duration.ofSeconds(2));
         ExecCreateCmd execCreate = harness.dockerClient.execCreateCmd(TEST_CONTAINER_ID);
-        verify(execCreate, timeout(2000)).withCmd(eq(new String[]{"sshd"}));
+        verify(execCreate, timeout(2000)).withCmd(eq(new String[]{"/usr/sbin/sshd"}));
         // No key pair was supplied, so nothing should have been written to authorized_keys.
         verify(harness.dockerClient, never()).copyArchiveToContainerCmd(TEST_CONTAINER_ID);
     }
@@ -486,7 +486,7 @@ class Ec2ContainerManagerTest {
         awaitUntil(() -> "running".equals(instance.getState().getName()), Duration.ofSeconds(2));
         verify(execCreate, timeout(2000)).withCmd(eq(SSHD_INSTALL_PROBE_CMD));
         verify(execCreate, never()).withCmd(eq(new String[]{"ssh-keygen", "-A"}));
-        verify(execCreate, never()).withCmd(eq(new String[]{"sshd"}));
+        verify(execCreate, never()).withCmd(eq(new String[]{"/usr/sbin/sshd"}));
     }
 
     private static LaunchHarness launchHarness() {
