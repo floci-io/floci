@@ -216,6 +216,76 @@ class CloudWatchLogsServiceTest {
     }
 
     @Test
+    void describeLogStreamsOrdersByLastEventTimeDescendingWithLimit() {
+        // The SDK idiom for "find the most recently active stream":
+        // orderBy(LAST_EVENT_TIME).descending(true).limit(1). Alphabetical order is set up
+        // to disagree with event recency so a name-sorted result would fail the assertion.
+        service.createLogGroup("/app/logs", null, null, REGION);
+        service.createLogStream("/app/logs", "a-oldest", REGION);
+        service.createLogStream("/app/logs", "b-newest", REGION);
+        service.createLogStream("/app/logs", "c-middle", REGION);
+        service.putLogEvents("/app/logs", "a-oldest", List.of(Map.of("timestamp", 1000L, "message", "old")), REGION);
+        service.putLogEvents("/app/logs", "b-newest", List.of(Map.of("timestamp", 3000L, "message", "new")), REGION);
+        service.putLogEvents("/app/logs", "c-middle", List.of(Map.of("timestamp", 2000L, "message", "mid")), REGION);
+
+        var result = service.describeLogStreams("/app/logs", null, "LastEventTime", true, 1, null, REGION);
+
+        assertEquals(1, result.logStreams().size());
+        assertEquals("b-newest", result.logStreams().getFirst().getLogStreamName());
+        assertNotNull(result.nextToken());
+    }
+
+    @Test
+    void describeLogStreamsSortsStreamsWithoutEventsOldestByLastEventTime() {
+        service.createLogGroup("/app/logs", null, null, REGION);
+        service.createLogStream("/app/logs", "z-empty", REGION);
+        service.createLogStream("/app/logs", "a-active", REGION);
+        service.putLogEvents("/app/logs", "a-active", List.of(Map.of("timestamp", 1000L, "message", "x")), REGION);
+
+        var descending = service.describeLogStreams("/app/logs", null, "LastEventTime", true, 0, null, REGION);
+        assertEquals(List.of("a-active", "z-empty"),
+                descending.logStreams().stream().map(LogStream::getLogStreamName).toList());
+
+        var ascending = service.describeLogStreams("/app/logs", null, "LastEventTime", false, 0, null, REGION);
+        assertEquals(List.of("z-empty", "a-active"),
+                ascending.logStreams().stream().map(LogStream::getLogStreamName).toList());
+    }
+
+    @Test
+    void describeLogStreamsPaginatesWithNextToken() {
+        service.createLogGroup("/app/logs", null, null, REGION);
+        service.createLogStream("/app/logs", "stream-1", REGION);
+        service.createLogStream("/app/logs", "stream-2", REGION);
+        service.createLogStream("/app/logs", "stream-3", REGION);
+
+        var page1 = service.describeLogStreams("/app/logs", null, null, false, 2, null, REGION);
+        assertEquals(List.of("stream-1", "stream-2"),
+                page1.logStreams().stream().map(LogStream::getLogStreamName).toList());
+        assertNotNull(page1.nextToken());
+
+        var page2 = service.describeLogStreams("/app/logs", null, null, false, 2, page1.nextToken(), REGION);
+        assertEquals(List.of("stream-3"),
+                page2.logStreams().stream().map(LogStream::getLogStreamName).toList());
+        assertNull(page2.nextToken());
+    }
+
+    @Test
+    void describeLogStreamsRejectsLastEventTimeWithPrefix() {
+        service.createLogGroup("/app/logs", null, null, REGION);
+        AwsException e = assertThrows(AwsException.class, () ->
+                service.describeLogStreams("/app/logs", "stream", "LastEventTime", true, 0, null, REGION));
+        assertEquals("InvalidParameterException", e.getErrorCode());
+    }
+
+    @Test
+    void describeLogStreamsRejectsUnknownOrderBy() {
+        service.createLogGroup("/app/logs", null, null, REGION);
+        AwsException e = assertThrows(AwsException.class, () ->
+                service.describeLogStreams("/app/logs", null, "CreationTime", false, 0, null, REGION));
+        assertEquals("InvalidParameterException", e.getErrorCode());
+    }
+
+    @Test
     void deleteLogGroupCascadesStreamsAndEvents() {
         service.createLogGroup("/app/logs", null, null, REGION);
         service.createLogStream("/app/logs", "stream-1", REGION);

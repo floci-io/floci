@@ -74,6 +74,34 @@ class CloudWatchLogsHandlerTest {
         assertEquals(STREAM, streams.get(0).path("logStreamName").asText());
     }
 
+    @Test
+    void describeLogStreamsHonorsOrderByDescendingLimitAndReturnsNextToken() {
+        service.createLogStream(GROUP, "another-stream", REGION);
+        service.putLogEvents(GROUP, STREAM,
+                java.util.List.of(java.util.Map.of("timestamp", 2000L, "message", "new")), REGION);
+        service.putLogEvents(GROUP, "another-stream",
+                java.util.List.of(java.util.Map.of("timestamp", 1000L, "message", "old")), REGION);
+        ObjectNode request = MAPPER.createObjectNode()
+                .put("logGroupName", GROUP)
+                .put("orderBy", "LastEventTime")
+                .put("descending", true)
+                .put("limit", 1);
+
+        Response response = handler.handle("DescribeLogStreams", request, REGION);
+
+        assertEquals(200, response.getStatus());
+        ObjectNode entity = (ObjectNode) response.getEntity();
+        JsonNode streams = entity.path("logStreams");
+        assertEquals(1, streams.size());
+        assertEquals(STREAM, streams.get(0).path("logStreamName").asText());
+        assertTrue(entity.has("nextToken"));
+
+        ObjectNode nextRequest = request.deepCopy().put("nextToken", entity.path("nextToken").asText());
+        ObjectNode nextEntity = (ObjectNode) handler.handle("DescribeLogStreams", nextRequest, REGION).getEntity();
+        assertEquals("another-stream", nextEntity.path("logStreams").get(0).path("logStreamName").asText());
+        assertFalse(nextEntity.has("nextToken"));
+    }
+
     // ──────────────────────────── GetDataProtectionPolicy ────────────────────────────
 
     @Test

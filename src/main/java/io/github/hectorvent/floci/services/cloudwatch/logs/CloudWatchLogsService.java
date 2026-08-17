@@ -305,7 +305,27 @@ public class CloudWatchLogsService {
         LOG.infov("Deleted log stream: {0}/{1}", groupName, streamName);
     }
 
+    public record DescribeLogStreamsResult(List<LogStream> logStreams, String nextToken) {}
+
     public List<LogStream> describeLogStreams(String groupName, String prefix, String region) {
+        return describeLogStreams(groupName, prefix, null, false, 0, null, region).logStreams();
+    }
+
+    public DescribeLogStreamsResult describeLogStreams(String groupName, String prefix, String orderBy,
+                                                       boolean descending, int limit, String nextToken,
+                                                       String region) {
+        boolean byLastEventTime = "LastEventTime".equals(orderBy);
+        if (orderBy != null && !orderBy.isBlank() && !byLastEventTime && !"LogStreamName".equals(orderBy)) {
+            throw new AwsException("InvalidParameterException",
+                    "1 validation error detected: Value '" + orderBy + "' at 'orderBy' failed to satisfy "
+                            + "constraint: Member must satisfy enum value set: [LogStreamName, LastEventTime]", 400);
+        }
+        // Matches real AWS: LastEventTime ordering cannot be combined with a name prefix.
+        if (byLastEventTime && prefix != null && !prefix.isBlank()) {
+            throw new AwsException("InvalidParameterException",
+                    "Cannot order by LastEventTime with a logStreamNamePrefix.", 400);
+        }
+
         // Verify group exists
         groupStore.get(groupKey(region, groupName))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
@@ -322,8 +342,28 @@ public class CloudWatchLogsService {
             String streamName = k.substring(storagePrefix.length());
             return streamName.startsWith(prefix);
         });
-        result.sort(Comparator.comparing(LogStream::getLogStreamName));
-        return result;
+        // Streams that never received events have no lastEventTimestamp; sort them oldest,
+        // with the name as tie-break so the order stays deterministic.
+        Comparator<LogStream> comparator = byLastEventTime
+                ? Comparator.comparingLong((LogStream s) ->
+                                s.getLastEventTimestamp() == null ? Long.MIN_VALUE : s.getLastEventTimestamp())
+                        .thenComparing(LogStream::getLogStreamName)
+                : Comparator.comparing(LogStream::getLogStreamName);
+        result.sort(descending ? comparator.reversed() : comparator);
+
+        int maxResults = Math.min(limit > 0 ? limit : 50, 50);
+        int offset = 0;
+        if (nextToken != null && !nextToken.isBlank()) {
+            try {
+                offset = Integer.parseInt(nextToken);
+            } catch (NumberFormatException e) {
+                offset = 0;
+            }
+        }
+        int start = Math.min(offset, result.size());
+        int end = Math.min(start + maxResults, result.size());
+        String token = end < result.size() ? String.valueOf(end) : null;
+        return new DescribeLogStreamsResult(result.subList(start, end), token);
     }
 
     // ──────────────────────────── Log Events ────────────────────────────
