@@ -787,6 +787,39 @@ class KinesisIntegrationTest {
     }
 
     @Test
+    @Order(57)
+    void getRecordsReturnsPlainDecimalArrivalTimestamp() {
+        String stream = "at-timestamp-plain-decimal";
+        String shardId = atTimestampCreateStream(stream);
+        atTimestampPutAndGetSequence(stream, "cmVjMA==");
+
+        // Timestamp at epoch 1s (before the record) so GetRecords returns it via the same
+        // AT_TIMESTAMP resolution path exercised by the other tests in this group.
+        String iterator = atTimestampIterator(stream, shardId, 1.0);
+
+        String responseBody = given()
+            .header("X-Amz-Target", "Kinesis_20131202.GetRecords")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"ShardIterator\": \"" + iterator + "\"}")
+        .when().post("/")
+        .then().statusCode(200)
+            .body("Records.size()", equalTo(1))
+            .extract().asString();
+
+        // ApproximateArrivalTimestamp must be a plain decimal lexeme - real 2020s-era epoch
+        // seconds render as a large double that Java serializes in scientific notation
+        // (e.g. "1.786959659083E9"), which AWS SDK for Java v2's timestamp unmarshaller cannot
+        // parse despite the response returning HTTP 200 (see floci-io/floci#2099 for the same
+        // defect against DescribeStream/DescribeStreamSummary's StreamCreationTimestamp).
+        var matcher = java.util.regex.Pattern
+            .compile("\"ApproximateArrivalTimestamp\"\\s*:\\s*(-?\\d+(?:\\.\\d+)?)(?=\\s*[,}])")
+            .matcher(responseBody);
+        assertTrue(matcher.find(), "timestamp must be serialized as a plain JSON decimal: " + responseBody);
+        assertFalse(matcher.group(1).contains("E"));
+        assertFalse(matcher.group(1).contains("e"));
+    }
+
+    @Test
     @Order(51)
     void atTimestampBeforeFirstRecordReturnsAll() {
         String stream = "at-timestamp-before";

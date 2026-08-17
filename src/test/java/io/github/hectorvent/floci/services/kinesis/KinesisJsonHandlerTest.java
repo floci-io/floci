@@ -10,12 +10,16 @@ import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.math.BigDecimal;
+import java.time.Instant;
 import java.util.Base64;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.is;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class KinesisJsonHandlerTest {
 
@@ -24,11 +28,12 @@ class KinesisJsonHandlerTest {
     private static final String STREAM_ARN = "arn:aws:kinesis:us-east-1:123456789012:stream/test-stream";
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
+    private KinesisService service;
     private KinesisJsonHandler handler;
 
     @BeforeEach
     void setUp() {
-        KinesisService service = new KinesisService(
+        service = new KinesisService(
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new RegionResolver(REGION, ACCOUNT)
@@ -436,5 +441,80 @@ class KinesisJsonHandlerTest {
         AwsException ex = assertThrows(AwsException.class,
                 () -> handler.handle("PutRecords", req, REGION));
         assertEquals("ResourceNotFoundException", ex.getErrorCode());
+    }
+
+    @Test
+    void getRecordsSerializesApproximateArrivalTimestampAsPlainDecimal() throws Exception {
+        createStream("test-stream");
+
+        ObjectNode putReq = MAPPER.createObjectNode();
+        putReq.put("StreamName", "test-stream");
+        putReq.put("Data", "dGVzdA==");
+        putReq.put("PartitionKey", "pk1");
+        handler.handle("PutRecord", putReq, REGION);
+
+        ObjectNode descReq = MAPPER.createObjectNode();
+        descReq.put("StreamName", "test-stream");
+        String shardId = responseEntity(handler.handle("DescribeStream", descReq, REGION))
+                .get("StreamDescription").get("Shards").get(0).get("ShardId").asText();
+
+        // A fixed, realistic (2020s-era) arrival timestamp - Instant.now() would also trigger
+        // the bug, but a fixed value makes the expected serialized decimal assertable exactly.
+        service.describeStream("test-stream", REGION).getShards().get(0).getRecords().get(0)
+                .setApproximateArrivalTimestamp(Instant.ofEpochMilli(1_786_959_659_083L));
+
+        ObjectNode iterReq = MAPPER.createObjectNode();
+        iterReq.put("StreamName", "test-stream");
+        iterReq.put("ShardId", shardId);
+        iterReq.put("ShardIteratorType", "TRIM_HORIZON");
+        String iterator = responseEntity(handler.handle("GetShardIterator", iterReq, REGION))
+                .get("ShardIterator").asText();
+
+        ObjectNode recReq = MAPPER.createObjectNode();
+        recReq.put("ShardIterator", iterator);
+        var timestampNode = responseEntity(handler.handle("GetRecords", recReq, REGION))
+                .get("Records").get(0).get("ApproximateArrivalTimestamp");
+
+        assertTrue(timestampNode.isNumber());
+        assertEquals(new BigDecimal("1786959659.083"), timestampNode.decimalValue());
+
+        String serialized = MAPPER.writeValueAsString(timestampNode);
+        assertEquals("1786959659.083", serialized);
+        assertFalse(serialized.contains("E"));
+        assertFalse(serialized.contains("e"));
+    }
+
+    @Test
+    void getRecordsWholeSecondArrivalTimestampRemainsNumeric() throws Exception {
+        createStream("test-stream");
+
+        ObjectNode putReq = MAPPER.createObjectNode();
+        putReq.put("StreamName", "test-stream");
+        putReq.put("Data", "dGVzdA==");
+        putReq.put("PartitionKey", "pk1");
+        handler.handle("PutRecord", putReq, REGION);
+
+        ObjectNode descReq = MAPPER.createObjectNode();
+        descReq.put("StreamName", "test-stream");
+        String shardId = responseEntity(handler.handle("DescribeStream", descReq, REGION))
+                .get("StreamDescription").get("Shards").get(0).get("ShardId").asText();
+
+        service.describeStream("test-stream", REGION).getShards().get(0).getRecords().get(0)
+                .setApproximateArrivalTimestamp(Instant.ofEpochMilli(1_786_959_659_000L));
+
+        ObjectNode iterReq = MAPPER.createObjectNode();
+        iterReq.put("StreamName", "test-stream");
+        iterReq.put("ShardId", shardId);
+        iterReq.put("ShardIteratorType", "TRIM_HORIZON");
+        String iterator = responseEntity(handler.handle("GetShardIterator", iterReq, REGION))
+                .get("ShardIterator").asText();
+
+        ObjectNode recReq = MAPPER.createObjectNode();
+        recReq.put("ShardIterator", iterator);
+        var timestampNode = responseEntity(handler.handle("GetRecords", recReq, REGION))
+                .get("Records").get(0).get("ApproximateArrivalTimestamp");
+
+        assertEquals(new BigDecimal("1786959659.000"), timestampNode.decimalValue());
+        assertEquals("1786959659.000", MAPPER.writeValueAsString(timestampNode));
     }
 }

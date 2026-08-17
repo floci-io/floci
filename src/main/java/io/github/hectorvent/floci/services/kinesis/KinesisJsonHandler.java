@@ -15,6 +15,8 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 
+import java.math.BigDecimal;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
@@ -297,7 +299,7 @@ public class KinesisJsonHandler {
                     .put("PartitionKey", rec.getPartitionKey())
                     .put("SequenceNumber", rec.getSequenceNumber())
                     .put("ApproximateArrivalTimestamp",
-                         rec.getApproximateArrivalTimestamp().toEpochMilli() / 1000.0);
+                         epochSeconds(rec.getApproximateArrivalTimestamp()));
         }
         if (continuationSeqNo != null) {
             eventPayload.put("ContinuationSequenceNumber", continuationSeqNo);
@@ -516,11 +518,23 @@ public class KinesisJsonHandler {
             rNode.put("Data", Base64.getEncoder().encodeToString(rec.getData()));
             rNode.put("PartitionKey", rec.getPartitionKey());
             rNode.put("SequenceNumber", rec.getSequenceNumber());
-            rNode.put("ApproximateArrivalTimestamp", rec.getApproximateArrivalTimestamp().toEpochMilli() / 1000.0);
+            rNode.put("ApproximateArrivalTimestamp", epochSeconds(rec.getApproximateArrivalTimestamp()));
         }
         response.put("NextShardIterator", (String) result.get("NextShardIterator"));
         response.put("MillisBehindLatest", ((Number) result.get("MillisBehindLatest")).longValue());
         return Response.ok(response).build();
+    }
+
+    /**
+     * Renders an {@link Instant} as an exact decimal epoch-seconds value (millisecond precision)
+     * rather than a {@code double} - {@code Instant.toEpochMilli() / 1000.0} loses precision and,
+     * for any 2020s-era timestamp, Jackson serializes the resulting large double in scientific
+     * notation (e.g. {@code 1.786959659083E9}), which AWS SDK for Java v2's timestamp unmarshaller
+     * cannot parse despite the response returning HTTP 200. See #2099 for the same defect against
+     * {@code DescribeStream}/{@code DescribeStreamSummary}'s {@code StreamCreationTimestamp}.
+     */
+    private BigDecimal epochSeconds(Instant timestamp) {
+        return BigDecimal.valueOf(timestamp.toEpochMilli(), 3);
     }
 
     private Response handleIncreaseStreamRetentionPeriod(JsonNode request, String region) {
