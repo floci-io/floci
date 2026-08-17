@@ -1362,7 +1362,7 @@ public class SesService {
         String key = configSetKey(region, configSet.getName());
         if (configSet.getTags() != null) {
             for (Tag tag : configSet.getTags()) {
-                validateTag(tag);
+                SesTags.validate(tag);
             }
         }
         if (configSet.getSuppressionOptions() != null
@@ -2047,7 +2047,7 @@ public class SesService {
                             + "Member must have length greater than or equal to 1", 400);
         }
         for (Tag t : newTags) {
-            validateTag(t);
+            SesTags.validate(t);
         }
         switch (ref.type()) {
             case "configuration-set" -> tagConfigurationSet(ref.name(), ref.region(), newTags);
@@ -2177,7 +2177,7 @@ public class SesService {
     public void setIdentityTags(String identityValue, String region, List<Tag> tags) {
         if (tags != null) {
             for (Tag tag : tags) {
-                validateTag(tag);
+                SesTags.validate(tag);
             }
         }
         String key = identityKey(region, identityValue);
@@ -2482,25 +2482,6 @@ public class SesService {
 
     private static String invalidSuppressionReasonMessage(String reason) {
         return "Reason " + reason + " is invalid, must be one of [BOUNCE, COMPLAINT].";
-    }
-
-    static void validateTag(Tag tag) {
-        if (tag == null) {
-            throw new AwsException("InvalidParameterValue", "Tag must not be null.", 400);
-        }
-        String key = tag.key();
-        if (key == null || key.isEmpty()) {
-            throw new AwsException("InvalidParameterValue", "Tag Key is required.", 400);
-        }
-        if (key.length() > 128) {
-            throw new AwsException("InvalidParameterValue",
-                    "Tag Key must be 1-128 characters.", 400);
-        }
-        String value = tag.value();
-        if (value != null && value.length() > 256) {
-            throw new AwsException("InvalidParameterValue",
-                    "Tag Value must be 0-256 characters.", 400);
-        }
     }
 
     public String sendTemplatedEmail(String source, List<String> toAddresses, List<String> ccAddresses,

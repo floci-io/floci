@@ -23,10 +23,10 @@ import java.util.Optional;
  * here; the facade's templated-send path reads templates back through {@link #getTemplate}, and its
  * ARN-dispatched tagging reads/writes through {@link #find} / {@link #save}.
  *
- * <p>Tag validation is the shared cross-resource concern kept on the facade, so {@code createTemplate}
- * calls the package-private {@link SesService#validateTag} — the same convention the controllers use
- * for {@link SesService#templateNameFromArn}. The template ARN parser itself stays on the facade
- * because external callers reference it statically.
+ * <p>Tag validation is a shared cross-resource concern, so {@code createTemplate} calls
+ * {@link SesTags#validate} rather than depending back on the facade. The template ARN parser
+ * ({@code SesService.templateNameFromArn}) stays on the facade because external callers reference it
+ * statically.
  */
 @ApplicationScoped
 public class SesTemplateService {
@@ -49,7 +49,7 @@ public class SesTemplateService {
         validateTemplate(template);
         if (template.getTags() != null) {
             for (Tag tag : template.getTags()) {
-                SesService.validateTag(tag);
+                SesTags.validate(tag);
             }
         }
         String key = templateKey(region, template.getTemplateName());

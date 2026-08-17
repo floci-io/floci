@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.ses;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.ses.model.EmailTemplate;
+import io.github.hectorvent.floci.services.ses.model.Tag;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -100,7 +101,15 @@ class SesTemplateServiceTest {
     @Test
     void findAndSave_supportFacadeTagging() {
         service.createTemplate(template("welcome"), REGION);
-        assertTrue(service.find("welcome", REGION).isPresent());
         assertTrue(service.find("ghost", REGION).isEmpty());
+
+        EmailTemplate found = service.find("welcome", REGION).orElseThrow();
+        found.setTags(List.of(new Tag("team", "ses")));
+        service.save(found, REGION);
+
+        EmailTemplate reloaded = service.find("welcome", REGION).orElseThrow();
+        assertEquals(1, reloaded.getTags().size());
+        assertEquals("team", reloaded.getTags().get(0).key());
+        assertEquals("ses", reloaded.getTags().get(0).value());
     }
 }
