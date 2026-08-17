@@ -428,7 +428,10 @@ public class CloudWatchLogsService {
         if (nextToken != null && nextToken.startsWith("f/")) {
             int offset = parseTokenIndex(nextToken, 2);
             pageStart = Math.min(offset, total);
-            pageEnd = Math.min(pageStart + maxEvents, total);
+            // Take the window out of what is left rather than adding to the offset, so a
+            // max-events cap configured near Integer.MAX_VALUE cannot overflow the end
+            // index negative once pagination has moved past the first page.
+            pageEnd = pageStart + Math.min(maxEvents, total - pageStart);
         } else if (nextToken != null && nextToken.startsWith("b/")) {
             int end = parseTokenIndex(nextToken, 2);
             pageEnd = Math.min(end, total);

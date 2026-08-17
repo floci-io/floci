@@ -525,6 +525,39 @@ class CloudWatchLogsServiceTest {
     }
 
     @Test
+    void getLogEventsPagesForwardWithAnUnboundedMaxEventsPerQuery() {
+        CloudWatchLogsService unboundedService = new CloudWatchLogsService(
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                Integer.MAX_VALUE,
+                new RegionResolver("us-east-1", "000000000000")
+        );
+
+        unboundedService.createLogGroup("/app/logs", null, null, REGION);
+        unboundedService.createLogStream("/app/logs", "stream-1", REGION);
+        long now = System.currentTimeMillis();
+        unboundedService.putLogEvents("/app/logs", "stream-1", List.of(
+                Map.of("timestamp", now, "message", "a"),
+                Map.of("timestamp", now + 1, "message", "b"),
+                Map.of("timestamp", now + 2, "message", "c")
+        ), REGION);
+
+        CloudWatchLogsService.LogEventsResult page =
+                unboundedService.getLogEvents("/app/logs", "stream-1", null, null, 0, true, null, REGION);
+        assertEquals(3, page.events().size());
+        assertEquals("f/3", page.nextForwardToken());
+
+        // GetLogEvents echoes its token at the end of the stream, so a paginator always
+        // spends one more call on the token it was just handed.
+        CloudWatchLogsService.LogEventsResult atEnd = unboundedService.getLogEvents(
+                "/app/logs", "stream-1", null, null, 0, true, page.nextForwardToken(), REGION);
+        assertEquals(0, atEnd.events().size());
+        assertEquals("f/3", atEnd.nextForwardToken());
+    }
+
+    @Test
     void getLogEventsRejectsMalformedNextToken() {
         service.createLogGroup("/app/logs", null, null, REGION);
         service.createLogStream("/app/logs", "stream-1", REGION);
