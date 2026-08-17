@@ -114,16 +114,39 @@ public class CloudControlStoreLister {
         // Strict first: a class named exactly for the type wins outright. The suffix rule
         // (TableDefinition for Table) only runs when nothing matched as written, so a service
         // holding both an EcsTask and a TaskDefinition cannot answer AWS::ECS::Task with both.
-        List<CloudControlService.ResourceDescription> found = scan(region, storeService, bareType, false);
-        return found.isEmpty() ? scan(region, storeService, bareType, true) : found;
+        List<CloudControlService.ResourceDescription> found = scan(region, storeService, bareType, Match.EXACT);
+        if (found.isEmpty()) {
+            found = scan(region, storeService, bareType, Match.SUFFIXED);
+        }
+        if (found.isEmpty()) {
+            found = scan(region, storeService, bareType, Match.STORE_NAME);
+        }
+        return found;
     }
 
+    /**
+     * How a stored entry is claimed for the requested type, tried in this order.
+     *
+     * <p>{@link #STORE_NAME} exists because a model class does not always spell its type the way
+     * CloudFormation does: floci holds {@code AWS::IAM::OIDCProvider} in a class called
+     * {@code OpenIDConnectProvider}, after the IAM API rather than after the CFN type, and no
+     * rule derives one name from the other. What does line up is the store the service put it in,
+     * {@code iam-oidc-providers.json}, because a store is named for what it holds. It is the last
+     * tier on purpose: a file name is a weaker claim than a class name, and it should never
+     * outrank one.
+     */
+    private enum Match { EXACT, SUFFIXED, STORE_NAME }
+
     private List<CloudControlService.ResourceDescription> scan(String region, String storeService,
-                                                               String bareType, boolean lenient) {
+                                                               String bareType, Match match) {
         List<CloudControlService.ResourceDescription> found = new ArrayList<>();
         Set<String> seen = new LinkedHashSet<>();
         for (StorageFactory.OwnedBackend owned : storageFactory.ownedBackends()) {
             if (!storeService.equals(owned.serviceName())) {
+                continue;
+            }
+            if (match == Match.STORE_NAME
+                    && !storeHolds(owned.fileName(), owned.serviceName(), bareType)) {
                 continue;
             }
             AccountAwareStorageBackend<?> backend = owned.backend();
@@ -145,9 +168,16 @@ public class CloudControlStoreLister {
                     continue;
                 }
                 String className = value == null ? null : value.getClass().getSimpleName();
-                if (className == null
-                        || !(lenient ? isOfType(className, bareType, storeService)
-                                     : matches(className, bareType, storeService))) {
+                if (className == null) {
+                    continue;
+                }
+                boolean claimed = switch (match) {
+                    case EXACT -> matches(className, bareType, storeService);
+                    case SUFFIXED -> isOfType(className, bareType, storeService);
+                    // The store's own name has already been checked; every entry in it counts.
+                    case STORE_NAME -> true;
+                };
+                if (!claimed) {
                     continue;
                 }
                 JsonNode node;
@@ -202,6 +232,51 @@ public class CloudControlStoreLister {
             }
         }
         return false;
+    }
+
+    /**
+     * Whether a store's file name says the store holds the requested type. The name is a service
+     * prefix, the type in dash-separated lowercase words, and a plural: {@code
+     * iam-oidc-providers.json} holds {@code AWS::IAM::OIDCProvider}. Both the prefix and the
+     * plural are optional, since not every store carries them.
+     *
+     * <p>Only the last word is singularized. A store named for a plural noun in the middle
+     * ({@code iam-access-keys.json}) still resolves, and one whose name is a different type's
+     * ({@code iam-roles.json} against {@code OIDCProvider}) does not.
+     */
+    static boolean storeHolds(String fileName, String storeService, String bareType) {
+        if (fileName == null || bareType == null) {
+            return false;
+        }
+        String stem = fileName;
+        int dot = stem.lastIndexOf('.');
+        if (dot > 0) {
+            stem = stem.substring(0, dot);
+        }
+        stem = stem.toLowerCase(Locale.ROOT);
+        if (storeService != null && stem.startsWith(storeService.toLowerCase(Locale.ROOT) + "-")) {
+            stem = stem.substring(storeService.length() + 1);
+        }
+        String[] words = stem.split("-");
+        if (words.length == 0 || words[words.length - 1].isEmpty()) {
+            return false;
+        }
+        words[words.length - 1] = singular(words[words.length - 1]);
+        return String.join("", words).equals(bareType.toLowerCase(Locale.ROOT));
+    }
+
+    private static String singular(String word) {
+        if (word.endsWith("ies") && word.length() > 3) {
+            return word.substring(0, word.length() - 3) + "y";
+        }
+        if (word.endsWith("ses") || word.endsWith("xes") || word.endsWith("zes")
+                || word.endsWith("ches") || word.endsWith("shes")) {
+            return word.substring(0, word.length() - 2);
+        }
+        if (word.endsWith("s") && !word.endsWith("ss")) {
+            return word.substring(0, word.length() - 1);
+        }
+        return word;
     }
 
     private static boolean matches(String candidate, String bareType, String storeService) {

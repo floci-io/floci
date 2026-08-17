@@ -2,11 +2,13 @@ package io.github.hectorvent.floci.services.cloudcontrol;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.json.JsonMapper;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ecs.model.EcsCluster;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
+import io.github.hectorvent.floci.services.iam.model.OpenIDConnectProvider;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -37,6 +39,16 @@ class CloudControlStoreListerTest {
         return td;
     }
 
+    /**
+     * The mapper the lister gets in production is Quarkus's, which knows about java.time. Built
+     * bare, valueToTree throws on any model carrying an Instant and the lister skips the entry -
+     * so a test using a bare mapper would report a resource missing for a reason no running
+     * emulator has.
+     */
+    private static ObjectMapper mapper() {
+        return JsonMapper.builder().findAndAddModules().build();
+    }
+
     private static CloudControlStoreLister listerOver(String service, String file, Object... values) {
         AccountAwareStorageBackend<Object> backend = AccountAwareStorageBackend.inMemory(ACCOUNT);
         for (int i = 0; i < values.length; i++) {
@@ -45,7 +57,7 @@ class CloudControlStoreListerTest {
         StorageFactory factory = mock(StorageFactory.class);
         when(factory.ownedBackends())
                 .thenReturn(List.of(new StorageFactory.OwnedBackend(service, file, backend)));
-        return new CloudControlStoreLister(factory, new ObjectMapper());
+        return new CloudControlStoreLister(factory, mapper());
     }
 
     @Test
@@ -67,7 +79,7 @@ class CloudControlStoreListerTest {
         CloudControlStoreLister lister = listerOver("ecs", "ecs-task-definitions.json",
                 taskDefinition(arn, "web", 1));
 
-        JsonNode model = new ObjectMapper()
+        JsonNode model = mapper()
                 .readTree(lister.list("us-east-1", "AWS::ECS::TaskDefinition").getFirst().properties());
 
         assertEquals(arn, model.path("TaskDefinitionArn").asText());
@@ -83,7 +95,7 @@ class CloudControlStoreListerTest {
         td.setTags(Map.of("owner", "platform"));
         CloudControlStoreLister lister = listerOver("ecs", "ecs-task-definitions.json", td);
 
-        JsonNode tags = new ObjectMapper()
+        JsonNode tags = mapper()
                 .readTree(lister.list("us-east-1", "AWS::ECS::TaskDefinition").getFirst().properties())
                 .path("Tags");
 
@@ -152,5 +164,50 @@ class CloudControlStoreListerTest {
 
         assertEquals(1, found.size());
         assertEquals("arn:aws:ecs:us-east-1:" + ACCOUNT + ":task/prod/abc", found.getFirst().identifier());
+    }
+
+    /**
+     * AWS::IAM::OIDCProvider is held in a class called OpenIDConnectProvider, after the IAM API
+     * rather than after the CloudFormation type, and no rule turns one name into the other. The
+     * store it sits in is named for what it holds, so that is what answers.
+     */
+    @Test
+    void listsATypeWhoseModelClassSpellsItsNameDifferently() {
+        OpenIDConnectProvider provider = new OpenIDConnectProvider();
+        String arn = "arn:aws:iam::" + ACCOUNT + ":oidc-provider/token.actions.githubusercontent.com";
+        provider.setArn(arn);
+        provider.setUrl("token.actions.githubusercontent.com");
+        CloudControlStoreLister lister = listerOver("iam", "iam-oidc-providers.json", provider);
+
+        List<CloudControlService.ResourceDescription> found =
+                lister.list("us-east-1", "AWS::IAM::OIDCProvider");
+
+        assertEquals(1, found.size());
+        assertEquals(arn, found.getFirst().identifier());
+    }
+
+    /** A store named for one type must not answer for another held by the same service. */
+    @Test
+    void aStoreNamedForAnotherTypeDoesNotAnswer() {
+        OpenIDConnectProvider provider = new OpenIDConnectProvider();
+        provider.setArn("arn:aws:iam::" + ACCOUNT + ":oidc-provider/example.com");
+        CloudControlStoreLister lister = listerOver("iam", "iam-roles.json", provider);
+
+        assertTrue(lister.list("us-east-1", "AWS::IAM::OIDCProvider").isEmpty());
+    }
+
+    @Test
+    void storeNamesResolveThroughTheServicePrefixAndThePlural() {
+        assertTrue(CloudControlStoreLister.storeHolds("iam-oidc-providers.json", "iam", "OIDCProvider"));
+        assertTrue(CloudControlStoreLister.storeHolds("iam-access-keys.json", "iam", "AccessKey"));
+        // The plural is optional, and so is the service prefix.
+        assertTrue(CloudControlStoreLister.storeHolds("ecs-cluster.json", "ecs", "Cluster"));
+        assertTrue(CloudControlStoreLister.storeHolds("oidc-providers.json", "iam", "OIDCProvider"));
+        // -ies is a plural too.
+        assertTrue(CloudControlStoreLister.storeHolds("iam-policies.json", "iam", "Policy"));
+        // And a store named for something else stays out.
+        assertFalse(CloudControlStoreLister.storeHolds("iam-roles.json", "iam", "OIDCProvider"));
+        assertFalse(CloudControlStoreLister.storeHolds("iam-instance-profiles.json", "iam", "Profile"));
+        assertFalse(CloudControlStoreLister.storeHolds("iam.json", "iam", "Role"));
     }
 }
