@@ -1678,38 +1678,183 @@ public class Ec2Service implements ContainerTeardown {
     }
 
     public List<SecurityGroupRule> authorizeSecurityGroupIngress(String region, String groupId, List<IpPermission> permissions) {
-        ensureDefaultResources(region);
-        List<SecurityGroupRule> rules = new ArrayList<>();
-        synchronized (lockFor(key(region, groupId))) {
-            SecurityGroup sg = getRequiredSecurityGroup(region, groupId);
-            List<IpPermission> next = new ArrayList<>(sg.getIpPermissions());
-            for (IpPermission perm : permissions) {
-                resolveGroupReferences(region, sg.getVpcId(), perm);
-                next.add(perm);
-                rules.addAll(createRules(region, groupId, perm, false));
-            }
-            sg.setIpPermissions(next);
-            securityGroups.put(key(region, groupId), sg);
-        }
+        List<SecurityGroupRule> rules = authorizeSecurityGroupRules(region, groupId, permissions, false);
         reconcilePublishedPortsForGroup(region, groupId);
         return rules;
     }
 
     public List<SecurityGroupRule> authorizeSecurityGroupEgress(String region, String groupId, List<IpPermission> permissions) {
+        return authorizeSecurityGroupRules(region, groupId, permissions, true);
+    }
+
+    /**
+     * Adds permissions in either direction.
+     *
+     * <p>A permission is stored one source at a time, because that is the granularity AWS both
+     * authorizes and revokes at: a rule is (protocol, port range, one source), and its description
+     * is metadata hanging off it rather than part of its identity. Re-authorizing a rule that
+     * already exists is {@code InvalidPermission.Duplicate} even when the description differs, and
+     * the whole request fails without adding any of it.
+     */
+    private List<SecurityGroupRule> authorizeSecurityGroupRules(String region, String groupId,
+                                                                List<IpPermission> permissions, boolean egress) {
         ensureDefaultResources(region);
         List<SecurityGroupRule> rules = new ArrayList<>();
         synchronized (lockFor(key(region, groupId))) {
             SecurityGroup sg = getRequiredSecurityGroup(region, groupId);
-            List<IpPermission> next = new ArrayList<>(sg.getIpPermissionsEgress());
+            List<IpPermission> current = explodePermissions(egress ? sg.getIpPermissionsEgress() : sg.getIpPermissions());
+            Set<String> seen = current.stream().map(Ec2Service::permissionSourceKey).collect(Collectors.toSet());
+
+            List<IpPermission> incoming = new ArrayList<>();
             for (IpPermission perm : permissions) {
                 resolveGroupReferences(region, sg.getVpcId(), perm);
-                next.add(perm);
-                rules.addAll(createRules(region, groupId, perm, true));
+                incoming.addAll(explodePermissions(List.of(perm)));
             }
-            sg.setIpPermissionsEgress(next);
+            // Checked in full before anything is stored: AWS rejects the whole call, and a request
+            // that repeats a rule inside itself is just as duplicate as one repeating a stored rule.
+            for (IpPermission atom : incoming) {
+                if (!seen.add(permissionSourceKey(atom))) {
+                    throw new AwsException("InvalidPermission.Duplicate",
+                            "the specified rule \"" + describeRule(atom, egress) + "\" already exists", 400);
+                }
+            }
+
+            current.addAll(incoming);
+            List<IpPermission> next = regroupPermissions(current);
+            if (egress) {
+                sg.setIpPermissionsEgress(next);
+            } else {
+                sg.setIpPermissions(next);
+            }
             securityGroups.put(key(region, groupId), sg);
+            for (IpPermission atom : incoming) {
+                rules.addAll(createRules(region, groupId, atom, egress));
+            }
         }
         return rules;
+    }
+
+    /**
+     * Splits permissions into one entry per source, so that two rules sharing a port range but not
+     * a source stay separable. A permission carrying no source at all survives as one sourceless
+     * entry, matching what Floci has always accepted.
+     */
+    private static List<IpPermission> explodePermissions(List<IpPermission> permissions) {
+        List<IpPermission> atoms = new ArrayList<>();
+        if (permissions == null) {
+            return atoms;
+        }
+        for (IpPermission perm : permissions) {
+            if (perm == null) {
+                continue;
+            }
+            int before = atoms.size();
+            if (perm.getIpRanges() != null) {
+                for (IpRange range : perm.getIpRanges()) {
+                    IpPermission atom = copyPorts(perm);
+                    atom.getIpRanges().add(range);
+                    atoms.add(atom);
+                }
+            }
+            if (perm.getIpv6Ranges() != null) {
+                for (Ipv6Range range : perm.getIpv6Ranges()) {
+                    IpPermission atom = copyPorts(perm);
+                    atom.getIpv6Ranges().add(range);
+                    atoms.add(atom);
+                }
+            }
+            if (perm.getUserIdGroupPairs() != null) {
+                for (UserIdGroupPair pair : perm.getUserIdGroupPairs()) {
+                    IpPermission atom = copyPorts(perm);
+                    atom.getUserIdGroupPairs().add(pair);
+                    atoms.add(atom);
+                }
+            }
+            if (atoms.size() == before) {
+                atoms.add(copyPorts(perm));
+            }
+        }
+        return atoms;
+    }
+
+    /**
+     * Collects single-source entries back into the shape DescribeSecurityGroups returns: one
+     * permission per (protocol, from port, to port), carrying every source authorized for it.
+     */
+    private static List<IpPermission> regroupPermissions(List<IpPermission> atoms) {
+        Map<String, IpPermission> byPorts = new LinkedHashMap<>();
+        for (IpPermission atom : atoms) {
+            IpPermission group = byPorts.computeIfAbsent(permissionPortKey(atom), k -> copyPorts(atom));
+            group.getIpRanges().addAll(atom.getIpRanges());
+            group.getIpv6Ranges().addAll(atom.getIpv6Ranges());
+            group.getUserIdGroupPairs().addAll(atom.getUserIdGroupPairs());
+        }
+        return new ArrayList<>(byPorts.values());
+    }
+
+    private static IpPermission copyPorts(IpPermission perm) {
+        IpPermission copy = new IpPermission();
+        copy.setIpProtocol(perm.getIpProtocol());
+        copy.setFromPort(perm.getFromPort());
+        copy.setToPort(perm.getToPort());
+        return copy;
+    }
+
+    private static String permissionPortKey(IpPermission perm) {
+        return perm.getIpProtocol() + "|" + perm.getFromPort() + "|" + perm.getToPort();
+    }
+
+    /**
+     * Identity of a single-source permission. Descriptions are left out on purpose: AWS calls two
+     * rules the same rule when they agree on protocol, ports and source, whatever they say about
+     * themselves.
+     */
+    private static String permissionSourceKey(IpPermission atom) {
+        return permissionPortKey(atom) + "|" + permissionSource(atom);
+    }
+
+    private static String permissionSource(IpPermission atom) {
+        if (!atom.getIpRanges().isEmpty()) {
+            return "cidr4:" + atom.getIpRanges().get(0).getCidrIp();
+        }
+        if (!atom.getIpv6Ranges().isEmpty()) {
+            return "cidr6:" + atom.getIpv6Ranges().get(0).getCidrIpv6();
+        }
+        if (!atom.getUserIdGroupPairs().isEmpty()) {
+            UserIdGroupPair pair = atom.getUserIdGroupPairs().get(0);
+            return "sg:" + pair.getUserId() + "/" + (pair.getGroupId() != null ? pair.getGroupId() : pair.getGroupName());
+        }
+        return "none";
+    }
+
+    private static String ruleSourceKey(SecurityGroupRule rule) {
+        String source;
+        if (rule.getCidrIpv4() != null) {
+            source = "cidr4:" + rule.getCidrIpv4();
+        } else if (rule.getCidrIpv6() != null) {
+            source = "cidr6:" + rule.getCidrIpv6();
+        } else if (rule.getReferencedGroupInfo() != null) {
+            source = "sg:" + rule.getReferencedGroupInfo().getUserId() + "/" + rule.getReferencedGroupInfo().getGroupId();
+        } else {
+            source = "none";
+        }
+        return rule.getIpProtocol() + "|" + rule.getFromPort() + "|" + rule.getToPort() + "|" + source;
+    }
+
+    /** The rule wording AWS puts in an InvalidPermission.Duplicate message. */
+    private static String describeRule(IpPermission atom, boolean egress) {
+        String peer = permissionSource(atom);
+        int colon = peer.indexOf(':');
+        String peerValue = colon >= 0 ? peer.substring(colon + 1) : peer;
+        StringBuilder sb = new StringBuilder("peer: ").append(peerValue)
+                .append(", ").append(atom.getIpProtocol());
+        if (atom.getFromPort() != null) {
+            sb.append(", from port: ").append(atom.getFromPort());
+        }
+        if (atom.getToPort() != null) {
+            sb.append(", to port: ").append(atom.getToPort());
+        }
+        return sb.append(egress ? ", EGRESS, ALLOW" : ", ALLOW").toString();
     }
 
     /**
@@ -1798,25 +1943,48 @@ public class Ec2Service implements ContainerTeardown {
     }
 
     public void revokeSecurityGroupIngress(String region, String groupId, List<IpPermission> permissions) {
-        ensureDefaultResources(region);
-        synchronized (lockFor(key(region, groupId))) {
-            SecurityGroup sg = getRequiredSecurityGroup(region, groupId);
-            List<IpPermission> next = new ArrayList<>(sg.getIpPermissions());
-            next.removeIf(p -> matchesAnyPermission(p, permissions));
-            sg.setIpPermissions(next);
-            securityGroups.put(key(region, groupId), sg);
-        }
+        revokeSecurityGroupRules(region, groupId, permissions, false);
         reconcilePublishedPortsForGroup(region, groupId);
     }
 
     public void revokeSecurityGroupEgress(String region, String groupId, List<IpPermission> permissions) {
+        revokeSecurityGroupRules(region, groupId, permissions, true);
+    }
+
+    /**
+     * Removes permissions in either direction, one source at a time. Revoking tcp/443 from
+     * 10.0.0.0/8 leaves tcp/443 from 10.1.0.0/16 alone, and the flattened rules
+     * DescribeSecurityGroupRules serves go with the permission they came from.
+     */
+    private void revokeSecurityGroupRules(String region, String groupId,
+                                          List<IpPermission> permissions, boolean egress) {
         ensureDefaultResources(region);
         synchronized (lockFor(key(region, groupId))) {
             SecurityGroup sg = getRequiredSecurityGroup(region, groupId);
-            List<IpPermission> next = new ArrayList<>(sg.getIpPermissionsEgress());
-            next.removeIf(p -> matchesAnyPermission(p, permissions));
-            sg.setIpPermissionsEgress(next);
+            Set<String> doomed = new HashSet<>();
+            for (IpPermission perm : permissions) {
+                resolveGroupReferences(region, sg.getVpcId(), perm);
+                for (IpPermission atom : explodePermissions(List.of(perm))) {
+                    doomed.add(permissionSourceKey(atom));
+                }
+            }
+            List<IpPermission> current = explodePermissions(egress ? sg.getIpPermissionsEgress() : sg.getIpPermissions());
+            current.removeIf(atom -> doomed.contains(permissionSourceKey(atom)));
+            List<IpPermission> next = regroupPermissions(current);
+            if (egress) {
+                sg.setIpPermissionsEgress(next);
+            } else {
+                sg.setIpPermissions(next);
+            }
             securityGroups.put(key(region, groupId), sg);
+
+            String regionPrefix = region + "::";
+            for (SecurityGroupRule rule : securityGroupRules.scan(k -> k.startsWith(regionPrefix))) {
+                if (groupId.equals(rule.getGroupId()) && rule.isEgress() == egress
+                        && doomed.contains(ruleSourceKey(rule))) {
+                    securityGroupRules.delete(key(region, rule.getSecurityGroupRuleId()));
+                }
+            }
         }
     }
 
@@ -1826,17 +1994,6 @@ public class Ec2Service implements ContainerTeardown {
             throw new AwsException("InvalidGroup.NotFound", "The security group '" + groupId + "' does not exist", 400);
 
         return sg;
-    }
-
-    private boolean matchesAnyPermission(IpPermission existing, List<IpPermission> toRemove) {
-        for (IpPermission perm : toRemove) {
-            if (Objects.equals(existing.getIpProtocol(), perm.getIpProtocol())
-                    && Objects.equals(existing.getFromPort(), perm.getFromPort())
-                    && Objects.equals(existing.getToPort(), perm.getToPort())) {
-                return true;
-            }
-        }
-        return false;
     }
 
     public List<SecurityGroupRule> describeSecurityGroupRules(String region, List<String> groupIds, List<String> ruleIds) {
