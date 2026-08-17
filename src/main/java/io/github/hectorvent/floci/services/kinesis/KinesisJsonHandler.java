@@ -370,7 +370,7 @@ public class KinesisJsonHandler {
                     .put("PartitionKey", rec.getPartitionKey())
                     .put("SequenceNumber", rec.getSequenceNumber())
                     .put("ApproximateArrivalTimestamp",
-                         rec.getApproximateArrivalTimestamp().toEpochMilli() / 1000.0);
+                         epochSeconds(rec.getApproximateArrivalTimestamp()));
         }
         if (continuationSeqNo != null) {
             eventPayload.put("ContinuationSequenceNumber", continuationSeqNo);
@@ -671,7 +671,7 @@ public class KinesisJsonHandler {
             rNode.put("Data", Base64.getEncoder().encodeToString(rec.getData()));
             rNode.put("PartitionKey", rec.getPartitionKey());
             rNode.put("SequenceNumber", rec.getSequenceNumber());
-            rNode.put("ApproximateArrivalTimestamp", rec.getApproximateArrivalTimestamp().toEpochMilli() / 1000.0);
+            rNode.put("ApproximateArrivalTimestamp", epochSeconds(rec.getApproximateArrivalTimestamp()));
         }
         response.put("NextShardIterator", (String) result.get("NextShardIterator"));
         response.put("MillisBehindLatest", ((Number) result.get("MillisBehindLatest")).longValue());
