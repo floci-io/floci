@@ -49,6 +49,7 @@ public class CloudControlService {
     private final IvsService ivsService;
     private final IvschatService ivschatService;
     private final MediaLiveService mediaLiveService;
+    private final CloudControlStoreLister storeLister;
     private final ObjectMapper mapper;
     /** How many finished request tokens to keep before evicting the oldest. */
     private static final int MAX_RETAINED_REQUESTS = 1000;
@@ -92,7 +93,9 @@ public class CloudControlService {
                                IamService iamService, CloudFormationResourceProvisioner provisioner,
                                AmpService ampService, IvsService ivsService,
                                IvschatService ivschatService,
-                               MediaLiveService mediaLiveService, ObjectMapper mapper) {
+                               MediaLiveService mediaLiveService,
+                               CloudControlStoreLister storeLister, ObjectMapper mapper) {
+        this.storeLister = storeLister;
         this.ampService = ampService;
         this.s3Service = s3Service;
         this.ec2Service = ec2Service;
@@ -294,7 +297,9 @@ public class CloudControlService {
                     w -> w.getArn(), w -> w.getAlias(), w -> w.getTags());
             case "AWS::APS::Scraper" -> arnListed(ampService.listScrapers(region),
                     sc -> sc.getArn(), sc -> sc.getAlias(), sc -> sc.getTags());
-            default -> List.of();
+            // Everything else is read from the owning service's own store. The cases above stay
+            // ahead of it because they shape a type's model exactly; this covers the rest.
+            default -> storeLister == null ? List.of() : storeLister.list(region, typeName);
         };
     }
 

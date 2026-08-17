@@ -224,7 +224,7 @@ public class TaggedResourceScanner {
      * three are accepted: a string-to-string map, a list of {@code {Key, Value}} objects, and a
      * list of single-entry maps.
      */
-    static Map<String, String> extractTags(JsonNode node) {
+    public static Map<String, String> extractTags(JsonNode node) {
         Map<String, String> tags = new LinkedHashMap<>();
         Iterator<Map.Entry<String, JsonNode>> fields = node.fields();
         while (fields.hasNext()) {

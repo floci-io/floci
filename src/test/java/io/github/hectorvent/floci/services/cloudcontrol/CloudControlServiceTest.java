@@ -40,6 +40,7 @@ class CloudControlServiceTest {
                 mock(io.github.hectorvent.floci.services.ivs.IvsService.class),
                 mock(io.github.hectorvent.floci.services.ivschat.IvschatService.class),
                 mock(io.github.hectorvent.floci.services.medialive.MediaLiveService.class),
+                new CloudControlStoreLister(null, mapper),
                 mapper);
 
         String properties = service.listResources("us-east-1", "AWS::EC2::VPC").getFirst().properties();
