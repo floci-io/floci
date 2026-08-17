@@ -97,6 +97,15 @@ public class LambdaService {
      * the same validation and bookkeeping as production rather than
      * silently no-op'ing past null checks.
      */
+    /**
+     * Resolves the VPC a function's subnets sit in, so GetFunctionConfiguration can report the
+     * {@code VpcId} AWS derives rather than only what the caller supplied. Injected as a field
+     * because the package-private test constructors do not have one, and a null one simply means
+     * the VpcId is left out.
+     */
+    @Inject
+    io.github.hectorvent.floci.services.ec2.Ec2Service ec2Service;
+
     LambdaService(LambdaFunctionStore functionStore,
                   WarmPool warmPool,
                   CodeStore codeStore,
@@ -331,7 +340,7 @@ public class LambdaService {
         if (request.get("VpcConfig") instanceof Map<?, ?>) {
             @SuppressWarnings("unchecked")
             Map<String, Object> vpc = (Map<String, Object>) request.get("VpcConfig");
-            fn.setVpcConfig(vpc);
+            fn.setVpcConfig(normalizeVpcConfig(region, vpc));
         }
 
         List<LambdaFileSystemConfig> fileSystemConfigs =
@@ -460,6 +469,34 @@ public class LambdaService {
         return fn;
     }
 
+    /**
+     * Stores a VpcConfig the way GetFunctionConfiguration reports it: the subnets and security
+     * groups the caller gave, plus the VpcId those subnets belong to. AWS fills the VpcId in;
+     * a caller never sends one.
+     */
+    Map<String, Object> normalizeVpcConfig(String region, Map<String, Object> vpc) {
+        if (vpc == null) {
+            return null;
+        }
+        Map<String, Object> normalized = new java.util.LinkedHashMap<>(vpc);
+        if (normalized.get("VpcId") == null && ec2Service != null
+                && normalized.get("SubnetIds") instanceof List<?> subnetIds && !subnetIds.isEmpty()) {
+            List<String> ids = subnetIds.stream().map(String::valueOf).toList();
+            try {
+                ec2Service.describeSubnets(region, ids, Map.of()).stream()
+                        .map(subnet -> subnet.getVpcId())
+                        .filter(java.util.Objects::nonNull)
+                        .findFirst()
+                        .ifPresent(vpcId -> normalized.put("VpcId", vpcId));
+            } catch (RuntimeException e) {
+                // A subnet that does not exist is not this call's business to reject: AWS validates
+                // it, Floci does not, and inventing a VpcId here would be worse than omitting one.
+                LOG.debugv("Could not resolve VpcId for subnets {0}: {1}", ids, e.toString());
+            }
+        }
+        return normalized;
+    }
+
     public LambdaFunction updateFunctionConfiguration(String region, String functionName, Map<String, Object> request) {
         LambdaFunction fn = getFunction(region, functionName);
 
@@ -557,7 +594,7 @@ public class LambdaService {
 
         if (request.containsKey("VpcConfig")) {
             if (request.get("VpcConfig") instanceof Map<?, ?>) {
-                fn.setVpcConfig(requestedVpcConfig);
+                fn.setVpcConfig(normalizeVpcConfig(region, requestedVpcConfig));
             }
         }
 

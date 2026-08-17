@@ -644,6 +644,24 @@ public class LambdaController {
                     .put("LocalMountPath", fileSystem.getLocalMountPath()));
         }
 
+        // VpcConfig — only when the function has one, which is how AWS reports it
+        if (fn.getVpcConfig() != null && !fn.getVpcConfig().isEmpty()) {
+            ObjectNode vpcNode = node.putObject("VpcConfig");
+            ArrayNode subnets = vpcNode.putArray("SubnetIds");
+            ArrayNode groups = vpcNode.putArray("SecurityGroupIds");
+            if (fn.getVpcConfig().get("SubnetIds") instanceof List<?> subnetIds) {
+                subnetIds.forEach(id -> subnets.add(String.valueOf(id)));
+            }
+            if (fn.getVpcConfig().get("SecurityGroupIds") instanceof List<?> groupIds) {
+                groupIds.forEach(id -> groups.add(String.valueOf(id)));
+            }
+            if (fn.getVpcConfig().get("VpcId") != null) {
+                vpcNode.put("VpcId", String.valueOf(fn.getVpcConfig().get("VpcId")));
+            }
+            vpcNode.put("Ipv6AllowedForDualStack",
+                    Boolean.TRUE.equals(fn.getVpcConfig().get("Ipv6AllowedForDualStack")));
+        }
+
         // Environment — always present (SDK expects it even when empty)
         ObjectNode envNode = node.putObject("Environment");
         if (fn.getEnvironment() != null && !fn.getEnvironment().isEmpty()) {
