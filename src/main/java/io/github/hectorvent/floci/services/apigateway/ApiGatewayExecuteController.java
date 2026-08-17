@@ -2038,12 +2038,12 @@ public class ApiGatewayExecuteController {
         http.put("userAgent", headers.getHeaderString("User-Agent") != null
                 ? headers.getHeaderString("User-Agent") : "");
 
-        // Matches AWS's real HTTP API JWT authorizer shape - requestContext.authorizer.jwt.claims
-        // (+ jwt.scopes, split from the standard OAuth2 space-delimited scope claim - AWS does
-        // this splitting itself, callers never see a raw "scope" string), not the v1/REST
-        // CUSTOM-authorizer shape (requestContext.authorizer.principalId/<claim>) built elsewhere
-        // in this class. Previously enforceJwtAuthorizer's verified claims were discarded instead
-        // of reaching here, so this node was never present at all.
+        // Matches AWS's real HTTP API JWT authorizer shape: requestContext.authorizer.jwt.claims
+        // retains the token's claims, while jwt.scopes contains the standard OAuth2 scope claim
+        // split on whitespace. This differs from the v1/REST CUSTOM-authorizer shape
+        // (requestContext.authorizer.principalId/<claim>) built elsewhere in this class.
+        // Previously enforceJwtAuthorizer's claims were discarded instead of reaching here, so
+        // this node was never present at all.
         if (jwtClaims != null && !jwtClaims.isEmpty()) {
             ObjectNode authorizerNode = ctx.putObject("authorizer");
             ObjectNode jwtNode = authorizerNode.putObject("jwt");
