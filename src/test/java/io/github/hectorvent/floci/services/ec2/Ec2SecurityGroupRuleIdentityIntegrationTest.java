@@ -293,6 +293,62 @@ class Ec2SecurityGroupRuleIdentityIntegrationTest {
             .body(not(containsString("<description>tcp-dns</description>")));
     }
 
+    @Test
+    void theDefaultEgressRuleCanBeRevokedWithExplicitZeroPorts() {
+        String vpcId = createVpc();
+        String groupId = createSecurityGroup(uniqueName("default-egress"), vpcId);
+
+        // AWS returns the all-protocols rule with no ports at all, but a client holding its own
+        // normalized copy sends the revoke back as ports 0 to 0. Both name the same rule, and a
+        // group whose default egress cannot be removed can never match a configuration that
+        // declares its own.
+        given()
+            .formParam("Action", "RevokeSecurityGroupEgress")
+            .formParam("GroupId", groupId)
+            .formParam("IpPermissions.1.IpProtocol", "-1")
+            .formParam("IpPermissions.1.FromPort", "0")
+            .formParam("IpPermissions.1.ToPort", "0")
+            .formParam("IpPermissions.1.IpRanges.1.CidrIp", "0.0.0.0/0")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .formParam("Action", "DescribeSecurityGroups")
+            .formParam("GroupId.1", groupId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(not(containsString("0.0.0.0/0")));
+    }
+
+    @Test
+    void aProtocolNumberNamesTheSameRuleAsItsName() {
+        String vpcId = createVpc();
+        String groupId = createSecurityGroup(uniqueName("protocol-number"), vpcId);
+
+        authorizeEgressCidr(groupId, "9090", "10.5.0.0/16", "by-name").then().statusCode(200);
+
+        // 6 is tcp. Authorizing it again under its number is the same rule.
+        given()
+            .formParam("Action", "AuthorizeSecurityGroupEgress")
+            .formParam("GroupId", groupId)
+            .formParam("IpPermissions.1.IpProtocol", "6")
+            .formParam("IpPermissions.1.FromPort", "9090")
+            .formParam("IpPermissions.1.ToPort", "9090")
+            .formParam("IpPermissions.1.IpRanges.1.CidrIp", "10.5.0.0/16")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body(containsString("InvalidPermission.Duplicate"));
+    }
+
     private io.restassured.response.Response authorizeEgressCidr(String groupId, String port,
                                                                  String cidr, String description) {
         var request = given()

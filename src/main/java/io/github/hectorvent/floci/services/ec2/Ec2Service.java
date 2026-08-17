@@ -1792,16 +1792,58 @@ public class Ec2Service implements ContainerTeardown {
         return new ArrayList<>(byPorts.values());
     }
 
+    /**
+     * Copies the protocol and port range of a permission, canonicalized the way AWS reports them,
+     * so that a caller's spelling never decides whether two rules are the same rule.
+     *
+     * <p>The all-protocols rule is the one that matters in practice: AWS returns it with no ports
+     * at all, but a client that keeps its own normalized copy sends the revoke back as ports 0 to
+     * 0. Held apart, those two never match, and a group's default egress rule survives every
+     * attempt to remove it.
+     */
     private static IpPermission copyPorts(IpPermission perm) {
         IpPermission copy = new IpPermission();
-        copy.setIpProtocol(perm.getIpProtocol());
-        copy.setFromPort(perm.getFromPort());
-        copy.setToPort(perm.getToPort());
+        String protocol = canonicalProtocol(perm.getIpProtocol());
+        copy.setIpProtocol(protocol);
+        if (!ALL_PROTOCOLS.equals(protocol)) {
+            copy.setFromPort(perm.getFromPort());
+            copy.setToPort(perm.getToPort());
+        }
         return copy;
     }
 
+    private static final String ALL_PROTOCOLS = "-1";
+
+    /**
+     * The protocol spelling AWS returns. A caller may give a name or an IANA number; AWS answers
+     * with the name for the three protocols that have one, the number otherwise, and {@code -1}
+     * for every protocol at once.
+     */
+    private static String canonicalProtocol(String protocol) {
+        if (protocol == null) {
+            return null;
+        }
+        String lower = protocol.toLowerCase(java.util.Locale.ROOT);
+        return switch (lower) {
+            case "all" -> ALL_PROTOCOLS;
+            case "1" -> "icmp";
+            case "6" -> "tcp";
+            case "17" -> "udp";
+            case "58" -> "icmpv6";
+            default -> lower;
+        };
+    }
+
     private static String permissionPortKey(IpPermission perm) {
-        return perm.getIpProtocol() + "|" + perm.getFromPort() + "|" + perm.getToPort();
+        return portKey(perm.getIpProtocol(), perm.getFromPort(), perm.getToPort());
+    }
+
+    private static String portKey(String protocol, Integer fromPort, Integer toPort) {
+        String canonical = canonicalProtocol(protocol);
+        if (ALL_PROTOCOLS.equals(canonical)) {
+            return canonical + "|all";
+        }
+        return canonical + "|" + fromPort + "|" + toPort;
     }
 
     /**
@@ -1838,7 +1880,7 @@ public class Ec2Service implements ContainerTeardown {
         } else {
             source = "none";
         }
-        return rule.getIpProtocol() + "|" + rule.getFromPort() + "|" + rule.getToPort() + "|" + source;
+        return portKey(rule.getIpProtocol(), rule.getFromPort(), rule.getToPort()) + "|" + source;
     }
 
     /** The rule wording AWS puts in an InvalidPermission.Duplicate message. */
