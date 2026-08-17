@@ -116,13 +116,17 @@ public class Ec2SecurityGroupRuleCfnProvisioner implements CfnResourceProvisione
             perm.setToPort(rule.get("ToPort").asInt());
         }
         // One Description property covers whichever peer the rule names, matching CloudFormation.
-        // It reaches the ipv4 and ipv6 ranges; UserIdGroupPair has no description field to put it on.
         String description = resolve(rule, "Description", engine);
         String cidr = resolve(rule, "CidrIp", engine);
         String cidr6 = resolve(rule, "CidrIpv6", engine);
         String peerGroup = firstNonBlank(
                 resolve(rule, "SourceSecurityGroupId", engine),
                 resolve(rule, "DestinationSecurityGroupId", engine));
+        // Ingress also names a peer by group name, with an owner id for a group in another
+        // account. Egress has no name variant. Counting only the id form rejected a template
+        // that did name exactly one source.
+        String peerGroupName = resolve(rule, "SourceSecurityGroupName", engine);
+        String peerGroupOwner = resolve(rule, "SourceSecurityGroupOwnerId", engine);
         String prefixList = firstNonBlank(
                 resolve(rule, "SourcePrefixListId", engine),
                 resolve(rule, "DestinationPrefixListId", engine));
@@ -131,7 +135,8 @@ public class Ec2SecurityGroupRuleCfnProvisioner implements CfnResourceProvisione
         // address range, a prefix list, or a security group." Naming several used to authorize a
         // rule record per peer while only the first id was kept, so delete revoked one of them and
         // an update left the others on the group.
-        long sources = Stream.of(cidr, cidr6, peerGroup, prefixList)
+        String peer = firstNonBlank(peerGroup, peerGroupName);
+        long sources = Stream.of(cidr, cidr6, peer, prefixList)
                 .filter(s -> s != null && !s.isBlank())
                 .count();
         // Exactly one, so zero is rejected too. Letting none through sent an IpPermission naming
@@ -154,9 +159,18 @@ public class Ec2SecurityGroupRuleCfnProvisioner implements CfnResourceProvisione
             range6.setDescription(description);
             perm.getIpv6Ranges().add(range6);
         }
-        if (peerGroup != null && !peerGroup.isBlank()) {
+        if (peer != null && !peer.isBlank()) {
             UserIdGroupPair pair = new UserIdGroupPair();
-            pair.setGroupId(peerGroup);
+            // Ec2Service resolves a name to an id on authorize, before it records the rule, so the
+            // name form is handed over as-is rather than resolved twice.
+            if (peerGroup != null && !peerGroup.isBlank()) {
+                pair.setGroupId(peerGroup);
+            } else {
+                pair.setGroupName(peerGroupName);
+            }
+            if (peerGroupOwner != null && !peerGroupOwner.isBlank()) {
+                pair.setUserId(peerGroupOwner);
+            }
             pair.setDescription(description);
             perm.getUserIdGroupPairs().add(pair);
         }

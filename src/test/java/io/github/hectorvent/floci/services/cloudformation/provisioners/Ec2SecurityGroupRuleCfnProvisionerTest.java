@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
+import io.github.hectorvent.floci.services.ec2.model.UserIdGroupPair;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.IpPermission;
 import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
@@ -315,6 +316,50 @@ class Ec2SecurityGroupRuleCfnProvisionerTest {
 
         assertEquals("ValidationError", failure.getErrorCode());
         verify(ec2, never()).authorizeSecurityGroupIngress(anyString(), anyString(), anyList());
+    }
+
+    @Test
+    void aPeerNamedByGroupNameCountsAsASource() {
+        // The schema lists SourceSecurityGroupName beside the id form. Counting only the id meant
+        // a template naming its peer by name was rejected for naming no source.
+        when(ec2.authorizeSecurityGroupIngress(eq("us-east-1"), eq("sg-app"), anyList()))
+                .thenReturn(List.of(rule("sgr-byname")));
+        StackResource r = resource(INGRESS, "AppFromWeb");
+        ObjectNode props = mapper.createObjectNode()
+                .put("GroupId", "sg-app")
+                .put("IpProtocol", "tcp")
+                .put("FromPort", 8080)
+                .put("ToPort", 8080)
+                .put("SourceSecurityGroupName", "web-sg")
+                .put("SourceSecurityGroupOwnerId", "111111111111");
+
+        provisioner.provision(r, props, ctx());
+
+        // Handed over as a name. Ec2Service resolves it to an id on authorize, before it records
+        // the rule, so delete still matches on the resolved id.
+        UserIdGroupPair pair = authorizedIngress().getUserIdGroupPairs().get(0);
+        assertEquals("web-sg", pair.getGroupName());
+        assertNull(pair.getGroupId());
+        assertEquals("111111111111", pair.getUserId());
+    }
+
+    @Test
+    void aPeerNamedByBothIdAndNameStillCountsAsOneSource() {
+        when(ec2.authorizeSecurityGroupIngress(eq("us-east-1"), eq("sg-app"), anyList()))
+                .thenReturn(List.of(rule("sgr-both")));
+        StackResource r = resource(INGRESS, "AppFromWeb");
+        ObjectNode props = mapper.createObjectNode()
+                .put("GroupId", "sg-app")
+                .put("IpProtocol", "tcp")
+                .put("SourceSecurityGroupId", "sg-web")
+                .put("SourceSecurityGroupName", "web-sg");
+
+        provisioner.provision(r, props, ctx());
+
+        // One peer named two ways is still one source, and the id wins.
+        UserIdGroupPair pair = authorizedIngress().getUserIdGroupPairs().get(0);
+        assertEquals("sg-web", pair.getGroupId());
+        assertNull(pair.getGroupName());
     }
 
     @Test
