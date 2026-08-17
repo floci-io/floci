@@ -17,6 +17,7 @@ import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -372,6 +373,47 @@ class CloudWatchLogsHandlerTest {
 
         assertEquals(200, response.getStatus());
         assertEquals(2, ((ObjectNode) response.getEntity()).path("events").size());
+    }
+
+    @Test
+    void filterLogEventsPagesForwardWithTheReturnedToken() {
+        // The wire-level version of the pagination contract: the token comes back on the
+        // response, goes out on the next request, and the second page carries the matches the
+        // first one capped off.
+        long now = System.currentTimeMillis();
+        service.putLogEvents(GROUP, STREAM, java.util.List.of(
+                java.util.Map.of("timestamp", now, "message", "msg-0"),
+                java.util.Map.of("timestamp", now + 1, "message", "msg-1"),
+                java.util.Map.of("timestamp", now + 2, "message", "msg-2"),
+                java.util.Map.of("timestamp", now + 3, "message", "msg-3"),
+                java.util.Map.of("timestamp", now + 4, "message", "msg-4")
+        ), REGION);
+
+        ObjectNode firstRequest = MAPPER.createObjectNode();
+        firstRequest.put("logGroupName", GROUP);
+        firstRequest.put("limit", 3);
+
+        Response firstResponse = handler.handle("FilterLogEvents", firstRequest, REGION);
+        assertEquals(200, firstResponse.getStatus());
+        ObjectNode firstBody = (ObjectNode) firstResponse.getEntity();
+        assertEquals(3, firstBody.path("events").size());
+        assertEquals("msg-0", firstBody.path("events").get(0).path("message").asText());
+        String nextToken = firstBody.path("nextToken").asText(null);
+        assertNotNull(nextToken, "a capped page must advertise the rest");
+
+        ObjectNode secondRequest = MAPPER.createObjectNode();
+        secondRequest.put("logGroupName", GROUP);
+        secondRequest.put("limit", 3);
+        secondRequest.put("nextToken", nextToken);
+
+        Response secondResponse = handler.handle("FilterLogEvents", secondRequest, REGION);
+        assertEquals(200, secondResponse.getStatus());
+        ObjectNode secondBody = (ObjectNode) secondResponse.getEntity();
+        assertEquals(2, secondBody.path("events").size());
+        assertEquals("msg-3", secondBody.path("events").get(0).path("message").asText());
+        assertEquals("msg-4", secondBody.path("events").get(1).path("message").asText());
+        assertTrue(secondBody.path("nextToken").isMissingNode(),
+                "an absent nextToken is how FilterLogEvents says pagination is finished");
     }
 
     // ──────────────────────────── Resilience ────────────────────────────

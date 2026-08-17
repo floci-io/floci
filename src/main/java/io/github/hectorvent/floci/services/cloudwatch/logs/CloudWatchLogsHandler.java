@@ -203,12 +203,14 @@ public class CloudWatchLogsHandler {
         Long endTime = request.has("endTime") ? request.path("endTime").asLong() : null;
         String filterPattern = request.path("filterPattern").asText(null);
         int limit = request.path("limit").asInt(0);
+        String nextToken = request.has("nextToken") ? request.path("nextToken").asText(null) : null;
 
         List<String> streamNames = new ArrayList<>();
         request.path("logStreamNames").forEach(n -> streamNames.add(resolveLogStreamName(n.asText(null))));
 
         CloudWatchLogsService.FilteredLogEventsResult result =
-                logsService.filterLogEvents(groupName, streamNames, startTime, endTime, filterPattern, limit, region);
+                logsService.filterLogEvents(groupName, streamNames, startTime, endTime, filterPattern, limit,
+                        nextToken, region);
 
         ObjectNode response = objectMapper.createObjectNode();
         response.set("events", buildFilteredEventsArray(result.events()));

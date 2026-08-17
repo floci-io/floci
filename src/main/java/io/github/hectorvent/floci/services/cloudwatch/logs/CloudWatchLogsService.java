@@ -476,7 +476,7 @@ public class CloudWatchLogsService {
     public FilteredLogEventsResult filterLogEvents(String groupName, List<String> streamNames,
                                                     Long startTime, Long endTime,
                                                     String filterPattern, int limit,
-                                                    String region) {
+                                                    String nextToken, String region) {
         int maxEvents = Math.min(limit > 0 ? limit : Integer.MAX_VALUE,
                 maxEventsPerQuery);
 
@@ -501,16 +501,38 @@ public class CloudWatchLogsService {
 
         all.sort(Comparator.comparing(FilteredEvent::event, EVENT_ORDER));
 
-        List<FilteredEvent> result = all.stream()
+        List<FilteredEvent> matches = all.stream()
                 .filter(f -> (startTime == null || f.event().getTimestamp() >= startTime)
                         && (endTime == null || f.event().getTimestamp() <= endTime))
                 .filter(f -> filterPattern == null || filterPattern.isBlank()
                         || f.event().getMessage().contains(filterPattern))
-                .limit(maxEvents)
                 .toList();
 
-        String nextToken = result.size() >= maxEvents ? UUID.randomUUID().toString() : null;
-        return new FilteredLogEventsResult(result, nextToken);
+        // The cursor indexes matches rather than stored events, which is why the window is applied
+        // here instead of folded into the stream as a limit. Forward-only, so one prefix where
+        // GetLogEvents needs two.
+        int total = matches.size();
+        int pageStart;
+        if (nextToken != null && nextToken.startsWith("f/")) {
+            pageStart = Math.min(parseTokenIndex(nextToken, 2), total);
+        } else if (nextToken != null) {
+            throw invalidNextToken();
+        } else {
+            pageStart = 0;
+        }
+        // Subtracting from `total` rather than adding to `pageStart` keeps the arithmetic inside
+        // the list's own bounds, so a max-events cap configured near Integer.MAX_VALUE cannot
+        // overflow the end index negative.
+        int pageEnd = pageStart + Math.min(maxEvents, total - pageStart);
+
+        List<FilteredEvent> page = matches.subList(pageStart, pageEnd);
+
+        // Unlike GetLogEvents, which echoes its token back so an SDK paginator can stop on a repeat,
+        // FilterLogEvents signals exhaustion by omitting the token, and its paginators keep going
+        // while one is present. The second clause refuses a cursor that cannot advance, which a
+        // max-events cap of zero would otherwise produce.
+        String pageToken = pageEnd < total && pageEnd > pageStart ? "f/" + pageEnd : null;
+        return new FilteredLogEventsResult(page, pageToken);
     }
 
     // ──────────────────────────── Logs Insights Queries ────────────────────────────
