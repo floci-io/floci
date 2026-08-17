@@ -26,6 +26,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongSupplier;
 
@@ -62,6 +63,13 @@ public class CloudWatchLogsService {
     // Non-monotonic: a backward NTP step could briefly flip a Complete query back to Running — a rare,
     // self-healing emulator artifact we accept rather than complicate the injectable clock with nanoTime.
     private final LongSupplier clock;
+
+    /**
+     * DescribeLogStreams pagination snapshots keyed by the snapshot id embedded in nextToken.
+     * TTL-evicted on snapshot creation; see describeLogStreams for why pagination is
+     * snapshot-based rather than offset- or cursor-based.
+     */
+    private final ConcurrentHashMap<String, StreamPageSnapshot> streamPageSnapshots = new ConcurrentHashMap<>();
 
     /** Cached Logs Insights queries keyed by queryId, bounded with LRU-style eviction. */
     private static final int MAX_STORED_QUERIES = 100;
@@ -333,6 +341,22 @@ public class CloudWatchLogsService {
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "The specified log group does not exist: " + groupName, 400));
 
+        int maxResults = Math.min(limit > 0 ? limit : 50, 50);
+
+        // Pagination works over a snapshot of the ordering taken when the first page is
+        // served: the token names a stored snapshot plus a position in it. Re-sorting the
+        // live collection on every page (whether resumed by offset or by sort-key cursor)
+        // skips or repeats streams whenever creates, deletes or PutLogEvents reorder streams
+        // across a page boundary — e.g. an unreturned stream that receives a newer event
+        // between descending LastEventTime pages jumps ahead of any cursor and is never
+        // returned. The snapshot freezes membership and order; attributes are re-read live
+        // per page and streams deleted since the snapshot are dropped, so every stream that
+        // existed when pagination started is returned at most once, with current attributes.
+        if (nextToken != null && !nextToken.isBlank()) {
+            return resumeStreamPage(nextToken, groupName, prefix, byLastEventTime, descending,
+                    maxResults, region);
+        }
+
         String storagePrefix = streamKeyPrefix(region, groupName);
         List<LogStream> result = streamStore.scan(k -> {
             if (!k.startsWith(storagePrefix)) {
@@ -351,65 +375,78 @@ public class CloudWatchLogsService {
                                 s.getLastEventTimestamp() == null ? Long.MIN_VALUE : s.getLastEventTimestamp())
                         .thenComparing(LogStream::getLogStreamName)
                 : Comparator.comparing(LogStream::getLogStreamName);
-        Comparator<LogStream> order = descending ? base.reversed() : base;
-        result.sort(order);
+        result.sort(descending ? base.reversed() : base);
 
-        // The token is a cursor on the sort key of the last stream returned, not a positional
-        // offset: streams created, deleted or reordered between page requests must not shift
-        // the resume point, or callers see duplicates and gaps. Names are unique per group and
-        // the comparator tie-breaks on name, so "strictly after the cursor" is well-defined.
-        int start = 0;
-        if (nextToken != null && !nextToken.isBlank()) {
-            LogStream cursor = decodeStreamCursor(nextToken, byLastEventTime, descending);
-            while (start < result.size() && order.compare(result.get(start), cursor) <= 0) {
-                start++;
-            }
+        int end = Math.min(maxResults, result.size());
+        String token = null;
+        if (end < result.size()) {
+            String snapshotId = UUID.randomUUID().toString();
+            streamPageSnapshots.put(snapshotId, new StreamPageSnapshot(
+                    groupKey(region, groupName), prefix == null ? "" : prefix,
+                    byLastEventTime, descending,
+                    result.stream().map(LogStream::getLogStreamName).toList(),
+                    clock.getAsLong()));
+            evictExpiredStreamPageSnapshots();
+            token = encodeStreamPageToken(snapshotId, end);
         }
-        int maxResults = Math.min(limit > 0 ? limit : 50, 50);
-        int end = Math.min(start + maxResults, result.size());
-        String token = end < result.size()
-                ? encodeStreamCursor(result.get(end - 1), byLastEventTime, descending)
-                : null;
-        return new DescribeLogStreamsResult(result.subList(start, end), token);
+        return new DescribeLogStreamsResult(result.subList(0, end), token);
     }
 
-    // Cursor format (base64 of "v1:<order>:<direction>:<lastEventTimestamp|->:<name>").
-    // ':' cannot appear in a log stream name, and the name comes last, so the split is safe.
-    // The ordering fields are embedded so a token replayed against a query with different
-    // orderBy/descending arguments is rejected instead of resuming at a meaningless position.
-
-    private static String encodeStreamCursor(LogStream last, boolean byLastEventTime, boolean descending) {
-        String raw = "v1:" + (byLastEventTime ? "ts" : "name") + ":" + (descending ? "desc" : "asc") + ":"
-                + (last.getLastEventTimestamp() == null ? "-" : last.getLastEventTimestamp()) + ":"
-                + last.getLogStreamName();
-        return Base64.getUrlEncoder().withoutPadding().encodeToString(raw.getBytes(StandardCharsets.UTF_8));
-    }
-
-    private static LogStream decodeStreamCursor(String nextToken, boolean byLastEventTime, boolean descending) {
+    private DescribeLogStreamsResult resumeStreamPage(String nextToken, String groupName, String prefix,
+                                                      boolean byLastEventTime, boolean descending,
+                                                      int maxResults, String region) {
         String[] parts;
         try {
             String raw = new String(Base64.getUrlDecoder().decode(nextToken), StandardCharsets.UTF_8);
-            parts = raw.split(":", 5);
+            parts = raw.split(":", 3);
         } catch (IllegalArgumentException e) {
             throw invalidNextToken();
         }
-        if (parts.length != 5
-                || !"v1".equals(parts[0])
-                || !(byLastEventTime ? "ts" : "name").equals(parts[1])
-                || !(descending ? "desc" : "asc").equals(parts[2])
-                || parts[4].isEmpty()) {
+        int position;
+        if (parts.length != 3 || !"v2".equals(parts[0])) {
             throw invalidNextToken();
         }
-        LogStream cursor = new LogStream();
-        cursor.setLogStreamName(parts[4]);
-        if (!"-".equals(parts[3])) {
-            try {
-                cursor.setLastEventTimestamp(Long.parseLong(parts[3]));
-            } catch (NumberFormatException e) {
-                throw invalidNextToken();
-            }
+        try {
+            position = Integer.parseInt(parts[2]);
+        } catch (NumberFormatException e) {
+            throw invalidNextToken();
         }
-        return cursor;
+        StreamPageSnapshot snapshot = streamPageSnapshots.get(parts[1]);
+        // A token replayed against a different group or query shape resumes at a meaningless
+        // position; reject it like an unknown or expired token.
+        if (snapshot == null
+                || position < 0
+                || !snapshot.groupKey().equals(groupKey(region, groupName))
+                || !snapshot.prefix().equals(prefix == null ? "" : prefix)
+                || snapshot.byLastEventTime() != byLastEventTime
+                || snapshot.descending() != descending) {
+            throw invalidNextToken();
+        }
+
+        List<LogStream> page = new ArrayList<>();
+        List<String> names = snapshot.streamNames();
+        int index = position;
+        while (index < names.size() && page.size() < maxResults) {
+            streamStore.get(streamKey(region, groupName, names.get(index))).ifPresent(page::add);
+            index++;
+        }
+        String token = index < names.size() ? encodeStreamPageToken(parts[1], index) : null;
+        return new DescribeLogStreamsResult(page, token);
+    }
+
+    private record StreamPageSnapshot(String groupKey, String prefix, boolean byLastEventTime,
+                                      boolean descending, List<String> streamNames, long createdAtMs) {}
+
+    private static final long STREAM_PAGE_SNAPSHOT_TTL_MS = 15 * 60 * 1000;
+
+    private void evictExpiredStreamPageSnapshots() {
+        long cutoff = clock.getAsLong() - STREAM_PAGE_SNAPSHOT_TTL_MS;
+        streamPageSnapshots.values().removeIf(s -> s.createdAtMs() < cutoff);
+    }
+
+    private static String encodeStreamPageToken(String snapshotId, int position) {
+        String raw = "v2:" + snapshotId + ":" + position;
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(raw.getBytes(StandardCharsets.UTF_8));
     }
 
     private static AwsException invalidNextToken() {

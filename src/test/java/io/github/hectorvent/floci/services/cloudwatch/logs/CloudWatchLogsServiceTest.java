@@ -347,6 +347,37 @@ class CloudWatchLogsServiceTest {
     }
 
     @Test
+    void describeLogStreamsReturnsUnseenStreamThatReorderedAcrossThePageBoundary() {
+        // An unreturned stream that receives a newer event between descending LastEventTime
+        // pages sorts ahead of any saved sort-key cursor on the next request and would be
+        // skipped forever. The snapshot freezes the ordering at page one, so the stream is
+        // still returned in its original position.
+        service.createLogGroup("/app/logs", null, null, REGION);
+        service.createLogStream("/app/logs", "a", REGION);
+        service.createLogStream("/app/logs", "b", REGION);
+        service.createLogStream("/app/logs", "c", REGION);
+        service.createLogStream("/app/logs", "d", REGION);
+        service.putLogEvents("/app/logs", "a", List.of(Map.of("timestamp", 1000L, "message", "x")), REGION);
+        service.putLogEvents("/app/logs", "b", List.of(Map.of("timestamp", 2000L, "message", "x")), REGION);
+        service.putLogEvents("/app/logs", "c", List.of(Map.of("timestamp", 3000L, "message", "x")), REGION);
+        service.putLogEvents("/app/logs", "d", List.of(Map.of("timestamp", 4000L, "message", "x")), REGION);
+
+        var page1 = service.describeLogStreams("/app/logs", null, "LastEventTime", true, 2, null, REGION);
+        assertEquals(List.of("d", "c"),
+                page1.logStreams().stream().map(LogStream::getLogStreamName).toList());
+
+        // b was not returned yet; this would now sort it ahead of c, the last returned stream.
+        service.putLogEvents("/app/logs", "b", List.of(Map.of("timestamp", 9000L, "message", "x")), REGION);
+
+        var page2 = service.describeLogStreams("/app/logs", null, "LastEventTime", true, 2, page1.nextToken(), REGION);
+        assertEquals(List.of("b", "a"),
+                page2.logStreams().stream().map(LogStream::getLogStreamName).toList());
+        assertNull(page2.nextToken());
+        // Attributes are live even though the position is frozen.
+        assertEquals(9000L, page2.logStreams().getFirst().getLastEventTimestamp());
+    }
+
+    @Test
     void describeLogStreamsRejectsLastEventTimeWithPrefix() {
         service.createLogGroup("/app/logs", null, null, REGION);
         AwsException e = assertThrows(AwsException.class, () ->
