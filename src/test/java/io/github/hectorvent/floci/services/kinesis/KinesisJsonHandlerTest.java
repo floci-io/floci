@@ -517,4 +517,44 @@ class KinesisJsonHandlerTest {
         assertEquals(new BigDecimal("1786959659.000"), timestampNode.decimalValue());
         assertEquals("1786959659.000", MAPPER.writeValueAsString(timestampNode));
     }
+
+    @Test
+    void getRecordsOmitsArrivalTimestampRatherThanThrowingWhenNull() throws Exception {
+        // A record loaded back from hybrid/persistent JSON-backed storage (KinesisRecord is
+        // @RegisterForReflection with a no-arg constructor) can have a null
+        // approximateArrivalTimestamp if it was persisted by an older Floci version, or the
+        // field was otherwise dropped - GetRecords must not NPE serializing the whole response
+        // just because one record's timestamp is missing.
+        createStream("test-stream");
+
+        ObjectNode putReq = MAPPER.createObjectNode();
+        putReq.put("StreamName", "test-stream");
+        putReq.put("Data", "dGVzdA==");
+        putReq.put("PartitionKey", "pk1");
+        handler.handle("PutRecord", putReq, REGION);
+
+        ObjectNode descReq = MAPPER.createObjectNode();
+        descReq.put("StreamName", "test-stream");
+        String shardId = responseEntity(handler.handle("DescribeStream", descReq, REGION))
+                .get("StreamDescription").get("Shards").get(0).get("ShardId").asText();
+
+        service.describeStream("test-stream", REGION).getShards().get(0).getRecords().get(0)
+                .setApproximateArrivalTimestamp(null);
+
+        ObjectNode iterReq = MAPPER.createObjectNode();
+        iterReq.put("StreamName", "test-stream");
+        iterReq.put("ShardId", shardId);
+        iterReq.put("ShardIteratorType", "TRIM_HORIZON");
+        String iterator = responseEntity(handler.handle("GetShardIterator", iterReq, REGION))
+                .get("ShardIterator").asText();
+
+        ObjectNode recReq = MAPPER.createObjectNode();
+        recReq.put("ShardIterator", iterator);
+        Response resp = handler.handle("GetRecords", recReq, REGION);
+        assertThat(resp.getStatus(), is(200));
+
+        ObjectNode record = (ObjectNode) responseEntity(resp).get("Records").get(0);
+        assertFalse(record.has("ApproximateArrivalTimestamp"));
+        assertTrue(record.has("SequenceNumber"));
+    }
 }
