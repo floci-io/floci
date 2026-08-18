@@ -123,3 +123,184 @@ images:
     rootDeviceType: ebs
     virtualizationType: hvm
     creationDate: "2024-03-09T00:00:00.000Z"
+
+  # sumaform (uyuni-project/sumaform) backend_modules/aws/base/ami.tf declares one
+  # data "aws_ami" block per supported guest OS, feeding a single `ami_info` local
+  # that every host module call reads via lookup() - so ALL of these data sources
+  # are evaluated unconditionally on every apply, even ones for an OS family the
+  # estate never actually launches an instance from (the same unconditional-eval
+  # shape ami-eksworker above exists for). Floci's catalog had zero AWS-owned SUSE,
+  # Red Hat or Rocky Linux entries, so every one of these returned zero results -
+  # not an EC2 gap, an AMI catalog gap, discovered crossing sumaform's own AWS
+  # backend (main.tf.aws.example) against choudoufu/floci.
+  #
+  # Owner IDs are SUSE's and Red Hat's and Rocky Linux's real, documented AWS
+  # publisher accounts (679593333241 SUSE, 013907871322 AWS Marketplace SLES BYOL,
+  # 792107900819 Rocky Linux, 309956199498 Red Hat), and each `name` is shaped to
+  # match that data source's own name_regex - name_regex filtering itself happens
+  # client-side in the AWS provider, not in Floci, so Floci only needs to return a
+  # candidate whose owner/architecture/name make it through DescribeImages. None of
+  # these are ever actually launched by an instance in this fix's own coverage (the
+  # sumaform crossing picks ubuntu2204 for every host it creates), so the guest
+  # behind each is the same untargeted default already used for the metadata-only
+  # entries above - these exist purely so the data source resolves, not to model a
+  # bootable SUSE/RHEL/Rocky guest.
+  - imageId: ami-sumaform-opensuse160o
+    dockerImage: public.ecr.aws/amazonlinux/amazonlinux:2023
+    name: openSUSE-Leap-16-0-v20260101-hvm-ssd-x86_64
+    description: sumaform AMI catalog placeholder - openSUSE Leap 16.0
+    ownerId: "679593333241"
+    architecture: x86_64
+    creationDate: "2026-01-01T00:00:00.000Z"
+
+  - imageId: ami-sumaform-sles15sp4o
+    dockerImage: public.ecr.aws/amazonlinux/amazonlinux:2023
+    name: suse-sles-15-sp4-byos-v20260101-hvm-ssd-x86_64
+    description: sumaform AMI catalog placeholder - SLES 15 SP4 BYOS
+    ownerId: "679593333241"
+    architecture: x86_64
+    creationDate: "2026-01-01T00:00:00.000Z"
+
+  - imageId: ami-sumaform-sles15sp5o
+    dockerImage: public.ecr.aws/amazonlinux/amazonlinux:2023
+    name: suse-sles-15-sp5-byos-v20260101-hvm-ssd-x86_64
+    description: sumaform AMI catalog placeholder - SLES 15 SP5 BYOS
+    ownerId: "679593333241"
+    architecture: x86_64
+    creationDate: "2026-01-01T00:00:00.000Z"
+
+  - imageId: ami-sumaform-sles15sp5-paygo
+    dockerImage: public.ecr.aws/amazonlinux/amazonlinux:2023
+    name: suse-sles-15-sp5-v20260101-hvm-ssd-x86_64
+    description: sumaform AMI catalog placeholder - SLES 15 SP5 PAYG (aws-marketplace)
+    ownerId: "013907871322"
+    architecture: x86_64
+    creationDate: "2026-01-01T00:00:00.000Z"
+
+  - imageId: ami-sumaform-sles15sp6-paygo
+    dockerImage: public.ecr.aws/amazonlinux/amazonlinux:2023
+    name: suse-sles-15-sp6-v20260101-hvm-ssd-x86_64
+    description: sumaform AMI catalog placeholder - SLES 15 SP6 PAYG (aws-marketplace)
+    ownerId: "013907871322"
+    architecture: x86_64
+    creationDate: "2026-01-01T00:00:00.000Z"
+
+  - imageId: ami-sumaform-sles15sp6o
+    dockerImage: public.ecr.aws/amazonlinux/amazonlinux:2023
+    name: suse-sles-15-sp6-byos-v20260101-hvm-ssd-x86_64
+    description: sumaform AMI catalog placeholder - SLES 15 SP6 BYOS
+    ownerId: "679593333241"
+    architecture: x86_64
+    creationDate: "2026-01-01T00:00:00.000Z"
+
+  - imageId: ami-sumaform-sles15sp7-paygo
+    dockerImage: public.ecr.aws/amazonlinux/amazonlinux:2023
+    name: suse-sles-15-sp7-v20260101-hvm-ssd-x86_64
+    description: sumaform AMI catalog placeholder - SLES 15 SP7 PAYG (aws-marketplace)
+    ownerId: "013907871322"
+    architecture: x86_64
+    creationDate: "2026-01-01T00:00:00.000Z"
+
+  - imageId: ami-sumaform-sles160-paygo
+    dockerImage: public.ecr.aws/amazonlinux/amazonlinux:2023
+    name: suse-sles-16-0-v20260101-hvm-ssd-x86_64
+    description: sumaform AMI catalog placeholder - SLES 16.0 PAYG (aws-marketplace)
+    ownerId: "013907871322"
+    architecture: x86_64
+    creationDate: "2026-01-01T00:00:00.000Z"
+
+  - imageId: ami-sumaform-sles15sp7o
+    dockerImage: public.ecr.aws/amazonlinux/amazonlinux:2023
+    name: suse-sles-15-sp7-byos-v20260101-hvm-ssd-x86_64
+    description: sumaform AMI catalog placeholder - SLES 15 SP7 BYOS
+    ownerId: "679593333241"
+    architecture: x86_64
+    creationDate: "2026-01-01T00:00:00.000Z"
+
+  - imageId: ami-sumaform-smlm-server-51-x86-64-ltd-paygo
+    dockerImage: public.ecr.aws/amazonlinux/amazonlinux:2023
+    name: suse-multi-linux-manager-server-5-1-v1-ltd-x86_64
+    description: sumaform AMI catalog placeholder - SUSE Multi-Linux Manager Server 5.1 LTD PAYG (x86_64)
+    ownerId: "679593333241"
+    architecture: x86_64
+    creationDate: "2026-01-01T00:00:00.000Z"
+
+  - imageId: ami-sumaform-smlm-server-51-arm64-ltd-paygo
+    dockerImage: public.ecr.aws/amazonlinux/amazonlinux:2023
+    name: suse-multi-linux-manager-server-5-1-v1-ltd-arm64
+    description: sumaform AMI catalog placeholder - SUSE Multi-Linux Manager Server 5.1 LTD PAYG (arm64)
+    ownerId: "679593333241"
+    architecture: arm64
+    creationDate: "2026-01-01T00:00:00.000Z"
+
+  - imageId: ami-sumaform-smlm-proxy-51-arm64-byos
+    dockerImage: public.ecr.aws/amazonlinux/amazonlinux:2023
+    name: suse-multi-linux-manager-proxy-5-1-byos-v1-arm64
+    description: sumaform AMI catalog placeholder - SUSE Multi-Linux Manager Proxy 5.1 BYOS (arm64)
+    ownerId: "679593333241"
+    architecture: arm64
+    creationDate: "2026-01-01T00:00:00.000Z"
+
+  - imageId: ami-sumaform-smlm-proxy-51-x86-64-byos
+    dockerImage: public.ecr.aws/amazonlinux/amazonlinux:2023
+    name: suse-multi-linux-manager-proxy-5-1-byos-v1-x86_64
+    description: sumaform AMI catalog placeholder - SUSE Multi-Linux Manager Proxy 5.1 BYOS (x86_64)
+    ownerId: "679593333241"
+    architecture: x86_64
+    creationDate: "2026-01-01T00:00:00.000Z"
+
+  - imageId: ami-sumaform-sles12sp5
+    dockerImage: public.ecr.aws/amazonlinux/amazonlinux:2023
+    name: suse-sles-12-sp5-byos-v20260101-hvm-ssd-x86_64
+    description: sumaform AMI catalog placeholder - SLES 12 SP5 BYOS
+    ownerId: "679593333241"
+    architecture: x86_64
+    creationDate: "2026-01-01T00:00:00.000Z"
+
+  - imageId: ami-sumaform-sles12sp5-paygo
+    dockerImage: public.ecr.aws/amazonlinux/amazonlinux:2023
+    name: suse-sles-12-sp5-v20260101-hvm-ssd-x86_64
+    description: sumaform AMI catalog placeholder - SLES 12 SP5 PAYG (aws-marketplace)
+    ownerId: "013907871322"
+    architecture: x86_64
+    creationDate: "2026-01-01T00:00:00.000Z"
+
+  - imageId: ami-sumaform-rocky9
+    dockerImage: public.ecr.aws/amazonlinux/amazonlinux:2023
+    name: Rocky-9-EC2-Base-9.6-20260101.0.x86_64
+    description: sumaform AMI catalog placeholder - Rocky Linux 9
+    ownerId: "792107900819"
+    architecture: x86_64
+    creationDate: "2026-01-01T00:00:00.000Z"
+
+  - imageId: ami-sumaform-rocky10
+    dockerImage: public.ecr.aws/amazonlinux/amazonlinux:2023
+    name: Rocky-10-EC2-Base-10.0-20260101.0.x86_64
+    description: sumaform AMI catalog placeholder - Rocky Linux 10
+    ownerId: "792107900819"
+    architecture: x86_64
+    creationDate: "2026-01-01T00:00:00.000Z"
+
+  - imageId: ami-sumaform-rhel8
+    dockerImage: public.ecr.aws/amazonlinux/amazonlinux:2023
+    name: RHEL-8.10.0_HVM-20260101-x86_64-0-Hourly2-GP3
+    description: sumaform AMI catalog placeholder - RHEL 8.10
+    ownerId: "309956199498"
+    architecture: x86_64
+    creationDate: "2026-01-01T00:00:00.000Z"
+
+  - imageId: ami-sumaform-rhel9
+    dockerImage: public.ecr.aws/amazonlinux/amazonlinux:2023
+    name: RHEL-9.5.0_HVM-20260101-x86_64-0-Hourly2-GP3
+    description: sumaform AMI catalog placeholder - RHEL 9.5
+    ownerId: "309956199498"
+    architecture: x86_64
+    creationDate: "2026-01-01T00:00:00.000Z"
+
+  - imageId: ami-sumaform-slesforsap15sp5-paygo
+    dockerImage: public.ecr.aws/amazonlinux/amazonlinux:2023
+    name: suse-sles-sap-15-sp5-v20260101-hvm-ssd-x86_64
+    description: sumaform AMI catalog placeholder - SLES for SAP 15 SP5 PAYG
+    ownerId: "679593333241"
+    architecture: x86_64
+    creationDate: "2026-01-01T00:00:00.000Z"

@@ -307,6 +307,91 @@ class Ec2IntegrationTest {
             .body("DescribeImagesResponse.imagesSet.item.imageOwnerId", equalTo("801119661308"));
     }
 
+    // uyuni-project/sumaform's AWS backend (backend_modules/aws/base/ami.tf) declares one
+    // data "aws_ami" block per supported guest OS behind a single `ami_info` local every host
+    // module reads via lookup() - so all ~20 of them evaluate unconditionally on every apply,
+    // the same shape as the EKS worker tests above. Owner 679593333241 is SUSE's real,
+    // documented AWS AMI publisher account. Representative of 9 catalog entries under this
+    // owner (opensuse160o, sles15sp4o/5o/6o/7o, sles12sp5, slesforsap15sp5-paygo, and the two
+    // smlm-proxy entries besides this one) - not exhaustively tested here, one per real owner
+    // account is enough to prove the shape without 20 near-identical test bodies.
+    @Test
+    @Order(12)
+    void describeImagesWithSumaformSuseByosAmiFilters() {
+        given()
+            .formParam("Action", "DescribeImages")
+            .formParam("Owner.1", "679593333241")
+            .formParam("Filter.1.Name", "name")
+            .formParam("Filter.1.Value.1", "openSUSE-Leap-16-0-*")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body("DescribeImagesResponse.imagesSet.item.size()", equalTo(1))
+            .body("DescribeImagesResponse.imagesSet.item.imageId", equalTo("ami-sumaform-opensuse160o"))
+            .body("DescribeImagesResponse.imagesSet.item.imageOwnerId", equalTo("679593333241"));
+    }
+
+    // Owner 013907871322 is the real AWS Marketplace account SUSE's PAYGO SLES listings
+    // publish under - a different account from the BYOS entries above, so it needs its own
+    // catalog coverage. Representative of the 5 aws-marketplace-owned entries this fix adds
+    // (sles15sp5/6/7-paygo, sles160-paygo, sles12sp5-paygo).
+    @Test
+    @Order(13)
+    void describeImagesWithSumaformSlesPaygoAmiFilters() {
+        given()
+            .formParam("Action", "DescribeImages")
+            .formParam("Owner.1", "013907871322")
+            .formParam("Filter.1.Name", "name")
+            .formParam("Filter.1.Value.1", "suse-sles-15-sp5-v*-hvm*")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body("DescribeImagesResponse.imagesSet.item.size()", equalTo(1))
+            .body("DescribeImagesResponse.imagesSet.item.imageId", equalTo("ami-sumaform-sles15sp5-paygo"))
+            .body("DescribeImagesResponse.imagesSet.item.imageOwnerId", equalTo("013907871322"));
+    }
+
+    // Owners 792107900819 (Rocky Linux) and 309956199498 (Red Hat) round out the other two
+    // AWS-owned families sumaform's ami.tf reaches for besides SUSE and Ubuntu (already
+    // catalogued above this test).
+    @Test
+    @Order(14)
+    void describeImagesWithSumaformRockyAndRhelAmiFilters() {
+        given()
+            .formParam("Action", "DescribeImages")
+            .formParam("Owner.1", "792107900819")
+            .formParam("Filter.1.Name", "name")
+            .formParam("Filter.1.Value.1", "Rocky-9-EC2-Base-9*")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body("DescribeImagesResponse.imagesSet.item.size()", equalTo(1))
+            .body("DescribeImagesResponse.imagesSet.item.imageId", equalTo("ami-sumaform-rocky9"));
+
+        given()
+            .formParam("Action", "DescribeImages")
+            .formParam("Owner.1", "309956199498")
+            .formParam("Filter.1.Name", "name")
+            .formParam("Filter.1.Value.1", "RHEL-9.5.0_HVM-*")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body("DescribeImagesResponse.imagesSet.item.size()", equalTo(1))
+            .body("DescribeImagesResponse.imagesSet.item.imageId", equalTo("ami-sumaform-rhel9"));
+    }
+
     @Test
     // Runs after the DescribeNetworkInterfaces pagination tests at @Order(92), like the
     // metadata test below. Terminating the source instance is not enough on its own:

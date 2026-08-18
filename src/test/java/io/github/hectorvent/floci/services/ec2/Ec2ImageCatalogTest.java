@@ -40,7 +40,27 @@ class Ec2ImageCatalogTest {
                 "ami-alpine",
                 "ami-0abcdef1234567893",
                 "ami-0eksworker000000001",
-                "ami-0ekswinworker0000001"), imageIds);
+                "ami-0ekswinworker0000001",
+                "ami-sumaform-opensuse160o",
+                "ami-sumaform-sles15sp4o",
+                "ami-sumaform-sles15sp5o",
+                "ami-sumaform-sles15sp5-paygo",
+                "ami-sumaform-sles15sp6-paygo",
+                "ami-sumaform-sles15sp6o",
+                "ami-sumaform-sles15sp7-paygo",
+                "ami-sumaform-sles160-paygo",
+                "ami-sumaform-sles15sp7o",
+                "ami-sumaform-smlm-server-51-x86-64-ltd-paygo",
+                "ami-sumaform-smlm-server-51-arm64-ltd-paygo",
+                "ami-sumaform-smlm-proxy-51-arm64-byos",
+                "ami-sumaform-smlm-proxy-51-x86-64-byos",
+                "ami-sumaform-sles12sp5",
+                "ami-sumaform-sles12sp5-paygo",
+                "ami-sumaform-rocky9",
+                "ami-sumaform-rocky10",
+                "ami-sumaform-rhel8",
+                "ami-sumaform-rhel9",
+                "ami-sumaform-slesforsap15sp5-paygo"), imageIds);
 
         assertTrue(imageCatalog.findByIdOrAlias("ami-amazonlinux2").isPresent());
         assertTrue(imageCatalog.findByIdOrAlias("ami-amazonlinux2023").isPresent());
