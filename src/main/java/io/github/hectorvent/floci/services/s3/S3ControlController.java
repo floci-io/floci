@@ -115,7 +115,23 @@ public class S3ControlController {
     }
 
     /**
-     * TagResource — replaces all tags on the specified S3 bucket.
+     * TagResource — adds or updates the given tags on the specified S3
+     * bucket, leaving every other existing tag untouched.
+     *
+     * Real S3 Control's TagResource is a merge/upsert, not a replace: it is
+     * the resource-tagging counterpart to UntagResource below, which already
+     * does a read-modify-write rather than overwriting the whole tag set.
+     * This handler used to call {@link S3Service#putBucketTagging} directly
+     * with only the tags in the request body, which - because
+     * putBucketTagging implements the classic S3 PutBucketTagging API's
+     * genuinely-replace-all semantics - silently deleted every tag not named
+     * in this particular request. The AWS provider (v6.58+) calls this
+     * endpoint with only the tags that changed, trusting TagResource's real
+     * merge behavior to leave the rest alone; against the old replace-all
+     * handler here, any out-of-band or previously-set tag not part of the
+     * current delta (choudoufu's own tofu-estate/tofu-address ownership
+     * markers among them - see intentius/choudoufu#306) was wiped out by
+     * the very next incremental tag update.
      *
      * POST /v20180820/tags/{resourceArn+}
      * Header: x-amz-account-id
@@ -132,8 +148,10 @@ public class S3ControlController {
         try {
             String bucketName = extractBucketName(resourceArn);
             String xml = new String(body, StandardCharsets.UTF_8);
-            Map<String, String> tags = XmlParser.extractPairs(xml, "Tag", "Key", "Value");
-            s3Service.putBucketTagging(bucketName, tags);
+            Map<String, String> newTags = XmlParser.extractPairs(xml, "Tag", "Key", "Value");
+            Map<String, String> merged = new HashMap<>(s3Service.getBucketTagging(bucketName));
+            merged.putAll(newTags);
+            s3Service.putBucketTagging(bucketName, merged);
             return Response.noContent().build();
         } catch (AwsException e) {
             return xmlErrorResponse(e);
