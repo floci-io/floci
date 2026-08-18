@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.services.elasticache.ElastiCacheQueryHandler;
 import io.github.hectorvent.floci.services.iam.IamQueryHandler;
 import io.github.hectorvent.floci.services.iam.StsQueryHandler;
 import io.github.hectorvent.floci.services.rds.RdsQueryHandler;
+import io.github.hectorvent.floci.services.redshift.RedshiftQueryHandler;
 import io.github.hectorvent.floci.services.sns.SnsQueryHandler;
 import io.github.hectorvent.floci.services.ses.SesQueryHandler;
 import io.github.hectorvent.floci.services.sqs.SqsQueryHandler;
@@ -192,6 +193,7 @@ public class AwsQueryController {
     private final ElbV2QueryHandler elbV2QueryHandler;
     private final AutoScalingQueryHandler autoScalingQueryHandler;
     private final ElasticBeanstalkQueryHandler elasticBeanstalkQueryHandler;
+    private final RedshiftQueryHandler redshiftQueryHandler;
     private final ResolvedServiceCatalog catalog;
     private final RegionResolver regionResolver;
 
@@ -212,6 +214,7 @@ public class AwsQueryController {
                               ElbV2QueryHandler elbV2QueryHandler,
                               AutoScalingQueryHandler autoScalingQueryHandler,
                               ElasticBeanstalkQueryHandler elasticBeanstalkQueryHandler,
+                              RedshiftQueryHandler redshiftQueryHandler,
                               ResolvedServiceCatalog catalog,
                               RegionResolver regionResolver) {
         this.cloudFormationQueryHandler = cloudFormationQueryHandler;
@@ -232,6 +235,7 @@ public class AwsQueryController {
         this.elbV2QueryHandler = elbV2QueryHandler;
         this.autoScalingQueryHandler = autoScalingQueryHandler;
         this.elasticBeanstalkQueryHandler = elasticBeanstalkQueryHandler;
+        this.redshiftQueryHandler = redshiftQueryHandler;
         this.catalog = catalog;
         this.regionResolver = regionResolver;
     }
@@ -314,6 +318,7 @@ public class AwsQueryController {
             case "elasticloadbalancing" -> elbV2QueryHandler.handle(action, formParams, region);
             case "autoscaling" -> autoScalingQueryHandler.handle(action, formParams, region);
             case "elasticbeanstalk" -> elasticBeanstalkQueryHandler.handle(action, formParams, region);
+            case "redshift" -> redshiftQueryHandler.handle(action, formParams, region);
             default -> xmlErrorResponse("UnknownService",
                     "Unknown or unsupported service: " + service, 400);
         };
