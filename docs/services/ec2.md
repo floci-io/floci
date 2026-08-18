@@ -156,6 +156,7 @@ Floci seeds the following resources on first use in each region so Terraform, th
 | Default Internet Gateway | `igw-default` | Attached to default VPC |
 | Main Route Table | `rtb-default` | Associated with default VPC |
 | Default Network ACL | `acl-default` | Allow-all, associated with the default subnets |
+| Default DHCP Options Set | `dopt-default` | `domain-name-servers=AmazonProvidedDNS`, region-appropriate `domain-name`; associated with the default VPC |
 
 ## Supported Actions
 
@@ -189,6 +190,22 @@ Floci seeds the following resources on first use in each region so Terraform, th
 | CreateDefaultVpc | Creates or returns the default VPC for the region. |
 | AssociateVpcCidrBlock | Adds a secondary CIDR block association to a VPC. |
 | DisassociateVpcCidrBlock | Removes a secondary CIDR block association from a VPC. |
+
+### DHCP Options
+
+| Action | Description |
+|--------|-------------|
+| CreateDhcpOptions | Creates a DHCP options set from the supplied `DhcpConfiguration` entries. |
+| DescribeDhcpOptions | Lists or returns stored DHCP options sets. |
+| DeleteDhcpOptions | Deletes a DHCP options set from the local EC2 store; rejected with `DependencyViolation` while a VPC is still associated with it. |
+| AssociateDhcpOptions | Associates a DHCP options set (or the literal `default`) with a VPC. |
+
+Every region seeds a default DHCP options set (`dopt-default`, see Default Resources above)
+that the default VPC and any newly created VPC start out associated with. Valid
+`DhcpConfiguration` keys are `domain-name`, `domain-name-servers`, `ntp-servers`,
+`netbios-name-servers`, and `netbios-node-type`; an unrecognized key, more than 4 values on a
+multi-value key, or a `netbios-node-type` outside `1`, `2`, `4`, `8` is rejected with
+`InvalidParameterValue`.
 
 ### Subnets
 

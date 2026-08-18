@@ -74,6 +74,11 @@ public class Ec2QueryHandler {
                 case "CreateVpcEndpoint" -> handleCreateVpcEndpoint(params, region);
                 case "DescribeVpcEndpoints" -> handleDescribeVpcEndpoints(params, region);
                 case "DeleteVpcEndpoints" -> handleDeleteVpcEndpoints(params, region);
+                // DHCP Options
+                case "CreateDhcpOptions" -> handleCreateDhcpOptions(params, region);
+                case "DescribeDhcpOptions" -> handleDescribeDhcpOptions(params, region);
+                case "DeleteDhcpOptions" -> handleDeleteDhcpOptions(params, region);
+                case "AssociateDhcpOptions" -> handleAssociateDhcpOptions(params, region);
                 // Flow Logs
                 case "CreateFlowLogs" -> handleCreateFlowLogs(params, region);
                 case "DescribeFlowLogs" -> handleDescribeFlowLogs(params, region);
@@ -889,6 +894,81 @@ public class Ec2QueryHandler {
         }
         xml.end("DescribeVpcAttributeResponse");
         return xmlResponse(xml.build());
+    }
+
+    // ─── DHCP Options handlers ──────────────────────────────────────────────────
+
+    private Response handleCreateDhcpOptions(MultivaluedMap<String, String> p, String region) {
+        DhcpOptions options = service.createDhcpOptions(
+                region,
+                parseDhcpConfigurations(p),
+                parseTagsForResource(p, "dhcp-options"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("CreateDhcpOptionsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("dhcpOptions").raw(dhcpOptionsXml(options)).end("dhcpOptions")
+                .end("CreateDhcpOptionsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDescribeDhcpOptions(MultivaluedMap<String, String> p, String region) {
+        List<String> ids = getList(p, "DhcpOptionsId");
+        Map<String, List<String>> filters = getFilters(p);
+        List<DhcpOptions> optionSets = service.describeDhcpOptions(region, ids, filters);
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeDhcpOptionsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("dhcpOptionsSet");
+        for (DhcpOptions options : optionSets) {
+            xml.start("item").raw(dhcpOptionsXml(options)).end("item");
+        }
+        xml.end("dhcpOptionsSet").end("DescribeDhcpOptionsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDeleteDhcpOptions(MultivaluedMap<String, String> p, String region) {
+        service.deleteDhcpOptions(region, p.getFirst("DhcpOptionsId"));
+        return booleanResponse("DeleteDhcpOptions");
+    }
+
+    private Response handleAssociateDhcpOptions(MultivaluedMap<String, String> p, String region) {
+        service.associateDhcpOptions(region, p.getFirst("DhcpOptionsId"), p.getFirst("VpcId"));
+        return booleanResponse("AssociateDhcpOptions");
+    }
+
+    private List<DhcpConfiguration> parseDhcpConfigurations(MultivaluedMap<String, String> p) {
+        List<DhcpConfiguration> configurations = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String key = p.getFirst("DhcpConfiguration." + i + ".Key");
+            if (key == null) break;
+            List<String> values = new ArrayList<>();
+            for (int j = 1; ; j++) {
+                String value = p.getFirst("DhcpConfiguration." + i + ".Value." + j);
+                if (value == null) break;
+                values.add(value);
+            }
+            configurations.add(new DhcpConfiguration(key, values));
+        }
+        return configurations;
+    }
+
+    private String dhcpOptionsXml(DhcpOptions options) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("dhcpOptionsId", options.getDhcpOptionsId())
+                .elem("ownerId", options.getOwnerId())
+                .start("dhcpConfigurationSet");
+        for (DhcpConfiguration config : options.getDhcpConfigurationSet()) {
+            xml.start("item")
+                    .elem("key", config.getKey())
+                    .start("valueSet");
+            for (String value : config.getValues()) {
+                xml.start("item").elem("value", value).end("item");
+            }
+            xml.end("valueSet").end("item");
+        }
+        xml.end("dhcpConfigurationSet")
+                .raw(tagSetXml(options.getTags()));
+        return xml.build();
     }
 
     private Response handleDescribeVpcEndpointServices(MultivaluedMap<String, String> p, String region) {

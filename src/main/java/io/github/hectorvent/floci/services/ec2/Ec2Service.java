@@ -32,6 +32,8 @@ import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.model.Address;
 import io.github.hectorvent.floci.services.ec2.model.BlockDeviceMapping;
+import io.github.hectorvent.floci.services.ec2.model.DhcpConfiguration;
+import io.github.hectorvent.floci.services.ec2.model.DhcpOptions;
 import io.github.hectorvent.floci.services.ec2.model.EbsBlockDevice;
 import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
@@ -120,6 +122,7 @@ public class Ec2Service implements ContainerTeardown {
     private final StorageBackend<String, SpotInstanceRequest> spotInstanceRequests;
     private final StorageBackend<String, NetworkAcl> networkAcls;
     private final StorageBackend<String, ManagedPrefixList> managedPrefixLists;
+    private final StorageBackend<String, DhcpOptions> dhcpOptionsSets;
     // resourceId → List<Tag>
     private final StorageBackend<String, List<Tag>> tags;
     private final Set<String> seededRegions = ConcurrentHashMap.newKeySet();
@@ -150,6 +153,7 @@ public class Ec2Service implements ContainerTeardown {
                 storageFactory.create("ec2", "ec2-spot-instance-requests.json", new TypeReference<Map<String, SpotInstanceRequest>>() {}),
                 storageFactory.create("ec2", "ec2-network-acls.json", new TypeReference<Map<String, NetworkAcl>>() {}),
                 storageFactory.create("ec2", "ec2-managed-prefix-lists.json", new TypeReference<Map<String, ManagedPrefixList>>() {}),
+                storageFactory.create("ec2", "ec2-dhcp-options.json", new TypeReference<Map<String, DhcpOptions>>() {}),
                 storageFactory.create("ec2", "ec2-tags.json", new TypeReference<Map<String, List<Tag>>>() {}));
     }
 
@@ -176,6 +180,7 @@ public class Ec2Service implements ContainerTeardown {
                StorageBackend<String, SpotInstanceRequest> spotInstanceRequests,
                StorageBackend<String, NetworkAcl> networkAcls,
                StorageBackend<String, ManagedPrefixList> managedPrefixLists,
+               StorageBackend<String, DhcpOptions> dhcpOptionsSets,
                StorageBackend<String, List<Tag>> tags) {
         this.accountId = config.defaultAccountId();
         this.config = config;
@@ -202,6 +207,7 @@ public class Ec2Service implements ContainerTeardown {
         this.spotInstanceRequests = spotInstanceRequests;
         this.networkAcls = networkAcls;
         this.managedPrefixLists = managedPrefixLists;
+        this.dhcpOptionsSets = dhcpOptionsSets;
         this.tags = tags;
     }
 
@@ -260,6 +266,19 @@ public class Ec2Service implements ContainerTeardown {
         }
         LOG.debugv("Seeding default EC2 resources for region {0}", region);
 
+        // Default DHCP options set, matching what AWS provisions alongside every VPC:
+        // Amazon-provided DNS plus the region's default DNS suffix.
+        String dhcpOptionsId = "dopt-default";
+        DhcpOptions defaultDhcpOptions = new DhcpOptions();
+        defaultDhcpOptions.setDhcpOptionsId(dhcpOptionsId);
+        defaultDhcpOptions.setOwnerId(accountId);
+        defaultDhcpOptions.setRegion(region);
+        defaultDhcpOptions.getDhcpConfigurationSet().add(
+                new DhcpConfiguration("domain-name", List.of(defaultDomainName(region))));
+        defaultDhcpOptions.getDhcpConfigurationSet().add(
+                new DhcpConfiguration("domain-name-servers", List.of("AmazonProvidedDNS")));
+        dhcpOptionsSets.put(key(region, dhcpOptionsId), defaultDhcpOptions);
+
         // Default VPC
         String vpcId = "vpc-default";
         Vpc defaultVpc = new Vpc();
@@ -269,6 +288,7 @@ public class Ec2Service implements ContainerTeardown {
         defaultVpc.setDefault(true);
         defaultVpc.setOwnerId(accountId);
         defaultVpc.setRegion(region);
+        defaultVpc.setDhcpOptionsId(dhcpOptionsId);
         defaultVpc.getCidrBlockAssociationSet().add(
                 new VpcCidrBlockAssociation("vpc-cidr-assoc-default", "172.31.0.0/16"));
         vpcs.put(key(region, vpcId), defaultVpc);
@@ -1431,6 +1451,114 @@ public class Ec2Service implements ContainerTeardown {
                 vpcs.put(key(region, vpc.getVpcId()), vpc);
             }
         }
+    }
+
+    // ─── DHCP Options ──────────────────────────────────────────────────────────
+
+    private static final Set<String> VALID_DHCP_OPTION_KEYS = Set.of(
+            "domain-name", "domain-name-servers", "ntp-servers",
+            "netbios-name-servers", "netbios-node-type");
+    private static final Set<String> LIMITED_DHCP_OPTION_KEYS = Set.of(
+            "domain-name-servers", "ntp-servers", "netbios-name-servers");
+    private static final Set<String> VALID_NETBIOS_NODE_TYPES = Set.of("1", "2", "4", "8");
+
+    // AWS assigns the default DHCP options set's domain-name based on region: us-east-1 gets
+    // the historical "ec2.internal", every other region gets "<region>.compute.internal".
+    private String defaultDomainName(String region) {
+        return "us-east-1".equals(region) ? "ec2.internal" : region + ".compute.internal";
+    }
+
+    private void validateDhcpConfiguration(DhcpConfiguration configuration) {
+        String key = configuration.getKey();
+        if (key == null || !VALID_DHCP_OPTION_KEYS.contains(key)) {
+            throw new AwsException("InvalidParameterValue",
+                    "The value '" + key + "' is invalid for dhcpConfiguration.key. Allowed values are: "
+                            + "domain-name-servers, domain-name, ntp-servers, netbios-name-servers, "
+                            + "netbios-node-type", 400);
+        }
+        List<String> values = configuration.getValues();
+        if (values == null || values.isEmpty()) {
+            throw new AwsException("InvalidParameterValue",
+                    "The dhcpConfiguration '" + key + "' must have at least one value.", 400);
+        }
+        if (LIMITED_DHCP_OPTION_KEYS.contains(key) && values.size() > 4) {
+            throw new AwsException("InvalidParameterValue",
+                    "Value (" + String.join(",", values) + ") for parameter " + key
+                            + " is invalid. The maximum number of values is 4.", 400);
+        }
+        if ("netbios-node-type".equals(key) && (values.size() > 1 || !VALID_NETBIOS_NODE_TYPES.contains(values.get(0)))) {
+            throw new AwsException("InvalidParameterValue",
+                    "Value (" + String.join(",", values) + ") for parameter netbios-node-type is invalid. "
+                            + "Valid values are 1, 2, 4, 8.", 400);
+        }
+    }
+
+    public DhcpOptions createDhcpOptions(String region, List<DhcpConfiguration> configurations, List<Tag> dhcpTags) {
+        ensureDefaultResources(region);
+        if (configurations == null || configurations.isEmpty()) {
+            throw new AwsException("MissingParameter",
+                    "The request must contain the parameter DhcpConfiguration.", 400);
+        }
+        configurations.forEach(this::validateDhcpConfiguration);
+
+        DhcpOptions options = new DhcpOptions();
+        String dhcpOptionsId = "dopt-" + randomHex(17);
+        options.setDhcpOptionsId(dhcpOptionsId);
+        options.setOwnerId(accountId);
+        options.setRegion(region);
+        options.setDhcpConfigurationSet(new ArrayList<>(configurations));
+        if (dhcpTags != null && !dhcpTags.isEmpty()) {
+            options.setTags(new ArrayList<>(dhcpTags));
+            tags.put(dhcpOptionsId, new ArrayList<>(dhcpTags));
+        }
+        dhcpOptionsSets.put(key(region, dhcpOptionsId), options);
+        return options;
+    }
+
+    public List<DhcpOptions> describeDhcpOptions(String region, List<String> dhcpOptionsIds,
+                                                 Map<String, List<String>> filters) {
+        ensureDefaultResources(region);
+        if (!dhcpOptionsIds.isEmpty()) {
+            for (String id : dhcpOptionsIds) {
+                getRequiredDhcpOptions(region, id);
+            }
+        }
+        return dhcpOptionsSets.scan(k -> true).stream()
+                .filter(o -> region.equals(o.getRegion()))
+                .filter(o -> dhcpOptionsIds.isEmpty() || dhcpOptionsIds.contains(o.getDhcpOptionsId()))
+                .filter(o -> matchesFilters(o, filters, region))
+                .collect(Collectors.toList());
+    }
+
+    public void deleteDhcpOptions(String region, String dhcpOptionsId) {
+        ensureDefaultResources(region);
+        getRequiredDhcpOptions(region, dhcpOptionsId);
+        boolean stillAssociated = vpcs.scan(k -> true).stream()
+                .anyMatch(v -> region.equals(v.getRegion()) && dhcpOptionsId.equals(v.getDhcpOptionsId()));
+        if (stillAssociated) {
+            throw new AwsException("DependencyViolation",
+                    "The dhcpOptions '" + dhcpOptionsId + "' has dependencies and cannot be deleted.", 400);
+        }
+        dhcpOptionsSets.delete(key(region, dhcpOptionsId));
+        tags.delete(dhcpOptionsId);
+    }
+
+    // AssociateDhcpOptions accepts the literal "default" to fall back to the region's default
+    // DHCP options set instead of a real dopt-* id (see AWS API docs for AssociateDhcpOptions).
+    public void associateDhcpOptions(String region, String dhcpOptionsId, String vpcId) {
+        ensureDefaultResources(region);
+        Vpc vpc = getRequiredVpc(region, vpcId);
+        String resolvedId = "default".equals(dhcpOptionsId)
+                ? "dopt-default"
+                : getRequiredDhcpOptions(region, dhcpOptionsId).getDhcpOptionsId();
+        vpc.setDhcpOptionsId(resolvedId);
+        vpcs.put(key(region, vpcId), vpc);
+    }
+
+    private DhcpOptions getRequiredDhcpOptions(String region, String dhcpOptionsId) {
+        return dhcpOptionsSets.get(key(region, dhcpOptionsId)).orElseThrow(() ->
+                new AwsException("InvalidDhcpOptionID.NotFound",
+                        "The dhcpOptions ID '" + dhcpOptionsId + "' does not exist", 400));
     }
 
     // ─── VPC Endpoints ────────────────────────────────────────────────────────
@@ -2909,6 +3037,7 @@ public class Ec2Service implements ContainerTeardown {
                 new TagTarget<>(networkAcls, NetworkAcl::getTags, NetworkAcl::setTags),
                 new TagTarget<>(addresses, Address::getTags, Address::setTags),
                 new TagTarget<>(managedPrefixLists, ManagedPrefixList::getTags, ManagedPrefixList::setTags),
+                new TagTarget<>(dhcpOptionsSets, DhcpOptions::getTags, DhcpOptions::setTags),
                 new TagTarget<>(volumes, Volume::getTags, Volume::setTags),
                 new TagTarget<>(snapshots, Snapshot::getTags, Snapshot::setTags),
                 new TagTarget<>(registeredImages, Image::getTags, Image::setTags),
@@ -3583,6 +3712,18 @@ public class Ec2Service implements ContainerTeardown {
                 default -> true;
             };
         }
+        if (resource instanceof DhcpOptions dhcpOptions) {
+            return switch (filterName) {
+                case "dhcp-options-id" -> matchesValue(values, dhcpOptions.getDhcpOptionsId());
+                case "owner-id" -> matchesValue(values, dhcpOptions.getOwnerId());
+                case "key" -> dhcpOptions.getDhcpConfigurationSet().stream()
+                        .anyMatch(c -> matchesValue(values, c.getKey()));
+                case "value" -> dhcpOptions.getDhcpConfigurationSet().stream()
+                        .flatMap(c -> c.getValues().stream())
+                        .anyMatch(v -> matchesValue(values, v));
+                default -> true;
+            };
+        }
         if (resource instanceof SecurityGroup sg) {
             return switch (filterName) {
                 case "group-id" -> matchesValue(values, sg.getGroupId());
@@ -3709,6 +3850,7 @@ public class Ec2Service implements ContainerTeardown {
         if (resource instanceof Volume vol) return vol.getTags();
         if (resource instanceof NetworkInterface ni) return ni.getTagSet();
         if (resource instanceof ManagedPrefixList prefixList) return prefixList.getTags();
+        if (resource instanceof DhcpOptions dhcpOptions) return dhcpOptions.getTags();
         if (resource instanceof LaunchTemplate lt) return lt.getTags();
         if (resource instanceof VpcEndpoint endpoint) return endpoint.getTags();
         if (resource instanceof NatGateway natGateway) return natGateway.getTags();
