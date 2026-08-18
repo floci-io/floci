@@ -4,7 +4,6 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import java.time.Clock;
-import java.util.List;
 import java.util.Map;
 import java.util.regex.Pattern;
 
@@ -23,7 +22,6 @@ public class OidcAuthValidator {
     public Map<String, Object> validate(
             String authorization,
             Map<String, Object> oidcConfig,
-            List<String> sourceIp,
             boolean skipIssuer
     ) {
         Map<String, Object> claims = jwtClaimsDecoder.decode(authorization)
@@ -40,7 +38,7 @@ public class OidcAuthValidator {
         if (!clientIdMatches(claims, oidcConfig)) {
             throw AppSyncAuth.unauthorized();
         }
-        return IdentityBuilder.oidc(claims, sourceIp);
+        return IdentityBuilder.oidc(claims);
     }
 
     boolean matchesProvider(Map<String, Object> claims, Map<String, Object> oidcConfig, boolean skipIssuer) {

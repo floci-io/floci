@@ -48,14 +48,14 @@ class IdentityBuilderTest {
     }
 
     @Test
-    void oidcIdentityHasSubIssuerClaimsSourceIp() {
+    void oidcIdentityHasSubIssuerClaims() {
         Map<String, Object> claims = Map.of("sub", "s1", "iss", "https://issuer");
-        Map<String, Object> identity = IdentityBuilder.oidc(claims, List.of("1.1.1.1"));
+        Map<String, Object> identity = IdentityBuilder.oidc(claims);
         assertEquals("s1", identity.get("sub"));
         assertEquals("https://issuer", identity.get("issuer"));
         assertEquals(claims, identity.get("claims"));
-        assertEquals(List.of("1.1.1.1"), identity.get("sourceIp"));
-        assertEquals(4, identity.size());
+        assertTrue(!identity.containsKey("sourceIp"));
+        assertEquals(3, identity.size());
     }
 
     @Test

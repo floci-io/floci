@@ -221,7 +221,7 @@ Configured modes are the API default `authenticationType` plus `additionalAuthen
 |---|---|
 | API_KEY | Lookup by key value (`da2-…`). Identity is absent (not `{}`). Default key expiry is 7 days when `expires` is omitted. |
 | AWS_IAM | Parses `Credential=` access key; no HMAC. Known keys evaluate `appsync:GraphQL`. Unknown/`test` keys are emulator ALLOW. |
-| Cognito / OIDC | JWT payload decode only (no JWKS). OIDC as the sole mode skips the `iss` check. |
+| Cognito / OIDC | JWT payload decode only (no JWKS). OIDC as the sole mode skips the `iss` check. OIDC identity is `{sub, issuer, claims}` (no `sourceIp`). |
 | Lambda | AppSync `isAuthorized` contract via `LambdaService.invoke` (not an API Gateway policy document). |
 
 SDL field auth: unmarked fields require the API **default** mode. Additional modes unlock fields tagged `@aws_api_key` / `@aws_iam` / `@aws_oidc` / `@aws_cognito_user_pools` / `@aws_lambda`. Multiple directives on a field are OR. Field-level directives override type-level. `@aws_auth` is allowed on `OBJECT \| FIELD_DEFINITION` and is ignored when additional modes exist.

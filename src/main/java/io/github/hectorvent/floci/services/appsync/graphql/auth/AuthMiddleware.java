@@ -88,7 +88,7 @@ public class AuthMiddleware {
         for (ProviderConfig provider : oidc) {
             if (oidcAuthValidator.matchesProvider(claims, provider.config(), skipIssuer)) {
                 Map<String, Object> identity = oidcAuthValidator.validate(
-                        authorization, provider.config(), info.sourceIp(), skipIssuer);
+                        authorization, provider.config(), skipIssuer);
                 return context(identity, AppSyncAuth.AUTH_TYPE_OIDC, AuthenticationType.OPENID_CONNECT,
                         Set.of(), api, null, info);
             }

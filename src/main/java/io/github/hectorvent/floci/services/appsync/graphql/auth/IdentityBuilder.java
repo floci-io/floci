@@ -47,12 +47,11 @@ public final class IdentityBuilder {
         return identity;
     }
 
-    public static Map<String, Object> oidc(Map<String, Object> claims, List<String> sourceIp) {
+    public static Map<String, Object> oidc(Map<String, Object> claims) {
         Map<String, Object> identity = new LinkedHashMap<>();
         identity.put("sub", claims.get("sub"));
         identity.put("issuer", claims.get("iss"));
         identity.put("claims", claims);
-        identity.put("sourceIp", sourceIpArray(sourceIp));
         return identity;
     }
 
