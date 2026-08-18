@@ -257,6 +257,56 @@ class Ec2IntegrationTest {
             .body("DescribeImagesResponse.imagesSet.item.architecture", everyItem(equalTo("arm64")));
     }
 
+    // terraform-aws-modules/terraform-aws-eks (every version, not just this one) discovers its
+    // self-managed worker AMI with exactly this owner + name-filter shape: owner
+    // 602401143452 is the real AWS account that publishes the official EKS-optimized AMIs, and
+    // "amazon-eks-node-<k8s version>-v*" is their real naming convention. Before this catalog
+    // entry existed, this data source returned zero results against Floci, which failed every
+    // self-managed-node-group EKS estate at plan time - not an EKS control-plane gap, an AMI
+    // catalog gap.
+    @Test
+    @Order(10)
+    void describeImagesWithEksWorkerAmiFilters() {
+        given()
+            .formParam("Action", "DescribeImages")
+            .formParam("Owner.1", "602401143452")
+            .formParam("Filter.1.Name", "name")
+            .formParam("Filter.1.Value.1", "amazon-eks-node-1.14-v*")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body("DescribeImagesResponse.imagesSet.item.size()", equalTo(1))
+            .body("DescribeImagesResponse.imagesSet.item.imageId", equalTo("ami-0eksworker000000001"))
+            .body("DescribeImagesResponse.imagesSet.item.imageOwnerId", equalTo("602401143452"));
+    }
+
+    // The Windows counterpart: real AWS account 801119661308 publishes the EKS-optimized
+    // Windows AMIs, named "Windows_Server-2019-English-Core-EKS_Optimized-<version>-*". The
+    // upstream module evaluates this data source unconditionally (it feeds a locals default
+    // that a lookup() default-argument always evaluates), so it must resolve even for an estate
+    // that only ever launches Linux workers.
+    @Test
+    @Order(11)
+    void describeImagesWithEksWindowsWorkerAmiFilters() {
+        given()
+            .formParam("Action", "DescribeImages")
+            .formParam("Owner.1", "801119661308")
+            .formParam("Filter.1.Name", "name")
+            .formParam("Filter.1.Value.1", "Windows_Server-2019-English-Core-EKS_Optimized-1.14-*")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body("DescribeImagesResponse.imagesSet.item.size()", equalTo(1))
+            .body("DescribeImagesResponse.imagesSet.item.imageId", equalTo("ami-0ekswinworker0000001"))
+            .body("DescribeImagesResponse.imagesSet.item.imageOwnerId", equalTo("801119661308"));
+    }
+
     @Test
     // Runs after the DescribeNetworkInterfaces pagination tests at @Order(92), like the
     // metadata test below. Terminating the source instance is not enough on its own:

@@ -96,3 +96,30 @@ images:
     architecture: x86_64
     platform: windows
     creationDate: "2023-04-12T00:00:00.000Z"
+
+  - imageId: ami-0eksworker000000001
+    aliases:
+      - ami-eksworker
+    dockerImage: public.ecr.aws/amazonlinux/amazonlinux:2
+    name: amazon-eks-node-1.14-v20240329
+    description: EKS Kubernetes Worker AMI with AmazonLinux2 image
+    ownerId: "602401143452"
+    imageOwnerAlias: amazon
+    architecture: x86_64
+    rootDeviceType: ebs
+    virtualizationType: hvm
+    creationDate: "2024-03-29T00:00:00.000Z"
+
+  - imageId: ami-0ekswinworker0000001
+    aliases:
+      - ami-eksworker-windows
+    dockerImage: public.ecr.aws/amazonlinux/amazonlinux:2023
+    name: Windows_Server-2019-English-Core-EKS_Optimized-1.14-2024.03.09
+    description: EKS Kubernetes Worker AMI with Windows Server 2019 Core image
+    ownerId: "801119661308"
+    imageOwnerAlias: amazon
+    architecture: x86_64
+    platform: windows
+    rootDeviceType: ebs
+    virtualizationType: hvm
+    creationDate: "2024-03-09T00:00:00.000Z"

@@ -38,7 +38,9 @@ class Ec2ImageCatalogTest {
                 "ami-ubuntu2404-cloud-arm64",
                 "ami-debian12",
                 "ami-alpine",
-                "ami-0abcdef1234567893"), imageIds);
+                "ami-0abcdef1234567893",
+                "ami-0eksworker000000001",
+                "ami-0ekswinworker0000001"), imageIds);
 
         assertTrue(imageCatalog.findByIdOrAlias("ami-amazonlinux2").isPresent());
         assertTrue(imageCatalog.findByIdOrAlias("ami-amazonlinux2023").isPresent());
