@@ -320,6 +320,10 @@ public class S3Controller {
                 s3Service.putBucketRequestPayment(bucket, new String(body, StandardCharsets.UTF_8));
                 return Response.ok().build();
             }
+            if (hasQueryParam(uriInfo, "accelerate")) {
+                s3Service.putBucketAccelerateConfiguration(bucket, new String(body, StandardCharsets.UTF_8));
+                return Response.ok().build();
+            }
             if (hasQueryParam(uriInfo, "inventory")) {
                 s3Service.putBucketInventoryConfiguration(bucket, configurationId(uriInfo),
                         new String(body, StandardCharsets.UTF_8));
@@ -539,6 +543,10 @@ public class S3Controller {
             if (hasQueryParam(uriInfo, "requestPayment")) {
                 s3Service.authorizeBucketRead(bucket, "s3:GetBucketRequestPayment", authorization);
                 return Response.ok(s3Service.getBucketRequestPayment(bucket)).build();
+            }
+            if (hasQueryParam(uriInfo, "accelerate")) {
+                s3Service.authorizeBucketRead(bucket, "s3:GetAccelerateConfiguration", authorization);
+                return Response.ok(s3Service.getBucketAccelerateConfiguration(bucket)).build();
             }
             if (hasQueryParam(uriInfo, "inventory")) {
                 s3Service.authorizeBucketRead(bucket, "s3:GetInventoryConfiguration", authorization);

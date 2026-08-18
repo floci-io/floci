@@ -2304,6 +2304,45 @@ public class S3Service implements Resettable {
                 .build();
     }
 
+    /**
+     * Stores the bucket Transfer Acceleration status. AWS only allows the values
+     * {@code Enabled} and {@code Suspended}; we accept either and reject anything
+     * else with {@code MalformedXML} to match the real S3 behavior.
+     */
+    public void putBucketAccelerateConfiguration(String bucketName, String accelerateXml) {
+        Bucket bucket = bucketStore.get(bucketName)
+                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+        String status = XmlParser.extractFirst(accelerateXml, "Status", null);
+        if (status == null) {
+            throw new AwsException("MalformedXML",
+                    "The XML you provided was not well-formed or did not validate against our published schema.",
+                    400);
+        }
+        status = status.trim();
+        if (!"Enabled".equals(status) && !"Suspended".equals(status)) {
+            throw new AwsException("MalformedXML",
+                    "The XML you provided was not well-formed or did not validate against our published schema.",
+                    400);
+        }
+        bucket.setAccelerateStatus(status);
+        bucketStore.put(bucketName, bucket);
+    }
+
+    /**
+     * Returns the bucket Transfer Acceleration status as XML. A bucket that has
+     * never been configured returns an empty {@code AccelerateConfiguration}
+     * element with no {@code Status} child, matching real S3.
+     */
+    public String getBucketAccelerateConfiguration(String bucketName) {
+        Bucket bucket = bucketStore.get(bucketName)
+                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+        XmlBuilder xml = new XmlBuilder().start("AccelerateConfiguration", AwsNamespaces.S3);
+        if (bucket.getAccelerateStatus() != null) {
+            xml.elem("Status", bucket.getAccelerateStatus());
+        }
+        return xml.end("AccelerateConfiguration").build();
+    }
+
     public void restoreObject(String bucketName, String key, String versionId, String restoreXml) {
         // Validation only - stub implementation
         getObject(bucketName, key, versionId);
