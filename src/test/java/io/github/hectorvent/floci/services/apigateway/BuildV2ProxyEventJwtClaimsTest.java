@@ -11,6 +11,7 @@ import org.junit.jupiter.api.Test;
 
 import java.net.URI;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -57,7 +58,7 @@ class BuildV2ProxyEventJwtClaimsTest {
 
         String json = controller.buildV2ProxyEvent(
                 "POST", "/v1/things", "$default",
-                "abc123", "us-east-2", "$default", headers, uriInfo, null, "req-1", claims);
+                "abc123", "us-east-2", "$default", headers, uriInfo, null, "req-1", claims, null);
         JsonNode event = new ObjectMapper().readTree(json);
 
         JsonNode jwtClaims = event.at("/requestContext/authorizer/jwt/claims");
@@ -67,42 +68,52 @@ class BuildV2ProxyEventJwtClaimsTest {
     }
 
     @Test
-    void populatesAuthorizerJwtScopesFromSpaceDelimitedScopeClaim() throws Exception {
+    void populatesAuthorizerJwtScopesHandedOverByDispatch() throws Exception {
         Map<String, String> claims = new LinkedHashMap<>();
         claims.put("sub", "user_01ABC");
-        claims.put("scope", "read:things  write:things");
+        claims.put("scope", "read:things write:things");
 
         String json = controller.buildV2ProxyEvent(
                 "POST", "/v1/things", "$default",
-                "abc123", "us-east-2", "$default", headers, uriInfo, null, "req-4", claims);
+                "abc123", "us-east-2", "$default", headers, uriInfo, null, "req-4", claims,
+                List.of("read:things", "write:things"));
         JsonNode event = new ObjectMapper().readTree(json);
 
-        JsonNode scopes = event.at("/requestContext/authorizer/jwt/scopes");
+        JsonNode jwt = event.at("/requestContext/authorizer/jwt");
+        JsonNode scopes = jwt.get("scopes");
         assertTrue(scopes.isArray(), "requestContext.authorizer.jwt.scopes must be an array");
         assertEquals(2, scopes.size());
         assertEquals("read:things", scopes.get(0).asText());
         assertEquals("write:things", scopes.get(1).asText());
+        assertEquals("read:things write:things", jwt.at("/claims/scope").asText(),
+                "the raw scope claim itself stays in claims (matches real AWS events)");
     }
 
     @Test
-    void omitsScopesWhenScopeClaimAbsent() throws Exception {
+    void rendersScopesAsExplicitNullWhenDispatchHandsNone() throws Exception {
+        // Measured against real API Gateway (2026-08): a route WITHOUT authorizationScopes
+        // renders "scopes": null even when the token carries a scope claim, so the builder
+        // must not derive scopes from the claims map on its own.
         Map<String, String> claims = new LinkedHashMap<>();
         claims.put("sub", "user_01ABC");
+        claims.put("scope", "aws.cognito.signin.user.admin");
 
         String json = controller.buildV2ProxyEvent(
                 "POST", "/v1/things", "$default",
-                "abc123", "us-east-2", "$default", headers, uriInfo, null, "req-5", claims);
+                "abc123", "us-east-2", "$default", headers, uriInfo, null, "req-5", claims, null);
         JsonNode event = new ObjectMapper().readTree(json);
 
-        assertFalse(event.at("/requestContext/authorizer/jwt").has("scopes"),
-                "scopes must be absent when the token has no scope claim");
+        JsonNode jwt = event.at("/requestContext/authorizer/jwt");
+        assertTrue(jwt.has("scopes") && jwt.get("scopes").isNull(),
+                "scopes must be an explicit null for routes without authorizationScopes");
+        assertEquals("aws.cognito.signin.user.admin", jwt.at("/claims/scope").asText());
     }
 
     @Test
     void omitsAuthorizerNodeWhenClaimsAreNull() throws Exception {
         String json = controller.buildV2ProxyEvent(
                 "GET", "/v1/things", "$default",
-                "abc123", "us-east-2", "$default", headers, uriInfo, null, "req-2", null);
+                "abc123", "us-east-2", "$default", headers, uriInfo, null, "req-2", null, null);
         JsonNode event = new ObjectMapper().readTree(json);
 
         assertFalse(event.get("requestContext").has("authorizer"),
@@ -113,7 +124,7 @@ class BuildV2ProxyEventJwtClaimsTest {
     void omitsAuthorizerNodeWhenClaimsAreEmpty() throws Exception {
         String json = controller.buildV2ProxyEvent(
                 "GET", "/v1/things", "$default",
-                "abc123", "us-east-2", "$default", headers, uriInfo, null, "req-3", Map.of());
+                "abc123", "us-east-2", "$default", headers, uriInfo, null, "req-3", Map.of(), null);
         JsonNode event = new ObjectMapper().readTree(json);
 
         assertFalse(event.get("requestContext").has("authorizer"),

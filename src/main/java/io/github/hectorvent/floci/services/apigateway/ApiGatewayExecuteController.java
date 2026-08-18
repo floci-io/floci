@@ -1371,10 +1371,12 @@ public class ApiGatewayExecuteController {
         }
 
         Map<String, String> jwtClaims = null;
+        List<String> jwtScopes = null;
         if ("JWT".equalsIgnoreCase(route.getAuthorizationType()) && route.getAuthorizerId() != null) {
             JwtAuthorizerResult jwtResult = enforceJwtAuthorizer(region, apiId, route, headers, uriInfo);
             if (jwtResult.errorResponse() != null) return jwtResult.errorResponse();
             jwtClaims = jwtResult.claims();
+            jwtScopes = jwtResult.scopes();
         }
 
         if ("CUSTOM".equalsIgnoreCase(route.getAuthorizationType()) && route.getAuthorizerId() != null) {
@@ -1418,7 +1420,7 @@ public class ApiGatewayExecuteController {
 
         String requestId = UUID.randomUUID().toString();
         String eventJson = buildV2ProxyEvent(httpMethod, path, route.getRouteKey(),
-                apiId, region, stageName, headers, uriInfo, body, requestId, jwtClaims);
+                apiId, region, stageName, headers, uriInfo, body, requestId, jwtClaims, jwtScopes);
 
         LOG.debugv("execute-api v2: {0} {1}/{2}{3} → Lambda {4}", httpMethod, apiId, stageName, path, functionName);
 
@@ -1585,7 +1587,14 @@ public class ApiGatewayExecuteController {
     // reason: a null errorResponse means "authorized, proceed", and claims (when non-null) is what
     // the caller threads through to buildV2ProxyEvent so requestContext.authorizer.jwt.claims is
     // actually populated - previously this information was parsed and validated, then discarded.
-    private record JwtAuthorizerResult(Response errorResponse, Map<String, String> claims) {}
+    // scopes is the validated token's full scope list when the route carries authorizationScopes,
+    // and null otherwise - real API Gateway only surfaces jwt.scopes on scoped routes (measured
+    // 2026-08, see enforceJwtAuthorizer).
+    private record JwtAuthorizerResult(Response errorResponse, Map<String, String> claims, List<String> scopes) {
+        JwtAuthorizerResult(Response errorResponse, Map<String, String> claims) {
+            this(errorResponse, claims, null);
+        }
+    }
 
     private JwtAuthorizerResult enforceJwtAuthorizer(String region, String apiId, Route route, HttpHeaders headers,
                                           UriInfo uriInfo) {
@@ -1656,7 +1665,23 @@ public class ApiGatewayExecuteController {
             }
         }
 
-        return new JwtAuthorizerResult(null, claims.raw); // authorized
+        // Measured API Gateway behavior (2026-08, Cognito-backed HTTP API): a route with
+        // authorizationScopes rejects tokens whose scp/scope claim matches none of them with
+        // 403 {"message":"Forbidden"}, and surfaces the token's FULL scope list (not the
+        // intersection with the route's scopes) as jwt.scopes. Routes without
+        // authorizationScopes render jwt.scopes as null even when the token carries scopes.
+        List<String> routeScopes = route.getAuthorizationScopes();
+        List<String> tokenScopes = null;
+        if (routeScopes != null && !routeScopes.isEmpty()) {
+            tokenScopes = claims.scopes;
+            if (tokenScopes == null || tokenScopes.stream().noneMatch(routeScopes::contains)) {
+                return new JwtAuthorizerResult(Response.status(403)
+                        .entity(jsonMessage("Forbidden"))
+                        .type(MediaType.APPLICATION_JSON).build(), null);
+            }
+        }
+
+        return new JwtAuthorizerResult(null, claims.raw, tokenScopes); // authorized
     }
 
     // ──────────────────────────── HTTP API v2 Lambda REQUEST authorizer ────────────────────────────
@@ -1976,9 +2001,13 @@ public class ApiGatewayExecuteController {
     // requestContext.authorizer.jwt.claims uses on real AWS - a Lambda reads e.g. "sub" out of it
     // the same way regardless of provider), so enforceJwtAuthorizer's caller can propagate the full
     // set into the outgoing Lambda event instead of only the fields needed for verification.
-    private record JwtClaims(String iss, String aud, String clientId, long exp, Map<String, String> raw) {}
+    // `scopes` is the token's own scope list (scp claim first, else scope) or null when it has
+    // neither - kept separate from `raw` because scope matching needs the pre-rendered values.
+    // Package-private (like buildV2ProxyEvent) so the wire-format rendering is unit-testable.
+    record JwtClaims(String iss, String aud, String clientId, long exp,
+                     Map<String, String> raw, List<String> scopes) {}
 
-    private JwtClaims parseJwtClaims(String token) {
+    JwtClaims parseJwtClaims(String token) {
         try {
             String[] parts = token.split("\\.");
             if (parts.length < 2) return null;
@@ -1992,23 +2021,67 @@ public class ApiGatewayExecuteController {
             String clientId = claims.path("client_id").asText(null);
             long exp = claims.path("exp").asLong(0);
 
-            // AWS's real requestContext.authorizer.jwt.claims flattens every claim to a string,
-            // including non-scalar ones (arrays/objects become their JSON text) - mirrored here
-            // rather than dropping or restructuring anything, since callers may read any claim
-            // name, not just the ones this method itself validates.
+            // AWS's real requestContext.authorizer.jwt.claims flattens every claim to a string
+            // - mirrored here rather than dropping or restructuring anything, since callers may
+            // read any claim name, not just the ones this method itself validates. The exact
+            // per-type rendering is renderClaimValue's (measured, not JSON for arrays/nulls).
             Map<String, String> raw = new java.util.LinkedHashMap<>();
             java.util.Iterator<Map.Entry<String, JsonNode>> fields = claims.fields();
             while (fields.hasNext()) {
                 Map.Entry<String, JsonNode> field = fields.next();
-                JsonNode value = field.getValue();
-                raw.put(field.getKey(), value.isTextual() ? value.asText() : value.toString());
+                String rendered = renderClaimValue(field.getValue());
+                if (rendered != null) raw.put(field.getKey(), rendered);
             }
 
-            return new JwtClaims(iss, aud, clientId, exp, raw);
+            return new JwtClaims(iss, aud, clientId, exp, raw, deriveJwtScopes(claims));
         } catch (Exception e) {
             LOG.debugv("JWT parse error: {0}", e.getMessage());
             return null;
         }
+    }
+
+    /**
+     * Renders a claim value the way API Gateway's payload 2.0 JWT authorizer context does
+     * (measured against real HTTP APIs, 2026-08): strings as-is, numbers/booleans stringified,
+     * arrays as a space-separated bracket form (e.g. {@code cognito:groups} →
+     * {@code "[admin poweruser]"} - not JSON), null-valued claims omitted (returns null),
+     * nested objects as JSON text as a fallback.
+     */
+    private static String renderClaimValue(JsonNode value) {
+        if (value == null || value.isNull()) return null;
+        if (value.isTextual()) return value.asText();
+        if (value.isArray()) {
+            StringBuilder sb = new StringBuilder("[");
+            for (JsonNode item : value) {
+                if (sb.length() > 1) sb.append(' ');
+                sb.append(item.isTextual() ? item.asText() : item.toString());
+            }
+            return sb.append(']').toString();
+        }
+        return value.toString();
+    }
+
+    /**
+     * Extracts the token's scope list from its payload: the {@code scp} claim (array, or
+     * space-separated string) wins, else the {@code scope} claim (either form - the string
+     * form is what Cognito access tokens use, e.g. {@code "read write"} → {@code [read, write]}).
+     * Returns null when the token carries neither - the claim pair API Gateway evaluates
+     * against a route's {@code authorizationScopes} and surfaces as {@code jwt.scopes}.
+     */
+    private static List<String> deriveJwtScopes(JsonNode claims) {
+        for (String key : List.of("scp", "scope")) {
+            JsonNode value = claims.get(key);
+            if (value == null) continue;
+            if (value.isArray() && !value.isEmpty()) {
+                List<String> scopes = new java.util.ArrayList<>();
+                value.forEach(item -> scopes.add(item.isTextual() ? item.asText() : item.toString()));
+                return List.copyOf(scopes);
+            }
+            if (value.isTextual() && !value.asText().isBlank()) {
+                return List.of(value.asText().trim().split("\\s+"));
+            }
+        }
+        return null;
     }
 
     private static String padBase64(String base64) {
@@ -2024,24 +2097,28 @@ public class ApiGatewayExecuteController {
                                      HttpHeaders headers, UriInfo uriInfo,
                                      byte[] body, String requestId) {
         return buildV2ProxyEvent(httpMethod, path, routeKey, apiId, region, stageName,
-                headers, uriInfo, body, requestId, null);
+                headers, uriInfo, body, requestId, null, null);
     }
 
     // jwtClaims is non-null only when the route's authorizer is JWT-type and verification
     // succeeded (see dispatchV2/enforceJwtAuthorizer) - null means either no authorizer on this
-    // route (Auth: NONE) or a CUSTOM/REQUEST authorizer. Unlike the v1/REST CUSTOM-authorizer
-    // path (buildV1ProxyEvent's principalId/context handling), a v2 CUSTOM/REQUEST authorizer's
-    // response context is not currently threaded into requestContext.authorizer here at all.
+    // route (Auth: NONE) or a CUSTOM/REQUEST authorizer. jwtScopes is non-null only when that
+    // route additionally carries authorizationScopes (see JwtAuthorizerResult). Unlike the
+    // v1/REST CUSTOM-authorizer path (buildV1ProxyEvent's principalId/context handling), a v2
+    // CUSTOM/REQUEST authorizer's response context is not currently threaded into
+    // requestContext.authorizer here at all.
     String buildV2ProxyEvent(String httpMethod, String path, String routeKey,
                                      String apiId, String region, String stageName,
                                      HttpHeaders headers, UriInfo uriInfo,
-                                     byte[] body, String requestId, Map<String, String> jwtClaims) {
+                                     byte[] body, String requestId, Map<String, String> jwtClaims,
+                                     List<String> jwtScopes) {
         // The JAX-RS {proxy} binding strips a trailing slash, but rawPath is by contract the
         // raw path and routers treat /x and /x/ as distinct routes. Recover it from the raw
         // request URI for the event path fields. Route matching in dispatchV2 and the
         // pathParameters extraction below continue to use the normalized `path`, mirroring what
         // buildProxyEvent already does for REST (V1).
         String preservedPath = preserveTrailingSlash(path, uriInfo.getRequestUri().getRawPath());
+
 
         ObjectNode event = objectMapper.createObjectNode();
         event.put("version", "2.0");
@@ -2091,23 +2168,24 @@ public class ApiGatewayExecuteController {
                 ? headers.getHeaderString("User-Agent") : "");
 
         // Matches AWS's real HTTP API JWT authorizer shape: requestContext.authorizer.jwt.claims
-        // retains the token's claims, while jwt.scopes contains the standard OAuth2 scope claim
-        // split on whitespace. This differs from the v1/REST CUSTOM-authorizer shape
-        // (requestContext.authorizer.principalId/<claim>) built elsewhere in this class.
-        // Previously enforceJwtAuthorizer's claims were discarded instead of reaching here, so
-        // this node was never present at all.
+        // retains the token's claims, while jwt.scopes is null unless the route carries
+        // authorizationScopes - measured API Gateway (2026-08) renders "scopes": null on
+        // unscoped routes even when the token has a scope claim, and the token's full scope
+        // list (dispatch hands it over as jwtScopes) on scoped routes. This differs from the
+        // v1/REST CUSTOM-authorizer shape (requestContext.authorizer.principalId/<claim>)
+        // built elsewhere in this class. Previously enforceJwtAuthorizer's claims were
+        // discarded instead of reaching here, so this node was never present at all.
         if (jwtClaims != null && !jwtClaims.isEmpty()) {
             ObjectNode authorizerNode = ctx.putObject("authorizer");
             ObjectNode jwtNode = authorizerNode.putObject("jwt");
             ObjectNode claimsNode = jwtNode.putObject("claims");
             jwtClaims.forEach(claimsNode::put);
 
-            String scopeClaim = jwtClaims.get("scope");
-            if (scopeClaim != null && !scopeClaim.isBlank()) {
+            if (jwtScopes == null) {
+                jwtNode.putNull("scopes");
+            } else {
                 ArrayNode scopesNode = jwtNode.putArray("scopes");
-                for (String scope : scopeClaim.trim().split("\\s+")) {
-                    scopesNode.add(scope);
-                }
+                jwtScopes.forEach(scopesNode::add);
             }
         }
 
