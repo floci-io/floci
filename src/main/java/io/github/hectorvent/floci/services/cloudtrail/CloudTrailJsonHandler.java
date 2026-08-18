@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.cloudtrail;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudtrail.model.AdvancedEventSelector;
@@ -13,7 +14,9 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 @ApplicationScoped
 public class CloudTrailJsonHandler {
@@ -39,6 +42,9 @@ public class CloudTrailJsonHandler {
             case "StopLogging" -> stopLogging(request, region);
             case "GetTrailStatus" -> getTrailStatus(request, region);
             case "LookupEvents" -> lookupEvents(request, region);
+            case "ListTrails" -> listTrails(request, region);
+            case "AddTags" -> addTags(request, region);
+            case "ListTags" -> listTags(request, region);
             default -> throw new AwsException(
                     "InvalidAction", "Could not find operation " + action, 400);
         };
@@ -167,6 +173,39 @@ public class CloudTrailJsonHandler {
             List<EventSelector> selectors = service.getEventSelectors(region, trailName);
             resp.set("EventSelectors", mapper.valueToTree(selectors));
         }
+        return Response.ok(resp).build();
+    }
+
+    private Response listTrails(JsonNode req, String region) {
+        List<CloudTrailService.TrailInfo> trails = service.listTrails(region);
+        ObjectNode resp = mapper.createObjectNode();
+        resp.set("Trails", mapper.valueToTree(trails));
+        return Response.ok(resp).build();
+    }
+
+    private Response addTags(JsonNode req, String region) {
+        String resourceId = req.path("ResourceId").asText(null);
+        Map<String, String> tags = new LinkedHashMap<>();
+        req.path("TagsList").forEach(tag ->
+                tags.put(tag.path("Key").asText(null), tag.path("Value").asText(null)));
+        service.addTags(region, resourceId, tags);
+        return Response.ok(mapper.createObjectNode()).build();
+    }
+
+    private Response listTags(JsonNode req, String region) {
+        ArrayNode resourceTagList = mapper.createArrayNode();
+        req.path("ResourceIdList").forEach(idNode -> {
+            String resourceId = idNode.asText();
+            Map<String, String> tags = service.listTags(region, resourceId);
+            ObjectNode entry = mapper.createObjectNode();
+            entry.put("ResourceId", resourceId);
+            ArrayNode tagsList = mapper.createArrayNode();
+            tags.forEach((k, v) -> tagsList.add(mapper.createObjectNode().put("Key", k).put("Value", v)));
+            entry.set("TagsList", tagsList);
+            resourceTagList.add(entry);
+        });
+        ObjectNode resp = mapper.createObjectNode();
+        resp.set("ResourceTagList", resourceTagList);
         return Response.ok(resp).build();
     }
 

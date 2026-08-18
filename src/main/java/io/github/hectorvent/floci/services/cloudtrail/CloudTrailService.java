@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cloudtrail;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -17,6 +18,7 @@ import io.github.hectorvent.floci.services.cloudtrail.model.Trail;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.model.AccessKey;
 import io.github.hectorvent.floci.services.iam.model.IamUser;
+import io.quarkus.runtime.annotations.RegisterForReflection;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -162,6 +164,44 @@ public class CloudTrailService {
         return store.get(regionKey(trail.homeRegion(), trail.name()))
                 .map(e -> e.advancedSelectors() != null ? e.advancedSelectors() : List.<AdvancedEventSelector>of())
                 .orElse(List.of());
+    }
+
+    public List<TrailInfo> listTrails(String region) {
+        List<TrailInfo> result = new ArrayList<>();
+        for (String k : store.keys()) {
+            CloudTrailEntry entry = store.get(k).orElse(null);
+            if (entry == null) continue;
+            Trail t = entry.trail();
+            if (regionFromKey(k).equals(region) || t.isMultiRegionTrail()) {
+                result.add(new TrailInfo(t.name(), t.trailArn(), t.homeRegion()));
+            }
+        }
+        return result;
+    }
+
+    public void addTags(String region, String resourceIdOrArn, Map<String, String> tags) {
+        Trail trail = findTrailOrThrow(region, resourceIdOrArn);
+        String key = regionKey(trail.homeRegion(), trail.name());
+        store.get(key).ifPresent(entry -> {
+            Map<String, String> merged = new java.util.HashMap<>(
+                    entry.tags() != null ? entry.tags() : Map.of());
+            merged.putAll(tags);
+            store.put(key, entry.withTags(merged));
+        });
+    }
+
+    public Map<String, String> listTags(String region, String resourceIdOrArn) {
+        Trail trail = findTrailOrThrow(region, resourceIdOrArn);
+        return store.get(regionKey(trail.homeRegion(), trail.name()))
+                .map(e -> e.tags() != null ? e.tags() : Map.<String, String>of())
+                .orElse(Map.of());
+    }
+
+    @RegisterForReflection
+    public record TrailInfo(
+            @JsonProperty("Name") String name,
+            @JsonProperty("TrailARN") String trailArn,
+            @JsonProperty("HomeRegion") String homeRegion) {
     }
 
     public void startLogging(String region, String trailNameOrArn) {
