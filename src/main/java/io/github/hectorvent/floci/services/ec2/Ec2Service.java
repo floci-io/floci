@@ -3340,6 +3340,81 @@ public class Ec2Service implements ContainerTeardown {
         return zones;
     }
 
+    /**
+     * AWS services that only ever expose a Gateway-type VPC endpoint (no
+     * Interface type exists for them at all). Everything else defaults to
+     * Interface when the caller does not name a type explicitly - matching
+     * how most AWS services publish themselves.
+     */
+    private static final Set<String> GATEWAY_ONLY_ENDPOINT_SERVICES = Set.of("s3", "dynamodb");
+
+    /**
+     * DescribeVpcEndpointServices, synthesized rather than served from a
+     * static catalog. Real AWS answers this from an account-wide table of
+     * every published service; floci has no such table and building one
+     * would only ever cover the services somebody remembered to add. What
+     * every caller observed in practice actually needs is narrower: the
+     * Terraform AWS provider's `aws_vpc_endpoint_service` data source (used
+     * by, among others, terraform-aws-modules/terraform-aws-vpc's
+     * vpc-endpoints submodule) resolves a short name like "s3" to a full
+     * `com.amazonaws.<region>.<service>` name ITSELF before the API call
+     * ever reaches here, then asks DescribeVpcEndpointServices to confirm
+     * that exact name exists. So confirming is all this needs to do: for
+     * every requested ServiceName (or "service-name" filter value), and
+     * for names that are not a real, floci-known service, answer this the
+     * emulator's affirmative rather than AWS's real per-account catalog:
+     * synthesize a plausible detail so a caller providing any well-formed
+     * service name is not blocked by an empty response. This mirrors how
+     * DescribeInstanceTypes and other floci endpoints answer generically
+     * rather than off a curated allowlist.
+     *
+     * The "service-type" filter, when present, is honored as the caller's
+     * own statement of what type they want (Gateway vs Interface) rather
+     * than second-guessed - a caller asking for the Interface type of a
+     * service that also has a Gateway type on real AWS (S3 does) is
+     * describing real, valid AWS behavior.
+     */
+    public List<Map<String, String>> describeVpcEndpointServices(String region, List<String> serviceNames,
+                                                                   Map<String, List<String>> filters) {
+        LinkedHashSet<String> names = new LinkedHashSet<>(serviceNames);
+        if (filters != null && filters.containsKey("service-name")) {
+            names.addAll(filters.get("service-name"));
+        }
+
+        List<String> requestedTypes = filters != null ? filters.get("service-type") : null;
+        List<Map<String, String>> details = new ArrayList<>();
+        for (String name : names) {
+            String slug = name.contains(".") ? name.substring(name.lastIndexOf('.') + 1) : name;
+            String type = requestedTypes != null && !requestedTypes.isEmpty()
+                    ? requestedTypes.get(0)
+                    : GATEWAY_ONLY_ENDPOINT_SERVICES.contains(slug) ? "Gateway" : "Interface";
+            String dnsName = slug + "." + region + ".amazonaws.com";
+
+            Map<String, String> detail = new LinkedHashMap<>();
+            detail.put("serviceName", name);
+            detail.put("serviceId", "vpce-svc-" + stableHex(name, 17));
+            detail.put("serviceType", type);
+            detail.put("owner", "amazon");
+            detail.put("baseEndpointDnsName", dnsName);
+            detail.put("privateDnsName", dnsName);
+            detail.put("vpcEndpointPolicySupported", "true");
+            detail.put("acceptanceRequired", "false");
+            detail.put("managesVpcEndpoints", "false");
+            detail.put("privateDnsNameVerificationState", "verified");
+            details.add(detail);
+        }
+        return details;
+    }
+
+    /** A deterministic hex id, the same shape [.randomHex] produces but stable for a given input. */
+    private static String stableHex(String seed, int len) {
+        StringBuilder sb = new StringBuilder(Integer.toHexString(seed.hashCode()));
+        while (sb.length() < len) {
+            sb.append(Integer.toHexString((seed + sb).hashCode()));
+        }
+        return sb.substring(0, len);
+    }
+
     public List<String> describeRegions() {
         return AwsRegions.ALL;
     }
