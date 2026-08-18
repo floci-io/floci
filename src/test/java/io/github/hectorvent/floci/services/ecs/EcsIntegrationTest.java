@@ -1110,4 +1110,59 @@ class EcsIntegrationTest {
         .then()
             .statusCode(200);
     }
+
+    @Test
+    @Order(70)
+    void registerTaskDefinitionWithLogConfigurationRoundTrips() {
+        String logsTaskDefArn = ecs("RegisterTaskDefinition")
+            .body("""
+                {
+                    "family": "task-with-log-configuration",
+                    "containerDefinitions": [
+                        {
+                            "name": "app",
+                            "image": "nginx:latest",
+                            "essential": true,
+                            "logConfiguration": {
+                                "logDriver": "awslogs",
+                                "options": {
+                                    "awslogs-group": "/ecs/task-with-log-configuration",
+                                    "awslogs-region": "us-east-1",
+                                    "awslogs-stream-prefix": "app"
+                                }
+                            }
+                        }
+                    ]
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("taskDefinition.containerDefinitions[0].logConfiguration.logDriver", equalTo("awslogs"))
+            .body("taskDefinition.containerDefinitions[0].logConfiguration.options.'awslogs-group'",
+                    equalTo("/ecs/task-with-log-configuration"))
+            .body("taskDefinition.containerDefinitions[0].logConfiguration.options.'awslogs-region'",
+                    equalTo("us-east-1"))
+            .body("taskDefinition.containerDefinitions[0].logConfiguration.options.'awslogs-stream-prefix'",
+                    equalTo("app"))
+        .extract()
+            .path("taskDefinition.taskDefinitionArn");
+
+        ecs("DescribeTaskDefinition")
+            .body("""
+                {"taskDefinition": "%s"}
+                """.formatted(logsTaskDefArn))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("taskDefinition.containerDefinitions[0].logConfiguration.logDriver", equalTo("awslogs"))
+            .body("taskDefinition.containerDefinitions[0].logConfiguration.options.'awslogs-group'",
+                    equalTo("/ecs/task-with-log-configuration"))
+            .body("taskDefinition.containerDefinitions[0].logConfiguration.options.'awslogs-region'",
+                    equalTo("us-east-1"))
+            .body("taskDefinition.containerDefinitions[0].logConfiguration.options.'awslogs-stream-prefix'",
+                    equalTo("app"));
+    }
 }

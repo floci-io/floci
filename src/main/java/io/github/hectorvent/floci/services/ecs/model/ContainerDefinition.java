@@ -19,6 +19,7 @@ public class ContainerDefinition {
     private List<String> command;
     private List<String> entryPoint;
     private List<MountPoint> mountPoints;
+    private LogConfiguration logConfiguration;
 
     public String getName() { return name; }
     public void setName(String name) { this.name = name; }
@@ -55,4 +56,7 @@ public class ContainerDefinition {
 
     public List<MountPoint> getMountPoints() { return mountPoints; }
     public void setMountPoints(List<MountPoint> mountPoints) { this.mountPoints = mountPoints; }
+
+    public LogConfiguration getLogConfiguration() { return logConfiguration; }
+    public void setLogConfiguration(LogConfiguration logConfiguration) { this.logConfiguration = logConfiguration; }
 }
