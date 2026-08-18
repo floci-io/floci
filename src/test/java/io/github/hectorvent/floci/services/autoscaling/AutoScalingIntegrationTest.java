@@ -776,8 +776,66 @@ class AutoScalingIntegrationTest {
         assertThat(overrides, not(containsString("<InstanceType>t4g.medium</InstanceType>")));
     }
 
+    // The AWS provider calls SuspendProcesses/ResumeProcesses unconditionally around ASG
+    // creation whenever wait_for_capacity_timeout is non-zero (the default), so an
+    // unimplemented SuspendProcesses fails ASG creation outright - found crossing
+    // terraform-aws-modules/terraform-aws-eks against Floci.
     @Test
     @Order(31)
+    void suspendProcesses() {
+        given()
+                .formParam("Action", "SuspendProcesses")
+                .formParam("AutoScalingGroupName", "my-asg")
+                .formParam("ScalingProcesses.member.1", "Launch")
+                .formParam("ScalingProcesses.member.2", "Terminate")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("SuspendProcessesResponse"));
+
+        given()
+                .formParam("Action", "DescribeAutoScalingGroups")
+                .formParam("AutoScalingGroupNames.member.1", "my-asg")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("<SuspendedProcesses>"))
+                .body(containsString("<ProcessName>Launch</ProcessName>"))
+                .body(containsString("<ProcessName>Terminate</ProcessName>"));
+    }
+
+    @Test
+    @Order(32)
+    void resumeProcesses() {
+        given()
+                .formParam("Action", "ResumeProcesses")
+                .formParam("AutoScalingGroupName", "my-asg")
+                .formParam("ScalingProcesses.member.1", "Launch")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("ResumeProcessesResponse"));
+
+        given()
+                .formParam("Action", "DescribeAutoScalingGroups")
+                .formParam("AutoScalingGroupNames.member.1", "my-asg")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(not(containsString("<ProcessName>Launch</ProcessName>")))
+                .body(containsString("<ProcessName>Terminate</ProcessName>"));
+    }
+
+    @Test
+    @Order(33)
     void deleteLaunchTemplateAutoScalingGroup() {
         given()
                 .formParam("Action", "DeleteAutoScalingGroup")
@@ -794,7 +852,7 @@ class AutoScalingIntegrationTest {
     // ── Cleanup ───────────────────────────────────────────────────────────────
 
     @Test
-    @Order(32)
+    @Order(34)
     void deleteAutoScalingGroup() {
         given()
                 .formParam("Action", "DeleteAutoScalingGroup")
@@ -809,7 +867,7 @@ class AutoScalingIntegrationTest {
     }
 
     @Test
-    @Order(33)
+    @Order(35)
     void deleteMixedInstancesAutoScalingGroup() {
         given()
                 .formParam("Action", "DeleteAutoScalingGroup")
@@ -824,7 +882,7 @@ class AutoScalingIntegrationTest {
     }
 
     @Test
-    @Order(34)
+    @Order(36)
     void deleteLaunchConfiguration() {
         given()
                 .formParam("Action", "DeleteLaunchConfiguration")
@@ -838,7 +896,7 @@ class AutoScalingIntegrationTest {
     }
 
     @Test
-    @Order(35)
+    @Order(37)
     void describeAutoScalingGroupsEmpty() {
         given()
                 .formParam("Action", "DescribeAutoScalingGroups")
