@@ -283,7 +283,7 @@ public class AwsQueryController {
             case "sns" -> snsQueryHandler.handle(action, formParams, region);
             case "iam" -> iamQueryHandler.handle(action, formParams, authorization);
             case "sts" -> stsQueryHandler.handle(action, formParams);
-            case "elasticache" -> elastiCacheQueryHandler.handle(action, formParams);
+            case "elasticache" -> elastiCacheQueryHandler.handle(action, formParams, region);
             case "rds" -> { 
                 // Neptune signs requests with "rds" credential scope (same wire protocol).
                 // Route to Neptune when Engine=neptune (create ops) or when the cluster/instance
@@ -344,7 +344,8 @@ public class AwsQueryController {
     private static final Set<String> ELASTICACHE_ACTIONS = Set.of(
             "ValidateIamAuthToken",
             "CreateReplicationGroup", "DescribeReplicationGroups", "ModifyReplicationGroup", "DeleteReplicationGroup",
-            "CreateUser", "DescribeUsers", "ModifyUser", "DeleteUser"
+            "CreateUser", "DescribeUsers", "ModifyUser", "DeleteUser",
+            "CreateCacheSubnetGroup", "DescribeCacheSubnetGroups", "ModifyCacheSubnetGroup", "DeleteCacheSubnetGroup"
     );
 
     private static final Set<String> CLOUDWATCH_ACTIONS = Set.of(
