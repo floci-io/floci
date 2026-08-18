@@ -131,10 +131,12 @@ public class Ec2QueryHandler {
                 case "DeleteInternetGateway" -> handleDeleteInternetGateway(params, region);
                 case "AttachInternetGateway" -> handleAttachInternetGateway(params, region);
                 case "DetachInternetGateway" -> handleDetachInternetGateway(params, region);
-                // VPN Gateways. There is no VPN gateway model; an empty set is
-                // AWS-accurate for an account without VPN gateways and unblocks the
-                // CDK VPC context provider, which always issues this describe.
-                case "DescribeVpnGateways" -> handleDescribeVpnGateways();
+                // VPN Gateways
+                case "CreateVpnGateway" -> handleCreateVpnGateway(params, region);
+                case "DescribeVpnGateways" -> handleDescribeVpnGateways(params, region);
+                case "DeleteVpnGateway" -> handleDeleteVpnGateway(params, region);
+                case "AttachVpnGateway" -> handleAttachVpnGateway(params, region);
+                case "DetachVpnGateway" -> handleDetachVpnGateway(params, region);
 
                 // Route Tables
                 case "CreateRouteTable" -> handleCreateRouteTable(params, region);
@@ -157,6 +159,10 @@ public class Ec2QueryHandler {
                 case "CreateNatGateway" -> handleCreateNatGateway(params, region);
                 case "DescribeNatGateways" -> handleDescribeNatGateways(params, region);
                 case "DeleteNatGateway" -> handleDeleteNatGateway(params, region);
+                // Customer Gateways
+                case "CreateCustomerGateway" -> handleCreateCustomerGateway(params, region);
+                case "DescribeCustomerGateways" -> handleDescribeCustomerGateways(params, region);
+                case "DeleteCustomerGateway" -> handleDeleteCustomerGateway(params, region);
                 // Elastic IPs
                 case "AllocateAddress" -> handleAllocateAddress(params, region);
                 case "AssociateAddress" -> handleAssociateAddress(params, region);
@@ -1775,14 +1781,132 @@ public class Ec2QueryHandler {
         return xmlResponse(xml.build());
     }
 
-    private Response handleDescribeVpnGateways() {
+    // ─── VPN Gateway handlers ─────────────────────────────────────────────────
+
+    private Response handleCreateVpnGateway(MultivaluedMap<String, String> p, String region) {
+        VpnGateway gateway = service.createVpnGateway(
+                region,
+                p.getFirst("Type"),
+                p.getFirst("AvailabilityZone"),
+                p.getFirst("AmazonSideAsn"));
+        applyResourceTags(p, region, "vpn-gateway", gateway.getVpnGatewayId());
+        XmlBuilder xml = new XmlBuilder()
+                .start("CreateVpnGatewayResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("vpnGateway").raw(vpnGatewayXml(gateway)).end("vpnGateway")
+                .end("CreateVpnGatewayResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDescribeVpnGateways(MultivaluedMap<String, String> p, String region) {
+        List<String> ids = getList(p, "VpnGatewayId");
+        Map<String, List<String>> filters = getFilters(p);
+        List<VpnGateway> gateways = service.describeVpnGateways(region, ids, filters);
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeVpnGatewaysResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
-                .start("vpnGatewaySet")
-                .end("vpnGatewaySet")
-                .end("DescribeVpnGatewaysResponse");
+                .start("vpnGatewaySet");
+        for (VpnGateway gateway : gateways) {
+            xml.start("item").raw(vpnGatewayXml(gateway)).end("item");
+        }
+        xml.end("vpnGatewaySet").end("DescribeVpnGatewaysResponse");
         return xmlResponse(xml.build());
+    }
+
+    private Response handleDeleteVpnGateway(MultivaluedMap<String, String> p, String region) {
+        service.deleteVpnGateway(region, p.getFirst("VpnGatewayId"));
+        return booleanResponse("DeleteVpnGateway");
+    }
+
+    private Response handleAttachVpnGateway(MultivaluedMap<String, String> p, String region) {
+        VpcAttachment attachment = service.attachVpnGateway(region, p.getFirst("VpnGatewayId"), p.getFirst("VpcId"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("AttachVpnGatewayResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("attachment")
+                .elem("vpcId", attachment.getVpcId())
+                .elem("state", attachment.getState())
+                .end("attachment")
+                .end("AttachVpnGatewayResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDetachVpnGateway(MultivaluedMap<String, String> p, String region) {
+        service.detachVpnGateway(region, p.getFirst("VpnGatewayId"), p.getFirst("VpcId"));
+        return booleanResponse("DetachVpnGateway");
+    }
+
+    private String vpnGatewayXml(VpnGateway gateway) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("vpnGatewayId", gateway.getVpnGatewayId())
+                .elem("state", gateway.getState())
+                .elem("type", gateway.getType())
+                .elem("availabilityZone", gateway.getAvailabilityZone())
+                .elem("amazonSideAsn", gateway.getAmazonSideAsn())
+                .start("attachments");
+        for (VpcAttachment attachment : gateway.getVpcAttachments()) {
+            xml.start("item")
+                    .elem("vpcId", attachment.getVpcId())
+                    .elem("state", attachment.getState())
+                    .end("item");
+        }
+        xml.end("attachments")
+                .raw(tagSetXml(gateway.getTags()));
+        return xml.build();
+    }
+
+    // ─── Customer Gateway handlers ────────────────────────────────────────────
+
+    private Response handleCreateCustomerGateway(MultivaluedMap<String, String> p, String region) {
+        CustomerGateway gateway = service.createCustomerGateway(
+                region,
+                p.getFirst("Type"),
+                firstPresent(p, "IpAddress", "PublicIp"),
+                p.getFirst("BgpAsn"),
+                p.getFirst("BgpAsnExtended"),
+                p.getFirst("CertificateArn"),
+                p.getFirst("DeviceName"));
+        applyResourceTags(p, region, "customer-gateway", gateway.getCustomerGatewayId());
+        XmlBuilder xml = new XmlBuilder()
+                .start("CreateCustomerGatewayResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("customerGateway").raw(customerGatewayXml(gateway)).end("customerGateway")
+                .end("CreateCustomerGatewayResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDescribeCustomerGateways(MultivaluedMap<String, String> p, String region) {
+        List<String> ids = getList(p, "CustomerGatewayId");
+        Map<String, List<String>> filters = getFilters(p);
+        List<CustomerGateway> gateways = service.describeCustomerGateways(region, ids, filters);
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeCustomerGatewaysResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("customerGatewaySet");
+        for (CustomerGateway gateway : gateways) {
+            xml.start("item").raw(customerGatewayXml(gateway)).end("item");
+        }
+        xml.end("customerGatewaySet").end("DescribeCustomerGatewaysResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDeleteCustomerGateway(MultivaluedMap<String, String> p, String region) {
+        service.deleteCustomerGateway(region, p.getFirst("CustomerGatewayId"));
+        return booleanResponse("DeleteCustomerGateway");
+    }
+
+    private String customerGatewayXml(CustomerGateway gateway) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("customerGatewayId", gateway.getCustomerGatewayId())
+                .elem("state", gateway.getState())
+                .elem("type", gateway.getType())
+                .elem("ipAddress", gateway.getIpAddress())
+                .elem("bgpAsn", gateway.getBgpAsn())
+                .elem("bgpAsnExtended", gateway.getBgpAsnExtended())
+                .elem("certificateArn", gateway.getCertificateArn())
+                .elem("deviceName", gateway.getDeviceName())
+                .raw(tagSetXml(gateway.getTags()));
+        return xml.build();
     }
 
     private Response handleDescribeRouteTables(MultivaluedMap<String, String> p, String region) {
