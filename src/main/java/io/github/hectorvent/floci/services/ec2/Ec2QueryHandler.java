@@ -892,13 +892,52 @@ public class Ec2QueryHandler {
     }
 
     private Response handleDescribeVpcEndpointServices(MultivaluedMap<String, String> p, String region) {
+        List<String> serviceNames = getList(p, "ServiceName");
+        Map<String, List<String>> filters = getFilters(p);
+        List<Map<String, String>> details = service.describeVpcEndpointServices(region, serviceNames, filters);
+        List<Map<String, String>> azs = service.describeAvailabilityZones(region);
+
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeVpcEndpointServicesResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
-                .start("serviceNameSet")
-                .end("serviceNameSet")
-                .start("serviceDetailSet")
-                .end("serviceDetailSet")
+                .start("serviceNameSet");
+        for (Map<String, String> d : details) {
+            xml.elem("item", d.get("serviceName"));
+        }
+        xml.end("serviceNameSet")
+                .start("serviceDetailSet");
+        for (Map<String, String> d : details) {
+            xml.start("item")
+                    .elem("serviceName", d.get("serviceName"))
+                    .elem("serviceId", d.get("serviceId"))
+                    .start("serviceType")
+                        .start("item")
+                            .elem("serviceType", d.get("serviceType"))
+                        .end("item")
+                    .end("serviceType")
+                    .start("availabilityZoneSet");
+            for (Map<String, String> az : azs) {
+                xml.elem("item", az.get("zoneName"));
+            }
+            xml.end("availabilityZoneSet")
+                    .elem("owner", d.get("owner"))
+                    .start("baseEndpointDnsNameSet")
+                        .elem("item", d.get("baseEndpointDnsName"))
+                    .end("baseEndpointDnsNameSet")
+                    .elem("privateDnsName", d.get("privateDnsName"))
+                    .start("privateDnsNames")
+                        .start("item")
+                            .elem("privateDnsName", d.get("privateDnsName"))
+                        .end("item")
+                    .end("privateDnsNames")
+                    .elem("vpcEndpointPolicySupported", d.get("vpcEndpointPolicySupported"))
+                    .elem("acceptanceRequired", d.get("acceptanceRequired"))
+                    .elem("managesVpcEndpoints", d.get("managesVpcEndpoints"))
+                    .elem("privateDnsNameVerificationState", d.get("privateDnsNameVerificationState"))
+                    .start("tagSet").end("tagSet")
+                    .end("item");
+        }
+        xml.end("serviceDetailSet")
                 .end("DescribeVpcEndpointServicesResponse");
         return xmlResponse(xml.build());
     }

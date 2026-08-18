@@ -770,7 +770,52 @@ class Ec2IntegrationTest {
         .when()
             .post("/")
         .then()
-            .statusCode(200);
+            .statusCode(200)
+            .body("DescribeVpcEndpointServicesResponse.serviceDetailSet.item.size()", equalTo(0));
+    }
+
+    @Test
+    @Order(16)
+    void describeVpcEndpointServicesSynthesizesRequestedNames() {
+        // No static catalog: real callers (Terraform's aws_vpc_endpoint_service data
+        // source, in particular) resolve a short alias like "s3" into a full
+        // com.amazonaws.<region>.<service> name THEMSELVES before asking this API to
+        // confirm it exists. Confirming any well-formed name that is asked for, rather
+        // than only names on a curated allowlist, is what unblocks that caller.
+        given()
+            .formParam("Action", "DescribeVpcEndpointServices")
+            .formParam("ServiceName.1", "com.amazonaws.us-east-1.s3")
+            .formParam("Filter.1.Name", "service-type")
+            .formParam("Filter.1.Value.1", "Interface")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeVpcEndpointServicesResponse.serviceDetailSet.item.serviceName", equalTo("com.amazonaws.us-east-1.s3"))
+            .body("DescribeVpcEndpointServicesResponse.serviceDetailSet.item.serviceType.item.serviceType", equalTo("Interface"))
+            .body("DescribeVpcEndpointServicesResponse.serviceDetailSet.item.owner", equalTo("amazon"))
+            .body("DescribeVpcEndpointServicesResponse.serviceDetailSet.item.availabilityZoneSet.item.size()", greaterThan(0))
+            .body("DescribeVpcEndpointServicesResponse.serviceNameSet.item", equalTo("com.amazonaws.us-east-1.s3"));
+    }
+
+    @Test
+    @Order(16)
+    void describeVpcEndpointServicesHonorsGatewayFilter() {
+        // dynamodb is Gateway-only on real AWS; a caller asking for that type is
+        // describing real AWS behavior and the synthesized detail should say so back,
+        // not default every unfiltered request to "Interface".
+        given()
+            .formParam("Action", "DescribeVpcEndpointServices")
+            .formParam("ServiceName.1", "com.amazonaws.us-east-1.dynamodb")
+            .formParam("Filter.1.Name", "service-type")
+            .formParam("Filter.1.Value.1", "Gateway")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeVpcEndpointServicesResponse.serviceDetailSet.item.serviceType.item.serviceType", equalTo("Gateway"));
     }
 
     @Test
