@@ -563,7 +563,7 @@ class IamServiceTest {
 
     @Test
     void createAndGetInstanceProfile() {
-        InstanceProfile profile = iamService.createInstanceProfile("MyProfile", "/");
+        InstanceProfile profile = iamService.createInstanceProfile("MyProfile", "/", null);
 
         assertEquals("MyProfile", profile.getInstanceProfileName());
         assertTrue(profile.getInstanceProfileId().startsWith("AIPA"));
@@ -573,7 +573,7 @@ class IamServiceTest {
     @Test
     void addAndRemoveRoleFromInstanceProfile() {
         iamService.createRole("LambdaExec", "/", "{}", null, 0, null);
-        iamService.createInstanceProfile("MyProfile", "/");
+        iamService.createInstanceProfile("MyProfile", "/", null);
 
         iamService.addRoleToInstanceProfile("MyProfile", "LambdaExec");
         InstanceProfile profile = iamService.getInstanceProfile("MyProfile");
@@ -587,7 +587,7 @@ class IamServiceTest {
     void instanceProfileMaxOneRole() {
         iamService.createRole("Role1", "/", "{}", null, 0, null);
         iamService.createRole("Role2", "/", "{}", null, 0, null);
-        iamService.createInstanceProfile("Profile", "/");
+        iamService.createInstanceProfile("Profile", "/", null);
 
         iamService.addRoleToInstanceProfile("Profile", "Role1");
         assertThrows(AwsException.class,
@@ -597,7 +597,7 @@ class IamServiceTest {
     @Test
     void deleteInstanceProfileWithRoleFails() {
         iamService.createRole("R", "/", "{}", null, 0, null);
-        iamService.createInstanceProfile("P", "/");
+        iamService.createInstanceProfile("P", "/", null);
         iamService.addRoleToInstanceProfile("P", "R");
         assertThrows(AwsException.class, () -> iamService.deleteInstanceProfile("P"));
     }
@@ -605,13 +605,25 @@ class IamServiceTest {
     @Test
     void listInstanceProfilesForRole() {
         iamService.createRole("R", "/", "{}", null, 0, null);
-        iamService.createInstanceProfile("P1", "/");
-        iamService.createInstanceProfile("P2", "/");
+        iamService.createInstanceProfile("P1", "/", null);
+        iamService.createInstanceProfile("P2", "/", null);
         iamService.addRoleToInstanceProfile("P1", "R");
 
         List<InstanceProfile> profiles = iamService.listInstanceProfilesForRole("R");
         assertEquals(1, profiles.size());
         assertEquals("P1", profiles.getFirst().getInstanceProfileName());
+    }
+
+    @Test
+    void createInstanceProfileWithTagsAndTagAndUntag() {
+        iamService.createInstanceProfile("MyProfile", "/", Map.of("env", "test"));
+        iamService.tagInstanceProfile("MyProfile", Map.of("owner", "team-a"));
+        Map<String, String> tags = iamService.listInstanceProfileTags("MyProfile");
+        assertEquals("test", tags.get("env"));
+        assertEquals("team-a", tags.get("owner"));
+
+        iamService.untagInstanceProfile("MyProfile", List.of("env"));
+        assertFalse(iamService.listInstanceProfileTags("MyProfile").containsKey("env"));
     }
 
     // =========================================================================

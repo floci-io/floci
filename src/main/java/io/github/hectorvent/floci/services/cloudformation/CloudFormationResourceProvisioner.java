@@ -2587,7 +2587,7 @@ public class CloudFormationResourceProvisioner {
             name = generatePhysicalName(stackName, r.getLogicalId(), 128, false);
         }
         try {
-            var profile = iamService.createInstanceProfile(name, "/");
+            var profile = iamService.createInstanceProfile(name, "/", null);
             r.setPhysicalId(name);
             r.getAttributes().put("Arn", profile.getArn());
         } catch (Exception e) {
