@@ -229,7 +229,7 @@ public class AwsJsonCborController {
             return false;
         }
         for (String header : contentEncodingHeaders) {
-            if (header != null &&  header.toLowerCase().contains("gzip")) {
+            if (header != null && header.toLowerCase(java.util.Locale.ROOT).contains("gzip")) {
                 return true;
             }
         }
