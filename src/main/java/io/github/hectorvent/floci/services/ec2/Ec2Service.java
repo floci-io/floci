@@ -32,6 +32,7 @@ import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.model.Address;
 import io.github.hectorvent.floci.services.ec2.model.BlockDeviceMapping;
+import io.github.hectorvent.floci.services.ec2.model.CustomerGateway;
 import io.github.hectorvent.floci.services.ec2.model.EbsBlockDevice;
 import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
@@ -74,8 +75,10 @@ import io.github.hectorvent.floci.services.ec2.model.UserIdGroupPair;
 import io.github.hectorvent.floci.services.ec2.model.Volume;
 import io.github.hectorvent.floci.services.ec2.model.VolumeAttachment;
 import io.github.hectorvent.floci.services.ec2.model.Vpc;
+import io.github.hectorvent.floci.services.ec2.model.VpcAttachment;
 import io.github.hectorvent.floci.services.ec2.model.VpcCidrBlockAssociation;
 import io.github.hectorvent.floci.services.ec2.model.VpcEndpoint;
+import io.github.hectorvent.floci.services.ec2.model.VpnGateway;
 import jakarta.annotation.PostConstruct;
 import io.github.hectorvent.floci.services.ec2.model.LaunchSpecification;
 import io.github.hectorvent.floci.services.ec2.model.SpotInstanceRequest;
@@ -120,6 +123,8 @@ public class Ec2Service implements ContainerTeardown {
     private final StorageBackend<String, SpotInstanceRequest> spotInstanceRequests;
     private final StorageBackend<String, NetworkAcl> networkAcls;
     private final StorageBackend<String, ManagedPrefixList> managedPrefixLists;
+    private final StorageBackend<String, CustomerGateway> customerGateways;
+    private final StorageBackend<String, VpnGateway> vpnGateways;
     // resourceId → List<Tag>
     private final StorageBackend<String, List<Tag>> tags;
     private final Set<String> seededRegions = ConcurrentHashMap.newKeySet();
@@ -150,6 +155,8 @@ public class Ec2Service implements ContainerTeardown {
                 storageFactory.create("ec2", "ec2-spot-instance-requests.json", new TypeReference<Map<String, SpotInstanceRequest>>() {}),
                 storageFactory.create("ec2", "ec2-network-acls.json", new TypeReference<Map<String, NetworkAcl>>() {}),
                 storageFactory.create("ec2", "ec2-managed-prefix-lists.json", new TypeReference<Map<String, ManagedPrefixList>>() {}),
+                storageFactory.create("ec2", "ec2-customer-gateways.json", new TypeReference<Map<String, CustomerGateway>>() {}),
+                storageFactory.create("ec2", "ec2-vpn-gateways.json", new TypeReference<Map<String, VpnGateway>>() {}),
                 storageFactory.create("ec2", "ec2-tags.json", new TypeReference<Map<String, List<Tag>>>() {}));
     }
 
@@ -176,6 +183,8 @@ public class Ec2Service implements ContainerTeardown {
                StorageBackend<String, SpotInstanceRequest> spotInstanceRequests,
                StorageBackend<String, NetworkAcl> networkAcls,
                StorageBackend<String, ManagedPrefixList> managedPrefixLists,
+               StorageBackend<String, CustomerGateway> customerGateways,
+               StorageBackend<String, VpnGateway> vpnGateways,
                StorageBackend<String, List<Tag>> tags) {
         this.accountId = config.defaultAccountId();
         this.config = config;
@@ -202,6 +211,8 @@ public class Ec2Service implements ContainerTeardown {
         this.spotInstanceRequests = spotInstanceRequests;
         this.networkAcls = networkAcls;
         this.managedPrefixLists = managedPrefixLists;
+        this.customerGateways = customerGateways;
+        this.vpnGateways = vpnGateways;
         this.tags = tags;
     }
 
@@ -2912,7 +2923,9 @@ public class Ec2Service implements ContainerTeardown {
                 new TagTarget<>(volumes, Volume::getTags, Volume::setTags),
                 new TagTarget<>(snapshots, Snapshot::getTags, Snapshot::setTags),
                 new TagTarget<>(registeredImages, Image::getTags, Image::setTags),
-                new TagTarget<>(spotInstanceRequests, SpotInstanceRequest::getTags, SpotInstanceRequest::setTags));
+                new TagTarget<>(spotInstanceRequests, SpotInstanceRequest::getTags, SpotInstanceRequest::setTags),
+                new TagTarget<>(customerGateways, CustomerGateway::getTags, CustomerGateway::setTags),
+                new TagTarget<>(vpnGateways, VpnGateway::getTags, VpnGateway::setTags));
     }
 
     private void updateResourceTags(String region, String resourceId, List<Tag> tagList) {
@@ -3054,6 +3067,166 @@ public class Ec2Service implements ContainerTeardown {
             throw new AwsException("InvalidInternetGatewayID.NotFound", "The internet gateway '" + igwId + "' does not exist", 400);
 
         return igw;
+    }
+
+    // ─── VPN Gateways ──────────────────────────────────────────────────────────
+
+    /** The Amazon-side BGP ASN AWS assigns when the request omits AmazonSideAsn. */
+    private static final long DEFAULT_AMAZON_SIDE_ASN = 64512L;
+
+    public VpnGateway createVpnGateway(String region, String type, String availabilityZone, String amazonSideAsn) {
+        ensureDefaultResources(region);
+        if (type == null || type.isBlank()) {
+            throw new AwsException("MissingParameter",
+                    "The request must contain the parameter Type.", 400);
+        }
+        if (!"ipsec.1".equals(type)) {
+            throw new AwsException("InvalidParameterValue",
+                    "Value (" + type + ") for parameter Type is invalid. The only supported type is ipsec.1.", 400);
+        }
+
+        VpnGateway gateway = new VpnGateway();
+        gateway.setVpnGatewayId("vgw-" + randomHex(8));
+        gateway.setType(type);
+        gateway.setAvailabilityZone(availabilityZone != null && !availabilityZone.isBlank()
+                ? availabilityZone : region + "a");
+        long asn;
+        try {
+            asn = (amazonSideAsn != null && !amazonSideAsn.isBlank())
+                    ? Long.parseLong(amazonSideAsn) : DEFAULT_AMAZON_SIDE_ASN;
+        } catch (NumberFormatException e) {
+            throw new AwsException("InvalidParameterValue",
+                    "Value (" + amazonSideAsn + ") for parameter AmazonSideAsn is invalid.", 400);
+        }
+        gateway.setAmazonSideAsn(asn);
+        gateway.setOwnerId(accountId);
+        gateway.setRegion(region);
+        // AWS transitions pending → available asynchronously. Nothing here is slow, so the
+        // gateway is available on the create response and on the first describe, the same
+        // simplification the other EC2 gateway/attachment resources make.
+        gateway.setState("available");
+        vpnGateways.put(key(region, gateway.getVpnGatewayId()), gateway);
+        return gateway;
+    }
+
+    public List<VpnGateway> describeVpnGateways(String region, List<String> vpnGatewayIds,
+                                                Map<String, List<String>> filters) {
+        ensureDefaultResources(region);
+        for (String vpnGatewayId : vpnGatewayIds) {
+            getRequiredVpnGateway(region, vpnGatewayId);
+        }
+        return vpnGateways.scan(k -> true).stream()
+                .filter(gateway -> gateway.getRegion().equals(region))
+                .filter(gateway -> vpnGatewayIds.isEmpty() || vpnGatewayIds.contains(gateway.getVpnGatewayId()))
+                .filter(gateway -> matchesFilters(gateway, filters, region))
+                .collect(Collectors.toList());
+    }
+
+    public void deleteVpnGateway(String region, String vpnGatewayId) {
+        ensureDefaultResources(region);
+        getRequiredVpnGateway(region, vpnGatewayId);
+        vpnGateways.delete(key(region, vpnGatewayId));
+    }
+
+    public VpcAttachment attachVpnGateway(String region, String vpnGatewayId, String vpcId) {
+        ensureDefaultResources(region);
+        VpnGateway gateway = getRequiredVpnGateway(region, vpnGatewayId);
+        getRequiredVpc(region, vpcId);
+
+        VpcAttachment attachment = new VpcAttachment(vpcId, "attached");
+        gateway.getVpcAttachments().removeIf(a -> a.getVpcId().equals(vpcId));
+        gateway.getVpcAttachments().add(attachment);
+        vpnGateways.put(key(region, vpnGatewayId), gateway);
+        return attachment;
+    }
+
+    public void detachVpnGateway(String region, String vpnGatewayId, String vpcId) {
+        ensureDefaultResources(region);
+        VpnGateway gateway = getRequiredVpnGateway(region, vpnGatewayId);
+
+        boolean removed = gateway.getVpcAttachments().removeIf(a -> a.getVpcId().equals(vpcId));
+        if (!removed) {
+            throw new AwsException("InvalidVpnGatewayAttachment.NotFound",
+                    "The attachment with vpn gateway ID '" + vpnGatewayId + "' and vpc ID '" + vpcId
+                            + "' does not exist", 400);
+        }
+        vpnGateways.put(key(region, vpnGatewayId), gateway);
+    }
+
+    private VpnGateway getRequiredVpnGateway(String region, String vpnGatewayId) {
+        VpnGateway gateway = vpnGateways.get(key(region, vpnGatewayId)).orElse(null);
+        if (gateway == null)
+            throw new AwsException("InvalidVpnGatewayID.NotFound", "The vpn gateway ID '" + vpnGatewayId + "' does not exist", 400);
+
+        return gateway;
+    }
+
+    // ─── Customer Gateways ─────────────────────────────────────────────────────
+
+    /** The BGP ASN AWS assigns when the request omits both BgpAsn and BgpAsnExtended. */
+    private static final String DEFAULT_CUSTOMER_GATEWAY_BGP_ASN = "65000";
+
+    public CustomerGateway createCustomerGateway(String region, String type, String ipAddress,
+                                                 String bgpAsn, String bgpAsnExtended,
+                                                 String certificateArn, String deviceName) {
+        ensureDefaultResources(region);
+        if (type == null || type.isBlank()) {
+            throw new AwsException("MissingParameter",
+                    "The request must contain the parameter Type.", 400);
+        }
+        if (!"ipsec.1".equals(type)) {
+            throw new AwsException("InvalidParameterValue",
+                    "Value (" + type + ") for parameter Type is invalid. The only supported type is ipsec.1.", 400);
+        }
+
+        CustomerGateway gateway = new CustomerGateway();
+        gateway.setCustomerGatewayId("cgw-" + randomHex(17));
+        gateway.setType(type);
+        gateway.setIpAddress(ipAddress);
+        gateway.setCertificateArn(certificateArn);
+        gateway.setDeviceName(deviceName);
+        gateway.setOwnerId(accountId);
+        gateway.setRegion(region);
+        if (bgpAsnExtended != null && !bgpAsnExtended.isBlank()) {
+            gateway.setBgpAsnExtended(bgpAsnExtended);
+            gateway.setBgpAsn(bgpAsn);
+        } else {
+            gateway.setBgpAsn(bgpAsn != null && !bgpAsn.isBlank() ? bgpAsn : DEFAULT_CUSTOMER_GATEWAY_BGP_ASN);
+        }
+        // AWS transitions pending → available asynchronously. Nothing here is slow, so the
+        // gateway is available on the create response and on the first describe.
+        gateway.setState("available");
+        customerGateways.put(key(region, gateway.getCustomerGatewayId()), gateway);
+        return gateway;
+    }
+
+    public List<CustomerGateway> describeCustomerGateways(String region, List<String> customerGatewayIds,
+                                                          Map<String, List<String>> filters) {
+        ensureDefaultResources(region);
+        for (String customerGatewayId : customerGatewayIds) {
+            getRequiredCustomerGateway(region, customerGatewayId);
+        }
+        return customerGateways.scan(k -> true).stream()
+                .filter(gateway -> gateway.getRegion().equals(region))
+                .filter(gateway -> customerGatewayIds.isEmpty()
+                        || customerGatewayIds.contains(gateway.getCustomerGatewayId()))
+                .filter(gateway -> matchesFilters(gateway, filters, region))
+                .collect(Collectors.toList());
+    }
+
+    public void deleteCustomerGateway(String region, String customerGatewayId) {
+        ensureDefaultResources(region);
+        getRequiredCustomerGateway(region, customerGatewayId);
+        customerGateways.delete(key(region, customerGatewayId));
+    }
+
+    private CustomerGateway getRequiredCustomerGateway(String region, String customerGatewayId) {
+        CustomerGateway gateway = customerGateways.get(key(region, customerGatewayId)).orElse(null);
+        if (gateway == null) {
+            throw new AwsException("InvalidCustomerGatewayID.NotFound",
+                    "The customer gateway ID '" + customerGatewayId + "' does not exist", 400);
+        }
+        return gateway;
     }
 
     // ─── Route Tables ──────────────────────────────────────────────────────────
@@ -3694,6 +3867,30 @@ public class Ec2Service implements ContainerTeardown {
                 default -> true;
             };
         }
+        if (resource instanceof CustomerGateway cgw) {
+            return switch (filterName) {
+                case "customer-gateway-id" -> matchesValue(values, cgw.getCustomerGatewayId());
+                case "bgp-asn" -> cgw.getBgpAsn() != null && matchesValue(values, cgw.getBgpAsn());
+                case "ip-address" -> cgw.getIpAddress() != null && matchesValue(values, cgw.getIpAddress());
+                case "state" -> matchesValue(values, cgw.getState());
+                case "type" -> matchesValue(values, cgw.getType());
+                default -> true;
+            };
+        }
+        if (resource instanceof VpnGateway vgw) {
+            return switch (filterName) {
+                case "vpn-gateway-id" -> matchesValue(values, vgw.getVpnGatewayId());
+                case "state" -> matchesValue(values, vgw.getState());
+                case "type" -> matchesValue(values, vgw.getType());
+                case "availability-zone" -> matchesValue(values, vgw.getAvailabilityZone());
+                case "amazon-side-asn" -> matchesValue(values, String.valueOf(vgw.getAmazonSideAsn()));
+                case "attachment.vpc-id" -> vgw.getVpcAttachments().stream()
+                        .anyMatch(a -> matchesValue(values, a.getVpcId()));
+                case "attachment.state" -> vgw.getVpcAttachments().stream()
+                        .anyMatch(a -> matchesValue(values, a.getState()));
+                default -> true;
+            };
+        }
         return true;
     }
 
@@ -3713,6 +3910,8 @@ public class Ec2Service implements ContainerTeardown {
         if (resource instanceof VpcEndpoint endpoint) return endpoint.getTags();
         if (resource instanceof NatGateway natGateway) return natGateway.getTags();
         if (resource instanceof SpotInstanceRequest sir) return sir.getTags();
+        if (resource instanceof CustomerGateway cgw) return cgw.getTags();
+        if (resource instanceof VpnGateway vgw) return vgw.getTags();
         return Collections.emptyList();
     }
 

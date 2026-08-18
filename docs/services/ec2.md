@@ -315,6 +315,42 @@ through `create-in-progress`, since nothing about it is slow locally.
 | DescribeNatGateways | Lists or returns stored NAT gateways. |
 | DeleteNatGateway | Deletes a NAT gateway record. |
 
+### Customer Gateways
+
+| Action | Description |
+|--------|-------------|
+| CreateCustomerGateway | Creates the customer side of a Site-to-Site VPN connection. |
+| DescribeCustomerGateways | Lists or returns stored customer gateways. |
+| DeleteCustomerGateway | Deletes a customer gateway record. |
+
+`Type` must be `ipsec.1`, the only value AWS accepts. `BgpAsn` defaults to `65000` when the
+request omits both `BgpAsn` and `BgpAsnExtended`, and both are reported as strings the way
+AWS reports them. Creation is synchronous: the gateway comes back `available` on the create
+response rather than passing through `pending`. `DescribeCustomerGateways` supports the
+`bgp-asn`, `customer-gateway-id`, `ip-address`, `state` and `type` filters alongside the
+shared `tag:`, `tag-key` and `tag-value` filters.
+
+### VPN Gateways
+
+| Action | Description |
+|--------|-------------|
+| CreateVpnGateway | Creates the AWS side of a Site-to-Site VPN connection. |
+| DescribeVpnGateways | Lists or returns stored VPN gateways. |
+| DeleteVpnGateway | Deletes a VPN gateway record. |
+| AttachVpnGateway | Attaches a VPN gateway to a VPC. |
+| DetachVpnGateway | Detaches a VPN gateway from a VPC. |
+
+`Type` must be `ipsec.1`. `AmazonSideAsn` defaults to `64512` when omitted. `AvailabilityZone`
+defaults to `<region>a` when omitted, the same simplification `CreateSubnet` and
+`CreateVolume` make. Creation is synchronous, so the gateway is `available` on the create
+response. `state` on the gateway itself never changes on attach or detach — only the
+`state` of the matching entry in `attachments` moves between `attached` and absent, matching
+AWS's split between gateway state (pending/available/deleting/deleted) and attachment state
+(attaching/attached/detaching/detached). `DescribeVpnGateways` supports the
+`amazon-side-asn`, `attachment.state`, `attachment.vpc-id`, `availability-zone`, `state`,
+`type` and `vpn-gateway-id` filters alongside the shared `tag:`, `tag-key` and `tag-value`
+filters.
+
 ### Elastic IPs
 
 | Action | Description |

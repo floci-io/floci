@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.storage.PersistentStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.ec2.model.Address;
 import io.github.hectorvent.floci.services.ec2.model.BlockDeviceMapping;
+import io.github.hectorvent.floci.services.ec2.model.CustomerGateway;
 import io.github.hectorvent.floci.services.ec2.model.EbsBlockDevice;
 import io.github.hectorvent.floci.services.ec2.model.ManagedPrefixList;
 import io.github.hectorvent.floci.services.ec2.model.PrefixListEntry;
@@ -27,6 +28,7 @@ import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.ec2.model.Volume;
 import io.github.hectorvent.floci.services.ec2.model.Vpc;
 import io.github.hectorvent.floci.services.ec2.model.VpcEndpoint;
+import io.github.hectorvent.floci.services.ec2.model.VpnGateway;
 import io.github.hectorvent.floci.services.ec2.model.SpotInstanceRequest;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
 import org.junit.jupiter.api.Test;
@@ -201,6 +203,8 @@ class Ec2ServicePersistenceTest {
                 load(dir, "ec2-spot-instance-requests.json", new TypeReference<Map<String, SpotInstanceRequest>>() {}),
                 load(dir, "ec2-network-acls.json", new TypeReference<Map<String, NetworkAcl>>() {}),
                 load(dir, "ec2-managed-prefix-lists.json", new TypeReference<Map<String, ManagedPrefixList>>() {}),
+                load(dir, "ec2-customer-gateways.json", new TypeReference<Map<String, CustomerGateway>>() {}),
+                load(dir, "ec2-vpn-gateways.json", new TypeReference<Map<String, VpnGateway>>() {}),
                 load(dir, "ec2-tags.json", new TypeReference<Map<String, List<Tag>>>() {}));
     }
 
