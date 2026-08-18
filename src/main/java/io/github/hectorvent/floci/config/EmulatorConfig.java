@@ -605,9 +605,15 @@ public interface EmulatorConfig {
         MediaPackageV2ServiceConfig mediapackagev2();
         MediaLiveServiceConfig medialive();
         SageMakerServiceConfig sagemaker();
+        AppRunnerServiceConfig apprunner();
     }
 
     interface SageMakerServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface AppRunnerServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }

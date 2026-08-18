@@ -469,7 +469,11 @@ public class ResolvedServiceCatalog {
                 descriptor("sagemaker", "sagemaker", config.services().sagemaker().enabled(), true,
                         "sagemaker", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
-                        Set.of("SageMaker."), Set.of("sagemaker"), Set.of(), Set.of())
+                        Set.of("SageMaker."), Set.of("sagemaker"), Set.of(), Set.of()),
+                descriptor("apprunner", "apprunner", config.services().apprunner().enabled(), true,
+                        "apprunner", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
+                        protocols(ServiceProtocol.JSON),
+                        Set.of("AppRunner."), Set.of("apprunner"), Set.of(), Set.of())
         ));
     }
 
