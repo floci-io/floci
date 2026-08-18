@@ -315,3 +315,5 @@ floci:
       enabled: true
     apprunner:
       enabled: true
+    redshift:
+      enabled: true

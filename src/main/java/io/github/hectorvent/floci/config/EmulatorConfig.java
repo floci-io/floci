@@ -606,6 +606,12 @@ public interface EmulatorConfig {
         MediaLiveServiceConfig medialive();
         SageMakerServiceConfig sagemaker();
         AppRunnerServiceConfig apprunner();
+        RedshiftServiceConfig redshift();
+    }
+
+    interface RedshiftServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
     }
 
     interface SageMakerServiceConfig {
