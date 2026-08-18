@@ -52,13 +52,21 @@ public class EfsService implements Resettable {
     // --- File Systems ---
 
     public FileSystem createFileSystem(CreateFileSystemRequest request, String region) {
+        String token = request.getCreationToken() != null ? request.getCreationToken() : UUID.randomUUID().toString();
+
+        for (FileSystem existing : fileSystemStore.scan(k -> k.startsWith(region + "::"))) {
+            if (token.equals(existing.getCreationToken())) {
+                return existing;
+            }
+        }
+
         String fsId = "fs-" + UUID.randomUUID().toString().replace("-", "").substring(0, 17);
         String regionKey = regionKey(region, fsId);
         
         FileSystem fs = new FileSystem();
         fs.setFileSystemId(fsId);
-        fs.setCreationToken(request.getCreationToken() != null ? request.getCreationToken() : UUID.randomUUID().toString());
-        fs.setCreationTime(Instant.now().toEpochMilli());
+        fs.setCreationToken(token);
+        fs.setCreationTime(Instant.now().getEpochSecond());
         fs.setLifeCycleState(LifeCycleState.available.name());
         fs.setFileSystemArn("arn:aws:elasticfilesystem:" + region + ":000000000000:file-system/" + fsId);
         fs.setOwnerId("000000000000");
@@ -88,7 +96,7 @@ public class EfsService implements Resettable {
     }
 
     public List<FileSystem> describeFileSystems(String region) {
-        return fileSystemStore.scan(k -> true).stream()
+        return fileSystemStore.scan(k -> k.startsWith(region + "::")).stream()
                 .filter(fs -> fs.getFileSystemArn().contains(":" + region + ":"))
                 .collect(Collectors.toList());
     }
@@ -173,7 +181,7 @@ public class EfsService implements Resettable {
     }
 
     public List<MountTarget> describeMountTargets(String region, String fileSystemId) {
-        return mountTargetStore.scan(k -> true).stream()
+        return mountTargetStore.scan(k -> k.startsWith(region + "::")).stream()
                 .filter(mt -> fileSystemId == null || mt.getFileSystemId().equals(fileSystemId))
                 .collect(Collectors.toList());
     }
@@ -220,12 +228,20 @@ public class EfsService implements Resettable {
     // --- Access Points ---
 
     public AccessPointDescription createAccessPoint(String region, CreateAccessPointRequest request) {
+        String token = request.getClientToken() != null ? request.getClientToken() : UUID.randomUUID().toString();
+
+        for (AccessPointDescription existing : accessPointStore.scan(k -> k.startsWith(region + "::"))) {
+            if (token.equals(existing.getClientToken())) {
+                return existing;
+            }
+        }
+
         String apId = "fsap-" + UUID.randomUUID().toString().replace("-", "").substring(0, 17);
         
         AccessPointDescription ap = new AccessPointDescription();
         ap.setAccessPointId(apId);
         ap.setAccessPointArn("arn:aws:elasticfilesystem:" + region + ":000000000000:access-point/" + apId);
-        ap.setClientToken(request.getClientToken());
+        ap.setClientToken(token);
         ap.setFileSystemId(request.getFileSystemId());
         ap.setPosixUser(request.getPosixUser());
         ap.setRootDirectory(request.getRootDirectory());
@@ -240,7 +256,7 @@ public class EfsService implements Resettable {
     }
 
     public List<AccessPointDescription> describeAccessPoints(String region, String fileSystemId, String accessPointId) {
-        return accessPointStore.scan(k -> true).stream()
+        return accessPointStore.scan(k -> k.startsWith(region + "::")).stream()
                 .filter(ap -> fileSystemId == null || ap.getFileSystemId().equals(fileSystemId))
                 .filter(ap -> accessPointId == null || ap.getAccessPointId().equals(accessPointId))
                 .collect(Collectors.toList());
