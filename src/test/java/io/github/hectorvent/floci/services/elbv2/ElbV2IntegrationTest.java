@@ -125,10 +125,10 @@ class ElbV2IntegrationTest {
                 .post("/")
             .then()
                 .statusCode(200)
+                // AWS echoes the whole attribute set, so the modified key arrives among the defaults.
                 .body("ModifyLoadBalancerAttributesResponse.ModifyLoadBalancerAttributesResult.Attributes.member.Key",
-                        equalTo("deletion_protection.enabled"))
-                .body("ModifyLoadBalancerAttributesResponse.ModifyLoadBalancerAttributesResult.Attributes.member.Value",
-                        equalTo("true"));
+                        hasItem("deletion_protection.enabled"))
+                .body(containsString("<Key>deletion_protection.enabled</Key><Value>true</Value>"));
     }
 
     @Test
@@ -143,7 +143,8 @@ class ElbV2IntegrationTest {
             .then()
                 .statusCode(200)
                 .body("DescribeLoadBalancerAttributesResponse.DescribeLoadBalancerAttributesResult.Attributes.member.Key",
-                        equalTo("deletion_protection.enabled"));
+                        hasItem("deletion_protection.enabled"))
+                .body(containsString("<Key>deletion_protection.enabled</Key><Value>true</Value>"));
     }
 
     @Test
@@ -608,7 +609,8 @@ class ElbV2IntegrationTest {
             .then()
                 .statusCode(200)
                 .body("ModifyTargetGroupAttributesResponse.ModifyTargetGroupAttributesResult.Attributes.member.Key",
-                        equalTo("deregistration_delay.timeout_seconds"));
+                        hasItem("deregistration_delay.timeout_seconds"))
+                .body(containsString("<Key>deregistration_delay.timeout_seconds</Key><Value>60</Value>"));
     }
 
     @Test

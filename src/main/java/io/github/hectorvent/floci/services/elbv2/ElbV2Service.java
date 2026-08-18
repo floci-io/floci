@@ -270,7 +270,8 @@ public class ElbV2Service {
 
     public Map<String, String> describeLoadBalancerAttributes(String region, String arn) {
         LoadBalancer lb = requireLoadBalancer(region, arn);
-        return new LinkedHashMap<>(lb.getAttributes());
+        return ElbV2AttributeDefaults.overlay(
+                ElbV2AttributeDefaults.forLoadBalancer(lb.getType()), lb.getAttributes());
     }
 
     public void modifyLoadBalancerAttributes(String region, String arn, Map<String, String> newAttrs) {
@@ -439,7 +440,8 @@ public class ElbV2Service {
 
     public Map<String, String> describeTargetGroupAttributes(String region, String arn) {
         TargetGroup tg = requireTargetGroup(region, arn);
-        return new LinkedHashMap<>(tg.getAttributes());
+        return ElbV2AttributeDefaults.overlay(
+                ElbV2AttributeDefaults.forTargetGroup(tg.getProtocol()), tg.getAttributes());
     }
 
     public void modifyTargetGroupAttributes(String region, String arn, Map<String, String> newAttrs) {
@@ -523,7 +525,8 @@ public class ElbV2Service {
 
     public Map<String, String> describeListenerAttributes(String region, String arn) {
         Listener listener = requireListener(region, arn);
-        return new LinkedHashMap<>(listener.getAttributes());
+        return ElbV2AttributeDefaults.overlay(
+                ElbV2AttributeDefaults.forListener(), listener.getAttributes());
     }
 
     public void modifyListenerAttributes(String region, String arn, Map<String, String> newAttrs) {

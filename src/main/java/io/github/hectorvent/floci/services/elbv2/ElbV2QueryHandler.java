@@ -176,8 +176,9 @@ public class ElbV2QueryHandler {
 
     private Response handleModifyLoadBalancerAttributes(MultivaluedMap<String, String> p, String region) {
         String arn = p.getFirst("LoadBalancerArn");
-        Map<String, String> attrs = parseAttributes(p, "Attributes");
-        service.modifyLoadBalancerAttributes(region, arn, attrs);
+        service.modifyLoadBalancerAttributes(region, arn, parseAttributes(p, "Attributes"));
+        // AWS echoes the load balancer's whole attribute set, not just the keys that changed.
+        Map<String, String> attrs = service.describeLoadBalancerAttributes(region, arn);
 
         XmlBuilder xml = new XmlBuilder()
                 .start("ModifyLoadBalancerAttributesResponse", AwsNamespaces.ELB_V2)
@@ -374,8 +375,8 @@ public class ElbV2QueryHandler {
 
     private Response handleModifyTargetGroupAttributes(MultivaluedMap<String, String> p, String region) {
         String arn = p.getFirst("TargetGroupArn");
-        Map<String, String> attrs = parseAttributes(p, "Attributes");
-        service.modifyTargetGroupAttributes(region, arn, attrs);
+        service.modifyTargetGroupAttributes(region, arn, parseAttributes(p, "Attributes"));
+        Map<String, String> attrs = service.describeTargetGroupAttributes(region, arn);
 
         XmlBuilder xml = new XmlBuilder()
                 .start("ModifyTargetGroupAttributesResponse", AwsNamespaces.ELB_V2)
@@ -493,8 +494,8 @@ public class ElbV2QueryHandler {
 
     private Response handleModifyListenerAttributes(MultivaluedMap<String, String> p, String region) {
         String arn = p.getFirst("ListenerArn");
-        Map<String, String> attrs = parseAttributes(p, "Attributes");
-        service.modifyListenerAttributes(region, arn, attrs);
+        service.modifyListenerAttributes(region, arn, parseAttributes(p, "Attributes"));
+        Map<String, String> attrs = service.describeListenerAttributes(region, arn);
 
         XmlBuilder xml = new XmlBuilder()
                 .start("ModifyListenerAttributesResponse", AwsNamespaces.ELB_V2)
