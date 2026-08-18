@@ -1581,6 +1581,9 @@ public class CloudFormationResourceProvisioner {
         try {
             return lookup.apply(name);
         } catch (AwsException notFound) {
+            // Expected when the resource was deleted out of band since the prior update; the
+            // caller falls back to creating it fresh under the same name.
+            LOG.debugv(notFound, "No existing {0} found on file, falling back to create", name);
             return null;
         }
     }
