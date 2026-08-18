@@ -11,6 +11,7 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
+import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
@@ -62,6 +63,10 @@ public class AutoScalingQueryHandler {
                 case "AttachLoadBalancers"               -> handleAttachLoadBalancers(p, region);
                 case "DetachLoadBalancers"               -> handleDetachLoadBalancers(p, region);
                 case "DescribeLoadBalancers"             -> handleDescribeLoadBalancers(p, region);
+                // Traffic sources
+                case "AttachTrafficSources"              -> handleAttachTrafficSources(p, region);
+                case "DetachTrafficSources"               -> handleDetachTrafficSources(p, region);
+                case "DescribeTrafficSources"             -> handleDescribeTrafficSources(p, region);
                 // Lifecycle hooks
                 case "PutLifecycleHook"             -> handlePutLifecycleHook(p, region);
                 case "DeleteLifecycleHook"          -> handleDeleteLifecycleHook(p, region);
@@ -72,6 +77,10 @@ public class AutoScalingQueryHandler {
                 case "PutScalingPolicy"             -> handlePutScalingPolicy(p, region);
                 case "DeletePolicy"                 -> handleDeletePolicy(p, region);
                 case "DescribePolicies"             -> handleDescribePolicies(p, region);
+                // Scheduled actions
+                case "PutScheduledUpdateGroupAction" -> handlePutScheduledUpdateGroupAction(p, region);
+                case "DeleteScheduledAction"         -> handleDeleteScheduledAction(p, region);
+                case "DescribeScheduledActions"      -> handleDescribeScheduledActions(p, region);
                 // Activities
                 case "DescribeScalingActivities"    -> handleDescribeScalingActivities(p, region);
                 // Metadata
@@ -691,6 +700,69 @@ public class AutoScalingQueryHandler {
         return ok(xml.build());
     }
 
+    // ── Traffic sources ─────────────────────────────────────────────────────────
+    // The modern, unified elbv2/vpc-lattice ASG-to-load-balancer wiring API -
+    // aws_autoscaling_traffic_source_attachment uses this instead of the older
+    // AttachLoadBalancerTargetGroups above. AWS's own DescribeTrafficSources doc
+    // page example shows a bare, unwrapped <TrafficSources> element per item, which
+    // reads as a flattened list - but botocore's actual service-2.json models the
+    // TrafficSources list WITHOUT "flattened": true and with member locationName
+    // "member" like every other list in this API, so the wire shape is the normal
+    // <TrafficSources><member>...</member></TrafficSources>. The doc page's example
+    // was simply wrong; trusting it verbatim left the AWS provider's own
+    // post-create waiter polling DescribeTrafficSources and never finding the
+    // resource it had just attached ("couldn't find resource (21 retries)"),
+    // caught crossing terraform-aws-modules/terraform-aws-autoscaling's "complete"
+    // example - the actual wire format, not the docs, is the source of truth here.
+
+    private Response handleAttachTrafficSources(MultivaluedMap<String, String> p, String region) {
+        service.attachTrafficSources(region, p.getFirst("AutoScalingGroupName"), parseTrafficSources(p));
+        return ok(new XmlBuilder()
+                .start("AttachTrafficSourcesResponse", NS)
+                  .start("AttachTrafficSourcesResult").end("AttachTrafficSourcesResult")
+                  .raw(AwsQueryResponse.responseMetadata())
+                .end("AttachTrafficSourcesResponse").build());
+    }
+
+    private Response handleDetachTrafficSources(MultivaluedMap<String, String> p, String region) {
+        service.detachTrafficSources(region, p.getFirst("AutoScalingGroupName"), parseTrafficSources(p));
+        return ok(new XmlBuilder()
+                .start("DetachTrafficSourcesResponse", NS)
+                  .start("DetachTrafficSourcesResult").end("DetachTrafficSourcesResult")
+                  .raw(AwsQueryResponse.responseMetadata())
+                .end("DetachTrafficSourcesResponse").build());
+    }
+
+    private Response handleDescribeTrafficSources(MultivaluedMap<String, String> p, String region) {
+        Map<String, String> sources = service.describeTrafficSources(region,
+                p.getFirst("AutoScalingGroupName"), p.getFirst("TrafficSourceType"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeTrafficSourcesResponse", NS)
+                  .start("DescribeTrafficSourcesResult")
+                    .start("TrafficSources");
+        sources.forEach((identifier, type) -> xml.start("member")
+               .elem("Identifier", identifier)
+               .elem("State", "InService")
+               .elem("Type", type)
+               .end("member"));
+        xml.end("TrafficSources")
+           .end("DescribeTrafficSourcesResult")
+           .raw(AwsQueryResponse.responseMetadata())
+           .end("DescribeTrafficSourcesResponse");
+        return ok(xml.build());
+    }
+
+    private List<AutoScalingService.TrafficSourceIdentifier> parseTrafficSources(MultivaluedMap<String, String> p) {
+        List<AutoScalingService.TrafficSourceIdentifier> result = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String identifier = p.getFirst("TrafficSources.member." + i + ".Identifier");
+            if (identifier == null) { break; }
+            String type = p.getFirst("TrafficSources.member." + i + ".Type");
+            result.add(new AutoScalingService.TrafficSourceIdentifier(identifier, type));
+        }
+        return result;
+    }
+
     // ── Lifecycle hooks ────────────────────────────────────────────────────────
 
     private Response handlePutLifecycleHook(MultivaluedMap<String, String> p, String region) {
@@ -827,6 +899,74 @@ public class AutoScalingQueryHandler {
            .raw(AwsQueryResponse.responseMetadata())
            .end("DescribePoliciesResponse");
         return ok(xml.build());
+    }
+
+    // ── Scheduled actions ───────────────────────────────────────────────────────
+
+    private Response handlePutScheduledUpdateGroupAction(MultivaluedMap<String, String> p, String region) {
+        ScheduledAction action = service.putScheduledUpdateGroupAction(region,
+                p.getFirst("AutoScalingGroupName"),
+                p.getFirst("ScheduledActionName"),
+                parseInstant(p.getFirst("StartTime")),
+                parseInstant(p.getFirst("EndTime")),
+                p.getFirst("Recurrence"),
+                p.getFirst("TimeZone"),
+                nullableIntParam(p, "MinSize"),
+                nullableIntParam(p, "MaxSize"),
+                nullableIntParam(p, "DesiredCapacity"));
+        return ok(new XmlBuilder()
+                .start("PutScheduledUpdateGroupActionResponse", NS)
+                  .start("PutScheduledUpdateGroupActionResult").end("PutScheduledUpdateGroupActionResult")
+                  .raw(AwsQueryResponse.responseMetadata())
+                .end("PutScheduledUpdateGroupActionResponse").build());
+    }
+
+    private Response handleDeleteScheduledAction(MultivaluedMap<String, String> p, String region) {
+        service.deleteScheduledAction(region,
+                p.getFirst("AutoScalingGroupName"), p.getFirst("ScheduledActionName"));
+        return ok(new XmlBuilder()
+                .start("DeleteScheduledActionResponse", NS)
+                  .raw(AwsQueryResponse.responseMetadata())
+                .end("DeleteScheduledActionResponse").build());
+    }
+
+    private Response handleDescribeScheduledActions(MultivaluedMap<String, String> p, String region) {
+        List<ScheduledAction> actions = service.describeScheduledActions(
+                region, p.getFirst("AutoScalingGroupName"), memberList(p, "ScheduledActionNames"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeScheduledActionsResponse", NS)
+                  .start("DescribeScheduledActionsResult")
+                    .start("ScheduledUpdateGroupActions");
+        for (ScheduledAction action : actions) {
+            xml.start("member")
+               .elem("ScheduledActionName", action.getScheduledActionName())
+               .elem("ScheduledActionARN", action.getScheduledActionArn())
+               .elem("AutoScalingGroupName", action.getAutoScalingGroupName());
+            if (action.getStartTime() != null) { xml.elem("StartTime", ISO_FMT.format(action.getStartTime())); }
+            if (action.getEndTime() != null) { xml.elem("EndTime", ISO_FMT.format(action.getEndTime())); }
+            if (action.getRecurrence() != null) { xml.elem("Recurrence", action.getRecurrence()); }
+            if (action.getTimeZone() != null) { xml.elem("TimeZone", action.getTimeZone()); }
+            if (action.getMinSize() != null) { xml.elem("MinSize", String.valueOf(action.getMinSize())); }
+            if (action.getMaxSize() != null) { xml.elem("MaxSize", String.valueOf(action.getMaxSize())); }
+            if (action.getDesiredCapacity() != null) {
+                xml.elem("DesiredCapacity", String.valueOf(action.getDesiredCapacity()));
+            }
+            xml.end("member");
+        }
+        xml.end("ScheduledUpdateGroupActions")
+           .end("DescribeScheduledActionsResult")
+           .raw(AwsQueryResponse.responseMetadata())
+           .end("DescribeScheduledActionsResponse");
+        return ok(xml.build());
+    }
+
+    private Instant parseInstant(String value) {
+        if (value == null || value.isBlank()) { return null; }
+        try {
+            return Instant.parse(value);
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     private static ScalingPolicy.TargetTrackingConfiguration parseTargetTrackingConfiguration(MultivaluedMap<String, String> p) {

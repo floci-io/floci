@@ -14,6 +14,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.doThrow;
@@ -121,6 +122,57 @@ class AutoScalingServiceTest {
         assertTrue(group.getSuspendedProcesses().contains("Launch"));
         assertTrue(group.getSuspendedProcesses().contains("Terminate"));
         assertTrue(group.getSuspendedProcesses().contains("HealthCheck"));
+    }
+
+    // AttachTrafficSources/DetachTrafficSources/DescribeTrafficSources - the modern,
+    // unified elbv2/vpc-lattice ASG-to-load-balancer wiring API that
+    // aws_autoscaling_traffic_source_attachment uses instead of the older
+    // AttachLoadBalancerTargetGroups. Found crossing
+    // terraform-aws-modules/terraform-aws-autoscaling's "complete" example against Floci.
+    @Test
+    void attachTrafficSourcesRecordsIdentifierAndTypeAndDetachRemovesIt() {
+        service.attachTrafficSources(REGION, "test-asg", List.of(
+                new AutoScalingService.TrafficSourceIdentifier("arn:aws:elasticloadbalancing:...:tg/ex", "elbv2")));
+
+        assertEquals(Map.of("arn:aws:elasticloadbalancing:...:tg/ex", "elbv2"),
+                service.describeTrafficSources(REGION, "test-asg", null));
+
+        service.detachTrafficSources(REGION, "test-asg", List.of(
+                new AutoScalingService.TrafficSourceIdentifier("arn:aws:elasticloadbalancing:...:tg/ex", null)));
+
+        assertEquals(Map.of(), service.describeTrafficSources(REGION, "test-asg", null));
+    }
+
+    @Test
+    void describeTrafficSourcesFiltersByType() {
+        service.attachTrafficSources(REGION, "test-asg", List.of(
+                new AutoScalingService.TrafficSourceIdentifier("arn:elbv2-source", "elbv2"),
+                new AutoScalingService.TrafficSourceIdentifier("arn:lattice-source", "vpc-lattice")));
+
+        assertEquals(Map.of("arn:elbv2-source", "elbv2"),
+                service.describeTrafficSources(REGION, "test-asg", "elbv2"));
+    }
+
+    // PutScheduledUpdateGroupAction/DescribeScheduledActions/DeleteScheduledAction -
+    // aws_autoscaling_schedule's whole lifecycle, unimplemented until this fix. Found
+    // crossing terraform-aws-modules/terraform-aws-autoscaling's "complete" example.
+    @Test
+    void putScheduledUpdateGroupActionRecordsScheduleAndDeleteRemovesIt() {
+        service.putScheduledUpdateGroupAction(REGION, "test-asg", "morning",
+                null, null, "0 7 * * 1-5", "Europe/Rome", 0, 1, 1);
+
+        var actions = service.describeScheduledActions(REGION, "test-asg", List.of());
+        assertEquals(1, actions.size());
+        assertEquals("morning", actions.getFirst().getScheduledActionName());
+        assertEquals("0 7 * * 1-5", actions.getFirst().getRecurrence());
+        assertEquals("Europe/Rome", actions.getFirst().getTimeZone());
+        assertEquals(0, actions.getFirst().getMinSize());
+        assertEquals(1, actions.getFirst().getMaxSize());
+        assertEquals(1, actions.getFirst().getDesiredCapacity());
+        assertNotNull(actions.getFirst().getScheduledActionArn());
+
+        service.deleteScheduledAction(REGION, "test-asg", "morning");
+        assertEquals(List.of(), service.describeScheduledActions(REGION, "test-asg", List.of()));
     }
 
     @Test
