@@ -2,6 +2,10 @@ package io.github.hectorvent.floci.services.efs.model;
 
 import java.util.List;
 
+import com.fasterxml.jackson.databind.annotation.JsonNaming;
+import com.fasterxml.jackson.databind.PropertyNamingStrategies;
+
+@JsonNaming(PropertyNamingStrategies.UpperCamelCaseStrategy.class)
 public class PosixUser {
 
     private Long gid;

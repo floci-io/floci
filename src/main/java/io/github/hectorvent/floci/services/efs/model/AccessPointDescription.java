@@ -2,6 +2,10 @@ package io.github.hectorvent.floci.services.efs.model;
 
 import java.util.List;
 
+import com.fasterxml.jackson.databind.annotation.JsonNaming;
+import com.fasterxml.jackson.databind.PropertyNamingStrategies;
+
+@JsonNaming(PropertyNamingStrategies.UpperCamelCaseStrategy.class)
 public class AccessPointDescription {
 
     private String accessPointArn;
@@ -14,15 +18,6 @@ public class AccessPointDescription {
     private PosixUser posixUser;
     private RootDirectory rootDirectory;
     private List<Tag> tags;
-
-    public enum LifeCycleState {
-        creating,
-        available,
-        updating,
-        deleting,
-        deleted,
-        error
-    }
 
     public String getAccessPointArn() {
         return accessPointArn;

@@ -2,6 +2,10 @@ package io.github.hectorvent.floci.services.efs.model;
 
 import java.util.List;
 
+import com.fasterxml.jackson.databind.annotation.JsonNaming;
+import com.fasterxml.jackson.databind.PropertyNamingStrategies;
+
+@JsonNaming(PropertyNamingStrategies.UpperCamelCaseStrategy.class)
 public class FileSystem {
 
     private String availabilityZoneId;
@@ -11,7 +15,7 @@ public class FileSystem {
     private Boolean encrypted;
     private String fileSystemArn;
     private String fileSystemId;
-    private FileSystemProtection fileSystemProtection;
+    private FileSystemProtectionDescription fileSystemProtection;
     private String kmsKeyId;
     private String lifeCycleState;
     private String name;
@@ -79,11 +83,11 @@ public class FileSystem {
         this.fileSystemId = fileSystemId;
     }
 
-    public FileSystemProtection getFileSystemProtection() {
+    public FileSystemProtectionDescription getFileSystemProtectionDescription() {
         return fileSystemProtection;
     }
 
-    public void setFileSystemProtection(FileSystemProtection fileSystemProtection) {
+    public void setFileSystemProtectionDescription(FileSystemProtectionDescription fileSystemProtection) {
         this.fileSystemProtection = fileSystemProtection;
     }
 

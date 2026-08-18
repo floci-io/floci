@@ -2,17 +2,23 @@ package io.github.hectorvent.floci.services.efs.model;
 
 import java.util.List;
 
+import com.fasterxml.jackson.databind.annotation.JsonNaming;
+import com.fasterxml.jackson.databind.PropertyNamingStrategies;
+
+@JsonNaming(PropertyNamingStrategies.UpperCamelCaseStrategy.class)
 public class MountTarget {
 
     private String availabilityZoneId;
     private String availabilityZoneName;
     private String fileSystemId;
     private String ipAddress;
+    private IpAddressType ipAddressType;
     private String ipv6Address;
     private LifeCycleState lifeCycleState;
     private String mountTargetId;
     private String networkInterfaceId;
     private String ownerId;
+    private List<String> securityGroups;
     private String subnetId;
     private String vpcId;
 

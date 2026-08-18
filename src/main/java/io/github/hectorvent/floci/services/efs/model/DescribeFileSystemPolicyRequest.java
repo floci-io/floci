@@ -4,15 +4,8 @@ import com.fasterxml.jackson.databind.annotation.JsonNaming;
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 
 @JsonNaming(PropertyNamingStrategies.UpperCamelCaseStrategy.class)
-public class DeleteFileSystemRequest {
-
+public class DescribeFileSystemPolicyRequest {
     private String fileSystemId;
-
-    public String getFileSystemId() {
-        return fileSystemId;
-    }
-
-    public void setFileSystemId(String fileSystemId) {
-        this.fileSystemId = fileSystemId;
-    }
+    public String getFileSystemId() { return fileSystemId; }
+    public void setFileSystemId(String fileSystemId) { this.fileSystemId = fileSystemId; }
 }

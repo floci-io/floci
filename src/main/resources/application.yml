@@ -507,6 +507,8 @@ floci:
     iotdata:
       enabled: true
     cloudhsmv2:
+    efs:
+      enabled: true
     rum:
       enabled: true
     guardduty:
