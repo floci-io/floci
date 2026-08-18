@@ -32,6 +32,7 @@ public class AutoScalingGroup {
     private int healthCheckGracePeriod = 0;
     private List<AsgInstance> instances = new ArrayList<>();
     private List<String> terminationPolicies = new ArrayList<>();
+    private List<String> suspendedProcesses = new ArrayList<>();
     private Instant createdTime;
     private String region;
     private Map<String, String> tags = new ConcurrentHashMap<>();
@@ -96,6 +97,9 @@ public class AutoScalingGroup {
 
     public List<String> getTerminationPolicies() { return terminationPolicies; }
     public void setTerminationPolicies(List<String> v) { this.terminationPolicies = v; }
+
+    public List<String> getSuspendedProcesses() { return suspendedProcesses; }
+    public void setSuspendedProcesses(List<String> v) { this.suspendedProcesses = v; }
 
     public Instant getCreatedTime() { return createdTime; }
     public void setCreatedTime(Instant v) { this.createdTime = v; }

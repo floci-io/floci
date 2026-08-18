@@ -93,6 +93,36 @@ class AutoScalingServiceTest {
         assertNull(group.getLaunchConfigurationName());
     }
 
+    // The AWS provider calls SuspendProcesses/ResumeProcesses unconditionally around ASG
+    // creation whenever wait_for_capacity_timeout is non-zero (the default), so an
+    // unimplemented SuspendProcesses fails ASG creation outright - found crossing
+    // terraform-aws-modules/terraform-aws-eks against Floci.
+    @Test
+    void suspendProcessesRecordsNamedProcessesAndResumeClearsThem() {
+        service.suspendProcesses(REGION, "test-asg", List.of("Launch", "Terminate"));
+
+        var group = service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst();
+        assertEquals(List.of("Launch", "Terminate"), group.getSuspendedProcesses());
+
+        service.resumeProcesses(REGION, "test-asg", List.of("Launch"));
+        group = service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst();
+        assertEquals(List.of("Terminate"), group.getSuspendedProcesses());
+
+        service.resumeProcesses(REGION, "test-asg", List.of());
+        group = service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst();
+        assertEquals(List.of(), group.getSuspendedProcesses());
+    }
+
+    @Test
+    void suspendProcessesWithNoNamesSuspendsEveryScalingProcess() {
+        service.suspendProcesses(REGION, "test-asg", List.of());
+
+        var group = service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst();
+        assertTrue(group.getSuspendedProcesses().contains("Launch"));
+        assertTrue(group.getSuspendedProcesses().contains("Terminate"));
+        assertTrue(group.getSuspendedProcesses().contains("HealthCheck"));
+    }
+
     @Test
     void createAutoScalingGroupRejectsResolvedLaunchTemplateWithoutImageId() {
         Ec2Service ec2Service = mock(Ec2Service.class);
