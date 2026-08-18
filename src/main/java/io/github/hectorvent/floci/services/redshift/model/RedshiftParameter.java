@@ -1,5 +1,8 @@
 package io.github.hectorvent.floci.services.redshift.model;
 
+import io.quarkus.runtime.annotations.RegisterForReflection;
+
+@RegisterForReflection
 public class RedshiftParameter {
 
     private String parameterName;

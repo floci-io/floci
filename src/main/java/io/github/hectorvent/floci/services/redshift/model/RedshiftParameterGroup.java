@@ -1,8 +1,11 @@
 package io.github.hectorvent.floci.services.redshift.model;
 
+import io.quarkus.runtime.annotations.RegisterForReflection;
+
 import java.util.LinkedHashMap;
 import java.util.Map;
 
+@RegisterForReflection
 public class RedshiftParameterGroup {
 
     private String parameterGroupName;
