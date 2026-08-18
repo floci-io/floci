@@ -594,8 +594,21 @@ public class AcmService {
      */
     private DomainValidation generateDomainValidation(String domain, ValidationMethod method, CertificateType type) {
         String validationToken = generateValidationToken(domain);
+        // Real ACM strips a leading "*." from the domain when it builds the
+        // DNS validation record's NAME: a CNAME record cannot itself carry a
+        // literal "*" label at that position, so the challenge is issued
+        // against the base domain instead. DomainName/ValidationDomain (see
+        // the DomainValidation constructed below) keep the wildcard as
+        // requested; only the resource record name is stripped. Before this
+        // fix, floci left the "*." in place, so terraform-aws-modules/acm's
+        // aws_route53_record.validation resource created a record whose fqdn
+        // never matched what aws_acm_certificate_validation looked for,
+        // failing every wildcard-SAN certificate's validation wait
+        // (surfaced by choudoufu's terraform-aws-modules/terraform-aws-alb
+        // complete-alb crossing, module.wildcard_cert).
+        String recordDomain = domain.startsWith("*.") ? domain.substring(2) : domain;
         ResourceRecord resourceRecord = new ResourceRecord(
-            "_" + validationToken.substring(0, 32) + "." + domain + ".",
+            "_" + validationToken.substring(0, 32) + "." + recordDomain + ".",
             "CNAME",
             "_" + validationToken.substring(32) + ".acm-validations.aws."
         );

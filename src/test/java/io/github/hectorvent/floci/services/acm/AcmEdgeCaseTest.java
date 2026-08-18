@@ -30,7 +30,7 @@ class AcmEdgeCaseTest {
 
     @Test
     void wildcardDomainAsPrimary() {
-        given()
+        String arn = given()
             .header("X-Amz-Target", "CertificateManager.RequestCertificate")
             .contentType(ACM_CONTENT_TYPE)
             .body("""
@@ -42,12 +42,36 @@ class AcmEdgeCaseTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("CertificateArn", startsWith("arn:aws:acm:"));
+            .body("CertificateArn", startsWith("arn:aws:acm:"))
+            .extract().jsonPath().getString("CertificateArn");
+
+        // A CNAME record cannot itself carry a literal "*" label, so real ACM
+        // strips the wildcard from the DNS validation record's NAME while
+        // DomainName/ValidationDomain keep it. A regression here breaks every
+        // wildcard-SAN certificate's aws_acm_certificate_validation wait in
+        // terraform-aws-modules/acm, because the fqdn it creates in Route 53
+        // never matches what ValidationOptions asks for.
+        given()
+            .header("X-Amz-Target", "CertificateManager.DescribeCertificate")
+            .contentType(ACM_CONTENT_TYPE)
+            .body("""
+                {
+                    "CertificateArn": "%s"
+                }
+                """.formatted(arn))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Certificate.DomainValidationOptions[0].DomainName", equalTo("*.example.com"))
+            .body("Certificate.DomainValidationOptions[0].ResourceRecord.Name", startsWith("_"))
+            .body("Certificate.DomainValidationOptions[0].ResourceRecord.Name", endsWith(".example.com."))
+            .body("Certificate.DomainValidationOptions[0].ResourceRecord.Name", not(containsString("*")));
     }
 
     @Test
     void wildcardDomainAsSan() {
-        given()
+        String arn = given()
             .header("X-Amz-Target", "CertificateManager.RequestCertificate")
             .contentType(ACM_CONTENT_TYPE)
             .body("""
@@ -60,7 +84,27 @@ class AcmEdgeCaseTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("CertificateArn", startsWith("arn:aws:acm:"));
+            .body("CertificateArn", startsWith("arn:aws:acm:"))
+            .extract().jsonPath().getString("CertificateArn");
+
+        given()
+            .header("X-Amz-Target", "CertificateManager.DescribeCertificate")
+            .contentType(ACM_CONTENT_TYPE)
+            .body("""
+                {
+                    "CertificateArn": "%s"
+                }
+                """.formatted(arn))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Certificate.DomainValidationOptions.find { it.DomainName == '*.example.com' }.ResourceRecord.Name",
+                allOf(startsWith("_"), endsWith(".example.com."), not(containsString("*"))))
+            .body("Certificate.DomainValidationOptions.find { it.DomainName == 'www.example.com' }.ResourceRecord.Name",
+                allOf(startsWith("_"), endsWith(".www.example.com.")))
+            .body("Certificate.DomainValidationOptions.find { it.DomainName == 'example.com' }.ResourceRecord.Name",
+                allOf(startsWith("_"), endsWith(".example.com.")));
     }
 
     @Test
