@@ -3923,11 +3923,17 @@ public class CloudFormationResourceProvisioner {
         String startingPositionTimestamp = resolveOptional(props, "StartingPositionTimestamp", engine);
         if (startingPositionTimestamp != null) {
             try {
-                req.put("StartingPositionTimestamp", Double.parseDouble(startingPositionTimestamp));
+                double timestamp = Double.parseDouble(startingPositionTimestamp);
+                if (!Double.isFinite(timestamp)) {
+                    throw new NumberFormatException("Non-finite timestamp");
+                }
+                req.put("StartingPositionTimestamp", timestamp);
             } catch (NumberFormatException e) {
                 // Not swallowed the way BatchSize above is: dropping this one degrades into the
                 // "StartingPositionTimestamp is required" error from the service, which points at
-                // the wrong problem and hides the value that actually failed to parse.
+                // the wrong problem and hides the value that actually failed to parse. Double.parseDouble
+                // accepts "NaN"/"Infinity"/"-Infinity" without throwing, so isFinite is checked explicitly
+                // to keep those from silently becoming epoch-zero or long-extremum timestamps downstream.
                 throw new AwsException("ValidationError",
                         "Value of property StartingPositionTimestamp must be a number.", 400);
             }

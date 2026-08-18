@@ -4265,6 +4265,71 @@ class CloudFormationIntegrationTest {
     }
 
     @Test
+    void createStack_lambdaEventSourceMappingWithNonFiniteStartingPositionTimestampFailsResource() {
+        String stackName = "cfn-esm-nonfinite-timestamp-stack";
+        String funcName = "cfn-esm-nonfinite-timestamp-func";
+        String streamName = "cfn-esm-nonfinite-timestamp-stream";
+
+        // "NaN" is passed as a JSON string since JSON itself has no NaN/Infinity literal;
+        // Double.parseDouble happily accepts it, which is exactly what the isFinite guard exists to catch.
+        String template = """
+            {
+              "Resources": {
+                "MyStream": {
+                  "Type": "AWS::Kinesis::Stream",
+                  "Properties": {
+                    "Name": "%s",
+                    "ShardCount": 1
+                  }
+                },
+                "MyFunction": {
+                  "Type": "AWS::Lambda::Function",
+                  "Properties": {
+                    "FunctionName": "%s",
+                    "Runtime": "nodejs20.x",
+                    "Handler": "index.handler",
+                    "Role": "arn:aws:iam::000000000000:role/lambda-role",
+                    "Code": {
+                      "ZipFile": "exports.handler = async (e) => ({ statusCode: 200 });"
+                    }
+                  }
+                },
+                "MyESM": {
+                  "Type": "AWS::Lambda::EventSourceMapping",
+                  "Properties": {
+                    "FunctionName": { "Ref": "MyFunction" },
+                    "EventSourceArn": { "Fn::GetAtt": ["MyStream", "Arn"] },
+                    "StartingPosition": "AT_TIMESTAMP",
+                    "StartingPositionTimestamp": "NaN",
+                    "BatchSize": 5
+                  }
+                }
+              }
+            }
+            """.formatted(streamName, funcName);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackResources")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("CREATE_FAILED"));
+    }
+
+    @Test
     void crossStackReference_fnImportValue() {
         // Stack A exports a bucket name
         String templateA = """
