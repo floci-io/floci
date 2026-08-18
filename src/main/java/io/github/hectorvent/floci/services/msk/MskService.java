@@ -8,6 +8,8 @@ import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.msk.model.ClusterState;
+import io.github.hectorvent.floci.services.msk.model.CreateClusterRequest;
+import io.github.hectorvent.floci.services.msk.model.CreateClusterV2Request;
 import io.github.hectorvent.floci.services.msk.model.MskCluster;
 import com.fasterxml.jackson.core.type.TypeReference;
 import jakarta.annotation.PostConstruct;
@@ -63,6 +65,14 @@ public class MskService {
     }
 
     public MskCluster createCluster(String clusterName, String kafkaVersion) {
+        CreateClusterRequest request = new CreateClusterRequest();
+        request.setClusterName(clusterName);
+        request.setKafkaVersion(kafkaVersion);
+        return createCluster(request);
+    }
+
+    public MskCluster createCluster(CreateClusterRequest request) {
+        String clusterName = request.getClusterName();
         if (storage.scan(k -> true).stream().anyMatch(c -> c.getClusterName().equals(clusterName))) {
             throw new AwsException("ConflictException", "Cluster already exists: " + clusterName, 409);
         }
@@ -70,10 +80,22 @@ public class MskService {
         String accountId = regionResolver.getAccountId();
         String clusterArn = AwsArnUtils.Arn.of("kafka", config.defaultRegion(), accountId, "cluster/" + clusterName + "/" + java.util.UUID.randomUUID()).toString();
 
+        String kafkaVersion = request.getKafkaVersion();
         String resolvedKafkaVersion = (kafkaVersion == null || kafkaVersion.isBlank()) ? DEFAULT_KAFKA_VERSION : kafkaVersion;
         MskCluster cluster = new MskCluster(clusterArn, clusterName, resolvedKafkaVersion);
         cluster.setAccountId(accountId);
         cluster.setVolumeId(String.format("%06x", new SecureRandom().nextInt(0xFFFFFF)));
+
+        if (request.getNumberOfBrokerNodes() != null) {
+            cluster.setNumberOfBrokerNodes(request.getNumberOfBrokerNodes());
+        }
+        cluster.setTags(request.getTags());
+        cluster.setBrokerNodeGroupInfo(request.getBrokerNodeGroupInfo());
+        cluster.setEncryptionInfo(request.getEncryptionInfo());
+        cluster.setClientAuthentication(request.getClientAuthentication());
+        cluster.setEnhancedMonitoring(request.getEnhancedMonitoring());
+        cluster.setLoggingInfo(request.getLoggingInfo());
+        cluster.setConfigurationInfo(request.getConfigurationInfo());
 
         if (config.services().msk().mock()) {
             cluster.setState(ClusterState.ACTIVE);
@@ -84,6 +106,23 @@ public class MskService {
 
         storage.put(clusterArn, cluster);
         return cluster;
+    }
+
+    public MskCluster createCluster(CreateClusterV2Request request) {
+        CreateClusterRequest merged = new CreateClusterRequest();
+        merged.setClusterName(request.getClusterName());
+        merged.setTags(request.getTags());
+        if (request.getProvisioned() != null) {
+            merged.setKafkaVersion(request.getProvisioned().getKafkaVersion());
+            merged.setNumberOfBrokerNodes(request.getProvisioned().getNumberOfBrokerNodes());
+            merged.setBrokerNodeGroupInfo(request.getProvisioned().getBrokerNodeGroupInfo());
+            merged.setEncryptionInfo(request.getProvisioned().getEncryptionInfo());
+            merged.setClientAuthentication(request.getProvisioned().getClientAuthentication());
+            merged.setEnhancedMonitoring(request.getProvisioned().getEnhancedMonitoring());
+            merged.setLoggingInfo(request.getProvisioned().getLoggingInfo());
+            merged.setConfigurationInfo(request.getProvisioned().getConfigurationInfo());
+        }
+        return createCluster(merged);
     }
 
     public MskCluster describeCluster(String clusterArn) {

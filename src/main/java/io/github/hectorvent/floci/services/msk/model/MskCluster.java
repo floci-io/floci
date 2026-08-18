@@ -36,16 +36,37 @@ public class MskCluster {
     @JsonProperty("currentBrokerSoftwareInfo")
     private BrokerSoftwareInfo currentBrokerSoftwareInfo;
 
+    @JsonProperty("brokerNodeGroupInfo")
+    private BrokerNodeGroupInfo brokerNodeGroupInfo;
+
+    @JsonProperty("encryptionInfo")
+    private EncryptionInfo encryptionInfo;
+
+    @JsonProperty("clientAuthentication")
+    private ClientAuthentication clientAuthentication;
+
+    @JsonProperty("enhancedMonitoring")
+    private String enhancedMonitoring;
+
+    @JsonProperty("loggingInfo")
+    private LoggingInfo loggingInfo;
+
+    @JsonProperty("configurationInfo")
+    private ConfigurationInfo configurationInfo;
+
     // Internal field, not directly in AWS response but needed for GetBootstrapBrokers
+    @JsonIgnore
     private String bootstrapBrokers;
-    
+
     // Docker container ID for mock=false
+    @JsonIgnore
     private String containerId;
 
     @JsonIgnore
     private String accountId;
 
     // 6-char hex generated once at creation for stable, collision-free volume/container naming
+    @JsonIgnore
     private String volumeId;
 
     public MskCluster() {}
@@ -88,15 +109,37 @@ public class MskCluster {
     public BrokerSoftwareInfo getCurrentBrokerSoftwareInfo() { return currentBrokerSoftwareInfo; }
     public void setCurrentBrokerSoftwareInfo(BrokerSoftwareInfo currentBrokerSoftwareInfo) { this.currentBrokerSoftwareInfo = currentBrokerSoftwareInfo; }
 
+    public BrokerNodeGroupInfo getBrokerNodeGroupInfo() { return brokerNodeGroupInfo; }
+    public void setBrokerNodeGroupInfo(BrokerNodeGroupInfo brokerNodeGroupInfo) { this.brokerNodeGroupInfo = brokerNodeGroupInfo; }
+
+    public EncryptionInfo getEncryptionInfo() { return encryptionInfo; }
+    public void setEncryptionInfo(EncryptionInfo encryptionInfo) { this.encryptionInfo = encryptionInfo; }
+
+    public ClientAuthentication getClientAuthentication() { return clientAuthentication; }
+    public void setClientAuthentication(ClientAuthentication clientAuthentication) { this.clientAuthentication = clientAuthentication; }
+
+    public String getEnhancedMonitoring() { return enhancedMonitoring; }
+    public void setEnhancedMonitoring(String enhancedMonitoring) { this.enhancedMonitoring = enhancedMonitoring; }
+
+    public LoggingInfo getLoggingInfo() { return loggingInfo; }
+    public void setLoggingInfo(LoggingInfo loggingInfo) { this.loggingInfo = loggingInfo; }
+
+    public ConfigurationInfo getConfigurationInfo() { return configurationInfo; }
+    public void setConfigurationInfo(ConfigurationInfo configurationInfo) { this.configurationInfo = configurationInfo; }
+
+    @JsonIgnore
     public String getBootstrapBrokers() { return bootstrapBrokers; }
     public void setBootstrapBrokers(String bootstrapBrokers) { this.bootstrapBrokers = bootstrapBrokers; }
 
+    @JsonIgnore
     public String getContainerId() { return containerId; }
     public void setContainerId(String containerId) { this.containerId = containerId; }
 
+    @JsonIgnore
     public String getAccountId() { return accountId; }
     public void setAccountId(String accountId) { this.accountId = accountId; }
 
+    @JsonIgnore
     public String getVolumeId() { return volumeId; }
     public void setVolumeId(String volumeId) { this.volumeId = volumeId; }
 }

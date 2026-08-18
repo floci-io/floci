@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.msk;
 
+import io.github.hectorvent.floci.services.msk.model.CreateClusterRequest;
+import io.github.hectorvent.floci.services.msk.model.CreateClusterV2Request;
 import io.github.hectorvent.floci.services.msk.model.MskCluster;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.*;
@@ -21,22 +23,15 @@ public class MskController {
 
     @POST
     @Path("/v1/clusters")
-    public Response createCluster(Map<String, Object> request) {
-        String clusterName = (String) request.get("clusterName");
-        String kafkaVersion = (String) request.get("kafkaVersion");
-        MskCluster cluster = mskService.createCluster(clusterName, kafkaVersion);
+    public Response createCluster(CreateClusterRequest request) {
+        MskCluster cluster = mskService.createCluster(request);
         return Response.ok(Map.of("clusterArn", cluster.getClusterArn(), "clusterName", cluster.getClusterName(), "state", cluster.getState())).build();
     }
 
     @POST
     @Path("/api/v2/clusters")
-    @SuppressWarnings("unchecked")
-    public Response createClusterV2(Map<String, Object> request) {
-        // Simple mapping to V1 for now
-        String clusterName = (String) request.get("clusterName");
-        Map<String, Object> provisioned = (Map<String, Object>) request.get("provisioned");
-        String kafkaVersion = provisioned != null ? (String) provisioned.get("kafkaVersion") : null;
-        MskCluster cluster = mskService.createCluster(clusterName, kafkaVersion);
+    public Response createClusterV2(CreateClusterV2Request request) {
+        MskCluster cluster = mskService.createCluster(request);
         return Response.ok(Map.of("clusterArn", cluster.getClusterArn(), "clusterName", cluster.getClusterName(), "state", cluster.getState())).build();
     }
 
