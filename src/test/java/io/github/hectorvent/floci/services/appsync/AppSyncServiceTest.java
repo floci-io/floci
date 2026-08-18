@@ -118,6 +118,9 @@ class AppSyncServiceTest {
         AwsException ex = assertThrows(AwsException.class, () -> service.createGraphqlApi(request, "us-east-1"));
         assertEquals(400, ex.getHttpStatus());
         assertEquals("BadRequestException", ex.getErrorCode());
+        assertEquals(
+                "Authentication type API_KEY for additional authentication provider 1 already specified on the API. It can only be specified once.",
+                ex.getMessage());
     }
 
     @Test
@@ -128,6 +131,9 @@ class AppSyncServiceTest {
                 "additionalAuthenticationProviders", List.of(Map.of("authenticationType", "AWS_IAM"))
         ), "us-east-1"));
         assertEquals(400, iam.getHttpStatus());
+        assertEquals(
+                "Authentication type AWS_IAM for additional authentication provider 1 already specified on the API. It can only be specified once.",
+                iam.getMessage());
 
         AwsException lambda = assertThrows(AwsException.class, () -> service.createGraphqlApi(Map.of(
                 "name", "dup-lambda",
@@ -135,6 +141,9 @@ class AppSyncServiceTest {
                 "additionalAuthenticationProviders", List.of(Map.of("authenticationType", "AWS_LAMBDA"))
         ), "us-east-1"));
         assertEquals(400, lambda.getHttpStatus());
+        assertEquals(
+                "Authentication type AWS_LAMBDA for additional authentication provider 1 already specified on the API. It can only be specified once.",
+                lambda.getMessage());
     }
 
     @Test

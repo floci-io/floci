@@ -976,22 +976,25 @@ public class AppSyncService {
         Set<AuthenticationType> singletonSeen = EnumSet.noneOf(AuthenticationType.class);
         Set<String> cognitoPools = new HashSet<>();
         Set<String> oidcIssuers = new HashSet<>();
-        rememberProvider(api.getAuthenticationType(), configForDefault(api), singletonSeen, cognitoPools, oidcIssuers);
+        rememberProvider(api.getAuthenticationType(), configForDefault(api), 0, singletonSeen, cognitoPools, oidcIssuers);
         if (api.getAdditionalAuthenticationProviders() == null) {
             return;
         }
-        for (AdditionalAuthenticationProvider provider : api.getAdditionalAuthenticationProviders()) {
+        List<AdditionalAuthenticationProvider> additional = api.getAdditionalAuthenticationProviders();
+        for (int i = 0; i < additional.size(); i++) {
+            AdditionalAuthenticationProvider provider = additional.get(i);
             if (provider == null || provider.getAuthenticationType() == null) {
                 continue;
             }
             rememberProvider(provider.getAuthenticationType(), configForAdditional(provider),
-                    singletonSeen, cognitoPools, oidcIssuers);
+                    i + 1, singletonSeen, cognitoPools, oidcIssuers);
         }
     }
 
     private void rememberProvider(
             AuthenticationType type,
             Map<String, Object> config,
+            int additionalIndex,
             Set<AuthenticationType> singletonSeen,
             Set<String> cognitoPools,
             Set<String> oidcIssuers
@@ -1002,8 +1005,7 @@ public class AppSyncService {
         if (type == AuthenticationType.API_KEY || type == AuthenticationType.AWS_IAM
                 || type == AuthenticationType.AWS_LAMBDA) {
             if (!singletonSeen.add(type)) {
-                throw new AwsException("BadRequestException",
-                        "Duplicate authentication provider: " + type, 400);
+                throw new AwsException("BadRequestException", duplicateProviderMessage(type, additionalIndex), 400);
             }
             return;
         }
@@ -1012,7 +1014,7 @@ public class AppSyncService {
             String key = poolId == null ? UUID.randomUUID().toString() : poolId;
             if (!cognitoPools.add(key) && poolId != null) {
                 throw new AwsException("BadRequestException",
-                        "Duplicate authentication provider: AMAZON_COGNITO_USER_POOLS", 400);
+                        duplicateProviderMessage(AuthenticationType.AMAZON_COGNITO_USER_POOLS, additionalIndex), 400);
             }
             return;
         }
@@ -1021,9 +1023,14 @@ public class AppSyncService {
             String key = issuer == null ? UUID.randomUUID().toString() : issuer;
             if (!oidcIssuers.add(key) && issuer != null) {
                 throw new AwsException("BadRequestException",
-                        "Duplicate authentication provider: OPENID_CONNECT", 400);
+                        duplicateProviderMessage(AuthenticationType.OPENID_CONNECT, additionalIndex), 400);
             }
         }
+    }
+
+    static String duplicateProviderMessage(AuthenticationType type, int additionalIndex) {
+        return "Authentication type " + type + " for additional authentication provider "
+                + additionalIndex + " already specified on the API. It can only be specified once.";
     }
 
     private static Map<String, Object> configForDefault(GraphqlApi api) {
