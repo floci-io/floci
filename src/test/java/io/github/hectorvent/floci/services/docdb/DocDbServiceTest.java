@@ -118,4 +118,42 @@ class DocDbServiceTest {
         assertTrue(docDbService.listDbClusters(null).isEmpty());
         verify(containerManager, never()).stop(any());
     }
+
+    @Test
+    void createWithoutDockerDaemonStillReachesAvailable() {
+        // tryStart() returns null when no Docker daemon is reachable. The cluster record is
+        // metadata, so the create still succeeds and the cluster reaches 'available' on the
+        // first describe (what SDK/Terraform waiters poll).
+        StorageFactory storageFactory = Mockito.mock(StorageFactory.class);
+        when(storageFactory.create(anyString(), anyString(), any()))
+                .thenAnswer(inv -> AccountAwareStorageBackend.inMemory("000000000000"));
+        EmulatorConfig config = Mockito.mock(EmulatorConfig.class);
+        var servicesConfig = Mockito.mock(EmulatorConfig.ServicesConfig.class);
+        var docdbConfig = Mockito.mock(EmulatorConfig.DocDbServiceConfig.class);
+        when(config.services()).thenReturn(servicesConfig);
+        when(servicesConfig.docdb()).thenReturn(docdbConfig);
+        when(docdbConfig.mock()).thenReturn(false);
+        when(docdbConfig.defaultImage()).thenReturn("mongo:7.0");
+        when(config.hostname()).thenReturn(java.util.Optional.of("localhost"));
+
+        DocDbContainerManager noDaemonContainerManager = Mockito.mock(DocDbContainerManager.class);
+        when(noDaemonContainerManager.tryStart(anyString(), anyString(), anyString(), anyString()))
+                .thenReturn(null);
+        RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
+        DocDbService noDaemonService = new DocDbService(config, regionResolver, noDaemonContainerManager, storageFactory);
+
+        DocDbCluster created = noDaemonService.createDbCluster(
+                "no-docker-cluster", null, "admin", "secret", false);
+
+        assertEquals("available", created.getStatus());
+        assertEquals("localhost", created.getEndpoint());
+        assertEquals(27017, created.getPort());
+
+        assertEquals("no-docker-cluster",
+                noDaemonService.getDbCluster("no-docker-cluster").getDbClusterIdentifier());
+
+        // Delete must not reach for a container that was never created.
+        noDaemonService.deleteDbCluster("no-docker-cluster");
+        verify(noDaemonContainerManager, never()).stop(any());
+    }
 }

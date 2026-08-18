@@ -58,7 +58,7 @@ class NeptuneServiceTest {
 
         when(storageFactory.create(anyString(), anyString(), any()))
                 .thenAnswer(inv -> AccountAwareStorageBackend.inMemory("000000000000"));
-        when(containerManager.start(anyString(), anyString(), any(NeptuneDbType.class)))
+        when(containerManager.tryStart(anyString(), anyString(), any(NeptuneDbType.class)))
                 .thenReturn(new NeptuneContainerHandle("cid", "c", "localhost", 8182));
         doNothing().when(proxyManager).startProxy(anyString(), anyInt(), anyString(), anyInt());
 
@@ -68,7 +68,7 @@ class NeptuneServiceTest {
     @Test
     void failedProvisioningRollsBackContainerAndReleasesProxyPort() {
         NeptuneContainerHandle handle = new NeptuneContainerHandle("cid", "c", "localhost", 8182);
-        when(containerManager.start(anyString(), anyString(), any(NeptuneDbType.class)))
+        when(containerManager.tryStart(anyString(), anyString(), any(NeptuneDbType.class)))
                 .thenReturn(handle);
 
         // Proxy startup blows up after the port is reserved and the container is started.
@@ -94,7 +94,7 @@ class NeptuneServiceTest {
     @Test
     void jvmErrorDuringProvisioningStillRollsBack() {
         NeptuneContainerHandle handle = new NeptuneContainerHandle("cid", "c", "localhost", 8182);
-        when(containerManager.start(anyString(), anyString(), any(NeptuneDbType.class)))
+        when(containerManager.tryStart(anyString(), anyString(), any(NeptuneDbType.class)))
                 .thenReturn(handle);
 
         // A JVM Error (not a RuntimeException) escapes provisioning — a catch (RuntimeException)
@@ -117,11 +117,11 @@ class NeptuneServiceTest {
 
     @Test
     void failedContainerStartupCleansUpContainerByIdAndReleasesPort() {
-        // containerManager.start(...) throws — this models both a container that never started
+        // containerManager.tryStart(...) throws — this models both a container that never started
         // and (crucially) a readiness timeout, where start() created + registered the container
         // before throwing, so no handle ever reaches the service.
         doThrow(new RuntimeException("readiness boom"))
-                .when(containerManager).start(eq("c"), anyString(), any(NeptuneDbType.class));
+                .when(containerManager).tryStart(eq("c"), anyString(), any(NeptuneDbType.class));
 
         // The original failure must propagate to the caller (we clean up, then rethrow).
         assertThrows(RuntimeException.class,
@@ -134,7 +134,7 @@ class NeptuneServiceTest {
         verify(containerManager).stopByClusterId("c");
 
         // The reserved proxy port was still released: a subsequent successful create reuses the base port.
-        when(containerManager.start(anyString(), anyString(), any(NeptuneDbType.class)))
+        when(containerManager.tryStart(anyString(), anyString(), any(NeptuneDbType.class)))
                 .thenReturn(new NeptuneContainerHandle("cid", "c2", "localhost", 8182));
         NeptuneCluster recovered = service.createDbCluster("c2", "1.3.2.1", false);
         assertEquals(18182, recovered.getProxyPort(),
@@ -179,5 +179,26 @@ class NeptuneServiceTest {
         // fabricated "InsufficientNeptuneCapacity" the SDK couldn't map to a typed exception.
         assertEquals("InsufficientStorageClusterCapacity", e.getErrorCode());
         assertEquals(400, e.getHttpStatus());
+    }
+
+    @Test
+    void createWithoutDockerDaemonStillReachesAvailable() {
+        // tryStart() returns null when no Docker daemon is reachable. The cluster record is
+        // metadata, so the create still succeeds, the cluster reaches 'available' on the first
+        // describe (what SDK/Terraform waiters poll), and no proxy is started.
+        when(containerManager.tryStart(anyString(), anyString(), any(NeptuneDbType.class))).thenReturn(null);
+
+        NeptuneCluster created = service.createDbCluster("no-docker-cluster", "1.3.2.1", false);
+
+        assertEquals("available", created.getStatus());
+        assertEquals("localhost", created.getEndpoint());
+        assertEquals(18182, created.getProxyPort());
+        verify(proxyManager, never()).startProxy(anyString(), anyInt(), anyString(), anyInt());
+
+        assertEquals("no-docker-cluster", service.getDbCluster("no-docker-cluster").getDbClusterIdentifier());
+
+        // Delete must not reach for a container that was never created.
+        service.deleteDbCluster("no-docker-cluster");
+        verify(containerManager, never()).stop(any());
     }
 }

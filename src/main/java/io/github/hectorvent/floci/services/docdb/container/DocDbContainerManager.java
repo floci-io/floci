@@ -40,6 +40,7 @@ public class DocDbContainerManager {
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
     private final Map<String, DocDbContainerHandle> activeContainers = new ConcurrentHashMap<>();
+    private volatile boolean dockerUnavailableLogged;
 
     @Inject
     public DocDbContainerManager(ContainerBuilder containerBuilder,
@@ -54,6 +55,49 @@ public class DocDbContainerManager {
         this.containerDetector = containerDetector;
         this.config = config;
         this.regionResolver = regionResolver;
+    }
+
+    /**
+     * Attempts {@link #start} and reports the backend as unavailable instead of propagating the
+     * failure, when the cause is that no Docker daemon is reachable from Floci — Floci running
+     * inside Docker without a mounted socket, or a stopped daemon on the host. A failure raised
+     * while the daemon <em>is</em> reachable is a genuine container problem and still propagates,
+     * so nothing changes for a Floci that can start DocumentDB containers.
+     *
+     * @return the container handle, or {@code null} when no Docker daemon is reachable
+     */
+    public DocDbContainerHandle tryStart(String clusterId, String image, String masterUsername, String masterPassword) {
+        try {
+            DocDbContainerHandle handle = start(clusterId, image, masterUsername, masterPassword);
+            dockerUnavailableLogged = false;
+            return handle;
+        } catch (RuntimeException e) {
+            if (isDockerReachable()) {
+                throw e;
+            }
+            if (!dockerUnavailableLogged) {
+                dockerUnavailableLogged = true;
+                LOG.warnv("No Docker daemon is reachable from Floci ({0}). DocumentDB metadata "
+                        + "operations keep working and clusters still reach 'available', but they "
+                        + "have no backing MongoDB container until a daemon becomes reachable.",
+                        e.getMessage());
+            }
+            return null;
+        }
+    }
+
+    /**
+     * Probes the configured Docker endpoint, which is how a missing daemon is told apart from a
+     * container that failed for its own reasons.
+     */
+    public boolean isDockerReachable() {
+        try {
+            lifecycleManager.getDockerClient().pingCmd().exec();
+            return true;
+        } catch (Exception e) {
+            LOG.debugv("Docker daemon is not reachable: {0}", e.getMessage());
+            return false;
+        }
     }
 
     public DocDbContainerHandle start(String clusterId, String image, String masterUsername, String masterPassword) {
