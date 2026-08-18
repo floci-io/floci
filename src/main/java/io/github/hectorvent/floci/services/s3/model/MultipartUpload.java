@@ -18,6 +18,7 @@ public class MultipartUpload {
     private String storageClass;
     private String contentDisposition;
     private String serverSideEncryption;
+    private String sseKmsKeyId;
     private String sseCustomerAlgorithm;
     private String sseCustomerKeyMd5;
     private String acl;
@@ -61,6 +62,9 @@ public class MultipartUpload {
 
     public String getServerSideEncryption() { return serverSideEncryption; }
     public void setServerSideEncryption(String serverSideEncryption) { this.serverSideEncryption = serverSideEncryption; }
+
+    public String getSseKmsKeyId() { return sseKmsKeyId; }
+    public void setSseKmsKeyId(String sseKmsKeyId) { this.sseKmsKeyId = sseKmsKeyId; }
 
     public String getSseCustomerAlgorithm() { return sseCustomerAlgorithm; }
     public void setSseCustomerAlgorithm(String sseCustomerAlgorithm) { this.sseCustomerAlgorithm = sseCustomerAlgorithm; }

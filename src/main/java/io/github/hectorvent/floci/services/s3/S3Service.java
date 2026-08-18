@@ -1338,12 +1338,23 @@ public class S3Service implements Resettable {
                                                    Map<String, String> metadata, String storageClass,
                                                    String contentDisposition, String serverSideEncryption, String acl) {
         return initiateMultipartUpload(bucket, key, contentType, metadata, storageClass, contentDisposition,
-                serverSideEncryption, acl, null, null, null, null);
+                serverSideEncryption, acl, null, null, null, null, null);
     }
 
     public MultipartUpload initiateMultipartUpload(String bucket, String key, String contentType,
                                                    Map<String, String> metadata, String storageClass,
                                                    String contentDisposition, String serverSideEncryption, String acl,
+                                                   String sseCustomerAlgorithm, String sseCustomerKey, String sseCustomerKeyMd5,
+                                                   String checksumAlgorithm) {
+        return initiateMultipartUpload(bucket, key, contentType, metadata, storageClass, contentDisposition,
+                serverSideEncryption, acl, null, sseCustomerAlgorithm, sseCustomerKey, sseCustomerKeyMd5,
+                checksumAlgorithm);
+    }
+
+    public MultipartUpload initiateMultipartUpload(String bucket, String key, String contentType,
+                                                   Map<String, String> metadata, String storageClass,
+                                                   String contentDisposition, String serverSideEncryption, String acl,
+                                                   String sseKmsKeyId,
                                                    String sseCustomerAlgorithm, String sseCustomerKey, String sseCustomerKeyMd5,
                                                    String checksumAlgorithm) {
         ensureBucketExists(bucket);
@@ -1360,6 +1371,7 @@ public class S3Service implements Resettable {
         upload.setStorageClass(ObjectAttributeName.normalizeStorageClass(storageClass));
         upload.setContentDisposition(contentDisposition);
         upload.setServerSideEncryption(normalizedServerSideEncryption);
+        upload.setSseKmsKeyId("aws:kms".equals(normalizedServerSideEncryption) ? sseKmsKeyId : null);
         if (customerKey != null) {
             upload.setSseCustomerAlgorithm(customerKey.algorithm());
             upload.setSseCustomerKeyMd5(customerKey.keyMd5());

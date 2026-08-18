@@ -1163,6 +1163,7 @@ public class S3Controller {
                         httpHeaders.getHeaderString("Content-Disposition"),
                         httpHeaders.getHeaderString("x-amz-server-side-encryption"),
                         httpHeaders.getHeaderString("x-amz-acl"),
+                        httpHeaders.getHeaderString("x-amz-server-side-encryption-aws-kms-key-id"),
                         httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-algorithm"),
                         httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key"),
                         httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key-MD5"),
@@ -1991,6 +1992,12 @@ public class S3Controller {
                 .end("CopyObjectResult")
                 .build();
         Response.ResponseBuilder response = Response.ok(xml);
+        if (copy.getServerSideEncryption() != null) {
+            response.header("x-amz-server-side-encryption", copy.getServerSideEncryption());
+        }
+        if (copy.getSseKmsKeyId() != null) {
+            response.header("x-amz-server-side-encryption-aws-kms-key-id", copy.getSseKmsKeyId());
+        }
         appendSseCustomerHeaders(response, copy);
         return response.build();
     }
@@ -2004,6 +2011,11 @@ public class S3Controller {
                 sourceBucket, sourceObject.objectKey(), sourceObject.versionId(), copySourceRange,
                 copySourceSseCustomerHeaders(httpHeaders),
                 sseCustomerHeaders(httpHeaders));
+        // The destination multipart upload's own SSE settings (captured at
+        // CreateMultipartUpload), not anything from this request's headers —
+        // UploadPartCopy doesn't take server-side-encryption headers itself,
+        // parts always inherit the upload they belong to.
+        MultipartUpload destinationUpload = s3Service.listParts(destBucket, destKey, uploadId);
         String xml = new XmlBuilder()
                 .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
                 .start("CopyPartResult", AwsNamespaces.S3)
@@ -2012,6 +2024,12 @@ public class S3Controller {
                 .end("CopyPartResult")
                 .build();
         Response.ResponseBuilder response = Response.ok(xml).type(MediaType.APPLICATION_XML);
+        if (destinationUpload.getServerSideEncryption() != null) {
+            response.header("x-amz-server-side-encryption", destinationUpload.getServerSideEncryption());
+        }
+        if (destinationUpload.getSseKmsKeyId() != null) {
+            response.header("x-amz-server-side-encryption-aws-kms-key-id", destinationUpload.getSseKmsKeyId());
+        }
         appendSseCustomerHeaders(response,
                 httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-algorithm"),
                 httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key-MD5"));

@@ -501,12 +501,54 @@ class S3MultipartIntegrationTest {
 
     @Test
     @Order(18)
+    void uploadPartCopyPreservesDestinationServerSideEncryption() {
+        given()
+            .body("KMS-SOURCE-DATA")
+        .when()
+            .put("/" + BUCKET + "/kms-source-for-copy.bin")
+        .then()
+            .statusCode(200);
+
+        String kmsKeyId = "arn:aws:kms:us-east-1:000000000000:key/test-key";
+        String copyUploadId = given()
+            .header("x-amz-server-side-encryption", "aws:kms")
+            .header("x-amz-server-side-encryption-aws-kms-key-id", kmsKeyId)
+        .when()
+            .post("/" + BUCKET + "/kms-copy-dest.bin?uploads")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath().getString("InitiateMultipartUploadResult.UploadId");
+
+        // UploadPartCopy doesn't take x-amz-server-side-encryption headers
+        // itself — a part always inherits the destination multipart upload's
+        // own encryption settings, captured at CreateMultipartUpload above.
+        // The CopyPartResult response must reflect those, not come back bare.
+        given()
+            .header("x-amz-copy-source", "/" + BUCKET + "/kms-source-for-copy.bin")
+        .when()
+            .put("/" + BUCKET + "/kms-copy-dest.bin?uploadId=" + copyUploadId + "&partNumber=1")
+        .then()
+            .statusCode(200)
+            .body(containsString("<CopyPartResult"))
+            .header("x-amz-server-side-encryption", equalTo("aws:kms"))
+            .header("x-amz-server-side-encryption-aws-kms-key-id", equalTo(kmsKeyId));
+
+        given()
+            .when()
+                .delete("/" + BUCKET + "/kms-copy-dest.bin?uploadId=" + copyUploadId)
+            .then()
+                .statusCode(204);
+    }
+
+    @Test
+    @Order(19)
     void cleanUp() {
         given().when().delete("/" + BUCKET + "/" + KEY).then().statusCode(204);
         given().when().delete("/" + BUCKET + "/source-for-copy.bin").then().statusCode(204);
         given().when().delete("/" + BUCKET + "/copy-dest.bin").then().statusCode(204);
         given().when().delete("/" + BUCKET + "/sse-c-multipart.bin").then().statusCode(204);
         given().when().delete("/" + BUCKET + "/sse-c-source-for-copy.bin").then().statusCode(204);
+        given().when().delete("/" + BUCKET + "/kms-source-for-copy.bin").then().statusCode(204);
         given().when().delete("/" + BUCKET).then().statusCode(204);
     }
 

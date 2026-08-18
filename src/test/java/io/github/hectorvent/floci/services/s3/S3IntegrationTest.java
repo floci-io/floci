@@ -1657,7 +1657,11 @@ class S3IntegrationTest {
             .put("/sse-bucket/encrypted-copy.txt")
         .then()
             .statusCode(200)
-            .body(containsString("CopyObjectResult"));
+            .body(containsString("CopyObjectResult"))
+            // Asserted directly on the CopyObjectResult response itself, not
+            // just via a follow-up HEAD — handleCopyObject previously never
+            // emitted x-amz-server-side-encryption at all.
+            .header("x-amz-server-side-encryption", equalTo("AES256"));
 
         given()
         .when()
@@ -1673,7 +1677,9 @@ class S3IntegrationTest {
             .put("/sse-bucket/kms-encrypted-copy.txt")
         .then()
             .statusCode(200)
-            .body(containsString("CopyObjectResult"));
+            .body(containsString("CopyObjectResult"))
+            .header("x-amz-server-side-encryption", equalTo("aws:kms"))
+            .header("x-amz-server-side-encryption-aws-kms-key-id", equalTo(kmsKeyId));
 
         given()
         .when()
