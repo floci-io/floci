@@ -17,6 +17,8 @@ import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.time.Clock;
+import java.time.Duration;
 import java.util.*;
 import java.util.Base64;
 
@@ -41,13 +43,15 @@ public class AppSyncService {
     private final SchemaCreationWorker schemaCreationWorker;
     private final Instance<RequestContext> requestContextInstance;
     private final ObjectMapper objectMapper;
+    private final Clock clock;
 
     @Inject
     public AppSyncService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver,
                           SchemaRegistry schemaRegistry, SchemaCreationWorker schemaCreationWorker,
                           Instance<RequestContext> requestContextInstance, ObjectMapper objectMapper,
                           AccountAwareStorageBackend<SchemaCreationStatus> schemaStatusStore,
-                          AccountAwareStorageBackend<String> schemaStore) {
+                          AccountAwareStorageBackend<String> schemaStore,
+                          Clock clock) {
         this.apiStore = storageFactory.create("appsync", "appsync-apis.json", new TypeReference<>() {});
         this.schemaStore = schemaStore;
         this.schemaStatusStore = schemaStatusStore;
@@ -65,6 +69,7 @@ public class AppSyncService {
         this.schemaCreationWorker = schemaCreationWorker;
         this.requestContextInstance = requestContextInstance;
         this.objectMapper = objectMapper;
+        this.clock = clock;
     }
 
     // ──────────────────────────── GraphQL API ────────────────────────────
@@ -115,6 +120,7 @@ public class AppSyncService {
                 additionalList, new TypeReference<List<AdditionalAuthenticationProvider>>() {});
             api.setAdditionalAuthenticationProviders(providers);
         }
+        assertUniqueAuthProviders(api);
 
         api.setArn(buildApiArn(apiId, region));
 
@@ -190,6 +196,7 @@ public class AppSyncService {
                     objectMapper.convertValue(additionalList, new TypeReference<List<AdditionalAuthenticationProvider>>() {}));
             }
         }
+        assertUniqueAuthProviders(existing);
         apiStore.put(apiId, existing);
         return existing;
     }
@@ -581,21 +588,15 @@ public class AppSyncService {
         key.setApiId(apiId);
         key.setDescription((String) request.get("description"));
         Object expiresValue = request.get("expires");
-        if (expiresValue instanceof Long l) {
-            key.setExpires(l);
-        } else if (expiresValue instanceof Number n) {
-            key.setExpires(n.longValue());
-        } else if (expiresValue instanceof String s) {
-            try {
-                key.setExpires(Long.parseLong(s));
-            } catch (NumberFormatException e) {
-                try {
-                    key.setExpires(java.time.Instant.parse(s).getEpochSecond());
-                } catch (java.time.format.DateTimeParseException ex) {
-                    throw new AwsException("BadRequestException",
-                        "Invalid expires value: " + s + ". Expected epoch seconds or ISO 8601.", 400);
-                }
-            }
+        if (expiresValue == null) {
+            key.setExpires(clock.instant().getEpochSecond() + Duration.ofDays(7).getSeconds());
+        } else {
+            key.setExpires(parseExpires(expiresValue));
+        }
+        long maxExpires = clock.instant().getEpochSecond() + Duration.ofDays(365).getSeconds();
+        if (key.getExpires() != null && key.getExpires() > maxExpires) {
+            throw new AwsException("BadRequestException",
+                    "API key expires cannot be more than 365 days from creation.", 400);
         }
 
         key.setApiKey("da2-" + generateShortId());
@@ -611,6 +612,22 @@ public class AppSyncService {
     public ApiKey getApiKey(String apiId, String keyId) {
         return apiKeyStore.get(apiKey(apiId, keyId))
                 .orElseThrow(() -> new AwsException("NotFoundException", "API key not found: " + keyId, 404));
+    }
+
+    public Optional<ApiKey> validateApiKey(String apiId, String keyValue) {
+        if (apiId == null || keyValue == null || keyValue.isBlank()) {
+            return Optional.empty();
+        }
+        long now = clock.instant().getEpochSecond();
+        for (ApiKey key : apiKeyStore.scan(k -> k.startsWith(apiId + "::"))) {
+            if (keyValue.equals(key.getApiKey())) {
+                if (key.getExpires() != null && key.getExpires() <= now) {
+                    return Optional.empty();
+                }
+                return Optional.of(key);
+            }
+        }
+        return Optional.empty();
     }
 
     public ApiKey updateApiKey(String apiId, String keyId, Map<String, Object> request) {
@@ -968,6 +985,101 @@ public class AppSyncService {
     }
 
     // ──────────────────────────── Helpers ────────────────────────────
+
+    void assertUniqueAuthProviders(GraphqlApi api) {
+        Set<AuthenticationType> singletonSeen = EnumSet.noneOf(AuthenticationType.class);
+        Set<String> cognitoPools = new HashSet<>();
+        Set<String> oidcIssuers = new HashSet<>();
+        rememberProvider(api.getAuthenticationType(), configForDefault(api), singletonSeen, cognitoPools, oidcIssuers);
+        if (api.getAdditionalAuthenticationProviders() == null) {
+            return;
+        }
+        for (AdditionalAuthenticationProvider provider : api.getAdditionalAuthenticationProviders()) {
+            if (provider == null || provider.getAuthenticationType() == null) {
+                continue;
+            }
+            rememberProvider(provider.getAuthenticationType(), configForAdditional(provider),
+                    singletonSeen, cognitoPools, oidcIssuers);
+        }
+    }
+
+    private void rememberProvider(
+            AuthenticationType type,
+            Map<String, Object> config,
+            Set<AuthenticationType> singletonSeen,
+            Set<String> cognitoPools,
+            Set<String> oidcIssuers
+    ) {
+        if (type == null) {
+            return;
+        }
+        if (type == AuthenticationType.API_KEY || type == AuthenticationType.AWS_IAM
+                || type == AuthenticationType.AWS_LAMBDA) {
+            if (!singletonSeen.add(type)) {
+                throw new AwsException("BadRequestException",
+                        "Duplicate authentication provider: " + type, 400);
+            }
+            return;
+        }
+        if (type == AuthenticationType.AMAZON_COGNITO_USER_POOLS) {
+            String poolId = config == null ? null : coerceString(config.get("userPoolId"));
+            String key = poolId == null ? UUID.randomUUID().toString() : poolId;
+            if (!cognitoPools.add(key) && poolId != null) {
+                throw new AwsException("BadRequestException",
+                        "Duplicate authentication provider: AMAZON_COGNITO_USER_POOLS", 400);
+            }
+            return;
+        }
+        if (type == AuthenticationType.OPENID_CONNECT) {
+            String issuer = config == null ? null : coerceString(config.get("issuer"));
+            String key = issuer == null ? UUID.randomUUID().toString() : issuer;
+            if (!oidcIssuers.add(key) && issuer != null) {
+                throw new AwsException("BadRequestException",
+                        "Duplicate authentication provider: OPENID_CONNECT", 400);
+            }
+        }
+    }
+
+    private static Map<String, Object> configForDefault(GraphqlApi api) {
+        if (api.getAuthenticationType() == AuthenticationType.AMAZON_COGNITO_USER_POOLS) {
+            return api.getUserPoolConfig();
+        }
+        if (api.getAuthenticationType() == AuthenticationType.OPENID_CONNECT) {
+            return api.getOpenIDConnectConfig();
+        }
+        return api.getLambdaAuthorizerConfig();
+    }
+
+    private static Map<String, Object> configForAdditional(AdditionalAuthenticationProvider provider) {
+        return switch (provider.getAuthenticationType()) {
+            case AMAZON_COGNITO_USER_POOLS -> provider.getUserPoolConfig();
+            case OPENID_CONNECT -> provider.getOpenIDConnectConfig();
+            case AWS_LAMBDA -> provider.getLambdaAuthorizerConfig();
+            default -> Map.of();
+        };
+    }
+
+    private long parseExpires(Object expiresValue) {
+        if (expiresValue instanceof Long l) {
+            return l;
+        }
+        if (expiresValue instanceof Number n) {
+            return n.longValue();
+        }
+        if (expiresValue instanceof String s) {
+            try {
+                return Long.parseLong(s);
+            } catch (NumberFormatException e) {
+                try {
+                    return java.time.Instant.parse(s).getEpochSecond();
+                } catch (java.time.format.DateTimeParseException ex) {
+                    throw new AwsException("BadRequestException",
+                        "Invalid expires value: " + s + ". Expected epoch seconds or ISO 8601.", 400);
+                }
+            }
+        }
+        throw new AwsException("BadRequestException", "Invalid expires value.", 400);
+    }
 
     private String generateApiId() {
         return UUID.randomUUID().toString().replace("-", "").substring(0, 26);
