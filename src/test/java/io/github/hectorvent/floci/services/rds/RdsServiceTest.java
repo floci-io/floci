@@ -123,6 +123,8 @@ class RdsServiceTest {
 
         when(containerManager.start(any(), any(), any(), any(), any(), any(), any(), any(), any()))
                 .thenReturn(new RdsContainerHandle("cont-id", "id", "localhost", 5432));
+        when(ec2Service.resolveDefaultVpcId(any()))
+                .thenAnswer(invocation -> Ec2Service.defaultVpcId(invocation.getArgument(0)));
         when(ec2Service.describeSubnets(any(), anyList(), any()))
                 .thenAnswer(invocation -> {
                     @SuppressWarnings("unchecked")
