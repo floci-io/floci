@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.rds.RdsService;
 import io.github.hectorvent.floci.services.rds.model.DbCluster;
+import io.github.hectorvent.floci.services.rds.model.DbClusterParameterGroup;
 import io.github.hectorvent.floci.services.rds.model.DbEndpoint;
 import io.github.hectorvent.floci.services.rds.model.DbInstance;
 import io.github.hectorvent.floci.services.rds.model.DbParameterGroup;
@@ -101,6 +102,16 @@ class RdsCfnProvisionerTest {
                                             Map<String, String> attributes) {
         return provisioner.provision(logicalId, type, props(json), engine(),
                 region, "000000000000", "my-stack", physicalId, attributes);
+    }
+
+    /**
+     * Simulates an UpdateStack re-invocation: {@code provision()} is called again for the same
+     * resource with the physical id it was already assigned, exactly as CloudFormationService does
+     * on every update regardless of whether the resource's properties actually changed.
+     */
+    private StackResource provisionUpdate(String logicalId, String type, String json, String existingPhysicalId) {
+        return provisioner.provision(logicalId, type, props(json), engine(),
+                "us-east-1", "000000000000", "my-stack", existingPhysicalId);
     }
 
     @Test
@@ -1005,6 +1016,101 @@ class RdsCfnProvisionerTest {
                 List.of("mycluster"), List.of(), 90, 40, 17,
                 "SET sql_mode='STRICT_ALL_TABLES'", List.of("EXCLUDE_VARIABLE_SETS"),
                 "us-west-2");
+    }
+
+    @Test
+    void updateStackReconcilesExistingDbSubnetGroupInsteadOfRecreating() {
+        // Regression for lex00/floci#16: CloudFormationService re-invokes provision() for every
+        // resource on every UpdateStack regardless of whether its properties changed, so a fixed-name
+        // DBSubnetGroup already on file used to hit createDbSubnetGroup again and throw
+        // DBSubnetGroupAlreadyExists, rolling back an otherwise no-op update.
+        DbSubnetGroup existing = mock(DbSubnetGroup.class);
+        when(rdsService.getDbSubnetGroup("my-subnet-group", "us-east-1")).thenReturn(existing);
+        DbSubnetGroup reconciled = mock(DbSubnetGroup.class);
+        when(reconciled.getDbSubnetGroupName()).thenReturn("my-subnet-group");
+        when(rdsService.modifyDbSubnetGroup(eq("my-subnet-group"), anyList(), eq("us-east-1")))
+                .thenReturn(reconciled);
+
+        StackResource r = provisionUpdate("Sg", "AWS::RDS::DBSubnetGroup", """
+                {"DBSubnetGroupName":"my-subnet-group","DBSubnetGroupDescription":"db subnets",
+                 "SubnetIds":["subnet-a","subnet-b"]}
+                """, "my-subnet-group");
+
+        assertEquals("CREATE_COMPLETE", r.getStatus());
+        assertEquals("my-subnet-group", r.getPhysicalId());
+        verify(rdsService, never()).createDbSubnetGroup(any(), any(), anyList(), any());
+        verify(rdsService).modifyDbSubnetGroup("my-subnet-group", List.of("subnet-a", "subnet-b"), "us-east-1");
+    }
+
+    @Test
+    void updateStackNoOpsExistingDbParameterGroupInsteadOfRecreating() {
+        // DBParameterGroupName/Family/Description are all immutable on real AWS, so an unchanged
+        // re-apply must no-op rather than hit createDbParameterGroup's DBParameterGroupAlreadyExists.
+        DbParameterGroup existing = mock(DbParameterGroup.class);
+        when(existing.getDbParameterGroupName()).thenReturn("my-pg");
+        when(rdsService.getDbParameterGroup("my-pg", "us-east-1")).thenReturn(existing);
+
+        StackResource r = provisionUpdate("Pg", "AWS::RDS::DBParameterGroup", """
+                {"DBParameterGroupName":"my-pg","Family":"postgres16","Description":"params"}
+                """, "my-pg");
+
+        assertEquals("my-pg", r.getPhysicalId());
+        assertEquals("my-pg", r.getAttributes().get("DBParameterGroupName"));
+        verify(rdsService, never()).createDbParameterGroup(any(), any(), any(), any());
+    }
+
+    @Test
+    void updateStackNoOpsExistingDbClusterParameterGroupInsteadOfRecreating() {
+        DbClusterParameterGroup existing = mock(DbClusterParameterGroup.class);
+        when(existing.getDbClusterParameterGroupName()).thenReturn("my-cpg");
+        when(rdsService.getDbClusterParameterGroup("my-cpg", "us-east-1")).thenReturn(existing);
+
+        StackResource r = provisionUpdate("Cpg", "AWS::RDS::DBClusterParameterGroup", """
+                {"DBClusterParameterGroupName":"my-cpg","Family":"aurora-postgresql16","Description":"params"}
+                """, "my-cpg");
+
+        assertEquals("my-cpg", r.getPhysicalId());
+        assertEquals("my-cpg", r.getAttributes().get("DBClusterParameterGroupName"));
+        verify(rdsService, never()).createDbClusterParameterGroup(any(), any(), any(), any());
+    }
+
+    @Test
+    void updateStackReconcilesExistingDbInstanceInsteadOfRecreating() {
+        DbInstance existing = mock(DbInstance.class);
+        when(rdsService.getDbInstance("mydb")).thenReturn(existing);
+        DbInstance reconciled = mock(DbInstance.class);
+        when(reconciled.getDbInstanceIdentifier()).thenReturn("mydb");
+        when(rdsService.modifyDbInstance(eq("mydb"), any(), anyBoolean(), any())).thenReturn(reconciled);
+
+        StackResource r = provisionUpdate("Db", "AWS::RDS::DBInstance", """
+                {"DBInstanceIdentifier":"mydb","Engine":"postgres","MasterUsername":"admin",
+                 "MasterUserPassword":"secret"}
+                """, "mydb");
+
+        assertEquals("mydb", r.getPhysicalId());
+        verify(rdsService, never()).createDbInstance(any(), any(), any(), any(), any(), any(), any(),
+                anyInt(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), anyBoolean(),
+                any(), anyMap(), nullable(String.class));
+        verify(rdsService).modifyDbInstance("mydb", "secret", false, null);
+    }
+
+    @Test
+    void updateStackReconcilesExistingDbClusterInsteadOfRecreating() {
+        DbCluster existing = mock(DbCluster.class);
+        when(rdsService.getDbCluster("mycluster")).thenReturn(existing);
+        DbCluster reconciled = mock(DbCluster.class);
+        when(reconciled.getDbClusterIdentifier()).thenReturn("mycluster");
+        when(rdsService.modifyDbCluster(eq("mycluster"), any(), anyBoolean())).thenReturn(reconciled);
+
+        StackResource r = provisionUpdate("Cluster", "AWS::RDS::DBCluster", """
+                {"DBClusterIdentifier":"mycluster","Engine":"aurora-postgresql",
+                 "MasterUsername":"admin","MasterUserPassword":"secret"}
+                """, "mycluster");
+
+        assertEquals("mycluster", r.getPhysicalId());
+        verify(rdsService, never()).createDbCluster(any(), any(), any(), any(), any(), any(),
+                anyBoolean(), any(), any(), any(), anyBoolean(), any());
+        verify(rdsService).modifyDbCluster("mycluster", "secret", false);
     }
 
     @Test
