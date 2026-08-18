@@ -9,6 +9,8 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.cloudtrail.model.AdvancedEventSelector;
+import io.github.hectorvent.floci.services.cloudtrail.model.AdvancedFieldSelector;
 import io.github.hectorvent.floci.services.cloudtrail.model.DataResource;
 import io.github.hectorvent.floci.services.cloudtrail.model.EventSelector;
 import io.github.hectorvent.floci.services.cloudtrail.model.Trail;
@@ -76,7 +78,7 @@ public class CloudTrailService {
                 name, arn, s3BucketName, s3KeyPrefix, snsTopicArn,
                 includeGlobalServiceEvents, isMultiRegionTrail, region,
                 enableLogFileValidation, false, false, isOrganizationTrail);
-        store.put(key, new CloudTrailEntry(trail, List.of(), false, null, null));
+        store.put(key, new CloudTrailEntry(trail, List.of(), List.of(), false, null, null, Map.of()));
         return trail;
     }
 
@@ -143,6 +145,22 @@ public class CloudTrailService {
         Trail trail = findTrailOrThrow(region, trailNameOrArn);
         return store.get(regionKey(trail.homeRegion(), trail.name()))
                 .map(e -> e.selectors() != null ? e.selectors() : List.<EventSelector>of())
+                .orElse(List.of());
+    }
+
+    public List<AdvancedEventSelector> putAdvancedEventSelectors(
+            String region, String trailNameOrArn, List<AdvancedEventSelector> selectors) {
+        Trail trail = findTrailOrThrow(region, trailNameOrArn);
+        List<AdvancedEventSelector> normalized = selectors == null ? List.of() : List.copyOf(selectors);
+        String key = regionKey(trail.homeRegion(), trail.name());
+        store.get(key).ifPresent(entry -> store.put(key, entry.withAdvancedSelectors(normalized, true)));
+        return normalized;
+    }
+
+    public List<AdvancedEventSelector> getAdvancedEventSelectors(String region, String trailNameOrArn) {
+        Trail trail = findTrailOrThrow(region, trailNameOrArn);
+        return store.get(regionKey(trail.homeRegion(), trail.name()))
+                .map(e -> e.advancedSelectors() != null ? e.advancedSelectors() : List.<AdvancedEventSelector>of())
                 .orElse(List.of());
     }
 
@@ -245,8 +263,16 @@ public class CloudTrailService {
             Trail trail = entry.trail();
             if (!sameRegion && !trail.isMultiRegionTrail()) continue;
             if (!entry.logging()) continue;
-            List<EventSelector> selectors = entry.selectors() != null ? entry.selectors() : List.of();
-            if (matchesAnySelector(selectors, in)) {
+            List<AdvancedEventSelector> advancedSelectors =
+                    entry.advancedSelectors() != null ? entry.advancedSelectors() : List.of();
+            boolean matched;
+            if (!advancedSelectors.isEmpty()) {
+                matched = matchesAnyAdvancedSelector(advancedSelectors, in);
+            } else {
+                List<EventSelector> selectors = entry.selectors() != null ? entry.selectors() : List.of();
+                matched = matchesAnySelector(selectors, in);
+            }
+            if (matched) {
                 result.add(new MatchedTrail(trail, trailRegion));
             }
         }
@@ -278,6 +304,54 @@ public class CloudTrailService {
             }
         }
         return false;
+    }
+
+    private boolean matchesAnyAdvancedSelector(List<AdvancedEventSelector> selectors, S3EventInput in) {
+        String arn = "arn:aws:s3:::" + in.bucketName() + (in.key() != null ? "/" + in.key() : "");
+        for (AdvancedEventSelector sel : selectors) {
+            if (matchesAdvancedSelector(sel, arn)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean matchesAdvancedSelector(AdvancedEventSelector selector, String s3ObjectArn) {
+        List<AdvancedFieldSelector> fieldSelectors = selector.fieldSelectors();
+        if (fieldSelectors == null || fieldSelectors.isEmpty()) {
+            return false;
+        }
+        for (AdvancedFieldSelector fs : fieldSelectors) {
+            if (!matchesAdvancedFieldSelector(fs, s3ObjectArn)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Package-private for unit testing. Only the fields CloudTrail evaluates for S3 data events
+    // are supported: eventCategory, resources.type, resources.ARN.
+    static boolean matchesAdvancedFieldSelector(AdvancedFieldSelector fs, String s3ObjectArn) {
+        String value = switch (fs.field()) {
+            case "eventCategory" -> "Data";
+            case "resources.type" -> "AWS::S3::Object";
+            case "resources.ARN" -> s3ObjectArn;
+            default -> null;
+        };
+        if (value == null) {
+            return false;
+        }
+        if (!isEmpty(fs.equalsValues()) && fs.equalsValues().stream().noneMatch(value::equals)) return false;
+        if (!isEmpty(fs.notEquals()) && fs.notEquals().stream().anyMatch(value::equals)) return false;
+        if (!isEmpty(fs.startsWith()) && fs.startsWith().stream().noneMatch(value::startsWith)) return false;
+        if (!isEmpty(fs.notStartsWith()) && fs.notStartsWith().stream().anyMatch(value::startsWith)) return false;
+        if (!isEmpty(fs.endsWith()) && fs.endsWith().stream().noneMatch(value::endsWith)) return false;
+        if (!isEmpty(fs.notEndsWith()) && fs.notEndsWith().stream().anyMatch(value::endsWith)) return false;
+        return true;
+    }
+
+    private static boolean isEmpty(List<String> values) {
+        return values == null || values.isEmpty();
     }
 
     // Package-private for unit testing.
