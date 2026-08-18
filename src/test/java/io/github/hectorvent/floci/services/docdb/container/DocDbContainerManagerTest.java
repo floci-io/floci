@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import com.github.dockerjava.api.DockerClient;
+import org.jboss.logging.Logger;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
@@ -28,6 +29,8 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 class DocDbContainerManagerTest {
+
+    private static final Logger LOG = Logger.getLogger(DocDbContainerManagerTest.class);
 
     @Test
     void tryStartReportsUnavailableInsteadOfThrowingWhenNoDockerDaemonIsReachable() {
@@ -73,8 +76,9 @@ class DocDbContainerManagerTest {
             Thread acceptor = new Thread(() -> {
                 try (Socket socket = serverSocket.accept()) {
                     socket.getInputStream().read(new byte[1]);
-                } catch (IOException ignored) {
+                } catch (IOException e) {
                     // Test teardown races the socket close; nothing left to assert on.
+                    LOG.debugv(e, "Acceptor socket closed during test teardown");
                 }
             });
             acceptor.setDaemon(true);

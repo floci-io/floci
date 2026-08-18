@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import com.github.dockerjava.api.DockerClient;
+import org.jboss.logging.Logger;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
@@ -30,6 +31,8 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class MemoryDbContainerManagerTest {
+
+    private static final Logger LOG = Logger.getLogger(MemoryDbContainerManagerTest.class);
 
     @Test
     void stopByClusterNameRemovesByDeterministicNameWhenNothingRegistered() {
@@ -92,8 +95,9 @@ class MemoryDbContainerManagerTest {
                     OutputStream out = socket.getOutputStream();
                     out.write("+PONG\r\n".getBytes(java.nio.charset.StandardCharsets.UTF_8));
                     out.flush();
-                } catch (IOException ignored) {
+                } catch (IOException e) {
                     // Test teardown races the socket close; nothing left to assert on.
+                    LOG.debugv(e, "Acceptor socket closed during test teardown");
                 }
             });
             responder.setDaemon(true);

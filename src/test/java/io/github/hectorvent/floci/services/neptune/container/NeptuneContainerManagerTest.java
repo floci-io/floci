@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.services.neptune.model.NeptuneDbType;
 import com.github.dockerjava.api.DockerClient;
+import org.jboss.logging.Logger;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
@@ -31,6 +32,8 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class NeptuneContainerManagerTest {
+
+    private static final Logger LOG = Logger.getLogger(NeptuneContainerManagerTest.class);
 
     @Test
     void stopByClusterIdRemovesByDeterministicNameWhenNothingRegistered() {
@@ -93,8 +96,9 @@ class NeptuneContainerManagerTest {
                     OutputStream out = socket.getOutputStream();
                     out.write("HTTP/1.1 400 Bad Request\r\n\r\n".getBytes(java.nio.charset.StandardCharsets.UTF_8));
                     out.flush();
-                } catch (IOException ignored) {
+                } catch (IOException e) {
                     // Test teardown races the socket close; nothing left to assert on.
+                    LOG.debugv(e, "Acceptor socket closed during test teardown");
                 }
             });
             responder.setDaemon(true);
