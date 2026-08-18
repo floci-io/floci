@@ -26,6 +26,7 @@ class Ec2InstanceTypeCatalogTest {
 
         assertEquals(Set.of(
                 "t2.micro",
+                "t3.nano",
                 "t3.micro",
                 "t3.small",
                 "t3.medium",
