@@ -20,6 +20,7 @@ import io.github.hectorvent.floci.services.ecs.model.EcsServiceModel;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.KeyValuePair;
 import io.github.hectorvent.floci.services.ecs.model.LaunchType;
+import io.github.hectorvent.floci.services.ecs.model.LogConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.MountPoint;
 import io.github.hectorvent.floci.services.ecs.model.NetworkBinding;
 import io.github.hectorvent.floci.services.ecs.model.NetworkConfiguration;
@@ -44,6 +45,7 @@ import jakarta.ws.rs.core.Response;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -1200,6 +1202,31 @@ public class EcsJsonHandler {
             n.set("mountPoints", mps);
         }
 
+        if (def.getLogConfiguration() != null) {
+            n.set("logConfiguration", logConfigurationNode(def.getLogConfiguration()));
+        }
+
+        return n;
+    }
+
+    private ObjectNode logConfigurationNode(LogConfiguration logConfiguration) {
+        ObjectNode n = objectMapper.createObjectNode();
+        n.put("logDriver", logConfiguration.logDriver());
+        if (logConfiguration.options() != null && !logConfiguration.options().isEmpty()) {
+            ObjectNode opts = objectMapper.createObjectNode();
+            logConfiguration.options().forEach(opts::put);
+            n.set("options", opts);
+        }
+        if (logConfiguration.secretOptions() != null && !logConfiguration.secretOptions().isEmpty()) {
+            ArrayNode secretsArr = objectMapper.createArrayNode();
+            for (Secret secret : logConfiguration.secretOptions()) {
+                ObjectNode secretNode = objectMapper.createObjectNode();
+                secretNode.put("name", secret.name());
+                secretNode.put("valueFrom", secret.valueFrom());
+                secretsArr.add(secretNode);
+            }
+            n.set("secretOptions", secretsArr);
+        }
         return n;
     }
 
@@ -1649,10 +1676,36 @@ public class EcsJsonHandler {
                 item.path("entryPoint").forEach(e -> ep.add(e.asText()));
                 def.setEntryPoint(ep);
             }
+            if (item.has("logConfiguration")) {
+                def.setLogConfiguration(parseLogConfiguration(item.path("logConfiguration")));
+            }
 
             result.add(def);
         }
         return result;
+    }
+
+    private LogConfiguration parseLogConfiguration(JsonNode node) {
+        if (node == null || !node.isObject()) {
+            return null;
+        }
+        String logDriver = node.path("logDriver").asText(null);
+        if (logDriver == null) {
+            return null;
+        }
+        Map<String, String> options = null;
+        JsonNode optionsNode = node.path("options");
+        if (optionsNode.isObject()) {
+            options = new LinkedHashMap<>();
+            var fields = optionsNode.fields();
+            while (fields.hasNext()) {
+                var entry = fields.next();
+                options.put(entry.getKey(), entry.getValue().asText());
+            }
+        }
+        List<Secret> secretOptions = node.has("secretOptions")
+                ? parseSecrets(node.path("secretOptions")) : null;
+        return new LogConfiguration(logDriver, options, secretOptions);
     }
 
     private List<DaemonContainerDefinition> parseDaemonContainerDefinitions(JsonNode node) {
