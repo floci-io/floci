@@ -7,6 +7,8 @@ import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
 import io.github.hectorvent.floci.services.ec2.model.BlockDeviceMapping;
+import io.github.hectorvent.floci.services.ec2.model.DhcpConfiguration;
+import io.github.hectorvent.floci.services.ec2.model.DhcpOptions;
 import io.github.hectorvent.floci.services.ec2.model.EbsBlockDevice;
 import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
 import io.github.hectorvent.floci.services.ec2.model.Image;
@@ -19,6 +21,7 @@ import io.github.hectorvent.floci.services.ec2.model.Reservation;
 import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
 import io.github.hectorvent.floci.services.ec2.model.Snapshot;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
+import io.github.hectorvent.floci.services.ec2.model.Vpc;
 import io.github.hectorvent.floci.services.ec2.model.VpcEndpoint;
 import io.github.hectorvent.floci.services.ec2.model.Volume;
 import io.github.hectorvent.floci.services.ec2.model.VolumeAttachment;
@@ -1133,6 +1136,191 @@ class Ec2ServiceTest {
         assertEquals("running", instance.getState().getName());
         assertNull(instance.getDockerContainerId());
         assertTrue(service.isInstanceContainerRunning(instanceId));
+    }
+
+    // =========================================================================
+    // DHCP options
+    // =========================================================================
+
+    private static Ec2Service dhcpOptionsService() {
+        return new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+    }
+
+    @Test
+    void ensureDefaultResourcesSeedsARegionScopedDefaultDhcpOptionsSet() {
+        Ec2Service service = dhcpOptionsService();
+        service.ensureDefaultResources("us-east-1");
+        service.ensureDefaultResources("eu-west-1");
+
+        DhcpOptions east = service.describeDhcpOptions("us-east-1", List.of("dopt-default"), Map.of()).getFirst();
+        assertEquals("ec2.internal", east.getDhcpConfigurationSet().stream()
+                .filter(c -> "domain-name".equals(c.getKey())).findFirst().orElseThrow().getValues().getFirst());
+
+        DhcpOptions west = service.describeDhcpOptions("eu-west-1", List.of("dopt-default"), Map.of()).getFirst();
+        assertEquals("eu-west-1.compute.internal", west.getDhcpConfigurationSet().stream()
+                .filter(c -> "domain-name".equals(c.getKey())).findFirst().orElseThrow().getValues().getFirst());
+
+        // Each region gets its own default set, scoped independently.
+        assertNotEquals(east.getDhcpConfigurationSet(), west.getDhcpConfigurationSet());
+    }
+
+    @Test
+    void createDhcpOptionsStoresTheFullConfigurationSet() {
+        Ec2Service service = dhcpOptionsService();
+
+        DhcpOptions options = service.createDhcpOptions("us-east-1", List.of(
+                new DhcpConfiguration("domain-name", List.of("example.com")),
+                new DhcpConfiguration("domain-name-servers", List.of("10.0.0.2", "10.0.1.2")),
+                new DhcpConfiguration("ntp-servers", List.of("10.0.0.3")),
+                new DhcpConfiguration("netbios-name-servers", List.of("10.0.0.4")),
+                new DhcpConfiguration("netbios-node-type", List.of("2"))
+        ), List.of());
+
+        assertTrue(options.getDhcpOptionsId().startsWith("dopt-"));
+        assertEquals("000000000000", options.getOwnerId());
+        assertEquals(5, options.getDhcpConfigurationSet().size());
+
+        DhcpOptions described = service.describeDhcpOptions("us-east-1",
+                List.of(options.getDhcpOptionsId()), Map.of()).getFirst();
+        assertEquals(List.of("example.com"), described.getDhcpConfigurationSet().stream()
+                .filter(c -> "domain-name".equals(c.getKey())).findFirst().orElseThrow().getValues());
+        assertEquals(List.of("10.0.0.2", "10.0.1.2"), described.getDhcpConfigurationSet().stream()
+                .filter(c -> "domain-name-servers".equals(c.getKey())).findFirst().orElseThrow().getValues());
+    }
+
+    @Test
+    void createDhcpOptionsRejectsAnUnknownKey() {
+        Ec2Service service = dhcpOptionsService();
+
+        AwsException error = assertThrows(AwsException.class, () -> service.createDhcpOptions(
+                "us-east-1", List.of(new DhcpConfiguration("not-a-real-option", List.of("x"))), List.of()));
+        assertEquals("InvalidParameterValue", error.getErrorCode());
+    }
+
+    @Test
+    void createDhcpOptionsRejectsTooManyValuesForALimitedKey() {
+        Ec2Service service = dhcpOptionsService();
+
+        AwsException error = assertThrows(AwsException.class, () -> service.createDhcpOptions(
+                "us-east-1", List.of(new DhcpConfiguration("domain-name-servers",
+                        List.of("10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4", "10.0.0.5"))), List.of()));
+        assertEquals("InvalidParameterValue", error.getErrorCode());
+    }
+
+    @Test
+    void createDhcpOptionsRejectsAnInvalidNetbiosNodeType() {
+        Ec2Service service = dhcpOptionsService();
+
+        AwsException error = assertThrows(AwsException.class, () -> service.createDhcpOptions(
+                "us-east-1", List.of(new DhcpConfiguration("netbios-node-type", List.of("3"))), List.of()));
+        assertEquals("InvalidParameterValue", error.getErrorCode());
+    }
+
+    @Test
+    void createDhcpOptionsRequiresAtLeastOneConfiguration() {
+        Ec2Service service = dhcpOptionsService();
+
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.createDhcpOptions("us-east-1", List.of(), List.of()));
+        assertEquals("MissingParameter", error.getErrorCode());
+    }
+
+    @Test
+    void createTagsOnADhcpOptionsSetIsVisibleToDescribe() {
+        Ec2Service service = dhcpOptionsService();
+        DhcpOptions options = service.createDhcpOptions("us-east-1",
+                List.of(new DhcpConfiguration("domain-name", List.of("example.com"))), List.of());
+
+        service.createTags("us-east-1", List.of(options.getDhcpOptionsId()), List.of(new Tag("Name", "corp-dhcp")));
+
+        DhcpOptions described = service.describeDhcpOptions("us-east-1",
+                List.of(options.getDhcpOptionsId()), Map.of()).getFirst();
+        assertEquals(1, described.getTags().size());
+        assertEquals("corp-dhcp", described.getTags().getFirst().getValue());
+    }
+
+    @Test
+    void associateDhcpOptionsUpdatesTheVpcAndDescribeVpcsReflectsIt() {
+        Ec2Service service = dhcpOptionsService();
+        Vpc vpc = service.createVpc("us-east-1", "10.42.0.0/16", false);
+        DhcpOptions options = service.createDhcpOptions("us-east-1",
+                List.of(new DhcpConfiguration("domain-name", List.of("example.com"))), List.of());
+
+        service.associateDhcpOptions("us-east-1", options.getDhcpOptionsId(), vpc.getVpcId());
+
+        Vpc described = service.describeVpcs("us-east-1", List.of(vpc.getVpcId()), Map.of()).getFirst();
+        assertEquals(options.getDhcpOptionsId(), described.getDhcpOptionsId());
+    }
+
+    @Test
+    void associatingTheLiteralDefaultResetsTheVpcToTheRegionsDefaultSet() {
+        Ec2Service service = dhcpOptionsService();
+        Vpc vpc = service.createVpc("us-east-1", "10.42.0.0/16", false);
+        DhcpOptions options = service.createDhcpOptions("us-east-1",
+                List.of(new DhcpConfiguration("domain-name", List.of("example.com"))), List.of());
+        service.associateDhcpOptions("us-east-1", options.getDhcpOptionsId(), vpc.getVpcId());
+
+        service.associateDhcpOptions("us-east-1", "default", vpc.getVpcId());
+
+        Vpc described = service.describeVpcs("us-east-1", List.of(vpc.getVpcId()), Map.of()).getFirst();
+        assertEquals("dopt-default", described.getDhcpOptionsId());
+    }
+
+    @Test
+    void associateDhcpOptionsRejectsAnUnknownVpcOrDhcpOptionsId() {
+        Ec2Service service = dhcpOptionsService();
+        DhcpOptions options = service.createDhcpOptions("us-east-1",
+                List.of(new DhcpConfiguration("domain-name", List.of("example.com"))), List.of());
+        Vpc vpc = service.createVpc("us-east-1", "10.42.0.0/16", false);
+
+        assertEquals("InvalidVpcID.NotFound", assertThrows(AwsException.class, () ->
+                service.associateDhcpOptions("us-east-1", options.getDhcpOptionsId(), "vpc-doesnotexist"))
+                .getErrorCode());
+        assertEquals("InvalidDhcpOptionID.NotFound", assertThrows(AwsException.class, () ->
+                service.associateDhcpOptions("us-east-1", "dopt-doesnotexist", vpc.getVpcId()))
+                .getErrorCode());
+    }
+
+    @Test
+    void deleteDhcpOptionsRejectsASetStillAssociatedWithAVpc() {
+        Ec2Service service = dhcpOptionsService();
+        Vpc vpc = service.createVpc("us-east-1", "10.42.0.0/16", false);
+        DhcpOptions options = service.createDhcpOptions("us-east-1",
+                List.of(new DhcpConfiguration("domain-name", List.of("example.com"))), List.of());
+        service.associateDhcpOptions("us-east-1", options.getDhcpOptionsId(), vpc.getVpcId());
+
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.deleteDhcpOptions("us-east-1", options.getDhcpOptionsId()));
+        assertEquals("DependencyViolation", error.getErrorCode());
+
+        service.associateDhcpOptions("us-east-1", "default", vpc.getVpcId());
+        service.deleteDhcpOptions("us-east-1", options.getDhcpOptionsId());
+        assertEquals("InvalidDhcpOptionID.NotFound", assertThrows(AwsException.class, () ->
+                service.describeDhcpOptions("us-east-1", List.of(options.getDhcpOptionsId()), Map.of()))
+                .getErrorCode());
+    }
+
+    @Test
+    void describeDhcpOptionsFiltersByKeyAndDhcpOptionsId() {
+        Ec2Service service = dhcpOptionsService();
+        DhcpOptions corp = service.createDhcpOptions("us-east-1", List.of(
+                new DhcpConfiguration("domain-name", List.of("corp.internal")),
+                new DhcpConfiguration("ntp-servers", List.of("10.0.0.3"))), List.of());
+        service.createDhcpOptions("us-east-1", List.of(
+                new DhcpConfiguration("domain-name", List.of("lab.internal"))), List.of());
+
+        List<DhcpOptions> byId = service.describeDhcpOptions("us-east-1", List.of(),
+                Map.of("dhcp-options-id", List.of(corp.getDhcpOptionsId())));
+        assertEquals(1, byId.size());
+        assertEquals(corp.getDhcpOptionsId(), byId.getFirst().getDhcpOptionsId());
+
+        List<DhcpOptions> byKey = service.describeDhcpOptions("us-east-1", List.of(),
+                Map.of("key", List.of("ntp-servers")));
+        assertEquals(1, byKey.size());
+        assertEquals(corp.getDhcpOptionsId(), byKey.getFirst().getDhcpOptionsId());
     }
 
 }
