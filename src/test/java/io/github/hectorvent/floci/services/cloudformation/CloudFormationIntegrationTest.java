@@ -4182,6 +4182,89 @@ class CloudFormationIntegrationTest {
     }
 
     @Test
+    void createStack_lambdaEventSourceMappingWithStartingPosition() {
+        String stackName = "cfn-esm-starting-position-stack";
+        String funcName = "cfn-esm-starting-position-func";
+        String streamName = "cfn-esm-starting-position-stream";
+
+        String template = """
+            {
+              "Resources": {
+                "MyStream": {
+                  "Type": "AWS::Kinesis::Stream",
+                  "Properties": {
+                    "Name": "%s",
+                    "ShardCount": 1
+                  }
+                },
+                "MyFunction": {
+                  "Type": "AWS::Lambda::Function",
+                  "Properties": {
+                    "FunctionName": "%s",
+                    "Runtime": "nodejs20.x",
+                    "Handler": "index.handler",
+                    "Role": "arn:aws:iam::000000000000:role/lambda-role",
+                    "Code": {
+                      "ZipFile": "exports.handler = async (e) => ({ statusCode: 200 });"
+                    }
+                  }
+                },
+                "MyESM": {
+                  "Type": "AWS::Lambda::EventSourceMapping",
+                  "Properties": {
+                    "FunctionName": { "Ref": "MyFunction" },
+                    "EventSourceArn": { "Fn::GetAtt": ["MyStream", "Arn"] },
+                    "StartingPosition": "AT_TIMESTAMP",
+                    "StartingPositionTimestamp": 1787036486.712,
+                    "BatchSize": 5
+                  }
+                }
+              }
+            }
+            """.formatted(streamName, funcName);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackId>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
+
+        // The whole point of this test: StartingPosition/StartingPositionTimestamp must survive
+        // the CFN -> Lambda plumbing, not just the direct-API path EsmIntegrationTest covers.
+        given()
+        .when()
+            .get("/2015-03-31/event-source-mappings?FunctionName=" + funcName)
+        .then()
+            .statusCode(200)
+            .body("EventSourceMappings[0].StartingPosition", equalTo("AT_TIMESTAMP"))
+            .body("EventSourceMappings[0].StartingPositionTimestamp", equalTo(1787036486.712f));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteStack")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
     void crossStackReference_fnImportValue() {
         // Stack A exports a bucket name
         String templateA = """
