@@ -82,6 +82,34 @@ class AppSyncServiceTest {
     }
 
     @Test
+    void omittedExpiresRoundsDownToHour() {
+        Instant now = Instant.parse("2026-01-01T00:30:00Z");
+        AppSyncService svc = newService(Clock.fixed(now, ZoneOffset.UTC));
+        GraphqlApi api = svc.createGraphqlApi(Map.of("name", "round-default", "authenticationType", "API_KEY"), "us-east-1");
+        ApiKey created = svc.createApiKey(api.getApiId(), Map.of());
+        assertEquals(Instant.parse("2026-01-08T00:00:00Z").getEpochSecond(), created.getExpires());
+    }
+
+    @Test
+    void explicitExpiresRoundsDownToHour() {
+        Instant now = Instant.parse("2026-01-01T00:30:00Z");
+        AppSyncService svc = newService(Clock.fixed(now, ZoneOffset.UTC));
+        GraphqlApi api = svc.createGraphqlApi(Map.of("name", "round-explicit", "authenticationType", "API_KEY"), "us-east-1");
+        long expires = Instant.parse("2026-01-31T00:30:00Z").getEpochSecond();
+        ApiKey created = svc.createApiKey(api.getApiId(), Map.of("expires", expires));
+        assertEquals(Instant.parse("2026-01-31T00:00:00Z").getEpochSecond(), created.getExpires());
+    }
+
+    @Test
+    void updateApiKeyExpiresRoundsDownToHour() {
+        GraphqlApi api = service.createGraphqlApi(Map.of("name", "round-update", "authenticationType", "API_KEY"), "us-east-1");
+        ApiKey created = service.createApiKey(api.getApiId(), Map.of());
+        long expires = Instant.parse("2026-02-01T00:45:00Z").getEpochSecond();
+        ApiKey updated = service.updateApiKey(api.getApiId(), created.getId(), Map.of("expires", expires));
+        assertEquals(Instant.parse("2026-02-01T00:00:00Z").getEpochSecond(), updated.getExpires());
+    }
+
+    @Test
     void duplicateApiKeyProviderRejected() {
         Map<String, Object> request = new HashMap<>();
         request.put("name", "dup-key");

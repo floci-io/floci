@@ -589,9 +589,9 @@ public class AppSyncService {
         key.setDescription((String) request.get("description"));
         Object expiresValue = request.get("expires");
         if (expiresValue == null) {
-            key.setExpires(clock.instant().getEpochSecond() + Duration.ofDays(7).getSeconds());
+            key.setExpires(roundDownToHour(clock.instant().getEpochSecond() + Duration.ofDays(7).getSeconds()));
         } else {
-            key.setExpires(parseExpires(expiresValue));
+            key.setExpires(roundDownToHour(parseExpires(expiresValue)));
         }
         long maxExpires = clock.instant().getEpochSecond() + Duration.ofDays(365).getSeconds();
         if (key.getExpires() != null && key.getExpires() > maxExpires) {
@@ -632,25 +632,11 @@ public class AppSyncService {
 
     public ApiKey updateApiKey(String apiId, String keyId, Map<String, Object> request) {
         ApiKey existing = getApiKey(apiId, keyId);
-        if (request.containsKey("description")) existing.setDescription((String) request.get("description"));
+        if (request.containsKey("description")) {
+            existing.setDescription((String) request.get("description"));
+        }
         if (request.containsKey("expires")) {
-            Object expiresValue = request.get("expires");
-            if (expiresValue instanceof Long l) {
-                existing.setExpires(l);
-            } else if (expiresValue instanceof Number n) {
-                existing.setExpires(n.longValue());
-            } else if (expiresValue instanceof String s) {
-                try {
-                    existing.setExpires(Long.parseLong(s));
-                } catch (NumberFormatException e) {
-                    try {
-                        existing.setExpires(java.time.Instant.parse(s).getEpochSecond());
-                    } catch (java.time.format.DateTimeParseException ex) {
-                        throw new AwsException("BadRequestException",
-                            "Invalid expires value: " + s + ". Expected epoch seconds or ISO 8601.", 400);
-                    }
-                }
-            }
+            existing.setExpires(roundDownToHour(parseExpires(request.get("expires"))));
         }
         apiKeyStore.put(apiKey(apiId, keyId), existing);
         return existing;
@@ -1079,6 +1065,10 @@ public class AppSyncService {
             }
         }
         throw new AwsException("BadRequestException", "Invalid expires value.", 400);
+    }
+
+    static long roundDownToHour(long epochSeconds) {
+        return Math.floorDiv(epochSeconds, 3600) * 3600;
     }
 
     private String generateApiId() {
