@@ -1799,22 +1799,29 @@ public class ApiGatewayExecuteController {
     /**
      * Builds a REQUEST authorizer event in payload format version 1.0.
      * Compatible with REST API (v1) REQUEST authorizer shape.
+     *
+     * <p>Package-private so the shape can be asserted directly, the way {@code buildV2ProxyEvent}
+     * is: a REQUEST authorizer's context never reaches the v2 proxy event, so these fields are
+     * not observable end to end.
      */
-    private String buildRequestAuthorizerEventV1(String httpMethod, String path,
-                                                  String apiId, String stageName, String region,
-                                                  HttpHeaders headers, UriInfo uriInfo) {
+    String buildRequestAuthorizerEventV1(String httpMethod, String path,
+                                         String apiId, String stageName, String region,
+                                         HttpHeaders headers, UriInfo uriInfo) {
         // The JAX-RS {proxy} binding strips a trailing slash before dispatchV2 rebuilds the
-        // path, so recover it from the raw request URI for the delivered path fields. Same split
-        // as the REST authorizer event (see toAuthorizerEvent): methodArn and resource keep the
-        // normalized path, because methodArn is matched against IAM-style policy resources where
-        // a stray trailing slash would silently fail an authorizer's wildcards.
+        // path, so recover it from the raw request URI for the delivered path fields. methodArn
+        // keeps the normalized path, as in the REST authorizer event (see toAuthorizerEvent),
+        // because it is matched against IAM-style policy resources where a stray trailing slash
+        // would silently fail an authorizer's wildcards. `resource` and requestContext.resourcePath
+        // do NOT: an HTTP API has no REST-style resource template, so both are copies of the
+        // request path here rather than of a matched resource, and AWS's own 1.0 payload example
+        // shows `resource` and `path` carrying the same value.
         String preservedPath = preserveTrailingSlash(path, uriInfo.getRequestUri().getRawPath());
 
         ObjectNode event = objectMapper.createObjectNode();
         event.put("version", "1.0");
         event.put("type", "REQUEST");
         event.put("methodArn", buildMethodArn(region, apiId, stageName, httpMethod, path));
-        event.put("resource", path);
+        event.put("resource", preservedPath);
         event.put("path", preservedPath);
         event.put("httpMethod", httpMethod);
 
@@ -1832,7 +1839,7 @@ public class ApiGatewayExecuteController {
         ctx.put("apiId", apiId);
         ctx.put("httpMethod", httpMethod);
         ctx.put("path", preservedPath);
-        ctx.put("resourcePath", path);
+        ctx.put("resourcePath", preservedPath);
         ctx.put("stage", stageName);
         ctx.put("requestId", UUID.randomUUID().toString());
 
