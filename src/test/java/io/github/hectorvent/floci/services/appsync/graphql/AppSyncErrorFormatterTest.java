@@ -6,6 +6,7 @@ import graphql.ExecutionResultImpl;
 import graphql.GraphQLError;
 import graphql.GraphqlErrorBuilder;
 import graphql.language.SourceLocation;
+import io.github.hectorvent.floci.services.appsync.graphql.auth.AppSyncFieldUnauthorizedException;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -115,5 +116,25 @@ class AppSyncErrorFormatterTest {
         assertNull(responseData.get("hello"));
         assertTrue(responseData.containsKey("hello"));
         assertFalse(response.containsKey("errors"));
+    }
+
+    @Test
+    void unauthorizedClassificationMapsToUnauthorizedException() {
+        GraphQLError error = new AppSyncFieldUnauthorizedException(List.of("hello"));
+        Map<String, Object> data = new java.util.LinkedHashMap<>();
+        data.put("hello", null);
+        ExecutionResult result = ExecutionResultImpl.newExecutionResult()
+                .data(data)
+                .addError(error)
+                .build();
+
+        Map<String, Object> response = formatter.format(result);
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> errors = (List<Map<String, Object>>) response.get("errors");
+        assertEquals("UnauthorizedException", errors.get(0).get("errorType"));
+        assertEquals("You are not authorized to make this call.", errors.get(0).get("message"));
+        assertEquals(List.of("hello"), errors.get(0).get("path"));
+        assertNull(errors.get(0).get("errorInfo"));
     }
 }

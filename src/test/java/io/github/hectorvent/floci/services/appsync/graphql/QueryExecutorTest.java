@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.appsync.graphql;
 
+import graphql.schema.DataFetcher;
+import graphql.schema.GraphQLObjectType;
 import graphql.schema.GraphQLSchema;
 import io.github.hectorvent.floci.services.appsync.graphql.scalars.AppSyncScalarRegistry;
 import org.junit.jupiter.api.BeforeEach;
@@ -8,6 +10,8 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 import java.util.Map;
 
+import static graphql.Scalars.GraphQLString;
+import static graphql.schema.FieldCoordinates.coordinates;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -111,5 +115,37 @@ class QueryExecutorTest {
         @SuppressWarnings("unchecked")
         List<Map<String, Object>> errors = (List<Map<String, Object>>) response.get("errors");
         assertEquals("SyntaxError", errors.get(0).get("errorType"));
+    }
+
+    @Test
+    void executePassesGraphQlContextKeys() {
+        DataFetcher<Object> fetcher = env -> {
+            assertEquals("IAM Authorization", env.getGraphQlContext().get("authType"));
+            Object identity = env.getGraphQlContext().get("identity");
+            assertTrue(identity instanceof Map<?, ?>);
+            assertTrue(((Map<?, ?>) identity).get("sourceIp") instanceof List<?>);
+            return env.getGraphQlContext().get("authType");
+        };
+        GraphQLObjectType query = GraphQLObjectType.newObject()
+                .name("Query")
+                .field(f -> f.name("hello").type(GraphQLString))
+                .build();
+        GraphQLSchema schema = GraphQLSchema.newSchema()
+                .query(query)
+                .codeRegistry(graphql.schema.GraphQLCodeRegistry.newCodeRegistry()
+                        .dataFetcher(coordinates("Query", "hello"), fetcher)
+                        .build())
+                .build();
+        Map<Object, Object> ctx = Map.of(
+                "identity", Map.of("sourceIp", List.of("127.0.0.1")),
+                "authType", "IAM Authorization",
+                "deniedFields", List.of());
+
+        Map<String, Object> response = executor.execute(
+                SchemaRegistry.buildGraphQL(schema), "{ hello }", null, null, ctx);
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> data = (Map<String, Object>) response.get("data");
+        assertEquals("IAM Authorization", data.get("hello"));
     }
 }
