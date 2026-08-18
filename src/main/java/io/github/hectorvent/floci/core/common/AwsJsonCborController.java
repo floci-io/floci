@@ -21,6 +21,7 @@ import org.jboss.logging.Logger;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.zip.GZIPInputStream;
 
@@ -210,10 +211,10 @@ public class AwsJsonCborController {
         }
     }
 
-    private JsonNode bodyToJson(HttpHeaders httpHeaders, byte[] body) throws IOException {
+    JsonNode bodyToJson(HttpHeaders httpHeaders, byte[] body) throws IOException {
         JsonNode request;
         if (body != null && body.length > 0) {
-            if( httpHeaders.getRequestHeader("Content-encoding") != null && httpHeaders.getRequestHeader("Content-encoding").contains("gzip")) {
+            if( httpHeaders.getRequestHeader("Content-encoding") != null && isGZipped(httpHeaders.getRequestHeader("Content-encoding"))) {
                 body = decodeBody(body);
             }
             request = CBOR_MAPPER.readTree(body);
@@ -221,6 +222,19 @@ public class AwsJsonCborController {
             request = objectMapper.createObjectNode();
         }
         return request;
+    }
+
+    private boolean isGZipped(List<String> contentEncodingHeaders) {
+        if (contentEncodingHeaders == null) {
+            return false;
+        }
+        for (String header : contentEncodingHeaders) {
+            if (header != null &&  header.toLowerCase().contains("gzip")) {
+                return true;
+            }
+        }
+        return false;
+
     }
 
     /**
@@ -294,7 +308,12 @@ public class AwsJsonCborController {
 
     private byte[] decodeBody(byte[] compressed) throws IOException {
         try (GZIPInputStream gis = new GZIPInputStream(new java.io.ByteArrayInputStream(compressed))) {
-            return gis.readAllBytes();
+            byte[] buffer = gis.readNBytes(10*1024*1024); // 10 MB limit max over all aws services, to avoid OOM. AWS services should not send more than 10 MB in a single request.
+            int check = gis.read();
+            if (check != -1) {
+                throw new AwsException("PayloadTooLargeException", "Payload Too Large", 413);
+            }
+            return buffer;
         }
     }
 
