@@ -4663,7 +4663,8 @@ public class RdsService implements Resettable {
     }
 
     private DbSubnetGroup buildDefaultSubnetGroup(String region) {
-        List<Subnet> subnets = ec2Service.describeSubnets(region, List.of(), Map.of("vpc-id", List.of("vpc-default")));
+        List<Subnet> subnets = ec2Service.describeSubnets(region, List.of(),
+                Map.of("vpc-id", List.of(Ec2Service.defaultVpcId(region))));
         if (subnets.isEmpty()) {
             throw new AwsException("InvalidVPCNetworkStateFault",
                     "No subnets available for DB subnet group default.", 400);

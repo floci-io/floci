@@ -339,7 +339,7 @@ public class Ec2Service implements ContainerTeardown {
         LOG.debugv("Seeding default EC2 resources for region {0}", region);
 
         // Default VPC
-        String vpcId = "vpc-default";
+        String vpcId = defaultVpcId(region);
         Vpc defaultVpc = new Vpc();
         defaultVpc.setVpcId(vpcId);
         defaultVpc.setCidrBlock("172.31.0.0/16");
@@ -354,7 +354,10 @@ public class Ec2Service implements ContainerTeardown {
         // Default subnets (a/b/c)
         String[] azSuffixes = {"a", "b", "c"};
         String[] cidrBlocks = {"172.31.0.0/20", "172.31.16.0/20", "172.31.32.0/20"};
-        String[] subnetIds = {"subnet-default-a", "subnet-default-b", "subnet-default-c"};
+        String[] subnetIds = {
+                defaultSubnetId(region, azSuffixes[0]),
+                defaultSubnetId(region, azSuffixes[1]),
+                defaultSubnetId(region, azSuffixes[2])};
         for (int i = 0; i < 3; i++) {
             Subnet subnet = new Subnet();
             subnet.setSubnetId(subnetIds[i]);
@@ -372,7 +375,7 @@ public class Ec2Service implements ContainerTeardown {
             subnets.put(key(region, subnetIds[i]), subnet);
         }
 
-        createDefaultSecurityGroup(region, vpcId, "sg-default");
+        createDefaultSecurityGroup(region, vpcId, defaultSecurityGroupId(region));
 
         // Default NACL, with the default subnets associated to it.
         String defaultAclId = createDefaultNetworkAcl(region, vpcId, "acl-default");
@@ -867,6 +870,23 @@ public class Ec2Service implements ContainerTeardown {
 
     private String key(String region, String id) {
         return region + "::" + id;
+    }
+
+    // Default resource ids must be derived per region (#21): every region seeds its own
+    // default VPC/subnets/security group independently, but a literal id like "vpc-default"
+    // is identical text in every region's response even though storage itself is already
+    // correctly keyed by region. RdsService derives the same ids from these methods so its
+    // default DB subnet group resolves against the right region's default VPC.
+    public static String defaultVpcId(String region) {
+        return "vpc-default-" + region;
+    }
+
+    public static String defaultSubnetId(String region, String azSuffix) {
+        return "subnet-default-" + region + "-" + azSuffix;
+    }
+
+    public static String defaultSecurityGroupId(String region) {
+        return "sg-default-" + region;
     }
 
     // Per-resource mutation locks (#1464): storage get() returns the live stored object, so
@@ -2067,7 +2087,7 @@ public class Ec2Service implements ContainerTeardown {
                     .orElse(null);
         }
 
-        String vpcId = subnet != null ? subnet.getVpcId() : "vpc-default";
+        String vpcId = subnet != null ? subnet.getVpcId() : defaultVpcId(region);
         String az = subnet != null ? subnet.getAvailabilityZone() : region + "a";
         String finalSubnetId = subnet != null ? subnet.getSubnetId() : null;
 
@@ -2080,7 +2100,7 @@ public class Ec2Service implements ContainerTeardown {
             }
         } else {
             // Use default SG
-            SecurityGroup defaultSg = securityGroups.get(key(region, "sg-default")).orElse(null);
+            SecurityGroup defaultSg = securityGroups.get(key(region, defaultSecurityGroupId(region))).orElse(null);
             if (defaultSg != null) {
                 sgIdentifiers.add(new GroupIdentifier(defaultSg.getGroupId(), defaultSg.getGroupName()));
             }
@@ -2848,7 +2868,7 @@ public class Ec2Service implements ContainerTeardown {
         if (vpcId != null && !vpcId.isEmpty()) {
             getRequiredVpc(region, vpcId);
         } else {
-            vpcId = "vpc-default";
+            vpcId = defaultVpcId(region);
         }
         // Check duplicate
         String finalVpcId = vpcId;
@@ -4608,7 +4628,7 @@ public class Ec2Service implements ContainerTeardown {
         ensureDefaultResources(region);
         Map<String, String> attrs = new LinkedHashMap<>();
         attrs.put("supported-platforms", "VPC");
-        attrs.put("default-vpc", "vpc-default");
+        attrs.put("default-vpc", defaultVpcId(region));
         return attrs;
     }
 

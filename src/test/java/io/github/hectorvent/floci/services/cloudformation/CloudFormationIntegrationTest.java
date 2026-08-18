@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.testing.MutableClock;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
@@ -6208,12 +6209,12 @@ class CloudFormationIntegrationTest {
                       "Properties": {
                         "GroupName": "%s",
                         "GroupDescription": "Security group created by CloudFormation",
-                        "VpcId": "vpc-default"
+                        "VpcId": "%s"
                       }
                     }
                   }
                 }
-                """.formatted(groupName);
+                """.formatted(groupName, Ec2Service.defaultVpcId("us-east-1"));
 
         given()
                 .formParam("Action", "CreateStack")
@@ -6371,7 +6372,7 @@ class CloudFormationIntegrationTest {
                     "Name": "cfn-alb",
                     "Type": "application",
                     "Scheme": "internet-facing",
-                    "Subnets": ["subnet-default-a", "subnet-default-b"],
+                    "Subnets": ["%s", "%s"],
                     "SecurityGroups": ["sg-123"]
                   }
                 },
@@ -6381,7 +6382,7 @@ class CloudFormationIntegrationTest {
                     "Name": "cfn-tg",
                     "Protocol": "HTTP",
                     "Port": 80,
-                    "VpcId": "vpc-default",
+                    "VpcId": "%s",
                     "TargetType": "ip",
                     "HealthCheckPath": "/health",
                     "Matcher": { "HttpCode": "200-299" }
@@ -6424,7 +6425,8 @@ class CloudFormationIntegrationTest {
                 "RuleRef": { "Value": { "Ref": "Rule" } }
               }
             }
-            """;
+            """.formatted(Ec2Service.defaultSubnetId("us-east-1", "a"), Ec2Service.defaultSubnetId("us-east-1", "b"),
+                Ec2Service.defaultVpcId("us-east-1"));
 
         String stackName = "cfn-elbv2-stack";
 

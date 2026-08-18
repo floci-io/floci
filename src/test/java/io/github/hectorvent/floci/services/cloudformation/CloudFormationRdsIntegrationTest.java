@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
 import io.github.hectorvent.floci.core.common.XmlParser;
+import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
@@ -36,7 +37,7 @@ class CloudFormationRdsIntegrationTest {
                       "Properties": {
                         "DBSubnetGroupName": "%s",
                         "DBSubnetGroupDescription": "managed by cfn",
-                        "SubnetIds": ["subnet-default-a", "subnet-default-b"]
+                        "SubnetIds": ["%s", "%s"]
                       }
                     }
                   },
@@ -44,7 +45,8 @@ class CloudFormationRdsIntegrationTest {
                     "GroupName": {"Value": {"Ref": "DbSubnets"}}
                   }
                 }
-                """.formatted(groupName);
+                """.formatted(groupName, Ec2Service.defaultSubnetId("us-east-1", "a"),
+                Ec2Service.defaultSubnetId("us-east-1", "b"));
 
         given()
             .contentType("application/x-www-form-urlencoded")
