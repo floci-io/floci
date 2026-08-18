@@ -6,6 +6,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationResourceProvisioner;
+import io.github.hectorvent.floci.services.cloudfront.CloudFrontService;
+import io.github.hectorvent.floci.services.cloudfront.model.CachePolicy;
+import io.github.hectorvent.floci.services.cloudfront.model.OriginRequestPolicy;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
@@ -49,6 +52,7 @@ public class CloudControlService {
     private final IvsService ivsService;
     private final IvschatService ivschatService;
     private final MediaLiveService mediaLiveService;
+    private final CloudFrontService cloudFrontService;
     private final CloudControlStoreLister storeLister;
     private final ObjectMapper mapper;
     /** How many finished request tokens to keep before evicting the oldest. */
@@ -94,6 +98,7 @@ public class CloudControlService {
                                AmpService ampService, IvsService ivsService,
                                IvschatService ivschatService,
                                MediaLiveService mediaLiveService,
+                               CloudFrontService cloudFrontService,
                                CloudControlStoreLister storeLister, ObjectMapper mapper) {
         this.storeLister = storeLister;
         this.ampService = ampService;
@@ -104,6 +109,7 @@ public class CloudControlService {
         this.ivsService = ivsService;
         this.ivschatService = ivschatService;
         this.mediaLiveService = mediaLiveService;
+        this.cloudFrontService = cloudFrontService;
         this.mapper = mapper;
     }
 
@@ -293,6 +299,8 @@ public class CloudControlService {
             case "AWS::IVSChat::LoggingConfiguration" -> arnListed(ivschatService.listLoggingConfigurations(),
                     l -> l.getArn(), l -> null, l -> l.getTags());
             case "AWS::MediaLive::Multiplex" -> multiplexes();
+            case "AWS::CloudFront::CachePolicy" -> cachePolicies();
+            case "AWS::CloudFront::OriginRequestPolicy" -> originRequestPolicies();
             case "AWS::APS::Workspace" -> arnListed(ampService.listWorkspaces(null, region),
                     w -> w.getArn(), w -> w.getAlias(), w -> w.getTags());
             case "AWS::APS::Scraper" -> arnListed(ampService.listScrapers(region),
@@ -506,6 +514,50 @@ public class CloudControlService {
             putIfPresent(properties, "State", m.getState());
             putTagsList(properties, m.getTags());
             resources.add(new ResourceDescription(m.getId(), propertiesString(properties)));
+        }
+        return resources;
+    }
+
+    /**
+     * The real CFN registry schema for {@code AWS::CloudFront::CachePolicy} requires
+     * {@code CachePolicyConfig} and nests {@code Name}/{@code Comment} (and the rest of the
+     * policy's settings) under it — {@code Id} and {@code LastModifiedTime} are the only
+     * top-level, read-only properties. The generic store lister ({@link CloudControlStoreLister})
+     * would instead flatten the persisted model's own field names ({@code Id}, {@code Name}, ...),
+     * which is wrong for this type, so it is shaped by hand here the same way {@link #instances}
+     * and {@link #vpcs} shape theirs — mirroring
+     * {@code CloudFrontController.xmlCachePolicyResponse}, the native CloudFront API's own nesting
+     * for this same model.
+     */
+    private List<ResourceDescription> cachePolicies() {
+        List<ResourceDescription> resources = new ArrayList<>();
+        for (CachePolicy policy : cloudFrontService.listCachePolicies(null, 0)) {
+            ObjectNode properties = mapper.createObjectNode();
+            properties.put("Id", policy.getId());
+            if (policy.getLastModifiedTime() != null) {
+                properties.put("LastModifiedTime", policy.getLastModifiedTime().toString());
+            }
+            ObjectNode config = properties.putObject("CachePolicyConfig");
+            putIfPresent(config, "Name", policy.getName());
+            putIfPresent(config, "Comment", policy.getComment());
+            resources.add(new ResourceDescription(policy.getId(), propertiesString(properties)));
+        }
+        return resources;
+    }
+
+    /** As {@link #cachePolicies}, for {@code AWS::CloudFront::OriginRequestPolicy}. */
+    private List<ResourceDescription> originRequestPolicies() {
+        List<ResourceDescription> resources = new ArrayList<>();
+        for (OriginRequestPolicy policy : cloudFrontService.listOriginRequestPolicies(null, 0)) {
+            ObjectNode properties = mapper.createObjectNode();
+            properties.put("Id", policy.getId());
+            if (policy.getLastModifiedTime() != null) {
+                properties.put("LastModifiedTime", policy.getLastModifiedTime().toString());
+            }
+            ObjectNode config = properties.putObject("OriginRequestPolicyConfig");
+            putIfPresent(config, "Name", policy.getName());
+            putIfPresent(config, "Comment", policy.getComment());
+            resources.add(new ResourceDescription(policy.getId(), propertiesString(properties)));
         }
         return resources;
     }
