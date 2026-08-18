@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.lambda.model;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -12,6 +13,7 @@ import java.util.Map;
  * ARN construction. Configuration blocks are held as {@link JsonNode} so a describe returns
  * exactly what the create was given.
  */
+@RegisterForReflection
 public class LambdaCapacityProvider {
 
     private String name;

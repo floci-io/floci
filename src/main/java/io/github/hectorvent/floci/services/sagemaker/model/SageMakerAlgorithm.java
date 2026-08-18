@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.sagemaker.model;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
 import java.util.HashMap;
@@ -13,6 +14,7 @@ import java.util.Map;
  * request JSON and echoed back verbatim on describe, since the caller already sent them in
  * the exact AWS wire shape.
  */
+@RegisterForReflection
 public class SageMakerAlgorithm {
 
     private String algorithmArn;
