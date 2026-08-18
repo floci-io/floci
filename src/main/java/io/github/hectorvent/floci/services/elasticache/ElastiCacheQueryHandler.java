@@ -297,7 +297,11 @@ public class ElastiCacheQueryHandler {
                     "The request must contain the parameter CacheSubnetGroupName.", AwsNamespaces.EC, 400);
         }
         String description = params.getFirst("CacheSubnetGroupDescription");
-        List<String> subnetIds = extractMemberList(params, "SubnetIds.member.");
+        // AWS's SubnetIdentifierList shape overrides its member locationName to
+        // "SubnetIdentifier" (see the ElastiCache 2015-02-02 service model), so
+        // the wire form is SubnetIds.SubnetIdentifier.N, not the generic
+        // SubnetIds.member.N every real client and the CLI actually sends.
+        List<String> subnetIds = extractMemberList(params, "SubnetIds.SubnetIdentifier.");
         try {
             CacheSubnetGroup group = service.createCacheSubnetGroup(name, description, subnetIds, region);
             return Response.ok(AwsQueryResponse.envelope("CreateCacheSubnetGroup",
@@ -329,7 +333,11 @@ public class ElastiCacheQueryHandler {
                     "CacheSubnetGroupName is required.", AwsNamespaces.EC, 400);
         }
         String description = params.getFirst("CacheSubnetGroupDescription");
-        List<String> subnetIds = extractMemberList(params, "SubnetIds.member.");
+        // AWS's SubnetIdentifierList shape overrides its member locationName to
+        // "SubnetIdentifier" (see the ElastiCache 2015-02-02 service model), so
+        // the wire form is SubnetIds.SubnetIdentifier.N, not the generic
+        // SubnetIds.member.N every real client and the CLI actually sends.
+        List<String> subnetIds = extractMemberList(params, "SubnetIds.SubnetIdentifier.");
         try {
             CacheSubnetGroup group = service.modifyCacheSubnetGroup(name, description,
                     subnetIds.isEmpty() ? null : subnetIds, region);

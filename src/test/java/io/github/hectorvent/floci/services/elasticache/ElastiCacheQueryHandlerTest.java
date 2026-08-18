@@ -93,8 +93,8 @@ class ElastiCacheQueryHandlerTest {
         MultivaluedMap<String, String> p = params();
         p.add("CacheSubnetGroupName", "sample-group");
         p.add("CacheSubnetGroupDescription", "desc");
-        p.add("SubnetIds.member.1", "subnet-aaa");
-        p.add("SubnetIds.member.2", "subnet-bbb");
+        p.add("SubnetIds.SubnetIdentifier.1", "subnet-aaa");
+        p.add("SubnetIds.SubnetIdentifier.2", "subnet-bbb");
 
         Response response = handler.handle("CreateCacheSubnetGroup", p);
 
@@ -134,7 +134,7 @@ class ElastiCacheQueryHandlerTest {
 
         MultivaluedMap<String, String> p = params();
         p.add("CacheSubnetGroupName", "sample-group");
-        p.add("SubnetIds.member.1", "subnet-ccc");
+        p.add("SubnetIds.SubnetIdentifier.1", "subnet-ccc");
 
         Response response = handler.handle("ModifyCacheSubnetGroup", p);
 
