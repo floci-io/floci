@@ -9,6 +9,8 @@ import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.lang.reflect.ParameterizedType;
+import java.lang.reflect.Type;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -102,13 +104,61 @@ public class StorageFactory {
         AccountAwareStorageBackend<V> backend = new AccountAwareStorageBackend<>(
                 inner, requestContextInstance, config.defaultAccountId());
         allBackends.add(backend);
-        ownedBackends.add(new OwnedBackend(serviceName, fileName, backend));
+        ownedBackends.add(new OwnedBackend(serviceName, fileName, backend, isFlatTagMapStore(typeReference)));
         backendsByPath.put(filePath, backend);
         return backend;
     }
 
-    /** A storage backend together with the service name and file name it was created under. */
-    public record OwnedBackend(String serviceName, String fileName, AccountAwareStorageBackend<?> backend) {}
+    /**
+     * A storage backend together with the service name and file name it was created under, and
+     * whether its declared value type is itself a flat {@code Map<String, String>}.
+     *
+     * <p>{@code flatTagMapStore} is what lets the estate-wide tagging scan
+     * ({@code TaggedResourceScanner}) recognise a service's side tag-store — several services
+     * (Route53, ELBv2, CodeDeploy, Config, CloudFront, Transfer) keep {@code ResourceId → tags}
+     * in a store separate from the resource's own model, rather than a {@code tags} field on it.
+     * A store registered with that exact shape has nothing in it but tags by construction: no
+     * domain model here is declared as a bare string-to-string map, so the signal has no false
+     * positives to guard against, and a service added tomorrow with the same shape is covered
+     * with no change to the scanner.
+     */
+    public record OwnedBackend(String serviceName, String fileName, AccountAwareStorageBackend<?> backend,
+                               boolean flatTagMapStore) {
+        /** Convenience constructor for callers that do not care about the tag-store signal. */
+        public OwnedBackend(String serviceName, String fileName, AccountAwareStorageBackend<?> backend) {
+            this(serviceName, fileName, backend, false);
+        }
+    }
+
+    /**
+     * True when {@code typeReference} was declared as {@code TypeReference<Map<String, Map<String,
+     * String>>>} — i.e. the store's per-key value is itself a flat string-to-string map, with no
+     * typed domain fields of its own. Detected from the registered generic type rather than from
+     * sniffing stored JSON, so it cannot be confused by a legitimate domain object that happens to
+     * have only string fields at the moment it is inspected.
+     */
+    private static boolean isFlatTagMapStore(TypeReference<?> typeReference) {
+        Type outer = typeReference.getType();
+        if (!(outer instanceof ParameterizedType outerMap)) {
+            return false;
+        }
+        Type[] outerArgs = outerMap.getActualTypeArguments();
+        if (outerArgs.length != 2) {
+            return false;
+        }
+        return isStringToStringMap(outerArgs[1]);
+    }
+
+    private static boolean isStringToStringMap(Type type) {
+        if (!(type instanceof ParameterizedType pt)) {
+            return false;
+        }
+        if (!(pt.getRawType() instanceof Class<?> rawType) || !Map.class.isAssignableFrom(rawType)) {
+            return false;
+        }
+        Type[] args = pt.getActualTypeArguments();
+        return args.length == 2 && String.class.equals(args[0]) && String.class.equals(args[1]);
+    }
 
     /**
      * Every backend created so far, labelled with its owning service. Used by the Resource Groups

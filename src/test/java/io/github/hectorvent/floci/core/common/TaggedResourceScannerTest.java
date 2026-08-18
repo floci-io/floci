@@ -140,4 +140,34 @@ class TaggedResourceScannerTest {
         assertTrue(TaggedResourceScanner.extractTags(json("{\"tags\": {}}")).isEmpty());
         assertTrue(TaggedResourceScanner.extractTags(json("{\"tags\": []}")).isEmpty());
     }
+
+    // ─── flatTags ──────────────────────────────────────────────────────────────
+
+    /**
+     * The shape Route53's {@code route53-tags.json}, ELBv2's {@code elbv2-tags.json}, and their
+     * siblings actually persist: no {@code tags} field wrapping the collection, because the whole
+     * stored value already IS the collection.
+     */
+    @Test
+    void readsEveryFieldOnAFlatTagMapNode() {
+        Map<String, String> tags = TaggedResourceScanner.flatTags(
+                json("""
+                        {"tofu-estate": "demo", "Name": "zone"}
+                        """));
+        assertEquals(Map.of("tofu-estate", "demo", "Name", "zone"), tags);
+    }
+
+    @Test
+    void flatTagsIgnoresNonValueFields() {
+        Map<String, String> tags = TaggedResourceScanner.flatTags(
+                json("""
+                        {"tofu-estate": "demo", "nested": {"a": "b"}}
+                        """));
+        assertEquals(Map.of("tofu-estate", "demo"), tags);
+    }
+
+    @Test
+    void flatTagsOfAnEmptyMapIsEmpty() {
+        assertTrue(TaggedResourceScanner.flatTags(json("{}")).isEmpty());
+    }
 }

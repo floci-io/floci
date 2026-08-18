@@ -190,4 +190,85 @@ class EstateTaggingIndexIntegrationTest {
             .statusCode(200)
             .body("DescribeTagsResponse.tagSet.item.resourceType", hasItem("volume"));
     }
+
+    /**
+     * Route53 keeps a hosted zone's tags in a side store ({@code route53-tags.json}, keyed
+     * {@code hostedzone/<id>}) with nothing on the model itself — no {@code tags} field, no
+     * {@code arn} field. {@code list-tags-for-resource} always saw them; {@code get-resources}
+     * did not, because the estate-wide scan only read tags off a resource's own model. This is
+     * the regression gate for that gap.
+     */
+    private static String hostedZoneId;
+
+    @Test
+    @Order(8)
+    void createHostedZoneAndTagItThroughRoute53() {
+        String createBody = """
+                <?xml version="1.0" encoding="UTF-8"?>
+                <CreateHostedZoneRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
+                  <Name>estate-index-probe.example.com</Name>
+                  <CallerReference>estate-index-probe</CallerReference>
+                </CreateHostedZoneRequest>
+                """;
+        String location = given()
+                .contentType("application/xml")
+                .body(createBody)
+            .when()
+                .post("/2013-04-01/hostedzone")
+            .then()
+                .statusCode(201)
+                .extract().header("Location");
+        hostedZoneId = location.substring(location.lastIndexOf('/') + 1);
+
+        String addTagBody = """
+                <?xml version="1.0" encoding="UTF-8"?>
+                <ChangeTagsForResourceRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
+                  <AddTags>
+                    <Tag><Key>tofu-estate</Key><Value>%s</Value></Tag>
+                  </AddTags>
+                </ChangeTagsForResourceRequest>
+                """.formatted(ESTATE_TAG);
+        given()
+                .contentType("application/xml")
+                .body(addTagBody)
+            .when()
+                .post("/2013-04-01/tags/hostedzone/" + hostedZoneId)
+            .then()
+                .statusCode(200);
+    }
+
+    @Test
+    @Order(9)
+    void getResourcesFindsTheHostedZoneWithNoTagResourcesCall() {
+        given()
+            .header("X-Amz-Target", TARGET_PREFIX + "GetResources")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {"ResourceARNList": ["arn:aws:route53:::hostedzone/%s"]}
+                """.formatted(hostedZoneId))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ResourceTagMappingList[0].ResourceARN", equalTo("arn:aws:route53:::hostedzone/" + hostedZoneId))
+            .body("ResourceTagMappingList[0].Tags.Key", hasItem("tofu-estate"))
+            .body("ResourceTagMappingList[0].Tags.Value", hasItem(ESTATE_TAG));
+    }
+
+    @Test
+    @Order(10)
+    void resourceTypeFilterSelectsTheSynthesizedRoute53Type() {
+        given()
+            .header("X-Amz-Target", TARGET_PREFIX + "GetResources")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {"TagFilters": [{"Key": "tofu-estate", "Values": ["%s"]}],
+                 "ResourceTypeFilters": ["route53:hostedzone"]}
+                """.formatted(ESTATE_TAG))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ResourceTagMappingList.ResourceARN", hasItem("arn:aws:route53:::hostedzone/" + hostedZoneId));
+    }
 }

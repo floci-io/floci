@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.core.common;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.services.ec2.Ec2ArnSynthesizer;
+import io.github.hectorvent.floci.services.route53.Route53ArnSynthesizer;
 import io.github.hectorvent.floci.services.s3.S3ArnSynthesizer;
 import io.github.hectorvent.floci.services.sqs.SqsArnSynthesizer;
 import org.junit.jupiter.api.Test;
@@ -97,5 +98,32 @@ class ArnSynthesizerTest {
         assertTrue(new SqsArnSynthesizer()
                 .synthesize("sqs", "sqs-messages.json", "us-east-1::000000000000/q", ACCOUNT, json("{}"))
                 .isEmpty());
+    }
+
+    // ─── Route53 ───────────────────────────────────────────────────────────────
+
+    /** Hosted zones are partition-scoped: no region, no account segment. */
+    @Test
+    void route53BuildsAHostedZoneArnFromTheStorageKey() {
+        Optional<String> arn = new Route53ArnSynthesizer().synthesize(
+                "route53", "route53-tags.json", "hostedzone/Z1D633PJN98FT9", ACCOUNT, json("{}"));
+        assertEquals(Optional.of("arn:aws:route53:::hostedzone/Z1D633PJN98FT9"), arn);
+    }
+
+    @Test
+    void route53BuildsAHealthCheckArnFromTheStorageKey() {
+        Optional<String> arn = new Route53ArnSynthesizer().synthesize(
+                "route53", "route53-tags.json", "healthcheck/d5e588b1-3bd3", ACCOUNT, json("{}"));
+        assertEquals(Optional.of("arn:aws:route53:::healthcheck/d5e588b1-3bd3"), arn);
+    }
+
+    @Test
+    void route53DeclinesOtherServicesStoresAndUnrecognisedResourceTypes() {
+        Route53ArnSynthesizer synthesizer = new Route53ArnSynthesizer();
+        assertTrue(synthesizer.synthesize("ec2", "route53-tags.json", "hostedzone/Z1", ACCOUNT, json("{}")).isEmpty());
+        assertTrue(synthesizer.synthesize("route53", "route53-zones.json", "hostedzone/Z1", ACCOUNT, json("{}")).isEmpty());
+        assertTrue(synthesizer.synthesize("route53", "route53-tags.json", "changebatch/C1", ACCOUNT, json("{}")).isEmpty());
+        assertTrue(synthesizer.synthesize("route53", "route53-tags.json", "hostedzone/", ACCOUNT, json("{}")).isEmpty());
+        assertTrue(synthesizer.synthesize("route53", "route53-tags.json", "noslash", ACCOUNT, json("{}")).isEmpty());
     }
 }

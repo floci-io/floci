@@ -33,6 +33,17 @@ import java.util.Map;
  * collection, and the resource's own ARN. Both are recognised structurally, so a service added
  * tomorrow is covered with no change here.
  *
+ * <h2>Side tag-stores</h2>
+ * Some services keep {@code ResourceId → tags} in a store separate from the resource's own model
+ * instead of a {@code tags} field on it — Route53 keeps a hosted zone's tags in
+ * {@code route53-tags.json} keyed {@code hostedzone/<id>}, and ELBv2, CodeDeploy, Config,
+ * CloudFront and Transfer do the same. {@link StorageFactory.OwnedBackend#flatTagMapStore()}
+ * marks a store whose registered value type is itself {@code Map<String, String>}; for those, the
+ * whole node passed to {@link #collect} at depth zero {@code is} the tag collection rather than
+ * containing one, so it is read directly with no field named {@code tags} required, and an ARN is
+ * sought from the storage key alone: first as an ARN the key already is, then via
+ * {@link ArnSynthesizer}.
+ *
  * <h2>Picking the right ARN</h2>
  * A model often carries several ARN-valued fields, most of them references to other resources —
  * a Lambda function's execution role, an EC2 instance's instance profile. Attributing a
@@ -136,7 +147,7 @@ public class TaggedResourceScanner {
                     continue;
                 }
                 collect(byArn, owned.serviceName(), owned.fileName(), logicalKey, accountId,
-                        value.getClass().getSimpleName(), node, 0);
+                        value.getClass().getSimpleName(), node, 0, owned.flatTagMapStore());
             }
         }
         return byArn;
@@ -164,13 +175,14 @@ public class TaggedResourceScanner {
                          String accountId,
                          String typeHint,
                          JsonNode node,
-                         int depth) {
+                         int depth,
+                         boolean wholeNodeIsTags) {
         if (node == null || depth > MAX_DEPTH) {
             return;
         }
         if (node.isArray()) {
             for (JsonNode element : node) {
-                collect(byArn, serviceName, storeName, logicalKey, accountId, typeHint, element, depth + 1);
+                collect(byArn, serviceName, storeName, logicalKey, accountId, typeHint, element, depth + 1, false);
             }
             return;
         }
@@ -178,11 +190,16 @@ public class TaggedResourceScanner {
             return;
         }
 
-        Map<String, String> tags = extractTags(node);
+        Map<String, String> tags = wholeNodeIsTags ? flatTags(node) : extractTags(node);
         if (!tags.isEmpty()) {
             String arn = resolveArn(node, typeHint);
             if (arn == null) {
                 arn = synthesize(serviceName, storeName, logicalKey, accountId, node);
+            }
+            if (arn == null && isArn(logicalKey)) {
+                // The storage key is already the resource's ARN — true of every side tag-store
+                // seen so far except Route53's, which needs a synthesizer instead.
+                arn = logicalKey;
             }
             if (arn != null) {
                 byArn.computeIfAbsent(arn, k -> new LinkedHashMap<>()).putAll(tags);
@@ -192,12 +209,18 @@ public class TaggedResourceScanner {
             }
         }
 
+        if (wholeNodeIsTags) {
+            // Every field on this node was already read as a tag above; there is nothing else to
+            // recurse into.
+            return;
+        }
+
         Iterator<Map.Entry<String, JsonNode>> fields = node.fields();
         while (fields.hasNext()) {
             Map.Entry<String, JsonNode> field = fields.next();
             JsonNode child = field.getValue();
             if (child.isContainerNode()) {
-                collect(byArn, serviceName, storeName, logicalKey, accountId, field.getKey(), child, depth + 1);
+                collect(byArn, serviceName, storeName, logicalKey, accountId, field.getKey(), child, depth + 1, false);
             }
         }
     }
@@ -258,6 +281,24 @@ public class TaggedResourceScanner {
         return tags;
     }
 
+    /**
+     * Reads every field on {@code node} as a tag, for a store whose registered value type is
+     * itself {@code Map<String, String>} (see {@link StorageFactory.OwnedBackend#flatTagMapStore()}).
+     * Unlike {@link #extractTags}, there is no {@code tags} field to look for: the node's fields
+     * are the tag keys and values directly.
+     */
+    static Map<String, String> flatTags(JsonNode node) {
+        Map<String, String> tags = new LinkedHashMap<>();
+        Iterator<Map.Entry<String, JsonNode>> fields = node.fields();
+        while (fields.hasNext()) {
+            Map.Entry<String, JsonNode> field = fields.next();
+            if (field.getValue().isValueNode()) {
+                tags.put(field.getKey(), field.getValue().asText());
+            }
+        }
+        return tags;
+    }
+
     private static JsonNode firstOf(JsonNode node, String... names) {
         for (String name : names) {
             JsonNode found = node.get(name);
@@ -308,6 +349,6 @@ public class TaggedResourceScanner {
     }
 
     private static boolean isArn(String candidate) {
-        return candidate.startsWith("arn:") && candidate.split(":", 6).length >= 6;
+        return candidate != null && candidate.startsWith("arn:") && candidate.split(":", 6).length >= 6;
     }
 }
