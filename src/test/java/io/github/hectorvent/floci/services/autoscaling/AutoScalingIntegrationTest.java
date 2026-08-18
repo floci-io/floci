@@ -834,8 +834,123 @@ class AutoScalingIntegrationTest {
                 .body(containsString("<ProcessName>Terminate</ProcessName>"));
     }
 
+    // AttachTrafficSources/DetachTrafficSources/DescribeTrafficSources - the modern,
+    // unified elbv2/vpc-lattice ASG-to-load-balancer wiring API that
+    // aws_autoscaling_traffic_source_attachment uses instead of the older
+    // AttachLoadBalancerTargetGroups above. Found crossing
+    // terraform-aws-modules/terraform-aws-autoscaling's "complete" example against
+    // Floci (its traffic_source_attachments block wires an ALB target group this way).
     @Test
     @Order(33)
+    void attachDescribeAndDetachTrafficSources() {
+        given()
+                .formParam("Action", "AttachTrafficSources")
+                .formParam("AutoScalingGroupName", "my-asg")
+                .formParam("TrafficSources.member.1.Identifier",
+                        "arn:aws:elasticloadbalancing:us-east-1:000000000000:targetgroup/ex-asg/abc123")
+                .formParam("TrafficSources.member.1.Type", "elbv2")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("AttachTrafficSourcesResponse"));
+
+        given()
+                .formParam("Action", "DescribeTrafficSources")
+                .formParam("AutoScalingGroupName", "my-asg")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("<Identifier>arn:aws:elasticloadbalancing:us-east-1:000000000000:targetgroup/ex-asg/abc123</Identifier>"))
+                .body(containsString("<Type>elbv2</Type>"))
+                .body(containsString("<State>InService</State>"));
+
+        given()
+                .formParam("Action", "DetachTrafficSources")
+                .formParam("AutoScalingGroupName", "my-asg")
+                .formParam("TrafficSources.member.1.Identifier",
+                        "arn:aws:elasticloadbalancing:us-east-1:000000000000:targetgroup/ex-asg/abc123")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("DetachTrafficSourcesResponse"));
+
+        given()
+                .formParam("Action", "DescribeTrafficSources")
+                .formParam("AutoScalingGroupName", "my-asg")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(not(containsString("<Identifier>")));
+    }
+
+    // PutScheduledUpdateGroupAction/DescribeScheduledActions/DeleteScheduledAction -
+    // aws_autoscaling_schedule's whole lifecycle, unimplemented until this fix (every
+    // scheduled action in the estate failed the ASG's own apply outright). Found
+    // crossing terraform-aws-modules/terraform-aws-autoscaling's "complete" example.
+    @Test
+    @Order(34)
+    void putDescribeAndDeleteScheduledAction() {
+        given()
+                .formParam("Action", "PutScheduledUpdateGroupAction")
+                .formParam("AutoScalingGroupName", "my-asg")
+                .formParam("ScheduledActionName", "morning")
+                .formParam("Recurrence", "0 7 * * 1-5")
+                .formParam("MinSize", "0")
+                .formParam("MaxSize", "1")
+                .formParam("DesiredCapacity", "1")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("PutScheduledUpdateGroupActionResponse"));
+
+        given()
+                .formParam("Action", "DescribeScheduledActions")
+                .formParam("AutoScalingGroupName", "my-asg")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("<ScheduledActionName>morning</ScheduledActionName>"))
+                .body(containsString("<Recurrence>0 7 * * 1-5</Recurrence>"))
+                .body(containsString("<MinSize>0</MinSize>"))
+                .body(containsString("<MaxSize>1</MaxSize>"))
+                .body(containsString("<DesiredCapacity>1</DesiredCapacity>"));
+
+        given()
+                .formParam("Action", "DeleteScheduledAction")
+                .formParam("AutoScalingGroupName", "my-asg")
+                .formParam("ScheduledActionName", "morning")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("DeleteScheduledActionResponse"));
+
+        given()
+                .formParam("Action", "DescribeScheduledActions")
+                .formParam("AutoScalingGroupName", "my-asg")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(not(containsString("<ScheduledActionName>")));
+    }
+
+    @Test
+    @Order(35)
     void deleteLaunchTemplateAutoScalingGroup() {
         given()
                 .formParam("Action", "DeleteAutoScalingGroup")
@@ -852,7 +967,7 @@ class AutoScalingIntegrationTest {
     // ── Cleanup ───────────────────────────────────────────────────────────────
 
     @Test
-    @Order(34)
+    @Order(36)
     void deleteAutoScalingGroup() {
         given()
                 .formParam("Action", "DeleteAutoScalingGroup")
@@ -867,7 +982,7 @@ class AutoScalingIntegrationTest {
     }
 
     @Test
-    @Order(35)
+    @Order(37)
     void deleteMixedInstancesAutoScalingGroup() {
         given()
                 .formParam("Action", "DeleteAutoScalingGroup")
@@ -882,7 +997,7 @@ class AutoScalingIntegrationTest {
     }
 
     @Test
-    @Order(36)
+    @Order(38)
     void deleteLaunchConfiguration() {
         given()
                 .formParam("Action", "DeleteLaunchConfiguration")
@@ -896,7 +1011,7 @@ class AutoScalingIntegrationTest {
     }
 
     @Test
-    @Order(37)
+    @Order(39)
     void describeAutoScalingGroupsEmpty() {
         given()
                 .formParam("Action", "DescribeAutoScalingGroups")

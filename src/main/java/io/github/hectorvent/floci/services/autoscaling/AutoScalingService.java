@@ -48,6 +48,7 @@ public class AutoScalingService {
     private Map<String, ScalingPolicy> policies = new ConcurrentHashMap<>();
     private Map<String, ScalingActivity> activities = new ConcurrentHashMap<>();
     private Map<String, InstanceRefresh> instanceRefreshes = new ConcurrentHashMap<>();
+    private Map<String, ScheduledAction> scheduledActions = new ConcurrentHashMap<>();
 
     @PostConstruct
     void initializeStorage()
@@ -61,6 +62,7 @@ public class AutoScalingService {
         this.policies = storageBacked("autoscaling-policies.json", new TypeReference<Map<String, ScalingPolicy>>() {});
         this.activities = storageBacked("autoscaling-activities.json", new TypeReference<Map<String, ScalingActivity>>() {});
         this.instanceRefreshes = storageBacked("autoscaling-instance-refreshes.json", new TypeReference<Map<String, InstanceRefresh>>() {});
+        this.scheduledActions = storageBacked("autoscaling-scheduled-actions.json", new TypeReference<Map<String, ScheduledAction>>() {});
     }
 
     private <V> Map<String, V> storageBacked(String fileName, TypeReference<Map<String, V>> typeReference)
@@ -585,6 +587,47 @@ public class AutoScalingService {
         groups.put(asgKey(region, name), asg);
     }
 
+    // ── Traffic sources ─────────────────────────────────────────────────────────
+    // AttachTrafficSources/DetachTrafficSources/DescribeTrafficSources is the modern,
+    // unified ASG-to-load-balancer wiring API (elb, elbv2, vpc-lattice), which
+    // aws_autoscaling_traffic_source_attachment uses instead of the older
+    // AttachLoadBalancerTargetGroups. "accept and remember" like the target-group
+    // attachment above - Floci has no real health-checking loop, so every attached
+    // traffic source is reported InService immediately.
+
+    public record TrafficSourceIdentifier(String identifier, String type) {}
+
+    public void attachTrafficSources(String region, String name, List<TrafficSourceIdentifier> sources) {
+        AutoScalingGroup asg = requireGroup(region, name);
+        for (TrafficSourceIdentifier source : sources) {
+            asg.getTrafficSourceTypeByIdentifier().put(source.identifier(),
+                    source.type() != null ? source.type() : "elbv2");
+        }
+        groups.put(asgKey(region, name), asg);
+    }
+
+    public void detachTrafficSources(String region, String name, List<TrafficSourceIdentifier> sources) {
+        AutoScalingGroup asg = requireGroup(region, name);
+        for (TrafficSourceIdentifier source : sources) {
+            asg.getTrafficSourceTypeByIdentifier().remove(source.identifier());
+        }
+        groups.put(asgKey(region, name), asg);
+    }
+
+    public Map<String, String> describeTrafficSources(String region, String name, String trafficSourceType) {
+        Map<String, String> all = requireGroup(region, name).getTrafficSourceTypeByIdentifier();
+        if (trafficSourceType == null || trafficSourceType.isBlank()) {
+            return all;
+        }
+        Map<String, String> filtered = new LinkedHashMap<>();
+        all.forEach((identifier, type) -> {
+            if (trafficSourceType.equals(type)) {
+                filtered.put(identifier, type);
+            }
+        });
+        return filtered;
+    }
+
     // ── Lifecycle hooks ────────────────────────────────────────────────────────
 
     public void putLifecycleHook(String region, String asgName, String hookName,
@@ -667,6 +710,49 @@ public class AutoScalingService {
                 .collect(Collectors.toList());
     }
 
+    // ── Scheduled actions ───────────────────────────────────────────────────────
+    // PutScheduledUpdateGroupAction/DescribeScheduledActions/DeleteScheduledAction -
+    // aws_autoscaling_schedule's whole lifecycle. Floci has no cron scheduler to
+    // actually run these, so - same "accept and remember" shape as scaling
+    // policies above - this only needs to record and read back the schedule
+    // definition itself; the AWS provider's own Read never expects a scheduled
+    // action to have fired inside an emulator.
+
+    public ScheduledAction putScheduledUpdateGroupAction(String region, String asgName, String actionName,
+                                                           Instant startTime, Instant endTime, String recurrence,
+                                                           String timeZone, Integer minSize, Integer maxSize,
+                                                           Integer desiredCapacity) {
+        requireGroup(region, asgName);
+        String key = scheduledActionKey(region, asgName, actionName);
+        ScheduledAction action = scheduledActions.computeIfAbsent(key, k -> new ScheduledAction());
+        action.setScheduledActionName(actionName);
+        action.setAutoScalingGroupName(asgName);
+        action.setScheduledActionArn(AwsArnUtils.Arn.of("autoscaling", region, regionResolver.getAccountId(),
+                "scheduledUpdateGroupAction:" + asgName + ":" + actionName).toString());
+        action.setStartTime(startTime);
+        action.setEndTime(endTime);
+        action.setRecurrence(recurrence);
+        action.setTimeZone(timeZone);
+        action.setMinSize(minSize);
+        action.setMaxSize(maxSize);
+        action.setDesiredCapacity(desiredCapacity);
+        action.setRegion(region);
+        scheduledActions.put(key, action);
+        return action;
+    }
+
+    public void deleteScheduledAction(String region, String asgName, String actionName) {
+        scheduledActions.remove(scheduledActionKey(region, asgName, actionName));
+    }
+
+    public List<ScheduledAction> describeScheduledActions(String region, String asgName, List<String> actionNames) {
+        return scheduledActions.values().stream()
+                .filter(a -> region.equals(a.getRegion()))
+                .filter(a -> asgName == null || asgName.equals(a.getAutoScalingGroupName()))
+                .filter(a -> actionNames == null || actionNames.isEmpty() || actionNames.contains(a.getScheduledActionName()))
+                .collect(Collectors.toList());
+    }
+
     // ── Scaling activities ─────────────────────────────────────────────────────
 
     public List<ScalingActivity> describeScalingActivities(String region, String asgName) {
@@ -728,6 +814,10 @@ public class AutoScalingService {
 
     private static String policyKey(String region, String asgName, String policyName) {
         return region + "::" + asgName + "::" + policyName;
+    }
+
+    private static String scheduledActionKey(String region, String asgName, String actionName) {
+        return region + "::" + asgName + "::" + actionName;
     }
 
     private static void validateLaunchSource(String launchConfigName,

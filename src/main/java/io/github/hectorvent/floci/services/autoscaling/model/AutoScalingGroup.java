@@ -33,6 +33,10 @@ public class AutoScalingGroup {
     private List<AsgInstance> instances = new ArrayList<>();
     private List<String> terminationPolicies = new ArrayList<>();
     private List<String> suspendedProcesses = new ArrayList<>();
+    // AttachTrafficSources (the modern elbv2/vpc-lattice ASG-to-load-balancer wiring API,
+    // which aws_autoscaling_traffic_source_attachment uses instead of the older
+    // AttachLoadBalancerTargetGroups) - identifier -> type ("elbv2", "elb", "vpc-lattice").
+    private Map<String, String> trafficSourceTypeByIdentifier = new ConcurrentHashMap<>();
     private Instant createdTime;
     private String region;
     private Map<String, String> tags = new ConcurrentHashMap<>();
@@ -100,6 +104,9 @@ public class AutoScalingGroup {
 
     public List<String> getSuspendedProcesses() { return suspendedProcesses; }
     public void setSuspendedProcesses(List<String> v) { this.suspendedProcesses = v; }
+
+    public Map<String, String> getTrafficSourceTypeByIdentifier() { return trafficSourceTypeByIdentifier; }
+    public void setTrafficSourceTypeByIdentifier(Map<String, String> v) { this.trafficSourceTypeByIdentifier = v; }
 
     public Instant getCreatedTime() { return createdTime; }
     public void setCreatedTime(Instant v) { this.createdTime = v; }
