@@ -20,6 +20,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.List;
+import java.util.UUID;
 import java.util.zip.GZIPOutputStream;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -46,6 +47,8 @@ class Ec2IntegrationTest {
     private static String subnetId;
     private static String securityGroupId;
     private static String keyPairId;
+    private static String keyPairName;
+    private static String importedKeyName;
     private static String igwId;
     private static String routeTableId;
     private static String rtbAssocId;
@@ -520,10 +523,14 @@ class Ec2IntegrationTest {
             .statusCode(200)
             .extract().path("RunInstancesResponse.instancesSet.item.instanceId");
 
+        // Per-invocation image name: CreateImage rejects a duplicate AMI name, and this image is
+        // never deregistered, so a fixed literal would collide with a leftover from an earlier
+        // pass through this class in the same JVM.
+        String imageName = "created-from-instance-" + UUID.randomUUID().toString().substring(0, 8);
         String amiId = given()
             .formParam("Action", "CreateImage")
             .formParam("InstanceId", imgInstanceId)
-            .formParam("Name", "created-from-instance")
+            .formParam("Name", imageName)
             .formParam("Description", "CreateImage test")
             .header("Authorization", AUTH_HEADER)
         .when()
@@ -542,7 +549,7 @@ class Ec2IntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("DescribeImagesResponse.imagesSet.item.name", equalTo("created-from-instance"));
+            .body("DescribeImagesResponse.imagesSet.item.name", equalTo(imageName));
 
         // The source instance is terminated here rather than left running: the
         // DescribeNetworkInterfaces pagination tests at @Order(92) assert that the
@@ -577,10 +584,14 @@ class Ec2IntegrationTest {
             .statusCode(200)
             .extract().path("RunInstancesResponse.instancesSet.item.instanceId");
 
+        // Per-invocation image name: CreateImage rejects a duplicate AMI name, and this image is
+        // never deregistered, so a fixed literal would collide with a leftover from an earlier
+        // pass through this class in the same JVM.
+        String imageName = "created-from-arm-instance-" + UUID.randomUUID().toString().substring(0, 8);
         String amiId = given()
             .formParam("Action", "CreateImage")
             .formParam("InstanceId", armInstanceId)
-            .formParam("Name", "created-from-arm-instance")
+            .formParam("Name", imageName)
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
@@ -630,9 +641,13 @@ class Ec2IntegrationTest {
     @Test
     @Order(10)
     void registerImageCreatesDescribableImageWithSnapshotMapping() {
+        // Per-invocation image name: RegisterImage rejects a duplicate AMI name, and this image
+        // is never deregistered, so a fixed literal would collide with a leftover from an
+        // earlier pass through this class in the same JVM.
+        String imageName = "test-image-" + UUID.randomUUID().toString().substring(0, 8);
         registeredImageId = given()
             .formParam("Action", "RegisterImage")
-            .formParam("Name", "test-image")
+            .formParam("Name", imageName)
             .formParam("Description", "test image")
             .formParam("Architecture", "x86_64")
             .formParam("RootDeviceName", "/dev/sda1")
@@ -652,7 +667,7 @@ class Ec2IntegrationTest {
         given()
             .formParam("Action", "DescribeImages")
             .formParam("Filter.1.Name", "name")
-            .formParam("Filter.1.Value.1", "test-image")
+            .formParam("Filter.1.Value.1", imageName)
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
@@ -1317,15 +1332,19 @@ class Ec2IntegrationTest {
     @Test
     @Order(40)
     void createKeyPair() {
+        // Generated fresh per invocation (rather than a fixed literal) so a second pass through
+        // this class in the same JVM doesn't collide with a key pair the first pass already
+        // created — CreateKeyPair rejects a duplicate KeyName.
+        keyPairName = "test-key-" + UUID.randomUUID().toString().substring(0, 8);
         keyPairId = given()
             .formParam("Action", "CreateKeyPair")
-            .formParam("KeyName", "test-key")
+            .formParam("KeyName", keyPairName)
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
         .then()
             .statusCode(200)
-            .body("CreateKeyPairResponse.keyName", equalTo("test-key"))
+            .body("CreateKeyPairResponse.keyName", equalTo(keyPairName))
             .body("CreateKeyPairResponse.keyMaterial", notNullValue())
             .extract().path("CreateKeyPairResponse.keyPairId");
     }
@@ -1335,13 +1354,13 @@ class Ec2IntegrationTest {
     void describeKeyPairs() {
         given()
             .formParam("Action", "DescribeKeyPairs")
-            .formParam("KeyName.1", "test-key")
+            .formParam("KeyName.1", keyPairName)
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
         .then()
             .statusCode(200)
-            .body("DescribeKeyPairsResponse.keySet.item.keyName", equalTo("test-key"));
+            .body("DescribeKeyPairsResponse.keySet.item.keyName", equalTo(keyPairName));
     }
 
     @Test
@@ -1361,16 +1380,19 @@ class Ec2IntegrationTest {
     @Test
     @Order(39)
     void importKeyPair() {
+        // Generated fresh per invocation: this key pair is never deleted, so a fixed literal
+        // would collide with a leftover from an earlier pass through this class in the same JVM.
+        importedKeyName = "imported-key-" + UUID.randomUUID().toString().substring(0, 8);
         given()
             .formParam("Action", "ImportKeyPair")
-            .formParam("KeyName", "imported-key")
+            .formParam("KeyName", importedKeyName)
             .formParam("PublicKeyMaterial", "c3NoLXJzYSBBQUFBQjNOemFDMXljMkVBQUFBREFRQUJBQUFCQVFD")
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
         .then()
             .statusCode(200)
-            .body("ImportKeyPairResponse.keyName", equalTo("imported-key"))
+            .body("ImportKeyPairResponse.keyName", equalTo(importedKeyName))
             .body("ImportKeyPairResponse.keyPairId", startsWith("key-"));
     }
 
@@ -1379,7 +1401,7 @@ class Ec2IntegrationTest {
     void importKeyPairRejectsDuplicateKeyName() {
         given()
             .formParam("Action", "ImportKeyPair")
-            .formParam("KeyName", "imported-key")
+            .formParam("KeyName", importedKeyName)
             .formParam("PublicKeyMaterial", "c3NoLXJzYSBBQUFBQjNOemFDMXljMkVBQUFBREFRQUJBQUFCQVFD")
             .header("Authorization", AUTH_HEADER)
         .when()
@@ -3360,6 +3382,13 @@ class Ec2IntegrationTest {
     @Test
     @Order(150)
     void spotInstanceLifecycle() {
+        // Per-invocation tag value: DescribeSpotInstanceRequests has no owner scoping beyond
+        // region, and this request's tag is never cleaned up (only cancelled). A fixed tag value
+        // would match a leftover cancelled request from an earlier pass through this class in
+        // the same JVM too, and since the in-memory store's scan has no defined ordering, step 3
+        // below could pick either match at item[0] and assert the wrong spotInstanceRequestId.
+        String spotTagValue = "SpotValue-" + UUID.randomUUID().toString().substring(0, 8);
+
         // 1. Request Spot Instance
         String spotRequestId = given()
             .formParam("Action", "RequestSpotInstances")
@@ -3370,7 +3399,7 @@ class Ec2IntegrationTest {
             .formParam("LaunchSpecification.InstanceType", "t2.micro")
             .formParam("TagSpecification.1.ResourceType", "spot-instances-request")
             .formParam("TagSpecification.1.Tag.1.Key", "SpotKey")
-            .formParam("TagSpecification.1.Tag.1.Value", "SpotValue")
+            .formParam("TagSpecification.1.Tag.1.Value", spotTagValue)
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
@@ -3384,7 +3413,7 @@ class Ec2IntegrationTest {
             .body("RequestSpotInstancesResponse.spotInstanceRequestSet.item[0].launchSpecification.imageId", equalTo("ami-0abcdef1234567890"))
             .body("RequestSpotInstancesResponse.spotInstanceRequestSet.item[0].productDescription", equalTo("Linux/UNIX"))
             .body("RequestSpotInstancesResponse.spotInstanceRequestSet.item[0].tagSet.item[0].key", equalTo("SpotKey"))
-            .body("RequestSpotInstancesResponse.spotInstanceRequestSet.item[0].tagSet.item[0].value", equalTo("SpotValue"))
+            .body("RequestSpotInstancesResponse.spotInstanceRequestSet.item[0].tagSet.item[0].value", equalTo(spotTagValue))
             .extract().path("RequestSpotInstancesResponse.spotInstanceRequestSet.item[0].spotInstanceRequestId");
 
         // 2. Describe Spot Instance Request by ID
@@ -3403,7 +3432,7 @@ class Ec2IntegrationTest {
         given()
             .formParam("Action", "DescribeSpotInstanceRequests")
             .formParam("Filter.1.Name", "tag:SpotKey")
-            .formParam("Filter.1.Value.1", "SpotValue")
+            .formParam("Filter.1.Value.1", spotTagValue)
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
