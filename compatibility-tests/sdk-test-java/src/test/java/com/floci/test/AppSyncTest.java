@@ -216,7 +216,7 @@ class AppSyncTest {
         List<Map<String, Object>> errors = (List<Map<String, Object>>) body.get("errors");
         assertThat(errors).isNotEmpty();
         assertThat(errors.get(0).get("errorType")).isEqualTo("UnauthorizedException");
-        assertThat(errors.get(0).get("message")).isEqualTo("You are not authorized to make this call.");
+        assertThat(errors.get(0).get("message")).isEqualTo("Missing authorization header");
         assertThat(body.get("data")).isNull();
         assertThat(body.get("__type")).isNull();
     }

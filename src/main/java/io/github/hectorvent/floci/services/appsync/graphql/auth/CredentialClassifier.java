@@ -9,16 +9,17 @@ public final class CredentialClassifier {
     }
 
     public static ClassifiedMode classify(Map<String, String> headers) {
+        String authorization = header(headers, "authorization");
+        if (authorization != null && !authorization.isBlank()
+                && authorization.startsWith("AWS4-HMAC-SHA256")) {
+            return ClassifiedMode.AWS_IAM;
+        }
         String apiKey = header(headers, "x-api-key");
-        if (apiKey != null) {
+        if (apiKey != null && !apiKey.isBlank()) {
             return ClassifiedMode.API_KEY;
         }
-        String authorization = header(headers, "authorization");
         if (authorization == null || authorization.isBlank()) {
             return ClassifiedMode.NONE;
-        }
-        if (authorization.startsWith("AWS4-HMAC-SHA256")) {
-            return ClassifiedMode.AWS_IAM;
         }
         if (isBearerJwt(authorization)) {
             return ClassifiedMode.BEARER_JWT;

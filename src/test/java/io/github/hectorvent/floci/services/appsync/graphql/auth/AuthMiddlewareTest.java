@@ -63,7 +63,7 @@ class AuthMiddlewareTest {
         AppSyncTransportException ex = assertThrows(AppSyncTransportException.class,
                 () -> middleware.authenticate(Map.of(), api, info));
         assertEquals(401, ex.getHttpStatus());
-        assertEquals("You are not authorized to make this call.", ex.getMessage());
+        assertEquals(AppSyncAuth.MISSING_AUTHORIZATION_HEADER, ex.getMessage());
     }
 
     @Test
@@ -75,20 +75,31 @@ class AuthMiddlewareTest {
     }
 
     @Test
-    void apiKeyWinsOverSigV4() {
+    void sigV4WinsOverApiKeyAndDoesNotFallBack() {
         GraphqlApi api = api(AuthenticationType.AWS_IAM);
         AdditionalAuthenticationProvider extra = new AdditionalAuthenticationProvider();
         extra.setAuthenticationType(AuthenticationType.API_KEY);
         api.setAdditionalAuthenticationProviders(List.of(extra));
-        when(apiKeyAuthValidator.validate("api-1", "da2-abc")).thenReturn(new ApiKey());
+        when(iamAuthValidator.validateRequest(any(), eq("api-1"), any())).thenReturn(Map.of("user", "test"));
 
         AppSyncAuthContext ctx = middleware.authenticate(Map.of(
                 "x-api-key", "da2-abc",
                 "Authorization", "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/appsync/aws4_request"),
                 api, info);
 
-        assertEquals(AuthenticationType.API_KEY, ctx.authenticationType());
-        verify(iamAuthValidator, never()).validateRequest(any(), any(), any());
+        assertEquals(AuthenticationType.AWS_IAM, ctx.authenticationType());
+        verify(apiKeyAuthValidator, never()).validate(any(), any());
+    }
+
+    @Test
+    void sigV4DoesNotFallBackToApiKeyWhenIamIsNotConfigured() {
+        GraphqlApi api = api(AuthenticationType.API_KEY);
+        AppSyncTransportException ex = assertThrows(AppSyncTransportException.class, () -> middleware.authenticate(Map.of(
+                "x-api-key", "da2-abc",
+                "Authorization", "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/appsync/aws4_request"),
+                api, info));
+        assertEquals(401, ex.getHttpStatus());
+        verify(apiKeyAuthValidator, never()).validate(any(), any());
     }
 
     @Test

@@ -75,7 +75,7 @@ class AppSyncAuthIntegrationTest {
             .header("x-amzn-errortype", containsString("UnauthorizedException"))
             .header("x-amz-request-id", not(nullValue()))
             .body("errors[0].errorType", equalTo("UnauthorizedException"))
-            .body("errors[0].message", equalTo("You are not authorized to make this call."))
+            .body("errors[0].message", equalTo("Missing authorization header"))
             .body("data", nullValue())
             .body("__type", nullValue());
     }
@@ -116,6 +116,25 @@ class AppSyncAuthIntegrationTest {
     }
 
     @Test
+    void sigV4PlusValidApiKeyDoesNotFallBackToApiKey() {
+        String apiId = createApi("nofallback-" + UUID.randomUUID().toString().substring(0, 8));
+        startSchema(apiId, "type Query { hello: String }");
+        awaitSchemaSuccess(apiId);
+        String apiKey = createApiKey(apiId);
+
+        given()
+            .contentType("application/json")
+            .header("x-api-key", apiKey)
+            .header("Authorization", MGMT_AUTH)
+            .body("{\"query\":\"{ hello }\"}")
+        .when()
+            .post("/v1/apis/" + apiId + "/graphql")
+        .then()
+            .statusCode(401)
+            .header("x-amzn-errortype", containsString("UnauthorizedException"));
+    }
+
+    @Test
     void unknownApiReturns404BeforeAuth() {
         given()
             .contentType("application/json")
@@ -139,7 +158,8 @@ class AppSyncAuthIntegrationTest {
             .post("/v1/apis/" + bareApiId + "/graphql")
         .then()
             .statusCode(401)
-            .header("x-amzn-errortype", containsString("UnauthorizedException"));
+            .header("x-amzn-errortype", containsString("UnauthorizedException"))
+            .body("errors[0].message", equalTo("Missing authorization header"));
     }
 
     @Test

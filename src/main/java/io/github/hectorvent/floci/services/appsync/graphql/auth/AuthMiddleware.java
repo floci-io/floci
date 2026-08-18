@@ -41,7 +41,7 @@ public class AuthMiddleware {
         ClassifiedMode classified = CredentialClassifier.classify(headers);
         Set<AuthenticationType> configured = configuredModes(api);
         return switch (classified) {
-            case NONE -> throw AppSyncAuth.unauthorized();
+            case NONE -> throw AppSyncAuth.missingAuthorizationHeader();
             case API_KEY -> authenticateApiKey(headers, api, configured, info);
             case AWS_IAM -> authenticateIam(headers, api, configured, info);
             case BEARER_JWT -> authenticateBearer(headers, api, configured, info);

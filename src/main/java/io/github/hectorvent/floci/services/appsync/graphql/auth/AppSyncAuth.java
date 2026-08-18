@@ -6,6 +6,7 @@ public final class AppSyncAuth {
 
     public static final String UNAUTHORIZED_TYPE = "UnauthorizedException";
     public static final String UNAUTHORIZED_MESSAGE = "You are not authorized to make this call.";
+    public static final String MISSING_AUTHORIZATION_HEADER = "Missing authorization header";
 
     public static final String AUTH_TYPE_API_KEY = "API Key Authorization";
     public static final String AUTH_TYPE_IAM = "IAM Authorization";
@@ -18,5 +19,9 @@ public final class AppSyncAuth {
 
     public static AppSyncTransportException unauthorized() {
         return new AppSyncTransportException(401, UNAUTHORIZED_TYPE, UNAUTHORIZED_MESSAGE);
+    }
+
+    public static AppSyncTransportException missingAuthorizationHeader() {
+        return new AppSyncTransportException(401, UNAUTHORIZED_TYPE, MISSING_AUTHORIZATION_HEADER);
     }
 }

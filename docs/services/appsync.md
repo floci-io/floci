@@ -195,7 +195,7 @@ Responses are `application/json` with AWS AppSync wire shapes (`data` / `errors[
 | Unknown `apiId` | 404 | `NotFoundException` |
 | API exists but no executable schema (incl. PROCESSING) | **502** | `GraphQLSchemaException` — `No schema definition exists.` + `x-amzn-errortype` |
 | Unexpected failure | 500 | `InternalFailure` |
-| Missing/invalid/expired credentials, unconfigured mode, Lambda deny | **401** | `UnauthorizedException` — GraphQL does not run; `x-amzn-errortype` is set |
+| Missing/invalid/expired credentials, unconfigured mode, Lambda deny | **401** | `UnauthorizedException` — GraphQL does not run; `x-amzn-errortype` is set. Missing headers use message `Missing authorization header`. |
 | Field directive mismatch, Cognito group miss, Lambda `deniedFields`, IAM field DENY | **200** | Field is `null` and `errors[]` contains `UnauthorizedException` (no `x-amzn-errortype`) |
 
 **Evidence for data-plane statuses** (empty/`[]`/`{}` → 400; missing schema → 502): AppSync team sample in [graphql/graphql-over-http#81](https://github.com/graphql/graphql-over-http/issues/81) (@robzhu). The management API Reference lists `GraphQLSchemaException` as HTTP 400 for “schema not valid” on management operations — a different surface than the GraphQL execute data plane.
@@ -204,12 +204,14 @@ Responses are `application/json` with AWS AppSync wire shapes (`data` / `errors[
 
 Request auth runs after Content-Type and body parse and after API lookup (unknown `apiId` is still 404). It runs before schema lookup, so a missing schema with no credentials is 401, not 502.
 
-Headers are classified by **shape** (not primary-then-fallback). If both `x-api-key` and `Authorization` are present, **`x-api-key` wins**.
+Headers are classified by **shape** (not primary-then-fallback). If both `x-api-key` and SigV4 `Authorization` are present, **SigV4 wins**. AppSync does not fall back to the API key when IAM validation fails.
+
+Missing required auth headers return HTTP **401** `UnauthorizedException` with message `Missing authorization header`. Invalid or expired credentials that are present still return 401 with `You are not authorized to make this call.`
 
 | Header shape | Mode |
 |---|---|
+| `Authorization` starts with `AWS4-HMAC-SHA256` | `AWS_IAM` (wins over `x-api-key` if both are present) |
 | `x-api-key` present | `API_KEY` |
-| `Authorization` starts with `AWS4-HMAC-SHA256` | `AWS_IAM` |
 | `Authorization: Bearer <jwt>` | Cognito and/or OIDC (matched by `iss` / `aud` or `azp`) |
 | Other `Authorization` | `AWS_LAMBDA` |
 
