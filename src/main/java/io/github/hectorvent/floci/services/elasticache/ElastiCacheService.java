@@ -3,11 +3,15 @@ package io.github.hectorvent.floci.services.elasticache;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheContainerHandle;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheContainerManager;
 import io.github.hectorvent.floci.services.elasticache.model.AuthMode;
+import io.github.hectorvent.floci.services.elasticache.model.CacheSubnetGroup;
 import io.github.hectorvent.floci.services.elasticache.model.Endpoint;
 import io.github.hectorvent.floci.services.elasticache.model.ElastiCacheUser;
 import io.github.hectorvent.floci.services.elasticache.model.ReplicationGroup;
@@ -19,8 +23,10 @@ import org.jboss.logging.Logger;
 
 import java.time.Instant;
 import java.util.Collection;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -35,8 +41,11 @@ public class ElastiCacheService {
 
     private final StorageBackend<String, ReplicationGroup> groups;
     private final StorageBackend<String, ElastiCacheUser> users;
+    private final StorageBackend<String, CacheSubnetGroup> subnetGroups;
     private final ElastiCacheContainerManager containerManager;
     private final ElastiCacheProxyManager proxyManager;
+    private final Ec2Service ec2Service;
+    private final RegionResolver regionResolver;
     private final EmulatorConfig config;
     private final Set<Integer> usedPorts = ConcurrentHashMap.newKeySet();
     private final Set<String> provisioningGroupIds = ConcurrentHashMap.newKeySet();
@@ -44,15 +53,21 @@ public class ElastiCacheService {
     @Inject
     public ElastiCacheService(ElastiCacheContainerManager containerManager,
                               ElastiCacheProxyManager proxyManager,
+                              Ec2Service ec2Service,
+                              RegionResolver regionResolver,
                               StorageFactory storageFactory,
                               EmulatorConfig config) {
         this.containerManager = containerManager;
         this.proxyManager = proxyManager;
+        this.ec2Service = ec2Service;
+        this.regionResolver = regionResolver;
         this.config = config;
         this.groups = storageFactory.create("elasticache", "elasticache-groups.json",
                 new TypeReference<Map<String, ReplicationGroup>>() {});
         this.users = storageFactory.create("elasticache", "elasticache-users.json",
                 new TypeReference<Map<String, ElastiCacheUser>>() {});
+        this.subnetGroups = storageFactory.create("elasticache", "elasticache-subnet-groups.json",
+                new TypeReference<Map<String, CacheSubnetGroup>>() {});
     }
 
     public ReplicationGroup createReplicationGroup(String groupId, String description,
@@ -276,6 +291,103 @@ public class ElastiCacheService {
                 .map(id -> users.get(id).orElse(null))
                 .filter(u -> u != null && username.equals(u.getUserName()) && u.getAuthMode() == AuthMode.PASSWORD)
                 .anyMatch(u -> u.getPasswords() != null && u.getPasswords().contains(password));
+    }
+
+    // ── Cache Subnet Groups ─────────────────────────────────────────────────────
+
+    public CacheSubnetGroup createCacheSubnetGroup(String name, String description, List<String> subnetIds) {
+        return createCacheSubnetGroup(name, description, subnetIds, regionResolver.getDefaultRegion());
+    }
+
+    public CacheSubnetGroup createCacheSubnetGroup(String name, String description, List<String> subnetIds, String region) {
+        if (name == null || name.isBlank()) {
+            throw new AwsException("MissingParameter",
+                    "The request must contain the parameter CacheSubnetGroupName.", 400);
+        }
+        if (subnetGroups.get(name).isPresent()) {
+            throw new AwsException("CacheSubnetGroupAlreadyExists",
+                    "Cache subnet group " + name + " already exists.", 400);
+        }
+        if (subnetIds == null || subnetIds.isEmpty()) {
+            throw new AwsException("MissingParameter",
+                    "The request must contain the parameter SubnetIds.", 400);
+        }
+
+        CacheSubnetGroup group = buildCacheSubnetGroup(name, description, subnetIds, effectiveRegion(region));
+        subnetGroups.put(name, group);
+        LOG.infov("Cache subnet group {0} created with {1} subnets", name, String.valueOf(subnetIds.size()));
+        return group;
+    }
+
+    public Collection<CacheSubnetGroup> listCacheSubnetGroups(String filterName) {
+        if (filterName != null && !filterName.isBlank()) {
+            return List.of(getCacheSubnetGroup(filterName));
+        }
+        return subnetGroups.scan(k -> true);
+    }
+
+    public CacheSubnetGroup getCacheSubnetGroup(String name) {
+        return subnetGroups.get(name).orElseThrow(() ->
+                new AwsException("CacheSubnetGroupNotFoundFault",
+                        "Cache subnet group " + name + " not found.", 404));
+    }
+
+    public CacheSubnetGroup modifyCacheSubnetGroup(String name, String description, List<String> subnetIds) {
+        return modifyCacheSubnetGroup(name, description, subnetIds, regionResolver.getDefaultRegion());
+    }
+
+    public CacheSubnetGroup modifyCacheSubnetGroup(String name, String description, List<String> subnetIds, String region) {
+        CacheSubnetGroup existing = getCacheSubnetGroup(name);
+        String effectiveDescription = description != null && !description.isBlank()
+                ? description
+                : existing.getDescription();
+        List<String> effectiveSubnetIds = subnetIds != null && !subnetIds.isEmpty()
+                ? subnetIds
+                : existing.getSubnetIds();
+
+        CacheSubnetGroup group = buildCacheSubnetGroup(name, effectiveDescription, effectiveSubnetIds, effectiveRegion(region));
+        subnetGroups.put(name, group);
+        return group;
+    }
+
+    public void deleteCacheSubnetGroup(String name) {
+        if (subnetGroups.get(name).isEmpty()) {
+            throw new AwsException("CacheSubnetGroupNotFoundFault",
+                    "Cache subnet group " + name + " not found.", 404);
+        }
+        subnetGroups.delete(name);
+        LOG.infov("Cache subnet group {0} deleted", name);
+    }
+
+    private CacheSubnetGroup buildCacheSubnetGroup(String name, String description, List<String> subnetIds, String region) {
+        List<Subnet> resolvedSubnets = ec2Service.describeSubnets(region, subnetIds, Map.of());
+        if (resolvedSubnets.size() != subnetIds.size()) {
+            throw new AwsException("InvalidSubnet",
+                    "One or more subnets for cache subnet group " + name + " do not exist.", 400);
+        }
+
+        String vpcId = resolvedSubnets.getFirst().getVpcId();
+        boolean sameVpc = resolvedSubnets.stream()
+                .map(Subnet::getVpcId)
+                .filter(Objects::nonNull)
+                .allMatch(vpcId::equals);
+        if (!sameVpc) {
+            throw new AwsException("InvalidParameterValue",
+                    "Cache subnet group " + name + " contains subnets in multiple VPCs.", 400);
+        }
+
+        Map<String, String> subnetAvailabilityZones = new LinkedHashMap<>();
+        for (Subnet subnet : resolvedSubnets) {
+            subnetAvailabilityZones.put(subnet.getSubnetId(), subnet.getAvailabilityZone());
+        }
+
+        CacheSubnetGroup group = new CacheSubnetGroup(name, description, vpcId, subnetIds, subnetAvailabilityZones);
+        group.setArn(regionResolver.buildArn("elasticache", region, "subnetgroup:" + name));
+        return group;
+    }
+
+    private String effectiveRegion(String region) {
+        return region == null || region.isBlank() ? regionResolver.getDefaultRegion() : region;
     }
 
     private String resolveEndpointHost() {

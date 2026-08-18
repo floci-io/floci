@@ -2,8 +2,10 @@ package io.github.hectorvent.floci.services.elasticache;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheContainerHandle;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheContainerManager;
 import io.github.hectorvent.floci.services.elasticache.model.AuthMode;
@@ -36,11 +38,15 @@ class ElastiCacheServiceTest {
     private ElastiCacheService service;
     private ElastiCacheContainerManager containerManager;
     private ElastiCacheProxyManager proxyManager;
+    private Ec2Service ec2Service;
+    private RegionResolver regionResolver;
 
     @BeforeEach
     void setUp() {
         containerManager = mock(ElastiCacheContainerManager.class);
         proxyManager = mock(ElastiCacheProxyManager.class);
+        ec2Service = mock(Ec2Service.class);
+        regionResolver = new RegionResolver("us-east-1", "123456789012");
         StorageFactory storageFactory = mock(StorageFactory.class);
         EmulatorConfig config = mock(EmulatorConfig.class);
 
@@ -58,7 +64,41 @@ class ElastiCacheServiceTest {
                 .thenReturn(new ElastiCacheContainerHandle("cid", "grp", "localhost", 6379));
         doNothing().when(proxyManager).startProxy(anyString(), any(), anyInt(), anyString(), anyInt(), any());
 
-        service = new ElastiCacheService(containerManager, proxyManager, storageFactory, config);
+        when(ec2Service.describeSubnets(eq("us-east-1"), any(), any()))
+                .thenAnswer(invocation -> {
+                    @SuppressWarnings("unchecked")
+                    List<String> subnetIds = invocation.getArgument(1, List.class);
+                    java.util.Map<String, io.github.hectorvent.floci.services.ec2.model.Subnet> byId =
+                            defaultSubnets().stream().collect(
+                                    java.util.stream.Collectors.toMap(
+                                            io.github.hectorvent.floci.services.ec2.model.Subnet::getSubnetId,
+                                            subnet -> subnet));
+                    if (subnetIds == null || subnetIds.isEmpty()) {
+                        return defaultSubnets();
+                    }
+                    return subnetIds.stream()
+                            .map(byId::get)
+                            .filter(java.util.Objects::nonNull)
+                            .toList();
+                });
+
+        service = new ElastiCacheService(containerManager, proxyManager, ec2Service, regionResolver, storageFactory, config);
+    }
+
+    private static List<io.github.hectorvent.floci.services.ec2.model.Subnet> defaultSubnets() {
+        return List.of(
+                subnet("subnet-default-a", "vpc-default", "us-east-1a"),
+                subnet("subnet-default-b", "vpc-default", "us-east-1b"));
+    }
+
+    private static io.github.hectorvent.floci.services.ec2.model.Subnet subnet(
+            String subnetId, String vpcId, String availabilityZone) {
+        io.github.hectorvent.floci.services.ec2.model.Subnet subnet =
+                new io.github.hectorvent.floci.services.ec2.model.Subnet();
+        subnet.setSubnetId(subnetId);
+        subnet.setVpcId(vpcId);
+        subnet.setAvailabilityZone(availabilityZone);
+        return subnet;
     }
 
     @Test
@@ -207,5 +247,108 @@ class ElastiCacheServiceTest {
         // Delete must not reach for a container that was never created.
         service.deleteReplicationGroup("no-docker-grp");
         verify(containerManager, never()).stop(any());
+    }
+
+    // ── Cache Subnet Groups ─────────────────────────────────────────────────────
+
+    @Test
+    void cacheSubnetGroupRoundTrip() {
+        io.github.hectorvent.floci.services.elasticache.model.CacheSubnetGroup group =
+                service.createCacheSubnetGroup("my-subnet-group", "test group",
+                        List.of("subnet-default-a", "subnet-default-b"));
+
+        assertEquals("my-subnet-group", group.getCacheSubnetGroupName());
+        assertEquals("test group", group.getDescription());
+        assertEquals("vpc-default", group.getVpcId());
+        assertEquals(List.of("subnet-default-a", "subnet-default-b"), group.getSubnetIds());
+        assertEquals("arn:aws:elasticache:us-east-1:123456789012:subnetgroup:my-subnet-group", group.getArn());
+
+        assertEquals(1, service.listCacheSubnetGroups("my-subnet-group").size());
+        assertEquals("my-subnet-group",
+                service.getCacheSubnetGroup("my-subnet-group").getCacheSubnetGroupName());
+
+        service.deleteCacheSubnetGroup("my-subnet-group");
+        AwsException missing = assertThrows(AwsException.class,
+                () -> service.getCacheSubnetGroup("my-subnet-group"));
+        assertEquals("CacheSubnetGroupNotFoundFault", missing.getErrorCode());
+        assertEquals(404, missing.getHttpStatus());
+    }
+
+    @Test
+    void createCacheSubnetGroupRejectsDuplicateName() {
+        service.createCacheSubnetGroup("dup-group", "desc", List.of("subnet-default-a"));
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.createCacheSubnetGroup("dup-group", "desc", List.of("subnet-default-a")));
+
+        assertEquals("CacheSubnetGroupAlreadyExists", exception.getErrorCode());
+    }
+
+    @Test
+    void createCacheSubnetGroupRequiresSubnetIds() {
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.createCacheSubnetGroup("empty-group", "desc", List.of()));
+
+        assertEquals("MissingParameter", exception.getErrorCode());
+    }
+
+    @Test
+    void createCacheSubnetGroupRequiresName() {
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.createCacheSubnetGroup(null, "desc", List.of("subnet-default-a")));
+
+        assertEquals("MissingParameter", exception.getErrorCode());
+    }
+
+    @Test
+    void createCacheSubnetGroupRejectsUnknownSubnet() {
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.createCacheSubnetGroup("bad-group", "desc", List.of("subnet-does-not-exist")));
+
+        assertEquals("InvalidSubnet", exception.getErrorCode());
+    }
+
+    @Test
+    void listCacheSubnetGroupsFaultsForMissingName() {
+        AwsException missing = assertThrows(AwsException.class,
+                () -> service.listCacheSubnetGroups("does-not-exist"));
+        assertEquals("CacheSubnetGroupNotFoundFault", missing.getErrorCode());
+        assertEquals(404, missing.getHttpStatus());
+    }
+
+    @Test
+    void deleteCacheSubnetGroupFaultsForMissingName() {
+        AwsException missing = assertThrows(AwsException.class,
+                () -> service.deleteCacheSubnetGroup("does-not-exist"));
+        assertEquals("CacheSubnetGroupNotFoundFault", missing.getErrorCode());
+        assertEquals(404, missing.getHttpStatus());
+    }
+
+    @Test
+    void modifyCacheSubnetGroupUpdatesSubnetsAndKeepsDescriptionWhenOmitted() {
+        service.createCacheSubnetGroup("mod-group", "original desc",
+                List.of("subnet-default-a", "subnet-default-b"));
+
+        io.github.hectorvent.floci.services.elasticache.model.CacheSubnetGroup updated =
+                service.modifyCacheSubnetGroup("mod-group", null, List.of("subnet-default-a"));
+
+        assertEquals("original desc", updated.getDescription());
+        assertEquals(List.of("subnet-default-a"), updated.getSubnetIds());
+    }
+
+    @Test
+    void createCacheSubnetGroupUsesSuppliedRegionForSubnetLookup() {
+        List<String> subnetIds = List.of("subnet-west-a", "subnet-west-b");
+        when(ec2Service.describeSubnets(eq("us-west-2"), eq(subnetIds), eq(java.util.Map.of())))
+                .thenReturn(List.of(
+                        subnet("subnet-west-a", "vpc-west", "us-west-2a"),
+                        subnet("subnet-west-b", "vpc-west", "us-west-2b")));
+
+        io.github.hectorvent.floci.services.elasticache.model.CacheSubnetGroup group =
+                service.createCacheSubnetGroup("west-subnets", "desc", subnetIds, "us-west-2");
+
+        assertEquals("vpc-west", group.getVpcId());
+        assertEquals("arn:aws:elasticache:us-west-2:123456789012:subnetgroup:west-subnets", group.getArn());
+        verify(ec2Service).describeSubnets(eq("us-west-2"), eq(subnetIds), eq(java.util.Map.of()));
     }
 }
