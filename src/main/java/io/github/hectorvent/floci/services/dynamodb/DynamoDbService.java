@@ -785,8 +785,13 @@ public class DynamoDbService {
         List<JsonNode> evaluatedItems = results;
         JsonNode lastEvaluatedKey = null;
 
-        // Apply Limit (stops at N items)
-        if (limit != null && limit > 0 && evaluatedItems.size() > limit) {
+        // Apply Limit (stops at N items). DynamoDB does not look ahead: whenever a
+        // read stops at the Limit boundary it returns a LastEvaluatedKey, even when
+        // the boundary happens to be the last item of the result set. The client
+        // only learns it reached the end when a follow-up request comes back without
+        // a LastEvaluatedKey ("the absence of LastEvaluatedKey is the only way to
+        // know that you have reached the end of the result set").
+        if (limit != null && limit > 0 && evaluatedItems.size() >= limit) {
             JsonNode lastItem = evaluatedItems.get(limit - 1);
             lastEvaluatedKey = buildKeyNode(table, lastItem, pkName, sortKeyNames, indexName != null);
             evaluatedItems = new ArrayList<>(evaluatedItems.subList(0, limit));
@@ -881,12 +886,13 @@ public class DynamoDbService {
                         && (scanFilter == null || matchesScanFilter(item, scanFilter));
                 if (matched) results.add(item);
             }
-            // Limit caps SCANNED items (those read), not matched items. Stop at the
-            // limit and surface a cursor when more items remain to be examined.
+            // Limit caps SCANNED items (those read), not matched items. DynamoDB does
+            // not look ahead when it stops at the Limit boundary: it always surfaces a
+            // cursor, even when the boundary happens to be the last item of the result
+            // set. The client only learns it reached the end when a follow-up request
+            // comes back without a LastEvaluatedKey.
             if (limit != null && limit > 0 && totalScanned >= limit) {
-                if (it.hasNext()) {
-                    lastEvaluatedKey = buildKeyNode(table, item, lekPkName, lekSkName, indexScan);
-                }
+                lastEvaluatedKey = buildKeyNode(table, item, lekPkName, lekSkName, indexScan);
                 break;
             }
         }
