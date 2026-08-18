@@ -43,7 +43,7 @@ public class AuthorizationDataFetcher implements DataFetcher<Object> {
         if (!authorize(environment)) {
             return DataFetcherResult.newResult()
                     .data(null)
-                    .error(AppSyncFieldUnauthorizedException.from(environment))
+                    .error(AppSyncFieldUnauthorizedException.from(environment, fieldName, typeName))
                     .build();
         }
         return delegate == null ? null : delegate.get(environment);

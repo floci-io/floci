@@ -7,6 +7,11 @@ public final class AppSyncAuth {
     public static final String UNAUTHORIZED_TYPE = "UnauthorizedException";
     public static final String UNAUTHORIZED_MESSAGE = "You are not authorized to make this call.";
     public static final String MISSING_AUTHORIZATION_HEADER = "Missing authorization header";
+    public static final String FIELD_UNAUTHORIZED_TYPE = "Unauthorized";
+
+    public static String fieldUnauthorizedMessage(String fieldName, String typeName) {
+        return "Not Authorized to access " + fieldName + " on type " + typeName;
+    }
 
     public static final String AUTH_TYPE_API_KEY = "API Key Authorization";
     public static final String AUTH_TYPE_IAM = "IAM Authorization";

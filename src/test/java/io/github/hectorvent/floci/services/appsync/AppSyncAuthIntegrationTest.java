@@ -195,8 +195,8 @@ class AppSyncAuthIntegrationTest {
             .statusCode(200)
             .header("x-amzn-errortype", nullValue())
             .body("data.hello", nullValue())
-            .body("errors[0].errorType", equalTo("UnauthorizedException"))
-            .body("errors[0].message", equalTo("You are not authorized to make this call."))
+            .body("errors[0].errorType", equalTo("Unauthorized"))
+            .body("errors[0].message", equalTo("Not Authorized to access hello on type Query"))
             .body("errors[0].path", equalTo(java.util.List.of("hello")));
     }
 

@@ -54,8 +54,8 @@ class AuthorizationDataFetcherTest {
         assertEquals(null, dataHello(response));
         @SuppressWarnings("unchecked")
         Map<String, Object> error = ((List<Map<String, Object>>) response.get("errors")).get(0);
-        assertEquals("UnauthorizedException", error.get("errorType"));
-        assertEquals("You are not authorized to make this call.", error.get("message"));
+        assertEquals("Unauthorized", error.get("errorType"));
+        assertEquals("Not Authorized to access hello on type Query", error.get("message"));
         assertEquals(List.of("hello"), error.get("path"));
         assertNull(error.get("errorInfo"));
     }
@@ -69,7 +69,7 @@ class AuthorizationDataFetcherTest {
         api.setAdditionalAuthenticationProviders(List.of(extra));
 
         Map<String, Object> response = execute(schema, "{ hello }", iamContext(api));
-        assertEquals("UnauthorizedException", firstErrorType(response));
+        assertEquals("Unauthorized", firstErrorType(response));
     }
 
     @Test
@@ -97,7 +97,7 @@ class AuthorizationDataFetcherTest {
         extra.setAuthenticationType(AuthenticationType.AWS_IAM);
         api.setAdditionalAuthenticationProviders(List.of(extra));
 
-        assertEquals("UnauthorizedException", firstErrorType(execute(schema, "{ hello }", apiKeyContext(api))));
+        assertEquals("Unauthorized", firstErrorType(execute(schema, "{ hello }", apiKeyContext(api))));
         assertNull(execute(schema, "{ hello }", iamContext(api)).get("errors"));
     }
 
@@ -140,7 +140,7 @@ class AuthorizationDataFetcherTest {
         AppSyncAuthContext ctx = new AppSyncAuthContext(
                 identity, AppSyncAuth.AUTH_TYPE_COGNITO, AuthenticationType.AMAZON_COGNITO_USER_POOLS,
                 Set.of(), api, null, "us-east-1", "000000000000");
-        assertEquals("UnauthorizedException", firstErrorType(execute(schema, "{ secret }", ctx)));
+        assertEquals("Unauthorized", firstErrorType(execute(schema, "{ secret }", ctx)));
     }
 
     @Test
@@ -175,7 +175,7 @@ class AuthorizationDataFetcherTest {
         AppSyncAuthContext ctx = new AppSyncAuthContext(
                 IdentityBuilder.lambda(Map.of()), AppSyncAuth.AUTH_TYPE_LAMBDA, AuthenticationType.AWS_LAMBDA,
                 Set.of(arn), api, null, "us-east-1", "000000000000");
-        assertEquals("UnauthorizedException", firstErrorType(execute(schema, "{ hello }", ctx)));
+        assertEquals("Unauthorized", firstErrorType(execute(schema, "{ hello }", ctx)));
     }
 
     @Test
@@ -198,7 +198,7 @@ class AuthorizationDataFetcherTest {
         extra.setAuthenticationType(AuthenticationType.AWS_IAM);
         api.setAdditionalAuthenticationProviders(List.of(extra));
         Map<String, Object> response = execute(schema, "{ hello }", apiKeyContext(api));
-        assertEquals("UnauthorizedException", firstErrorType(response));
+        assertEquals("Unauthorized", firstErrorType(response));
         assertTrue(!innerRan.get());
     }
 

@@ -196,7 +196,7 @@ Responses are `application/json` with AWS AppSync wire shapes (`data` / `errors[
 | API exists but no executable schema (incl. PROCESSING) | **502** | `GraphQLSchemaException` — `No schema definition exists.` + `x-amzn-errortype` |
 | Unexpected failure | 500 | `InternalFailure` |
 | Missing/invalid/expired credentials, unconfigured mode, Lambda deny | **401** | `UnauthorizedException` — GraphQL does not run; `x-amzn-errortype` is set. Missing headers use message `Missing authorization header`. |
-| Field directive mismatch, Cognito group miss, Lambda `deniedFields`, IAM field DENY | **200** | Field is `null` and `errors[]` contains `UnauthorizedException` (no `x-amzn-errortype`) |
+| Field directive mismatch, Cognito group miss, Lambda `deniedFields`, IAM field DENY | **200** | Field is `null` and `errors[]` contains `Unauthorized` — `Not Authorized to access {field} on type {type}` (no `x-amzn-errortype`) |
 
 **Evidence for data-plane statuses** (empty/`[]`/`{}` → 400; missing schema → 502): AppSync team sample in [graphql/graphql-over-http#81](https://github.com/graphql/graphql-over-http/issues/81) (@robzhu). The management API Reference lists `GraphQLSchemaException` as HTTP 400 for “schema not valid” on management operations — a different surface than the GraphQL execute data plane.
 

@@ -119,8 +119,8 @@ class AppSyncErrorFormatterTest {
     }
 
     @Test
-    void unauthorizedClassificationMapsToUnauthorizedException() {
-        GraphQLError error = new AppSyncFieldUnauthorizedException(List.of("hello"));
+    void unauthorizedClassificationMapsToUnauthorized() {
+        GraphQLError error = new AppSyncFieldUnauthorizedException(List.of("hello"), "hello", "Query");
         Map<String, Object> data = new java.util.LinkedHashMap<>();
         data.put("hello", null);
         ExecutionResult result = ExecutionResultImpl.newExecutionResult()
@@ -132,8 +132,8 @@ class AppSyncErrorFormatterTest {
 
         @SuppressWarnings("unchecked")
         List<Map<String, Object>> errors = (List<Map<String, Object>>) response.get("errors");
-        assertEquals("UnauthorizedException", errors.get(0).get("errorType"));
-        assertEquals("You are not authorized to make this call.", errors.get(0).get("message"));
+        assertEquals("Unauthorized", errors.get(0).get("errorType"));
+        assertEquals("Not Authorized to access hello on type Query", errors.get(0).get("message"));
         assertEquals(List.of("hello"), errors.get(0).get("path"));
         assertNull(errors.get(0).get("errorInfo"));
     }

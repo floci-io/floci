@@ -12,8 +12,10 @@ public class AppSyncFieldUnauthorizedException extends RuntimeException implemen
 
     private final List<Object> path;
 
-    public AppSyncFieldUnauthorizedException(List<Object> path) {
-        super(AppSyncAuth.UNAUTHORIZED_MESSAGE);
+    public AppSyncFieldUnauthorizedException(List<Object> path, String fieldName, String typeName) {
+        super(AppSyncAuth.fieldUnauthorizedMessage(
+                fieldName == null || fieldName.isBlank() ? "unknown" : fieldName,
+                typeName == null || typeName.isBlank() ? "Unknown" : typeName));
         this.path = path == null ? List.of() : List.copyOf(path);
     }
 
@@ -32,7 +34,7 @@ public class AppSyncFieldUnauthorizedException extends RuntimeException implemen
         return new ErrorClassification() {
             @Override
             public String toString() {
-                return AppSyncAuth.UNAUTHORIZED_TYPE;
+                return AppSyncAuth.FIELD_UNAUTHORIZED_TYPE;
             }
         };
     }
@@ -42,12 +44,14 @@ public class AppSyncFieldUnauthorizedException extends RuntimeException implemen
         return null;
     }
 
-    public static AppSyncFieldUnauthorizedException from(DataFetchingEnvironment environment) {
+    public static AppSyncFieldUnauthorizedException from(
+            DataFetchingEnvironment environment, String fieldName, String typeName) {
         if (environment == null
                 || environment.getExecutionStepInfo() == null
                 || environment.getExecutionStepInfo().getPath() == null) {
-            return new AppSyncFieldUnauthorizedException(List.of());
+            return new AppSyncFieldUnauthorizedException(List.of(), fieldName, typeName);
         }
-        return new AppSyncFieldUnauthorizedException(environment.getExecutionStepInfo().getPath().toList());
+        return new AppSyncFieldUnauthorizedException(
+                environment.getExecutionStepInfo().getPath().toList(), fieldName, typeName);
     }
 }
