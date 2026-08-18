@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.core.common;
 
+import com.fasterxml.jackson.core.JacksonException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
@@ -206,7 +207,7 @@ public class AwsJsonCborController {
                     .build();
         } catch (AwsException e) {
             return cborErrorResponse(e, "smithy-protocol", responseContentType(httpHeaders));
-        } catch (JsonParseException e) {
+        } catch (JacksonException e) {
            return cborErrorResponse(new AwsException("SerializationException", e.getMessage(), 400),
                     "smithy-protocol", responseContentType(httpHeaders));
         } catch (Exception e) {
@@ -304,7 +305,7 @@ public class AwsJsonCborController {
                     .build();
         } catch (AwsException e) {
             return cborErrorResponse(e, "smithy-protocol", responseContentType(httpHeaders));
-        } catch (JsonParseException e) {
+        } catch (JacksonException e) {
             return cborErrorResponse(new AwsException("SerializationException", e.getMessage(), 400),
                     "smithy-protocol", responseContentType(httpHeaders));
         } catch (Exception e) {
