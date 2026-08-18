@@ -508,3 +508,5 @@ floci:
       enabled: true
     sagemaker:
       enabled: true
+    apprunner:
+      enabled: true
