@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.services.route53.model.ChangeInfo;
 import io.github.hectorvent.floci.services.route53.model.HealthCheck;
 import io.github.hectorvent.floci.services.route53.model.HealthCheckConfig;
 import io.github.hectorvent.floci.services.route53.model.HostedZone;
+import io.github.hectorvent.floci.services.route53.model.HostedZoneVpc;
 import io.github.hectorvent.floci.services.route53.model.ResourceRecord;
 import io.github.hectorvent.floci.services.route53.model.ResourceRecordSet;
 import jakarta.inject.Inject;
@@ -67,12 +68,19 @@ public class Route53Controller {
                 throw new AwsException("InvalidInput", "Name and CallerReference are required.", 400);
             }
 
-            CreateZoneResult result = service.createHostedZone(name, callerRef, comment, privateZone);
-            String xml = new XmlBuilder()
+            CreateZoneResult result = service.createHostedZone(
+                    name, callerRef, comment, privateZone, parseVpcs(body));
+            XmlBuilder builder = new XmlBuilder()
                     .start("CreateHostedZoneResponse", NS)
                     .raw(xmlHostedZone(result.zone()))
                     .raw(xmlChangeInfo(result.change()))
-                    .raw(xmlDelegationSet())
+                    .raw(xmlDelegationSet());
+            // CreateHostedZone reports the single VPC it was given, GetHostedZone the whole set.
+            for (HostedZoneVpc vpc : result.zone().getVpcs()) {
+                builder.raw(xmlVpc(vpc));
+                break;
+            }
+            String xml = builder
                     .end("CreateHostedZoneResponse")
                     .build();
 
@@ -90,10 +98,18 @@ public class Route53Controller {
     public Response getHostedZone(@PathParam("Id") String id) {
         try {
             HostedZone zone = service.getHostedZone(id);
-            String xml = new XmlBuilder()
+            XmlBuilder builder = new XmlBuilder()
                     .start("GetHostedZoneResponse", NS)
                     .raw(xmlHostedZone(zone))
-                    .raw(xmlDelegationSet())
+                    .raw(xmlDelegationSet());
+            if (!zone.getVpcs().isEmpty()) {
+                builder.start("VPCs");
+                for (HostedZoneVpc vpc : zone.getVpcs()) {
+                    builder.raw(xmlVpc(vpc));
+                }
+                builder.end("VPCs");
+            }
+            String xml = builder
                     .end("GetHostedZoneResponse")
                     .build();
             return Response.ok(xml, XML).build();
@@ -186,6 +202,103 @@ public class Route53Controller {
                 .end("GetHostedZoneCountResponse")
                 .build();
         return Response.ok(xml, XML).build();
+    }
+
+    // ── VPC associations ──────────────────────────────────────────────────────
+
+    @POST
+    @Path("/hostedzone/{Id}/associatevpc")
+    public Response associateVpcWithHostedZone(@PathParam("Id") String id, String body) {
+        try {
+            List<HostedZoneVpc> vpcs = parseVpcs(body);
+            if (vpcs.isEmpty()) {
+                throw new AwsException("InvalidInput", "VPC is required.", 400);
+            }
+            HostedZoneVpc vpc = vpcs.get(0);
+            ChangeInfo change = service.associateVpcWithHostedZone(id, vpc.getVpcId(), vpc.getVpcRegion());
+            String xml = new XmlBuilder()
+                    .start("AssociateVPCWithHostedZoneResponse", NS)
+                    .raw(xmlChangeInfo(change))
+                    .end("AssociateVPCWithHostedZoneResponse")
+                    .build();
+            return Response.ok(xml, XML).build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    @POST
+    @Path("/hostedzone/{Id}/disassociatevpc")
+    public Response disassociateVpcFromHostedZone(@PathParam("Id") String id, String body) {
+        try {
+            List<HostedZoneVpc> vpcs = parseVpcs(body);
+            if (vpcs.isEmpty()) {
+                throw new AwsException("InvalidInput", "VPC is required.", 400);
+            }
+            HostedZoneVpc vpc = vpcs.get(0);
+            ChangeInfo change = service.disassociateVpcFromHostedZone(id, vpc.getVpcId(), vpc.getVpcRegion());
+            String xml = new XmlBuilder()
+                    .start("DisassociateVPCFromHostedZoneResponse", NS)
+                    .raw(xmlChangeInfo(change))
+                    .end("DisassociateVPCFromHostedZoneResponse")
+                    .build();
+            return Response.ok(xml, XML).build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    @GET
+    @Path("/hostedzonesbyvpc")
+    public Response listHostedZonesByVpc(@QueryParam("vpcid") String vpcId,
+                                         @QueryParam("vpcregion") String vpcRegion,
+                                         @QueryParam("maxitems") @DefaultValue("100") int maxItems) {
+        try {
+            List<HostedZone> zones = service.listHostedZonesByVpc(vpcId, vpcRegion, maxItems);
+            XmlBuilder xml = new XmlBuilder()
+                    .start("ListHostedZonesByVPCResponse", NS)
+                    .start("HostedZoneSummaries");
+            for (HostedZone zone : zones) {
+                xml.start("HostedZoneSummary")
+                   .elem("HostedZoneId", zone.getId())
+                   .elem("Name", zone.getName())
+                   .start("Owner")
+                   .elem("OwningAccount", "000000000000")
+                   .end("Owner")
+                   .end("HostedZoneSummary");
+            }
+            xml.end("HostedZoneSummaries")
+               .elem("MaxItems", maxItems)
+               .end("ListHostedZonesByVPCResponse");
+            return Response.ok(xml.build(), XML).build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    /**
+     * Reads {@code <VPC><VPCId>..</VPCId><VPCRegion>..</VPCRegion></VPC>} blocks out of a request
+     * body. CreateHostedZone, AssociateVPCWithHostedZone and DisassociateVPCFromHostedZone all
+     * spell the element the same way, so they all parse through here.
+     */
+    private static List<HostedZoneVpc> parseVpcs(String body) {
+        List<HostedZoneVpc> vpcs = new ArrayList<>();
+        for (Map<String, String> group : XmlParser.extractGroups(body, "VPC")) {
+            String vpcId = group.get("VPCId");
+            if (vpcId == null || vpcId.isBlank()) {
+                continue;
+            }
+            vpcs.add(new HostedZoneVpc(vpcId, group.get("VPCRegion")));
+        }
+        return vpcs;
+    }
+
+    private static String xmlVpc(HostedZoneVpc vpc) {
+        XmlBuilder xml = new XmlBuilder().start("VPC");
+        if (vpc.getVpcRegion() != null) {
+            xml.elem("VPCRegion", vpc.getVpcRegion());
+        }
+        return xml.elem("VPCId", vpc.getVpcId()).end("VPC").build();
     }
 
     // ── Resource Record Sets ──────────────────────────────────────────────────
