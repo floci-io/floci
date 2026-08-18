@@ -2,7 +2,7 @@ package io.github.hectorvent.floci.services.efs.model;
 
 import java.util.List;
 
-public class AcessPointDescription {
+public class AccessPointDescription {
 
     private String accessPointArn;
     private String accessPointId;
