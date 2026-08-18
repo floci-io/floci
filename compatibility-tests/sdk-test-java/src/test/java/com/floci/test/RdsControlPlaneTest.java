@@ -232,8 +232,10 @@ class RdsControlPlaneTest {
         String regionalProxyName = TestFixtures.uniqueName("rds-proxy-regional");
         try (RdsClient east = rdsClient(Region.US_EAST_1);
              RdsClient west = rdsClient(Region.US_WEST_2)) {
-            var eastProxy = createIamProxy(east, regionalProxyName);
-            var westProxy = createIamProxy(west, regionalProxyName);
+            // Subnet ids are region-scoped on real AWS (and on floci, since #21), so each proxy
+            // needs subnets from its own signed region rather than the shared us-east-1 subnetIds.
+            var eastProxy = createIamProxy(east, regionalProxyName, subnetIdsFor(Region.US_EAST_1));
+            var westProxy = createIamProxy(west, regionalProxyName, subnetIdsFor(Region.US_WEST_2));
 
             assertThat(eastProxy.dbProxy().dbProxyArn()).contains(":rds:us-east-1:");
             assertThat(westProxy.dbProxy().dbProxyArn()).contains(":rds:us-west-2:");
@@ -344,13 +346,32 @@ class RdsControlPlaneTest {
         }
     }
 
-    private static CreateDbProxyResponse createIamProxy(RdsClient client, String name) {
+    private static CreateDbProxyResponse createIamProxy(RdsClient client, String name, List<String> vpcSubnetIds) {
         return client.createDBProxy(b -> b
                 .dbProxyName(name)
                 .engineFamily("POSTGRESQL")
                 .roleArn("arn:aws:iam::000000000000:role/rds-proxy-regional")
-                .vpcSubnetIds(subnetIds)
+                .vpcSubnetIds(vpcSubnetIds)
                 .defaultAuthScheme("IAM_AUTH"));
+    }
+
+    private static List<String> subnetIdsFor(Region region) {
+        try (Ec2Client ec2 = ec2Client(region)) {
+            return ec2.describeSubnets().subnets().stream()
+                    .map(subnet -> subnet.subnetId())
+                    .sorted()
+                    .limit(2)
+                    .toList();
+        }
+    }
+
+    private static Ec2Client ec2Client(Region region) {
+        return Ec2Client.builder()
+                .endpointOverride(TestFixtures.endpoint())
+                .region(region)
+                .credentialsProvider(StaticCredentialsProvider.create(
+                        AwsBasicCredentials.create("test", "test")))
+                .build();
     }
 
     private static software.amazon.awssdk.services.rds.model.CreateDbInstanceResponse createDbInstance(
