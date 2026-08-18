@@ -274,12 +274,7 @@ public class CloudFrontController {
     public Response getCachePolicyConfig(@PathParam("Id") String id) {
         try {
             CachePolicy policy = service.getCachePolicy(id);
-            String xml = new XmlBuilder()
-                    .start("CachePolicyConfig", NS)
-                    .elem("Name", policy.getName())
-                    .elem("Comment", policy.getComment() != null ? policy.getComment() : "")
-                    .end("CachePolicyConfig")
-                    .build();
+            String xml = xmlCachePolicyConfig(policy, NS);
             return Response.ok(xml, XML).header("ETag", policy.getEtag()).build();
         } catch (AwsException e) {
             return xmlErrorResponse(e);
@@ -386,12 +381,7 @@ public class CloudFrontController {
     public Response getOriginRequestPolicyConfig(@PathParam("Id") String id) {
         try {
             OriginRequestPolicy policy = service.getOriginRequestPolicy(id);
-            String xml = new XmlBuilder()
-                    .start("OriginRequestPolicyConfig", NS)
-                    .elem("Name", policy.getName())
-                    .elem("Comment", policy.getComment() != null ? policy.getComment() : "")
-                    .end("OriginRequestPolicyConfig")
-                    .build();
+            String xml = xmlOriginRequestPolicyConfig(policy, NS);
             return Response.ok(xml, XML).header("ETag", policy.getEtag()).build();
         } catch (AwsException e) {
             return xmlErrorResponse(e);
@@ -2229,12 +2219,33 @@ public class CloudFrontController {
                 .elem("Id", policy.getId())
                 .elem("LastModifiedTime",
                         policy.getLastModifiedTime() != null ? policy.getLastModifiedTime().toString() : "")
-                .start("CachePolicyConfig")
-                .elem("Name", policy.getName())
-                .elem("Comment", policy.getComment() != null ? policy.getComment() : "")
-                .end("CachePolicyConfig")
+                .raw(xmlCachePolicyConfig(policy, null))
                 .end("CachePolicy")
                 .build();
+    }
+
+    /**
+     * {@code CachePolicyConfig} — shared by the full {@code GetCachePolicy}/
+     * {@code CreateCachePolicy}/{@code UpdateCachePolicy} responses ({@link #xmlCachePolicyResponse})
+     * and the {@code GetCachePolicyConfig} endpoint, which returns this element as the response
+     * root (hence the optional {@code xmlns}). {@link CachePolicy#getConfig()} carries every
+     * field beyond {@code Name}/{@code Comment} — the TTLs and the cache-key parameters — as a
+     * generic map so a schema change here doesn't need a new model class, the same shape
+     * {@link #parseDistributionConfig}'s siblings ({@link #parseGeoRestriction},
+     * {@link #parseLogging}, {@link #parseTenantConfig}) already use.
+     */
+    private String xmlCachePolicyConfig(CachePolicy policy, String xmlns) {
+        Map<String, Object> config = policy.getConfig();
+        XmlBuilder xml = new XmlBuilder()
+                .start("CachePolicyConfig", xmlns)
+                .elem("Comment", policy.getComment() != null ? policy.getComment() : "")
+                .elem("Name", policy.getName())
+                .elem("DefaultTTL", longOf(config, "DefaultTTL", 86400L))
+                .elem("MaxTTL", longOf(config, "MaxTTL", 31536000L))
+                .elem("MinTTL", longOf(config, "MinTTL", 0L))
+                .raw(xmlCacheKeyParameters(subMap(config, "ParametersInCacheKeyAndForwardedToOrigin")))
+                .end("CachePolicyConfig");
+        return xml.build();
     }
 
     private String xmlOriginRequestPolicyResponse(OriginRequestPolicy policy) {
@@ -2243,12 +2254,84 @@ public class CloudFrontController {
                 .elem("Id", policy.getId())
                 .elem("LastModifiedTime",
                         policy.getLastModifiedTime() != null ? policy.getLastModifiedTime().toString() : "")
-                .start("OriginRequestPolicyConfig")
-                .elem("Name", policy.getName())
-                .elem("Comment", policy.getComment() != null ? policy.getComment() : "")
-                .end("OriginRequestPolicyConfig")
+                .raw(xmlOriginRequestPolicyConfig(policy, null))
                 .end("OriginRequestPolicy")
                 .build();
+    }
+
+    /** As {@link #xmlCachePolicyConfig}, for {@code OriginRequestPolicyConfig}. */
+    private String xmlOriginRequestPolicyConfig(OriginRequestPolicy policy, String xmlns) {
+        Map<String, Object> config = policy.getConfig();
+        XmlBuilder xml = new XmlBuilder()
+                .start("OriginRequestPolicyConfig", xmlns)
+                .elem("Comment", policy.getComment() != null ? policy.getComment() : "")
+                .elem("Name", policy.getName())
+                .raw(xmlKeyBehaviorConfig("CookiesConfig", "CookieBehavior", "Cookies",
+                        subMap(config, "CookiesConfig")))
+                .raw(xmlKeyBehaviorConfig("HeadersConfig", "HeaderBehavior", "Headers",
+                        subMap(config, "HeadersConfig")))
+                .raw(xmlKeyBehaviorConfig("QueryStringsConfig", "QueryStringBehavior", "QueryStrings",
+                        subMap(config, "QueryStringsConfig")))
+                .end("OriginRequestPolicyConfig");
+        return xml.build();
+    }
+
+    /**
+     * {@code ParametersInCacheKeyAndForwardedToOrigin} — the cache policy's cache-key
+     * configuration. {@code params} is {@code null} for a policy stored before this field
+     * existed; the behavior configs then fall back to {@code "none"} the same way
+     * {@link #xmlKeyBehaviorConfig} does for a missing sub-map.
+     */
+    private String xmlCacheKeyParameters(Map<String, Object> params) {
+        XmlBuilder xml = new XmlBuilder()
+                .start("ParametersInCacheKeyAndForwardedToOrigin")
+                .raw(xmlKeyBehaviorConfig("CookiesConfig", "CookieBehavior", "Cookies",
+                        subMap(params, "CookiesConfig")))
+                .elem("EnableAcceptEncodingBrotli", boolOf(params, "EnableAcceptEncodingBrotli"))
+                .elem("EnableAcceptEncodingGzip", boolOf(params, "EnableAcceptEncodingGzip"))
+                .raw(xmlKeyBehaviorConfig("HeadersConfig", "HeaderBehavior", "Headers",
+                        subMap(params, "HeadersConfig")))
+                .raw(xmlKeyBehaviorConfig("QueryStringsConfig", "QueryStringBehavior", "QueryStrings",
+                        subMap(params, "QueryStringsConfig")))
+                .end("ParametersInCacheKeyAndForwardedToOrigin");
+        return xml.build();
+    }
+
+    /**
+     * One {@code *Config} member of {@code ParametersInCacheKeyAndForwardedToOrigin} or
+     * {@code OriginRequestPolicyConfig} — a behavior string (e.g. {@code CookieBehavior}) plus
+     * an optional {@code Quantity}/{@code Items} list, reusing {@link #xmlStringItems} the same
+     * way {@link #xmlForwardedValues} does for the legacy {@code ForwardedValues} shape.
+     */
+    private String xmlKeyBehaviorConfig(String wrapper, String behaviorField, String itemsWrapper,
+                                         Map<String, Object> behaviorConfig) {
+        Object behavior = behaviorConfig != null ? behaviorConfig.get(behaviorField) : null;
+        Map<String, Object> itemsMap = subMap(behaviorConfig, itemsWrapper);
+        List<String> names = itemsMap != null ? stringList(itemsMap.get("Items")) : List.of();
+        return new XmlBuilder()
+                .start(wrapper)
+                .elem(behaviorField, behavior != null ? behavior.toString() : "none")
+                .raw(xmlStringItems(itemsWrapper, "Name", names))
+                .end(wrapper)
+                .build();
+    }
+
+    /** Reads a numeric field out of a generic config map, falling back when absent or unparseable. */
+    private long longOf(Map<String, Object> config, String key, long defaultValue) {
+        Object value = config != null ? config.get(key) : null;
+        return value instanceof Number n ? n.longValue() : defaultValue;
+    }
+
+    /** Reads a boolean field out of a generic config map, defaulting to {@code false} when absent. */
+    private boolean boolOf(Map<String, Object> config, String key) {
+        Object value = config != null ? config.get(key) : null;
+        return value instanceof Boolean b && b;
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> subMap(Map<String, Object> config, String key) {
+        Object value = config != null ? config.get(key) : null;
+        return value instanceof Map<?, ?> m ? (Map<String, Object>) m : null;
     }
 
     private String xmlResponseHeadersPolicyResponse(ResponseHeadersPolicy policy) {
@@ -2727,17 +2810,92 @@ public class CloudFrontController {
         return inv;
     }
 
+    /**
+     * Reads a {@code CachePolicyConfig} from a {@code CreateCachePolicy}/{@code UpdateCachePolicy}
+     * body. Walks the parsed tree rather than {@link XmlParser#extractFirst} — a flat,
+     * first-match scan previously read only {@code Name}/{@code Comment} and silently dropped
+     * the TTLs and the entire {@code ParametersInCacheKeyAndForwardedToOrigin} cache-key
+     * configuration (choudoufu#299), the same class of bug {@link #parseDistributionConfig}'s
+     * javadoc documents for {@code DistributionConfig}.
+     */
     private CachePolicy parseCachePolicy(String body) {
+        CloudFrontXml.Node root = CloudFrontXml.parse(body);
+        CloudFrontXml.Node node = "CachePolicyConfig".equals(root.name())
+                ? root
+                : root.child("CachePolicyConfig");
         CachePolicy policy = new CachePolicy();
-        policy.setName(XmlParser.extractFirst(body, "Name", null));
-        policy.setComment(XmlParser.extractFirst(body, "Comment", null));
+        if (node == null) {
+            return policy;
+        }
+        policy.setName(node.text("Name", null));
+        policy.setComment(node.text("Comment", null));
+        policy.setConfig(parseCachePolicyConfig(node));
         return policy;
     }
 
+    private Map<String, Object> parseCachePolicyConfig(CloudFrontXml.Node node) {
+        Map<String, Object> config = new LinkedHashMap<>();
+        Long defaultTtl = node.longOrNull("DefaultTTL");
+        config.put("DefaultTTL", defaultTtl != null ? defaultTtl : 86400L);
+        Long maxTtl = node.longOrNull("MaxTTL");
+        config.put("MaxTTL", maxTtl != null ? maxTtl : 31536000L);
+        Long minTtl = node.longOrNull("MinTTL");
+        config.put("MinTTL", minTtl != null ? minTtl : 0L);
+        config.put("ParametersInCacheKeyAndForwardedToOrigin",
+                parseCacheKeyParameters(node.child("ParametersInCacheKeyAndForwardedToOrigin")));
+        return config;
+    }
+
+    /** {@code ParametersInCacheKeyAndForwardedToOrigin} — {@code params} may be {@code null}. */
+    private Map<String, Object> parseCacheKeyParameters(CloudFrontXml.Node params) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("EnableAcceptEncodingGzip", params != null && params.bool("EnableAcceptEncodingGzip", false));
+        result.put("EnableAcceptEncodingBrotli", params != null && params.bool("EnableAcceptEncodingBrotli", false));
+        result.put("CookiesConfig", parseKeyBehaviorConfig(
+                params != null ? params.child("CookiesConfig") : null, "CookieBehavior", "Cookies"));
+        result.put("HeadersConfig", parseKeyBehaviorConfig(
+                params != null ? params.child("HeadersConfig") : null, "HeaderBehavior", "Headers"));
+        result.put("QueryStringsConfig", parseKeyBehaviorConfig(
+                params != null ? params.child("QueryStringsConfig") : null, "QueryStringBehavior", "QueryStrings"));
+        return result;
+    }
+
+    /**
+     * One {@code *Config} member shared by {@code ParametersInCacheKeyAndForwardedToOrigin} and
+     * {@code OriginRequestPolicyConfig} — a behavior string plus a {@code Quantity}/{@code Items}
+     * list of names, reusing {@link CloudFrontXml.Node#items} the same way
+     * {@link #parseGeoRestriction} does for {@code Restrictions/GeoRestriction}.
+     */
+    private Map<String, Object> parseKeyBehaviorConfig(CloudFrontXml.Node node, String behaviorField,
+                                                         String itemsWrapper) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put(behaviorField, node != null ? node.text(behaviorField, "none") : "none");
+        List<String> names = node != null ? node.items(itemsWrapper, "Name") : List.of();
+        Map<String, Object> itemsMap = new LinkedHashMap<>();
+        itemsMap.put("Items", names);
+        itemsMap.put("Quantity", names.size());
+        result.put(itemsWrapper, itemsMap);
+        return result;
+    }
+
+    /** As {@link #parseCachePolicy}, for {@code OriginRequestPolicyConfig} (no TTLs). */
     private OriginRequestPolicy parseOriginRequestPolicy(String body) {
+        CloudFrontXml.Node root = CloudFrontXml.parse(body);
+        CloudFrontXml.Node node = "OriginRequestPolicyConfig".equals(root.name())
+                ? root
+                : root.child("OriginRequestPolicyConfig");
         OriginRequestPolicy policy = new OriginRequestPolicy();
-        policy.setName(XmlParser.extractFirst(body, "Name", null));
-        policy.setComment(XmlParser.extractFirst(body, "Comment", null));
+        if (node == null) {
+            return policy;
+        }
+        policy.setName(node.text("Name", null));
+        policy.setComment(node.text("Comment", null));
+        Map<String, Object> config = new LinkedHashMap<>();
+        config.put("CookiesConfig", parseKeyBehaviorConfig(node.child("CookiesConfig"), "CookieBehavior", "Cookies"));
+        config.put("HeadersConfig", parseKeyBehaviorConfig(node.child("HeadersConfig"), "HeaderBehavior", "Headers"));
+        config.put("QueryStringsConfig",
+                parseKeyBehaviorConfig(node.child("QueryStringsConfig"), "QueryStringBehavior", "QueryStrings"));
+        policy.setConfig(config);
         return policy;
     }
 
