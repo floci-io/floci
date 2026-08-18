@@ -50,6 +50,7 @@ public class S3Service implements Resettable {
     private String ownerId() { return regionResolver != null ? regionResolver.getAccountId() : "000000000000"; }
     private static final String DEFAULT_OWNER_DISPLAY_NAME = "floci";
     private static final String AUTHENTICATED_USERS_GROUP_URI = "http://acs.amazonaws.com/groups/global/AuthenticatedUsers";
+    private static final String LOG_DELIVERY_GROUP_URI = "http://acs.amazonaws.com/groups/s3/LogDelivery";
     private static final String LEGACY_ACCESS_KEY_ID = "test";
     private static final Set<String> SUPPORTED_SERVER_SIDE_ENCRYPTION_VALUES = Set.of("AES256", "aws:kms", "aws:kms:dsse", "aws:fsx");
     private static final String SSE_C_ALGORITHM = "AES256";
@@ -2451,6 +2452,18 @@ public class S3Service implements Resettable {
             case "authenticated-read" -> objectAclXml(
                     ownerFullControlGrant(),
                     groupGrant(AUTHENTICATED_USERS_GROUP_URI, "READ"));
+            // The canned ACL S3's own access-log and ELB/ALB/NLB log-delivery
+            // features ask buckets to carry (terraform-aws-modules/s3-bucket's
+            // attach_elb_log_delivery_policy/attach_lb_log_delivery_policy
+            // examples set object_ownership = "ObjectWriter" and acl =
+            // "log-delivery-write" together, as does this canned ACL's real
+            // AWS documentation). Grants the S3 log delivery group WRITE (to
+            // land new log objects) and READ_ACP (so it can confirm the
+            // grant took effect), alongside the bucket owner's full control.
+            case "log-delivery-write" -> objectAclXml(
+                    ownerFullControlGrant(),
+                    groupGrant(LOG_DELIVERY_GROUP_URI, "WRITE"),
+                    groupGrant(LOG_DELIVERY_GROUP_URI, "READ_ACP"));
             default -> throw new AwsException("InvalidArgument",
                     "Unsupported x-amz-acl value: " + cannedAcl, 400);
         };
