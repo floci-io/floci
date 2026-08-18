@@ -307,13 +307,22 @@ public class AwsJsonCborController {
     }
 
     private byte[] decodeBody(byte[] compressed) throws IOException {
+        int buffSize = 64 * 1024;
+        byte[] buffer = new byte[buffSize]; // 10 MB limit max over all aws services, to avoid OOM. AWS services should not send more than 10 MB in a single request.
+        int totalRead = 0;
+        int maxRead = 10 * 1024 * 1024; // 10 MB limit max over all aws services, to avoid OOM. AWS services should not send more than 10 MB in a single request.
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
         try (GZIPInputStream gis = new GZIPInputStream(new java.io.ByteArrayInputStream(compressed))) {
-            byte[] buffer = gis.readNBytes(10*1024*1024); // 10 MB limit max over all aws services, to avoid OOM. AWS services should not send more than 10 MB in a single request.
-            int check = gis.read();
-            if (check != -1) {
-                throw new AwsException("PayloadTooLargeException", "Payload Too Large", 413);
+            int read;
+            while ((read = gis.read(buffer)) != -1) {
+                totalRead += read;
+                if (totalRead >= maxRead) {
+                    throw new AwsException("PayloadTooLargeException", "Payload Too Large", 413);
+                }
+                baos.write(buffer, 0, read);
             }
-            return buffer;
+
+            return baos.toByteArray();
         }
     }
 
