@@ -6,6 +6,13 @@ instanceTypes:
       - x86_64
     currentGeneration: true
 
+  - instanceType: t3.nano
+    vcpu: 2
+    memoryMib: 512
+    supportedArchitectures:
+      - x86_64
+    currentGeneration: true
+
   - instanceType: t3.micro
     vcpu: 2
     memoryMib: 1024
