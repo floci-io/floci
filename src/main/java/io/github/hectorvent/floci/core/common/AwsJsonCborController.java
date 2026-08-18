@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
 import com.fasterxml.jackson.dataformat.cbor.CBORGenerator;
+import com.google.gson.JsonParseException;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.CloudWatchMetricsJsonHandler;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbJsonHandler;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbStreamsJsonHandler;
@@ -205,6 +206,9 @@ public class AwsJsonCborController {
                     .build();
         } catch (AwsException e) {
             return cborErrorResponse(e, "smithy-protocol", responseContentType(httpHeaders));
+        } catch (JsonParseException e) {
+           return cborErrorResponse(new AwsException("SerializationException", e.getMessage(), 400),
+                    "smithy-protocol", responseContentType(httpHeaders));
         } catch (Exception e) {
             LOG.error("Error processing Smithy CBOR request: " + serviceId + "." + operation, e);
             return Response.status(500).build();
@@ -300,13 +304,16 @@ public class AwsJsonCborController {
                     .build();
         } catch (AwsException e) {
             return cborErrorResponse(e, "smithy-protocol", responseContentType(httpHeaders));
+        } catch (JsonParseException e) {
+            return cborErrorResponse(new AwsException("SerializationException", e.getMessage(), 400),
+                    "smithy-protocol", responseContentType(httpHeaders));
         } catch (Exception e) {
             LOG.error("Error processing CBOR request: " + serviceKey + "." + action, e);
             return Response.status(500).build();
         }
     }
 
-    private byte[] decodeBody(byte[] compressed) throws IOException {
+    private byte[] decodeBody(byte[] compressed) {
         int buffSize = 64 * 1024;
         byte[] buffer = new byte[buffSize]; // 10 MB limit max over all aws services, to avoid OOM. AWS services should not send more than 10 MB in a single request.
         int totalRead = 0;
@@ -316,13 +323,15 @@ public class AwsJsonCborController {
             int read;
             while ((read = gis.read(buffer)) != -1) {
                 totalRead += read;
-                if (totalRead >= maxRead) {
+                if (totalRead > maxRead) {
                     throw new AwsException("PayloadTooLargeException", "Payload Too Large", 413);
                 }
                 baos.write(buffer, 0, read);
             }
 
             return baos.toByteArray();
+        } catch (IOException e) {
+            throw new AwsException("InvalidRequestException", "Failed to decode request body", 400);
         }
     }
 

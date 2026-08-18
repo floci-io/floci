@@ -31,7 +31,7 @@ import org.junit.jupiter.api.Test;
  * services.
  */
 @QuarkusTest
-class AwsJsonCborIncomingRequestTest {
+class AwsJsonCborIncomingRequestIntegrationTest {
 
     @Inject AwsJsonCborController awsJsonCborController;
 
