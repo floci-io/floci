@@ -67,6 +67,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
@@ -364,6 +365,35 @@ public class CodeBuildRunner implements ContainerTeardown {
      */
     static final int EXEC_SETUP_MAX_ATTEMPTS = 6;
     static final long EXEC_SETUP_RETRY_BACKOFF_MS = 500L;
+
+    /**
+     * How many times {@link #runPhaseSession} will start a fresh exec after the attach stream
+     * errors out (e.g. a Broken pipe from a Podman-closed socket) with zero phase output ever
+     * received. Safe to retry in that specific case only: the combined INSTALL/PRE_BUILD/BUILD/
+     * POST_BUILD script (see {@link #phaseSessionScript}) hasn't executed a single command yet,
+     * so nothing has to be undone. The instant a phase-start sentinel is seen, retries stop —
+     * a later attach failure may leave a real CFN operation in flight and must fail fast instead.
+     *
+     * Five attempts, not three: an attach failure usually means the streaming pool is holding a
+     * cohort of keep-alive connections Podman already closed after a fan-out drained (each build
+     * stream goes idle at once). Every failed attach discards one dead connection, so enough
+     * spaced draws empty the cohort; three instant draws observably did not (issues/0030 — all
+     * three attempts EPIPE'd within ~20 ms).
+     */
+    static final int PHASE_ATTACH_RETRY_MAX_ATTEMPTS = 5;
+
+    /**
+     * Base backoff between attach attempts; grows exponentially via
+     * {@link DockerRetry#backoffDelay} (500 ms, 1 s, 2 s, 4 s) so retries outlast the window in
+     * which the streaming pool is still handing out stale connections, instead of burning every
+     * attempt against the same rotten cohort within milliseconds.
+     */
+    static final long PHASE_ATTACH_RETRY_BACKOFF_MS = 500L;
+
+    /** Backoff before attach attempt {@code attempt + 1}; exposed for tests. */
+    static long attachRetryDelayMs(int attempt) {
+        return DockerRetry.backoffDelay(attempt, PHASE_ATTACH_RETRY_BACKOFF_MS, DockerRetry.BACKOFF_CAP_MS);
+    }
 
     synchronized Semaphore sourceCopySlots() {
         if (!sourceCopySlotsResolved) {
@@ -1294,37 +1324,77 @@ public class CodeBuildRunner implements ContainerTeardown {
         PhaseSession session = new PhaseSession(build, logGroup, logStream, region);
 
         try {
-            String execId = createPhaseExec(containerId, workDir, env, cmd);
+            Throwable lastAttachError = null;
 
-            CountDownLatch latch = new CountDownLatch(1);
+            for (int attempt = 1; attempt <= PHASE_ATTACH_RETRY_MAX_ATTEMPTS; attempt++) {
+                String execId = createPhaseExec(containerId, workDir, env, cmd);
 
-            // Held open for the entire exec phase (can run for minutes), not a quick call.
-            streamingDockerClient.execStartCmd(execId).exec(new ResultCallback.Adapter<Frame>() {
-                @Override
-                public void onNext(Frame frame) {
-                    if (frame.getPayload() != null) {
-                        session.accept(frame.getPayload());
+                CountDownLatch latch = new CountDownLatch(1);
+                // Set when the exec-attach stream itself errors out (e.g. the container was
+                // reaped or the docker socket dropped the connection under contention). Must
+                // NOT be treated as a clean completion: falling through to fetchExecExitCode
+                // in that case can inspect an exec that never actually ran and observe a
+                // stale/default exit code of 0, silently marking a build SUCCEEDED even though
+                // zero phases ever executed.
+                AtomicReference<Throwable> attachError = new AtomicReference<>();
+
+                // Held open for the entire exec phase (can run for minutes), not a quick call.
+                streamingDockerClient.execStartCmd(execId).exec(new ResultCallback.Adapter<Frame>() {
+                    @Override
+                    public void onNext(Frame frame) {
+                        if (frame.getPayload() != null) {
+                            session.accept(frame.getPayload());
+                        }
                     }
+                    @Override
+                    public void onComplete() { latch.countDown(); }
+                    @Override
+                    public void onError(Throwable t) {
+                        attachError.set(t);
+                        latch.countDown();
+                    }
+                });
+
+                boolean completed = latch.await(timeoutMinutes, TimeUnit.MINUTES);
+                if (stopFlag.get()) {
+                    return PhaseResult.ofStopped();
                 }
-                @Override
-                public void onComplete() { latch.countDown(); }
-                @Override
-                public void onError(Throwable t) { latch.countDown(); }
-            });
+                if (!completed) {
+                    String message = "Phase timed out after " + timeoutMinutes + " minutes";
+                    session.finish(null, message);
+                    return PhaseResult.ofFailure(message);
+                }
 
-            boolean completed = latch.await(timeoutMinutes, TimeUnit.MINUTES);
-            if (stopFlag.get()) {
-                return PhaseResult.ofStopped();
-            }
-            if (!completed) {
-                String message = "Phase timed out after " + timeoutMinutes + " minutes";
-                session.finish(null, message);
-                return PhaseResult.ofFailure(message);
+                Throwable error = attachError.get();
+                if (error == null) {
+                    Long exitCode = fetchExecExitCode(execId);
+                    boolean anyPhaseFailed = session.finish(exitCode, null);
+                    return anyPhaseFailed ? PhaseResult.ofFailure(null) : PhaseResult.ofSuccess();
+                }
+
+                lastAttachError = error;
+                // Only safe to retry with a fresh exec while nothing has run yet: the moment a
+                // phase-start sentinel is seen, a real CFN/CDK operation may be in flight and a
+                // blind re-run of the combined script could duplicate it. Once that line is
+                // crossed, or attempts are exhausted, fail fast and let the operator (or the
+                // CodePipeline stage-retry safety net) take it from here.
+                if (session.hasStarted() || attempt == PHASE_ATTACH_RETRY_MAX_ATTEMPTS) {
+                    break;
+                }
+                LOG.warnv(error, "Phase exec attach failed for build {0} before any phase started "
+                                + "(attempt {1}/{2}); retrying with a fresh exec after backoff",
+                        session.build.getId(), attempt, PHASE_ATTACH_RETRY_MAX_ATTEMPTS);
+                // Spaced, not immediate: the failed attach just discarded one stale pooled
+                // connection, and the pool needs time to shed the rest of the cohort. An
+                // interrupt lands in the InterruptedException handler below as a clean stop.
+                Thread.sleep(attachRetryDelayMs(attempt));
             }
 
-            Long exitCode = fetchExecExitCode(execId);
-            boolean anyPhaseFailed = session.finish(exitCode, null);
-            return anyPhaseFailed ? PhaseResult.ofFailure(null) : PhaseResult.ofSuccess();
+            String message = "Phase exec attach failed: "
+                    + (lastAttachError.getMessage() != null ? lastAttachError.getMessage() : lastAttachError.toString());
+            LOG.errorv(lastAttachError, "Phase exec attach failed for build {0}", session.build.getId());
+            session.finish(null, message);
+            return PhaseResult.ofFailure(message);
 
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
@@ -1644,6 +1714,13 @@ public class CodeBuildRunner implements ContainerTeardown {
             this.region = region;
         }
 
+        // Whether the shell script has emitted at least one phase-start sentinel. Used by
+        // runPhaseSession to decide whether a dead exec-attach stream is safe to retry with a
+        // fresh exec (nothing ran yet) or must fail fast (a phase may already be mid-flight).
+        synchronized boolean hasStarted() {
+            return runningPhase != null || !endedPhases.isEmpty();
+        }
+
         synchronized void accept(byte[] payload) {
             if (finished) {
                 return;
@@ -1747,6 +1824,18 @@ public class CodeBuildRunner implements ContainerTeardown {
             finished = true;
             boolean unattributedError = sessionErrorMessage != null
                     || execExitCode == null || execExitCode != 0;
+            // A real run always emits a phase-start sentinel for at least INSTALL before
+            // anything else happens. If the exec stream produced no phase transitions at
+            // all, a clean exit code is not trustworthy evidence of success — it can mean
+            // the exec was inspected before it ever actually ran (see the attach-error
+            // handling in runPhaseSession). Without this, every phase falls through to
+            // skipPhase() below and the build silently reports SUCCEEDED having done
+            // nothing: the phantom-success race.
+            if (!unattributedError && runningPhase == null && endedPhases.isEmpty()) {
+                unattributedError = true;
+                sessionErrorMessage = "Phase exec produced no output and no phase ever started; "
+                        + "exit code cannot be trusted as evidence of success";
+            }
             for (String phase : SHELL_PHASES) {
                 if (endedPhases.contains(phase)) {
                     continue;

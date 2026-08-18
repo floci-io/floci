@@ -23,7 +23,7 @@ public final class DockerRetry {
      * persist for several seconds, so the backoff grows exponentially toward this cap to ride it
      * out rather than exhausting a handful of sub-second retries against a still-busy socket.
      */
-    static final long BACKOFF_CAP_MS = 8000L;
+    public static final long BACKOFF_CAP_MS = 8000L;
 
     private DockerRetry() {
     }
@@ -32,7 +32,7 @@ public final class DockerRetry {
      * Exponential backoff for attempt {@code n} (1-based): {@code base * 2^(n-1)}, clamped to
      * {@code cap}. A zero base yields zero (no sleep); the shift is bounded so it cannot overflow.
      */
-    static long backoffDelay(int attempt, long baseMillis, long capMillis) {
+    public static long backoffDelay(int attempt, long baseMillis, long capMillis) {
         if (baseMillis <= 0) {
             return 0L;
         }
