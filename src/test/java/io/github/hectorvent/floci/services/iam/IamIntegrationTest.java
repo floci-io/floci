@@ -1016,6 +1016,96 @@ class IamIntegrationTest {
                     equalTo("TestRole"));
     }
 
+    // Reproduces GitHub choudoufu issue: a live aws_iam_instance_profile created and tagged
+    // through stock terraform (CreateInstanceProfile with Tags.member.N, the same wire shape
+    // this test drives directly) came back from a later GetInstanceProfile with no readable
+    // tofu-estate/tofu-address marker, because this emulator's InstanceProfile model carried no
+    // tags field at all: CreateInstanceProfile silently dropped a Tags parameter, GetInstanceProfile
+    // never emitted one, and ListInstanceProfileTags answered UnknownOperationException. Real AWS's
+    // GetInstanceProfile does return Tags (see API_InstanceProfile's "Tags.member.N", "Required: No")
+    // while ListInstanceProfiles deliberately omits them ("this operation does not return tags... To
+    // view all of the information for an instance profile, see GetInstanceProfile") - the same
+    // asymmetry Role already modeled here, which this test also asserts for InstanceProfile.
+    @Test
+    @Order(61)
+    void createInstanceProfileWithTagsAndReadThemBackThroughEveryRoute() {
+        given()
+            .formParam("Action", "CreateInstanceProfile")
+            .formParam("InstanceProfileName", "tagged-profile")
+            .formParam("Tags.member.1.Key", "tofu-estate")
+            .formParam("Tags.member.1.Value", "iam-ecr-cohort")
+            .formParam("Tags.member.2.Key", "tofu-address")
+            .formParam("Tags.member.2.Value", "aws_iam_instance_profile.app")
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("CreateInstanceProfileResponse.CreateInstanceProfileResult.InstanceProfile.Tags.member.Key",
+                    containsInAnyOrder("tofu-estate", "tofu-address"));
+
+        given()
+            .formParam("Action", "GetInstanceProfile")
+            .formParam("InstanceProfileName", "tagged-profile")
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("GetInstanceProfileResponse.GetInstanceProfileResult.InstanceProfile.Tags.member.Key",
+                    containsInAnyOrder("tofu-estate", "tofu-address"));
+
+        String listed = given()
+            .formParam("Action", "ListInstanceProfiles")
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ListInstanceProfilesResponse.ListInstanceProfilesResult.InstanceProfiles.member.find { it.InstanceProfileName == 'tagged-profile' }.InstanceProfileName",
+                    equalTo("tagged-profile"))
+            .extract().asString();
+        assertThat(listed, not(containsString("<Tags>")));
+
+        given()
+            .formParam("Action", "ListInstanceProfileTags")
+            .formParam("InstanceProfileName", "tagged-profile")
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ListInstanceProfileTagsResponse.ListInstanceProfileTagsResult.Tags.member.Key",
+                    containsInAnyOrder("tofu-estate", "tofu-address"));
+
+        given()
+            .formParam("Action", "UntagInstanceProfile")
+            .formParam("InstanceProfileName", "tagged-profile")
+            .formParam("TagKeys.member.1", "tofu-address")
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .formParam("Action", "ListInstanceProfileTags")
+            .formParam("InstanceProfileName", "tagged-profile")
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ListInstanceProfileTagsResponse.ListInstanceProfileTagsResult.Tags.member.Key",
+                    equalTo("tofu-estate"));
+    }
+
     // =========================================================================
     // Error cases
     // =========================================================================

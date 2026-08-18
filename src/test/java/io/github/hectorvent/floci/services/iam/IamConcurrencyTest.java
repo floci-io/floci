@@ -212,7 +212,7 @@ class IamConcurrencyTest {
         try {
             for (int trial = 0; trial < trials; trial++) {
                 IamService iam = newIamService();
-                iam.createInstanceProfile("prof", "/");
+                iam.createInstanceProfile("prof", "/", null);
                 for (int i = 0; i < racers; i++) iam.createRole("role" + i, "/", "{}", null, 3600, null);
 
                 CountDownLatch start = new CountDownLatch(1);
