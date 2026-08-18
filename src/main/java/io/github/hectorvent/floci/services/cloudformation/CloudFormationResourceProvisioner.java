@@ -3924,7 +3924,13 @@ public class CloudFormationResourceProvisioner {
         if (startingPositionTimestamp != null) {
             try {
                 req.put("StartingPositionTimestamp", Double.parseDouble(startingPositionTimestamp));
-            } catch (NumberFormatException ignored) {}
+            } catch (NumberFormatException e) {
+                // Not swallowed the way BatchSize above is: dropping this one degrades into the
+                // "StartingPositionTimestamp is required" error from the service, which points at
+                // the wrong problem and hides the value that actually failed to parse.
+                throw new AwsException("ValidationError",
+                        "Value of property StartingPositionTimestamp must be a number.", 400);
+            }
         }
 
         var esm = lambdaService.createEventSourceMapping(region, req);
