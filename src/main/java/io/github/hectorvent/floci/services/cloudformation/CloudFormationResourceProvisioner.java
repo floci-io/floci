@@ -3915,6 +3915,18 @@ public class CloudFormationResourceProvisioner {
             try { req.put("BatchSize", Integer.parseInt(batchSize)); } catch (NumberFormatException ignored) {}
         }
 
+        String startingPosition = resolveOptional(props, "StartingPosition", engine);
+        if (startingPosition != null) {
+            req.put("StartingPosition", startingPosition);
+        }
+
+        String startingPositionTimestamp = resolveOptional(props, "StartingPositionTimestamp", engine);
+        if (startingPositionTimestamp != null) {
+            try {
+                req.put("StartingPositionTimestamp", Double.parseDouble(startingPositionTimestamp));
+            } catch (NumberFormatException ignored) {}
+        }
+
         var esm = lambdaService.createEventSourceMapping(region, req);
         r.setPhysicalId(esm.getUuid());
         r.getAttributes().put("Id", esm.getUuid());

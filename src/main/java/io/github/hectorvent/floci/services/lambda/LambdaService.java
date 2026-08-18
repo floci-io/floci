@@ -775,6 +775,8 @@ public class LambdaService {
 
         EventSourceMapping.DestinationConfig destinationConfig = parseDestinationConfig(request);
 
+        StartingPositionSpec startingPosition = parseStartingPosition(request, eventSourceArn);
+
         String queueUrl = eventSourceArn.contains(":sqs:") ? AwsArnUtils.arnToQueueUrl(eventSourceArn, config.effectiveBaseUrl()) : null;
 
         EventSourceMapping esm = new EventSourceMapping();
@@ -792,6 +794,8 @@ public class LambdaService {
         esm.setFunctionResponseTypes(functionResponseTypes);
         esm.setBisectBatchOnFunctionError(bisectBatchOnFunctionError);
         esm.setDestinationConfig(destinationConfig);
+        esm.setStartingPosition(startingPosition.position());
+        esm.setStartingPositionTimestamp(startingPosition.timestampMillis());
         esm.setLastModified(System.currentTimeMillis());
 
         esmStore.save(esm);
@@ -832,6 +836,55 @@ public class LambdaService {
         EventSourceMapping.DestinationConfig destinationConfig = new EventSourceMapping.DestinationConfig();
         destinationConfig.setOnFailure(onFailure);
         return destinationConfig;
+    }
+
+    /** A validated {@code StartingPosition} plus, for {@code AT_TIMESTAMP}, its epoch-millis instant. */
+    private record StartingPositionSpec(String position, Long timestampMillis) {}
+
+    /**
+     * Parses {@code StartingPosition}/{@code StartingPositionTimestamp} out of a create request.
+     *
+     * <p>Absent means absent: AWS requires a starting position for stream event sources, but Floci
+     * has always accepted mappings without one (its pollers default to reading from the trim
+     * horizon), so this validates only what a caller actually sent rather than newly rejecting
+     * requests that used to succeed. There is no update counterpart because AWS's
+     * UpdateEventSourceMapping does not accept the field at all - it is replace-only.
+     */
+    private StartingPositionSpec parseStartingPosition(Map<String, Object> request, String eventSourceArn) {
+        Object raw = request.get("StartingPosition");
+        if (raw == null) {
+            return new StartingPositionSpec(null, null);
+        }
+        if (!(raw instanceof String position) || position.isBlank()) {
+            throw new AwsException("InvalidParameterValueException",
+                    "StartingPosition must be one of TRIM_HORIZON, LATEST, AT_TIMESTAMP", 400);
+        }
+        if (!"TRIM_HORIZON".equals(position) && !"LATEST".equals(position) && !"AT_TIMESTAMP".equals(position)) {
+            throw new AwsException("InvalidParameterValueException",
+                    "StartingPosition must be one of TRIM_HORIZON, LATEST, AT_TIMESTAMP (got " + position + ")", 400);
+        }
+        if (!"AT_TIMESTAMP".equals(position)) {
+            return new StartingPositionSpec(position, null);
+        }
+        // AT_TIMESTAMP is Kinesis-only among the event sources Floci supports - DynamoDB Streams
+        // shard iterators have no timestamp form at all, so silently accepting it there would
+        // promise a starting point that can never be honoured.
+        if (eventSourceArn != null && !eventSourceArn.contains(":kinesis:")) {
+            throw new AwsException("InvalidParameterValueException",
+                    "AT_TIMESTAMP is only supported for Amazon Kinesis event sources", 400);
+        }
+        Object rawTimestamp = request.get("StartingPositionTimestamp");
+        if (rawTimestamp == null) {
+            throw new AwsException("InvalidParameterValueException",
+                    "StartingPositionTimestamp is required when StartingPosition is AT_TIMESTAMP", 400);
+        }
+        if (!(rawTimestamp instanceof Number timestamp)) {
+            throw new AwsException("InvalidParameterValueException",
+                    "StartingPositionTimestamp must be a numeric epoch-seconds value", 400);
+        }
+        // Lambda speaks restJson1, whose timestamps are (possibly fractional) epoch seconds - the
+        // same convention buildEsmResponse already uses for LastModified on the way back out.
+        return new StartingPositionSpec(position, Math.round(timestamp.doubleValue() * 1000.0));
     }
 
     /**

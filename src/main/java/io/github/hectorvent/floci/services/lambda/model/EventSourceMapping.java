@@ -24,6 +24,8 @@ public class EventSourceMapping {
     private int batchSize = 10;
     private String state = "Enabled";
     private long lastModified;
+    private String startingPosition;
+    private Long startingPositionTimestamp;
     private List<String> functionResponseTypes = new ArrayList<>();
     private Map<String, String> shardSequenceNumbers = new HashMap<>();
     private ScalingConfig scalingConfig;
@@ -65,6 +67,15 @@ public class EventSourceMapping {
 
     public long getLastModified() { return lastModified; }
     public void setLastModified(long lastModified) { this.lastModified = lastModified; }
+
+    public String getStartingPosition() { return startingPosition; }
+    public void setStartingPosition(String startingPosition) { this.startingPosition = startingPosition; }
+
+    /** Epoch milliseconds; only ever set alongside an {@code AT_TIMESTAMP} starting position. */
+    public Long getStartingPositionTimestamp() { return startingPositionTimestamp; }
+    public void setStartingPositionTimestamp(Long startingPositionTimestamp) {
+        this.startingPositionTimestamp = startingPositionTimestamp;
+    }
 
     public List<String> getFunctionResponseTypes() { return functionResponseTypes; }
     public void setFunctionResponseTypes(List<String> functionResponseTypes) {

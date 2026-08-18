@@ -340,6 +340,15 @@ public class LambdaController {
         node.put("BatchSize", esm.getBatchSize());
         node.put("State", esm.getState());
         node.put("LastModified", (double) esm.getLastModified() / 1000.0);
+        // Omitted rather than nulled when unset, so a mapping created without a starting position
+        // reads back the way AWS returns it - and so Terraform sees the configured value on refresh
+        // instead of treating the field as unset and forcing a replacement on every plan.
+        if (esm.getStartingPosition() != null) {
+            node.put("StartingPosition", esm.getStartingPosition());
+        }
+        if (esm.getStartingPositionTimestamp() != null) {
+            node.put("StartingPositionTimestamp", (double) esm.getStartingPositionTimestamp() / 1000.0);
+        }
         ArrayNode responseTypes = node.putArray("FunctionResponseTypes");
 
         if (esm.getBisectBatchOnFunctionError() != null) {
