@@ -88,8 +88,11 @@ public class EfsService implements Resettable {
                 if (!java.util.Objects.equals(request.getAvailabilityZoneName(), existing.getAvailabilityZoneName())) match = false;
                 
                 Boolean reqBackup = request.getBackup() != null ? request.getBackup() : Boolean.TRUE;
-                io.github.hectorvent.floci.services.efs.model.BackupPolicy extBackupPolicy = backupPolicyStore.get(regionKey(region, existing.getFileSystemId())).orElse(null);
-                Boolean extBackup = extBackupPolicy != null && "ENABLED".equals(extBackupPolicy.getStatus());
+                Boolean extBackup = existing.getOriginalBackupParameter();
+                if (extBackup == null) {
+                    io.github.hectorvent.floci.services.efs.model.BackupPolicy extBackupPolicy = backupPolicyStore.get(regionKey(region, existing.getFileSystemId())).orElse(null);
+                    extBackup = extBackupPolicy != null && "ENABLED".equals(extBackupPolicy.getStatus());
+                }
                 if (!java.util.Objects.equals(reqBackup, extBackup)) match = false;
                 
                 java.util.List<io.github.hectorvent.floci.services.efs.model.Tag> reqTags = request.getTags() != null ? request.getTags() : java.util.Collections.emptyList();
@@ -125,6 +128,7 @@ public class EfsService implements Resettable {
             fs.setAvailabilityZoneName(request.getAvailabilityZoneName());
             fs.setAvailabilityZoneId(request.getAvailabilityZoneName() + "-id");
         }
+        fs.setOriginalBackupParameter(request.getBackup() != null ? request.getBackup() : Boolean.TRUE);
         
         if (request.getTags() != null) {
             fs.setTags(new ArrayList<>(request.getTags()));
