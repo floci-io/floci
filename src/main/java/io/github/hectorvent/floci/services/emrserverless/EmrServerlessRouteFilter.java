@@ -35,7 +35,12 @@ public class EmrServerlessRouteFilter implements ContainerRequestFilter {
         }
 
         String host = ctx.getHeaderString("Host");
-        if (host != null && host.startsWith("emr-serverless.")) {
+        boolean isEmrServerlessHost = host != null && host.startsWith("emr-serverless.");
+
+        String auth = ctx.getHeaderString("Authorization");
+        boolean isEmrServerlessAuth = auth != null && auth.contains("/emr-serverless/aws4_request");
+
+        if (isEmrServerlessHost || isEmrServerlessAuth) {
             URI rewritten = uriInfo.getRequestUriBuilder()
                     .replacePath(INTERNAL_PATH + (path.length() > 12 ? path.substring(12) : ""))
                     .build();

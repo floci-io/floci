@@ -25,7 +25,7 @@ public class EmrServerlessIntegrationTest {
 
     private io.restassured.specification.RequestSpecification givenReq() {
         return given()
-            .header("Host", "emr-serverless.us-east-1.amazonaws.com")
+            .header("Authorization", "AWS4-HMAC-SHA256 Credential=TEST/20260819/us-east-1/emr-serverless/aws4_request, SignedHeaders=host;x-amz-date, Signature=test")
             .contentType(JSON_CONTENT_TYPE);
     }
 
