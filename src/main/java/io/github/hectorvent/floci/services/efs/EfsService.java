@@ -12,6 +12,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 import java.util.stream.Collectors;
+import java.util.concurrent.ConcurrentHashMap;
 
 import org.jboss.logging.Logger;
 
@@ -26,6 +27,11 @@ public class EfsService implements Resettable {
     private final StorageBackend<String, String> fileSystemPolicyStore;
     private final StorageBackend<String, BackupPolicy> backupPolicyStore;
     private final StorageBackend<String, List<LifecyclePolicy>> lifecycleConfigurationStore;
+    private final ConcurrentHashMap<String, Object> syncLocks = new ConcurrentHashMap<>();
+
+    private Object lockFor(String key) {
+        return syncLocks.computeIfAbsent(key, k -> new Object());
+    }
 
     @Inject
     public EfsService(StorageFactory storageFactory) {
@@ -51,6 +57,7 @@ public class EfsService implements Resettable {
         fileSystemPolicyStore.clear();
         backupPolicyStore.clear();
         lifecycleConfigurationStore.clear();
+        syncLocks.clear();
     }
 
     // --- File Systems ---
@@ -58,6 +65,7 @@ public class EfsService implements Resettable {
     public FileSystem createFileSystem(CreateFileSystemRequest request, String region) {
         String token = request.getCreationToken() != null ? request.getCreationToken() : UUID.randomUUID().toString();
 
+        synchronized (lockFor(region + "::create::" + token)) {
         for (FileSystem existing : fileSystemStore.scan(k -> k.startsWith(region + "::"))) {
             if (token.equals(existing.getCreationToken())) {
                 return existing;
@@ -97,6 +105,7 @@ public class EfsService implements Resettable {
 
         fileSystemStore.put(regionKey, fs);
         return fs;
+        }
     }
 
     public List<FileSystem> describeFileSystems(String region) {
@@ -114,8 +123,9 @@ public class EfsService implements Resettable {
     }
 
     public FileSystem updateFileSystem(String region, String fileSystemId, UpdateFileSystemRequest request) {
-        FileSystem fs = getFileSystem(region, fileSystemId);
-        if (request.getThroughputMode() != null) {
+        synchronized (lockFor(regionKey(region, fileSystemId))) {
+            FileSystem fs = getFileSystem(region, fileSystemId);
+            if (request.getThroughputMode() != null) {
             fs.setThroughputMode(request.getThroughputMode().name());
         }
         if (request.getProvisionedThroughputInMibps() != null) {
@@ -123,13 +133,15 @@ public class EfsService implements Resettable {
         }
         fileSystemStore.put(regionKey(region, fileSystemId), fs);
         return fs;
+        }
     }
 
     public void deleteFileSystem(String region, String fileSystemId) {
         String key = regionKey(region, fileSystemId);
-        if (fileSystemStore.get(key).isEmpty()) {
-            throw EfsException.fileSystemNotFound(fileSystemId);
-        }
+        synchronized (lockFor(key)) {
+            if (fileSystemStore.get(key).isEmpty()) {
+                throw EfsException.fileSystemNotFound(fileSystemId);
+            }
 
         List<MountTarget> mountTargets = describeMountTargets(region, fileSystemId);
         if (!mountTargets.isEmpty()) {
@@ -148,13 +160,15 @@ public class EfsService implements Resettable {
         lifecycleConfigurationStore.delete(key);
 
         fileSystemStore.delete(key);
+        }
     }
 
     // --- Tags ---
 
     public void createTags(String region, String fileSystemId, CreateTagsRequest request) {
-        FileSystem fs = getFileSystem(region, fileSystemId);
-        List<Tag> existing = fs.getTags();
+        synchronized (lockFor(regionKey(region, fileSystemId))) {
+            FileSystem fs = getFileSystem(region, fileSystemId);
+            List<Tag> existing = fs.getTags();
         if (request.getTags() != null) {
             for (Tag newTag : request.getTags()) {
                 existing.removeIf(t -> t.getKey().equals(newTag.getKey()));
@@ -162,21 +176,25 @@ public class EfsService implements Resettable {
             }
         }
         fileSystemStore.put(regionKey(region, fileSystemId), fs);
+        }
     }
 
     public void deleteTags(String region, String fileSystemId, DeleteTagsRequest request) {
-        FileSystem fs = getFileSystem(region, fileSystemId);
-        if (request.getTagKeys() != null) {
+        synchronized (lockFor(regionKey(region, fileSystemId))) {
+            FileSystem fs = getFileSystem(region, fileSystemId);
+            if (request.getTagKeys() != null) {
             fs.getTags().removeIf(t -> request.getTagKeys().contains(t.getKey()));
         }
         fileSystemStore.put(regionKey(region, fileSystemId), fs);
+        }
     }
 
     // --- Mount Targets ---
 
     public MountTarget createMountTarget(CreateMountTargetRequest request, String region) {
-        FileSystem fs = getFileSystem(region, request.getFileSystemId());
-        String mtId = "fsmt-" + UUID.randomUUID().toString().replace("-", "").substring(0, 17);
+        synchronized (lockFor(regionKey(region, request.getFileSystemId()))) {
+            FileSystem fs = getFileSystem(region, request.getFileSystemId());
+            String mtId = "fsmt-" + UUID.randomUUID().toString().replace("-", "").substring(0, 17);
         
         MountTarget mt = new MountTarget();
         mt.setMountTargetId(mtId);
@@ -199,6 +217,7 @@ public class EfsService implements Resettable {
         
         mountTargetStore.put(regionKey(region, mtId), mt);
         return mt;
+        }
     }
 
     public List<MountTarget> describeMountTargets(String region, String fileSystemId) {
@@ -215,9 +234,11 @@ public class EfsService implements Resettable {
         }
         
         try {
-            FileSystem fs = getFileSystem(region, mt.getFileSystemId());
+            synchronized (lockFor(regionKey(region, mt.getFileSystemId()))) {
+                FileSystem fs = getFileSystem(region, mt.getFileSystemId());
             fs.setNumberOfMountTargets(Math.max(0, fs.getNumberOfMountTargets() - 1));
-            fileSystemStore.put(regionKey(region, fs.getFileSystemId()), fs);
+                fileSystemStore.put(regionKey(region, fs.getFileSystemId()), fs);
+            }
         } catch (EfsException e) {
             LOG.debug("File system " + mt.getFileSystemId() + " already deleted, skipping parent count update during mount target deletion");
         } catch (Exception e) {
@@ -251,8 +272,9 @@ public class EfsService implements Resettable {
     // --- Access Points ---
 
     public AccessPointDescription createAccessPoint(String region, CreateAccessPointRequest request) {
-        // Validate file system exists
-        getFileSystem(region, request.getFileSystemId());
+        synchronized (lockFor(regionKey(region, request.getFileSystemId()))) {
+            // Validate file system exists
+            getFileSystem(region, request.getFileSystemId());
 
         String token = request.getClientToken() != null ? request.getClientToken() : UUID.randomUUID().toString();
 
@@ -279,6 +301,7 @@ public class EfsService implements Resettable {
         
         accessPointStore.put(regionKey(region, apId), ap);
         return ap;
+        }
     }
 
     public List<AccessPointDescription> describeAccessPoints(String region, String fileSystemId, String accessPointId) {
@@ -299,8 +322,10 @@ public class EfsService implements Resettable {
     // --- Policies ---
 
     public void putFileSystemPolicy(String region, String fileSystemId, String policy) {
-        getFileSystem(region, fileSystemId); // check exists
-        fileSystemPolicyStore.put(regionKey(region, fileSystemId), policy);
+        synchronized (lockFor(regionKey(region, fileSystemId))) {
+            getFileSystem(region, fileSystemId); // check exists
+            fileSystemPolicyStore.put(regionKey(region, fileSystemId), policy);
+        }
     }
 
     public String getFileSystemPolicy(String region, String fileSystemId) {
@@ -313,13 +338,17 @@ public class EfsService implements Resettable {
     }
 
     public void deleteFileSystemPolicy(String region, String fileSystemId) {
-        getFileSystem(region, fileSystemId);
-        fileSystemPolicyStore.delete(regionKey(region, fileSystemId));
+        synchronized (lockFor(regionKey(region, fileSystemId))) {
+            getFileSystem(region, fileSystemId);
+            fileSystemPolicyStore.delete(regionKey(region, fileSystemId));
+        }
     }
 
     public void putBackupPolicy(String region, String fileSystemId, BackupPolicy policy) {
-        getFileSystem(region, fileSystemId);
-        backupPolicyStore.put(regionKey(region, fileSystemId), policy);
+        synchronized (lockFor(regionKey(region, fileSystemId))) {
+            getFileSystem(region, fileSystemId);
+            backupPolicyStore.put(regionKey(region, fileSystemId), policy);
+        }
     }
 
     public BackupPolicy getBackupPolicy(String region, String fileSystemId) {
@@ -333,8 +362,10 @@ public class EfsService implements Resettable {
     }
 
     public void putLifecycleConfiguration(String region, String fileSystemId, List<LifecyclePolicy> policies) {
-        getFileSystem(region, fileSystemId);
-        lifecycleConfigurationStore.put(regionKey(region, fileSystemId), new ArrayList<>(policies));
+        synchronized (lockFor(regionKey(region, fileSystemId))) {
+            getFileSystem(region, fileSystemId);
+            lifecycleConfigurationStore.put(regionKey(region, fileSystemId), new ArrayList<>(policies));
+        }
     }
 
     public List<LifecyclePolicy> getLifecycleConfiguration(String region, String fileSystemId) {
