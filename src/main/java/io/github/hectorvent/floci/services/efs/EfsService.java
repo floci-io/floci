@@ -284,6 +284,9 @@ public class EfsService implements Resettable {
 
                 for (AccessPointDescription existing : accessPointStore.scan(k -> k.startsWith(region + "::"))) {
                     if (token.equals(existing.getClientToken())) {
+                        if (!request.getFileSystemId().equals(existing.getFileSystemId())) {
+                            throw EfsException.idempotentParameterMismatch();
+                        }
                         return existing;
                     }
                 }
