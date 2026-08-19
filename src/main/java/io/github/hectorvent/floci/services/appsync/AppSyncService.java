@@ -588,16 +588,10 @@ public class AppSyncService {
         key.setApiId(apiId);
         key.setDescription((String) request.get("description"));
         Object expiresValue = request.get("expires");
-        if (expiresValue == null) {
-            key.setExpires(roundDownToHour(clock.instant().getEpochSecond() + Duration.ofDays(7).getSeconds()));
-        } else {
-            key.setExpires(roundDownToHour(parseExpires(expiresValue)));
-        }
-        long maxExpires = clock.instant().getEpochSecond() + Duration.ofDays(365).getSeconds();
-        if (key.getExpires() != null && key.getExpires() > maxExpires) {
-            throw new AwsException("BadRequestException",
-                    "API key expires cannot be more than 365 days from creation.", 400);
-        }
+        long expires = expiresValue == null
+                ? clock.instant().getEpochSecond() + Duration.ofDays(7).getSeconds()
+                : parseExpires(expiresValue);
+        applyApiKeyExpires(key, expires);
 
         key.setApiKey("da2-" + generateShortId());
 
@@ -636,7 +630,7 @@ public class AppSyncService {
             existing.setDescription((String) request.get("description"));
         }
         if (request.containsKey("expires")) {
-            existing.setExpires(roundDownToHour(parseExpires(request.get("expires"))));
+            applyApiKeyExpires(existing, parseExpires(request.get("expires")));
         }
         apiKeyStore.put(apiKey(apiId, keyId), existing);
         return existing;
@@ -1072,6 +1066,19 @@ public class AppSyncService {
             }
         }
         throw new AwsException("BadRequestException", "Invalid expires value.", 400);
+    }
+
+    private void applyApiKeyExpires(ApiKey key, long expires) {
+        long rounded = roundDownToHour(expires);
+        long now = clock.instant().getEpochSecond();
+        long minExpires = now + Duration.ofDays(1).getSeconds();
+        long maxExpires = now + Duration.ofDays(365).getSeconds();
+        if (rounded < minExpires || rounded > maxExpires) {
+            throw new AwsException("ApiKeyValidityOutOfBoundsException",
+                    "The API key expiration must be set to a value between 1 and 365 days from creation (for CreateApiKey) or from update (for UpdateApiKey).",
+                    400);
+        }
+        key.setExpires(rounded);
     }
 
     static long roundDownToHour(long epochSeconds) {

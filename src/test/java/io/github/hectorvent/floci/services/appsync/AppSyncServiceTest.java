@@ -21,6 +21,7 @@ import org.junit.jupiter.api.Test;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.HashMap;
 import java.util.List;
@@ -52,10 +53,46 @@ class AppSyncServiceTest {
     }
 
     @Test
-    void validateApiKeyExpiresAtNowFails() {
-        GraphqlApi api = service.createGraphqlApi(Map.of("name", "b", "authenticationType", "API_KEY"), "us-east-1");
-        ApiKey created = service.createApiKey(api.getApiId(), Map.of("expires", NOW.getEpochSecond()));
-        assertTrue(service.validateApiKey(api.getApiId(), created.getApiKey()).isEmpty());
+    void validateApiKeyExpiresAtBoundaryFails() {
+        MutableClock clock = new MutableClock(NOW);
+        AppSyncService svc = newService(clock);
+        GraphqlApi api = svc.createGraphqlApi(Map.of("name", "b", "authenticationType", "API_KEY"), "us-east-1");
+        long expires = NOW.getEpochSecond() + Duration.ofDays(1).getSeconds();
+        ApiKey created = svc.createApiKey(api.getApiId(), Map.of("expires", expires));
+        assertTrue(svc.validateApiKey(api.getApiId(), created.getApiKey()).isPresent());
+        clock.set(NOW.plus(Duration.ofDays(1)));
+        assertTrue(svc.validateApiKey(api.getApiId(), created.getApiKey()).isEmpty());
+    }
+
+    @Test
+    void createApiKeyExpiresNowThrowsOutOfBounds() {
+        GraphqlApi api = service.createGraphqlApi(Map.of("name", "bound-now", "authenticationType", "API_KEY"), "us-east-1");
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.createApiKey(api.getApiId(), Map.of("expires", NOW.getEpochSecond())));
+        assertEquals(400, ex.getHttpStatus());
+        assertEquals("ApiKeyValidityOutOfBoundsException", ex.getErrorCode());
+    }
+
+    @Test
+    void createApiKeyExpiresAfter365DaysThrowsOutOfBounds() {
+        GraphqlApi api = service.createGraphqlApi(Map.of("name", "bound-max", "authenticationType", "API_KEY"), "us-east-1");
+        long expires = NOW.getEpochSecond() + Duration.ofDays(366).getSeconds();
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.createApiKey(api.getApiId(), Map.of("expires", expires)));
+        assertEquals("ApiKeyValidityOutOfBoundsException", ex.getErrorCode());
+    }
+
+    @Test
+    void updateApiKeyExpiresOutOfBoundsThrows() {
+        GraphqlApi api = service.createGraphqlApi(Map.of("name", "bound-update", "authenticationType", "API_KEY"), "us-east-1");
+        ApiKey created = service.createApiKey(api.getApiId(), Map.of());
+        AwsException tooSoon = assertThrows(AwsException.class,
+                () -> service.updateApiKey(api.getApiId(), created.getId(), Map.of("expires", NOW.getEpochSecond())));
+        assertEquals("ApiKeyValidityOutOfBoundsException", tooSoon.getErrorCode());
+        long tooLate = NOW.getEpochSecond() + Duration.ofDays(366).getSeconds();
+        AwsException tooFar = assertThrows(AwsException.class,
+                () -> service.updateApiKey(api.getApiId(), created.getId(), Map.of("expires", tooLate)));
+        assertEquals("ApiKeyValidityOutOfBoundsException", tooFar.getErrorCode());
     }
 
     @Test
@@ -197,5 +234,32 @@ class AppSyncServiceTest {
                 AccountAwareStorageBackend.inMemory("000000000000"),
                 AccountAwareStorageBackend.inMemory("000000000000"),
                 clock);
+    }
+
+    private static final class MutableClock extends Clock {
+        private Instant instant;
+
+        private MutableClock(Instant instant) {
+            this.instant = instant;
+        }
+
+        void set(Instant instant) {
+            this.instant = instant;
+        }
+
+        @Override
+        public ZoneId getZone() {
+            return ZoneOffset.UTC;
+        }
+
+        @Override
+        public Clock withZone(ZoneId zone) {
+            return this;
+        }
+
+        @Override
+        public Instant instant() {
+            return instant;
+        }
     }
 }
