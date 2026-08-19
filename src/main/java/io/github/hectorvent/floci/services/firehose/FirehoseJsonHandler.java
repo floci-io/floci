@@ -46,8 +46,10 @@ public class FirehoseJsonHandler {
                 S3Destination s3 = null;
                 if (request.has("S3DestinationConfiguration")) {
                     s3 = mapper.treeToValue(request.get("S3DestinationConfiguration"), S3Destination.class);
+                    S3DestinationValidator.validateWireShape(s3, "s3DestinationConfiguration");
                 } else if (request.has("ExtendedS3DestinationConfiguration")) {
                     s3 = mapper.treeToValue(request.get("ExtendedS3DestinationConfiguration"), S3Destination.class);
+                    S3DestinationValidator.validateWireShape(s3, "extendedS3DestinationConfiguration");
                 }
                 List<io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.Tag> tags = new ArrayList<>();
                 if (request.has("Tags")) {
@@ -70,8 +72,10 @@ public class FirehoseJsonHandler {
                 S3Destination update = null;
                 if (request.has("ExtendedS3DestinationUpdate")) {
                     update = mapper.treeToValue(request.get("ExtendedS3DestinationUpdate"), S3Destination.class);
+                    S3DestinationValidator.validateWireShape(update, "extendedS3DestinationUpdate");
                 } else if (request.has("S3DestinationUpdate")) {
                     update = mapper.treeToValue(request.get("S3DestinationUpdate"), S3Destination.class);
+                    S3DestinationValidator.validateWireShape(update, "s3DestinationUpdate");
                 }
                 firehoseService.updateDestination(name, currentVersionId, destinationId, update);
                 yield Response.ok(Map.of()).build();

@@ -139,6 +139,12 @@
             <version>4.3.0</version>
         </dependency>
 
+        <!-- Snappy for Firehose Snappy/HADOOP_SNAPPY delivery to S3: the only Java
+             library that writes the xerial stream format AWS uses. -->
+        <dependency>
+            <groupId>org.xerial.snappy</groupId>
+            <artifactId>snappy-java</artifactId>
+        </dependency>
 
         <!-- Docker client for Lambda container lifecycle management -->
         <dependency>

@@ -444,6 +444,15 @@
             <version>1.84</version>
             <scope>test</scope>
         </dependency>
+        <!-- Decodes the Snappy variants Firehose delivers to S3 (issue #2328).
+             Pinned because this module imports no BOM; keep it in step with the
+             version the Quarkus BOM manages for the emulator itself. -->
+        <dependency>
+            <groupId>org.xerial.snappy</groupId>
+            <artifactId>snappy-java</artifactId>
+            <version>1.1.10.8</version>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>

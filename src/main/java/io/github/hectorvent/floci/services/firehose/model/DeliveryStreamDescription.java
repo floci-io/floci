@@ -184,6 +184,8 @@ public class DeliveryStreamDescription {
         private String errorOutputPrefix;
         @JsonProperty("CompressionFormat")
         private String compressionFormat;
+        @JsonProperty("FileExtension")
+        private String fileExtension;
         @JsonProperty("CustomTimeZone")
         private String customTimeZone;
         @JsonProperty("BufferingHints")
@@ -202,6 +204,8 @@ public class DeliveryStreamDescription {
         public void setErrorOutputPrefix(String errorOutputPrefix) { this.errorOutputPrefix = errorOutputPrefix; }
         public String getCompressionFormat() { return compressionFormat; }
         public void setCompressionFormat(String compressionFormat) { this.compressionFormat = compressionFormat; }
+        public String getFileExtension() { return fileExtension; }
+        public void setFileExtension(String fileExtension) { this.fileExtension = fileExtension; }
         public String getCustomTimeZone() { return customTimeZone; }
         public void setCustomTimeZone(String customTimeZone) { this.customTimeZone = customTimeZone; }
         public BufferingHints getBufferingHints() { return bufferingHints; }

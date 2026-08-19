@@ -8,21 +8,28 @@ import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescript
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.S3Destination;
 import io.github.hectorvent.floci.services.firehose.model.Record;
 import io.github.hectorvent.floci.services.s3.S3Service;
+import io.github.hectorvent.floci.services.s3.model.PutObjectOptions;
 import io.github.hectorvent.floci.testing.MutableClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.Arrays;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -31,6 +38,9 @@ import static org.mockito.Mockito.when;
 class FirehoseServiceTest {
 
     private static final String UUID_REGEX = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
+    /** AWS delivers every format as application/octet-stream, compressed or not. */
+    private static final String OCTET_STREAM = "application/octet-stream";
+    private static final String FIVE_RECORDS = "{\"n\":0}\n{\"n\":1}\n{\"n\":2}\n{\"n\":3}\n{\"n\":4}\n";
 
     private FirehoseService firehoseService;
     private StorageFactory storageFactory;
@@ -61,6 +71,13 @@ class FirehoseServiceTest {
                 new RegionResolver("us-east-1", "000000000000"), clock, config);
     }
 
+    private static S3Destination destination(String bucketArn, String compressionFormat) {
+        S3Destination s3 = new S3Destination();
+        s3.setBucketArn(bucketArn);
+        s3.setCompressionFormat(compressionFormat);
+        return s3;
+    }
+
     private void putRecords(String streamName, int count) {
         for (int i = 0; i < count; i++) {
             firehoseService.putRecord(streamName, new Record(("{\"n\":" + i + "}").getBytes(StandardCharsets.UTF_8)));
@@ -73,12 +90,36 @@ class FirehoseServiceTest {
         firehoseService.flush(streamName);
     }
 
-    private String deliveredKey(String expectedBucket) {
+    private record Delivered(String key, byte[] body, String contentType, String contentEncoding) {
+        String text() {
+            return new String(body, StandardCharsets.UTF_8);
+        }
+
+        String decoded(FirehoseCompression format) throws IOException {
+            return new String(FirehoseCompressionDecoder.decompress(format, body), StandardCharsets.UTF_8);
+        }
+    }
+
+    private Delivered delivered(String expectedBucket) {
         ArgumentCaptor<String> bucket = ArgumentCaptor.forClass(String.class);
         ArgumentCaptor<String> key = ArgumentCaptor.forClass(String.class);
-        verify(s3Service).putObject(bucket.capture(), key.capture(), any(byte[].class), anyString(), anyMap());
+        ArgumentCaptor<byte[]> body = ArgumentCaptor.forClass(byte[].class);
+        ArgumentCaptor<String> contentType = ArgumentCaptor.forClass(String.class);
+        ArgumentCaptor<PutObjectOptions> options = ArgumentCaptor.forClass(PutObjectOptions.class);
+        verify(s3Service).putObject(bucket.capture(), key.capture(), body.capture(), contentType.capture(),
+                anyMap(), options.capture());
         assertEquals(expectedBucket, bucket.getValue());
-        return key.getValue();
+        return new Delivered(key.getValue(), body.getValue(), contentType.getValue(),
+                options.getValue().getContentEncoding());
+    }
+
+    private String deliveredKey(String expectedBucket) {
+        return delivered(expectedBucket).key();
+    }
+
+    private void verifyNothingDelivered() {
+        verify(s3Service, never()).putObject(anyString(), anyString(), any(byte[].class), anyString(),
+                anyMap(), any(PutObjectOptions.class));
     }
 
     @Test
@@ -147,7 +188,7 @@ class FirehoseServiceTest {
 
         firehoseService.flushDueBuffers(clock.instant().plusSeconds(299));
 
-        verify(s3Service, never()).putObject(anyString(), anyString(), any(byte[].class), anyString(), anyMap());
+        verifyNothingDelivered();
     }
 
     @Test
@@ -157,9 +198,7 @@ class FirehoseServiceTest {
 
         firehoseService.flushDueBuffers(clock.instant().plusSeconds(300));
 
-        ArgumentCaptor<byte[]> body = ArgumentCaptor.forClass(byte[].class);
-        verify(s3Service).putObject(eq("floci-firehose-results"), anyString(), body.capture(), anyString(), anyMap());
-        assertEquals("{\"n\":0}\n{\"n\":1}\n", new String(body.getValue(), StandardCharsets.UTF_8));
+        assertEquals("{\"n\":0}\n{\"n\":1}\n", delivered("floci-firehose-results").text());
     }
 
     @Test
@@ -174,12 +213,10 @@ class FirehoseServiceTest {
         putRecords("hinted-stream", 1);
 
         firehoseService.flushDueBuffers(clock.instant().plusSeconds(59));
-        verify(s3Service, never()).putObject(anyString(), anyString(), any(byte[].class), anyString(), anyMap());
+        verifyNothingDelivered();
 
         firehoseService.flushDueBuffers(clock.instant().plusSeconds(60));
-        ArgumentCaptor<byte[]> body = ArgumentCaptor.forClass(byte[].class);
-        verify(s3Service).putObject(eq("custom-bucket"), anyString(), body.capture(), anyString(), anyMap());
-        assertEquals("{\"n\":0}\n", new String(body.getValue(), StandardCharsets.UTF_8));
+        assertEquals("{\"n\":0}\n", delivered("custom-bucket").text());
     }
 
     /** Matches real AWS: the volume trigger is bytes vs SizeInMBs, never a record count. */
@@ -188,7 +225,7 @@ class FirehoseServiceTest {
         firehoseService.createDeliveryStream("trickle-stream", null);
         putRecords("trickle-stream", 20);
 
-        verify(s3Service, never()).putObject(anyString(), anyString(), any(byte[].class), anyString(), anyMap());
+        verifyNothingDelivered();
     }
 
     @Test
@@ -202,13 +239,11 @@ class FirehoseServiceTest {
         firehoseService.createDeliveryStream("bulky-stream", s3);
 
         firehoseService.putRecord("bulky-stream", new Record(new byte[512 * 1024]));
-        verify(s3Service, never()).putObject(anyString(), anyString(), any(byte[].class), anyString(), anyMap());
+        verifyNothingDelivered();
 
         firehoseService.putRecord("bulky-stream", new Record(new byte[512 * 1024]));
-        ArgumentCaptor<byte[]> body = ArgumentCaptor.forClass(byte[].class);
-        verify(s3Service).putObject(eq("custom-bucket"), anyString(), body.capture(), anyString(), anyMap());
         // Both 512 KiB records, each followed by the newline the flush appends.
-        assertEquals(2 * 512 * 1024 + 2, body.getValue().length);
+        assertEquals(2 * 512 * 1024 + 2, delivered("custom-bucket").body().length);
     }
 
     /** Emulator-only opt-in: flush-record-count=1 restores LocalStack-style record-at-a-time delivery. */
@@ -218,9 +253,7 @@ class FirehoseServiceTest {
         firehoseService.createDeliveryStream("eager-stream", null);
         firehoseService.putRecord("eager-stream", new Record("{\"n\":0}".getBytes(StandardCharsets.UTF_8)));
 
-        ArgumentCaptor<byte[]> body = ArgumentCaptor.forClass(byte[].class);
-        verify(s3Service).putObject(eq("floci-firehose-results"), anyString(), body.capture(), anyString(), anyMap());
-        assertEquals("{\"n\":0}\n", new String(body.getValue(), StandardCharsets.UTF_8));
+        assertEquals("{\"n\":0}\n", delivered("floci-firehose-results").text());
     }
 
     @Test
@@ -228,13 +261,11 @@ class FirehoseServiceTest {
         firehoseService = newService(3);
         firehoseService.createDeliveryStream("counted-stream", null);
         putRecords("counted-stream", 2);
-        verify(s3Service, never()).putObject(anyString(), anyString(), any(byte[].class), anyString(), anyMap());
+        verifyNothingDelivered();
 
         firehoseService.putRecord("counted-stream", new Record("{\"n\":2}".getBytes(StandardCharsets.UTF_8)));
 
-        ArgumentCaptor<byte[]> body = ArgumentCaptor.forClass(byte[].class);
-        verify(s3Service).putObject(eq("floci-firehose-results"), anyString(), body.capture(), anyString(), anyMap());
-        assertEquals("{\"n\":0}\n{\"n\":1}\n{\"n\":2}\n", new String(body.getValue(), StandardCharsets.UTF_8));
+        assertEquals("{\"n\":0}\n{\"n\":1}\n{\"n\":2}\n", delivered("floci-firehose-results").text());
     }
 
     /** Matches real AWS: DeleteDeliveryStream discards undelivered records instead of flushing them. */
@@ -246,7 +277,7 @@ class FirehoseServiceTest {
         firehoseService.deleteDeliveryStream("doomed-stream");
         firehoseService.flushDueBuffers(clock.instant().plusSeconds(301));
 
-        verify(s3Service, never()).putObject(anyString(), anyString(), any(byte[].class), anyString(), anyMap());
+        verifyNothingDelivered();
     }
 
     @Test
@@ -258,6 +289,134 @@ class FirehoseServiceTest {
         firehoseService.flushDueBuffers(afterInterval);
         firehoseService.flushDueBuffers(afterInterval.plusSeconds(301));
 
-        verify(s3Service).putObject(anyString(), anyString(), any(byte[].class), anyString(), anyMap());
+        verify(s3Service).putObject(anyString(), anyString(), any(byte[].class), anyString(), anyMap(),
+                any(PutObjectOptions.class));
     }
+
+    @Test
+    void uncompressedDeliveryCarriesRawBytesWithNoExtensionOrContentEncoding() {
+        firehoseService.createDeliveryStream("plain-stream", destination("arn:aws:s3:::custom-bucket",
+                "UNCOMPRESSED"));
+        putRecordsAndFlush("plain-stream");
+
+        Delivered delivered = delivered("custom-bucket");
+        // Ending in the UUID means nothing was appended to the object name.
+        assertTrue(delivered.key().matches(".*-" + UUID_REGEX), delivered.key());
+        assertEquals(OCTET_STREAM, delivered.contentType());
+        assertNull(delivered.contentEncoding());
+        assertEquals(FIVE_RECORDS, delivered.text());
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = FirehoseCompression.class, names = "UNCOMPRESSED", mode = EnumSource.Mode.EXCLUDE)
+    void compressedFormatsDeliverTheirOwnFramingExtensionAndContentEncoding(FirehoseCompression format)
+            throws IOException {
+        firehoseService.createDeliveryStream("compressed-stream",
+                destination("arn:aws:s3:::custom-bucket", format.wireValue()));
+        putRecordsAndFlush("compressed-stream");
+
+        Delivered delivered = delivered("custom-bucket");
+        assertTrue(delivered.key().endsWith(format.extension()), delivered.key());
+        assertEquals(OCTET_STREAM, delivered.contentType());
+        assertEquals(format.contentEncoding(), delivered.contentEncoding());
+        assertFalse(Arrays.equals(FIVE_RECORDS.getBytes(StandardCharsets.UTF_8), delivered.body()),
+                "body should not be the plain payload");
+        assertEquals(FIVE_RECORDS, delivered.decoded(format));
+    }
+
+    /**
+     * Verified against real AWS: FileExtension replaces the extension the
+     * compression format contributes rather than being appended to it, and leaves
+     * the body and its Content-Encoding alone.
+     */
+    @Test
+    void fileExtensionReplacesTheCompressionExtension() throws IOException {
+        S3Destination s3 = destination("arn:aws:s3:::custom-bucket", "GZIP");
+        s3.setFileExtension(".custom.log");
+        firehoseService.createDeliveryStream("ext-stream", s3);
+        putRecordsAndFlush("ext-stream");
+
+        Delivered delivered = delivered("custom-bucket");
+        assertTrue(delivered.key().endsWith(".custom.log"), delivered.key());
+        assertFalse(delivered.key().contains(".gz"), delivered.key());
+        assertEquals("gzip", delivered.contentEncoding());
+        assertEquals(FIVE_RECORDS, delivered.decoded(FirehoseCompression.GZIP));
+    }
+
+    @Test
+    void fileExtensionIsAddedWhenTheStreamIsUncompressed() {
+        S3Destination s3 = destination("arn:aws:s3:::custom-bucket", "UNCOMPRESSED");
+        s3.setFileExtension(".custom.log");
+        firehoseService.createDeliveryStream("ext-stream", s3);
+        putRecordsAndFlush("ext-stream");
+
+        Delivered delivered = delivered("custom-bucket");
+        assertTrue(delivered.key().endsWith(".custom.log"), delivered.key());
+        assertNull(delivered.contentEncoding());
+        assertEquals(FIVE_RECORDS, delivered.text());
+    }
+
+    /** The empty string is a valid FileExtension AWS treats as "not specified". */
+    @Test
+    void emptyFileExtensionFallsBackToTheCompressionExtension() {
+        S3Destination s3 = destination("arn:aws:s3:::custom-bucket", "GZIP");
+        s3.setFileExtension("");
+        firehoseService.createDeliveryStream("ext-stream", s3);
+        putRecordsAndFlush("ext-stream");
+
+        assertTrue(deliveredKey("custom-bucket").endsWith(".gz"), "expected the GZIP extension back");
+    }
+
+    /**
+     * Verified against real AWS: a stream updated while records are still buffered
+     * delivers them with the format in effect at delivery rather than at ingest,
+     * and the key carries the version resulting from the update. AWS does not flush
+     * the pending buffer early either, it keeps to the original interval.
+     */
+    @Test
+    void compressionChangedWhileRecordsAreBufferedAppliesAtDeliveryTime() {
+        firehoseService.createDeliveryStream("mid-stream", destination("arn:aws:s3:::custom-bucket", "GZIP"));
+        putRecords("mid-stream", 5);
+
+        S3Destination update = new S3Destination();
+        update.setCompressionFormat("UNCOMPRESSED");
+        firehoseService.updateDestination("mid-stream", "1", "destinationId-000000000001", update);
+        verifyNothingDelivered();
+
+        firehoseService.flush("mid-stream");
+
+        Delivered delivered = delivered("custom-bucket");
+        assertNull(delivered.contentEncoding());
+        assertEquals(FIVE_RECORDS, delivered.text());
+        assertTrue(delivered.key().contains("mid-stream-2-"), delivered.key());
+    }
+
+    @Test
+    void updateDestinationMergesFileExtension() {
+        firehoseService.createDeliveryStream("ext-stream", destination("arn:aws:s3:::custom-bucket", "GZIP"));
+
+        S3Destination update = new S3Destination();
+        update.setFileExtension(".custom.log");
+        firehoseService.updateDestination("ext-stream", "1", "destinationId-000000000001", update);
+
+        S3Destination described = firehoseService.describeDeliveryStream("ext-stream").s3Destination();
+        assertEquals(".custom.log", described.getFileExtension());
+        assertEquals("GZIP", described.getCompressionFormat());
+    }
+
+    /**
+     * Record payloads are arbitrary bytes, so a delivery must not round-trip them
+     * through a String: that replaces every byte sequence that is not valid UTF-8.
+     */
+    @Test
+    void recordsThatAreNotValidUtf8AreDeliveredByteForByte() {
+        byte[] binary = {(byte) 0xff, (byte) 0xfe, 0x00, (byte) 0x80};
+        firehoseService.createDeliveryStream("binary-stream", null);
+        firehoseService.putRecord("binary-stream", new Record(binary));
+        firehoseService.flush("binary-stream");
+
+        assertArrayEquals(new byte[]{(byte) 0xff, (byte) 0xfe, 0x00, (byte) 0x80, '\n'},
+                delivered("floci-firehose-results").body());
+    }
+
 }

@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescript
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.S3Destination;
 import io.github.hectorvent.floci.services.firehose.model.Record;
 import io.github.hectorvent.floci.services.s3.S3Service;
+import io.github.hectorvent.floci.services.s3.model.PutObjectOptions;
 import io.quarkus.runtime.ShutdownDelayInitiatedEvent;
 import io.quarkus.runtime.StartupEvent;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -19,10 +20,9 @@ import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
-import java.nio.charset.StandardCharsets;
+import java.io.ByteArrayOutputStream;
 import java.time.Clock;
 import java.time.Instant;
-import java.time.ZoneId;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
@@ -229,6 +229,7 @@ public class FirehoseService {
         if (update.getPrefix() != null) current.setPrefix(update.getPrefix());
         if (update.getErrorOutputPrefix() != null) current.setErrorOutputPrefix(update.getErrorOutputPrefix());
         if (update.getCompressionFormat() != null) current.setCompressionFormat(update.getCompressionFormat());
+        if (update.getFileExtension() != null) current.setFileExtension(update.getFileExtension());
         if (update.getCustomTimeZone() != null) current.setCustomTimeZone(update.getCustomTimeZone());
         if (update.getBufferingHints() != null) current.setBufferingHints(update.getBufferingHints());
         if (update.getEncryptionConfiguration() != null) current.setEncryptionConfiguration(update.getEncryptionConfiguration());
@@ -370,24 +371,32 @@ public class FirehoseService {
         try {
             String bucket = resolveBucket(stream);
             S3Destination s3 = stream.s3Destination();
-            ZoneId zone = S3ObjectKeyResolver.resolveZone(s3 != null ? s3.getCustomTimeZone() : null);
-            String key = S3ObjectKeyResolver.resolveKey(s3 != null ? s3.getPrefix() : null,
-                    stream.getDeliveryStreamName(), stream.getVersionId(), clock.instant(), zone);
+            FirehoseCompression compression =
+                    FirehoseCompression.forDelivery(s3 == null ? null : s3.getCompressionFormat());
+            String key = S3ObjectKeyResolver.resolveKey(s3, stream.getDeliveryStreamName(),
+                    stream.getVersionId(), clock.instant(), compression);
 
             ensureBucket(bucket);
 
-            StringBuilder sb = new StringBuilder();
+            // Records are arbitrary bytes, so they are concatenated as bytes: routing
+            // them through a String would corrupt any payload that is not valid UTF-8.
+            // The appended newline is a deliberate deviation kept from before this
+            // method compressed anything: real AWS inserts no separator at all
+            // (verified: three "abc" records arrive as the 9 bytes "abcabcabc").
+            // See the deviation noted in docs/services/firehose.md.
+            ByteArrayOutputStream payload = new ByteArrayOutputStream();
             for (byte[] data : toFlush) {
-                sb.append(new String(data, StandardCharsets.UTF_8));
-                if (!sb.isEmpty() && sb.charAt(sb.length() - 1) != '\n') {
-                    sb.append('\n');
+                payload.writeBytes(data);
+                if (data.length > 0 && data[data.length - 1] != '\n') {
+                    payload.write('\n');
                 }
             }
 
-            byte[] body = sb.toString().getBytes(StandardCharsets.UTF_8);
-            s3Service.putObject(bucket, key, body, "application/x-ndjson", Map.of());
-            LOG.infov("Flushed {0} records from stream {1} to s3://{2}/{3}",
-                    toFlush.size(), streamName, bucket, key);
+            byte[] body = compression.compress(payload.toByteArray());
+            s3Service.putObject(bucket, key, body, "application/octet-stream", Map.of(),
+                    new PutObjectOptions().withContentEncoding(compression.contentEncoding()));
+            LOG.infov("Flushed {0} records from stream {1} to s3://{2}/{3} ({4})",
+                    toFlush.size(), streamName, bucket, key, compression.wireValue());
         } catch (Exception e) {
             LOG.errorv("Failed to flush Firehose stream {0}: {1}", streamName, e.getMessage());
         }
