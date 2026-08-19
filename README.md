@@ -822,11 +822,11 @@ Name in this README, a sponsor badge on GitHub, and our sincere thanks.
 ## Star History
 
 <p align="center">
-  <a href="https://www.star-history.com/?repos=floci-io%2Ffloci&type=date&legend=top-left">
+  <a href="https://star-history.dera.page/#floci-io/floci&type=date&legend=top-left">
     <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=floci-io/floci&type=date&theme=dark&legend=top-left" />
-      <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=floci-io/floci&type=date&legend=top-left" />
-      <img width="600" alt="Star History Chart" src="https://api.star-history.com/chart?repos=floci-io/floci&type=date&legend=top-left" />
+      <source media="(prefers-color-scheme: dark)" srcset="https://star-history.dera.page/svg?repos=floci-io/floci&type=date&theme=dark&legend=top-left" />
+      <source media="(prefers-color-scheme: light)" srcset="https://star-history.dera.page/svg?repos=floci-io/floci&type=date&legend=top-left" />
+      <img width="600" alt="Star History Chart" src="https://star-history.dera.page/svg?repos=floci-io/floci&type=date&legend=top-left" />
     </picture>
   </a>
 </p>
