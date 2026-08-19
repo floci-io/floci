@@ -197,6 +197,11 @@ floci:
     docker-host: unix:///var/run/docker.sock
     resource-namespace: ""          # FLOCI_DOCKER_RESOURCE_NAMESPACE; scopes child container/volume names
     docker-config-path: ""
+    # extra-labels:                 # Extra Docker labels applied to every Floci-created container and volume
+    #   - key: "com.example.project"  #   (FLOCI_DOCKER_EXTRA_LABELS_0__KEY / _0__VALUE; increment the index for more;
+    #     value: my-project           #   reserved keys floci, floci_emulator, floci_namespace are ignored)
+    #   - key: environment
+    #     value: dev
 
   services:
     ssm:
@@ -229,6 +234,7 @@ floci:
       unreserved-concurrency-min: 100
       # aws-config-path:                      # Host path to bind-mount (read-only) at /opt/aws-config for real credential discovery
       # extra-hosts:                          # Extra /etc/hosts entries for Lambda containers, "hostname:ip" ("host-gateway" allowed as ip)
+      # container-name-prefix: floci          # FLOCI_SERVICES_LAMBDA_CONTAINER_NAME_PREFIX — base name prefix for spawned containers and code volumes ([A-Za-z0-9][A-Za-z0-9_.-]*; invalid values fall back to "floci")
       hot-reload:
         enabled: false
     apigateway:

@@ -53,13 +53,49 @@ public final class ContainerStorageHelper {
     }
 
     /**
+     * Like {@link #dockerName} but with a caller-supplied base prefix in place of the default
+     * {@code floci}: {@code <prefix>-<rest>}, or {@code <prefix>-<namespace>-<rest>} when a
+     * resource namespace is configured.
+     */
+    public static String prefixedDockerName(EmulatorConfig config, String prefix, String rest) {
+        String namespace = resourceNamespace(config);
+        if (namespace.isBlank()) {
+            return prefix + "-" + rest;
+        }
+        return prefix + "-" + namespace + "-" + rest;
+    }
+
+    /**
+     * Label keys reserved for the emulator itself. {@code floci} and {@code floci_emulator}
+     * drive container/volume discovery and pruning (e.g.
+     * {@code docker volume prune --filter label=floci=true}); {@code floci_namespace} scopes
+     * resources when multiple Floci processes share one daemon. Extra labels using these keys
+     * are ignored so user configuration can never break cleanup.
+     */
+    private static final java.util.Set<String> RESERVED_LABEL_KEYS =
+            java.util.Set.of("floci", "floci_emulator", "floci_namespace");
+
+    /**
      * Labels applied to every emulator-created container and volume:
      * {@code floci=true} (umbrella across all Floci emulators),
      * {@code floci_emulator=floci-aws} (per-emulator discriminator), and
      * {@code floci_namespace} when a resource namespace is configured.
+     * User-configured {@code floci.docker.extra-labels} entries are included first;
+     * reserved keys always win on conflict.
      */
     public static Map<String, String> defaultLabels(EmulatorConfig config) {
         Map<String, String> labels = new LinkedHashMap<>();
+        if (config != null && config.docker() != null && config.docker().extraLabels() != null) {
+            for (EmulatorConfig.DockerConfig.LabelEntry entry : config.docker().extraLabels()) {
+                String key = entry.key() == null ? "" : entry.key().trim();
+                if (key.isEmpty() || RESERVED_LABEL_KEYS.contains(key)) {
+                    LOG.warnv("Ignoring extra Docker label with {0} key: \"{1}\"",
+                            key.isEmpty() ? "blank" : "reserved", key);
+                    continue;
+                }
+                labels.put(key, entry.value() == null ? "" : entry.value());
+            }
+        }
         labels.put("floci", "true");
         labels.put("floci_emulator", "floci-" + CLOUD);
         String namespace = resourceNamespace(config);

@@ -1514,6 +1514,17 @@ public interface EmulatorConfig {
         Optional<String> dockerNetwork();
 
         /**
+         * Base name prefix for the containers and code volumes Lambda spawns, replacing the
+         * default {@code floci} (e.g. prefix {@code acme} names containers
+         * {@code acme-<function>-<id>} and code volumes {@code acme-code-<function>-<hash>}).
+         * Must be a valid Docker name segment ({@code [A-Za-z0-9][A-Za-z0-9_.-]*}); invalid
+         * values are ignored with a warning. Unset or blank falls back to {@code floci}.
+         *
+         * Env var: FLOCI_SERVICES_LAMBDA_CONTAINER_NAME_PREFIX
+         */
+        Optional<String> containerNamePrefix();
+
+        /**
          * Extra /etc/hosts entries added to every Lambda container, as "hostname:ip" pairs.
          * The ip may be the literal "host-gateway" to map to the Docker host, mirroring
          * {@code docker run --add-host hostname:host-gateway}.
@@ -1916,6 +1927,23 @@ public interface EmulatorConfig {
             String server();
             String username();
             String password();
+        }
+
+        /**
+         * Extra Docker labels applied to every container and volume Floci creates,
+         * alongside the reserved {@code floci}, {@code floci_emulator} and
+         * {@code floci_namespace} labels (entries using a reserved key are ignored).
+         * A list of key/value entries rather than a {@code Map} so label keys with
+         * characters outside SmallRye's env-var naming convention (dots, colons,
+         * mixed case) survive:
+         * {@code FLOCI_DOCKER_EXTRA_LABELS_0__KEY} / {@code FLOCI_DOCKER_EXTRA_LABELS_0__VALUE}.
+         */
+        @WithDefault("")
+        List<LabelEntry> extraLabels();
+
+        interface LabelEntry {
+            String key();
+            String value();
         }
     }
 }

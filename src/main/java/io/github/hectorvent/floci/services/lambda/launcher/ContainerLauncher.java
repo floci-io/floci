@@ -68,6 +68,32 @@ public class ContainerLauncher {
     private static final String TASK_DIR = "/var/task";
     private static final String RUNTIME_DIR = "/var/runtime";
 
+    /** Default base prefix for the containers and code volumes Lambda spawns. */
+    static final String DEFAULT_NAME_PREFIX = "floci";
+    /** A prefix must be a legal Docker name on its own: names must start alphanumeric. */
+    private static final java.util.regex.Pattern SAFE_NAME_PREFIX =
+            java.util.regex.Pattern.compile("^[A-Za-z0-9][A-Za-z0-9_.-]*$");
+
+    /**
+     * The base name prefix for Lambda containers and code volumes:
+     * {@code floci.services.lambda.container-name-prefix} when set and Docker-safe,
+     * otherwise the default {@code floci}.
+     */
+    static String resolveContainerNamePrefix(EmulatorConfig config) {
+        String configured = config.services().lambda().containerNamePrefix()
+                .map(String::trim).orElse("");
+        if (configured.isEmpty()) {
+            return DEFAULT_NAME_PREFIX;
+        }
+        if (!SAFE_NAME_PREFIX.matcher(configured).matches()) {
+            LOG.warnv("Ignoring floci.services.lambda.container-name-prefix \"{0}\": not a valid "
+                    + "Docker name prefix ([A-Za-z0-9][A-Za-z0-9_.-]*); using \"{1}\"",
+                    configured, DEFAULT_NAME_PREFIX);
+            return DEFAULT_NAME_PREFIX;
+        }
+        return configured;
+    }
+
     /**
      * In-container location of Floci's CA certificate, injected when TLS is enabled so the
      * container trusts Floci's self-signed HTTPS endpoint. {@code /etc} exists in every Lambda
@@ -214,7 +240,8 @@ public class ContainerLauncher {
 
         // Give the container a human-readable name (needed for log stream name below)
         String shortId = java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 8);
-        String containerName = ContainerStorageHelper.dockerName(config, "floci-" + fn.getFunctionName() + "-" + shortId);
+        String containerName = ContainerStorageHelper.prefixedDockerName(config,
+                resolveContainerNamePrefix(config), fn.getFunctionName() + "-" + shortId);
 
         // CloudWatch log coordinates — computed here so they can be injected as env vars
         String cwLogGroup  = "/aws/lambda/" + fn.getFunctionName();
@@ -583,7 +610,6 @@ public class ContainerLauncher {
     // nothing under that name, silently mounting an empty /var/task into the next container.
     // ensureCodeVolume re-checks lifecycleManager.volumeExists() rather than trusting this alone.
     private static final String CODE_VOLUME_MARKER_DIR = "lambda-codevol-markers";
-    private static final String CODE_VOLUME_MARKER_PREFIX = "floci-code-";
     private final java.util.Set<String> populatedCodeVolumes = java.util.concurrent.ConcurrentHashMap.newKeySet();
     // Deliberately never pruned: removing an entry while a caller elsewhere still held a reference
     // to its lock object let a third caller's computeIfAbsent create a replacement lock for the same
@@ -652,7 +678,7 @@ public class ContainerLauncher {
      * just mounts the volume read-only, turning a ~95s per-container copy into a ~0.2s mount.
      */
     String ensureCodeVolume(LambdaFunction fn, String image) {
-        String volName = codeVolumeName(fn);
+        String volName = codeVolumeName(resolveContainerNamePrefix(config), fn);
         // Held for the whole resolve-and-reconcile, not just the populate branch: this is the same
         // lock cleanupSupersededVolumes acquires before claiming a volume for deletion, so a launch
         // that resolves a volume can never race a sweep that's about to delete that exact volume out
@@ -805,7 +831,7 @@ public class ContainerLauncher {
         // A minimal helper container (sleep) with the volume mounted read-write at /var/task; we
         // tar-copy the code into it, then discard it — the data persists in the volume.
         ContainerSpec helperSpec = containerBuilder.newContainer(image)
-                .withName("floci-codevol-" + fn.getFunctionName() + "-" + shortId)
+                .withName(resolveContainerNamePrefix(config) + "-codevol-" + fn.getFunctionName() + "-" + shortId)
                 .withEnv(java.util.List.of())
                 .withEntrypoint(java.util.List.of("sleep"))
                 .withCmd(java.util.List.of("3600"))
@@ -907,9 +933,14 @@ public class ContainerLauncher {
         if (volumeNames.isEmpty() || !Files.isDirectory(markerDir)) {
             return;
         }
+        // Markers are named after their volume, so the prune filter must track the configured
+        // name prefix. Markers written under a previously configured prefix are left alone —
+        // an orphaned marker file is harmless, and pruning only what this configuration could
+        // have written can never delete a concurrent process's live markers.
+        String markerPrefix = resolveContainerNamePrefix(config) + "-code-";
         try (java.util.stream.Stream<Path> markers = Files.list(markerDir)) {
             markers.filter(path -> Files.isRegularFile(path, java.nio.file.LinkOption.NOFOLLOW_LINKS))
-                    .filter(path -> path.getFileName().toString().startsWith(CODE_VOLUME_MARKER_PREFIX))
+                    .filter(path -> path.getFileName().toString().startsWith(markerPrefix))
                     .filter(path -> !volumeNames.get().contains(path.getFileName().toString()))
                     .forEach(path -> {
                         try {
@@ -966,6 +997,11 @@ public class ContainerLauncher {
      * Prefers the code SHA-256; falls back to last-modified when the SHA is unavailable.
      */
     static String codeVolumeName(LambdaFunction fn) {
+        return codeVolumeName(DEFAULT_NAME_PREFIX, fn);
+    }
+
+    /** {@link #codeVolumeName(LambdaFunction)} with a configured base prefix in place of {@code floci}. */
+    static String codeVolumeName(String namePrefix, LambdaFunction fn) {
         String key = fn.getCodeSha256();
         if (key == null || key.isBlank()) {
             key = Long.toString(fn.getLastModified());
@@ -978,7 +1014,7 @@ public class ContainerLauncher {
             h = "0";
         }
         String fname = fn.getFunctionName().replaceAll("[^a-zA-Z0-9_.-]", "-");
-        return "floci-code-" + fname + "-" + h;
+        return namePrefix + "-code-" + fname + "-" + h;
     }
 
     static String efsVolumeName(String accessPointArn) {

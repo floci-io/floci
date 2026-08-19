@@ -205,6 +205,20 @@ These AWS Lambda operations have no handler in Floci. Calls will return `404` or
 | `FLOCI_SERVICES_LAMBDA_DOCKER_NETWORK` | *(unset)* | Docker network to attach Lambda containers to (overrides `FLOCI_SERVICES_DOCKER_NETWORK`) |
 | `FLOCI_SERVICES_LAMBDA_EXTRA_HOSTS` | *(unset)* | Comma-separated `hostname:ip` entries added to each Lambda container's `/etc/hosts`; `ip` may be `host-gateway`, mirroring `docker run --add-host` |
 | `FLOCI_SERVICES_LAMBDA_DOCKER_HOST_OVERRIDE` | *(unset)* | Explicit host/IP that spawned Lambda containers use to reach Floci's Runtime API, bypassing auto-detection |
+| `FLOCI_SERVICES_LAMBDA_CONTAINER_NAME_PREFIX` | `floci` | Base name prefix for spawned Lambda containers and code volumes (e.g. `acme` → `acme-<function>-<id>` containers, `acme-code-<function>-<hash>` volumes). Must be a valid Docker name segment (`[A-Za-z0-9][A-Za-z0-9_.-]*`); invalid values are ignored with a warning |
+
+!!! note "Changing the container name prefix"
+    Code volumes are resolved by name, and a Floci process only manages resources under its
+    own prefix — deliberately, so multiple Floci processes with different prefixes can share
+    one Docker daemon without touching each other's containers and volumes. Restarting with a
+    different `container-name-prefix` therefore strands the code volumes (and their completion
+    markers) created under the previous prefix: they are no longer reused and no longer part of
+    automatic superseded-volume cleanup. They keep the prefix-independent `floci=true` label,
+    so reclaim them at any time with:
+
+    ```bash
+    docker volume prune --filter label=floci=true
+    ```
 
 ### Runtime API host override
 
