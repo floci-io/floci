@@ -69,11 +69,25 @@ public class EfsService implements Resettable {
         for (FileSystem existing : fileSystemStore.scan(k -> k.startsWith(region + "::"))) {
             if (token.equals(existing.getCreationToken())) {
                 boolean match = true;
-                if (request.getEncrypted() != null && !request.getEncrypted().equals(existing.getEncrypted())) match = false;
-                if (request.getKmsKeyId() != null && !request.getKmsKeyId().equals(existing.getKmsKeyId())) match = false;
-                if (request.getPerformanceMode() != null && !request.getPerformanceMode().name().equals(existing.getPerformanceMode())) match = false;
-                if (request.getThroughputMode() != null && !request.getThroughputMode().name().equals(existing.getThroughputMode())) match = false;
-                if (request.getProvisionedThroughputInMibps() != null && !request.getProvisionedThroughputInMibps().equals(existing.getProvisionedThroughputInMibps())) match = false;
+                
+                String reqPerfMode = request.getPerformanceMode() != null ? request.getPerformanceMode().name() : "generalPurpose";
+                String extPerfMode = existing.getPerformanceMode();
+                if (!java.util.Objects.equals(reqPerfMode, extPerfMode)) match = false;
+                
+                String reqTpMode = request.getThroughputMode() != null ? request.getThroughputMode().name() : "bursting";
+                String extTpMode = existing.getThroughputMode();
+                if (!java.util.Objects.equals(reqTpMode, extTpMode)) match = false;
+
+                Boolean reqEnc = request.getEncrypted() != null ? request.getEncrypted() : Boolean.FALSE;
+                Boolean extEnc = existing.getEncrypted() != null ? existing.getEncrypted() : Boolean.FALSE;
+                if (!java.util.Objects.equals(reqEnc, extEnc)) match = false;
+                
+                if (!java.util.Objects.equals(request.getKmsKeyId(), existing.getKmsKeyId())) match = false;
+                if (!java.util.Objects.equals(request.getProvisionedThroughputInMibps(), existing.getProvisionedThroughputInMibps())) match = false;
+                
+                java.util.List<io.github.hectorvent.floci.services.efs.model.Tag> reqTags = request.getTags() != null ? request.getTags() : java.util.Collections.emptyList();
+                java.util.List<io.github.hectorvent.floci.services.efs.model.Tag> extTags = existing.getTags() != null ? existing.getTags() : java.util.Collections.emptyList();
+                if (reqTags.size() != extTags.size() || !reqTags.containsAll(extTags)) match = false;
                 
                 if (!match) {
                     throw EfsException.idempotentParameterMismatch();
@@ -296,6 +310,10 @@ public class EfsService implements Resettable {
                     if (token.equals(existing.getClientToken())) {
                         boolean match = true;
                         if (!request.getFileSystemId().equals(existing.getFileSystemId())) match = false;
+                        
+                        java.util.List<io.github.hectorvent.floci.services.efs.model.Tag> reqTags = request.getTags() != null ? request.getTags() : java.util.Collections.emptyList();
+                        java.util.List<io.github.hectorvent.floci.services.efs.model.Tag> extTags = existing.getTags() != null ? existing.getTags() : java.util.Collections.emptyList();
+                        if (reqTags.size() != extTags.size() || !reqTags.containsAll(extTags)) match = false;
                         
                         // Compare PosixUser
                         if (request.getPosixUser() != null && existing.getPosixUser() == null) match = false;
