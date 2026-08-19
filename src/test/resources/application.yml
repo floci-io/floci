@@ -72,6 +72,8 @@ floci:
         flush-interval-ms: 60000
       guardduty:
         flush-interval-ms: 60000
+      emrserverless:
+        flush-interval-ms: 60000
 
   auth:
     validate-signatures: false
@@ -315,4 +317,6 @@ floci:
     rum:
       enabled: true
     guardduty:
+      enabled: true
+    emrserverless:
       enabled: true

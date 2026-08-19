@@ -283,6 +283,7 @@ public interface EmulatorConfig {
         CloudTrailStorageConfig cloudtrail();
         RumStorageConfig rum();
         GuardDutyStorageConfig guardduty();
+        EmrServerlessStorageConfig emrserverless();
     }
 
     interface SsmStorageConfig {
@@ -512,6 +513,13 @@ public interface EmulatorConfig {
         long flushIntervalMs();
     }
 
+    interface EmrServerlessStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+
     interface CodeDeployStorageConfig {
         Optional<String> mode();
 
@@ -619,6 +627,7 @@ public interface EmulatorConfig {
         CloudHsmV2ServiceConfig cloudhsmv2();
         RumServiceConfig rum();
         GuardDutyServiceConfig guardduty();
+        EmrServerlessServiceConfig emrserverless();
     }
 
     interface IotServiceConfig {
@@ -653,6 +662,11 @@ public interface EmulatorConfig {
     }
 
     interface GuardDutyServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface EmrServerlessServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }

@@ -146,6 +146,8 @@ floci:
         flush-interval-ms: 5000
       guardduty:
         flush-interval-ms: 5000
+      emrserverless:
+        flush-interval-ms: 5000
 
   dns:
     # Extra hostname suffixes resolved to Floci's container IP by the embedded DNS server.
@@ -498,4 +500,6 @@ floci:
     rum:
       enabled: true
     guardduty:
+      enabled: true
+    emrserverless:
       enabled: true
