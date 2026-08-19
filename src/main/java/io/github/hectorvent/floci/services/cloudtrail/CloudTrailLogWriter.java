@@ -144,6 +144,26 @@ public class CloudTrailLogWriter {
                     "application/x-gzip", Map.of());
             LOG.debugv("CloudTrail wrote {0} records to s3://{1}/{2}",
                     records.size(), trail.s3BucketName(), objectKey);
+
+            // This write goes straight to S3Service, bypassing the HTTP-facing
+            // S3Controller that normally emits data events for API-driven puts.
+            // Any trail whose selector matches its own destination bucket must
+            // still see its own deliveries — that's the real circular-logging
+            // behavior (issue #1192 / PR #1194) this emulator exists to prove.
+            cloudTrailService.emitS3DataEvent(CloudTrailService.S3EventInput.builder()
+                    .region(key.eventRegion())
+                    .eventName("PutObject")
+                    .bucketName(trail.s3BucketName())
+                    .key(objectKey)
+                    .accessKeyId(null)
+                    .sourceIp(null)
+                    .userAgent("cloudtrail.amazonaws.com")
+                    .bytesIn(payload.length)
+                    .bytesOut(0)
+                    .errorCode(null)
+                    .errorMessage(null)
+                    .eventTimeMillis(System.currentTimeMillis())
+                    .build());
         } catch (RuntimeException e) {
             // Re-queue so records survive the failed flush and are retried next cycle.
             cloudTrailService.requeueRecords(key, records);
