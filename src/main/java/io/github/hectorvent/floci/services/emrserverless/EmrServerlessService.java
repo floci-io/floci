@@ -39,7 +39,7 @@ public class EmrServerlessService {
                 new TypeReference<Map<String, Application>>() {});
     }
 
-    public Application createApplication(CreateApplicationRequest request) {
+    public synchronized Application createApplication(CreateApplicationRequest request) {
         if (request.getClientToken() != null) {
             for (Application existing : storage.scan(k -> true)) {
                 if (request.getClientToken().equals(existing.getClientToken())) {
@@ -130,6 +130,24 @@ public class EmrServerlessService {
         }
         if (request.getWorkerTypeSpecifications() != null) {
             app.setWorkerTypeSpecifications(request.getWorkerTypeSpecifications());
+        }
+        if (request.getMonitoringConfiguration() != null) {
+            app.setMonitoringConfiguration(request.getMonitoringConfiguration());
+        }
+        if (request.getRuntimeConfiguration() != null) {
+            app.setRuntimeConfiguration(request.getRuntimeConfiguration());
+        }
+        if (request.getSchedulerConfiguration() != null) {
+            app.setSchedulerConfiguration(request.getSchedulerConfiguration());
+        }
+        if (request.getDiskEncryptionConfiguration() != null) {
+            app.setDiskEncryptionConfiguration(request.getDiskEncryptionConfiguration());
+        }
+        if (request.getInteractiveConfiguration() != null) {
+            app.setInteractiveConfiguration(request.getInteractiveConfiguration());
+        }
+        if (request.getIdentityCenterConfiguration() != null) {
+            app.setIdentityCenterConfiguration(request.getIdentityCenterConfiguration());
         }
 
         app.setUpdatedAt(System.currentTimeMillis());

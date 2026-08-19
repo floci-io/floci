@@ -169,6 +169,14 @@ public class EmrServerlessIntegrationTest {
                                 "memory": "16 GB"
                             }
                         }
+                    },
+                    "monitoringConfiguration": {
+                        "s3MonitoringConfiguration": {
+                            "logUri": "s3://my-bucket/logs"
+                        }
+                    },
+                    "interactiveConfiguration": {
+                        "studioEnabled": true
                     }
                 }
                 """)
@@ -178,13 +186,15 @@ public class EmrServerlessIntegrationTest {
             .statusCode(200)
             .body("applicationId", equalTo(applicationId));
             
-        // Verify releaseLabel updated
+        // Verify releaseLabel and new configurations updated
         givenReq()
         .when()
             .get("/applications/" + applicationId)
         .then()
             .statusCode(200)
-            .body("application.releaseLabel", equalTo("emr-6.7.0"));
+            .body("application.releaseLabel", equalTo("emr-6.7.0"))
+            .body("application.monitoringConfiguration", notNullValue())
+            .body("application.interactiveConfiguration", notNullValue());
     }
 
     @Test

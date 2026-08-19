@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.emrserverless.model;
 
 import io.quarkus.runtime.annotations.RegisterForReflection;
 import java.util.Date;
+import java.util.List;
 import java.util.Map;
 
 @RegisterForReflection
@@ -25,6 +26,12 @@ public class Application {
     private NetworkConfiguration networkConfiguration;
     private ImageConfiguration imageConfiguration;
     private Map<String, WorkerTypeSpecification> workerTypeSpecifications;
+    private MonitoringConfiguration monitoringConfiguration;
+    private List<RuntimeConfiguration> runtimeConfiguration;
+    private SchedulerConfiguration schedulerConfiguration;
+    private DiskEncryptionConfiguration diskEncryptionConfiguration;
+    private InteractiveConfiguration interactiveConfiguration;
+    private IdentityCenterConfiguration identityCenterConfiguration;
 
     public String getApplicationId() { return applicationId; }
     public void setApplicationId(String applicationId) { this.applicationId = applicationId; }
@@ -64,4 +71,16 @@ public class Application {
     public void setImageConfiguration(ImageConfiguration imageConfiguration) { this.imageConfiguration = imageConfiguration; }
     public Map<String, WorkerTypeSpecification> getWorkerTypeSpecifications() { return workerTypeSpecifications; }
     public void setWorkerTypeSpecifications(Map<String, WorkerTypeSpecification> workerTypeSpecifications) { this.workerTypeSpecifications = workerTypeSpecifications; }
+    public MonitoringConfiguration getMonitoringConfiguration() { return monitoringConfiguration; }
+    public void setMonitoringConfiguration(MonitoringConfiguration monitoringConfiguration) { this.monitoringConfiguration = monitoringConfiguration; }
+    public List<RuntimeConfiguration> getRuntimeConfiguration() { return runtimeConfiguration; }
+    public void setRuntimeConfiguration(List<RuntimeConfiguration> runtimeConfiguration) { this.runtimeConfiguration = runtimeConfiguration; }
+    public SchedulerConfiguration getSchedulerConfiguration() { return schedulerConfiguration; }
+    public void setSchedulerConfiguration(SchedulerConfiguration schedulerConfiguration) { this.schedulerConfiguration = schedulerConfiguration; }
+    public DiskEncryptionConfiguration getDiskEncryptionConfiguration() { return diskEncryptionConfiguration; }
+    public void setDiskEncryptionConfiguration(DiskEncryptionConfiguration diskEncryptionConfiguration) { this.diskEncryptionConfiguration = diskEncryptionConfiguration; }
+    public InteractiveConfiguration getInteractiveConfiguration() { return interactiveConfiguration; }
+    public void setInteractiveConfiguration(InteractiveConfiguration interactiveConfiguration) { this.interactiveConfiguration = interactiveConfiguration; }
+    public IdentityCenterConfiguration getIdentityCenterConfiguration() { return identityCenterConfiguration; }
+    public void setIdentityCenterConfiguration(IdentityCenterConfiguration identityCenterConfiguration) { this.identityCenterConfiguration = identityCenterConfiguration; }
 }
