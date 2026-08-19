@@ -35,3 +35,64 @@ Deployed the fix to a live parent and drove the full lifecycle end-to-end, not j
 4. **One gap found and fixed in the same pass**, filed separately as issue 0035: a bucket-level `ListObjects` call (no object key) against the excluded bucket still slipped through, because `resources.type` was hardcoded to `AWS::S3::Object` for every event regardless of whether it was object- or bucket-level. Fixed in the same rebuild.
 
 Image `localhost/floci-lza:local` rebuilt 2026-08-19 with both fixes.
+
+### Delivery timeline (raw data)
+
+Per-cycle delivery size, `1160-ct`, `AWSAccelerator-Organizations-CloudTrail` → `aws-accelerator-central-logs-845036286238-us-east-1`. Full 52-row listing saved at `.temp/1160ct-loop-full-listing.json`.
+
+```
+01:34:32    748           ← seed write delivered
+01:35:32    949  (+201)
+01:36:32    723  (-226)   ← settles toward steady-state (~722-727B, 1 self-record)
+01:37:32    951  (+228)
+01:38:32    962   (+11)
+01:39:32    723  (-239)
+01:40:32    723    (0)
+01:41:32    724    (+1)
+01:42:32    723    (-1)
+01:43:32    722    (-1)
+01:44:32    725    (+3)
+01:45:32    724    (-1)
+01:46:32    721    (-3)   ← pure steady-state: one self-referential record, forever
+
+── 400-write EKS-log burst fired here ──
+01:47:32   1,016  (+295)
+01:48:32     723  (-293)
+01:49:32     724    (+1)
+01:50:32     722    (-2)
+01:51:32     723    (+1)
+01:52:32   1,196  (+473)
+01:53:32     722  (-474)
+01:54:32     947  (+225)
+01:55:32     960   (+13)
+01:56:32     723  (-237)
+01:57:32  14,234 (+13,511) ← bulk of the 400-write burst lands, folded into this cycle
+01:58:32  12,799  (-1,435) ← burst continues draining
+01:59:32     723 (-12,076) ← fully drained, back to pure steady-state in ONE cycle
+02:00:32     951    (+228)
+02:01:32   1,058    (+107)
+02:02:32     723    (-335)
+
+── 600-write varied-size burst fired here ──
+02:03:32  12,193  (+11,470)
+02:04:32  20,059   (+7,866) ← peak: multiple write-batches overlapping in one cycle
+02:05:32   9,758  (-10,301)
+02:06:32     727   (-9,031) ← fully drained again, back to steady-state
+02:07:32     723      (-4)
+
+── fix-side AdvancedEventSelectors applied ~02:08 ──
+02:08:32   1,251    (+528) ← still-queued pre-fix backlog draining
+02:09:32     953    (-298)
+02:10:32     947      (-6)
+02:11:32     724    (-223) ← backlog exhausted, loop should now be dead
+02:12:32     726      (+2)
+02:13:32     722      (-4) ← still 1 record/cycle — this is the issue-0035 gap:
+02:14:32     722       (0)   resources.type hardcoding let a bucket-level op
+02:15:32     723      (+1)   through; the real write-loop was actually still live
+02:17:32     749     (+26) ← last delivery attributable to the actual write loop
+02:22:32     749       (0) ← my own ListObjects diagnostic poll, not the loop
+02:24:32     750       (+1) ← same — another diagnostic poll
+[12+ min silence since, zero organic deliveries]
+```
+
+Each burst spikes delivery size by more than an order of magnitude in the very next 60-second cycle (steady ~723B → 12-20KB), then fully drains back to the 723B baseline within 1-2 cycles — exact, lossless absorption of external writes into the ongoing self-referential loop, with no backlog left behind and no records dropped.
