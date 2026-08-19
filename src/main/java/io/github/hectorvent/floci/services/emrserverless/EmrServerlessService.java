@@ -40,6 +40,16 @@ public class EmrServerlessService {
     }
 
     public synchronized Application createApplication(CreateApplicationRequest request) {
+        if (request.getReleaseLabel() == null || request.getReleaseLabel().isBlank()) {
+            throw new AwsException("ValidationException", "releaseLabel is required", 400);
+        }
+        if (request.getType() == null || request.getType().isBlank()) {
+            throw new AwsException("ValidationException", "type is required", 400);
+        }
+        if (request.getClientToken() == null || request.getClientToken().isBlank()) {
+            throw new AwsException("ValidationException", "clientToken is required", 400);
+        }
+
         if (request.getClientToken() != null) {
             for (Application existing : storage.scan(k -> true)) {
                 if (request.getClientToken().equals(existing.getClientToken())) {
@@ -79,7 +89,7 @@ public class EmrServerlessService {
 
     public Application getApplication(String applicationId) {
         return storage.get(applicationId)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Application " + applicationId + " not found", 400));
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Application " + applicationId + " not found", 404));
     }
 
     public PaginatedResult<ApplicationSummary> listApplications(ListApplicationsRequest request) {
