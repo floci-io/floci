@@ -26,3 +26,4 @@ The emulator implements the standard AWS `emr-serverless` service endpoints:
 * **Jobs not implemented**: Floci supports the provisioning of the `Application` management plane (which satisfies tools like Terraform's `aws_emrserverless_application` resource). Executing actual Spark or Hive jobs against these applications via `StartJobRun` is not currently implemented.
 * **Instant Start/Stop**: Floci marks the application `STARTED` or `STOPPED` immediately without provisioning actual compute capacity in the background.
 * **Data Plane**: Floci does not implement the data-plane API or any execution environments.
+* **Tagging APIs**: `TagResource`, `UntagResource`, and `ListTagsForResource` are currently unsupported.
