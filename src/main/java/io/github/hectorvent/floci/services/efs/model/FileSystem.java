@@ -30,16 +30,7 @@ public class FileSystem {
     private List<Tag> tags;
     private String throughputMode;
 
-    @com.fasterxml.jackson.annotation.JsonIgnore
-    private Boolean originalBackupParameter;
 
-    public Boolean getOriginalBackupParameter() {
-        return originalBackupParameter;
-    }
-
-    public void setOriginalBackupParameter(Boolean originalBackupParameter) {
-        this.originalBackupParameter = originalBackupParameter;
-    }
 
     public String getAvailabilityZoneId() {
         return availabilityZoneId;
