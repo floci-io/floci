@@ -5,6 +5,7 @@ import com.github.dockerjava.api.command.InspectContainerCmd;
 import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.command.StartContainerCmd;
 import com.github.dockerjava.api.exception.NotModifiedException;
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.lambda.launcher.ImageCacheService;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -54,6 +55,9 @@ class ContainerLifecycleManagerStartTest {
     @Mock
     private PortAllocator portAllocator;
 
+    @Mock
+    private EmulatorConfig config;
+
     private final ContainerSpec spec = new ContainerSpec("busybox:latest");
 
     /**
@@ -73,7 +77,7 @@ class ContainerLifecycleManagerStartTest {
 
     private ContainerLifecycleManager manager(DockerClient docker) {
         return new ContainerLifecycleManager(
-                docker, imageCacheService, containerDetector, portAllocator);
+                docker, imageCacheService, containerDetector, portAllocator, config);
     }
 
     @Test
