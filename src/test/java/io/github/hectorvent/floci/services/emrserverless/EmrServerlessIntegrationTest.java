@@ -99,7 +99,8 @@ public class EmrServerlessIntegrationTest {
                 {
                     "name": "my-second-app",
                     "releaseLabel": "emr-6.6.0",
-                    "type": "SPARK"
+                    "type": "SPARK",
+                    "clientToken": "test-token-2"
                 }
                 """)
         .when()
@@ -211,6 +212,6 @@ public class EmrServerlessIntegrationTest {
         .when()
             .get("/applications/" + applicationId)
         .then()
-            .statusCode(400);
+            .statusCode(404);
     }
 }
