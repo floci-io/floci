@@ -20,3 +20,7 @@ The CloudTrail emulation (merged commit `100f2ac9`) can prove a dangerous config
 ## Suggested fix direction
 
 Either route `CloudTrailLogWriter`'s delivery write through `S3Controller`/whatever emits data events (so internal writes are treated identically to API-driven ones), or add an explicit `cloudTrailService.recordDataEvent(...)`-style call at the point of delivery so `flushTrail` self-reports like a real S3 PutObject would. Out of scope for the current CloudTrail work — filed for later triage.
+
+## Status: Fixed
+
+`CloudTrailLogWriter.flushTrail()` now calls `cloudTrailService.emitS3DataEvent(...)` immediately after each successful delivery write, using the same evaluation path (`trailsMatching`/selector matching) that API-driven S3 writes go through. Regression test: `CloudTrailSelfDeliveryTest.trailWithBlanketSelectorCapturesItsOwnLogDeliveryAsDataEvent` — creates a trail with a blanket selector pointed at its own destination bucket, forces two flushes, and asserts the second delivery contains a `PutObject` record for the first delivery's own log key. RED confirmed before the fix (only 1 log file delivered instead of 2); GREEN after (48/48 CloudTrail tests passing, no regressions). Fixed commit: `ad229a6b`.
