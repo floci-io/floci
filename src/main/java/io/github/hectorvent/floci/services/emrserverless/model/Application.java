@@ -13,6 +13,7 @@ public class Application {
     private String type;
     private String state;
     private String stateDetails;
+    private String clientToken;
     private Long createdAt;
     private Long updatedAt;
     private Map<String, String> tags;
@@ -39,6 +40,8 @@ public class Application {
     public void setState(String state) { this.state = state; }
     public String getStateDetails() { return stateDetails; }
     public void setStateDetails(String stateDetails) { this.stateDetails = stateDetails; }
+    public String getClientToken() { return clientToken; }
+    public void setClientToken(String clientToken) { this.clientToken = clientToken; }
     public Long getCreatedAt() { return createdAt; }
     public void setCreatedAt(Long createdAt) { this.createdAt = createdAt; }
     public Long getUpdatedAt() { return updatedAt; }

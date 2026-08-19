@@ -46,9 +46,27 @@ public class EmrServerlessIntegrationTest {
         .then()
             .statusCode(200)
             .body("applicationId", notNullValue())
-            .body("arn", startsWith("arn:aws:emr-serverless"))
+            .body("arn", startsWith("arn:aws:emr-serverless:us-east-1:000000000000:/applications/"))
             .body("name", equalTo("my-test-app"))
             .extract().path("applicationId");
+            
+        // Test Idempotency
+        String retryApplicationId = givenReq()
+            .body("""
+                {
+                    "name": "my-test-app",
+                    "releaseLabel": "emr-6.6.0",
+                    "type": "SPARK",
+                    "clientToken": "test-token"
+                }
+                """)
+        .when()
+            .post("/applications")
+        .then()
+            .statusCode(200)
+            .extract().path("applicationId");
+            
+        org.junit.jupiter.api.Assertions.assertEquals(applicationId, retryApplicationId, "Idempotent create should return the same application ID");
     }
 
     @Test
@@ -74,6 +92,32 @@ public class EmrServerlessIntegrationTest {
             .statusCode(200)
             .body("applications.size()", greaterThanOrEqualTo(1))
             .body("applications.find { it.id == '" + applicationId + "' }.name", equalTo("my-test-app"));
+            
+        // Create a second app to test pagination
+        givenReq()
+            .body("""
+                {
+                    "name": "my-second-app",
+                    "releaseLabel": "emr-6.6.0",
+                    "type": "SPARK"
+                }
+                """)
+        .when()
+            .post("/applications")
+        .then()
+            .statusCode(200);
+
+        // Test pagination and state filtering
+        givenReq()
+            .queryParam("states", "CREATED")
+            .queryParam("maxResults", 1)
+        .when()
+            .get("/applications")
+        .then()
+            .statusCode(200)
+            .body("applications.size()", equalTo(1))
+            .body("applications[0].state", equalTo("CREATED"))
+            .body("nextToken", notNullValue());
     }
 
     @Test
@@ -116,6 +160,7 @@ public class EmrServerlessIntegrationTest {
         givenReq()
             .body("""
                 {
+                    "releaseLabel": "emr-6.7.0",
                     "initialCapacity": {
                         "DRIVER": {
                             "workerCount": 2,
@@ -132,6 +177,14 @@ public class EmrServerlessIntegrationTest {
         .then()
             .statusCode(200)
             .body("applicationId", equalTo(applicationId));
+            
+        // Verify releaseLabel updated
+        givenReq()
+        .when()
+            .get("/applications/" + applicationId)
+        .then()
+            .statusCode(200)
+            .body("application.releaseLabel", equalTo("emr-6.7.0"));
     }
 
     @Test

@@ -6,6 +6,9 @@ import io.github.hectorvent.floci.services.emrserverless.model.CreateApplication
 import io.github.hectorvent.floci.services.emrserverless.model.CreateApplicationResponse;
 import io.github.hectorvent.floci.services.emrserverless.model.DeleteApplicationResponse;
 import io.github.hectorvent.floci.services.emrserverless.model.GetApplicationResponse;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
+import io.github.hectorvent.floci.services.emrserverless.model.ListApplicationsRequest;
 import io.github.hectorvent.floci.services.emrserverless.model.ListApplicationsResponse;
 import io.github.hectorvent.floci.services.emrserverless.model.StartApplicationResponse;
 import io.github.hectorvent.floci.services.emrserverless.model.StopApplicationResponse;
@@ -21,6 +24,7 @@ import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.MediaType;
 
 import java.util.List;
@@ -49,10 +53,21 @@ public class EmrServerlessController {
     }
 
     @GET
-    public ListApplicationsResponse listApplications() {
-        List<ApplicationSummary> summaries = service.listApplications();
+    public ListApplicationsResponse listApplications(
+            @QueryParam("states") List<String> states,
+            @QueryParam("maxResults") String maxResults,
+            @QueryParam("nextToken") String nextToken) {
+        
+        ListApplicationsRequest req = new ListApplicationsRequest();
+        req.setStates(states);
+        req.setMaxResults(Pagination.parseMaxResults(maxResults, "ValidationException"));
+        req.setNextToken(nextToken);
+        
+        PaginatedResult<ApplicationSummary> page = service.listApplications(req);
+        
         ListApplicationsResponse response = new ListApplicationsResponse();
-        response.setApplications(summaries);
+        response.setApplications(page.items());
+        response.setNextToken(page.nextToken());
         return response;
     }
 

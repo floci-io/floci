@@ -3,11 +3,15 @@ package io.github.hectorvent.floci.services.emrserverless;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
+import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.emrserverless.model.Application;
 import io.github.hectorvent.floci.services.emrserverless.model.ApplicationSummary;
 import io.github.hectorvent.floci.services.emrserverless.model.CreateApplicationRequest;
+import io.github.hectorvent.floci.services.emrserverless.model.ListApplicationsRequest;
 import io.github.hectorvent.floci.services.emrserverless.model.UpdateApplicationRequest;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -24,6 +28,9 @@ public class EmrServerlessService {
 
     private final EmulatorConfig config;
     private final AccountAwareStorageBackend<Application> storage;
+    
+    @Inject
+    RequestContext requestContext;
 
     @Inject
     public EmrServerlessService(EmulatorConfig config, StorageFactory storageFactory) {
@@ -33,12 +40,21 @@ public class EmrServerlessService {
     }
 
     public Application createApplication(CreateApplicationRequest request) {
+        if (request.getClientToken() != null) {
+            for (Application existing : storage.scan(k -> true)) {
+                if (request.getClientToken().equals(existing.getClientToken())) {
+                    return existing;
+                }
+            }
+        }
+
         String id = generateId();
         String arn = buildArn(id);
         long now = System.currentTimeMillis();
 
         Application app = new Application();
         app.setApplicationId(id);
+        app.setClientToken(request.getClientToken());
         app.setArn(arn);
         app.setName(request.getName());
         app.setReleaseLabel(request.getReleaseLabel());
@@ -66,10 +82,18 @@ public class EmrServerlessService {
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Application " + applicationId + " not found", 400));
     }
 
-    public List<ApplicationSummary> listApplications() {
-        return storage.scan(k -> true).stream()
-                .map(this::toSummary)
-                .collect(Collectors.toList());
+    public PaginatedResult<ApplicationSummary> listApplications(ListApplicationsRequest request) {
+        List<Application> all = storage.scan(k -> true);
+        if (request.getStates() != null && !request.getStates().isEmpty()) {
+            all = all.stream().filter(app -> request.getStates().contains(app.getState())).collect(Collectors.toList());
+        }
+        
+        PaginatedResult<Application> page = Pagination.paginate(all, Application::getApplicationId, request.getMaxResults(), request.getNextToken(), 50, "ValidationException");
+        
+        return new PaginatedResult<>(
+                page.items().stream().map(this::toSummary).collect(Collectors.toList()),
+                page.nextToken()
+        );
     }
 
     public Application updateApplication(String applicationId, UpdateApplicationRequest request) {
@@ -80,6 +104,9 @@ public class EmrServerlessService {
             throw new AwsException("ValidationException", "Application must be in a stopped or created state in order to be updated.", 400);
         }
 
+        if (request.getReleaseLabel() != null) {
+            app.setReleaseLabel(request.getReleaseLabel());
+        }
         if (request.getInitialCapacity() != null) {
             app.setInitialCapacity(request.getInitialCapacity());
         }
@@ -146,8 +173,10 @@ public class EmrServerlessService {
     }
 
     private String buildArn(String id) {
+        String region = requestContext != null && requestContext.getRegion() != null ? requestContext.getRegion() : config.defaultRegion();
+        String accountId = requestContext != null && requestContext.getAccountId() != null ? requestContext.getAccountId() : config.defaultAccountId();
         return String.format("arn:aws:emr-serverless:%s:%s:/applications/%s",
-                config.defaultRegion(), config.defaultAccountId(), id);
+                region, accountId, id);
     }
 
     private ApplicationSummary toSummary(Application app) {
