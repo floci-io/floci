@@ -85,6 +85,13 @@ public class EfsService implements Resettable {
                 if (!java.util.Objects.equals(request.getKmsKeyId(), existing.getKmsKeyId())) match = false;
                 if (!java.util.Objects.equals(request.getProvisionedThroughputInMibps(), existing.getProvisionedThroughputInMibps())) match = false;
                 
+                if (!java.util.Objects.equals(request.getAvailabilityZoneName(), existing.getAvailabilityZoneName())) match = false;
+                
+                Boolean reqBackup = request.getBackup() != null ? request.getBackup() : Boolean.TRUE;
+                io.github.hectorvent.floci.services.efs.model.BackupPolicy extBackupPolicy = backupPolicyStore.get(regionKey(region, existing.getFileSystemId())).orElse(null);
+                Boolean extBackup = extBackupPolicy != null && "ENABLED".equals(extBackupPolicy.getStatus());
+                if (!java.util.Objects.equals(reqBackup, extBackup)) match = false;
+                
                 java.util.List<io.github.hectorvent.floci.services.efs.model.Tag> reqTags = request.getTags() != null ? request.getTags() : java.util.Collections.emptyList();
                 java.util.List<io.github.hectorvent.floci.services.efs.model.Tag> extTags = existing.getTags() != null ? existing.getTags() : java.util.Collections.emptyList();
                 if (reqTags.size() != extTags.size() || !reqTags.containsAll(extTags)) match = false;
@@ -114,6 +121,10 @@ public class EfsService implements Resettable {
         }
         fs.setEncrypted(request.getEncrypted() != null ? request.getEncrypted() : false);
         fs.setKmsKeyId(request.getKmsKeyId());
+        if (request.getAvailabilityZoneName() != null) {
+            fs.setAvailabilityZoneName(request.getAvailabilityZoneName());
+            fs.setAvailabilityZoneId(request.getAvailabilityZoneName() + "-id");
+        }
         
         if (request.getTags() != null) {
             fs.setTags(new ArrayList<>(request.getTags()));
@@ -128,6 +139,11 @@ public class EfsService implements Resettable {
         fs.setSizeInBytes(size);
 
         fileSystemStore.put(regionKey, fs);
+        
+        io.github.hectorvent.floci.services.efs.model.BackupPolicy bp = new io.github.hectorvent.floci.services.efs.model.BackupPolicy();
+        bp.setStatus(request.getBackup() != null && !request.getBackup() ? "DISABLED" : "ENABLED");
+        backupPolicyStore.put(regionKey, bp);
+        
         return fs;
         }
     }
