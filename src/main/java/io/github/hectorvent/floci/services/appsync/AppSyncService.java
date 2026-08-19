@@ -1079,6 +1079,7 @@ public class AppSyncService {
                     400);
         }
         key.setExpires(rounded);
+        key.setDeletes(roundDownToHour(rounded + Duration.ofDays(60).getSeconds()));
     }
 
     static long roundDownToHour(long epochSeconds) {

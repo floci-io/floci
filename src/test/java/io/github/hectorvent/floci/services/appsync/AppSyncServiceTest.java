@@ -108,6 +108,7 @@ class AppSyncServiceTest {
         GraphqlApi api = service.createGraphqlApi(Map.of("name", "e", "authenticationType", "API_KEY"), "us-east-1");
         ApiKey created = service.createApiKey(api.getApiId(), Map.of());
         assertEquals(NOW.getEpochSecond() + Duration.ofDays(7).getSeconds(), created.getExpires());
+        assertEquals(NOW.getEpochSecond() + Duration.ofDays(67).getSeconds(), created.getDeletes());
     }
 
     @Test
@@ -116,6 +117,7 @@ class AppSyncServiceTest {
         long expires = NOW.getEpochSecond() + Duration.ofDays(30).getSeconds();
         ApiKey created = service.createApiKey(api.getApiId(), Map.of("expires", expires));
         assertEquals(expires, created.getExpires());
+        assertEquals(expires + Duration.ofDays(60).getSeconds(), created.getDeletes());
     }
 
     @Test
