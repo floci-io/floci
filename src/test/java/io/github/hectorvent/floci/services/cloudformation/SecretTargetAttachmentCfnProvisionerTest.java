@@ -70,7 +70,7 @@ class SecretTargetAttachmentCfnProvisionerTest {
                 mapper,
                 null, null, null, null, null, null, null,
                 rdsService, null, null, null, null, null, null,
-                docDbService,
+                docDbService, null,
                 new CloudFormationResourceRegistry(List.of()));
     }
 

@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.services.iam.model.IamPolicy;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
 import io.github.hectorvent.floci.services.iam.model.IamUser;
 import io.github.hectorvent.floci.services.iam.model.InstanceProfile;
+import io.github.hectorvent.floci.services.iam.model.OpenIDConnectProvider;
 import io.github.hectorvent.floci.services.iam.model.PolicyVersion;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -65,7 +66,22 @@ public class IamQueryHandler {
             // Identity providers & server certificates (read-only, not modeled)
             case "ListSAMLProviders" -> handleListSAMLProviders(params);
             case "ListOpenIDConnectProviders" -> handleListOpenIDConnectProviders(params);
+            case "CreateOpenIDConnectProvider" -> handleCreateOpenIDConnectProvider(params);
+            case "GetOpenIDConnectProvider" -> handleGetOpenIDConnectProvider(params);
+            case "DeleteOpenIDConnectProvider" -> handleDeleteOpenIDConnectProvider(params);
+            case "AddClientIDToOpenIDConnectProvider" -> handleAddClientIDToOpenIDConnectProvider(params);
+            case "RemoveClientIDFromOpenIDConnectProvider" ->
+                    handleRemoveClientIDFromOpenIDConnectProvider(params);
+            case "UpdateOpenIDConnectProviderThumbprint" -> handleUpdateOpenIDConnectProviderThumbprint(params);
+            case "TagOpenIDConnectProvider" -> handleTagOpenIDConnectProvider(params);
+            case "UntagOpenIDConnectProvider" -> handleUntagOpenIDConnectProvider(params);
+            case "ListOpenIDConnectProviderTags" -> handleListOpenIDConnectProviderTags(params);
             case "ListServerCertificates" -> handleListServerCertificates(params);
+
+            // Account Aliases
+            case "ListAccountAliases" -> handleListAccountAliases(params);
+            case "CreateAccountAlias" -> handleCreateAccountAlias(params);
+            case "DeleteAccountAlias" -> handleDeleteAccountAlias(params);
 
             // Groups
             case "CreateGroup" -> handleCreateGroup(params);
@@ -82,6 +98,9 @@ public class IamQueryHandler {
             case "DeleteRole" -> handleDeleteRole(params);
             case "ListRoles" -> handleListRoles(params);
             case "UpdateRole" -> handleUpdateRole(params);
+            case "CreateServiceLinkedRole" -> handleCreateServiceLinkedRole(params);
+            case "DeleteServiceLinkedRole" -> handleDeleteServiceLinkedRole(params);
+            case "GetServiceLinkedRoleDeletionStatus" -> handleGetServiceLinkedRoleDeletionStatus(params);
             case "UpdateAssumeRolePolicy" -> handleUpdateAssumeRolePolicy(params);
             case "TagRole" -> handleTagRole(params);
             case "UntagRole" -> handleUntagRole(params);
@@ -93,6 +112,7 @@ public class IamQueryHandler {
             case "DeletePolicy" -> handleDeletePolicy(params);
             case "ListPolicies" -> handleListPolicies(params);
             case "ListEntitiesForPolicy" -> handleListEntitiesForPolicy(params);
+            case "GetAccountSummary" -> handleGetAccountSummary(params);
             case "CreatePolicyVersion" -> handleCreatePolicyVersion(params);
             case "GetPolicyVersion" -> handleGetPolicyVersion(params);
             case "DeletePolicyVersion" -> handleDeletePolicyVersion(params);
@@ -179,7 +199,7 @@ public class IamQueryHandler {
         IamUser user = iamService.createUser(userName, path);
         if (!tags.isEmpty()) iamService.tagUser(userName, tags);
         user = iamService.getUser(userName);
-        String result = new XmlBuilder().start("User").raw(userXml(user)).end("User").build();
+        String result = new XmlBuilder().start("User").raw(userXml(user, true)).end("User").build();
         return Response.ok(AwsQueryResponse.envelope("CreateUser", AwsNamespaces.IAM, result)).build();
     }
 
@@ -205,7 +225,7 @@ public class IamQueryHandler {
         // UserName is optional per the IAM model: it defaults to the user owning the
         // access key that signed the request.
         IamUser user = iamService.getUser(resolveUserName(params, authorization));
-        String result = new XmlBuilder().start("User").raw(userXml(user)).end("User").build();
+        String result = new XmlBuilder().start("User").raw(userXml(user, true)).end("User").build();
         return Response.ok(AwsQueryResponse.envelope("GetUser", AwsNamespaces.IAM, result)).build();
     }
 
@@ -220,7 +240,7 @@ public class IamQueryHandler {
         List<IamUser> userList = iamService.listUsers(pathPrefix);
         var xml = new XmlBuilder().start("Users");
         for (IamUser u : userList) {
-            xml.start("member").raw(userXml(u)).end("member");
+            xml.start("member").raw(userXml(u, false)).end("member");
         }
         xml.end("Users").elem("IsTruncated", false);
         return Response.ok(AwsQueryResponse.envelope("ListUsers", AwsNamespaces.IAM, xml.build())).build();
@@ -286,13 +306,97 @@ public class IamQueryHandler {
         return Response.ok(AwsQueryResponse.envelope("ListSAMLProviders", AwsNamespaces.IAM, result)).build();
     }
 
+    // ListOpenIDConnectProviders is not paginated and carries only ARNs — the client fetches
+    // the rest with GetOpenIDConnectProvider.
     private Response handleListOpenIDConnectProviders(MultivaluedMap<String, String> params) {
-        // OIDC identity providers are not modeled; return the wire-accurate empty
-        // list (ListOpenIDConnectProviders is not paginated).
+        var xml = new XmlBuilder().start("OpenIDConnectProviderList");
+        for (OpenIDConnectProvider provider : iamService.listOpenIDConnectProviders()) {
+            xml.start("member").elem("Arn", provider.getArn()).end("member");
+        }
+        xml.end("OpenIDConnectProviderList");
+        return Response.ok(AwsQueryResponse.envelope("ListOpenIDConnectProviders", AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    private Response handleCreateOpenIDConnectProvider(MultivaluedMap<String, String> params) {
+        OpenIDConnectProvider provider = iamService.createOpenIDConnectProvider(
+                getParam(params, "Url"),
+                getMemberList(params, "ClientIDList"),
+                getMemberList(params, "ThumbprintList"),
+                extractTags(params));
+        var xml = new XmlBuilder().elem("OpenIDConnectProviderArn", provider.getArn());
+        if (!provider.getTags().isEmpty()) {
+            xml.start("Tags").raw(tagsXml(provider.getTags())).end("Tags");
+        }
+        return Response.ok(AwsQueryResponse.envelope("CreateOpenIDConnectProvider", AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    // The response carries no ARN: AWS echoes back the scheme-less Url, and the caller already
+    // knows the ARN it asked for.
+    private Response handleGetOpenIDConnectProvider(MultivaluedMap<String, String> params) {
+        OpenIDConnectProvider provider =
+                iamService.getOpenIDConnectProvider(getParam(params, "OpenIDConnectProviderArn"));
+        var xml = new XmlBuilder().elem("Url", provider.getUrl());
+        xml.start("ClientIDList");
+        for (String clientId : provider.getClientIdList()) {
+            xml.elem("member", clientId);
+        }
+        xml.end("ClientIDList").start("ThumbprintList");
+        for (String thumbprint : provider.getThumbprintList()) {
+            xml.elem("member", thumbprint);
+        }
+        xml.end("ThumbprintList")
+                .elem("CreateDate", isoDate(provider.getCreateDate()));
+        if (!provider.getTags().isEmpty()) {
+            xml.start("Tags").raw(tagsXml(provider.getTags())).end("Tags");
+        }
+        return Response.ok(AwsQueryResponse.envelope("GetOpenIDConnectProvider", AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    private Response handleDeleteOpenIDConnectProvider(MultivaluedMap<String, String> params) {
+        iamService.deleteOpenIDConnectProvider(getParam(params, "OpenIDConnectProviderArn"));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("DeleteOpenIDConnectProvider", AwsNamespaces.IAM)).build();
+    }
+
+    private Response handleAddClientIDToOpenIDConnectProvider(MultivaluedMap<String, String> params) {
+        iamService.addClientIdToOpenIDConnectProvider(
+                getParam(params, "OpenIDConnectProviderArn"), getParam(params, "ClientID"));
+        return Response.ok(AwsQueryResponse.envelopeNoResult(
+                "AddClientIDToOpenIDConnectProvider", AwsNamespaces.IAM)).build();
+    }
+
+    private Response handleRemoveClientIDFromOpenIDConnectProvider(MultivaluedMap<String, String> params) {
+        iamService.removeClientIdFromOpenIDConnectProvider(
+                getParam(params, "OpenIDConnectProviderArn"), getParam(params, "ClientID"));
+        return Response.ok(AwsQueryResponse.envelopeNoResult(
+                "RemoveClientIDFromOpenIDConnectProvider", AwsNamespaces.IAM)).build();
+    }
+
+    private Response handleUpdateOpenIDConnectProviderThumbprint(MultivaluedMap<String, String> params) {
+        iamService.updateOpenIDConnectProviderThumbprint(
+                getParam(params, "OpenIDConnectProviderArn"), getMemberList(params, "ThumbprintList"));
+        return Response.ok(AwsQueryResponse.envelopeNoResult(
+                "UpdateOpenIDConnectProviderThumbprint", AwsNamespaces.IAM)).build();
+    }
+
+    private Response handleTagOpenIDConnectProvider(MultivaluedMap<String, String> params) {
+        iamService.tagOpenIDConnectProvider(getParam(params, "OpenIDConnectProviderArn"), extractTags(params));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("TagOpenIDConnectProvider", AwsNamespaces.IAM)).build();
+    }
+
+    private Response handleUntagOpenIDConnectProvider(MultivaluedMap<String, String> params) {
+        iamService.untagOpenIDConnectProvider(
+                getParam(params, "OpenIDConnectProviderArn"), extractTagKeys(params));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("UntagOpenIDConnectProvider", AwsNamespaces.IAM)).build();
+    }
+
+    private Response handleListOpenIDConnectProviderTags(MultivaluedMap<String, String> params) {
+        Map<String, String> providerTags =
+                iamService.listOpenIDConnectProviderTags(getParam(params, "OpenIDConnectProviderArn"));
         String result = new XmlBuilder()
-                .start("OpenIDConnectProviderList").end("OpenIDConnectProviderList")
+                .start("Tags").raw(tagsXml(providerTags)).end("Tags")
+                .elem("IsTruncated", false)
                 .build();
-        return Response.ok(AwsQueryResponse.envelope("ListOpenIDConnectProviders", AwsNamespaces.IAM, result)).build();
+        return Response.ok(AwsQueryResponse.envelope("ListOpenIDConnectProviderTags", AwsNamespaces.IAM, result)).build();
     }
 
     private Response handleListServerCertificates(MultivaluedMap<String, String> params) {
@@ -302,6 +406,29 @@ public class IamQueryHandler {
                 .elem("IsTruncated", false)
                 .build();
         return Response.ok(AwsQueryResponse.envelope("ListServerCertificates", AwsNamespaces.IAM, result)).build();
+    }
+
+    // =========================================================================
+    // Account Aliases
+    // =========================================================================
+
+    // ListAccountAliases is paginated on the wire (IsTruncated) even though an account can only
+    // ever hold one alias, so the envelope carries the flag to match the AWS response shape.
+    private Response handleListAccountAliases(MultivaluedMap<String, String> params) {
+        var xml = new XmlBuilder().start("AccountAliases");
+        iamService.getAccountAlias().ifPresent(alias -> xml.elem("member", alias));
+        xml.end("AccountAliases").elem("IsTruncated", false);
+        return Response.ok(AwsQueryResponse.envelope("ListAccountAliases", AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    private Response handleCreateAccountAlias(MultivaluedMap<String, String> params) {
+        iamService.createAccountAlias(getParam(params, "AccountAlias"));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("CreateAccountAlias", AwsNamespaces.IAM)).build();
+    }
+
+    private Response handleDeleteAccountAlias(MultivaluedMap<String, String> params) {
+        iamService.deleteAccountAlias(getParam(params, "AccountAlias"));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("DeleteAccountAlias", AwsNamespaces.IAM)).build();
     }
 
     // =========================================================================
@@ -331,7 +458,7 @@ public class IamQueryHandler {
                 .start("Group").raw(groupXml(group)).end("Group")
                 .start("Users");
         for (IamUser u : members) {
-            xml.start("member").raw(userXml(u)).end("member");
+            xml.start("member").raw(userXml(u, false)).end("member");
         }
         xml.end("Users").elem("IsTruncated", false);
         return Response.ok(AwsQueryResponse.envelope("GetGroup", AwsNamespaces.IAM, xml.build())).build();
@@ -384,13 +511,13 @@ public class IamQueryHandler {
         int maxSession = getIntParam(params, "MaxSessionDuration", 3600);
         Map<String, String> tags = extractTags(params);
         IamRole role = iamService.createRole(roleName, path, trustPolicy, description, maxSession, tags);
-        String result = new XmlBuilder().start("Role").raw(roleXml(role)).end("Role").build();
+        String result = new XmlBuilder().start("Role").raw(roleXml(role, true)).end("Role").build();
         return Response.ok(AwsQueryResponse.envelope("CreateRole", AwsNamespaces.IAM, result)).build();
     }
 
     private Response handleGetRole(MultivaluedMap<String, String> params) {
         IamRole role = iamService.getRole(getParam(params, "RoleName"));
-        String result = new XmlBuilder().start("Role").raw(roleXml(role)).end("Role").build();
+        String result = new XmlBuilder().start("Role").raw(roleXml(role, true)).end("Role").build();
         return Response.ok(AwsQueryResponse.envelope("GetRole", AwsNamespaces.IAM, result)).build();
     }
 
@@ -399,11 +526,32 @@ public class IamQueryHandler {
         return Response.ok(AwsQueryResponse.envelopeNoResult("DeleteRole", AwsNamespaces.IAM)).build();
     }
 
+    private Response handleCreateServiceLinkedRole(MultivaluedMap<String, String> params) {
+        IamRole role = iamService.createServiceLinkedRole(
+                getParam(params, "AWSServiceName"),
+                getParam(params, "CustomSuffix"),
+                getParam(params, "Description"));
+        String result = new XmlBuilder().start("Role").raw(roleXml(role, true)).end("Role").build();
+        return Response.ok(AwsQueryResponse.envelope("CreateServiceLinkedRole", AwsNamespaces.IAM, result)).build();
+    }
+
+    private Response handleDeleteServiceLinkedRole(MultivaluedMap<String, String> params) {
+        String deletionTaskId = iamService.deleteServiceLinkedRole(getParam(params, "RoleName"));
+        String result = new XmlBuilder().elem("DeletionTaskId", deletionTaskId).build();
+        return Response.ok(AwsQueryResponse.envelope("DeleteServiceLinkedRole", AwsNamespaces.IAM, result)).build();
+    }
+
+    private Response handleGetServiceLinkedRoleDeletionStatus(MultivaluedMap<String, String> params) {
+        String status = iamService.getServiceLinkedRoleDeletionStatus(getParam(params, "DeletionTaskId"));
+        String result = new XmlBuilder().elem("Status", status).build();
+        return Response.ok(AwsQueryResponse.envelope("GetServiceLinkedRoleDeletionStatus", AwsNamespaces.IAM, result)).build();
+    }
+
     private Response handleListRoles(MultivaluedMap<String, String> params) {
         List<IamRole> roleList = iamService.listRoles(getParam(params, "PathPrefix"));
         var xml = new XmlBuilder().start("Roles");
         for (IamRole r : roleList) {
-            xml.start("member").raw(roleXml(r)).end("member");
+            xml.start("member").raw(roleXml(r, false)).end("member");
         }
         xml.end("Roles").elem("IsTruncated", false);
         return Response.ok(AwsQueryResponse.envelope("ListRoles", AwsNamespaces.IAM, xml.build())).build();
@@ -450,13 +598,13 @@ public class IamQueryHandler {
         String document = getParam(params, "PolicyDocument");
         Map<String, String> tags = extractTags(params);
         IamPolicy policy = iamService.createPolicy(policyName, path, description, document, tags);
-        String result = new XmlBuilder().start("Policy").raw(policyXml(policy)).end("Policy").build();
+        String result = new XmlBuilder().start("Policy").raw(policyXml(policy, true)).end("Policy").build();
         return Response.ok(AwsQueryResponse.envelope("CreatePolicy", AwsNamespaces.IAM, result)).build();
     }
 
     private Response handleGetPolicy(MultivaluedMap<String, String> params) {
         IamPolicy policy = iamService.getPolicy(getParam(params, "PolicyArn"));
-        String result = new XmlBuilder().start("Policy").raw(policyXml(policy)).end("Policy").build();
+        String result = new XmlBuilder().start("Policy").raw(policyXml(policy, true)).end("Policy").build();
         return Response.ok(AwsQueryResponse.envelope("GetPolicy", AwsNamespaces.IAM, result)).build();
     }
 
@@ -470,7 +618,7 @@ public class IamQueryHandler {
                 getParam(params, "Scope"), getParam(params, "PathPrefix"));
         var xml = new XmlBuilder().start("Policies");
         for (IamPolicy p : policyList) {
-            xml.start("member").raw(policyXml(p)).end("member");
+            xml.start("member").raw(policyXml(p, false)).end("member");
         }
         xml.end("Policies").elem("IsTruncated", false);
         return Response.ok(AwsQueryResponse.envelope("ListPolicies", AwsNamespaces.IAM, xml.build())).build();
@@ -495,6 +643,15 @@ public class IamQueryHandler {
         }
         xml.end("PolicyRoles").elem("IsTruncated", false);
         return Response.ok(AwsQueryResponse.envelope("ListEntitiesForPolicy", AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    private Response handleGetAccountSummary(MultivaluedMap<String, String> params) {
+        var xml = new XmlBuilder().start("SummaryMap");
+        for (Map.Entry<String, Long> entry : iamService.getAccountSummary().entrySet()) {
+            xml.start("entry").elem("key", entry.getKey()).elem("value", entry.getValue()).end("entry");
+        }
+        xml.end("SummaryMap");
+        return Response.ok(AwsQueryResponse.envelope("GetAccountSummary", AwsNamespaces.IAM, xml.build())).build();
     }
 
     private Response handleCreatePolicyVersion(MultivaluedMap<String, String> params) {
@@ -873,13 +1030,21 @@ public class IamQueryHandler {
     // XML serialization helpers
     // =========================================================================
 
-    private String userXml(IamUser u) {
+    /**
+     * {@code detailed} is per-operation, not per-user: ListUsers documents that "IAM
+     * resource-listing operations return a subset of the available attributes for the resource.
+     * This operation does not return the following attributes, even though they are an attribute
+     * of the returned object: PermissionsBoundary, Tags". GetGroup likewise lists its members
+     * without tags.
+     */
+    private String userXml(IamUser u, boolean detailed) {
         return new XmlBuilder()
                 .elem("Path", u.getPath())
                 .elem("UserName", u.getUserName())
                 .elem("UserId", u.getUserId())
                 .elem("Arn", u.getArn())
                 .elem("CreateDate", isoDate(u.getCreateDate()))
+                .raw(detailed ? tagsElement(u.getTags()) : "")
                 .build();
     }
 
@@ -893,7 +1058,15 @@ public class IamQueryHandler {
                 .build();
     }
 
-    private String roleXml(IamRole r) {
+    /**
+     * {@code detailed} is per-operation, not per-role: ListRoles documents that "IAM
+     * resource-listing operations return a subset of the available attributes for the resource.
+     * This operation does not return the following attributes, even though they are an attribute
+     * of the returned object: PermissionsBoundary, RoleLastUsed, Tags". {@code Description} is
+     * deliberately not gated — it is absent from that exclusion list. Roles embedded in an
+     * instance profile are a subset too, as GetInstanceProfile's own example response shows.
+     */
+    private String roleXml(IamRole r, boolean detailed) {
         return new XmlBuilder()
                 .elem("Path", r.getPath())
                 .elem("RoleName", r.getRoleName())
@@ -903,10 +1076,19 @@ public class IamQueryHandler {
                 .elem("MaxSessionDuration", (long) r.getMaxSessionDuration())
                 .elem("AssumeRolePolicyDocument", r.getAssumeRolePolicyDocument())
                 .elem("Description", r.getDescription())
+                .raw(detailed ? tagsElement(r.getTags()) : "")
                 .build();
     }
 
-    private String policyXml(IamPolicy p) {
+    /**
+     * {@code detailed} is per-operation, not per-policy: AWS's own {@code Policy} model documents
+     * that {@code Description} "is included in the response to the GetPolicy operation. It is not
+     * included in the response to the ListPolicies operation" — CreatePolicy documents neither
+     * inclusion nor exclusion, so it's treated the same as GetPolicy. ListPolicies excludes
+     * {@code Tags} on the same grounds ("this operation does not return tags"), so one flag
+     * governs both.
+     */
+    private String policyXml(IamPolicy p, boolean detailed) {
         return new XmlBuilder()
                 .elem("PolicyName", p.getPolicyName())
                 .elem("PolicyId", p.getPolicyId())
@@ -917,6 +1099,8 @@ public class IamQueryHandler {
                 .elem("IsAttachable", true)
                 .elem("CreateDate", isoDate(p.getCreateDate()))
                 .elem("UpdateDate", isoDate(p.getUpdateDate()))
+                .elem("Description", detailed ? p.getDescription() : null)
+                .raw(detailed ? tagsElement(p.getTags()) : "")
                 .build();
     }
 
@@ -951,7 +1135,7 @@ public class IamQueryHandler {
         for (String roleName : p.getRoleNames()) {
             try {
                 IamRole role = iamService.getRole(roleName);
-                xml.start("member").raw(roleXml(role)).end("member");
+                xml.start("member").raw(roleXml(role, false)).end("member");
             } catch (AwsException ignored) {}
         }
         return xml.end("Roles").build();
@@ -974,6 +1158,22 @@ public class IamQueryHandler {
             xml.elem("member", name);
         }
         return xml.end("PolicyNames").elem("IsTruncated", false).build();
+    }
+
+    /**
+     * Renders the {@code <Tags>} wrapper for a resource, or nothing when it has no tags.
+     *
+     * <p>The AWS SDKs and the Terraform provider read a role's, policy's or user's tags off the
+     * Get/Create response rather than by calling List*Tags, so omitting this element makes every
+     * tagged resource read back untagged and diff on every plan. Emitting nothing rather than an
+     * empty {@code <Tags/>} keeps an untagged resource from reading back as having an empty tag
+     * set, which would be a diff of its own.
+     */
+    private String tagsElement(Map<String, String> tags) {
+        if (tags == null || tags.isEmpty()) {
+            return "";
+        }
+        return new XmlBuilder().start("Tags").raw(tagsXml(tags)).end("Tags").build();
     }
 
     private String tagsXml(Map<String, String> tags) {
@@ -1000,6 +1200,16 @@ public class IamQueryHandler {
             tags.put(key, value != null ? value : "");
         }
         return tags;
+    }
+
+    private List<String> getMemberList(MultivaluedMap<String, String> params, String name) {
+        List<String> values = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String value = params.getFirst(name + ".member." + i);
+            if (value == null) break;
+            values.add(value);
+        }
+        return values;
     }
 
     private List<String> extractTagKeys(MultivaluedMap<String, String> params) {

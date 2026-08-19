@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.ses.model.BulkEmailEntryResult;
 import io.github.hectorvent.floci.services.ses.model.CloudWatchDestination;
 import io.github.hectorvent.floci.services.ses.model.CloudWatchDimensionConfiguration;
 import io.github.hectorvent.floci.services.ses.model.ConfigurationSet;
+import io.github.hectorvent.floci.services.ses.model.CustomVerificationEmailTemplate;
 import io.github.hectorvent.floci.services.ses.model.DeliveryOptions;
 import io.github.hectorvent.floci.services.ses.model.EmailTemplate;
 import io.github.hectorvent.floci.services.ses.model.EventDestination;
@@ -70,6 +71,8 @@ public class SesQueryHandler {
                 case "SetIdentityNotificationTopic" -> handleSetIdentityNotificationTopic(params, region);
                 case "GetIdentityNotificationAttributes" -> handleGetIdentityNotificationAttributes(params, region);
                 case "SetIdentityFeedbackForwardingEnabled" -> handleSetIdentityFeedbackForwardingEnabled(params, region);
+                case "SetIdentityDkimEnabled" -> handleSetIdentityDkimEnabled(params, region);
+                case "VerifyDomainDkim" -> handleVerifyDomainDkim(params, region);
                 case "SetIdentityHeadersInNotificationsEnabled" -> handleSetIdentityHeadersInNotificationsEnabled(params, region);
                 case "SetIdentityMailFromDomain" -> handleSetIdentityMailFromDomain(params, region);
                 case "GetIdentityMailFromDomainAttributes" -> handleGetIdentityMailFromDomainAttributes(params, region);
@@ -86,6 +89,18 @@ public class SesQueryHandler {
                 case "SendTemplatedEmail" -> handleSendTemplatedEmail(params, region);
                 case "SendBulkTemplatedEmail" -> handleSendBulkTemplatedEmail(params, region);
                 case "TestRenderTemplate" -> handleTestRenderTemplate(params, region);
+                case "CreateCustomVerificationEmailTemplate" ->
+                        handleCreateCustomVerificationEmailTemplate(params, region);
+                case "GetCustomVerificationEmailTemplate" ->
+                        handleGetCustomVerificationEmailTemplate(params, region);
+                case "ListCustomVerificationEmailTemplates" ->
+                        handleListCustomVerificationEmailTemplates(region);
+                case "UpdateCustomVerificationEmailTemplate" ->
+                        handleUpdateCustomVerificationEmailTemplate(params, region);
+                case "DeleteCustomVerificationEmailTemplate" ->
+                        handleDeleteCustomVerificationEmailTemplate(params, region);
+                case "SendCustomVerificationEmail" ->
+                        handleSendCustomVerificationEmail(params, region);
                 case "CreateConfigurationSet" -> handleCreateConfigurationSet(params, region);
                 case "DescribeConfigurationSet" -> handleDescribeConfigurationSet(params, region);
                 case "ListConfigurationSets" -> handleListConfigurationSets(region);
@@ -199,9 +214,10 @@ public class SesQueryHandler {
         String configurationSetName = getParam(params, "ConfigurationSetName");
         List<MessageTag> emailTags = extractMessageTags(params, "Tags");
 
+        // ListManagementOptions is a v2-only SendEmail field; the v1 Query API has no equivalent.
         String messageId = sesService.sendEmail(source, toAddresses, ccAddresses, bccAddresses,
                 replyToAddresses, subject, bodyText, bodyHtml, configurationSetName,
-                emailTags, List.of(), region);
+                emailTags, List.of(), null, region);
 
         String result = new XmlBuilder().elem("MessageId", messageId).build();
         return Response.ok(AwsQueryResponse.envelope("SendEmail", AwsNamespaces.SES, result)).build();
@@ -219,7 +235,7 @@ public class SesQueryHandler {
         List<MessageTag> emailTags = extractMessageTags(params, "Tags");
 
         String messageId = sesService.sendRawEmail(source, destinations, rawMessage,
-                configurationSetName, emailTags, region);
+                configurationSetName, emailTags, null, region);
 
         String result = new XmlBuilder().elem("MessageId", messageId).build();
         return Response.ok(AwsQueryResponse.envelope("SendRawEmail", AwsNamespaces.SES, result)).build();
@@ -320,14 +336,16 @@ public class SesQueryHandler {
         var xml = new XmlBuilder().start("DkimAttributes");
         for (String identityValue : identities) {
             Identity identity = sesService.getIdentityVerificationAttributes(identityValue, region);
+            // An email identity reports its parent domain's DKIM state (matching AWS).
+            Identity src = sesService.effectiveDkimSource(identity, region);
             xml.start("entry");
             xml.elem("key", identityValue);
             xml.start("value");
-            xml.elem("DkimEnabled", identity != null ? String.valueOf(identity.isDkimEnabled()) : "false");
-            xml.elem("DkimVerificationStatus", identity != null ? identity.getDkimVerificationStatus() : "NotStarted");
+            xml.elem("DkimEnabled", src != null ? String.valueOf(src.isDkimEnabled()) : "false");
+            xml.elem("DkimVerificationStatus", src != null ? src.getDkimVerificationStatus() : "NotStarted");
             xml.start("DkimTokens");
-            if (identity != null && identity.getDkimTokens() != null) {
-                for (String token : identity.getDkimTokens()) {
+            if (src != null && src.getDkimTokens() != null) {
+                for (String token : src.getDkimTokens()) {
                     xml.elem("member", token);
                 }
             }
@@ -344,6 +362,24 @@ public class SesQueryHandler {
         boolean enabled = parseRequiredBoolean(params, "ForwardingEnabled");
         sesService.setFeedbackForwardingEnabled(identityValue, enabled, region);
         return Response.ok(AwsQueryResponse.envelopeEmptyResult("SetIdentityFeedbackForwardingEnabled", AwsNamespaces.SES)).build();
+    }
+
+    private Response handleSetIdentityDkimEnabled(MultivaluedMap<String, String> params, String region) {
+        String identityValue = getParam(params, "Identity");
+        boolean enabled = parseRequiredBoolean(params, "DkimEnabled");
+        sesService.setDkimAttributes(identityValue, enabled, region);
+        return Response.ok(AwsQueryResponse.envelopeEmptyResult("SetIdentityDkimEnabled", AwsNamespaces.SES)).build();
+    }
+
+    private Response handleVerifyDomainDkim(MultivaluedMap<String, String> params, String region) {
+        String domain = getParam(params, "Domain");
+        List<String> tokens = sesService.verifyDomainDkim(domain, region);
+        var xml = new XmlBuilder().start("DkimTokens");
+        for (String token : tokens) {
+            xml.elem("member", token);
+        }
+        xml.end("DkimTokens");
+        return Response.ok(AwsQueryResponse.envelope("VerifyDomainDkim", AwsNamespaces.SES, xml.build())).build();
     }
 
     private Response handleSetIdentityHeadersInNotificationsEnabled(MultivaluedMap<String, String> params, String region) {
@@ -528,7 +564,7 @@ public class SesQueryHandler {
         List<MessageTag> emailTags = extractMessageTags(params, "Tags");
         String messageId = sesService.sendTemplatedEmail(source, toAddresses, ccAddresses,
                 bccAddresses, replyToAddresses, resolvedName, templateData,
-                configurationSetName, emailTags, List.of(), region);
+                configurationSetName, emailTags, List.of(), null, region);
 
         String result = new XmlBuilder().elem("MessageId", messageId).build();
         return Response.ok(AwsQueryResponse.envelope("SendTemplatedEmail", AwsNamespaces.SES, result)).build();
@@ -546,6 +582,83 @@ public class SesQueryHandler {
         String xmlSafe = SesService.stripXml10InvalidChars(rendered);
         String result = new XmlBuilder().elem("RenderedTemplate", xmlSafe).build();
         return Response.ok(AwsQueryResponse.envelope("TestRenderTemplate", AwsNamespaces.SES, result)).build();
+    }
+
+    // --- Custom verification email templates ---
+
+    private Response handleCreateCustomVerificationEmailTemplate(MultivaluedMap<String, String> params, String region) {
+        sesService.createCustomVerificationEmailTemplate(readCvetParams(params), region);
+        return Response.ok(AwsQueryResponse.envelopeEmptyResult(
+                "CreateCustomVerificationEmailTemplate", AwsNamespaces.SES)).build();
+    }
+
+    private Response handleUpdateCustomVerificationEmailTemplate(MultivaluedMap<String, String> params, String region) {
+        sesService.updateCustomVerificationEmailTemplate(readCvetParams(params), region);
+        return Response.ok(AwsQueryResponse.envelopeEmptyResult(
+                "UpdateCustomVerificationEmailTemplate", AwsNamespaces.SES)).build();
+    }
+
+    private Response handleGetCustomVerificationEmailTemplate(MultivaluedMap<String, String> params, String region) {
+        CustomVerificationEmailTemplate t = sesService.getCustomVerificationEmailTemplate(
+                requireParam(params, "TemplateName"), region);
+        String xml = new XmlBuilder()
+                .elem("TemplateName", t.getTemplateName())
+                .elem("FromEmailAddress", t.getFromEmailAddress())
+                .elem("TemplateSubject", t.getTemplateSubject())
+                .elem("TemplateContent", t.getTemplateContent())
+                .elem("SuccessRedirectionURL", t.getSuccessRedirectionURL())
+                .elem("FailureRedirectionURL", t.getFailureRedirectionURL())
+                .build();
+        return Response.ok(AwsQueryResponse.envelope(
+                "GetCustomVerificationEmailTemplate", AwsNamespaces.SES, xml)).build();
+    }
+
+    private Response handleListCustomVerificationEmailTemplates(String region) {
+        XmlBuilder xml = new XmlBuilder().start("CustomVerificationEmailTemplates");
+        for (CustomVerificationEmailTemplate t : sesService.listCustomVerificationEmailTemplates(region)) {
+            xml.start("member")
+                    .elem("TemplateName", t.getTemplateName())
+                    .elem("FromEmailAddress", t.getFromEmailAddress())
+                    .elem("TemplateSubject", t.getTemplateSubject())
+                    .elem("SuccessRedirectionURL", t.getSuccessRedirectionURL())
+                    .elem("FailureRedirectionURL", t.getFailureRedirectionURL())
+                    .end("member");
+        }
+        xml.end("CustomVerificationEmailTemplates");
+        return Response.ok(AwsQueryResponse.envelope(
+                "ListCustomVerificationEmailTemplates", AwsNamespaces.SES, xml.build())).build();
+    }
+
+    private Response handleDeleteCustomVerificationEmailTemplate(MultivaluedMap<String, String> params, String region) {
+        sesService.deleteCustomVerificationEmailTemplate(requireParam(params, "TemplateName"), region);
+        return Response.ok(AwsQueryResponse.envelopeEmptyResult(
+                "DeleteCustomVerificationEmailTemplate", AwsNamespaces.SES)).build();
+    }
+
+    private Response handleSendCustomVerificationEmail(MultivaluedMap<String, String> params, String region) {
+        if (!sesService.isAccountSendingEnabled(region)) {
+            throw new AwsException("AccountSendingPausedException",
+                    "Account sending is disabled.", 400);
+        }
+        // getParam (not requireParam) so the service is the single validation authority and returns
+        // the AWS-faithful "Email address not specified." / "Invalid email address<...>." shapes.
+        String messageId = sesService.sendCustomVerificationEmail(
+                getParam(params, "EmailAddress"), getParam(params, "TemplateName"),
+                getParam(params, "ConfigurationSetName"), region);
+        String result = new XmlBuilder().elem("MessageId", messageId).build();
+        return Response.ok(AwsQueryResponse.envelope(
+                "SendCustomVerificationEmail", AwsNamespaces.SES, result)).build();
+    }
+
+    private CustomVerificationEmailTemplate readCvetParams(MultivaluedMap<String, String> params) {
+        CustomVerificationEmailTemplate t = new CustomVerificationEmailTemplate();
+        t.setTemplateName(params.getFirst("TemplateName"));
+        t.setFromEmailAddress(params.getFirst("FromEmailAddress"));
+        t.setTemplateSubject(params.getFirst("TemplateSubject"));
+        t.setTemplateContent(params.getFirst("TemplateContent"));
+        t.setSuccessRedirectionURL(params.getFirst("SuccessRedirectionURL"));
+        t.setFailureRedirectionURL(params.getFirst("FailureRedirectionURL"));
+        return t;
     }
 
     private Response handleSendBulkTemplatedEmail(MultivaluedMap<String, String> params, String region) {

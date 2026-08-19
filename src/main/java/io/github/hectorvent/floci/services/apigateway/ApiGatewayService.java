@@ -2,8 +2,10 @@ package io.github.hectorvent.floci.services.apigateway;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 
 import io.github.hectorvent.floci.services.apigateway.model.EndpointConfiguration;
@@ -469,7 +471,42 @@ public class ApiGatewayService {
         Deployment deployment = new Deployment(shortId(10), description, System.currentTimeMillis() / 1000L);
         deploymentStore.put(deploymentKey(region, apiId, deployment.id()), deployment);
         LOG.infov("Created deployment {0} for API {1}", deployment.id(), apiId);
+
+        String stageName = (String) request.get("stageName");
+        if (stageName != null && !stageName.isBlank()) {
+            deployStage(region, apiId, stageName, deployment.id(), request);
+        }
         return deployment;
+    }
+
+    /**
+     * Points {@code stageName} at {@code deploymentId}, creating the stage if it doesn't exist.
+     *
+     * <p>The API does not document collision behavior. Repointing preserves existing stage
+     * settings and supports repeated deployments.
+     */
+    private void deployStage(String region, String apiId, String stageName, String deploymentId,
+                             Map<String, Object> request) {
+        String key = stageKey(region, apiId, stageName);
+        long now = System.currentTimeMillis() / 1000L;
+        Stage stage = stageStore.get(key).orElse(null);
+        if (stage == null) {
+            stage = new Stage();
+            stage.setStageName(stageName);
+            stage.setCreatedDate(now);
+            stage.setDescription((String) request.get("stageDescription"));
+        }
+        stage.setDeploymentId(deploymentId);
+        stage.setLastUpdatedDate(now);
+
+        @SuppressWarnings("unchecked")
+        Map<String, String> variables = (Map<String, String>) request.get("variables");
+        if (variables != null) {
+            stage.setVariables(variables);
+        }
+
+        stageStore.put(key, stage);
+        LOG.infov("Deployed stage {0} of API {1} to deployment {2}", stageName, apiId, deploymentId);
     }
 
     public List<Deployment> getDeployments(String region, String apiId) {
@@ -671,12 +708,27 @@ public class ApiGatewayService {
 
     public ApiKey createApiKey(String region, Map<String, Object> request) {
         ApiKey apiKey = new ApiKey();
-        apiKey.setId(shortId(10));
         apiKey.setName((String) request.get("name"));
-        apiKey.setValue((String) request.getOrDefault("value", UUID.randomUUID().toString().replace("-", "")));
         apiKey.setEnabled(!Boolean.FALSE.equals(request.get("enabled")));
         apiKey.setCreatedDate(System.currentTimeMillis() / 1000L);
         apiKey.setLastUpdatedDate(apiKey.getCreatedDate());
+        apiKey.setDescription((String) request.get("description"));
+
+        boolean generateDistinctId = Boolean.TRUE.equals(request.get("generateDistinctId"));
+        String suppliedValue = (String) request.get("value");
+
+        if (!generateDistinctId) {
+            String sharedValue = (suppliedValue != null && !suppliedValue.isBlank())
+                    ? suppliedValue
+                    : UUID.randomUUID().toString().replace("-", "");
+            apiKey.setId(sharedValue);
+            apiKey.setValue(sharedValue);
+        } else {
+            apiKey.setId(shortId(10));
+            apiKey.setValue((suppliedValue != null && !suppliedValue.isBlank())
+                    ? suppliedValue
+                    : UUID.randomUUID().toString().replace("-", ""));
+        }
 
         Map<String, String> tags = new HashMap<>();
         if (request.get("tags") instanceof Map<?, ?> rawTags) {
@@ -690,8 +742,16 @@ public class ApiGatewayService {
     }
 
     public ApiKey getApiKey(String region, String apiKeyId) {
-        return apiKeyStore.get(apiKeyGlobalKey(region, apiKeyId))
+        return findApiKey(region, apiKeyId)
                 .orElseThrow(() -> new AwsException("NotFoundException", "Invalid API Key identifier specified", 404));
+    }
+
+    /**
+     * Non-throwing key lookup for callers on the data plane, which must treat a missing key as
+     * "not authenticated" rather than surface a management-plane 404.
+     */
+    public Optional<ApiKey> findApiKey(String region, String apiKeyId) {
+        return apiKeyStore.get(apiKeyGlobalKey(region, apiKeyId));
     }
 
     public List<ApiKey> getApiKeys(String region) {
@@ -699,18 +759,52 @@ public class ApiGatewayService {
         return apiKeyStore.scan(k -> k.startsWith(prefix));
     }
 
+    /**
+     * Deleting a key detaches it from every usage plan, matching AWS. Usage plan keys hold their own
+     * copy of the key value, so leaving the associations behind would keep a deleted key working as a
+     * credential on the data plane and keep it listed by GetUsagePlanKeys.
+     */
     public void deleteApiKey(String region, String apiKeyId) {
         getApiKey(region, apiKeyId);
+        for (UsagePlan plan : getUsagePlans(region)) {
+            usagePlanKeyStore.delete(usagePlanKeyPathKey(region, plan.getId(), apiKeyId));
+        }
         apiKeyStore.delete(apiKeyGlobalKey(region, apiKeyId));
+    }
+
+    public ApiKey updateApiKey(String region, String apiKeyId, List<Map<String, String>> patchOperations) {
+        ApiKey key = getApiKey(region, apiKeyId);
+        if (patchOperations != null) {
+            for (Map<String, String> op : patchOperations) {
+                if (!"replace".equals(op.get("op"))) { continue; }
+                switch (op.getOrDefault("path", "")) {
+                    case "/name"        -> key.setName(op.get("value"));
+                    case "/description" -> key.setDescription(op.get("value"));
+                    case "/enabled"     -> key.setEnabled(Boolean.parseBoolean(op.get("value")));
+                }
+            }
+        }
+        key.setLastUpdatedDate(System.currentTimeMillis() / 1000L);
+        apiKeyStore.put(apiKeyGlobalKey(region, apiKeyId), key);
+        return key;
     }
 
     // ──────────────────────────── Usage Plans ────────────────────────────
 
     public UsagePlan createUsagePlan(String region, Map<String, Object> request) {
+        Map<String, String> tags = new HashMap<>();
+        if (request.get("tags") instanceof Map<?, ?> rawTags) {
+            rawTags.forEach((key, value) -> tags.put(String.valueOf(key), String.valueOf(value)));
+        }
+
+        String customId = ReservedTags.extractOverrideApiId(tags);
+        String planId = customId != null ? customId : shortId(10);
+
         UsagePlan plan = new UsagePlan();
-        plan.setId(shortId(10));
+        plan.setId(planId);
         plan.setName((String) request.get("name"));
         plan.setDescription((String) request.get("description"));
+        plan.setTags(ReservedTags.stripApiGatewayReservedTags(tags));
 
         @SuppressWarnings("unchecked")
         List<Map<String, Object>> apiStages = (List<Map<String, Object>>) request.get("apiStages");
@@ -847,8 +941,8 @@ public class ApiGatewayService {
         // AWS enforces global uniqueness of custom domain names across all regions
         boolean exists = !domainStore.scan(k -> k.endsWith("::" + domainName)).isEmpty();
         if (exists) {
-            throw new AwsException("ConflictException",
-                    "The domain name you provided already exists.", 409);
+            throw new AwsException("BadRequestException",
+                    "The domain name you provided already exists.", 400);
         }
 
         CustomDomain domain = new CustomDomain();
@@ -857,15 +951,43 @@ public class ApiGatewayService {
         domain.setCertificateArn((String) request.get("certificateArn"));
         domain.setRegionalDomainName(domainName + ".regional.local");
         domain.setRegionalHostedZoneId("Z2FDTNDATAQYL2");
+        domain.setEndpointConfigurationType(endpointTypeOf(request));
+        domain.setSecurityPolicy((String) request.getOrDefault("securityPolicy", "TLS_1_2"));
+        // Nothing is provisioned behind the domain, so it is usable as soon as it exists.
+        domain.setDomainNameStatus("AVAILABLE");
+        if (request.get("tags") instanceof Map<?, ?> tags && !tags.isEmpty()) {
+            Map<String, String> copied = new java.util.LinkedHashMap<>();
+            tags.forEach((key, value) -> copied.put(String.valueOf(key), String.valueOf(value)));
+            domain.setTags(copied);
+        }
 
         domainStore.put(domainKey(region, domainName), domain);
         LOG.infov("Created custom domain {0} in {1}", domainName, region);
         return domain;
     }
 
+    /**
+     * Reads the endpoint type from either spelling: REST passes {@code endpointConfiguration.types},
+     * HTTP APIs pass a single {@code endpointType}. REGIONAL is the default an emulated domain gets,
+     * since nothing here fronts it with an edge distribution.
+     */
+    private static String endpointTypeOf(Map<String, Object> request) {
+        Object endpointType = request.get("endpointType");
+        if (endpointType instanceof String type && !type.isBlank()) {
+            return type;
+        }
+        if (request.get("endpointConfiguration") instanceof Map<?, ?> configuration
+                && configuration.get("types") instanceof List<?> types && !types.isEmpty()
+                && types.getFirst() instanceof String type && !type.isBlank()) {
+            return type;
+        }
+        return "REGIONAL";
+    }
+
     public CustomDomain getDomainName(String region, String domainName) {
         return domainStore.get(domainKey(region, domainName))
-                .orElseThrow(() -> new AwsException("NotFoundException", "Domain name not found", 404));
+                .orElseThrow(() -> new AwsException("NotFoundException",
+                        "Invalid domain name identifier specified", 404));
     }
 
     public List<CustomDomain> getDomainNames(String region) {
@@ -883,9 +1005,19 @@ public class ApiGatewayService {
 
     // ──────────────────────────── Base Path Mappings ────────────────────────────
 
+    /**
+     * The canonical spelling of a base path. Reads have always normalised the root this way, so
+     * writes have to as well: otherwise the store holds several records that all mean the root, a
+     * mapping created as "" cannot be read back as "", and anything deriving an identity from the
+     * base path sees one path under several names.
+     */
+    public static String canonicalBasePath(String basePath) {
+        return basePath == null || basePath.isBlank() || "/".equals(basePath) ? "(none)" : basePath;
+    }
+
     public BasePathMapping createBasePathMapping(String region, String domainName, Map<String, Object> request) {
         getDomainName(region, domainName);
-        String basePath = (String) request.getOrDefault("basePath", "(none)");
+        String basePath = canonicalBasePath((String) request.get("basePath"));
         String apiId = (String) request.get("restApiId");
         String stage = (String) request.get("stage");
 
@@ -893,6 +1025,21 @@ public class ApiGatewayService {
         basePathMappingStore.put(mappingKey(region, domainName, basePath), mapping);
         LOG.infov("Created mapping for {0} path={1} -> API {2}", domainName, basePath, apiId);
         return mapping;
+    }
+
+    /**
+     * Refuses to let an API go while a custom domain still maps to it, which is what AWS answers:
+     * the mapping would otherwise be left pointing at an API that no longer exists.
+     */
+    public void requireNoApiMappings(String apiId) {
+        // Every region is scanned, not just the caller's: a mapping is keyed under the region of
+        // the domain it belongs to, which need not be the region the API is being deleted in.
+        boolean mapped = basePathMappingStore.scan(key -> true).stream()
+                .anyMatch(mapping -> apiId.equals(mapping.getRestApiId()));
+        if (mapped) {
+            throw new AwsException("BadRequestException", "Deleting API " + apiId
+                    + " failed. Please remove all API mappings for the API from your custom domain names.", 400);
+        }
     }
 
     public BasePathMapping getBasePathMapping(String region, String domainName, String basePath) {
@@ -911,6 +1058,42 @@ public class ApiGatewayService {
         getBasePathMapping(region, domainName, basePath);
         String path = (basePath == null || basePath.isEmpty() || "/" .equals(basePath)) ? "(none)" : basePath;
         basePathMappingStore.delete(mappingKey(region, domainName, path));
+    }
+
+    /**
+     * The mappings on a domain, keyed by the base path each record is stored under.
+     *
+     * <p>That path is the record's identity, and it is not always what the record reports:
+     * {@link BasePathMapping} normalises an empty base path to {@code (none)} in its constructor,
+     * so a record written before writes were canonicalised can sit under the key {@code ""} while
+     * its own field reads {@code (none)}. Anything identifying a record — an id derived from it, a
+     * delete aimed at it — has to use the key rather than the field.
+     */
+    public Map<String, BasePathMapping> basePathMappingsByStoredPath(String region, String domainName) {
+        getDomainName(region, domainName);
+        String prefix = region + "::" + domainName + "::";
+        Map<String, BasePathMapping> byStoredPath = new LinkedHashMap<>();
+        for (String key : basePathMappingStore.keys()) {
+            if (key.startsWith(prefix)) {
+                basePathMappingStore.get(key)
+                        .ifPresent(mapping -> byStoredPath.put(key.substring(prefix.length()), mapping));
+            }
+        }
+        return byStoredPath;
+    }
+
+    /**
+     * Deletes the record stored under exactly this base path, for a caller that already holds the
+     * record rather than a key to look one up by. Normalising here would delete the canonical root
+     * instead — state written before writes were canonicalised can hold a record under "/" or "",
+     * and that is the record such a caller selected.
+     */
+    public void deleteBasePathMappingRecord(String region, String domainName, String storedBasePath) {
+        String key = mappingKey(region, domainName, storedBasePath == null ? "" : storedBasePath);
+        if (basePathMappingStore.get(key).isEmpty()) {
+            throw new AwsException("NotFoundException", "Base path mapping not found", 404);
+        }
+        basePathMappingStore.delete(key);
     }
 
     // ──────────────────────────── Custom Domain Resolution ────────────────────────────

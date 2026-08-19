@@ -79,13 +79,25 @@ public class DocDbService {
         } else {
             String image = config.services().docdb().defaultImage();
             LOG.infov("Creating DocDB cluster {0}, image={1}", id, image);
-            DocDbContainerHandle handle = containerManager.start(id, image, masterUsername, masterPassword);
-            cluster.setEndpoint(handle.getHost());
-            cluster.setReaderEndpoint(handle.getHost());
-            cluster.setPort(handle.getPort());
-            cluster.setContainerId(handle.getContainerId());
-            cluster.setContainerHost(handle.getHost());
-            cluster.setContainerPort(handle.getPort());
+            // A cluster record is metadata: its identifier, ARN and tags need no Docker, so the
+            // cluster is created and reaches 'available' even when no daemon is reachable. Only
+            // connecting to the database needs the container.
+            DocDbContainerHandle handle = containerManager.tryStart(id, image, masterUsername, masterPassword);
+            if (handle != null) {
+                cluster.setEndpoint(handle.getHost());
+                cluster.setReaderEndpoint(handle.getHost());
+                cluster.setPort(handle.getPort());
+                cluster.setContainerId(handle.getContainerId());
+                cluster.setContainerHost(handle.getHost());
+                cluster.setContainerPort(handle.getPort());
+            } else {
+                cluster.setEndpoint(resolveEndpointHost());
+                cluster.setReaderEndpoint(resolveEndpointHost());
+                cluster.setPort(MONGO_PORT);
+                LOG.warnv("DocDB cluster {0} created without a backing MongoDB container: no "
+                        + "Docker daemon is reachable. Metadata operations work; connections to "
+                        + "the cluster do not until a daemon appears.", id);
+            }
         }
 
         clusters.put(id, cluster);
@@ -116,6 +128,15 @@ public class DocDbService {
 
     public Collection<DocDbCluster> listDbClusters(String filterId) {
         if (filterId != null && !filterId.isBlank()) {
+            // The db-cluster-id filter accepts ARNs as well as identifiers. Match the
+            // full ARN against each cluster's stored ARN rather than reducing it to
+            // the bare identifier, so a cross-account or cross-region ARN does not
+            // resolve a same-named local cluster.
+            if (filterId.startsWith("arn:")) {
+                return clusters.scan(k -> true).stream()
+                        .filter(c -> filterId.equalsIgnoreCase(c.getDbClusterArn()))
+                        .toList();
+            }
             return clusters.scan(k -> k.equalsIgnoreCase(filterId));
         }
         return clusters.scan(k -> true);
@@ -200,6 +221,13 @@ public class DocDbService {
 
     public Collection<DocDbInstance> listDbInstances(String filterId) {
         if (filterId != null && !filterId.isBlank()) {
+            // The db-instance-id filter accepts ARNs as well as identifiers; see
+            // listDbClusters for why the match is against the stored ARN.
+            if (filterId.startsWith("arn:")) {
+                return instances.scan(k -> true).stream()
+                        .filter(i -> filterId.equalsIgnoreCase(i.getDbInstanceArn()))
+                        .toList();
+            }
             return instances.scan(k -> k.equalsIgnoreCase(filterId));
         }
         return instances.scan(k -> true);

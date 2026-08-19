@@ -10,6 +10,10 @@ setup() {
 teardown() {
     aws_cmd rds delete-db-instance --db-instance-identifier "$DB_ID" --skip-final-snapshot >/dev/null 2>&1 || true
     aws_cmd rds delete-db-instance --db-instance-identifier "$DB_ID_2" --skip-final-snapshot >/dev/null 2>&1 || true
+    if [ -n "${MANAGED_SECRET_ARN:-}" ]; then
+        aws_cmd secretsmanager delete-secret --secret-id "$MANAGED_SECRET_ARN" \
+            --force-delete-without-recovery >/dev/null 2>&1 || true
+    fi
 }
 
 @test "RDS: create db instance returns resource identifiers" {
@@ -86,4 +90,58 @@ teardown() {
     # Might have more from other tests, but at least 2
     count=$(echo "$output" | jq '.DBInstances | length')
     [ "$count" -ge 2 ]
+}
+
+@test "RDS: managed master user secret is owned by rds and rotates without a Lambda" {
+    run aws_cmd rds create-db-instance \
+        --db-instance-identifier "$DB_ID" \
+        --engine postgres \
+        --db-instance-class db.t3.micro \
+        --allocated-storage 10 \
+        --master-username admin \
+        --manage-master-user-password
+    assert_success
+
+    MANAGED_SECRET_ARN=$(json_get "$output" '.DBInstance.MasterUserSecret.SecretArn')
+    [ -n "$MANAGED_SECRET_ARN" ]
+
+    run aws_cmd secretsmanager describe-secret --secret-id "$MANAGED_SECRET_ARN"
+    assert_success
+    [ "$(json_get "$output" '.OwningService')" = "rds" ]
+
+    # RDS rotates this secret itself, so a rotation Lambda is not accepted for it.
+    run aws_cmd secretsmanager rotate-secret \
+        --secret-id "$MANAGED_SECRET_ARN" \
+        --rotation-lambda-arn "arn:aws:lambda:$AWS_DEFAULT_REGION:000000000000:function:absent"
+    assert_failure
+    assert_output --partial "not supported for a service-managed secret"
+
+    # The call terraform's aws_secretsmanager_secret_rotation makes: rules, no Lambda ARN.
+    run aws_cmd secretsmanager rotate-secret \
+        --secret-id "$MANAGED_SECRET_ARN" \
+        --rotation-rules 'AutomaticallyAfterDays=7'
+    assert_success
+
+    run aws_cmd secretsmanager describe-secret --secret-id "$MANAGED_SECRET_ARN"
+    assert_success
+    [ "$(json_get "$output" '.RotationEnabled')" = "true" ]
+    [ "$(json_get "$output" '.RotationRules.AutomaticallyAfterDays')" = "7" ]
+}
+
+@test "RDS: describe global clusters returns an empty list" {
+    run aws_cmd rds describe-global-clusters
+    assert_success
+    [ "$(json_get "$output" '.GlobalClusters | length')" = "0" ]
+}
+
+@test "DocDB: describe global clusters answers the read every cluster read makes" {
+    # DocumentDB signs with the rds scope, so this is the same handler the CLI reaches
+    # for either service. Without an answer here a created cluster cannot be read back.
+    run aws_cmd docdb describe-global-clusters
+    assert_success
+    [ "$(json_get "$output" '.GlobalClusters | length')" = "0" ]
+
+    run aws_cmd docdb describe-global-clusters --global-cluster-identifier "bats-absent-gc"
+    assert_failure
+    assert_output --partial "GlobalClusterNotFoundFault"
 }

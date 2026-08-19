@@ -12,7 +12,14 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ReservedTags;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
-import io.github.hectorvent.floci.services.cognito.model.*;
+import io.github.hectorvent.floci.services.cognito.model.CognitoGroup;
+import io.github.hectorvent.floci.services.cognito.model.CognitoUser;
+import io.github.hectorvent.floci.services.cognito.model.ResourceServer;
+import io.github.hectorvent.floci.services.cognito.model.ResourceServerScope;
+import io.github.hectorvent.floci.services.cognito.model.RevokedTokenInfo;
+import io.github.hectorvent.floci.services.cognito.model.UserPool;
+import io.github.hectorvent.floci.services.cognito.model.UserPoolClient;
+import io.github.hectorvent.floci.services.cognito.model.UserPoolClientSecret;
 import io.github.hectorvent.floci.services.cognito.verification.CognitoMessageDispatcher;
 import io.github.hectorvent.floci.services.cognito.verification.VerificationCode;
 import io.github.hectorvent.floci.services.cognito.verification.VerificationCodeException;
@@ -25,14 +32,36 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 import org.jspecify.annotations.Nullable;
 
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 import java.nio.charset.StandardCharsets;
-import java.security.*;
+import java.security.KeyFactory;
+import java.security.KeyPair;
+import java.security.KeyPairGenerator;
+import java.security.MessageDigest;
+import java.security.PrivateKey;
+import java.security.PublicKey;
+import java.security.SecureRandom;
+import java.security.Signature;
 import java.security.interfaces.RSAPublicKey;
 import java.security.spec.PKCS8EncodedKeySpec;
 import java.security.spec.X509EncodedKeySpec;
 import java.time.Clock;
 import java.time.Duration;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Base64;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
 
 import static io.github.hectorvent.floci.core.common.ReservedTags.rejectUnknownReservedTags;
 
@@ -166,6 +195,7 @@ public class CognitoService {
         populateUserPool(pool, request);
 
         ensureJwtSigningKeys(pool);
+        ensureRefreshTokenSecret(pool);
         poolStore.put(id, pool);
         LOG.infov("Created User Pool: {0}", id);
         return pool;
@@ -271,7 +301,9 @@ public class CognitoService {
     public UserPool describeUserPool(String id) {
         UserPool pool = poolStore.get(id)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "User pool not found", 404));
-        if (ensureJwtSigningKeys(pool)) {
+        boolean generatedKeys = ensureJwtSigningKeys(pool);
+        boolean generatedSecret = ensureRefreshTokenSecret(pool);
+        if (generatedKeys || generatedSecret) {
             poolStore.put(id, pool);
         }
         return pool;
@@ -1317,6 +1349,16 @@ public class CognitoService {
             } catch (VerificationCodeException e) {
                 throw mapVerificationCodeException(e);
             }
+
+            var signupDeliveryTarget = resolveSignUpDeliveryTarget(pool, user);
+
+            if (signupDeliveryTarget != null) {
+                if ("email".equals(signupDeliveryTarget.attributeName())) {
+                    user.getAttributes().put("email_verified", "true");
+                } else if ("phone_number".equals(signupDeliveryTarget.attributeName())) {
+                    user.getAttributes().put("phone_number_verified", "true");
+                }
+            }
         }
         user.setUserStatus("CONFIRMED");
         user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
@@ -1523,6 +1565,57 @@ public class CognitoService {
         return result;
     }
 
+    public Map<String, Object> getUserAttributeVerificationCode(String accessToken, String attributeName) {
+        String username = extractUsernameFromToken(accessToken);
+        String poolId = extractPoolIdFromToken(accessToken);
+        String jti = extractJtiFromToken(accessToken);
+
+        if (username == null || poolId == null || jti == null) {
+            throw new AwsException("NotAuthorizedException", "Invalid Access Token", 400);
+        }
+
+        validateTokenNotRevoked(jti, poolId, "access");
+        validateOriginJtiNotRevoked(accessToken, poolId);
+        Long iat = extractIatFromToken(accessToken);
+        validateUserNotGloballySignedOut(username, poolId, "access", iat != null ? iat : 0L);
+
+        if (!"email".equals(attributeName) && !"phone_number".equals(attributeName)) {
+            throw new AwsException("InvalidParameterException",
+                    "Invalid attribute name. Only phone_number and email can be verified.", 400);
+        }
+
+        CognitoUser user = adminGetUser(poolId, username);
+        UserPool pool = describeUserPool(poolId);
+        String destination = blankToNull(user.getAttributes().get(attributeName));
+        if (destination == null) {
+            throw new AwsException("InvalidParameterException",
+                    "email".equals(attributeName)
+                            ? "User does not have a valid registered email address"
+                            : "User does not have a valid registered phone number",
+                    400);
+        }
+
+        String deliveryMedium = "email".equals(attributeName) ? "EMAIL" : "SMS";
+        VerificationCode.Purpose purpose = "email".equals(attributeName)
+                ? VerificationCode.Purpose.EMAIL_ATTRIBUTE_VERIFICATION
+                : VerificationCode.Purpose.PHONE_ATTRIBUTE_VERIFICATION;
+        ensureVerificationWiring();
+        try {
+            String code = verificationCodeService.issue(poolId, user.getUsername(),
+                    purpose, Duration.ofHours(24));
+            messageDispatcher.dispatch(pool, user, purpose, code, List.of(deliveryMedium));
+        } catch (VerificationCodeException e) {
+            throw mapVerificationCodeException(e);
+        }
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("AttributeName", attributeName);
+        response.put("DeliveryMedium", deliveryMedium);
+        response.put("Destination",
+                "email".equals(attributeName) ? maskEmail(destination) : maskPhoneNumber(destination));
+        return response;
+    }
+
     public void updateUserAttributes(String accessToken, Map<String, String> attributes) {
         String username = extractUsernameFromToken(accessToken);
         String poolId = extractPoolIdFromToken(accessToken);
@@ -1703,7 +1796,7 @@ public class CognitoService {
         Map<String, Object> auth = new HashMap<>();
         auth.put("AccessToken", generateSignedJwt(user, pool, "access", client, override, originJti));
         auth.put("IdToken", generateSignedJwt(user, pool, "id", client, override, originJti));
-        auth.put("RefreshToken", buildRefreshToken(pool.getId(), user.getUsername(), client.getClientId(), originJti));
+        auth.put("RefreshToken", buildRefreshToken(pool, user.getUsername(), client.getClientId(), originJti));
         auth.put("ExpiresIn", resolveAccessTokenLifetimeSeconds(client));
         auth.put("TokenType", "Bearer");
         return auth;
@@ -2192,6 +2285,32 @@ public class CognitoService {
         }
     }
 
+    private boolean ensureRefreshTokenSecret(UserPool pool) {
+        synchronized (pool) {
+            if (pool.getSigningSecret() != null && !pool.getSigningSecret().isBlank()) {
+                return false;
+            }
+            byte[] secretBytes = new byte[32];
+            new SecureRandom().nextBytes(secretBytes);
+            pool.setSigningSecret(Base64.getEncoder().encodeToString(secretBytes));
+            if (pool.getId() != null) {
+                pool.setLastModifiedDate(System.currentTimeMillis() / 1000L);
+            }
+            return true;
+        }
+    }
+
+    static String hmacSha256(byte[] key, String data) {
+        try {
+            Mac mac = Mac.getInstance("HmacSHA256");
+            mac.init(new SecretKeySpec(key, "HmacSHA256"));
+            return Base64.getEncoder().withoutPadding()
+                    .encodeToString(mac.doFinal(data.getBytes(StandardCharsets.UTF_8)));
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to compute refresh token HMAC", e);
+        }
+    }
+
     String hashPassword(String password) {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
@@ -2280,24 +2399,36 @@ public class CognitoService {
         return configured == null || configured.isBlank() ? defaultUnit : configured.trim().toLowerCase(Locale.ROOT);
     }
 
-    private boolean isRefreshTokenExpired(UserPoolClient client, String[] parts) {
+    boolean isRefreshTokenExpired(UserPoolClient client, String[] parts) {
         if (parts.length < 5) {
             return false;
         }
         try {
-            long issuedAt = Long.parseLong(parts[3]);
-            long expiresAt = issuedAt + resolveTokenLifetimeSeconds(client, "refresh");
-            return System.currentTimeMillis() / 1000L >= expiresAt;
+            // buildRefreshToken writes issued-at as epoch milliseconds, but the lifetime and
+            // the comparison clock below are in seconds — convert before comparing so the check
+            // is not off by a factor of ~1000 (which made it never fire for real tokens).
+            long issuedAtSeconds = Long.parseLong(parts[3]) / 1000L;
+            long expiresAtSeconds = issuedAtSeconds + resolveTokenLifetimeSeconds(client, "refresh");
+            return System.currentTimeMillis() / 1000L >= expiresAtSeconds;
         } catch (NumberFormatException ignored) {
             return false;
         }
     }
 
-    String buildRefreshToken(String poolId, String username, String clientId, String originJti) {
+    String buildRefreshToken(UserPool pool, String username, String clientId, String originJti) {
+        if (ensureRefreshTokenSecret(pool)) {
+            poolStore.put(pool.getId(), pool);
+        }
         long issuedAt = System.currentTimeMillis();
         String familyId = originJti != null ? originJti : UUID.randomUUID().toString();
-        String raw = poolId + "|" + username + "|" + clientId + "|" + issuedAt + "|" + familyId;
-        return Base64.getEncoder().withoutPadding().encodeToString(raw.getBytes(StandardCharsets.UTF_8));
+        String raw = pool.getId() + "|" + username + "|" + clientId + "|" + issuedAt + "|" + familyId;
+        String signature = hmacSha256(refreshTokenSecretBytes(pool), raw);
+        return Base64.getEncoder().withoutPadding()
+                .encodeToString((raw + "|" + signature).getBytes(StandardCharsets.UTF_8));
+    }
+
+    static byte[] refreshTokenSecretBytes(UserPool pool) {
+        return Base64.getDecoder().decode(pool.getSigningSecret());
     }
 
     private boolean isTokenRevocationEnabled(UserPoolClient client) {
@@ -2309,13 +2440,21 @@ public class CognitoService {
         try {
             byte[] decoded = Base64.getDecoder().decode(refreshToken);
             String raw = new String(decoded, StandardCharsets.UTF_8);
-            String[] parts = raw.split("\\|", 5);
-            if (parts.length == 5) {
-                return parts; // [poolId, username, clientId, issuedAt, nonce]
+            String[] parts = raw.split("\\|", 6);
+            if (parts.length != 6) {
+                return null;
             }
-            if (parts.length == 4) {
-                return new String[] { parts[0], parts[1], parts[2], "", parts[3] };
+            UserPool pool = poolStore.get(parts[0]).orElse(null);
+            if (pool == null || pool.getSigningSecret() == null || pool.getSigningSecret().isBlank()) {
+                return null;
             }
+            String payload = String.join("|", Arrays.copyOf(parts, 5));
+            byte[] expectedSignature = Base64.getDecoder().decode(hmacSha256(refreshTokenSecretBytes(pool), payload));
+            byte[] actualSignature = Base64.getDecoder().decode(parts[5]);
+            if (!MessageDigest.isEqual(expectedSignature, actualSignature)) {
+                return null;
+            }
+            return Arrays.copyOf(parts, 5); // [poolId, username, clientId, issuedAt, nonce]
         } catch (Exception ignored) { }
         return null;
     }
@@ -2717,32 +2856,19 @@ public class CognitoService {
         if (at <= 0 || at == email.length() - 1) {
             return "****";
         }
-        String local = email.substring(0, at);
-        String domain = email.substring(at + 1);
-        return maskSegment(local) + "@" + maskDomain(domain);
+        return email.charAt(0) + "***@" + email.charAt(at + 1) + "***";
     }
 
     private String maskPhoneNumber(String phoneNumber) {
         if (phoneNumber.length() <= 4) {
             return "*".repeat(phoneNumber.length());
         }
+        if (phoneNumber.charAt(0) == '+') {
+            return "+" + "*".repeat(Math.max(0, phoneNumber.length() - 5))
+                    + phoneNumber.substring(phoneNumber.length() - 4);
+        }
         return "*".repeat(phoneNumber.length() - 4)
                 + phoneNumber.substring(phoneNumber.length() - 4);
-    }
-
-    private String maskDomain(String domain) {
-        int dot = domain.lastIndexOf('.');
-        if (dot <= 0 || dot == domain.length() - 1) {
-            return maskSegment(domain);
-        }
-        return maskSegment(domain.substring(0, dot)) + domain.substring(dot);
-    }
-
-    private String maskSegment(String value) {
-        if (value.length() <= 1) {
-            return "*";
-        }
-        return value.charAt(0) + "*".repeat(Math.max(1, value.length() - 1));
     }
 
     private String blankToNull(String value) {

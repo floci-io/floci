@@ -52,7 +52,7 @@ duplicate override IDs.
 | **Deployments** | CreateDeployment, GetDeployments |
 | **Stages** | CreateStage, GetStage, GetStages, UpdateStage, DeleteStage |
 | **Authorizers** | CreateAuthorizer, GetAuthorizer, GetAuthorizers |
-| **API Keys** | CreateApiKey, GetApiKeys |
+| **API Keys** | CreateApiKey, GetApiKey, GetApiKeys, UpdateApiKey, DeleteApiKey |
 | **Usage Plans** | CreateUsagePlan, GetUsagePlans, DeleteUsagePlan |
 | **Usage Plan Keys** | CreateUsagePlanKey, GetUsagePlanKey, GetUsagePlanKeys, DeleteUsagePlanKey |
 | **Request Validators** | CreateRequestValidator, GetRequestValidator, GetRequestValidators, DeleteRequestValidator |
@@ -62,13 +62,44 @@ duplicate override IDs.
 | **Account** | GetAccount, UpdateAccount |
 | **Tags** | TagResource, UntagResource, GetTags (ListTagsForResource) |
 
+### API Key Behaviour Notes
+
+#### `generateDistinctId`
+
+Controls whether the key's `id` and `value` fields are distinct. AWS's undocumented default behaviour is that they are **the same string** unless `generateDistinctId=true` is explicitly requested.
+
+| `generateDistinctId` | `id` | `value` |
+|---|---|---|
+| absent (default) | same as `value` | caller-supplied `value`, or a generated UUID-derived string |
+| `false` | same as `value` | caller-supplied `value`, or a generated UUID-derived string |
+| `true` | opaque short token (`shortId`) | caller-supplied `value`, or a generated UUID-derived string |
+
+When `generateDistinctId` is absent or `false`, a single shared string is used for both `id` and `value`. If the caller supplies a `value` in the request body, that string is used for both; otherwise a UUID-derived string is generated and assigned to both.
+
+When `generateDistinctId=true`, `id` is set to an opaque short token independent of `value`.
+
+#### Revocation
+
+`DeleteApiKey` detaches the key from every usage plan before removing it, matching AWS. A usage plan key
+stores its own copy of the key value, so without that sweep a deleted key would stay listed by
+`GetUsagePlanKeys` and keep being recognised on the data plane.
+
+`requestContext.identity.apiKey` is only populated when the `x-api-key` header matches a key that still
+exists and has `enabled` set to `true`, so disabling a key through `UpdateApiKey` takes effect
+immediately.
+
+> [!NOTE]
+> Floci does not implement the `apiKeyRequired` gate on methods, so a request carrying an unknown,
+> disabled, or deleted key is still executed — it simply arrives with a null `identity.apiKey` rather
+> than being rejected with `403`.
+
 ### Not Implemented
 
 These management-plane operations have no handler in v1. Calls will return `404` or an error:
 
 - Deployment detail and lifecycle: `GetDeployment`, `UpdateDeployment`, `DeleteDeployment`
 - Authorizer lifecycle: `UpdateAuthorizer`, `DeleteAuthorizer`, `TestInvokeAuthorizer`
-- API key detail: `GetApiKey`, `UpdateApiKey`, `DeleteApiKey`, `ImportApiKeys`
+- API key detail: `ImportApiKeys`
 - Usage plan detail: `GetUsagePlan`, `UpdateUsagePlan`
 - Model updates and templates: `UpdateModel`, `GetModelTemplate`
 - Gateway Responses (the entire family: `PutGatewayResponse`, `GetGatewayResponse`, etc.)
@@ -132,6 +163,27 @@ aws apigateway create-deployment \
 curl http://localhost:4566/restapis/$API_ID/dev/_user_request_/users
 ```
 
+### Usage Plan Tags and Custom IDs
+
+Usage plans accept arbitrary tags, and the same reserved `floci:override-id` tag used for
+[custom API IDs](#custom-api-ids) pins the plan's `id`:
+
+```bash
+# Create a usage plan with a custom ID and additional tags
+aws apigateway create-usage-plan \
+  --name "my-plan" \
+  --tags '{"floci:override-id":"my-plan-id","env":"staging"}' \
+  --endpoint-url $AWS_ENDPOINT_URL
+
+# The plan is now accessible at its custom ID
+aws apigateway get-usage-plans --endpoint-url $AWS_ENDPOINT_URL
+```
+
+The override key is validated and consumed exactly as it is for `CreateRestApi`, so it never appears in
+the tags a usage plan returns. The deprecated `_custom_id_` key is still honored on create for existing
+setups, and `floci:override-id` wins when both are present. Every other tag is persisted and returned in
+`CreateUsagePlan` and `GetUsagePlans` responses.
+
 ---
 
 ## Configuration
@@ -148,6 +200,23 @@ curl http://localhost:4566/restapis/$API_ID/dev/_user_request_/users
 
 Both HTTP and WebSocket protocol types are fully supported, including the WebSocket data-plane (real connection handling, message routing, and the `@connections` management API).
 
+### HTTP API data-plane
+
+API Gateway v2 advertises HTTP APIs through Floci's local execute-api domain:
+
+```bash
+curl http://{apiId}.execute-api.localhost.floci.io:4566/{stageName}/{path}
+```
+
+When an API has a `$default` stage, callers may omit the stage segment:
+
+```bash
+curl http://{apiId}.execute-api.localhost.floci.io:4566/{path}
+```
+
+APIs created or updated with `disableExecuteApiEndpoint` reject requests to
+this default hostname with `404 Not Found`, matching AWS HTTP API behavior.
+
 ### Supported Operations
 
 | Category | Operations |
@@ -161,6 +230,8 @@ Both HTTP and WebSocket protocol types are fully supported, including the WebSoc
 | **Stages** | CreateStage, GetStage, GetStages, UpdateStage, DeleteStage |
 | **Deployments** | CreateDeployment, GetDeployment, GetDeployments, UpdateDeployment, DeleteDeployment |
 | **Models** | CreateModel, GetModel, GetModels, UpdateModel, DeleteModel |
+| **Domain Names** | CreateDomainName, GetDomainName, GetDomainNames, DeleteDomainName |
+| **API Mappings** | CreateApiMapping, GetApiMapping, GetApiMappings, DeleteApiMapping |
 | **Tags** | TagResource, UntagResource, GetTags |
 
 ### WebSocket Data-Plane {#websocket-data-plane}
@@ -210,15 +281,19 @@ DELETE /execute-api/{apiId}/{stageName}/@connections/{connectionId}  — Disconn
 
 #### Behavior Notes
 
-- **Connection URL**: Floci uses `ws://localhost:4566/ws/{apiId}/{stage}` instead of AWS's `wss://{api-id}.execute-api.{region}.amazonaws.com/{stage}`.
+- **Connection URL**: Floci accepts the AWS-style execute-api host as well as the path form. All of these reach the same WebSocket API:
+  - `ws://{apiId}.execute-api.{region}.localhost:4566/{stage}` — region-bearing, mirroring AWS's `wss://{api-id}.execute-api.{region}.amazonaws.com/{stage}`
+  - `ws://{apiId}.execute-api.localhost.floci.io:4566/{stage}` — Floci's built-in execute-api domain (regionless; the region is resolved by an apiId lookup)
+  - `ws://localhost:4566/ws/{apiId}/{stage}` — the explicit path form
+
+  The `@connections` management API is likewise reachable on the execute-api host (`http://{apiId}.execute-api.{region}.localhost:4566/{stage}/@connections/{connectionId}`).
 - **Idle timeout**: 10 minutes (matching AWS default). Not configurable per-API.
 - **Max connection duration**: 2 hours (matching AWS). Connections are closed automatically.
 - **Payload size limit**: 128 KB per frame (matching AWS). Oversized messages receive an error frame.
 
 ### Not Implemented
 
-- `ReimportApi`, `ExportApi`, `GetApiMapping`, `CreateApiMapping`, `DeleteApiMapping`
-- `GetDomainName`, `CreateDomainName`, `DeleteDomainName`
+- `ReimportApi`, `ExportApi`, `UpdateDomainName`, `UpdateApiMapping`
 - `CreateVpcLink`, `GetVpcLink`, `GetVpcLinks`, `UpdateVpcLink`, `DeleteVpcLink`
 
 ### Examples

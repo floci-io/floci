@@ -79,7 +79,7 @@ class S3MultipartServiceTest {
         s3Service.uploadPart("test-bucket", "file.bin", upload.getUploadId(), 2, "part2".getBytes());
 
         S3Object result = s3Service.completeMultipartUpload("test-bucket", "file.bin",
-                upload.getUploadId(), List.of(1, 2));
+                upload.getUploadId(), List.of(1, 2), null, null);
 
         assertNotNull(result);
         assertEquals("text/plain", result.getContentType());
@@ -101,7 +101,7 @@ class S3MultipartServiceTest {
                 Map.of("token", "abc-123", "teamId", "42"));
         s3Service.uploadPart("test-bucket", "tagged.bin", upload.getUploadId(), 1, "part1".getBytes());
 
-        s3Service.completeMultipartUpload("test-bucket", "tagged.bin", upload.getUploadId(), List.of(1));
+        s3Service.completeMultipartUpload("test-bucket", "tagged.bin", upload.getUploadId(), List.of(1), null, null);
 
         Map<String, String> tags = s3Service.getObjectTagging("test-bucket", "tagged.bin");
         assertEquals(2, tags.size());
@@ -114,7 +114,7 @@ class S3MultipartServiceTest {
         MultipartUpload upload = s3Service.initiateMultipartUpload("test-bucket", "untagged.bin", null);
         s3Service.uploadPart("test-bucket", "untagged.bin", upload.getUploadId(), 1, "part1".getBytes());
 
-        s3Service.completeMultipartUpload("test-bucket", "untagged.bin", upload.getUploadId(), List.of(1));
+        s3Service.completeMultipartUpload("test-bucket", "untagged.bin", upload.getUploadId(), List.of(1), null, null);
 
         assertTrue(s3Service.getObjectTagging("test-bucket", "untagged.bin").isEmpty());
     }
@@ -126,7 +126,7 @@ class S3MultipartServiceTest {
 
         assertThrows(AwsException.class, () ->
                 s3Service.completeMultipartUpload("test-bucket", "file.bin",
-                        upload.getUploadId(), List.of(1, 2)));
+                        upload.getUploadId(), List.of(1, 2), null, null));
     }
 
     @Test
@@ -163,7 +163,7 @@ class S3MultipartServiceTest {
         s3Service.uploadPart("test-bucket", "versioned.bin", upload.getUploadId(), 1, "data".getBytes());
 
         S3Object result = s3Service.completeMultipartUpload("test-bucket", "versioned.bin",
-                upload.getUploadId(), List.of(1));
+                upload.getUploadId(), List.of(1), null, null);
 
         assertNotNull(result.getVersionId(), "Versioned bucket should produce a versionId");
     }
@@ -172,7 +172,7 @@ class S3MultipartServiceTest {
     void completeMultipartUploadCleansUp() {
         MultipartUpload upload = s3Service.initiateMultipartUpload("test-bucket", "file.bin", null);
         s3Service.uploadPart("test-bucket", "file.bin", upload.getUploadId(), 1, "data".getBytes());
-        s3Service.completeMultipartUpload("test-bucket", "file.bin", upload.getUploadId(), List.of(1));
+        s3Service.completeMultipartUpload("test-bucket", "file.bin", upload.getUploadId(), List.of(1), null, null);
 
         // Should no longer be in active uploads
         List<MultipartUpload> uploads = s3Service.listMultipartUploads("test-bucket");
@@ -184,7 +184,7 @@ class S3MultipartServiceTest {
         MultipartUpload upload = s3Service.initiateMultipartUpload("test-bucket", "parts.bin", "application/octet-stream");
         s3Service.uploadPart("test-bucket", "parts.bin", upload.getUploadId(), 1, "abc".getBytes(StandardCharsets.UTF_8));
         s3Service.uploadPart("test-bucket", "parts.bin", upload.getUploadId(), 2, "def".getBytes(StandardCharsets.UTF_8));
-        s3Service.completeMultipartUpload("test-bucket", "parts.bin", upload.getUploadId(), List.of(1, 2));
+        s3Service.completeMultipartUpload("test-bucket", "parts.bin", upload.getUploadId(), List.of(1, 2), null, null);
 
         GetObjectAttributesResult attributes = s3Service.getObjectAttributes("test-bucket", "parts.bin", null,
                 Set.of(ObjectAttributeName.OBJECT_PARTS, ObjectAttributeName.CHECKSUM),

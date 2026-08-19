@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.rds.container;
 import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.model.Frame;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ServiceConfigAccess;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
@@ -26,9 +27,11 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Pattern;
 
 /**
  * Manages backend Docker container lifecycle for RDS DB instances and clusters.
@@ -38,6 +41,7 @@ import java.util.concurrent.TimeUnit;
 public class RdsContainerManager {
 
     private static final Logger LOG = Logger.getLogger(RdsContainerManager.class);
+    private static final Pattern SAFE_STORAGE_COMPONENT = Pattern.compile("[A-Za-z0-9._-]+");
 
     private final ContainerBuilder containerBuilder;
     private final ContainerLifecycleManager lifecycleManager;
@@ -47,6 +51,8 @@ public class RdsContainerManager {
     private final RegionResolver regionResolver;
     private final ServiceConfigAccess serviceConfigAccess;
     private final Map<String, RdsContainerHandle> activeContainers = new ConcurrentHashMap<>();
+    private final Map<String, String> activeStorageOwners = new ConcurrentHashMap<>();
+    private final Set<String> claimedRuntimes = ConcurrentHashMap.newKeySet();
 
     @Inject
     public RdsContainerManager(ContainerBuilder containerBuilder,
@@ -68,75 +74,212 @@ public class RdsContainerManager {
     public RdsContainerHandle start(String instanceId, String volumeId, DatabaseEngine engine,
                                     String image, String masterUsername,
                                     String masterPassword, String dbName) {
+        return start(instanceId, instanceId, volumeId, engine, image,
+                masterUsername, masterPassword, dbName);
+    }
+
+    public RdsContainerHandle start(
+            String runtimeId, String instanceId, String volumeId, DatabaseEngine engine,
+            String image, String masterUsername, String masterPassword, String dbName) {
+        String exactVolumeName = ContainerStorageHelper.resourceName(
+                config, "rds", volumeId, instanceId);
+        return start(runtimeId, instanceId, instanceId, exactVolumeName,
+                engine, image, masterUsername, masterPassword, dbName);
+    }
+
+    public RdsContainerHandle start(
+            String runtimeId, String instanceId, String containerStorageResourceId,
+            String dockerVolumeName, DatabaseEngine engine, String image,
+            String masterUsername, String masterPassword, String dbName) {
         LOG.infov("Starting RDS backend container for instance: {0} engine={1}", instanceId, engine);
 
+        String effectiveRuntimeId = runtimeId == null || runtimeId.isBlank()
+                ? instanceId : runtimeId;
+        String storageResourceId = requireSafeStorageComponent(
+                containerStorageResourceId, "container storage resource ID");
+        String exactVolumeName = requireSafeStorageComponent(
+                dockerVolumeName, "Docker volume name");
         int enginePort = engine.defaultPort();
-        String containerName = ContainerStorageHelper.resourceName(config, "rds", volumeId, instanceId);
+        String containerName = exactVolumeName;
+        String storageKey = storageKey(storageResourceId, exactVolumeName);
+        String containerKey = "container:" + containerName;
+        if (!claimedRuntimes.add(effectiveRuntimeId)) {
+            throw new IllegalStateException(
+                    "RDS runtime " + effectiveRuntimeId + " already has an active container");
+        }
+        try {
+            claimStorage(storageKey, effectiveRuntimeId);
+        } catch (RuntimeException | Error e) {
+            claimedRuntimes.remove(effectiveRuntimeId);
+            throw e;
+        }
+        try {
+            claimStorage(containerKey, effectiveRuntimeId);
+        } catch (RuntimeException | Error e) {
+            releaseOwnership(storageKey, null, effectiveRuntimeId);
+            throw e;
+        }
 
-        // Remove any stale container with the same name
-        lifecycleManager.removeIfExists(containerName);
+        String cleanupContainerId = containerName;
+        RdsContainerHandle handle = null;
+        try {
+            // Remove any stale container with the same name only after storage ownership is secured.
+            lifecycleManager.removeIfExistsStrict(containerName);
+            cleanupContainerId = null;
 
-        // Build environment variables
-        List<String> envVars = buildEnvVars(engine, masterUsername, masterPassword, dbName);
+            // Build environment variables
+            List<String> envVars = buildEnvVars(engine, masterUsername, masterPassword, dbName);
 
         // Build container spec with bind mounts for persistence. Publish the
         // engine port to the host only in native mode; in Docker mode the auth
         // proxy reaches the DB via the container network.
-        ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
-                .withName(containerName)
-                .withEnv(envVars)
-                .withDockerNetwork(config.services().rds().dockerNetwork())
-                .withLogRotation();
+            ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
+                    .withName(containerName)
+                    .withEnv(envVars)
+                    .withDockerNetwork(config.services().rds().dockerNetwork())
+                    .withLogRotation();
 
-        if (!containerDetector.isRunningInContainer()) {
-            specBuilder.withDynamicPort(enginePort);
-        } else {
-            specBuilder.withExposedPort(enginePort);
-        }
+            if (!containerDetector.isRunningInContainer()) {
+                specBuilder.withDynamicPort(enginePort);
+            } else {
+                specBuilder.withExposedPort(enginePort);
+            }
 
         // Handle persistence mounting
-        addPersistenceMounts(specBuilder, instanceId, volumeId, engine, image);
+            addPersistenceMounts(
+                    specBuilder, storageResourceId, exactVolumeName, engine, image);
 
         // Add engine-specific command
-        List<String> cmd = buildContainerCmd(engine);
-        if (!cmd.isEmpty()) {
-            specBuilder.withCmd(cmd);
-        }
+            List<String> cmd = buildContainerCmd(engine);
+            if (!cmd.isEmpty()) {
+                specBuilder.withCmd(cmd);
+            }
 
-        ContainerSpec spec = specBuilder.build();
+            ContainerSpec spec = specBuilder.build();
 
-        // Create and start container
-        ContainerInfo info = lifecycleManager.createAndStart(spec);
-        EndpointInfo endpoint = info.getEndpoint(enginePort);
+        // Create and start container separately so a failed start retains the cleanup identity.
+            // The fixed name remains a valid cleanup identity if create succeeds but its response
+            // is lost before Docker returns the generated ID.
+            cleanupContainerId = containerName;
+            String createdContainerId = lifecycleManager.create(spec);
+            cleanupContainerId = createdContainerId;
+            ContainerInfo info = lifecycleManager.startCreated(createdContainerId, spec);
+            EndpointInfo endpoint = info.getEndpoint(enginePort);
 
-        LOG.infov("RDS backend for instance {0}: {1}", instanceId, endpoint);
-        initializeEngine(containerName, info.containerId(), engine, masterUsername);
+            LOG.infov("RDS backend for instance {0}: {1}", instanceId, endpoint);
+            initializeEngine(containerName, info.containerId(), engine, masterUsername);
 
-        RdsContainerHandle handle = new RdsContainerHandle(
-                info.containerId(), instanceId, endpoint.host(), endpoint.port());
-        activeContainers.put(instanceId, handle);
+            handle = new RdsContainerHandle(
+                    info.containerId(), effectiveRuntimeId, instanceId,
+                    endpoint.host(), endpoint.port(), storageKey, containerKey);
 
         // Attach log streaming
-        String shortId = info.containerId().length() >= 8
-                ? info.containerId().substring(0, 8)
-                : info.containerId();
-        String logGroup = "/aws/rds/instance/" + instanceId + "/error";
-        String logStream = logStreamer.generateLogStreamName(shortId);
-        String region = regionResolver.getDefaultRegion();
+            String shortId = info.containerId().length() >= 8
+                    ? info.containerId().substring(0, 8)
+                    : info.containerId();
+            String logGroup = "/aws/rds/instance/" + instanceId + "/error";
+            String logStream = logStreamer.generateLogStreamName(shortId);
+            String region = regionResolver.getDefaultRegion();
+            String accountId = null;
+            try {
+                AwsArnUtils.Arn runtimeArn = AwsArnUtils.parse(effectiveRuntimeId);
+                if ("rds".equals(runtimeArn.service())) {
+                    if (!runtimeArn.region().isBlank()) {
+                        region = runtimeArn.region();
+                    }
+                    if (!runtimeArn.accountId().isBlank()) {
+                        accountId = runtimeArn.accountId();
+                    }
+                }
+            } catch (IllegalArgumentException ignored) {
+                LOG.debugv("Using legacy RDS runtime identity for log routing: {0}",
+                        effectiveRuntimeId);
+            }
 
-        Closeable logHandle = logStreamer.attach(
-                info.containerId(), logGroup, logStream, region, "rds:" + instanceId);
-        handle.setLogStream(logHandle);
+            Closeable logHandle = accountId != null
+                    ? logStreamer.attachForAccount(
+                            accountId, info.containerId(), logGroup, logStream, region,
+                            "rds:" + effectiveRuntimeId)
+                    : logStreamer.attach(
+                            info.containerId(), logGroup, logStream, region,
+                            "rds:" + effectiveRuntimeId);
+            handle.setLogStream(logHandle);
+            activeContainers.put(effectiveRuntimeId, handle);
 
-        return handle;
+            return handle;
+        } catch (RuntimeException | Error e) {
+            if (handle != null) {
+                activeContainers.remove(effectiveRuntimeId, handle);
+            }
+            boolean cleaned = cleanupContainerId == null;
+            if (cleanupContainerId != null) {
+                try {
+                    lifecycleManager.stopAndRemoveStrict(
+                            cleanupContainerId,
+                            handle != null ? handle.getLogStream() : null);
+                    cleaned = true;
+                } catch (RuntimeException | Error cleanupFailure) {
+                    e.addSuppressed(cleanupFailure);
+                    RdsContainerHandle retained = handle != null ? handle
+                            : new RdsContainerHandle(
+                            cleanupContainerId, effectiveRuntimeId, instanceId,
+                            null, 0, storageKey, containerKey);
+                    activeContainers.put(effectiveRuntimeId, retained);
+                    LOG.errorv(cleanupFailure,
+                            "Failed to clean up RDS container {0}; retaining storage ownership for {1}",
+                            cleanupContainerId, effectiveRuntimeId);
+                }
+            }
+            if (cleaned) {
+                releaseOwnership(storageKey, containerKey, effectiveRuntimeId);
+            }
+            throw e;
+        }
     }
 
     public void stop(RdsContainerHandle handle) {
         if (handle == null) {
             return;
         }
-        activeContainers.remove(handle.getInstanceId());
-        lifecycleManager.stopAndRemove(handle.getContainerId(), handle.getLogStream());
+        RdsContainerHandle active = activeContainers.get(handle.getRuntimeId());
+        RdsContainerHandle effectiveHandle = active != null ? active : handle;
+        try {
+            lifecycleManager.stopAndRemoveStrict(
+                    effectiveHandle.getContainerId(), effectiveHandle.getLogStream());
+        } catch (RuntimeException | Error e) {
+            activeContainers.putIfAbsent(effectiveHandle.getRuntimeId(), effectiveHandle);
+            claimedRuntimes.add(effectiveHandle.getRuntimeId());
+            throw e;
+        }
+        activeContainers.remove(effectiveHandle.getRuntimeId(), effectiveHandle);
+        releaseOwnership(
+                effectiveHandle.getStorageKey(), effectiveHandle.getContainerKey(),
+                effectiveHandle.getRuntimeId());
+    }
+
+    /**
+     * Retries cleanup for a runtime retained after an earlier stop failure.
+     *
+     * <p>The persisted RDS model intentionally clears stale Docker endpoint fields after a failed
+     * restore. The runtime ARN remains stable and is therefore the safe lookup key for a later
+     * delete retry.
+     */
+    public void stopByRuntimeId(String runtimeId) {
+        if (runtimeId == null || runtimeId.isBlank()) {
+            return;
+        }
+        RdsContainerHandle active = activeContainers.get(runtimeId);
+        if (active != null) {
+            stop(active);
+        }
+    }
+
+    /** Returns the retained runtime handle used to persist cleanup identity after a failed start. */
+    public RdsContainerHandle getActiveHandle(String runtimeId) {
+        if (runtimeId == null || runtimeId.isBlank()) {
+            return null;
+        }
+        return activeContainers.get(runtimeId);
     }
 
     public void stopAll() {
@@ -145,21 +288,28 @@ public class RdsContainerManager {
             LOG.infov("Stopping {0} RDS container(s) on shutdown", handles.size());
         }
         for (RdsContainerHandle handle : handles) {
-            stop(handle);
+            try {
+                stop(handle);
+            } catch (RuntimeException | Error e) {
+                LOG.warnv(e, "Failed to stop RDS container {0} during shutdown; continuing",
+                        handle.getContainerId());
+            }
         }
     }
 
-    private void addPersistenceMounts(ContainerBuilder.Builder specBuilder, String instanceId,
-                                      String volumeId, DatabaseEngine engine, String image) {
+    private void addPersistenceMounts(
+            ContainerBuilder.Builder specBuilder, String storageResourceId,
+            String exactVolumeName, DatabaseEngine engine, String image) {
         if (ContainerStorageHelper.isNamedVolumeMode(config)) {
-            ContainerStorageHelper.applyStorage(
-                    specBuilder, lifecycleManager, config, "rds", volumeId, instanceId,
+            ContainerStorageHelper.applyNamedVolume(
+                    specBuilder, lifecycleManager, exactVolumeName,
                     engineDefaultDataPath(engine, image));
             return;
         }
 
         // Legacy host-path mode: host-persistent-path is an absolute path
-        String hostDataPath = ContainerStorageHelper.hostResourcePath(config, "rds", instanceId).toString();
+        String hostDataPath = ContainerStorageHelper.hostResourcePath(
+                config, "rds", storageResourceId).toString();
         if (!containerDetector.isRunningInContainer()) {
             ContainerStorageHelper.ensureHostDir(hostDataPath);
         }
@@ -303,10 +453,64 @@ public class RdsContainerManager {
     record ContainerExecResult(long exitCode, String output) {}
 
     public void removeVolume(String instanceId, String volumeId) {
+        removeVolume(instanceId, instanceId,
+                ContainerStorageHelper.resourceName(config, "rds", volumeId, instanceId));
+    }
+
+    public void removeVolume(
+            String runtimeId, String containerStorageResourceId, String dockerVolumeName) {
         if (ContainerStorageHelper.isNamedVolumeMode(config)) {
-            ContainerStorageHelper.removeStorage(config, lifecycleManager, "rds", volumeId, instanceId);
+            requireSafeStorageComponent(
+                    containerStorageResourceId, "container storage resource ID");
+            String exactVolumeName = requireSafeStorageComponent(
+                    dockerVolumeName, "Docker volume name");
+            String key = "volume:" + exactVolumeName;
+            String owner = activeStorageOwners.get(key);
+            if (owner != null) {
+                throw new IllegalStateException(
+                        "Refusing to remove active RDS storage " + exactVolumeName
+                                + ", owned by " + owner);
+            }
+            ContainerStorageHelper.removeNamedVolumeStrict(
+                    config, lifecycleManager, exactVolumeName);
         }
         // host-path mode: host directories are not removed automatically
+    }
+
+    private String storageKey(String storageResourceId, String exactVolumeName) {
+        if (ContainerStorageHelper.isNamedVolumeMode(config)) {
+            return "volume:" + exactVolumeName;
+        }
+        Path hostPath = ContainerStorageHelper.hostResourcePath(
+                config, "rds", storageResourceId).toAbsolutePath().normalize();
+        return "path:" + hostPath;
+    }
+
+    private void claimStorage(String storageKey, String runtimeId) {
+        String existingOwner = activeStorageOwners.putIfAbsent(storageKey, runtimeId);
+        if (existingOwner != null && !existingOwner.equals(runtimeId)) {
+            throw new IllegalStateException(
+                    "RDS storage " + storageKey + " is already owned by " + existingOwner);
+        }
+    }
+
+    private void releaseOwnership(String storageKey, String containerKey, String runtimeId) {
+        if (storageKey != null) {
+            activeStorageOwners.remove(storageKey, runtimeId);
+        }
+        if (containerKey != null) {
+            activeStorageOwners.remove(containerKey, runtimeId);
+        }
+        claimedRuntimes.remove(runtimeId);
+    }
+
+    private static String requireSafeStorageComponent(String value, String label) {
+        if (value == null || value.isBlank()
+                || ".".equals(value) || "..".equals(value)
+                || !SAFE_STORAGE_COMPONENT.matcher(value).matches()) {
+            throw new IllegalArgumentException("Invalid " + label + ": " + value);
+        }
+        return value;
     }
 
     private List<String> buildEnvVars(DatabaseEngine engine, String masterUsername,

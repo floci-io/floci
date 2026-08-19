@@ -10,6 +10,8 @@ import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.common.docker.LaunchedContainerAwsEnv;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
+import io.github.hectorvent.floci.services.iam.model.SessionCreds;
+import io.github.hectorvent.floci.services.lambda.model.LambdaFileSystemConfig;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import io.github.hectorvent.floci.services.lambda.runtime.RuntimeApiServer;
 import io.github.hectorvent.floci.services.lambda.runtime.RuntimeApiServerFactory;
@@ -45,9 +47,12 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalInt;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -56,6 +61,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
@@ -71,6 +77,7 @@ class ContainerLauncherTest {
     @Mock EmbeddedDnsServer embeddedDnsServer;
     @Mock RuntimeApiServer runtimeApiServer;
     @Mock DockerClient dockerClient;
+    @Mock LambdaExecutionRoleCredentials executionRoleCredentials;
 
     @TempDir
     Path tempDir;
@@ -84,6 +91,8 @@ class ContainerLauncherTest {
         EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
         EmulatorConfig.LambdaServiceConfig lambda = mock(EmulatorConfig.LambdaServiceConfig.class);
         EmulatorConfig.DockerConfig docker = mock(EmulatorConfig.DockerConfig.class);
+        EmulatorConfig.StorageConfig storage = mock(EmulatorConfig.StorageConfig.class);
+        EmulatorConfig.EfsSharingConfig efs = mock(EmulatorConfig.EfsSharingConfig.class);
 
         when(config.services()).thenReturn(services);
         when(services.lambda()).thenReturn(lambda);
@@ -99,6 +108,16 @@ class ContainerLauncherTest {
         lenient().when(tls.enabled()).thenReturn(false);
         lenient().when(config.defaultRegion()).thenReturn("us-east-1");
         lenient().when(config.hostname()).thenReturn(Optional.empty());
+        // The large-code path resolves a code-volume completion marker under the storage persistent path.
+        lenient().when(config.storage()).thenReturn(storage);
+        lenient().when(storage.persistentPath()).thenReturn(tempDir.toString());
+        lenient().when(storage.efs()).thenReturn(efs);
+        lenient().when(efs.ownerUid()).thenReturn(OptionalInt.empty());
+        lenient().when(efs.ownerGid()).thenReturn(OptionalInt.empty());
+        lenient().when(efs.rootPermissions()).thenReturn(Optional.empty());
+        lenient().when(efs.initImage()).thenReturn("busybox:stable");
+        lenient().when(efs.mountUser()).thenReturn(Optional.empty());
+        lenient().when(efs.mountGroupAdd()).thenReturn(OptionalInt.empty());
 
         when(embeddedDnsServer.getServerIp()).thenReturn(Optional.empty());
 
@@ -108,11 +127,16 @@ class ContainerLauncherTest {
         LaunchedContainerAwsEnv awsEnv = new LaunchedContainerAwsEnv(reachableEndpoint);
         launcher = new ContainerLauncher(containerBuilder, lifecycleManager, logStreamer, imageResolver,
                 runtimeApiServerFactory, dockerHostResolver, config, ecrRegistryManager,
-                mock(io.github.hectorvent.floci.services.lambda.LambdaLayerService.class), awsEnv);
+                mock(io.github.hectorvent.floci.services.lambda.LambdaLayerService.class), awsEnv,
+                executionRoleCredentials);
 
         when(runtimeApiServerFactory.create()).thenReturn(runtimeApiServer);
         when(runtimeApiServer.getPort()).thenReturn(9000);
+        lenient().when(runtimeApiServer.stop()).thenReturn(CompletableFuture.completedFuture(null));
+        // stop() quiesces then close()s; the unregister assertions below run past that call.
+        lenient().when(runtimeApiServer.close()).thenReturn(CompletableFuture.completedFuture(null));
         when(dockerHostResolver.resolve()).thenReturn("127.0.0.1");
+        lenient().when(executionRoleCredentials.forFunction(any())).thenReturn(Optional.empty());
 
         // lenient: the failure-path test (populate fails before any container is created) never
         // reaches these, but every success-path test does — they must not trip strict-stubs.
@@ -206,6 +230,35 @@ class ContainerLauncherTest {
         // The code is tar-copied straight into /var/task on the real container.
         assertTrue(capturedRemotePaths.contains("/var/task"),
                 "small code should be copied directly into /var/task");
+    }
+
+    @Test
+    void launchFunction_mountsConfiguredFileSystemVolume() throws Exception {
+        Path codePath = Files.createDirectory(tempDir.resolve("efs-code"));
+
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("efs-fn");
+        fn.setFunctionArn("arn:aws:lambda:us-east-1:000000000000:function:efs-fn");
+        fn.setRuntime("nodejs20.x");
+        fn.setHandler("index.handler");
+        fn.setCodeLocalPath(codePath.toString());
+        fn.setFileSystemConfigs(List.of(new LambdaFileSystemConfig(
+                "arn:aws:elasticfilesystem:us-east-1:000000000000:access-point/fsap-0123456789abcdef0",
+                "/mnt/shared")));
+
+        launcher.launch(fn);
+
+        String expectedVolumeName = "floci-efs-fsap-0123456789abcdef0-"
+                + "9d6eafd2aec94d4518a004f005725b4b3c673c1506436bb7368cfd5450fc0810";
+        verify(lifecycleManager).ensureSharedVolume(expectedVolumeName,
+                OptionalInt.empty(), OptionalInt.empty(), Optional.empty(), "busybox:stable");
+        Mount mount = captureRealContainerSpec().mounts().stream()
+                .filter(candidate -> "/mnt/shared".equals(candidate.getTarget()))
+                .findFirst()
+                .orElseThrow();
+        assertEquals(MountType.VOLUME, mount.getType());
+        assertEquals(expectedVolumeName, mount.getSource());
+        assertTrue(!Boolean.TRUE.equals(mount.getReadOnly()));
     }
 
     @Test
@@ -332,47 +385,35 @@ class ContainerLauncherTest {
     }
 
     @Test
-    void launchFunction_userEnvironmentOverridesDefaultCredentials() throws Exception {
+    void launchFunction_executionRoleCredentialsOverrideUserCredentialEnvironment() throws Exception {
         Path codePath = Files.createDirectory(tempDir.resolve("creds-override"));
 
         LambdaFunction fn = new LambdaFunction();
         fn.setFunctionName("override-fn");
+        fn.setAccountId("000000000000");
         fn.setRuntime("nodejs20.x");
         fn.setHandler("index.handler");
         fn.setCodeLocalPath(codePath.toString());
         fn.setEnvironment(Map.of(
                 "AWS_ACCESS_KEY_ID", "user-key",
-                "AWS_SECRET_ACCESS_KEY", "user-secret"));
+                "AWS_SECRET_ACCESS_KEY", "user-secret",
+                "AWS_SESSION_TOKEN", "user-token"));
+        when(executionRoleCredentials.forFunction(fn)).thenReturn(Optional.of(
+                new SessionCreds("ASIAROLEKEY", "role-secret", "role-token")));
 
         launcher.launch(fn);
 
         List<String> env = captureRealContainerSpec().env();
-        // Docker honours the last occurrence of a duplicate Env entry, so user
-        // overrides must appear after the Floci defaults.
-        int defaultKeyIdx = -1;
-        int userKeyIdx = -1;
-        int defaultSecretIdx = -1;
-        int userSecretIdx = -1;
-        for (int i = 0; i < env.size(); i++) {
-            if (env.get(i).startsWith("AWS_ACCESS_KEY_ID=") && userKeyIdx < 0 && !env.get(i).equals("AWS_ACCESS_KEY_ID=user-key")) {
-                defaultKeyIdx = i;
-            }
-            if (env.get(i).equals("AWS_ACCESS_KEY_ID=user-key")) userKeyIdx = i;
-            if (env.get(i).startsWith("AWS_SECRET_ACCESS_KEY=") && userSecretIdx < 0 && !env.get(i).equals("AWS_SECRET_ACCESS_KEY=user-secret")) {
-                defaultSecretIdx = i;
-            }
-            if (env.get(i).equals("AWS_SECRET_ACCESS_KEY=user-secret")) userSecretIdx = i;
-        }
-        assertTrue(defaultKeyIdx >= 0, "default AWS_ACCESS_KEY_ID still present");
-        assertTrue(userKeyIdx > defaultKeyIdx,
-                "user AWS_ACCESS_KEY_ID must appear after the default");
-        assertTrue(defaultSecretIdx >= 0, "default AWS_SECRET_ACCESS_KEY still present");
-        assertTrue(userSecretIdx > defaultSecretIdx,
-                "user AWS_SECRET_ACCESS_KEY must appear after the default");
-
-        // AWS_SESSION_TOKEN was not overridden so the default remains.
+        assertTrue(env.contains("AWS_ACCESS_KEY_ID=ASIAROLEKEY"));
+        assertTrue(env.contains("AWS_SECRET_ACCESS_KEY=role-secret"));
+        assertTrue(env.contains("AWS_SESSION_TOKEN=role-token"));
+        assertTrue(env.stream().noneMatch("AWS_ACCESS_KEY_ID=user-key"::equals));
+        assertTrue(env.stream().noneMatch("AWS_SECRET_ACCESS_KEY=user-secret"::equals));
+        assertTrue(env.stream().noneMatch("AWS_SESSION_TOKEN=user-token"::equals));
+        assertEquals(1, env.stream().filter(e -> e.startsWith("AWS_ACCESS_KEY_ID=")).count());
+        assertEquals(1, env.stream().filter(e -> e.startsWith("AWS_SECRET_ACCESS_KEY=")).count());
         assertEquals(1, env.stream().filter(e -> e.startsWith("AWS_SESSION_TOKEN=")).count(),
-                "AWS_SESSION_TOKEN should retain its default exactly once");
+                "execution-role session token should appear exactly once");
     }
 
     @Test
@@ -489,6 +530,91 @@ class ContainerLauncherTest {
                 "AWS_SECRET_ACCESS_KEY should not be injected when awsConfigPath is set");
         assertTrue(env.stream().noneMatch(e -> e.startsWith("AWS_SESSION_TOKEN=")),
                 "AWS_SESSION_TOKEN should not be injected when awsConfigPath is set");
+        verify(executionRoleCredentials, never()).forFunction(any());
+    }
+
+    @Test
+    void stopUnregistersExecutionRoleSession() throws Exception {
+        Path codePath = Files.createDirectory(tempDir.resolve("role-session-stop"));
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("role-session-stop-fn");
+        fn.setAccountId("222233334444");
+        fn.setRuntime("nodejs20.x");
+        fn.setHandler("index.handler");
+        fn.setCodeLocalPath(codePath.toString());
+        when(executionRoleCredentials.forFunction(fn)).thenReturn(Optional.of(
+                new SessionCreds("ASIASTOPSESSION", "role-secret", "role-token")));
+
+        ContainerHandle handle = launcher.launch(fn);
+        launcher.stop(handle);
+
+        verify(executionRoleCredentials).unregister("222233334444", "ASIASTOPSESSION");
+    }
+
+    @Test
+    void launchFailureUnregistersExecutionRoleSession() throws Exception {
+        Path codePath = Files.createDirectory(tempDir.resolve("role-session-failure"));
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("role-session-failure-fn");
+        fn.setAccountId("222233334444");
+        fn.setRuntime("nodejs20.x");
+        fn.setHandler("index.handler");
+        fn.setCodeLocalPath(codePath.toString());
+        when(executionRoleCredentials.forFunction(fn)).thenReturn(Optional.of(
+                new SessionCreds("ASIAFAILEDSESSION", "role-secret", "role-token")));
+        doThrow(new RuntimeException("create failed")).when(lifecycleManager).create(any());
+
+        assertThrows(RuntimeException.class, () -> launcher.launch(fn));
+
+        verify(executionRoleCredentials).unregister("222233334444", "ASIAFAILEDSESSION");
+    }
+
+    @Test
+    void publishedVersionUnregistersUnderTheAccountItRegisteredWith() throws Exception {
+        // A published version has no accountId, so both the handle stamp and the revoke must take
+        // the account from the function ARN. Reading the field directly revokes under null and
+        // leaks a live, non-expiring session for the life of the process.
+        Path codePath = Files.createDirectory(tempDir.resolve("role-session-version"));
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("role-session-version-fn");
+        fn.setVersion("1");
+        fn.setFunctionArn(
+                "arn:aws:lambda:us-east-1:222233334444:function:role-session-version-fn:1");
+        fn.setRuntime("nodejs20.x");
+        fn.setHandler("index.handler");
+        fn.setCodeLocalPath(codePath.toString());
+        when(executionRoleCredentials.forFunction(fn)).thenReturn(Optional.of(
+                new SessionCreds("ASIAVERSIONSESSION", "role-secret", "role-token")));
+
+        ContainerHandle handle = launcher.launch(fn);
+        assertEquals("222233334444", handle.getExecutionRoleSessionAccountId());
+
+        launcher.stop(handle);
+
+        verify(executionRoleCredentials).unregister("222233334444", "ASIAVERSIONSESSION");
+    }
+
+    @Test
+    void publishedVersionLaunchFailureUnregistersUnderTheArnAccount() throws Exception {
+        // The launch-failure path recomputes the account rather than reading it back off a handle
+        // (there is no handle yet), so it needs the same ARN fallback. Reading the field here
+        // revokes under null and leaks the session that forFunction just registered.
+        Path codePath = Files.createDirectory(tempDir.resolve("role-session-version-failure"));
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("role-session-version-failure-fn");
+        fn.setVersion("2");
+        fn.setFunctionArn(
+                "arn:aws:lambda:us-east-1:222233334444:function:role-session-version-failure-fn:2");
+        fn.setRuntime("nodejs20.x");
+        fn.setHandler("index.handler");
+        fn.setCodeLocalPath(codePath.toString());
+        when(executionRoleCredentials.forFunction(fn)).thenReturn(Optional.of(
+                new SessionCreds("ASIAVERSIONFAILURE", "role-secret", "role-token")));
+        doThrow(new RuntimeException("create failed")).when(lifecycleManager).create(any());
+
+        assertThrows(RuntimeException.class, () -> launcher.launch(fn));
+
+        verify(executionRoleCredentials).unregister("222233334444", "ASIAVERSIONFAILURE");
     }
 
     @Test
@@ -592,7 +718,9 @@ class ContainerLauncherTest {
         verify(lifecycleManager, times(2)).create(any());
         verify(lifecycleManager, atLeastOnce()).ensureVolume(any());
         verify(lifecycleManager, times(1)).stopAndRemove(any(), any()); // the helper only
-        // Old code-version volumes are NOT eagerly deleted (race fix); they are label-pruned instead.
+        // A superseded code-version volume is never deleted synchronously within a single launch
+        // (see the cleanupSupersededVolumes tests below for the deferred sweep; this fn has no
+        // prior volume to supersede, since it's the fn's first deploy here).
         verify(lifecycleManager, never()).removeVolume(any());
     }
 
@@ -629,6 +757,461 @@ class ContainerLauncherTest {
         // ...and we bailed before creating or starting any container (nothing to reap).
         verify(lifecycleManager, never()).create(any());
         verify(lifecycleManager, never()).startCreated(any(), any());
+    }
+
+    @Test
+    void launchFunction_reprovisionsCodeVolume_whenDockerHasNoRecordOfIt() throws Exception {
+        // Regression for #2164: the "populated" bookkeeping is only ever an in-memory cache of
+        // Docker's state, so a volume removed out of band (manual `docker volume rm`, or a stale
+        // in-memory flag left over from a process restart racing a prune) must not be trusted.
+        Path codePath = Files.createDirectory(tempDir.resolve("revalidate-code"));
+        Files.write(codePath.resolve("bundle.bin"), new byte[8 * 1024]); // 8 KiB
+
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("revalidate-fn");
+        fn.setRuntime("nodejs20.x");
+        fn.setHandler("index.handler");
+        fn.setCodeLocalPath(codePath.toString());
+        fn.setCodeSha256("revalidate-fn-sha-v1");
+
+        // Docker never reports this volume as existing, simulating it being gone every time
+        // ensureCodeVolume checks, regardless of what the in-memory flag says.
+        when(lifecycleManager.volumeExists(anyString())).thenReturn(false);
+
+        long original = ContainerLauncher.CODE_VOLUME_MIN_BYTES;
+        try {
+            ContainerLauncher.CODE_VOLUME_MIN_BYTES = 4 * 1024;
+            launcher.launch(fn);
+            launcher.launch(fn);
+        } finally {
+            ContainerLauncher.CODE_VOLUME_MIN_BYTES = original;
+        }
+
+        // Populated twice, once per launch, because the bookkeeping alone is never trusted.
+        assertEquals(2, capturedRemotePaths.stream().filter("/var/task"::equals).count(),
+                "each launch should repopulate since Docker never confirms the volume exists");
+    }
+
+    @Test
+    void cleanupSupersededVolumes_removesPreviousVersionVolume_onceGracePeriodElapses() throws Exception {
+        Path codePath = Files.createDirectory(tempDir.resolve("cleanup-code"));
+        Files.write(codePath.resolve("bundle.bin"), new byte[8 * 1024]); // 8 KiB
+        // No volumeExists stub needed: v1 and v2 are each a first-ever population of their own
+        // distinct volume name, so populatedCodeVolumes.contains(volName) is false both times
+        // ensureCodeVolume checks it, short-circuiting the volumeExists call away entirely.
+
+        LambdaFunction v1 = new LambdaFunction();
+        v1.setFunctionName("cleanup-fn");
+        v1.setRuntime("nodejs20.x");
+        v1.setHandler("index.handler");
+        v1.setCodeLocalPath(codePath.toString());
+        v1.setCodeSha256("cleanup-fn-sha-v1");
+        String volumeV1 = ContainerLauncher.codeVolumeName(v1);
+
+        LambdaFunction v2 = new LambdaFunction();
+        v2.setFunctionName("cleanup-fn");
+        v2.setRuntime("nodejs20.x");
+        v2.setHandler("index.handler");
+        v2.setCodeLocalPath(codePath.toString());
+        v2.setCodeSha256("cleanup-fn-sha-v2");
+        String volumeV2 = ContainerLauncher.codeVolumeName(v2);
+
+        long originalBytes = ContainerLauncher.CODE_VOLUME_MIN_BYTES;
+        long originalGrace = ContainerLauncher.VOLUME_CLEANUP_GRACE_MS;
+        try {
+            ContainerLauncher.CODE_VOLUME_MIN_BYTES = 4 * 1024;
+            launcher.launch(v1);
+            launcher.launch(v2);
+
+            // The v1 volume is superseded but not yet cleaned up: the grace period hasn't elapsed.
+            launcher.cleanupSupersededVolumes();
+            verify(lifecycleManager, never()).removeVolume(volumeV1);
+
+            // Once the grace period has (trivially) elapsed, the sweep removes exactly the
+            // superseded v1 volume, not the current v2 one.
+            ContainerLauncher.VOLUME_CLEANUP_GRACE_MS = -1;
+            launcher.cleanupSupersededVolumes();
+            verify(lifecycleManager, times(1)).removeVolume(volumeV1);
+            verify(lifecycleManager, never()).removeVolume(volumeV2);
+        } finally {
+            ContainerLauncher.CODE_VOLUME_MIN_BYTES = originalBytes;
+            ContainerLauncher.VOLUME_CLEANUP_GRACE_MS = originalGrace;
+        }
+    }
+
+    @Test
+    void rollingBackToAPreviousCodeVersion_rescuesItsVolumeFromCleanup() throws Exception {
+        // Regression: v1 -> v2 -> back to v1 (e.g. a CloudFormation rollback) resolves v1's volume
+        // name again, which is already populated - a fast-path hit in ensureCodeVolume. Without
+        // reconciling functionCurrentVolume/volumesPendingCleanup on that path too, v1 would stay
+        // queued as superseded from the v1 -> v2 step and the next sweep would delete the volume
+        // this function is actively using again.
+        Path codePath = Files.createDirectory(tempDir.resolve("rollback-code"));
+        Files.write(codePath.resolve("bundle.bin"), new byte[8 * 1024]); // 8 KiB
+
+        LambdaFunction v1 = new LambdaFunction();
+        v1.setFunctionName("rollback-fn");
+        v1.setRuntime("nodejs20.x");
+        v1.setHandler("index.handler");
+        v1.setCodeLocalPath(codePath.toString());
+        v1.setCodeSha256("rollback-fn-sha-v1");
+        String volumeV1 = ContainerLauncher.codeVolumeName(v1);
+
+        LambdaFunction v2 = new LambdaFunction();
+        v2.setFunctionName("rollback-fn");
+        v2.setRuntime("nodejs20.x");
+        v2.setHandler("index.handler");
+        v2.setCodeLocalPath(codePath.toString());
+        v2.setCodeSha256("rollback-fn-sha-v2");
+        String volumeV2 = ContainerLauncher.codeVolumeName(v2);
+
+        // Needed for the rollback launch below: v1's volume is already populated by then, so its
+        // fast path actually evaluates volumeExists instead of short-circuiting past it.
+        when(lifecycleManager.volumeExists(volumeV1)).thenReturn(true);
+
+        long originalBytes = ContainerLauncher.CODE_VOLUME_MIN_BYTES;
+        long originalGrace = ContainerLauncher.VOLUME_CLEANUP_GRACE_MS;
+        try {
+            ContainerLauncher.CODE_VOLUME_MIN_BYTES = 4 * 1024;
+            launcher.launch(v1);
+            launcher.launch(v2);
+            launcher.launch(v1); // roll back
+
+            ContainerLauncher.VOLUME_CLEANUP_GRACE_MS = -1;
+            launcher.cleanupSupersededVolumes();
+            verify(lifecycleManager, never()).removeVolume(volumeV1);
+            verify(lifecycleManager, times(1)).removeVolume(volumeV2);
+        } finally {
+            ContainerLauncher.CODE_VOLUME_MIN_BYTES = originalBytes;
+            ContainerLauncher.VOLUME_CLEANUP_GRACE_MS = originalGrace;
+        }
+    }
+
+    @Test
+    void cleanupSupersededVolumes_retriesOnALaterSweep_whenTheVolumeIsStillInUse() throws Exception {
+        // Regression: removeVolume() silently no-ops when Docker refuses because the volume is
+        // still in use (e.g. a slow-draining in-flight container outliving the grace period). The
+        // pending-cleanup entry must not be discarded in that case, or the volume is orphaned until
+        // someone manually runs `docker volume prune`- the exact problem this fix exists to avoid.
+        Path codePath = Files.createDirectory(tempDir.resolve("retry-code"));
+        Files.write(codePath.resolve("bundle.bin"), new byte[8 * 1024]); // 8 KiB
+
+        LambdaFunction v1 = new LambdaFunction();
+        v1.setFunctionName("retry-fn");
+        v1.setRuntime("nodejs20.x");
+        v1.setHandler("index.handler");
+        v1.setCodeLocalPath(codePath.toString());
+        v1.setCodeSha256("retry-fn-sha-v1");
+        String volumeV1 = ContainerLauncher.codeVolumeName(v1);
+
+        LambdaFunction v2 = new LambdaFunction();
+        v2.setFunctionName("retry-fn");
+        v2.setRuntime("nodejs20.x");
+        v2.setHandler("index.handler");
+        v2.setCodeLocalPath(codePath.toString());
+        v2.setCodeSha256("retry-fn-sha-v2");
+
+        // v1's volume persists (still in use) no matter how many times removal is attempted.
+        when(lifecycleManager.removeVolume(volumeV1)).thenReturn(false);
+
+        long originalBytes = ContainerLauncher.CODE_VOLUME_MIN_BYTES;
+        long originalGrace = ContainerLauncher.VOLUME_CLEANUP_GRACE_MS;
+        try {
+            ContainerLauncher.CODE_VOLUME_MIN_BYTES = 4 * 1024;
+            launcher.launch(v1);
+            launcher.launch(v2);
+
+            ContainerLauncher.VOLUME_CLEANUP_GRACE_MS = -1;
+            launcher.cleanupSupersededVolumes();
+            verify(lifecycleManager, times(1)).removeVolume(volumeV1);
+
+            // A later sweep must still retry it, not have silently dropped it after the first
+            // no-op'd attempt.
+            launcher.cleanupSupersededVolumes();
+            verify(lifecycleManager, times(2)).removeVolume(volumeV1);
+        } finally {
+            ContainerLauncher.CODE_VOLUME_MIN_BYTES = originalBytes;
+            ContainerLauncher.VOLUME_CLEANUP_GRACE_MS = originalGrace;
+        }
+    }
+
+    @Test
+    void cleanupAndAConcurrentRollback_areMutuallyExclusiveForTheSameVolume() throws Exception {
+        // Regression: without a shared per-volume lock, a sweep that has already claimed a
+        // superseded volume (removed its pending-cleanup entry) could race a concurrent rollback
+        // that resolves the same volume name, marks it current, and hands it to a new container -
+        // while the sweep proceeds to actually delete it underneath that launch. Proving this
+        // requires real concurrency: this test forces cleanupSupersededVolumes to block mid-deletion
+        // (still holding the volume's lock) and asserts a concurrent rollback blocks too, rather than
+        // racing past it.
+        Path codePath = Files.createDirectory(tempDir.resolve("race-code"));
+        Files.write(codePath.resolve("bundle.bin"), new byte[8 * 1024]); // 8 KiB
+
+        LambdaFunction v1 = new LambdaFunction();
+        v1.setFunctionName("race-fn");
+        v1.setRuntime("nodejs20.x");
+        v1.setHandler("index.handler");
+        v1.setCodeLocalPath(codePath.toString());
+        v1.setCodeSha256("race-fn-sha-v1");
+        String volumeV1 = ContainerLauncher.codeVolumeName(v1);
+
+        LambdaFunction v2 = new LambdaFunction();
+        v2.setFunctionName("race-fn");
+        v2.setRuntime("nodejs20.x");
+        v2.setHandler("index.handler");
+        v2.setCodeLocalPath(codePath.toString());
+        v2.setCodeSha256("race-fn-sha-v2");
+
+        when(lifecycleManager.volumeExists(volumeV1)).thenReturn(true);
+
+        java.util.concurrent.CountDownLatch cleanupHoldingLock = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.CountDownLatch releaseCleanup = new java.util.concurrent.CountDownLatch(1);
+        doAnswer(inv -> {
+            cleanupHoldingLock.countDown();
+            // Blocks here while still holding volumeV1's per-volume lock, simulating a slow delete.
+            assertTrue(releaseCleanup.await(5, java.util.concurrent.TimeUnit.SECONDS),
+                    "test did not release cleanup in time");
+            return null;
+        }).when(lifecycleManager).removeVolume(volumeV1);
+
+        long originalBytes = ContainerLauncher.CODE_VOLUME_MIN_BYTES;
+        long originalGrace = ContainerLauncher.VOLUME_CLEANUP_GRACE_MS;
+        try {
+            ContainerLauncher.CODE_VOLUME_MIN_BYTES = 4 * 1024;
+            launcher.launch(v1);
+            launcher.launch(v2);
+            ContainerLauncher.VOLUME_CLEANUP_GRACE_MS = -1;
+
+            Thread cleanupThread = new Thread(launcher::cleanupSupersededVolumes);
+            cleanupThread.start();
+            assertTrue(cleanupHoldingLock.await(5, java.util.concurrent.TimeUnit.SECONDS),
+                    "cleanup never reached removeVolume");
+
+            java.util.concurrent.atomic.AtomicBoolean rollbackReturned =
+                    new java.util.concurrent.atomic.AtomicBoolean(false);
+            Thread rollbackThread = new Thread(() -> {
+                launcher.launch(v1);
+                rollbackReturned.set(true);
+            });
+            rollbackThread.start();
+
+            // Give the rollback every chance to (wrongly) proceed if the lock weren't shared.
+            Thread.sleep(200);
+            assertFalse(rollbackReturned.get(),
+                    "rollback must block while cleanup holds the volume's lock, not race past it");
+
+            releaseCleanup.countDown();
+            cleanupThread.join(5000);
+            rollbackThread.join(5000);
+            assertTrue(rollbackReturned.get(), "rollback should complete once cleanup releases the lock");
+        } finally {
+            ContainerLauncher.CODE_VOLUME_MIN_BYTES = originalBytes;
+            ContainerLauncher.VOLUME_CLEANUP_GRACE_MS = originalGrace;
+        }
+    }
+
+    @Test
+    void cleanupSkipsAVolumeStillInFlight_evenPastItsGracePeriod() throws Exception {
+        // Regression: a launch that has resolved its code volume (ensureCodeVolume returned, its
+        // per-volume lock released) but hasn't yet reached lifecycleManager.create() has no real
+        // Docker container-to-volume reference for removeVolume's own in-use check to protect - and
+        // create() itself has no proven upper bound (observed ~80s under daemon load, longer than
+        // the default 60s grace period). This forces a second launch of v1 to block right before
+        // create() while a redeploy to v2 supersedes its volume and the grace period is made to
+        // elapse instantly, then asserts cleanup does NOT delete v1's volume while that launch is
+        // still in flight - only once it completes and releases its reference.
+        Path codePath = Files.createDirectory(tempDir.resolve("inflight-code"));
+        Files.write(codePath.resolve("bundle.bin"), new byte[8 * 1024]); // 8 KiB
+
+        LambdaFunction v1 = new LambdaFunction();
+        v1.setFunctionName("inflight-fn");
+        v1.setRuntime("nodejs20.x");
+        v1.setHandler("index.handler");
+        v1.setCodeLocalPath(codePath.toString());
+        v1.setCodeSha256("inflight-fn-sha-v1");
+        String volumeV1 = ContainerLauncher.codeVolumeName(v1);
+
+        LambdaFunction v2 = new LambdaFunction();
+        v2.setFunctionName("inflight-fn");
+        v2.setRuntime("nodejs20.x");
+        v2.setHandler("index.handler");
+        v2.setCodeLocalPath(codePath.toString());
+        v2.setCodeSha256("inflight-fn-sha-v2");
+
+        // Needed for the delayed re-launch below: v1's volume is already populated by then, so its
+        // fast path actually evaluates volumeExists instead of short-circuiting past it.
+        when(lifecycleManager.volumeExists(volumeV1)).thenReturn(true);
+
+        long originalBytes = ContainerLauncher.CODE_VOLUME_MIN_BYTES;
+        long originalGrace = ContainerLauncher.VOLUME_CLEANUP_GRACE_MS;
+        try {
+            ContainerLauncher.CODE_VOLUME_MIN_BYTES = 4 * 1024;
+
+            // Pre-populate v1's volume with an ordinary launch, before installing the create()
+            // blocking stub below - otherwise that stub would catch populateCodeVolume's own
+            // helper-container create() call instead of the real container's.
+            launcher.launch(v1);
+
+            java.util.concurrent.CountDownLatch launchReachedCreate = new java.util.concurrent.CountDownLatch(1);
+            java.util.concurrent.CountDownLatch releaseLaunch = new java.util.concurrent.CountDownLatch(1);
+            java.util.concurrent.atomic.AtomicBoolean blockedOnce = new java.util.concurrent.atomic.AtomicBoolean(false);
+            doAnswer(inv -> {
+                if (blockedOnce.compareAndSet(false, true)) {
+                    // Only the delayed re-launch of v1 (the first caller after this stub is
+                    // installed) blocks here; v2's later launch below must not, or the test would
+                    // deadlock itself waiting on its own main thread to release the latch.
+                    launchReachedCreate.countDown();
+                    assertTrue(releaseLaunch.await(5, java.util.concurrent.TimeUnit.SECONDS),
+                            "test did not release the delayed launch in time");
+                }
+                return "container-123";
+            }).when(lifecycleManager).create(any());
+
+            Thread launchThread = new Thread(() -> launcher.launch(v1));
+            launchThread.start();
+            assertTrue(launchReachedCreate.await(5, java.util.concurrent.TimeUnit.SECONDS),
+                    "v1's delayed re-launch never reached create()");
+
+            assertEquals(1, launcher.inFlightCount(volumeV1),
+                    "ensureCodeVolume must mark the volume in-flight before create() confirms it");
+
+            // A redeploy resolves v2 and supersedes v1's volume while v1's own launch is still stuck.
+            launcher.launch(v2);
+            ContainerLauncher.VOLUME_CLEANUP_GRACE_MS = -1; // grace period elapses instantly
+
+            launcher.cleanupSupersededVolumes();
+            verify(lifecycleManager, never()).removeVolume(volumeV1);
+
+            // Let the delayed launch finish; it releases its in-flight reference on success.
+            releaseLaunch.countDown();
+            launchThread.join(5000);
+            assertEquals(0, launcher.inFlightCount(volumeV1),
+                    "in-flight count must be released once create() succeeds");
+
+            // Nothing is in flight anymore, so a later sweep is free to actually delete it.
+            launcher.cleanupSupersededVolumes();
+            verify(lifecycleManager, times(1)).removeVolume(volumeV1);
+        } finally {
+            ContainerLauncher.CODE_VOLUME_MIN_BYTES = originalBytes;
+            ContainerLauncher.VOLUME_CLEANUP_GRACE_MS = originalGrace;
+        }
+    }
+
+    @Test
+    void concurrentRedeploysOfTheSameFunction_serializeTheCurrentVolumeTransition() throws Exception {
+        // Regression: functionCurrentVolume/volumesPendingCleanup reconciliation ran under the
+        // per-volume lock only, but two code versions of the same function resolve to two different
+        // volume names and so hold two different per-volume locks - meaning that reconciliation
+        // could interleave across a rapid back-to-back redeploy (v2 then v3), leaving the actually-
+        // current v3 volume mistakenly queued for cleanup while stale v2 stayed recorded as current.
+        // The three statements involved (remove pending-cleanup entry, swap in the new current
+        // volume, queue whatever was displaced) are plain map operations with no interception point
+        // inside them, so forcing that exact interleaving isn't reliably doable in a test. This
+        // instead verifies the fix's actual mechanism directly - a concurrent launch for a second
+        // code version of the same function must block on the same per-function lock object while
+        // another is still transitioning - the same style cleanupAndAConcurrentRollback... already
+        // uses to prove the per-volume lock.
+        Path codePath = Files.createDirectory(tempDir.resolve("xfn-code"));
+        Files.write(codePath.resolve("bundle.bin"), new byte[8 * 1024]); // 8 KiB
+
+        LambdaFunction v1 = new LambdaFunction();
+        v1.setFunctionName("xfn");
+        v1.setRuntime("nodejs20.x");
+        v1.setHandler("index.handler");
+        v1.setCodeLocalPath(codePath.toString());
+        v1.setCodeSha256("xfn-sha-v1");
+
+        long originalBytes = ContainerLauncher.CODE_VOLUME_MIN_BYTES;
+        try {
+            ContainerLauncher.CODE_VOLUME_MIN_BYTES = 4 * 1024;
+
+            Object functionLock = launcher.functionVolumeTransitionLockFor("xfn");
+            java.util.concurrent.CountDownLatch testHoldingLock = new java.util.concurrent.CountDownLatch(1);
+            java.util.concurrent.CountDownLatch releaseLock = new java.util.concurrent.CountDownLatch(1);
+            Thread holderThread = new Thread(() -> {
+                synchronized (functionLock) {
+                    testHoldingLock.countDown();
+                    try {
+                        assertTrue(releaseLock.await(5, java.util.concurrent.TimeUnit.SECONDS),
+                                "test did not release the function lock in time");
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
+            });
+            holderThread.start();
+            assertTrue(testHoldingLock.await(5, java.util.concurrent.TimeUnit.SECONDS),
+                    "test thread never acquired the function lock");
+
+            AtomicBoolean launchReturned = new AtomicBoolean(false);
+            Thread launchThread = new Thread(() -> {
+                launcher.launch(v1);
+                launchReturned.set(true);
+            });
+            launchThread.start();
+
+            // Give the launch every chance to (wrongly) proceed if the transition weren't guarded
+            // by this same lock.
+            Thread.sleep(200);
+            assertFalse(launchReturned.get(),
+                    "launch must block on the function lock while another holder has it, not race past it");
+
+            releaseLock.countDown();
+            holderThread.join(5000);
+            launchThread.join(5000);
+            assertTrue(launchReturned.get(), "launch should complete once the function lock is released");
+        } finally {
+            ContainerLauncher.CODE_VOLUME_MIN_BYTES = originalBytes;
+        }
+    }
+
+    @Test
+    void codeVolumeLocks_isNeverPruned_evenAfterCleanupDeletesTheVolume() throws Exception {
+        // Regression: pruning a volume's lock entry while a waiter still held a reference to the
+        // removed entry's lock object let a third caller's computeIfAbsent create a *different* lock
+        // object for the same volume name, so the waiter (once granted the old lock) and that third
+        // caller (holding the new one) could run their supposedly mutually-exclusive sections
+        // concurrently - defeating the whole point. The actual JVM interleaving needed to trigger
+        // that is timing-dependent and not reliably forceable in a test, so this instead verifies the
+        // fix's real invariant directly: the lock entry must survive a full populate-then-delete
+        // cycle unchanged, which is what actually guarantees computeIfAbsent always returns the same
+        // object for a given volume name for the life of the process.
+        Path codePath = Files.createDirectory(tempDir.resolve("lock-persist-code"));
+        Files.write(codePath.resolve("bundle.bin"), new byte[8 * 1024]); // 8 KiB
+
+        LambdaFunction v1 = new LambdaFunction();
+        v1.setFunctionName("lock-persist-fn");
+        v1.setRuntime("nodejs20.x");
+        v1.setHandler("index.handler");
+        v1.setCodeLocalPath(codePath.toString());
+        v1.setCodeSha256("lock-persist-fn-sha-v1");
+        String volumeV1 = ContainerLauncher.codeVolumeName(v1);
+
+        LambdaFunction v2 = new LambdaFunction();
+        v2.setFunctionName("lock-persist-fn");
+        v2.setRuntime("nodejs20.x");
+        v2.setHandler("index.handler");
+        v2.setCodeLocalPath(codePath.toString());
+        v2.setCodeSha256("lock-persist-fn-sha-v2");
+
+        long originalBytes = ContainerLauncher.CODE_VOLUME_MIN_BYTES;
+        long originalGrace = ContainerLauncher.VOLUME_CLEANUP_GRACE_MS;
+        try {
+            ContainerLauncher.CODE_VOLUME_MIN_BYTES = 4 * 1024;
+            launcher.launch(v1);
+            assertTrue(launcher.hasCodeVolumeLock(volumeV1), "lock must exist right after populate");
+
+            launcher.launch(v2); // supersedes v1's volume, queues it for cleanup
+            ContainerLauncher.VOLUME_CLEANUP_GRACE_MS = -1;
+            launcher.cleanupSupersededVolumes(); // deletes v1's volume for real
+
+            assertTrue(launcher.hasCodeVolumeLock(volumeV1),
+                    "lock must still exist even after the volume itself was deleted - "
+                            + "pruning it here is exactly the bug this test guards against");
+        } finally {
+            ContainerLauncher.CODE_VOLUME_MIN_BYTES = originalBytes;
+            ContainerLauncher.VOLUME_CLEANUP_GRACE_MS = originalGrace;
+        }
     }
 
     /** Builds a tar archive matching what {@code docker cp}/{@code copyArchiveFromContainerCmd}
@@ -781,7 +1364,8 @@ class ContainerLauncherTest {
                 imageResolver, runtimeApiServerFactory, dockerHostResolver, config,
                 ecrRegistryManager,
                 mock(io.github.hectorvent.floci.services.lambda.LambdaLayerService.class),
-                new LaunchedContainerAwsEnv(reachableEndpoint));
+                new LaunchedContainerAwsEnv(reachableEndpoint),
+                executionRoleCredentials);
 
         stubExtensionDiscovery("otel-collector");
         // Feed a real stdout frame through whatever callback the launcher hands to execStartCmd.
@@ -794,10 +1378,12 @@ class ContainerLauncherTest {
 
         launcherWithRealStreamer.launch(fn);
 
-        // The frame became a CloudWatch log event in the function's own log group.
+        // The frame became a CloudWatch log event in the function's own log group. Forwarding goes
+        // through the account-aware overload with a null account id: exec streams have no owning
+        // account of their own, so they land in the default account's copy of the log group.
         ArgumentCaptor<List<Map<String, Object>>> events = ArgumentCaptor.forClass(List.class);
-        verify(cloudWatchLogs, atLeastOnce()).putLogEvents(
-                eq("/aws/lambda/observability-fn"), anyString(), events.capture(), anyString());
+        verify(cloudWatchLogs, atLeastOnce()).putLogEventsForAccount(
+                isNull(), eq("/aws/lambda/observability-fn"), anyString(), events.capture(), anyString());
         assertTrue(events.getAllValues().stream()
                         .flatMap(List::stream)
                         .anyMatch(e -> "extension started on :8080".equals(e.get("message"))),

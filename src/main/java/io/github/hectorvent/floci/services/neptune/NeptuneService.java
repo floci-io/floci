@@ -81,7 +81,11 @@ public class NeptuneService {
             LOG.infov("Creating Neptune cluster {0} on proxy port {1}, dbType={2}, image={3}",
                     id, String.valueOf(proxyPort), dbType, image);
 
-            handle = containerManager.start(id, image, dbType);
+            // A cluster record is metadata: its identifier, ARN, endpoint host and proxy port
+            // are derived from configuration and need no Docker, so the cluster is created and
+            // reaches 'available' even when no daemon is reachable. Only connecting to the
+            // graph database needs the container.
+            handle = containerManager.tryStart(id, image, dbType);
 
             String region = regionResolver.getDefaultRegion();
             String endpointHost = resolveEndpointHost();
@@ -99,12 +103,19 @@ public class NeptuneService {
                     .replace("-", "").substring(0, 24).toUpperCase());
             cluster.setCreatedAt(Instant.now());
             cluster.setDbClusterMembers(new ArrayList<>());
-            cluster.setContainerId(handle.getContainerId());
-            cluster.setContainerHost(handle.getHost());
-            cluster.setContainerPort(handle.getPort());
             cluster.setProxyPort(proxyPort);
 
-            proxyManager.startProxy(id, proxyPort, handle.getHost(), handle.getPort());
+            if (handle != null) {
+                cluster.setContainerId(handle.getContainerId());
+                cluster.setContainerHost(handle.getHost());
+                cluster.setContainerPort(handle.getPort());
+
+                proxyManager.startProxy(id, proxyPort, handle.getHost(), handle.getPort());
+            } else {
+                LOG.warnv("Neptune cluster {0} created without a backing graph database container: "
+                        + "no Docker daemon is reachable. Metadata operations work; connections to "
+                        + "the cluster do not until a daemon appears.", id);
+            }
 
             clusters.put(id, cluster);
             provisioned = true;
@@ -173,6 +184,15 @@ public class NeptuneService {
 
     public Collection<NeptuneCluster> listDbClusters(String filterId) {
         if (filterId != null && !filterId.isBlank()) {
+            // The db-cluster-id filter accepts ARNs as well as identifiers. Match the
+            // full ARN against each cluster's stored ARN rather than reducing it to
+            // the bare identifier, so a cross-account or cross-region ARN does not
+            // resolve a same-named local cluster.
+            if (filterId.startsWith("arn:")) {
+                return clusters.scan(k -> true).stream()
+                        .filter(c -> filterId.equalsIgnoreCase(c.getDbClusterArn()))
+                        .toList();
+            }
             return clusters.scan(k -> k.equalsIgnoreCase(filterId));
         }
         return clusters.scan(k -> true);
@@ -260,6 +280,13 @@ public class NeptuneService {
 
     public Collection<NeptuneInstance> listDbInstances(String filterId) {
         if (filterId != null && !filterId.isBlank()) {
+            // The db-instance-id filter accepts ARNs as well as identifiers; see
+            // listDbClusters for why the match is against the stored ARN.
+            if (filterId.startsWith("arn:")) {
+                return instances.scan(k -> true).stream()
+                        .filter(i -> filterId.equalsIgnoreCase(i.getDbInstanceArn()))
+                        .toList();
+            }
             return instances.scan(k -> k.equalsIgnoreCase(filterId));
         }
         return instances.scan(k -> true);

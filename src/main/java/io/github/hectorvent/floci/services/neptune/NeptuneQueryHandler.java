@@ -69,14 +69,17 @@ public class NeptuneQueryHandler {
     }
 
     private Response handleDescribeDbClusters(MultivaluedMap<String, String> params) {
-        String filterId = params.getFirst("DBClusterIdentifier");
+        String identifier = params.getFirst("DBClusterIdentifier");
+        String filterId = identifier;
         if (filterId == null || filterId.isBlank()) {
             filterId = extractFilterValue(params, "db-cluster-id");
         }
 
-        // When a specific cluster ID is requested, AWS returns 404 if not found
-        if (filterId != null && !filterId.isBlank()) {
-            service.getDbCluster(filterId); // throws DBClusterNotFoundFault if absent
+        // AWS parity: the DBClusterIdentifier parameter faults with
+        // DBClusterNotFoundFault when no cluster matches, while the
+        // db-cluster-id Filters form returns an empty list.
+        if (identifier != null && !identifier.isBlank()) {
+            service.getDbCluster(identifier); // throws DBClusterNotFoundFault if absent
         }
 
         Collection<NeptuneCluster> result = service.listDbClusters(filterId);
@@ -140,13 +143,17 @@ public class NeptuneQueryHandler {
     }
 
     private Response handleDescribeDbInstances(MultivaluedMap<String, String> params) {
-        String filterId = params.getFirst("DBInstanceIdentifier");
+        String identifier = params.getFirst("DBInstanceIdentifier");
+        String filterId = identifier;
         if (filterId == null || filterId.isBlank()) {
             filterId = extractFilterValue(params, "db-instance-id");
         }
 
-        if (filterId != null && !filterId.isBlank()) {
-            service.getDbInstance(filterId); // throws DBInstanceNotFound if absent
+        // AWS parity: the DBInstanceIdentifier parameter faults with
+        // DBInstanceNotFound when no instance matches, while the
+        // db-instance-id Filters form returns an empty list.
+        if (identifier != null && !identifier.isBlank()) {
+            service.getDbInstance(identifier); // throws DBInstanceNotFound if absent
         }
 
         Collection<NeptuneInstance> result = service.listDbInstances(filterId);

@@ -7,8 +7,12 @@ import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.ec2.model.Address;
 import io.github.hectorvent.floci.services.ec2.model.BlockDeviceMapping;
 import io.github.hectorvent.floci.services.ec2.model.EbsBlockDevice;
+import io.github.hectorvent.floci.services.ec2.model.ManagedPrefixList;
+import io.github.hectorvent.floci.services.ec2.model.PrefixListEntry;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.InternetGateway;
+import io.github.hectorvent.floci.services.ec2.model.IpPermission;
+import io.github.hectorvent.floci.services.ec2.model.UserIdGroupPair;
 import io.github.hectorvent.floci.services.ec2.model.Image;
 import io.github.hectorvent.floci.services.ec2.model.NetworkAcl;
 import io.github.hectorvent.floci.services.ec2.model.KeyPair;
@@ -89,6 +93,74 @@ class Ec2ServicePersistenceTest {
         assertEquals(12, snapshots.getFirst().getVolumeSize());
     }
 
+    @Test
+    void managedPrefixListAndItsVersionHistorySurviveRestart(@TempDir Path dir) {
+        Ec2Service first = newService(dir);
+        ManagedPrefixList created = first.createManagedPrefixList(REGION, "persisted-list", "IPv4", 5,
+                List.of(new PrefixListEntry("10.0.0.0/8", "corporate")), List.of());
+        first.modifyManagedPrefixList(REGION, created.getPrefixListId(), null, null, null,
+                List.of(new PrefixListEntry("192.168.0.0/16", "lab")), List.of());
+
+        Ec2Service restarted = newService(dir);
+
+        List<ManagedPrefixList> lists =
+                restarted.describeManagedPrefixLists(REGION, List.of(created.getPrefixListId()), Map.of());
+        assertEquals(1, lists.size(), "managed prefix list must survive restart");
+        assertEquals("persisted-list", lists.getFirst().getPrefixListName());
+        assertEquals(2, lists.getFirst().getVersion());
+
+        // Entry history is a nested map on the model, so a restart is the first place a broken
+        // serialization round trip would show up.
+        assertEquals(2,
+                restarted.getManagedPrefixListEntries(REGION, created.getPrefixListId(), null).size());
+        List<PrefixListEntry> firstVersion =
+                restarted.getManagedPrefixListEntries(REGION, created.getPrefixListId(), 1L);
+        assertEquals(1, firstVersion.size(), "earlier version must survive restart");
+        assertEquals("corporate", firstVersion.getFirst().getDescription());
+    }
+
+    @Test
+    void securityGroupRuleSourcesSurviveRestart(@TempDir Path dir) {
+        Ec2Service first = newService(dir);
+        Vpc vpc = first.createVpc(REGION, "10.0.0.0/16", false);
+        SecurityGroup source = first.createSecurityGroup(REGION, "source-sg", "traffic source", vpc.getVpcId());
+        SecurityGroup target = first.createSecurityGroup(REGION, "target-sg", "traffic target", vpc.getVpcId());
+
+        IpPermission perm = new IpPermission();
+        perm.setIpProtocol("tcp");
+        perm.setFromPort(443);
+        perm.setToPort(443);
+        UserIdGroupPair pair = new UserIdGroupPair();
+        pair.setGroupId(source.getGroupId());
+        pair.setDescription("from-source-sg");
+        perm.getUserIdGroupPairs().add(pair);
+        first.authorizeSecurityGroupIngress(REGION, target.getGroupId(), List.of(perm));
+
+        // A fresh service over the same persistent files = a restart with the same data dir. Note
+        // PersistentStorage.load() quarantines a broken deserialization into an EMPTY store, so the
+        // assertions below have to touch restored content or they would pass through that failure.
+        Ec2Service restarted = newService(dir);
+
+        SecurityGroup restoredGroup =
+                restarted.describeSecurityGroups(REGION, List.of(target.getGroupId()), List.of(), Map.of()).getFirst();
+        List<UserIdGroupPair> restoredPairs = restoredGroup.getIpPermissions().getFirst().getUserIdGroupPairs();
+        assertEquals(1, restoredPairs.size(), "group reference must survive restart");
+        assertEquals(source.getGroupId(), restoredPairs.getFirst().getGroupId());
+        assertEquals("000000000000", restoredPairs.getFirst().getUserId());
+        assertEquals("from-source-sg", restoredPairs.getFirst().getDescription());
+
+        // referencedGroupInfo is a nested object on the flattened rule, so a restart is the first
+        // place a broken serialization round trip would show up.
+        List<SecurityGroupRule> ingress =
+                restarted.describeSecurityGroupRules(REGION, List.of(target.getGroupId()), List.of()).stream()
+                        .filter(r -> !r.isEgress())
+                        .toList();
+        assertEquals(1, ingress.size(), "one rule per source, and only the ingress rule here");
+        assertEquals(source.getGroupId(), ingress.getFirst().getReferencedGroupInfo().getGroupId());
+        assertEquals("000000000000", ingress.getFirst().getReferencedGroupInfo().getUserId());
+        assertEquals("from-source-sg", ingress.getFirst().getDescription());
+    }
+
     private BlockDeviceMapping blockDeviceMapping(String snapshotId, int volumeSize) {
         EbsBlockDevice ebs = new EbsBlockDevice();
         ebs.setSnapshotId(snapshotId);
@@ -101,7 +173,12 @@ class Ec2ServicePersistenceTest {
 
     private Ec2Service newService(Path dir) {
         EmulatorConfig config = mock(EmulatorConfig.class);
+        EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
+        EmulatorConfig.Ec2ServiceConfig ec2 = mock(EmulatorConfig.Ec2ServiceConfig.class);
         when(config.defaultAccountId()).thenReturn("000000000000");
+        when(config.services()).thenReturn(services);
+        when(services.ec2()).thenReturn(ec2);
+        when(ec2.mock()).thenReturn(true);
         Ec2ImageCatalog imageCatalog = new Ec2ImageCatalog();
         return new Ec2Service(config, null, mock(Ec2PortForwardManager.class),
                 new AmiImageResolver(imageCatalog), imageCatalog,
@@ -123,6 +200,7 @@ class Ec2ServicePersistenceTest {
                 load(dir, "ec2-nat-gateways.json", new TypeReference<Map<String, NatGateway>>() {}),
                 load(dir, "ec2-spot-instance-requests.json", new TypeReference<Map<String, SpotInstanceRequest>>() {}),
                 load(dir, "ec2-network-acls.json", new TypeReference<Map<String, NetworkAcl>>() {}),
+                load(dir, "ec2-managed-prefix-lists.json", new TypeReference<Map<String, ManagedPrefixList>>() {}),
                 load(dir, "ec2-tags.json", new TypeReference<Map<String, List<Tag>>>() {}));
     }
 

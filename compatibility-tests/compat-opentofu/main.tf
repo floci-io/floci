@@ -342,3 +342,47 @@ resource "aws_ses_active_receipt_rule_set" "compat" {
 output "ses_rule_set_name" {
   value = aws_ses_receipt_rule_set.compat.rule_set_name
 }
+
+# -- GuardDuty -----------------------------------------------------------------
+# Detector, per-feature configuration, and organization configuration mirror the
+# resource set an org security-baseline stack manages. additional_configuration
+# is an ordered list block: Floci must echo it back in submitted order or every
+# re-plan proposes a replacement.
+resource "aws_guardduty_detector" "compat" {
+  enable                       = true
+  finding_publishing_frequency = "SIX_HOURS"
+
+  tags = {
+    Environment = "compat-test"
+  }
+}
+
+resource "aws_guardduty_detector_feature" "runtime_monitoring" {
+  detector_id = aws_guardduty_detector.compat.id
+  name        = "RUNTIME_MONITORING"
+  status      = "ENABLED"
+
+  additional_configuration {
+    name   = "ECS_FARGATE_AGENT_MANAGEMENT"
+    status = "ENABLED"
+  }
+
+  additional_configuration {
+    name   = "EC2_AGENT_MANAGEMENT"
+    status = "ENABLED"
+  }
+
+  additional_configuration {
+    name   = "EKS_ADDON_MANAGEMENT"
+    status = "DISABLED"
+  }
+}
+
+resource "aws_guardduty_organization_configuration" "compat" {
+  detector_id                      = aws_guardduty_detector.compat.id
+  auto_enable_organization_members = "ALL"
+}
+
+output "guardduty_detector_id" {
+  value = aws_guardduty_detector.compat.id
+}

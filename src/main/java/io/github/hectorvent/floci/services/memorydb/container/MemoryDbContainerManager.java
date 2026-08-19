@@ -49,6 +49,7 @@ public class MemoryDbContainerManager {
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
     private final Map<String, MemoryDbContainerHandle> activeContainers = new ConcurrentHashMap<>();
+    private volatile boolean dockerUnavailableLogged;
 
     @Inject
     public MemoryDbContainerManager(ContainerBuilder containerBuilder,
@@ -65,10 +66,53 @@ public class MemoryDbContainerManager {
         this.regionResolver = regionResolver;
     }
 
+    /**
+     * Attempts {@link #start} and reports the backend as unavailable instead of propagating the
+     * failure, when the cause is that no Docker daemon is reachable from Floci — Floci running
+     * inside Docker without a mounted socket, or a stopped daemon on the host. A failure raised
+     * while the daemon <em>is</em> reachable is a genuine container problem and still propagates,
+     * so nothing changes for a Floci that can start MemoryDB containers.
+     *
+     * @return the container handle, or {@code null} when no Docker daemon is reachable
+     */
+    public MemoryDbContainerHandle tryStart(String clusterName, String image) {
+        try {
+            MemoryDbContainerHandle handle = start(clusterName, image);
+            dockerUnavailableLogged = false;
+            return handle;
+        } catch (RuntimeException e) {
+            if (isDockerReachable()) {
+                throw e;
+            }
+            if (!dockerUnavailableLogged) {
+                dockerUnavailableLogged = true;
+                LOG.warnv("No Docker daemon is reachable from Floci ({0}). MemoryDB metadata "
+                        + "operations keep working and clusters still reach 'available', but they "
+                        + "have no backing Redis/Valkey container until a daemon becomes reachable.",
+                        e.getMessage());
+            }
+            return null;
+        }
+    }
+
+    /**
+     * Probes the configured Docker endpoint, which is how a missing daemon is told apart from a
+     * container that failed for its own reasons.
+     */
+    public boolean isDockerReachable() {
+        try {
+            lifecycleManager.getDockerClient().pingCmd().exec();
+            return true;
+        } catch (Exception e) {
+            LOG.debugv("Docker daemon is not reachable: {0}", e.getMessage());
+            return false;
+        }
+    }
+
     public MemoryDbContainerHandle start(String clusterName, String image) {
         LOG.infov("Starting MemoryDB backend container for cluster: {0}", clusterName);
 
-        String containerName = ContainerStorageHelper.resourceName(config, "memorydb", null, clusterName);
+        String containerName = containerName(clusterName);
 
         lifecycleManager.removeIfExists(containerName);
 
@@ -171,6 +215,28 @@ public class MemoryDbContainerManager {
         }
         activeContainers.remove(handle.getClusterName());
         lifecycleManager.stopAndRemove(handle.getContainerId(), handle.getLogStream());
+    }
+
+    /**
+     * Stops and removes the backend container for a cluster by name, if one exists.
+     * Used by the service's provisioning rollback: {@link #start} registers the container in
+     * {@code activeContainers} <em>before</em> {@link #waitForBackendReady}, so a readiness
+     * timeout throws without ever returning the handle to the caller. In that case rollback
+     * can't go through {@link #stop} (it has no handle), so it cleans up by name instead. Falls
+     * back to the deterministic container name to catch a container that failed before it was
+     * registered. Idempotent — a no-op when nothing is running for the name.
+     */
+    public void stopByClusterName(String clusterName) {
+        MemoryDbContainerHandle handle = activeContainers.get(clusterName);
+        if (handle != null) {
+            stop(handle);
+            return;
+        }
+        lifecycleManager.removeIfExists(containerName(clusterName));
+    }
+
+    private String containerName(String clusterName) {
+        return ContainerStorageHelper.resourceName(config, "memorydb", null, clusterName);
     }
 
     public void stopAll() {

@@ -24,8 +24,24 @@ Floci manages real Valkey/Redis Docker containers and proxies TCP connections to
 | `DescribeCacheClusters` | - |
 | `DeleteCacheCluster` | - |
 | `DescribeCacheSubnetGroups` | - |
-| `DescribeCacheParameterGroups` | - |
+| `CreateCacheParameterGroup` | Create a cache parameter group |
+| `DescribeCacheParameterGroups` | List parameter groups, including the AWS defaults |
+| `ModifyCacheParameterGroup` | Set parameters on a group |
+| `DescribeCacheParameters` | List the parameters set on a group |
+| `DeleteCacheParameterGroup` | Delete a cache parameter group |
+| `ListTagsForResource` | Tags on a parameter group ARN |
 <!-- floci:actions:end -->
+
+### Cache Parameter Groups
+
+The `default.*` groups AWS publishes are listed for every family it supports, and cannot be modified
+or deleted — AWS refuses those by the identifier rule, since a name it accepts cannot contain a dot.
+
+floci does not carry AWS's per-family catalogue of parameter names, which runs to dozens per family.
+It therefore stores whatever parameters a caller sets and reports them with source `user`, rather
+than rejecting names a partial catalogue happens to be missing, which would refuse configurations
+AWS accepts. `DescribeCacheParameters` returns those parameters; a request for `system` or
+`engine-default` parameters returns none, and listings are unpaged.
 
 ## Configuration
 

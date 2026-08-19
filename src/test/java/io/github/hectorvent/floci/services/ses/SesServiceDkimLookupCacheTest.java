@@ -7,10 +7,12 @@ import io.github.hectorvent.floci.services.route53.model.HostedZone;
 import io.github.hectorvent.floci.services.route53.model.ResourceRecord;
 import io.github.hectorvent.floci.services.route53.model.ResourceRecordSet;
 import io.github.hectorvent.floci.services.ses.model.AccountSuppressionAttributes;
+import io.github.hectorvent.floci.services.ses.model.AccountVdmAttributes;
 import io.github.hectorvent.floci.services.ses.model.ConfigurationSet;
 import io.github.hectorvent.floci.services.ses.model.ContactList;
 import io.github.hectorvent.floci.services.ses.model.Contact;
 import io.github.hectorvent.floci.services.ses.model.ReceiptRuleSet;
+import io.github.hectorvent.floci.services.ses.model.CustomVerificationEmailTemplate;
 import io.github.hectorvent.floci.services.ses.model.DedicatedIpPool;
 import io.github.hectorvent.floci.services.ses.model.EmailTemplate;
 import io.github.hectorvent.floci.services.ses.model.Identity;
@@ -49,17 +51,16 @@ class SesServiceDkimLookupCacheTest {
         clock.reset();
         service = new SesService(
                 identityStore,
-                new InMemoryStorage<String, SentEmail>(),
-                new InMemoryStorage<String, Boolean>(),
-                new InMemoryStorage<String, EmailTemplate>(),
+                new SesSentEmailService(new InMemoryStorage<String, SentEmail>()),
+                new SesAccountService(new InMemoryStorage<String, Boolean>(), new InMemoryStorage<String, AccountVdmAttributes>()),
+                new SesTemplateService(new InMemoryStorage<String, EmailTemplate>()),
                 new InMemoryStorage<String, ConfigurationSet>(),
-                new InMemoryStorage<String, SuppressedDestination>(),
-                new InMemoryStorage<String, AccountSuppressionAttributes>(),
-                new InMemoryStorage<String, DedicatedIpPool>(),
-                new InMemoryStorage<String, ContactList>(),
-                new InMemoryStorage<String, Contact>(),
-                new InMemoryStorage<String, String>(),
-                new InMemoryStorage<String, ReceiptRuleSet>(),
+                new SesSuppressionService(new InMemoryStorage<String, SuppressedDestination>(), new InMemoryStorage<String, AccountSuppressionAttributes>()),
+                new SesDedicatedIpService(new InMemoryStorage<String, DedicatedIpPool>()),
+                new SesContactService(new InMemoryStorage<String, ContactList>(), new InMemoryStorage<String, Contact>(), clock),
+                new SesPolicyService(new InMemoryStorage<String, String>(), new ObjectMapper()),
+                new SesReceiptRuleService(new InMemoryStorage<String, ReceiptRuleSet>(), clock),
+                new SesCvetService(new InMemoryStorage<String, CustomVerificationEmailTemplate>()),
                 mock(SmtpRelay.class),
                 new ObjectMapper(),
                 route53Service,

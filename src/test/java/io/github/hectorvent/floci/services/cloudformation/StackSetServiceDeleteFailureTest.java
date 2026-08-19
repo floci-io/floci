@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudformation;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.cloudformation.model.Stack;
 import io.github.hectorvent.floci.services.cloudformation.model.StackInstance;
@@ -100,10 +101,10 @@ class StackSetServiceDeleteFailureTest {
         }
 
         @Override
-        public <V> StorageBackend<String, V> create(String serviceName,
+        public <V> AccountAwareStorageBackend<V> create(String serviceName,
                                                      String fileName,
                                                      TypeReference<Map<String, V>> typeReference) {
-            return new InMemoryStorage<>();
+            return AccountAwareStorageBackend.inMemory("000000000000");
         }
     }
 }

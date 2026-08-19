@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.cloudcontrol;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.services.cloudformation.CloudFormationResourceProvisioner;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.ec2.model.Vpc;
@@ -33,7 +34,8 @@ class CloudControlServiceTest {
         when(ec2Service.describeVpcs("us-east-1", List.of(), Map.of())).thenReturn(List.of(vpc));
         ObjectMapper mapper = new ObjectMapper();
         CloudControlService service = new CloudControlService(
-                mock(S3Service.class), ec2Service, mock(IamService.class), mapper);
+                mock(S3Service.class), ec2Service, mock(IamService.class),
+                mock(CloudFormationResourceProvisioner.class), mapper);
 
         String properties = service.listResources("us-east-1", "AWS::EC2::VPC").getFirst().properties();
         JsonNode tags = mapper.readTree(properties).path("Tags");

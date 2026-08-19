@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.services.cognito.verification.CognitoMessageDi
 import io.github.hectorvent.floci.services.cognito.verification.VerificationCode;
 import io.github.hectorvent.floci.services.cognito.verification.VerificationCodeService;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
@@ -30,10 +31,7 @@ import java.util.function.Function;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.doThrow;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.*;
 
 class CognitoServiceTest {
 
@@ -1739,6 +1737,13 @@ class CognitoServiceTest {
         assertTrue(result.isEmpty());
     }
 
+    /** Signs a hand-crafted {@code poolId|username|clientId|issuedAt|nonce} payload the same way buildRefreshToken does. */
+    private static String signRawRefreshToken(UserPool pool, String raw) {
+        String signature = CognitoService.hmacSha256(CognitoService.refreshTokenSecretBytes(pool), raw);
+        return Base64.getEncoder().withoutPadding()
+                .encodeToString((raw + "|" + signature).getBytes(StandardCharsets.UTF_8));
+    }
+
     // =========================================================================
     // Issue #234 — GetTokensFromRefreshToken
     // =========================================================================
@@ -1756,14 +1761,15 @@ class CognitoServiceTest {
         String refreshToken = (String) auth.get("RefreshToken");
 
         assertNotNull(refreshToken);
-        // Should be parseable as base64 structured token
+        // Should be parseable as base64 structured token: 5 payload fields + trailing HMAC signature
         String decoded = new String(Base64.getDecoder().decode(refreshToken), StandardCharsets.UTF_8);
-        String[] parts = decoded.split("\\|", 5);
-        assertEquals(5, parts.length, "Refresh token should encode 5 pipe-separated fields");
+        String[] parts = decoded.split("\\|", 6);
+        assertEquals(6, parts.length, "Refresh token should encode 5 pipe-separated fields plus a signature");
         assertEquals(pool.getId(), parts[0]);
         assertEquals("alice", parts[1]);
         assertEquals(client.getClientId(), parts[2]);
         assertFalse(parts[3].isBlank(), "Refresh token should encode its issued-at timestamp");
+        assertFalse(parts[5].isBlank(), "Refresh token should encode a signature");
     }
 
     @Test
@@ -1827,7 +1833,7 @@ class CognitoServiceTest {
 
         long issuedAt = (System.currentTimeMillis() / 1000L) - 5;
         String raw = pool.getId() + "|alice|" + client.getClientId() + "|" + issuedAt + "|" + java.util.UUID.randomUUID();
-        String expiredRefreshToken = Base64.getEncoder().withoutPadding().encodeToString(raw.getBytes(StandardCharsets.UTF_8));
+        String expiredRefreshToken = signRawRefreshToken(pool, raw);
 
         AwsException exception = assertThrows(AwsException.class, () ->
                 service.getTokensFromRefreshToken(client.getClientId(), expiredRefreshToken));
@@ -1852,6 +1858,163 @@ class CognitoServiceTest {
 
         assertNotNull(refreshed.get("AccessToken"));
         assertNotNull(refreshed.get("IdToken"));
+    }
+
+    @Test
+    void refreshTokenAuthFlowExpiredTokenThrows() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = service.createUserPoolClient(
+                pool.getId(),
+                "c",
+                false,
+                false,
+                List.of(),
+                List.of(),
+                null,
+                List.of(),
+                null,
+                List.of(),
+                null,
+                null,
+                List.of(),
+                null,
+                List.of(),
+                1,
+                List.of(),
+                Map.of("RefreshToken", "seconds"),
+                List.of(),
+                null,
+                null
+        );
+
+        // issued-at is epoch MILLISECONDS, exactly as buildRefreshToken writes it. A token
+        // issued 10s ago against a 1s refresh lifetime is expired only if isRefreshTokenExpired
+        // converts millis to seconds before comparing — before the fix the InitiateAuth
+        // REFRESH_TOKEN_AUTH path never called the check at all, so this minted fresh tokens.
+        long issuedAtMillis = System.currentTimeMillis() - 10_000L;
+        String raw = pool.getId() + "|alice|" + client.getClientId() + "|" + issuedAtMillis + "|"
+                + java.util.UUID.randomUUID();
+        String expiredRefreshToken = signRawRefreshToken(pool, raw);
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.initiateAuth(client.getClientId(), "REFRESH_TOKEN_AUTH",
+                        Map.of("REFRESH_TOKEN", expiredRefreshToken)));
+        assertEquals("NotAuthorizedException", exception.getErrorCode());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void refreshTokenAuthFlowRejectsTokenFromAnotherPool() {
+        // Two independent pools, each with an "alice". A refresh token minted for poolB is
+        // validly HMAC-signed (by poolB) and its username resolves in poolA too, so the only
+        // thing that can reject it against poolA's client is the embedded pool-id check.
+        UserPool poolA = createPoolAndUser();
+        UserPool poolB = createPoolAndUser();
+        UserPoolClient clientA = service.createUserPoolClient(poolA.getId(), "ca", false, false, List.of(), List.of());
+        UserPoolClient clientB = service.createUserPoolClient(poolB.getId(), "cb", false, false, List.of(), List.of());
+
+        Map<String, Object> authB = (Map<String, Object>) service.initiateAuth(
+                clientB.getClientId(), "USER_PASSWORD_AUTH",
+                Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!")).get("AuthenticationResult");
+        String foreignRefreshToken = (String) authB.get("RefreshToken");
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.initiateAuth(clientA.getClientId(), "REFRESH_TOKEN_AUTH",
+                        Map.of("REFRESH_TOKEN", foreignRefreshToken)));
+        assertEquals("NotAuthorizedException", exception.getErrorCode());
+    }
+
+    // =========================================================================
+    // Issue #2137 — Refresh tokens must be unforgeable (HMAC-signed)
+    // =========================================================================
+
+    @Test
+    void getTokensFromRefreshTokenRejectsUnsignedForgedToken() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+
+        // Attacker who knows the pool id, client id, and a valid username, but not the pool's secret.
+        String raw = pool.getId() + "|alice|" + client.getClientId() + "|"
+                + System.currentTimeMillis() + "|" + java.util.UUID.randomUUID();
+        String forgedToken = Base64.getEncoder().withoutPadding().encodeToString(raw.getBytes(StandardCharsets.UTF_8));
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.getTokensFromRefreshToken(client.getClientId(), forgedToken));
+        assertEquals("NotAuthorizedException", exception.getErrorCode());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void getTokensFromRefreshTokenRejectsTamperedUsername() {
+        UserPool pool = createPoolAndUser();
+        service.adminCreateUser(pool.getId(), "mallory", Map.of("email", "mallory@example.com"), "TempPass1!");
+        service.adminSetUserPassword(pool.getId(), "mallory", "Perm1234!", true);
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+
+        Map<String, Object> authResult = service.initiateAuth(
+                client.getClientId(), "USER_PASSWORD_AUTH",
+                Map.of("USERNAME", "mallory", "PASSWORD", "Perm1234!"));
+        String refreshToken = (String) ((Map<String, Object>) authResult.get("AuthenticationResult")).get("RefreshToken");
+
+        // Swap the username in the decoded payload post-signing; the HMAC no longer matches.
+        String decoded = new String(Base64.getDecoder().decode(refreshToken), StandardCharsets.UTF_8);
+        String tampered = decoded.replaceFirst("\\|mallory\\|", "|alice|");
+        String tamperedToken = Base64.getEncoder().withoutPadding().encodeToString(tampered.getBytes(StandardCharsets.UTF_8));
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.getTokensFromRefreshToken(client.getClientId(), tamperedToken));
+        assertEquals("NotAuthorizedException", exception.getErrorCode());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void getTokensFromRefreshTokenRejectsSwappedPoolId() {
+        UserPool poolA = createPoolAndUser();
+        UserPool poolB = service.createUserPool(Map.of("PoolName", "OtherPool"), "us-east-1");
+        UserPoolClient client = service.createUserPoolClient(poolA.getId(), "c", false, false, List.of(), List.of());
+
+        Map<String, Object> authResult = service.initiateAuth(
+                client.getClientId(), "USER_PASSWORD_AUTH",
+                Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!"));
+        String refreshToken = (String) ((Map<String, Object>) authResult.get("AuthenticationResult")).get("RefreshToken");
+
+        // Swap the embedded pool id for a different real pool; the signature was computed over poolA's id.
+        String decoded = new String(Base64.getDecoder().decode(refreshToken), StandardCharsets.UTF_8);
+        String tampered = decoded.replaceFirst("^" + poolA.getId() + "\\|", poolB.getId() + "|");
+        String tamperedToken = Base64.getEncoder().withoutPadding().encodeToString(tampered.getBytes(StandardCharsets.UTF_8));
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.getTokensFromRefreshToken(client.getClientId(), tamperedToken));
+        assertEquals("NotAuthorizedException", exception.getErrorCode());
+    }
+
+    @Test
+    void refreshTokenAuthRejectsForgedTokenInsteadOfIssuingUnknownUserTokens() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+
+        // A garbage/forged REFRESH_TOKEN must not fall through to minting real, signed
+        // tokens for a hardcoded "unknown" user via InitiateAuth REFRESH_TOKEN_AUTH.
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.initiateAuth(client.getClientId(), "REFRESH_TOKEN_AUTH",
+                        Map.of("REFRESH_TOKEN", "not-a-valid-refresh-token")));
+        assertEquals("NotAuthorizedException", exception.getErrorCode());
+    }
+
+    @Test
+    void refreshTokenAuthRejectsNonNumericIssuedAt() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+
+        // Validly signed, but with a non-numeric issued-at field, must not throw an
+        // uncaught NumberFormatException — it should be rejected as an invalid token.
+        String raw = pool.getId() + "|alice|" + client.getClientId() + "|not-a-number|" + java.util.UUID.randomUUID();
+        String malformedToken = signRawRefreshToken(pool, raw);
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.initiateAuth(client.getClientId(), "REFRESH_TOKEN_AUTH",
+                        Map.of("REFRESH_TOKEN", malformedToken)));
+        assertEquals("NotAuthorizedException", exception.getErrorCode());
     }
 
     // =========================================================================
@@ -2170,7 +2333,7 @@ class CognitoServiceTest {
     // =========================================================================
 
     @ParameterizedTest
-    @CsvSource( {
+    @CsvSource({
             "use-name,basic-client",
             "prepend-to-name:prepended-,prepended-basic-client",
             "append-to-name:-appended,basic-client-appended",
@@ -2187,7 +2350,7 @@ class CognitoServiceTest {
                 "us-east-1"
         );
 
-        assertEquals("test",pool.getUserPoolTags().get("env"));
+        assertEquals("test", pool.getUserPoolTags().get("env"));
         assertFalse(pool.getUserPoolTags().containsKey(ReservedTags.OVERRIDE_COGNITO_CLIENT_ID_KEY));
         assertFalse(pool.getUserPoolTags().containsKey(ReservedTags.OVERRIDE_COGNITO_CLIENT_SECRET_KEY));
 
@@ -2206,7 +2369,7 @@ class CognitoServiceTest {
     }
 
     @ParameterizedTest
-    @CsvSource( {
+    @CsvSource({
             "prepend-to-name: prepended- ,secret",
             "append-to-name: -appended ,secret",
             "append-to-name:-appended,",
@@ -2214,7 +2377,7 @@ class CognitoServiceTest {
     })
     void createUserPoolWithInvalidOverrideForClientIdAndClientSecret(String overrideClientId, String secret) {
         Map<String, Object> createUserPool = new HashMap<>();
-        Map<String,String> userPoolTags = new HashMap<>();
+        Map<String, String> userPoolTags = new HashMap<>();
         userPoolTags.put(ReservedTags.OVERRIDE_COGNITO_CLIENT_ID_KEY, overrideClientId);
         userPoolTags.put(ReservedTags.OVERRIDE_COGNITO_CLIENT_SECRET_KEY, secret);
         createUserPool.put("PoolName", "InvalidOverridesPool");
@@ -2228,4 +2391,226 @@ class CognitoServiceTest {
         assertEquals("InvalidParameterException", ex.getErrorCode());
 
     }
+
+    // Issue #1654: ConfirmSignUp updates verified attribute
+    @Nested
+    class ConfirmSignUpVerifiedAttributes {
+
+        private CognitoService svc;
+
+        @BeforeEach
+        void setUpVerificationService() {
+            svc = createVerificationEnabledService();
+        }
+
+        @Test
+        void confirmSignUpSetsEmailVerifiedAndDoesNotWritePhoneVerifiedForEmailOnlyUser() {
+            String poolName = "EmailVerifyPool";
+            String username = "alice@example.com";
+            String password = "Passw0rd!";
+
+            UserPool pool = svc.createUserPool(Map.of(
+                    "PoolName", poolName,
+                    "AutoVerifiedAttributes", List.of("email")
+            ), "us-east-1");
+            UserPoolClient client = svc.createUserPoolClient(
+                    pool.getId(), "c", false, false, List.of(), List.of());
+
+            svc.signUp(client.getClientId(), username, password,
+                    Map.of("email", username));
+            svc.confirmSignUp(client.getClientId(), username, "123456");
+
+            CognitoUser user = svc.adminGetUser(pool.getId(), username);
+
+            assertEquals("CONFIRMED", user.getUserStatus());
+            assertEquals("true", user.getAttributes().get("email_verified"),
+                    "ConfirmSignUp should set email_verified=true when email is the auto-verified attribute");
+            assertFalse(user.getAttributes().containsKey("phone_number_verified"),
+                    "ConfirmSignUp should not proactively write phone_number_verified when the user has no phone");
+        }
+
+        @Test
+        void confirmSignUpSetsPhoneNumberVerifiedAndDoesNotWriteEmailVerifiedForPhoneOnlyUser() {
+            String poolName = "PhoneVerifyPool";
+            String username = "phone-user";
+            String password = "Passw0rd!";
+            String phoneNumber = "+491701234567";
+
+            UserPool pool = svc.createUserPool(Map.of(
+                    "PoolName", poolName,
+                    "AutoVerifiedAttributes", List.of("phone_number")
+            ), "us-east-1");
+            UserPoolClient client = svc.createUserPoolClient(
+                    pool.getId(), "c", false, false, List.of(), List.of());
+
+            svc.signUp(client.getClientId(), username, password,
+                    Map.of("phone_number", phoneNumber));
+            svc.confirmSignUp(client.getClientId(), username, "123456");
+
+            CognitoUser user = svc.adminGetUser(pool.getId(), username);
+
+            assertEquals("CONFIRMED", user.getUserStatus());
+            assertEquals("true", user.getAttributes().get("phone_number_verified"),
+                    "ConfirmSignUp should set phone_number_verified=true when phone_number is the auto-verified attribute");
+            assertFalse(user.getAttributes().containsKey("email_verified"),
+                    "ConfirmSignUp should not proactively write email_verified when the user has no email");
+        }
+
+        @Test
+        void confirmSignUpMarksOnlyPhoneNumberVerifiedWhenBothAutoVerifiedEvenWhenEmailListedFirst() {
+            String poolName = "BothVerifyEmailFirstPool";
+            String email = "dual-user@example.com";
+            String password = "Passw0rd!";
+            String phoneNumber = "+491701234567";
+
+            UserPool pool = svc.createUserPool(Map.of(
+                    "PoolName", poolName,
+                    "AutoVerifiedAttributes", List.of("email", "phone_number")
+            ), "us-east-1");
+            UserPoolClient client = svc.createUserPoolClient(
+                    pool.getId(), "c", false, false, List.of(), List.of());
+
+            svc.signUp(client.getClientId(), email, password,
+                    Map.of("email", email, "phone_number", phoneNumber));
+            svc.confirmSignUp(client.getClientId(), email, "123456");
+
+            CognitoUser user = svc.adminGetUser(pool.getId(), email);
+
+            assertEquals("CONFIRMED", user.getUserStatus());
+            assertEquals("true", user.getAttributes().get("phone_number_verified"),
+                    "ConfirmSignUp should set phone_number_verified=true when both contacts are auto-verified, regardless of list order");
+            assertFalse(user.getAttributes().containsKey("email_verified"),
+                    "ConfirmSignUp should not set email_verified when the code was delivered to phone, not email");
+        }
+
+        @Test
+        void confirmSignUpMarksOnlyPhoneNumberVerifiedWhenBothAutoVerifiedAndPhoneIsFirstDeliveryTarget() {
+            String poolName = "BothVerifyPhoneFirstPool";
+            String email = "dual-user2@example.com";
+            String password = "Passw0rd!";
+            String phoneNumber = "+491701234567";
+
+            UserPool pool = svc.createUserPool(Map.of(
+                    "PoolName", poolName,
+                    "AutoVerifiedAttributes", List.of("phone_number", "email")
+            ), "us-east-1");
+            UserPoolClient client = svc.createUserPoolClient(
+                    pool.getId(), "c", false, false, List.of(), List.of());
+
+            svc.signUp(client.getClientId(), email, password,
+                    Map.of("email", email, "phone_number", phoneNumber));
+            svc.confirmSignUp(client.getClientId(), email, "123456");
+
+            CognitoUser user = svc.adminGetUser(pool.getId(), email);
+
+            assertEquals("CONFIRMED", user.getUserStatus());
+            assertEquals("true", user.getAttributes().get("phone_number_verified"),
+                    "ConfirmSignUp should set phone_number_verified=true when phone_number is the first auto-verified delivery target");
+            assertFalse(user.getAttributes().containsKey("email_verified"),
+                    "ConfirmSignUp should not set email_verified when the code was delivered to phone, not email");
+        }
+
+        @Test
+        void confirmSignUpDoesNotSetVerifiedFlagsWhenPoolHasNoAutoVerifiedAttributes() {
+            String poolName = "NoAutoVerifyPool";
+            String username = "no-auto-verify@example.com";
+            String password = "Passw0rd!";
+
+            UserPool pool = svc.createUserPool(Map.of("PoolName", poolName), "us-east-1");
+            UserPoolClient client = svc.createUserPoolClient(
+                    pool.getId(), "c", false, false, List.of(), List.of());
+
+            svc.signUp(client.getClientId(), username, password,
+                    Map.of("email", username));
+            svc.confirmSignUp(client.getClientId(), username, "123456");
+
+            CognitoUser user = svc.adminGetUser(pool.getId(), username);
+
+            assertEquals("CONFIRMED", user.getUserStatus());
+            assertFalse(user.getAttributes().containsKey("email_verified"),
+                    "ConfirmSignUp should not set email_verified when the pool has no auto-verified attributes");
+            assertFalse(user.getAttributes().containsKey("phone_number_verified"),
+                    "ConfirmSignUp should not set phone_number_verified when the pool has no auto-verified attributes");
+        }
+
+        @Test
+        void confirmSignUpDoesNotSetVerifiedFlagsWhenVerificationServiceIsAbsent() {
+            String poolName = "NoVerificationServicePool";
+            String username = "no-verification@example.com";
+            String password = "Passw0rd!";
+
+            // The default service from setUp() has verificationCodeService == null.
+            UserPool pool = service.createUserPool(Map.of(
+                    "PoolName", poolName,
+                    "AutoVerifiedAttributes", List.of("email")
+            ), "us-east-1");
+            UserPoolClient client = service.createUserPoolClient(
+                    pool.getId(), "c", false, false, List.of(), List.of());
+
+            service.signUp(client.getClientId(), username, password,
+                    Map.of("email", username));
+
+            service.confirmSignUp(client.getClientId(), username);
+
+            CognitoUser user = service.adminGetUser(pool.getId(), username);
+
+            assertEquals("CONFIRMED", user.getUserStatus());
+            assertFalse(user.getAttributes().containsKey("email_verified"),
+                    "ConfirmSignUp should not set email_verified when no verification service is configured");
+            assertFalse(user.getAttributes().containsKey("phone_number_verified"),
+                    "ConfirmSignUp should not set phone_number_verified when no verification service is configured");
+        }
+
+        @Test
+        void confirmSignUpDoesNotSetVerifiedFlagsWhenDeliveryTargetIsNull() {
+            String poolName = "NullDeliveryTargetPool";
+            String username = "email-only@example.com";
+            String password = "Passw0rd!";
+
+            UserPool pool = svc.createUserPool(Map.of(
+                    "PoolName", poolName,
+                    "AutoVerifiedAttributes", List.of("email")
+            ), "us-east-1");
+            UserPoolClient client = svc.createUserPoolClient(
+                    pool.getId(), "c", false, false, List.of(), List.of());
+
+            svc.signUp(client.getClientId(), username, password,
+                    Map.of("email", username));
+            svc.updateUserPool(Map.of(
+                    "UserPoolId", pool.getId(),
+                    "AutoVerifiedAttributes", List.of("phone_number")
+            ), "us-east-1");
+
+            svc.confirmSignUp(client.getClientId(), username, "123456");
+
+            CognitoUser user = svc.adminGetUser(pool.getId(), username);
+
+            assertEquals("CONFIRMED", user.getUserStatus());
+            assertFalse(user.getAttributes().containsKey("email_verified"),
+                    "ConfirmSignUp should not set email_verified when the user has no matching attribute for the updated auto verified attribute");
+            assertFalse(user.getAttributes().containsKey("phone_number_verified"),
+                    "ConfirmSignUp should not set phone_number_verified when the delivery target is null");
+        }
+
+        private CognitoService createVerificationEnabledService() {
+            VerificationCodeService verificationCodeService = mock(VerificationCodeService.class);
+            CognitoMessageDispatcher messageDispatcher = mock(CognitoMessageDispatcher.class);
+            when(verificationCodeService.issue(any(), any(), eq(VerificationCode.Purpose.SIGNUP_CONFIRMATION), any()))
+                    .thenReturn("123456");
+            return new CognitoService(
+                    new InMemoryStorage<>(),
+                    new InMemoryStorage<>(),
+                    new InMemoryStorage<>(),
+                    new InMemoryStorage<>(),
+                    new InMemoryStorage<>(),
+                    new InMemoryStorage<>(),
+                    "http://localhost:4566",
+                    regionResolver,
+                    null,
+                    verificationCodeService,
+                    messageDispatcher
+            );
+        }
+    }
+
 }

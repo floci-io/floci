@@ -202,3 +202,17 @@ setup() {
     assert_success
     assert_output "GZIP"
 }
+
+@test "OpenTofu: GuardDuty detector is created with organization configuration" {
+    run aws_cmd guardduty list-detectors --query "DetectorIds[0]" --output text
+    assert_success
+    DETECTOR_ID="$output"
+    run aws_cmd guardduty get-detector --detector-id "$DETECTOR_ID" \
+        --query "Status" --output text
+    assert_success
+    assert_output "ENABLED"
+    run aws_cmd guardduty describe-organization-configuration --detector-id "$DETECTOR_ID" \
+        --query "AutoEnableOrganizationMembers" --output text
+    assert_success
+    assert_output "ALL"
+}

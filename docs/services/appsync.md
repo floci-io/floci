@@ -133,7 +133,9 @@ Floci implements the AWS AppSync Management API, providing local emulation of Gr
 
 ## Schema Registry
 
-`StartSchemaCreation` validates the provided GraphQL SDL using [graphql-java](https://github.com/graphql-java/graphql-java). Invalid schemas are rejected with a `BadRequestException` (400) at registration time, preventing them from being caught later during query execution.
+`StartSchemaCreation` validates the provided GraphQL SDL using [graphql-java](https://github.com/graphql-java/graphql-java). Invalid schemas are rejected asynchronously (status `FAILED` with details after `PROCESSING`). Valid schemas are registered in an in-memory `SchemaRegistry` and persisted to the schema store.
+
+On emulator startup, after storage load and orphan recovery, Floci **rehydrates** SUCCESS SDLs from the schema store into `SchemaRegistry` so `POST /v1/apis/{apiId}/graphql` works across restarts (memory/persistent/hybrid/wal).
 
 The following **AWS scalar types** are pre-registered and available in any schema without requiring explicit `scalar` declarations:
 
@@ -167,12 +169,64 @@ The following **AppSync directives** are pre-defined and recognized in schemas:
 | `@aws_oidc` | OBJECT, FIELD_DEFINITION | Require OIDC auth |
 | `@aws_lambda` | OBJECT, FIELD_DEFINITION | Require Lambda auth |
 | `@aws_subscribe(mutations: [String!]!)` | FIELD_DEFINITION | Link subscription to mutation |
-| `@aws_auth(cognito_groups: [String!]!)` | OBJECT | Require Cognito groups |
+| `@aws_auth(cognito_groups: [String!]!)` | OBJECT, FIELD_DEFINITION | Require Cognito groups (ignored when additional auth modes exist) |
 | `@aws_delta_sync` | OBJECT | Delta sync configuration |
 
 Unknown directives are rejected during schema registration.
 
 Schema extensions (`extend type Query { ... }`) are supported natively through graphql-java.
+
+## GraphQL execute (data-plane)
+
+| Surface | Path | Content-Types |
+|---|---|---|
+| HTTP GraphQL | `POST /v1/apis/{apiId}/graphql` | `application/json`, `application/graphql` (+ charset) |
+
+Execute is a **separate** data-plane endpoint from the management API. Request body is GraphQL-over-HTTP JSON: `{ "query", "variables?", "operationName?" }`.
+
+Responses are `application/json` with AWS AppSync wire shapes (`data` / `errors[]` with top-level `errorType` / `errorInfo`). Most GraphQL syntax and validation errors return **HTTP 200** with `errors[]`.
+
+| Case | HTTP | Notes |
+|---|---|---|
+| Query / introspection / validation / syntax (incl. blank `query`) | 200 | Nullable fields may be `null` until DataFetchers (Phase 8) |
+| HTTP subscription operation | 200 | `OperationNotSupported` (realtime WebSocket is a later phase) |
+| Empty body / `{}` / `[]` / unparseable JSON / bad Content-Type | 400 | `MalformedHttpRequestException` |
+| Missing `operationName` with multiple operations | 400 | `BadRequestException` — `Missing operation name.` |
+| Unknown `apiId` | 404 | `NotFoundException` |
+| API exists but no executable schema (incl. PROCESSING) | **502** | `GraphQLSchemaException` — `No schema definition exists.` + `x-amzn-errortype` |
+| Unexpected failure | 500 | `InternalFailure` |
+| Missing/invalid/expired credentials, unconfigured mode, Lambda deny | **401** | `UnauthorizedException` — GraphQL does not run; `x-amzn-errortype` is set. Missing headers use message `Missing authorization header`. |
+| Field directive mismatch, Cognito group miss, Lambda `deniedFields`, IAM field DENY | **200** | Field is `null` and `errors[]` contains `Unauthorized` — `Not Authorized to access {field} on type {type}` (no `x-amzn-errortype`) |
+
+**Evidence for data-plane statuses** (empty/`[]`/`{}` → 400; missing schema → 502): AppSync team sample in [graphql/graphql-over-http#81](https://github.com/graphql/graphql-over-http/issues/81) (@robzhu). The management API Reference lists `GraphQLSchemaException` as HTTP 400 for “schema not valid” on management operations — a different surface than the GraphQL execute data plane.
+
+### Execute authentication
+
+Request auth runs after Content-Type and body parse and after API lookup (unknown `apiId` is still 404). It runs before schema lookup, so a missing schema with no credentials is 401, not 502.
+
+Headers are classified by **shape** (not primary-then-fallback). If both `x-api-key` and SigV4 `Authorization` are present, **SigV4 wins**. AppSync does not fall back to the API key when IAM validation fails.
+
+Missing required auth headers return HTTP **401** `UnauthorizedException` with message `Missing authorization header`. Invalid or expired credentials that are present still return 401 with `You are not authorized to make this call.`
+
+| Header shape | Mode |
+|---|---|
+| `Authorization` starts with `AWS4-HMAC-SHA256` | `AWS_IAM` (wins over `x-api-key` if both are present) |
+| `x-api-key` present | `API_KEY` |
+| `Authorization: Bearer <jwt>` | Cognito and/or OIDC (matched by `iss` / `aud` or `azp`) |
+| Other `Authorization` | `AWS_LAMBDA` |
+
+Configured modes are the API default `authenticationType` plus `additionalAuthenticationProviders`. A classified mode that is not configured returns 401.
+
+| Mode | Emulator notes |
+|---|---|
+| API_KEY | Lookup by key value (`da2-…`). Identity is absent (not `{}`). Default key expiry is 7 days when `expires` is omitted; stored `expires` is rounded down to the nearest hour. Create/UpdateApiKey require `expires` between 1 and 365 days from now (`ApiKeyValidityOutOfBoundsException`, 400). `deletes` is `expires` plus 60 days. |
+| AWS_IAM | Parses `Credential=` access key; no HMAC. Known keys evaluate `appsync:GraphQL`. Unknown/`test` keys are emulator ALLOW. |
+| Cognito / OIDC | JWT payload decode only (no JWKS). OIDC as the sole mode skips the `iss` check. OIDC identity is `{sub, issuer, claims}` (no `sourceIp`). |
+| Lambda | AppSync `isAuthorized` contract via `LambdaService.invoke` (not an API Gateway policy document). |
+
+SDL field auth: unmarked fields require the API **default** mode. Additional modes unlock fields tagged `@aws_api_key` / `@aws_iam` / `@aws_oidc` / `@aws_cognito_user_pools` / `@aws_lambda`. Multiple directives on a field are OR. Field-level directives override type-level. `@aws_auth` is allowed on `OBJECT \| FIELD_DEFINITION` and is ignored when additional modes exist.
+
+Duplicate `API_KEY` / `AWS_IAM` / `AWS_LAMBDA` (and the same Cognito pool or OIDC issuer) between default and additional providers is rejected on create/update with management 400 `BadRequestException`: `Authentication type {TYPE} for additional authentication provider {N} already specified on the API. It can only be specified once.` (`N` is 1-based in `additionalAuthenticationProviders`).
 
 ## Pagination
 
@@ -215,15 +269,13 @@ This matches AWS behavior where deleting an API removes its entire configuration
 
 ## Not Implemented
 
-These AWS AppSync operations are not yet implemented and are tracked in future phases:
+These AWS AppSync capabilities are not yet implemented and are tracked in future phases:
 
-- **Execution engine** (Phase 5): GraphQL query execution, resolver dispatch, VTL template evaluation
-- **Data source adapters** (Phase 7): DynamoDB, Lambda, HTTP, EventBridge, OpenSearch, RDS connectors
-- **Pipeline resolvers** (Phase 8): Function chaining with `$prev` and `$stash`
-- **Subscriptions** (Phase 9): WebSocket real-time subscriptions
-- **Caching** (Phase 10): API-level and per-resolver caching
-- **Authentication** (Phase 4): API key validation on the GraphQL endpoint
-- **Introspection** (Phase 6): `__schema` and `__type` queries
+- **DataFetcher / resolver dispatch** (Phase 8): resolver mapping templates and field resolution with non-null values
+- **Data source adapters** (Phase 9): DynamoDB, Lambda, HTTP, EventBridge, OpenSearch, RDS connectors
+- **Guardrails** (Phase 10): query depth / complexity limits and related errors
+- **Realtime subscriptions** (Phase 11+): WebSocket real-time subscriptions
+- **Caching**: API-level and per-resolver caching
 - **Merged API source management**: `AssociateMergedGraphqlApi`, `AssociateSourceGraphqlApi`, `StartSchemaMerge`, `ListTypesByAssociation`
 - **Data source introspection**: `StartDataSourceIntrospection`, `GetDataSourceIntrospection`
 
@@ -286,6 +338,12 @@ aws appsync associate-api \
   --domain-name api.example.com \
   --api-id API_ID \
   --endpoint-url $AWS_ENDPOINT_URL
+
+# Execute a GraphQL query (data-plane; send credentials for the API auth mode)
+curl -s -X POST "$AWS_ENDPOINT_URL/v1/apis/API_ID/graphql" \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: da2-YOUR_API_KEY" \
+  -d '{"query":"{ hello }"}'
 
 # Create a channel namespace
 aws appsync create-channel-namespace \

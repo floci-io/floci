@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.dynamodb.model.AttributeDefinition;
 import io.github.hectorvent.floci.services.dynamodb.model.ConditionalCheckFailedException;
+import io.github.hectorvent.floci.services.dynamodb.model.GlobalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -117,6 +118,48 @@ class DynamoDbServiceTest {
     @Test
     void describeTableNotFound() {
         assertThrows(AwsException.class, () -> service.describeTable("NonExistent", "eu-west-1"));
+    }
+
+    @Test
+    void applyReplicaUpdatesRejectsBlankRegion() {
+        createUsersTable("us-east-1");
+
+        AwsException exception = assertThrows(AwsException.class,
+                () -> service.applyReplicaUpdates("Users", List.of(" "), List.of(), "us-east-1"));
+
+        assertEquals("ValidationException", exception.getErrorCode());
+        assertEquals(400, exception.getHttpStatus());
+    }
+
+    @Test
+    void repeatedReplicaCreateAndDeleteAreIdempotent() {
+        createUsersTable("us-east-1");
+
+        service.applyReplicaUpdates("Users", List.of("eu-west-1"), List.of(), "us-east-1");
+        service.applyReplicaUpdates("Users", List.of("eu-west-1"), List.of(), "us-east-1");
+
+        assertEquals(List.of("eu-west-1"),
+                service.describeTable("Users", "us-east-1").getReplicaRegions());
+
+        service.applyReplicaUpdates("Users", List.of(), List.of("eu-west-1"), "us-east-1");
+        service.applyReplicaUpdates("Users", List.of(), List.of("eu-west-1"), "us-east-1");
+
+        assertTrue(service.describeTable("Users", "us-east-1").getReplicaRegions().isEmpty());
+    }
+
+    @Test
+    void invalidReplicaUpdateLeavesExistingReplicasUnchanged() {
+        createUsersTable("us-east-1");
+        service.applyReplicaUpdates(
+                "Users", List.of("eu-west-1"), List.of(), List.of(), "us-east-1");
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.applyReplicaUpdates(
+                        "Users", List.of(), List.of(), List.of("ap-south-1"), "us-east-1"));
+
+        assertEquals("ValidationException", exception.getErrorCode());
+        assertEquals(List.of("eu-west-1"),
+                service.describeTable("Users", "us-east-1").getReplicaRegions());
     }
 
     @Test
@@ -357,6 +400,66 @@ class DynamoDbServiceTest {
         assertEquals(List.of("o3", "o2", "o1"), results.items().stream()
                 .map(result -> result.get("orderId").get("S").asText())
                 .toList());
+    }
+
+    /**
+     * Regression for floci-io/floci#1675: a GSI whose sort key is composite (more than one RANGE
+     * attribute) must order by ALL sort-key attributes in schema order, so ScanIndexForward=false
+     * yields the reverse of the full composite order. Previously only the first RANGE attribute
+     * (here {@code state}, identical across the rows) was used, so {@code createdAt} never
+     * participated and ordering/reversal were effectively ignored.
+     */
+    @Test
+    void queryOnCompositeSortKeyGsiRespectsScanIndexForward() {
+        String region = "us-east-1";
+        GlobalSecondaryIndex gsi = new GlobalSecondaryIndex(
+                "memberIndex",
+                List.of(
+                        new KeySchemaElement("memberName", "HASH"),
+                        new KeySchemaElement("state", "RANGE"),
+                        new KeySchemaElement("createdAt", "RANGE")),
+                null, "ALL", null);
+        service.createTable("Requests",
+                List.of(new KeySchemaElement("requestId", "HASH")),
+                List.of(
+                        new AttributeDefinition("requestId", "S"),
+                        new AttributeDefinition("memberName", "S"),
+                        new AttributeDefinition("state", "S"),
+                        new AttributeDefinition("createdAt", "S")),
+                5L, 5L, List.of(gsi), region);
+
+        // Same memberName + state. Deliberately make base-table key order (requestId: a, b, c)
+        // DISAGREE with createdAt order, so a correct result can only come from sorting on the
+        // second composite component (createdAt) — not from incidental storage order.
+        service.putItem("Requests", item("requestId", "a", "memberName", "alice",
+                "state", "ACTIVE", "createdAt", "2026-07-14T00:00:03Z"), region);
+        service.putItem("Requests", item("requestId", "b", "memberName", "alice",
+                "state", "ACTIVE", "createdAt", "2026-07-14T00:00:01Z"), region);
+        service.putItem("Requests", item("requestId", "c", "memberName", "alice",
+                "state", "ACTIVE", "createdAt", "2026-07-14T00:00:02Z"), region);
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":pk", attributeValue("S", "alice"));
+        exprValues.set(":st", attributeValue("S", "ACTIVE"));
+        exprValues.set(":from", attributeValue("S", "1970-01-01T00:00:00Z"));
+        exprValues.set(":to", attributeValue("S", "2100-01-01T00:00:00Z"));
+        String kce = "memberName = :pk AND state = :st AND createdAt BETWEEN :from AND :to";
+
+        DynamoDbService.QueryResult ascending = service.query("Requests", null, exprValues,
+                kce, null, null, true, "memberIndex", null, null, region);
+        assertEquals(
+                List.of("2026-07-14T00:00:01Z", "2026-07-14T00:00:02Z", "2026-07-14T00:00:03Z"),
+                ascending.items().stream()
+                        .map(result -> result.get("createdAt").get("S").asText())
+                        .toList());
+
+        DynamoDbService.QueryResult descending = service.query("Requests", null, exprValues,
+                kce, null, null, false, "memberIndex", null, null, region);
+        assertEquals(
+                List.of("2026-07-14T00:00:03Z", "2026-07-14T00:00:02Z", "2026-07-14T00:00:01Z"),
+                descending.items().stream()
+                        .map(result -> result.get("createdAt").get("S").asText())
+                        .toList());
     }
 
     @Test

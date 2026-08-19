@@ -2,7 +2,7 @@ package io.github.hectorvent.floci.services.docdb;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.RegionResolver;
-import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.docdb.container.DocDbContainerManager;
 import io.github.hectorvent.floci.services.docdb.model.DocDbCluster;
@@ -29,7 +29,7 @@ class DocDbServiceTest {
     void setUp() {
         StorageFactory storageFactory = Mockito.mock(StorageFactory.class);
         when(storageFactory.create(anyString(), anyString(), any()))
-                .thenAnswer(invocation -> new InMemoryStorage<>());
+                .thenAnswer(inv -> AccountAwareStorageBackend.inMemory("000000000000"));
 
         EmulatorConfig config = Mockito.mock(EmulatorConfig.class);
         var servicesConfig = Mockito.mock(EmulatorConfig.ServicesConfig.class);
@@ -83,6 +83,33 @@ class DocDbServiceTest {
     }
 
     @Test
+    void listDbClustersMatchesByArnButNotForeignArn() {
+        DocDbCluster cluster = docDbService.createDbCluster(
+                "mock-cluster", null, "admin", "secret", false);
+
+        String arn = cluster.getDbClusterArn();
+        assertEquals(1, docDbService.listDbClusters(arn).size());
+        assertTrue(docDbService.listDbClusters(arn.replace("000000000000", "999999999999")).isEmpty(),
+                "cross-account ARN must not match");
+        assertTrue(docDbService.listDbClusters(arn.replace("us-east-1", "eu-west-1")).isEmpty(),
+                "cross-region ARN must not match");
+    }
+
+    @Test
+    void listDbInstancesMatchesByArnButNotForeignArn() {
+        docDbService.createDbCluster("mock-cluster", null, "admin", "secret", false);
+        DocDbInstance instance = docDbService.createDbInstance(
+                "mock-instance", "mock-cluster", "db.r5.large", null, false);
+
+        String arn = instance.getDbInstanceArn();
+        assertEquals(1, docDbService.listDbInstances(arn).size());
+        assertTrue(docDbService.listDbInstances(arn.replace("000000000000", "999999999999")).isEmpty(),
+                "cross-account ARN must not match");
+        assertTrue(docDbService.listDbInstances(arn.replace("us-east-1", "eu-west-1")).isEmpty(),
+                "cross-region ARN must not match");
+    }
+
+    @Test
     void deleteClusterInMockModeSkipsContainerStop() {
         docDbService.createDbCluster("mock-cluster", null, "admin", "secret", false);
 
@@ -90,5 +117,43 @@ class DocDbServiceTest {
 
         assertTrue(docDbService.listDbClusters(null).isEmpty());
         verify(containerManager, never()).stop(any());
+    }
+
+    @Test
+    void createWithoutDockerDaemonStillReachesAvailable() {
+        // tryStart() returns null when no Docker daemon is reachable. The cluster record is
+        // metadata, so the create still succeeds and the cluster reaches 'available' on the
+        // first describe (what SDK/Terraform waiters poll).
+        StorageFactory storageFactory = Mockito.mock(StorageFactory.class);
+        when(storageFactory.create(anyString(), anyString(), any()))
+                .thenAnswer(inv -> AccountAwareStorageBackend.inMemory("000000000000"));
+        EmulatorConfig config = Mockito.mock(EmulatorConfig.class);
+        var servicesConfig = Mockito.mock(EmulatorConfig.ServicesConfig.class);
+        var docdbConfig = Mockito.mock(EmulatorConfig.DocDbServiceConfig.class);
+        when(config.services()).thenReturn(servicesConfig);
+        when(servicesConfig.docdb()).thenReturn(docdbConfig);
+        when(docdbConfig.mock()).thenReturn(false);
+        when(docdbConfig.defaultImage()).thenReturn("mongo:7.0");
+        when(config.hostname()).thenReturn(java.util.Optional.of("localhost"));
+
+        DocDbContainerManager noDaemonContainerManager = Mockito.mock(DocDbContainerManager.class);
+        when(noDaemonContainerManager.tryStart(anyString(), anyString(), anyString(), anyString()))
+                .thenReturn(null);
+        RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
+        DocDbService noDaemonService = new DocDbService(config, regionResolver, noDaemonContainerManager, storageFactory);
+
+        DocDbCluster created = noDaemonService.createDbCluster(
+                "no-docker-cluster", null, "admin", "secret", false);
+
+        assertEquals("available", created.getStatus());
+        assertEquals("localhost", created.getEndpoint());
+        assertEquals(27017, created.getPort());
+
+        assertEquals("no-docker-cluster",
+                noDaemonService.getDbCluster("no-docker-cluster").getDbClusterIdentifier());
+
+        // Delete must not reach for a container that was never created.
+        noDaemonService.deleteDbCluster("no-docker-cluster");
+        verify(noDaemonContainerManager, never()).stop(any());
     }
 }

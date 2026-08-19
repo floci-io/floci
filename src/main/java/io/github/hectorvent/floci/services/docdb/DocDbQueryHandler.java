@@ -36,6 +36,7 @@ public class DocDbQueryHandler {
                 case "CreateDBCluster"    -> handleCreateDbCluster(params);
                 case "DescribeDBClusters" -> handleDescribeDbClusters(params);
                 case "DescribeDBClusterSnapshots" -> handleDescribeDbClusterSnapshots(params);
+                case "DescribeGlobalClusters" -> handleDescribeGlobalClusters(params);
                 case "DeleteDBCluster"    -> handleDeleteDbCluster(params);
                 case "ModifyDBCluster"    -> handleModifyDbCluster(params);
                 case "CreateDBInstance"   -> handleCreateDbInstance(params);
@@ -75,14 +76,17 @@ public class DocDbQueryHandler {
     }
 
     private Response handleDescribeDbClusters(MultivaluedMap<String, String> params) {
-        String filterId = params.getFirst("DBClusterIdentifier");
+        String identifier = params.getFirst("DBClusterIdentifier");
+        String filterId = identifier;
         if (filterId == null || filterId.isBlank()) {
             filterId = extractFilterValue(params, "db-cluster-id");
         }
 
-        // When a specific cluster ID is requested, AWS returns 404 if not found
-        if (filterId != null && !filterId.isBlank()) {
-            service.getDbCluster(filterId); // throws DBClusterNotFoundFault if absent
+        // AWS parity: the DBClusterIdentifier parameter faults with
+        // DBClusterNotFoundFault when no cluster matches, while the
+        // db-cluster-id Filters form returns an empty list.
+        if (identifier != null && !identifier.isBlank()) {
+            service.getDbCluster(identifier); // throws DBClusterNotFoundFault if absent
         }
 
         Collection<DocDbCluster> result = service.listDbClusters(filterId);
@@ -93,6 +97,42 @@ public class DocDbQueryHandler {
         }
         xml.end("DBClusters").start("Marker").end("Marker");
         return Response.ok(AwsQueryResponse.envelope("DescribeDBClusters", AwsNamespaces.RDS, xml.build())).build();
+    }
+
+    private Response handleDescribeGlobalClusters(MultivaluedMap<String, String> params) {
+        // Global clusters are not modeled; an empty list is what completes the provider's read.
+        // Real SDKs sign DocumentDB with the "rds" scope and land on RdsQueryHandler instead;
+        // this serves the "docdb" scope Floci also accepts, and must answer the same way.
+        // MaxRecords is rejected before the identifier is looked up, and a marker after it —
+        // the order a live account applies them in.
+        String maxRecords = params.getFirst("MaxRecords");
+        if (maxRecords != null && !maxRecords.isBlank()) {
+            int max = -1;
+            try {
+                max = Integer.parseInt(maxRecords.trim());
+            } catch (NumberFormatException e) {
+                LOG.debugv("Non-numeric MaxRecords {0} on DescribeGlobalClusters", maxRecords);
+            }
+            if (max < 20 || max > 100) {
+                throw new AwsException("InvalidParameterValue",
+                        "Invalid value " + maxRecords + " for MaxRecords. Must be between 20 and 100", 400);
+            }
+        }
+        String identifier = params.getFirst("GlobalClusterIdentifier");
+        if (identifier != null && !identifier.isBlank()) {
+            // Naming one is a different question from listing none, and AWS errors on it.
+            throw new AwsException("GlobalClusterNotFoundFault",
+                    "Global cluster '" + identifier + "' not found", 404);
+        }
+        // No page is ever handed out, so any marker a caller presents came from somewhere else.
+        String marker = params.getFirst("Marker");
+        if (marker != null && !marker.isBlank()) {
+            throw new AwsException("InvalidParameterValue", "The request token is invalid.", 400);
+        }
+        // Filters are not validated: the answer is empty for every name AWS accepts, and a partial
+        // list of accepted names would reject filters a live account allows.
+        XmlBuilder xml = new XmlBuilder().start("GlobalClusters").end("GlobalClusters");
+        return Response.ok(AwsQueryResponse.envelope("DescribeGlobalClusters", AwsNamespaces.RDS, xml.build())).build();
     }
 
     private Response handleDescribeDbClusterSnapshots(MultivaluedMap<String, String> params) {
@@ -154,13 +194,17 @@ public class DocDbQueryHandler {
     }
 
     private Response handleDescribeDbInstances(MultivaluedMap<String, String> params) {
-        String filterId = params.getFirst("DBInstanceIdentifier");
+        String identifier = params.getFirst("DBInstanceIdentifier");
+        String filterId = identifier;
         if (filterId == null || filterId.isBlank()) {
             filterId = extractFilterValue(params, "db-instance-id");
         }
 
-        if (filterId != null && !filterId.isBlank()) {
-            service.getDbInstance(filterId); // throws DBInstanceNotFound if absent
+        // AWS parity: the DBInstanceIdentifier parameter faults with
+        // DBInstanceNotFound when no instance matches, while the
+        // db-instance-id Filters form returns an empty list.
+        if (identifier != null && !identifier.isBlank()) {
+            service.getDbInstance(identifier); // throws DBInstanceNotFound if absent
         }
 
         Collection<DocDbInstance> result = service.listDbInstances(filterId);

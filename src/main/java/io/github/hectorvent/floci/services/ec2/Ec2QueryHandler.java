@@ -28,6 +28,15 @@ public class Ec2QueryHandler {
     private static final DateTimeFormatter ISO_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'")
             .withZone(ZoneOffset.UTC);
 
+    /** ReplaceRoute targets AWS accepts that a stored {@code Route} cannot represent here. */
+    private static final List<String> UNSUPPORTED_ROUTE_TARGETS = List.of(
+            "CarrierGatewayId", "CoreNetworkArn", "EgressOnlyInternetGatewayId", "InstanceId",
+            "LocalGatewayId", "NetworkInterfaceId", "OdbNetworkArn",
+            "TransitGatewayId", "VpcEndpointId", "VpcPeeringConnectionId");
+
+    /** The gateway id a route table's built-in route carries (see Ec2Service#createRouteTable). */
+    private static final String LOCAL_GATEWAY_ID = "local";
+
     private final Ec2Service service;
     private final EmulatorConfig config;
     private final FlowLogService flowLogService;
@@ -70,6 +79,47 @@ public class Ec2QueryHandler {
                 case "DescribeFlowLogs" -> handleDescribeFlowLogs(params, region);
                 case "DeleteFlowLogs" -> handleDeleteFlowLogs(params, region);
                 case "DescribePrefixLists" -> handleDescribePrefixLists(params, region);
+                case "CreateManagedPrefixList" -> handleCreateManagedPrefixList(params, region);
+                case "DescribeManagedPrefixLists" -> handleDescribeManagedPrefixLists(params, region);
+                case "GetManagedPrefixListEntries" -> handleGetManagedPrefixListEntries(params, region);
+                case "ModifyManagedPrefixList" -> handleModifyManagedPrefixList(params, region);
+                case "DeleteManagedPrefixList" -> handleDeleteManagedPrefixList(params, region);
+                // Transit Gateways
+                case "CreateTransitGateway" -> handleCreateTransitGateway(params, region);
+                case "DescribeTransitGateways" -> handleDescribeTransitGateways(params, region);
+                case "ModifyTransitGateway" -> handleModifyTransitGateway(params, region);
+                case "DeleteTransitGateway" -> handleDeleteTransitGateway(params, region);
+                case "CreateTransitGatewayVpcAttachment" ->
+                        handleCreateTransitGatewayVpcAttachment(params, region);
+                case "DescribeTransitGatewayVpcAttachments" ->
+                        handleDescribeTransitGatewayVpcAttachments(params, region);
+                case "DescribeTransitGatewayAttachments" ->
+                        handleDescribeTransitGatewayAttachments(params, region);
+                case "ModifyTransitGatewayVpcAttachment" ->
+                        handleModifyTransitGatewayVpcAttachment(params, region);
+                case "DeleteTransitGatewayVpcAttachment" ->
+                        handleDeleteTransitGatewayVpcAttachment(params, region);
+                // Transit Gateway route tables, associations, propagations and routes
+                case "CreateTransitGatewayRouteTable" -> handleCreateTransitGatewayRouteTable(params, region);
+                case "DescribeTransitGatewayRouteTables" ->
+                        handleDescribeTransitGatewayRouteTables(params, region);
+                case "DeleteTransitGatewayRouteTable" -> handleDeleteTransitGatewayRouteTable(params, region);
+                case "AssociateTransitGatewayRouteTable" ->
+                        handleAssociateTransitGatewayRouteTable(params, region);
+                case "DisassociateTransitGatewayRouteTable" ->
+                        handleDisassociateTransitGatewayRouteTable(params, region);
+                case "GetTransitGatewayRouteTableAssociations" ->
+                        handleGetTransitGatewayRouteTableAssociations(params, region);
+                case "EnableTransitGatewayRouteTablePropagation" ->
+                        handleEnableTransitGatewayRouteTablePropagation(params, region);
+                case "DisableTransitGatewayRouteTablePropagation" ->
+                        handleDisableTransitGatewayRouteTablePropagation(params, region);
+                case "GetTransitGatewayRouteTablePropagations" ->
+                        handleGetTransitGatewayRouteTablePropagations(params, region);
+                case "CreateTransitGatewayRoute" -> handleCreateTransitGatewayRoute(params, region);
+                case "DeleteTransitGatewayRoute" -> handleDeleteTransitGatewayRoute(params, region);
+                case "ReplaceTransitGatewayRoute" -> handleReplaceTransitGatewayRoute(params, region);
+                case "SearchTransitGatewayRoutes" -> handleSearchTransitGatewayRoutes(params, region);
                 case "CreateDefaultVpc" -> handleCreateDefaultVpc(params, region);
                 case "AssociateVpcCidrBlock" -> handleAssociateVpcCidrBlock(params, region);
                 case "DisassociateVpcCidrBlock" -> handleDisassociateVpcCidrBlock(params, region);
@@ -99,6 +149,7 @@ public class Ec2QueryHandler {
                 case "ImportKeyPair" -> handleImportKeyPair(params, region);
                 // AMIs
                 case "DescribeImages" -> handleDescribeImages(params, region);
+                case "CreateImage" -> handleCreateImage(params, region);
                 case "RegisterImage" -> handleRegisterImage(params, region);
                 case "DescribeSnapshots" -> handleDescribeSnapshots(params, region);
                 // Tags
@@ -123,6 +174,7 @@ public class Ec2QueryHandler {
                 case "AssociateRouteTable" -> handleAssociateRouteTable(params, region);
                 case "DisassociateRouteTable" -> handleDisassociateRouteTable(params, region);
                 case "CreateRoute" -> handleCreateRoute(params, region);
+                case "ReplaceRoute" -> handleReplaceRoute(params, region);
                 case "DeleteRoute" -> handleDeleteRoute(params, region);
                 // Network ACLs
                 case "CreateNetworkAcl" -> handleCreateNetworkAcl(params, region);
@@ -307,40 +359,101 @@ public class Ec2QueryHandler {
         throw new AwsException("InvalidParameterValue", name + " is not a valid boolean.", 400);
     }
 
+    /**
+     * Reads the {@code IpPermissions.N} list of an authorize/revoke request.
+     *
+     * <p>Each permission carries up to four kinds of source, and every one of them has to be read
+     * here or it is silently dropped before the service layer ever sees it (#2190). Note the EC2
+     * Query protocol serializes the {@code UserIdGroupPairs} member under the wire name
+     * {@code Groups}, which is why a group reference arrives as
+     * {@code IpPermissions.1.Groups.1.GroupId} rather than under the SDK-facing field name.
+     */
     private List<IpPermission> parseIpPermissions(MultivaluedMap<String, String> p, String prefix) {
         List<IpPermission> perms = new ArrayList<>();
         for (int i = 1; ; i++) {
             String proto = p.getFirst(prefix + "." + i + ".IpProtocol");
-            if (proto == null) break;
+            if (proto == null) {
+                break;
+            }
             IpPermission perm = new IpPermission();
             perm.setIpProtocol(proto);
             String fromPort = p.getFirst(prefix + "." + i + ".FromPort");
             String toPort = p.getFirst(prefix + "." + i + ".ToPort");
-            if (fromPort != null) perm.setFromPort(Integer.parseInt(fromPort));
-            if (toPort != null) perm.setToPort(Integer.parseInt(toPort));
+            if (fromPort != null) {
+                perm.setFromPort(Integer.parseInt(fromPort));
+            }
+            if (toPort != null) {
+                perm.setToPort(Integer.parseInt(toPort));
+            }
             for (int j = 1; ; j++) {
                 String cidr = p.getFirst(prefix + "." + i + ".IpRanges." + j + ".CidrIp");
-                if (cidr == null) cidr = p.getFirst(prefix + "." + i + ".IpRanges." + j);
-                if (cidr == null) break;
+                if (cidr == null) {
+                    cidr = p.getFirst(prefix + "." + i + ".IpRanges." + j);
+                }
+                if (cidr == null) {
+                    break;
+                }
                 String desc = p.getFirst(prefix + "." + i + ".IpRanges." + j + ".Description");
                 perm.getIpRanges().add(new IpRange(cidr, desc));
+            }
+            for (int j = 1; ; j++) {
+                String cidr = p.getFirst(prefix + "." + i + ".Ipv6Ranges." + j + ".CidrIpv6");
+                if (cidr == null) {
+                    break;
+                }
+                String desc = p.getFirst(prefix + "." + i + ".Ipv6Ranges." + j + ".Description");
+                perm.getIpv6Ranges().add(new Ipv6Range(cidr, desc));
+            }
+            for (int j = 1; ; j++) {
+                String base = prefix + "." + i + ".Groups." + j;
+                String groupId = p.getFirst(base + ".GroupId");
+                String groupName = p.getFirst(base + ".GroupName");
+                String userId = p.getFirst(base + ".UserId");
+                String desc = p.getFirst(base + ".Description");
+                // A default-VPC caller may reference a group by name alone, so the loop cannot end
+                // on a missing GroupId.
+                if (groupId == null && groupName == null && userId == null && desc == null) {
+                    break;
+                }
+                UserIdGroupPair pair = new UserIdGroupPair();
+                pair.setGroupId(groupId);
+                pair.setGroupName(groupName);
+                pair.setUserId(userId);
+                pair.setDescription(desc);
+                perm.getUserIdGroupPairs().add(pair);
+            }
+            for (int j = 1; ; j++) {
+                String prefixListId = p.getFirst(prefix + "." + i + ".PrefixListIds." + j + ".PrefixListId");
+                if (prefixListId == null) {
+                    break;
+                }
+                String desc = p.getFirst(prefix + "." + i + ".PrefixListIds." + j + ".Description");
+                perm.getPrefixListIds().add(new PrefixListId(prefixListId, desc));
             }
             perms.add(perm);
         }
         return perms;
     }
 
+    /**
+     * Reads a request's tag specifications. Most EC2 actions carry them under the wire name
+     * {@code TagSpecification}, but a handful — {@code CreateTransitGatewayVpcAttachment} among
+     * them — declare no {@code locationName} and so serialize as {@code TagSpecifications}. Both
+     * spellings are read, because an action that used the plural silently lost every tag.
+     */
     private List<Tag> parseTagsForResource(MultivaluedMap<String, String> p, String resourceType) {
         List<Tag> tags = new ArrayList<>();
-        for (int i = 1; ; i++) {
-            String resType = p.getFirst("TagSpecification." + i + ".ResourceType");
-            if (resType == null) break;
-            if (resourceType.equals(resType)) {
-                for (int j = 1; ; j++) {
-                    String key = p.getFirst("TagSpecification." + i + ".Tag." + j + ".Key");
-                    if (key == null) break;
-                    String value = p.getFirst("TagSpecification." + i + ".Tag." + j + ".Value");
-                    tags.add(new Tag(key, value));
+        for (String prefix : new String[] {"TagSpecification", "TagSpecifications"}) {
+            for (int i = 1; ; i++) {
+                String resType = p.getFirst(prefix + "." + i + ".ResourceType");
+                if (resType == null) break;
+                if (resourceType.equals(resType)) {
+                    for (int j = 1; ; j++) {
+                        String key = p.getFirst(prefix + "." + i + ".Tag." + j + ".Key");
+                        if (key == null) break;
+                        String value = p.getFirst(prefix + "." + i + ".Tag." + j + ".Value");
+                        tags.add(new Tag(key, value));
+                    }
                 }
             }
         }
@@ -410,6 +523,19 @@ public class Ec2QueryHandler {
         int maxCount = Integer.parseInt(p.getOrDefault("MaxCount", List.of("1")).get(0));
         String keyName = p.getFirst("KeyName");
         String subnetId = p.getFirst("SubnetId");
+        // The launch-time public-IP override arrives either on the primary
+        // network interface spec (the shape Terraform's
+        // associate_public_ip_address sends) or as the legacy top-level
+        // parameter. AWS rejects both at once, so the interface spec wins when
+        // present. Absent means "use the subnet's MapPublicIpOnLaunch default".
+        String assocParam = p.getFirst("NetworkInterface.1.AssociatePublicIpAddress");
+        if (assocParam == null) {
+            assocParam = p.getFirst("AssociatePublicIpAddress");
+        }
+        Boolean associatePublicIp = assocParam == null ? null : Boolean.parseBoolean(assocParam);
+        if (subnetId == null) {
+            subnetId = p.getFirst("NetworkInterface.1.SubnetId");
+        }
         String clientToken = p.getFirst("ClientToken");
         List<String> sgIds = getList(p, "SecurityGroupId");
 
@@ -456,7 +582,8 @@ public class Ec2QueryHandler {
         }
 
         Reservation res = service.runInstances(region, imageId, instanceType, minCount, maxCount,
-                keyName, sgIds, subnetId, clientToken, instanceTags, userData, iamInstanceProfileArn);
+                keyName, sgIds, subnetId, clientToken, instanceTags, userData, iamInstanceProfileArn,
+                associatePublicIp);
 
         XmlBuilder xml = new XmlBuilder()
                 .start("RunInstancesResponse", AwsNamespaces.EC2)
@@ -826,15 +953,64 @@ public class Ec2QueryHandler {
         return xmlResponse(xml.build());
     }
 
+    // The common AWS interface-endpoint services, as short names. Rendered as
+    // com.amazonaws.<region>.<name>. CDK's InterfaceVpcEndpoint (lookupSupportedAzs)
+    // calls DescribeVpcEndpointServices at synth time; an empty set aborts synth.
+    private static final List<String> INTERFACE_ENDPOINT_SERVICES = List.of(
+            "ec2", "ec2messages", "ssm", "ssmmessages", "logs", "monitoring", "sts",
+            "secretsmanager", "kms", "ecr.api", "ecr.dkr", "ecs", "ecs-agent", "ecs-telemetry",
+            "elasticloadbalancing", "sns", "sqs", "kinesis-streams", "kinesis-firehose",
+            "states", "events", "lambda", "glue", "athena", "iot.data", "execute-api");
+
     private Response handleDescribeVpcEndpointServices(MultivaluedMap<String, String> p, String region) {
+        List<String> requested = getList(p, "ServiceName");
+        List<String> azNames = service.describeAvailabilityZones(region).stream()
+                .map(z -> z.get("zoneName")).toList();
+
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeVpcEndpointServicesResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
-                .start("serviceNameSet")
-                .end("serviceNameSet")
-                .start("serviceDetailSet")
-                .end("serviceDetailSet")
-                .end("DescribeVpcEndpointServicesResponse");
+                .start("serviceNameSet");
+        List<String> fullNames = new ArrayList<>();
+        // An explicit ServiceName filter wins: the emulator supports any
+        // interface service in every AZ, so echo exactly what was asked. CDK's
+        // InterfaceVpcEndpoint queries a specific (often custom) service name
+        // and fails if the response omits it or lists no AZs.
+        if (!requested.isEmpty()) {
+            fullNames.addAll(requested);
+        } else {
+            // S3 has both a Gateway and an Interface offering; keep it in the set.
+            for (String name : INTERFACE_ENDPOINT_SERVICES) {
+                fullNames.add("com.amazonaws." + region + "." + name);
+            }
+            fullNames.add("com.amazonaws." + region + ".s3");
+        }
+        for (String full : fullNames) {
+            xml.elem("item", full);
+        }
+        xml.end("serviceNameSet").start("serviceDetailSet");
+        for (String full : fullNames) {
+            // S3 is the one service with both offerings, and AWS reports both
+            // types on its single service detail. Everything else is Interface.
+            List<String> serviceTypes = full.endsWith(".s3")
+                    ? List.of("Gateway", "Interface")
+                    : List.of("Interface");
+            xml.start("item")
+                    .elem("serviceName", full)
+                    .start("serviceType");
+            for (String serviceType : serviceTypes) {
+                xml.start("item").elem("serviceType", serviceType).end("item");
+            }
+            xml.end("serviceType")
+                    .start("availabilityZoneSet");
+            for (String az : azNames) xml.elem("item", az);
+            xml.end("availabilityZoneSet")
+                    .elem("owner", "amazon")
+                    .elem("acceptanceRequired", "false")
+                    .elem("managesVpcEndpoints", "false")
+                    .end("item");
+        }
+        xml.end("serviceDetailSet").end("DescribeVpcEndpointServicesResponse");
         return xmlResponse(xml.build());
     }
 
@@ -970,6 +1146,616 @@ public class Ec2QueryHandler {
         }
         xml.end("prefixListSet").end("DescribePrefixListsResponse");
         return xmlResponse(xml.build());
+    }
+
+    private Response handleCreateManagedPrefixList(MultivaluedMap<String, String> p, String region) {
+        ManagedPrefixList list = service.createManagedPrefixList(
+                region,
+                p.getFirst("PrefixListName"),
+                p.getFirst("AddressFamily"),
+                intOrNull(p, "MaxEntries"),
+                parsePrefixListEntries(p, "Entry"),
+                parseTagsForResource(p, "prefix-list"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("CreateManagedPrefixListResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("prefixList").raw(managedPrefixListXml(list)).end("prefixList")
+                .end("CreateManagedPrefixListResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDescribeManagedPrefixLists(MultivaluedMap<String, String> p, String region) {
+        List<String> ids = getList(p, "PrefixListId");
+        Map<String, List<String>> filters = getFilters(p);
+        List<ManagedPrefixList> lists = service.describeManagedPrefixLists(region, ids, filters);
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeManagedPrefixListsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("prefixListSet");
+        for (ManagedPrefixList list : lists) {
+            xml.start("item").raw(managedPrefixListXml(list)).end("item");
+        }
+        xml.end("prefixListSet").end("DescribeManagedPrefixListsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleGetManagedPrefixListEntries(MultivaluedMap<String, String> p, String region) {
+        List<PrefixListEntry> entries = service.getManagedPrefixListEntries(
+                region, p.getFirst("PrefixListId"), longOrNull(p, "TargetVersion"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("GetManagedPrefixListEntriesResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("entrySet");
+        for (PrefixListEntry entry : entries) {
+            xml.start("item").elem("cidr", entry.getCidr());
+            if (entry.getDescription() != null) {
+                xml.elem("description", entry.getDescription());
+            }
+            xml.end("item");
+        }
+        xml.end("entrySet").end("GetManagedPrefixListEntriesResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleModifyManagedPrefixList(MultivaluedMap<String, String> p, String region) {
+        List<PrefixListEntry> removeEntries = parsePrefixListEntries(p, "RemoveEntry");
+        ManagedPrefixList list = service.modifyManagedPrefixList(
+                region,
+                p.getFirst("PrefixListId"),
+                longOrNull(p, "CurrentVersion"),
+                p.getFirst("PrefixListName"),
+                intOrNull(p, "MaxEntries"),
+                parsePrefixListEntries(p, "AddEntry"),
+                removeEntries.stream().map(PrefixListEntry::getCidr).toList());
+        XmlBuilder xml = new XmlBuilder()
+                .start("ModifyManagedPrefixListResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("prefixList").raw(managedPrefixListXml(list)).end("prefixList")
+                .end("ModifyManagedPrefixListResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDeleteManagedPrefixList(MultivaluedMap<String, String> p, String region) {
+        ManagedPrefixList list = service.deleteManagedPrefixList(region, p.getFirst("PrefixListId"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("DeleteManagedPrefixListResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("prefixList").raw(managedPrefixListXml(list)).end("prefixList")
+                .end("DeleteManagedPrefixListResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleCreateTransitGateway(MultivaluedMap<String, String> p, String region) {
+        TransitGateway gateway = service.createTransitGateway(
+                region,
+                p.getFirst("Description"),
+                parseTransitGatewayOptions(p, "Options"),
+                parseTagsForResource(p, "transit-gateway"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("CreateTransitGatewayResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("transitGateway").raw(transitGatewayXml(gateway)).end("transitGateway")
+                .end("CreateTransitGatewayResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDescribeTransitGateways(MultivaluedMap<String, String> p, String region) {
+        List<TransitGateway> gateways = service.describeTransitGateways(
+                region, getList(p, "TransitGatewayIds"), getFilters(p));
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeTransitGatewaysResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("transitGatewaySet");
+        for (TransitGateway gateway : gateways) {
+            xml.start("item").raw(transitGatewayXml(gateway)).end("item");
+        }
+        xml.end("transitGatewaySet").end("DescribeTransitGatewaysResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleModifyTransitGateway(MultivaluedMap<String, String> p, String region) {
+        TransitGateway gateway = service.modifyTransitGateway(
+                region,
+                p.getFirst("TransitGatewayId"),
+                p.getFirst("Description"),
+                parseTransitGatewayOptions(p, "Options"),
+                getList(p, "Options.AddTransitGatewayCidrBlocks"),
+                getList(p, "Options.RemoveTransitGatewayCidrBlocks"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("ModifyTransitGatewayResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                // Verified against a live account: modify echoes the gateway without its tagSet,
+                // unlike create and describe.
+                .start("transitGateway").raw(transitGatewayXml(gateway, false)).end("transitGateway")
+                .end("ModifyTransitGatewayResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDeleteTransitGateway(MultivaluedMap<String, String> p, String region) {
+        TransitGateway gateway = service.deleteTransitGateway(region, p.getFirst("TransitGatewayId"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("DeleteTransitGatewayResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("transitGateway").raw(transitGatewayXml(gateway, false)).end("transitGateway")
+                .end("DeleteTransitGatewayResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private TransitGatewayOptions parseTransitGatewayOptions(MultivaluedMap<String, String> p, String prefix) {
+        TransitGatewayOptions options = new TransitGatewayOptions();
+        options.setAmazonSideAsn(longOrNull(p, prefix + ".AmazonSideAsn"));
+        options.setAutoAcceptSharedAttachments(p.getFirst(prefix + ".AutoAcceptSharedAttachments"));
+        options.setDefaultRouteTableAssociation(p.getFirst(prefix + ".DefaultRouteTableAssociation"));
+        options.setAssociationDefaultRouteTableId(p.getFirst(prefix + ".AssociationDefaultRouteTableId"));
+        options.setDefaultRouteTablePropagation(p.getFirst(prefix + ".DefaultRouteTablePropagation"));
+        options.setPropagationDefaultRouteTableId(p.getFirst(prefix + ".PropagationDefaultRouteTableId"));
+        options.setVpnEcmpSupport(p.getFirst(prefix + ".VpnEcmpSupport"));
+        options.setDnsSupport(p.getFirst(prefix + ".DnsSupport"));
+        options.setSecurityGroupReferencingSupport(p.getFirst(prefix + ".SecurityGroupReferencingSupport"));
+        options.setMulticastSupport(p.getFirst(prefix + ".MulticastSupport"));
+        options.setTransitGatewayCidrBlocks(getList(p, prefix + ".TransitGatewayCidrBlocks"));
+        return options;
+    }
+
+    private Response handleCreateTransitGatewayVpcAttachment(MultivaluedMap<String, String> p, String region) {
+        TransitGatewayVpcAttachment attachment = service.createTransitGatewayVpcAttachment(
+                region,
+                p.getFirst("TransitGatewayId"),
+                p.getFirst("VpcId"),
+                getList(p, "SubnetIds"),
+                parseVpcAttachmentOptions(p),
+                parseTagsForResource(p, "transit-gateway-attachment"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("CreateTransitGatewayVpcAttachmentResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("transitGatewayVpcAttachment").raw(vpcAttachmentXml(attachment, true, true))
+                .end("transitGatewayVpcAttachment")
+                .end("CreateTransitGatewayVpcAttachmentResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDescribeTransitGatewayVpcAttachments(MultivaluedMap<String, String> p, String region) {
+        List<TransitGatewayVpcAttachment> attachments = service.describeTransitGatewayVpcAttachments(
+                region, getList(p, "TransitGatewayAttachmentIds"), getFilters(p));
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeTransitGatewayVpcAttachmentsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("transitGatewayVpcAttachments");
+        for (TransitGatewayVpcAttachment attachment : attachments) {
+            xml.start("item").raw(vpcAttachmentXml(attachment, true, true)).end("item");
+        }
+        xml.end("transitGatewayVpcAttachments").end("DescribeTransitGatewayVpcAttachmentsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    /**
+     * The resource-agnostic view of the same attachments. It is a different shape rather than a
+     * superset: the subnets and options are gone, the VPC appears as a typed resource, and the
+     * route table association shows up here and nowhere else.
+     */
+    private Response handleDescribeTransitGatewayAttachments(MultivaluedMap<String, String> p, String region) {
+        List<TransitGatewayVpcAttachment> attachments = service.describeTransitGatewayVpcAttachments(
+                region, getList(p, "TransitGatewayAttachmentIds"), getFilters(p));
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeTransitGatewayAttachmentsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("transitGatewayAttachments");
+        for (TransitGatewayVpcAttachment attachment : attachments) {
+            XmlBuilder item = new XmlBuilder()
+                    .elem("transitGatewayAttachmentId", attachment.getTransitGatewayAttachmentId())
+                    .elem("transitGatewayId", attachment.getTransitGatewayId())
+                    .elem("transitGatewayOwnerId", attachment.getTransitGatewayOwnerId())
+                    .elem("resourceOwnerId", attachment.getVpcOwnerId())
+                    .elem("resourceType", "vpc")
+                    .elem("resourceId", attachment.getVpcId())
+                    .elem("state", attachment.getState());
+            if (attachment.getAssociationRouteTableId() != null) {
+                item.start("association")
+                        .elem("transitGatewayRouteTableId", attachment.getAssociationRouteTableId())
+                        .elem("state", attachment.getAssociationState())
+                        .end("association");
+            }
+            item.elem("creationTime", attachment.getCreationTime())
+                    .raw(tagSetXml(attachment.getTags()));
+            xml.start("item").raw(item.build()).end("item");
+        }
+        xml.end("transitGatewayAttachments").end("DescribeTransitGatewayAttachmentsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleModifyTransitGatewayVpcAttachment(MultivaluedMap<String, String> p, String region) {
+        TransitGatewayVpcAttachment attachment = service.modifyTransitGatewayVpcAttachment(
+                region,
+                p.getFirst("TransitGatewayAttachmentId"),
+                getList(p, "AddSubnetIds"),
+                getList(p, "RemoveSubnetIds"),
+                parseVpcAttachmentOptions(p));
+        XmlBuilder xml = new XmlBuilder()
+                .start("ModifyTransitGatewayVpcAttachmentResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                // Verified live: modify echoes the attachment without its tagSet.
+                .start("transitGatewayVpcAttachment").raw(vpcAttachmentXml(attachment, true, false))
+                .end("transitGatewayVpcAttachment")
+                .end("ModifyTransitGatewayVpcAttachmentResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDeleteTransitGatewayVpcAttachment(MultivaluedMap<String, String> p, String region) {
+        TransitGatewayVpcAttachment attachment = service.deleteTransitGatewayVpcAttachment(
+                region, p.getFirst("TransitGatewayAttachmentId"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("DeleteTransitGatewayVpcAttachmentResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                // Verified live: delete drops the subnets and the tagSet from the echo.
+                .start("transitGatewayVpcAttachment").raw(vpcAttachmentXml(attachment, false, false))
+                .end("transitGatewayVpcAttachment")
+                .end("DeleteTransitGatewayVpcAttachmentResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private TransitGatewayVpcAttachmentOptions parseVpcAttachmentOptions(MultivaluedMap<String, String> p) {
+        TransitGatewayVpcAttachmentOptions options = new TransitGatewayVpcAttachmentOptions();
+        options.setDnsSupport(p.getFirst("Options.DnsSupport"));
+        options.setSecurityGroupReferencingSupport(p.getFirst("Options.SecurityGroupReferencingSupport"));
+        options.setIpv6Support(p.getFirst("Options.Ipv6Support"));
+        options.setApplianceModeSupport(p.getFirst("Options.ApplianceModeSupport"));
+        return options;
+    }
+
+    private Response handleCreateTransitGatewayRouteTable(MultivaluedMap<String, String> p, String region) {
+        TransitGatewayRouteTable routeTable = service.createTransitGatewayRouteTable(
+                region, p.getFirst("TransitGatewayId"),
+                parseTagsForResource(p, "transit-gateway-route-table"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("CreateTransitGatewayRouteTableResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("transitGatewayRouteTable").raw(routeTableXml(routeTable, true))
+                .end("transitGatewayRouteTable")
+                .end("CreateTransitGatewayRouteTableResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDescribeTransitGatewayRouteTables(MultivaluedMap<String, String> p, String region) {
+        List<TransitGatewayRouteTable> routeTables = service.describeTransitGatewayRouteTables(
+                region, getList(p, "TransitGatewayRouteTableIds"), getFilters(p));
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeTransitGatewayRouteTablesResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("transitGatewayRouteTables");
+        for (TransitGatewayRouteTable routeTable : routeTables) {
+            xml.start("item").raw(routeTableXml(routeTable, true)).end("item");
+        }
+        xml.end("transitGatewayRouteTables").end("DescribeTransitGatewayRouteTablesResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDeleteTransitGatewayRouteTable(MultivaluedMap<String, String> p, String region) {
+        TransitGatewayRouteTable routeTable = service.deleteTransitGatewayRouteTable(
+                region, p.getFirst("TransitGatewayRouteTableId"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("DeleteTransitGatewayRouteTableResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("transitGatewayRouteTable").raw(routeTableXml(routeTable, false))
+                .end("transitGatewayRouteTable")
+                .end("DeleteTransitGatewayRouteTableResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleAssociateTransitGatewayRouteTable(MultivaluedMap<String, String> p, String region) {
+        TransitGatewayVpcAttachment attachment = service.associateTransitGatewayRouteTable(
+                region, p.getFirst("TransitGatewayRouteTableId"), p.getFirst("TransitGatewayAttachmentId"));
+        // Verified live: the call reports the transitional state even though the association is
+        // already recorded.
+        return xmlResponse(new XmlBuilder()
+                .start("AssociateTransitGatewayRouteTableResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("association").raw(associationXml(attachment, p.getFirst("TransitGatewayRouteTableId"),
+                        "associating", true)).end("association")
+                .end("AssociateTransitGatewayRouteTableResponse").build());
+    }
+
+    private Response handleDisassociateTransitGatewayRouteTable(MultivaluedMap<String, String> p, String region) {
+        String routeTableId = p.getFirst("TransitGatewayRouteTableId");
+        TransitGatewayVpcAttachment attachment = service.disassociateTransitGatewayRouteTable(
+                region, routeTableId, p.getFirst("TransitGatewayAttachmentId"));
+        return xmlResponse(new XmlBuilder()
+                .start("DisassociateTransitGatewayRouteTableResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("association").raw(associationXml(attachment, routeTableId, "disassociating", true))
+                .end("association")
+                .end("DisassociateTransitGatewayRouteTableResponse").build());
+    }
+
+    private Response handleGetTransitGatewayRouteTableAssociations(
+            MultivaluedMap<String, String> p, String region) {
+        String routeTableId = p.getFirst("TransitGatewayRouteTableId");
+        List<TransitGatewayVpcAttachment> associated = service.associationsOf(region, routeTableId);
+        XmlBuilder xml = new XmlBuilder()
+                .start("GetTransitGatewayRouteTableAssociationsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("associations");
+        for (TransitGatewayVpcAttachment attachment : associated) {
+            // The listing form carries no route table id: the caller named it in the request.
+            xml.start("item").raw(associationXml(attachment, routeTableId, attachment.getAssociationState(), false))
+                    .end("item");
+        }
+        xml.end("associations").end("GetTransitGatewayRouteTableAssociationsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleEnableTransitGatewayRouteTablePropagation(
+            MultivaluedMap<String, String> p, String region) {
+        TransitGatewayRouteTablePropagation propagation = service.enableTransitGatewayRouteTablePropagation(
+                region, p.getFirst("TransitGatewayRouteTableId"), p.getFirst("TransitGatewayAttachmentId"));
+        return xmlResponse(new XmlBuilder()
+                .start("EnableTransitGatewayRouteTablePropagationResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("propagation").raw(propagationXml(propagation, true)).end("propagation")
+                .end("EnableTransitGatewayRouteTablePropagationResponse").build());
+    }
+
+    private Response handleDisableTransitGatewayRouteTablePropagation(
+            MultivaluedMap<String, String> p, String region) {
+        TransitGatewayRouteTablePropagation propagation = service.disableTransitGatewayRouteTablePropagation(
+                region, p.getFirst("TransitGatewayRouteTableId"), p.getFirst("TransitGatewayAttachmentId"));
+        return xmlResponse(new XmlBuilder()
+                .start("DisableTransitGatewayRouteTablePropagationResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("propagation").raw(propagationXml(propagation, true)).end("propagation")
+                .end("DisableTransitGatewayRouteTablePropagationResponse").build());
+    }
+
+    private Response handleGetTransitGatewayRouteTablePropagations(
+            MultivaluedMap<String, String> p, String region) {
+        List<TransitGatewayRouteTablePropagation> propagations =
+                service.propagationsOf(region, p.getFirst("TransitGatewayRouteTableId"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("GetTransitGatewayRouteTablePropagationsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("transitGatewayRouteTablePropagations");
+        for (TransitGatewayRouteTablePropagation propagation : propagations) {
+            // The listing form drops the route table id that enable and disable both carry.
+            xml.start("item").raw(propagationXml(propagation, false)).end("item");
+        }
+        xml.end("transitGatewayRouteTablePropagations")
+                .end("GetTransitGatewayRouteTablePropagationsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleCreateTransitGatewayRoute(MultivaluedMap<String, String> p, String region) {
+        TransitGatewayRoute route = service.createTransitGatewayRoute(
+                region,
+                p.getFirst("TransitGatewayRouteTableId"),
+                p.getFirst("DestinationCidrBlock"),
+                p.getFirst("TransitGatewayAttachmentId"),
+                Boolean.parseBoolean(p.getFirst("Blackhole")));
+        return xmlResponse(new XmlBuilder()
+                .start("CreateTransitGatewayRouteResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("route").raw(routeXml(route)).end("route")
+                .end("CreateTransitGatewayRouteResponse").build());
+    }
+
+    private Response handleReplaceTransitGatewayRoute(MultivaluedMap<String, String> p, String region) {
+        TransitGatewayRoute route = service.replaceTransitGatewayRoute(
+                region,
+                p.getFirst("TransitGatewayRouteTableId"),
+                p.getFirst("DestinationCidrBlock"),
+                p.getFirst("TransitGatewayAttachmentId"),
+                Boolean.parseBoolean(p.getFirst("Blackhole")));
+        return xmlResponse(new XmlBuilder()
+                .start("ReplaceTransitGatewayRouteResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("route").raw(routeXml(route)).end("route")
+                .end("ReplaceTransitGatewayRouteResponse").build());
+    }
+
+    private Response handleDeleteTransitGatewayRoute(MultivaluedMap<String, String> p, String region) {
+        TransitGatewayRoute route = service.deleteTransitGatewayRoute(
+                region, p.getFirst("TransitGatewayRouteTableId"), p.getFirst("DestinationCidrBlock"));
+        return xmlResponse(new XmlBuilder()
+                .start("DeleteTransitGatewayRouteResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("route").raw(routeXml(route)).end("route")
+                .end("DeleteTransitGatewayRouteResponse").build());
+    }
+
+    private Response handleSearchTransitGatewayRoutes(MultivaluedMap<String, String> p, String region) {
+        List<TransitGatewayRoute> routes = service.searchTransitGatewayRoutes(
+                region, p.getFirst("TransitGatewayRouteTableId"), getFilters(p));
+        XmlBuilder xml = new XmlBuilder()
+                .start("SearchTransitGatewayRoutesResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("routeSet");
+        for (TransitGatewayRoute route : routes) {
+            xml.start("item").raw(routeXml(route)).end("item");
+        }
+        xml.end("routeSet")
+                .elem("additionalRoutesAvailable", "false")
+                .end("SearchTransitGatewayRoutesResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private String routeTableXml(TransitGatewayRouteTable routeTable, boolean includeTags) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("transitGatewayRouteTableId", routeTable.getTransitGatewayRouteTableId())
+                .elem("transitGatewayId", routeTable.getTransitGatewayId())
+                .elem("state", routeTable.getState())
+                .elem("defaultAssociationRouteTable", String.valueOf(routeTable.isDefaultAssociationRouteTable()))
+                .elem("defaultPropagationRouteTable", String.valueOf(routeTable.isDefaultPropagationRouteTable()))
+                .elem("creationTime", routeTable.getCreationTime());
+        if (includeTags) {
+            xml.raw(tagSetXml(routeTable.getTags()));
+        }
+        return xml.build();
+    }
+
+    private String associationXml(TransitGatewayVpcAttachment attachment, String routeTableId,
+                                  String state, boolean includeRouteTableId) {
+        XmlBuilder xml = new XmlBuilder();
+        if (includeRouteTableId) {
+            xml.elem("transitGatewayRouteTableId", routeTableId);
+        }
+        return xml.elem("transitGatewayAttachmentId", attachment.getTransitGatewayAttachmentId())
+                .elem("resourceId", attachment.getVpcId())
+                .elem("resourceType", "vpc")
+                .elem("state", state)
+                .build();
+    }
+
+    private String propagationXml(TransitGatewayRouteTablePropagation propagation, boolean includeRouteTableId) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("transitGatewayAttachmentId", propagation.getTransitGatewayAttachmentId())
+                .elem("resourceId", propagation.getResourceId())
+                .elem("resourceType", propagation.getResourceType());
+        if (includeRouteTableId) {
+            xml.elem("transitGatewayRouteTableId", propagation.getTransitGatewayRouteTableId());
+        }
+        return xml.elem("state", propagation.getState()).build();
+    }
+
+    private String routeXml(TransitGatewayRoute route) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("destinationCidrBlock", route.getDestinationCidrBlock());
+        // A blackhole route, and a deleted one, carry no attachment at all.
+        if (route.getTransitGatewayAttachmentId() != null) {
+            xml.start("transitGatewayAttachments").start("item")
+                    .elem("resourceId", route.getResourceId())
+                    .elem("transitGatewayAttachmentId", route.getTransitGatewayAttachmentId())
+                    .elem("resourceType", route.getResourceType())
+                    .end("item").end("transitGatewayAttachments");
+        }
+        return xml.elem("type", route.getType())
+                .elem("state", route.getState())
+                .build();
+    }
+
+    private String vpcAttachmentXml(TransitGatewayVpcAttachment attachment, boolean includeSubnets,
+                                    boolean includeTags) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("transitGatewayAttachmentId", attachment.getTransitGatewayAttachmentId())
+                .elem("transitGatewayId", attachment.getTransitGatewayId())
+                .elem("vpcId", attachment.getVpcId())
+                .elem("vpcOwnerId", attachment.getVpcOwnerId())
+                .elem("state", attachment.getState());
+        if (includeSubnets) {
+            xml.start("subnetIds");
+            for (String subnetId : attachment.getSubnetIds()) {
+                xml.elem("item", subnetId);
+            }
+            xml.end("subnetIds");
+        }
+        xml.elem("creationTime", attachment.getCreationTime())
+                .start("options")
+                .elem("dnsSupport", attachment.getOptions().getDnsSupport())
+                .elem("securityGroupReferencingSupport", attachment.getOptions().getSecurityGroupReferencingSupport())
+                .elem("ipv6Support", attachment.getOptions().getIpv6Support())
+                .elem("applianceModeSupport", attachment.getOptions().getApplianceModeSupport())
+                .end("options");
+        if (includeTags) {
+            xml.raw(tagSetXml(attachment.getTags()));
+        }
+        return xml.build();
+    }
+
+    private String transitGatewayXml(TransitGateway gateway) {
+        return transitGatewayXml(gateway, true);
+    }
+
+    private String transitGatewayXml(TransitGateway gateway, boolean includeTags) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("transitGatewayId", gateway.getTransitGatewayId())
+                .elem("transitGatewayArn", gateway.getTransitGatewayArn())
+                .elem("state", gateway.getState())
+                .elem("ownerId", gateway.getOwnerId())
+                .elem("description", gateway.getDescription())
+                .elem("creationTime", gateway.getCreationTime())
+                .start("options")
+                .elem("amazonSideAsn", String.valueOf(gateway.getOptions().getAmazonSideAsn()));
+        List<String> cidrBlocks = gateway.getOptions().getTransitGatewayCidrBlocks();
+        // AWS omits the member entirely rather than sending an empty set.
+        if (cidrBlocks != null && !cidrBlocks.isEmpty()) {
+            // A plain string list (ValueStringList), so each item carries the CIDR as its own text
+            // rather than wrapping it in an element.
+            xml.start("transitGatewayCidrBlocks");
+            for (String cidr : cidrBlocks) {
+                xml.elem("item", cidr);
+            }
+            xml.end("transitGatewayCidrBlocks");
+        }
+        xml.elem("autoAcceptSharedAttachments", gateway.getOptions().getAutoAcceptSharedAttachments())
+                .elem("defaultRouteTableAssociation", gateway.getOptions().getDefaultRouteTableAssociation())
+                .elem("associationDefaultRouteTableId", gateway.getOptions().getAssociationDefaultRouteTableId())
+                .elem("defaultRouteTablePropagation", gateway.getOptions().getDefaultRouteTablePropagation())
+                .elem("propagationDefaultRouteTableId", gateway.getOptions().getPropagationDefaultRouteTableId())
+                .elem("vpnEcmpSupport", gateway.getOptions().getVpnEcmpSupport())
+                .elem("dnsSupport", gateway.getOptions().getDnsSupport())
+                .elem("securityGroupReferencingSupport", gateway.getOptions().getSecurityGroupReferencingSupport())
+                .elem("multicastSupport", gateway.getOptions().getMulticastSupport())
+                .end("options");
+        if (includeTags) {
+            xml.raw(tagSetXml(gateway.getTags()));
+        }
+        return xml.build();
+    }
+
+    private String managedPrefixListXml(ManagedPrefixList list) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("prefixListId", list.getPrefixListId())
+                .elem("addressFamily", list.getAddressFamily())
+                .elem("state", list.getState());
+        if (list.getStateMessage() != null) {
+            xml.elem("stateMessage", list.getStateMessage());
+        }
+        xml.elem("prefixListArn", list.getPrefixListArn())
+                .elem("prefixListName", list.getPrefixListName())
+                .elem("maxEntries", list.getMaxEntries() == null ? 0 : list.getMaxEntries())
+                .elem("version", list.getVersion())
+                .elem("ownerId", list.getOwnerId());
+        xml.raw(tagSetXml(list.getTags()));
+        return xml.build();
+    }
+
+    // Entry lists arrive as Entry.N.Cidr / AddEntry.N.Cidr / RemoveEntry.N.Cidr. RemoveEntry
+    // carries only a Cidr on the wire, which parses here as an entry with a null description.
+    private List<PrefixListEntry> parsePrefixListEntries(MultivaluedMap<String, String> p, String prefix) {
+        List<PrefixListEntry> entries = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String cidr = p.getFirst(prefix + "." + i + ".Cidr");
+            if (cidr == null) break;
+            entries.add(new PrefixListEntry(cidr, p.getFirst(prefix + "." + i + ".Description")));
+        }
+        return entries;
+    }
+
+    // Malformed numerics must surface as a client error, not escape the handler as an
+    // unchecked NumberFormatException and turn into a 500. Only an absent parameter is null: a
+    // present but blank value is malformed input, and treating it as absent would quietly drop
+    // the conditional-version check on ModifyManagedPrefixList.
+    private Integer intOrNull(MultivaluedMap<String, String> p, String name) {
+        String value = p.getFirst(name);
+        if (value == null) {
+            return null;
+        }
+        try {
+            return Integer.valueOf(value);
+        } catch (NumberFormatException e) {
+            throw new AwsException("InvalidParameterValue",
+                    "Invalid value '" + value + "' for " + name + ".", 400);
+        }
+    }
+
+    private Long longOrNull(MultivaluedMap<String, String> p, String name) {
+        String value = p.getFirst(name);
+        if (value == null) {
+            return null;
+        }
+        try {
+            return Long.valueOf(value);
+        } catch (NumberFormatException e) {
+            throw new AwsException("InvalidParameterValue",
+                    "Invalid value '" + value + "' for " + name + ".", 400);
+        }
     }
 
     private Response handleDeleteVpcEndpoints(MultivaluedMap<String, String> p, String region) {
@@ -1276,6 +2062,30 @@ public class Ec2QueryHandler {
         List<String> owners = getList(p, "Owner");
         Map<String, List<String>> filters = getFilters(p);
         List<Image> images = service.describeImages(region, imageIds, owners, filters);
+        // CDK's MachineImage.lookup is a synth-time context provider that queries
+        // by a `name` wildcard and aborts `cdk deploy` if the response is empty.
+        // When a wildcard name filter matches no seeded AMI, synthesize one that
+        // satisfies it, so the lookup resolves — the exact id is a runtime detail.
+        if (images.isEmpty() && imageIds.isEmpty() && filters.containsKey("name")) {
+            // A filter's values are an OR, so the wildcard is whichever value carries one rather
+            // than whichever comes first. Taking the first outright meant an exact value ahead of
+            // a wildcard skipped synthesis and the lookup got nothing.
+            String namePattern = filters.get("name").stream()
+                    .filter(v -> v != null && (v.contains("*") || v.contains("?")))
+                    .findFirst()
+                    .orElse(null);
+            if (namePattern != null) {
+                Image synthesized = synthesizeLookupImage(namePattern, filters, owners);
+                // Only hand it back if it satisfies everything that was asked for. Returning an
+                // AMI that violates the request is worse than the empty result the lookup would
+                // otherwise get, and the caller cannot tell the difference. Owner.N is carried
+                // outside the filter set, so it has to be checked separately.
+                if (service.imageMatchesFilters(synthesized, filters)
+                        && service.imageMatchesOwners(synthesized, owners)) {
+                    images = List.of(synthesized);
+                }
+            }
+        }
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeImagesResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -1301,6 +2111,108 @@ public class Ec2QueryHandler {
                     .end("item");
         }
         xml.end("imagesSet").end("DescribeImagesResponse");
+        return xmlResponse(xml.build());
+    }
+
+    /** Stands in for a {@code *} when turning a lookup pattern into a concrete name. */
+    private static final String SYNTH_WILDCARD_TOKEN = "20260101";
+
+    /** Stands in for a {@code ?}, which matches exactly one character. */
+    private static final String SYNTH_SINGLE_CHAR_TOKEN = "0";
+
+    /** AWS's own account for the Amazon-owned AMIs, and the default when no owner is requested. */
+    private static final String AMAZON_OWNER_ID = "137112412989";
+
+    /** The account behind the {@code aws-marketplace} owner alias. */
+    private static final String AWS_MARKETPLACE_OWNER_ID = "679593333241";
+
+    /**
+     * The owner the synthesized image should carry. {@code Owner.N} takes the aliases {@code self},
+     * {@code amazon} and {@code aws-marketplace} as well as bare account ids, and an alias written
+     * through verbatim produced an image owned by the literal string. AWS always reports an account
+     * id in {@code imageOwnerId}, so each alias resolves to the account it names.
+     */
+    private String resolveSynthOwner(Map<String, List<String>> filters, List<String> owners) {
+        // An owner-alias filter names an account just as much as Owner.N does, so it is consulted
+        // before the default. Without that, filtering on owner-alias alone produced an image
+        // carrying that alias beside the default Amazon account id, contradicting itself the same
+        // way an unresolved alias did in the other direction.
+        String requested = filters.getOrDefault("owner-id", owners == null ? List.of() : owners)
+                .stream().findFirst()
+                .orElseGet(() -> firstFilterValue(filters, "owner-alias", AMAZON_OWNER_ID));
+        return switch (requested) {
+            case "self" -> config.defaultAccountId();
+            case "amazon" -> AMAZON_OWNER_ID;
+            case "aws-marketplace" -> AWS_MARKETPLACE_OWNER_ID;
+            default -> requested;
+        };
+    }
+
+    /**
+     * The alias that belongs to a resolved owner account, or null when the account has none. AWS
+     * only sets imageOwnerAlias for its own published images, so defaulting it to amazon reported
+     * ownership contradicting the owner id whenever the scope named anything else.
+     */
+    private static String aliasForOwner(String ownerId) {
+        return switch (ownerId) {
+            case AMAZON_OWNER_ID -> "amazon";
+            case AWS_MARKETPLACE_OWNER_ID -> "aws-marketplace";
+            default -> null;
+        };
+    }
+
+    /** The requested value for a scalar filter, so the synthesized image satisfies it. */
+    private static String firstFilterValue(Map<String, List<String>> filters, String name, String fallback) {
+        return filters.getOrDefault(name, List.of()).stream()
+                .filter(v -> v != null && !v.contains("*") && !v.contains("?"))
+                .findFirst()
+                .orElse(fallback);
+    }
+
+    /**
+     * Builds an AMI that satisfies a lookup's name wildcard and its owner and architecture filters.
+     * The id is a hash of the pattern, so repeated lookups resolve to the same image.
+     */
+    private Image synthesizeLookupImage(String namePattern, Map<String, List<String>> filters, List<String> owners) {
+        Image img = new Image();
+        // 17 hex chars after "ami-", deterministic from the pattern.
+        String hash = String.format("%08x", namePattern.hashCode() & 0x7fffffff);
+        String id17 = (hash + hash + hash).substring(0, 17);
+        img.setImageId("ami-" + id17);
+        // Substitute each wildcard rather than truncating at the first one, so an infix pattern
+        // like ubuntu-*-20.04-* yields a name that still satisfies it. Truncating produced
+        // "ubuntu-20260101", which does not. A ? takes exactly one character, so leaving it in
+        // place would hand back a name the requesting filter no longer matches.
+        img.setName(namePattern
+                .replace("*", SYNTH_WILDCARD_TOKEN)
+                .replace("?", SYNTH_SINGLE_CHAR_TOKEN));
+        img.setState(firstFilterValue(filters, "state", "available"));
+        String ownerId = resolveSynthOwner(filters, owners);
+        img.setOwnerId(ownerId);
+        img.setImageOwnerAlias(firstFilterValue(filters, "owner-alias", aliasForOwner(ownerId)));
+        img.setPublic(true);
+        img.setArchitecture(firstFilterValue(filters, "architecture", "x86_64"));
+        img.setRootDeviceType(firstFilterValue(filters, "root-device-type", "ebs"));
+        img.setRootDeviceName(firstFilterValue(filters, "root-device-name", "/dev/xvda"));
+        img.setVirtualizationType(firstFilterValue(filters, "virtualization-type", "hvm"));
+        img.setHypervisor(firstFilterValue(filters, "hypervisor", "xen"));
+        img.setDescription("Synthesized AMI for MachineImage.lookup(" + namePattern + ")");
+        img.setCreationDate("2026-01-01T00:00:00.000Z");
+        return img;
+    }
+
+    private Response handleCreateImage(MultivaluedMap<String, String> p, String region) {
+        Image image = service.createImage(
+                region,
+                p.getFirst("InstanceId"),
+                p.getFirst("Name"),
+                p.getFirst("Description"),
+                Boolean.parseBoolean(p.getFirst("NoReboot")));
+        XmlBuilder xml = new XmlBuilder()
+                .start("CreateImageResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .elem("imageId", image.getImageId())
+                .end("CreateImageResponse");
         return xmlResponse(xml.build());
     }
 
@@ -1497,6 +2409,33 @@ public class Ec2QueryHandler {
         String natGwId = p.getFirst("NatGatewayId");
         service.createRoute(region, rtId, dest, gwId, natGwId);
         return booleanResponse("CreateRoute");
+    }
+
+    private Response handleReplaceRoute(MultivaluedMap<String, String> p, String region) {
+        // A route holds only a gateway or a NAT gateway here. Every other AWS target keeps the
+        // UnsupportedOperation it returned before this action existed, rather than being accepted
+        // and quietly clearing the route it was meant to repoint.
+        for (String target : UNSUPPORTED_ROUTE_TARGETS) {
+            if (p.getFirst(target) != null) {
+                throw new AwsException("UnsupportedOperation",
+                        "ReplaceRoute with " + target + " is not supported.", 400);
+            }
+        }
+        String rtId = p.getFirst("RouteTableId");
+        String dest = p.getFirst("DestinationCidrBlock");
+        String gwId = p.getFirst("GatewayId");
+        String natGwId = p.getFirst("NatGatewayId");
+        // Resetting a route to the local target is expressible: `local` is the gateway id the
+        // route table's built-in route already carries, so it needs no new field on Route.
+        if (Boolean.parseBoolean(p.getFirst("LocalTarget"))) {
+            if (gwId != null || natGwId != null) {
+                throw new AwsException("InvalidParameterCombination",
+                        "ReplaceRoute takes exactly one target.", 400);
+            }
+            gwId = LOCAL_GATEWAY_ID;
+        }
+        service.replaceRoute(region, rtId, dest, gwId, natGwId);
+        return booleanResponse("ReplaceRoute");
     }
 
     private Response handleDeleteRoute(MultivaluedMap<String, String> p, String region) {
@@ -2215,7 +3154,20 @@ public class Ec2QueryHandler {
         if (rule.getToPort() != null) xml.elem("toPort", String.valueOf(rule.getToPort()));
         xml.elem("cidrIpv4", rule.getCidrIpv4())
                 .elem("cidrIpv6", rule.getCidrIpv6())
-                .elem("description", rule.getDescription())
+                .elem("prefixListId", rule.getPrefixListId());
+        // Guarded: unlike elem(), start()/end() emit even when every child is null, which would put
+        // an empty <referencedGroupInfo/> on every CIDR rule.
+        ReferencedSecurityGroup ref = rule.getReferencedGroupInfo();
+        if (ref != null) {
+            xml.start("referencedGroupInfo")
+                    .elem("groupId", ref.getGroupId())
+                    .elem("peeringStatus", ref.getPeeringStatus())
+                    .elem("userId", ref.getUserId())
+                    .elem("vpcId", ref.getVpcId())
+                    .elem("vpcPeeringConnectionId", ref.getVpcPeeringConnectionId())
+                    .end("referencedGroupInfo");
+        }
+        xml.elem("description", rule.getDescription())
                 .raw(tagSetXml(rule.getTags()));
         return xml.build();
     }
@@ -2689,7 +3641,10 @@ public class Ec2QueryHandler {
             xml.end("ipRanges")
                     .start("ipv6Ranges");
             for (Ipv6Range r : perm.getIpv6Ranges()) {
-                xml.start("item").elem("cidrIpv6", r.getCidrIpv6()).end("item");
+                xml.start("item")
+                        .elem("cidrIpv6", r.getCidrIpv6())
+                        .elem("description", r.getDescription())
+                        .end("item");
             }
             xml.end("ipv6Ranges")
                     .start("groups");
@@ -2698,9 +3653,17 @@ public class Ec2QueryHandler {
                         .elem("userId", g.getUserId())
                         .elem("groupId", g.getGroupId())
                         .elem("groupName", g.getGroupName())
+                        .elem("description", g.getDescription())
                         .end("item");
             }
-            xml.end("groups").end("item");
+            xml.end("groups").start("prefixListIds");
+            for (PrefixListId prefixList : perm.getPrefixListIds()) {
+                xml.start("item")
+                        .elem("prefixListId", prefixList.getPrefixListId())
+                        .elem("description", prefixList.getDescription())
+                        .end("item");
+            }
+            xml.end("prefixListIds").end("item");
         }
         xml.end(wrapperTag);
         return xml.build();

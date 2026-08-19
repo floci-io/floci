@@ -369,11 +369,10 @@ public class CodeBuildRunner implements ContainerTeardown {
             }
         } finally {
             stopFlags.remove(buildId);
-            if (logHandle != null) {
-                try { logHandle.close(); } catch (Exception ignored) {}
-            }
             if (containerId != null && runningContainers.remove(buildId, containerId)) {
-                lifecycleManager.stopAndRemove(containerId, null);
+                lifecycleManager.stopAndRemove(containerId, logHandle);
+            } else if (logHandle != null) {
+                try { logHandle.close(); } catch (Exception ignored) {}
             }
             if (workspace != null) {
                 deleteDirectory(workspace);

@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ssm.model.Command;
 import io.github.hectorvent.floci.services.ssm.model.CommandInvocation;
 import io.github.hectorvent.floci.services.ssm.model.InstanceInformation;
+import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -77,6 +78,11 @@ public class SsmCommandService implements Resettable {
             thread.setDaemon(true);
             return thread;
         });
+    }
+
+    @PreDestroy
+    void stop() {
+        directExecutionExecutor.shutdownNow();
     }
 
     public void clear() {

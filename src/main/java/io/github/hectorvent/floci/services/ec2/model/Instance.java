@@ -25,6 +25,9 @@ public class Instance {
     private String publicIpAddress;
     private String privateDnsName;
     private String publicDnsName;
+    // Whether this instance should be assigned a public IP — true when its subnet
+    // has MapPublicIpOnLaunch (#1984). Instances in private subnets get none.
+    private boolean associatePublicIp = false;
     private String keyName;
     private List<GroupIdentifier> securityGroups = new ArrayList<>();
     private List<InstanceNetworkInterface> networkInterfaces = new ArrayList<>();
@@ -102,6 +105,8 @@ public class Instance {
 
     public String getPublicDnsName() { return publicDnsName; }
     public void setPublicDnsName(String publicDnsName) { this.publicDnsName = publicDnsName; }
+    public boolean isAssociatePublicIp() { return associatePublicIp; }
+    public void setAssociatePublicIp(boolean associatePublicIp) { this.associatePublicIp = associatePublicIp; }
 
     public String getKeyName() { return keyName; }
     public void setKeyName(String keyName) { this.keyName = keyName; }

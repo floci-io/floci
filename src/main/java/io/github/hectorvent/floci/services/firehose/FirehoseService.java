@@ -1,43 +1,125 @@
 package io.github.hectorvent.floci.services.firehose;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription;
+import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.KinesisStreamSource;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.S3Destination;
 import io.github.hectorvent.floci.services.firehose.model.Record;
 import io.github.hectorvent.floci.services.s3.S3Service;
+import io.github.hectorvent.floci.services.s3.model.PutObjectOptions;
+import io.quarkus.runtime.ShutdownDelayInitiatedEvent;
+import io.quarkus.runtime.StartupEvent;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
-import java.nio.charset.StandardCharsets;
-import java.time.ZoneOffset;
-import java.time.ZonedDateTime;
+import java.io.ByteArrayOutputStream;
+import java.time.Clock;
+import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 @ApplicationScoped
 public class FirehoseService {
 
     private static final Logger LOG = Logger.getLogger(FirehoseService.class);
     private static final String DEFAULT_BUCKET = "floci-firehose-results";
-    private static final int DEFAULT_FLUSH_COUNT = 5;
+    private static final int DEFAULT_BUFFERING_INTERVAL_SECONDS = 300;
+    private static final int DEFAULT_BUFFERING_SIZE_MBS = 5;
 
     private final StorageBackend<String, DeliveryStreamDescription> streamStore;
     private final Map<String, List<byte[]>> buffers = new ConcurrentHashMap<>();
+    private final Map<String, Instant> bufferSince = new ConcurrentHashMap<>();
     private final S3Service s3Service;
     private final RegionResolver regionResolver;
+    private final Clock clock;
+    private final long tickIntervalSeconds;
+    private final int flushRecordCount;
+    private final boolean flusherEnabled;
+    private final ScheduledExecutorService flushExecutor;
 
     @Inject
-    public FirehoseService(StorageFactory storageFactory, S3Service s3Service, RegionResolver regionResolver) {
+    public FirehoseService(StorageFactory storageFactory, S3Service s3Service, RegionResolver regionResolver,
+                           Clock clock, EmulatorConfig config) {
         this.streamStore = storageFactory.create("firehose", "streams.json",
                 new TypeReference<Map<String, DeliveryStreamDescription>>() {});
         this.s3Service = s3Service;
         this.regionResolver = regionResolver;
+        this.clock = clock;
+        this.tickIntervalSeconds = Math.max(1, config.services().firehose().tickIntervalSeconds());
+        this.flushRecordCount = Math.max(0, config.services().firehose().flushRecordCount());
+        this.flusherEnabled = config.services().firehose().enabled();
+        this.flushExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "firehose-buffer-flusher");
+            t.setDaemon(true);
+            return t;
+        });
+    }
+
+    void onStart(@Observes StartupEvent ignored) {
+        if (!flusherEnabled) {
+            LOG.info("Firehose buffer flusher disabled by configuration");
+            return;
+        }
+        flushExecutor.scheduleAtFixedRate(this::tickSafely, tickIntervalSeconds, tickIntervalSeconds, TimeUnit.SECONDS);
+        LOG.infov("Firehose buffer flusher started (tick every {0}s)", tickIntervalSeconds);
+    }
+
+    // ShutdownDelayInitiatedEvent fires before every ShutdownEvent observer, so this
+    // drain lands the pending records in S3 while EmulatorLifecycle.onStop can still
+    // persist them to disk via storageFactory.flushAll().
+    void onPreShutdown(@Observes ShutdownDelayInitiatedEvent ignored) {
+        flushExecutor.shutdownNow();
+        buffers.keySet().forEach(this::flush);
+    }
+
+    void tickSafely() {
+        try {
+            flushDueBuffers(clock.instant());
+        } catch (Throwable t) {
+            LOG.warnv("Firehose buffer flush tick failed: {0}", t.getMessage());
+        }
+    }
+
+    void flushDueBuffers(Instant now) {
+        for (Map.Entry<String, List<byte[]>> entry : buffers.entrySet()) {
+            if (entry.getValue().isEmpty()) {
+                continue;
+            }
+            String streamName = entry.getKey();
+            try {
+                DeliveryStreamDescription stream = describeDeliveryStream(streamName);
+                Instant since = bufferSince.putIfAbsent(streamName, now);
+                if (since == null) {
+                    since = now;
+                }
+                if (!now.isBefore(since.plusSeconds(bufferingIntervalSeconds(stream)))) {
+                    flush(streamName, stream);
+                }
+            } catch (Exception e) {
+                LOG.warnv("Firehose buffer flush failed for stream {0}: {1}", streamName, e.getMessage());
+            }
+        }
+    }
+
+    private static int bufferingIntervalSeconds(DeliveryStreamDescription stream) {
+        S3Destination s3 = stream.s3Destination();
+        // describeDeliveryStream already applied defaults, so hints only miss
+        // when the stream has no S3 destination at all (default-bucket delivery).
+        if (s3 == null || s3.getBufferingHints() == null || s3.getBufferingHints().getIntervalInSeconds() == null) {
+            return DEFAULT_BUFFERING_INTERVAL_SECONDS;
+        }
+        return s3.getBufferingHints().getIntervalInSeconds();
     }
 
     public String createDeliveryStream(String name, S3Destination s3Config) {
@@ -50,6 +132,11 @@ public class FirehoseService {
 
     public String createDeliveryStream(String name, S3Destination s3Config, List<DeliveryStreamDescription.Tag> tags,
                                        String deliveryStreamType) {
+        return createDeliveryStream(name, s3Config, tags, deliveryStreamType, null);
+    }
+
+    public String createDeliveryStream(String name, S3Destination s3Config, List<DeliveryStreamDescription.Tag> tags,
+                                       String deliveryStreamType, KinesisStreamSource source) {
         if (name == null || name.isEmpty() || name.length() > 64 || !name.matches("[a-zA-Z0-9_.-]+")) {
             throw new AwsException("InvalidArgumentException",
                     "Delivery stream name must be between 1 and 64 characters and contain only letters, numbers, underscores, hyphens, or periods.", 400);
@@ -62,7 +149,7 @@ public class FirehoseService {
 
         validateBufferingHints(s3Config);
         String arn = AwsArnUtils.Arn.of("firehose", regionResolver.getDefaultRegion(), regionResolver.getAccountId(), "deliverystream/" + name).toString();
-        DeliveryStreamDescription description = new DeliveryStreamDescription(name, arn, s3Config);
+        DeliveryStreamDescription description = new DeliveryStreamDescription(name, arn, s3Config, source);
         description.setAccountId(regionResolver.getAccountId());
         description.setTags(tags);
         if (deliveryStreamType != null && !deliveryStreamType.isBlank()) {
@@ -142,6 +229,8 @@ public class FirehoseService {
         if (update.getPrefix() != null) current.setPrefix(update.getPrefix());
         if (update.getErrorOutputPrefix() != null) current.setErrorOutputPrefix(update.getErrorOutputPrefix());
         if (update.getCompressionFormat() != null) current.setCompressionFormat(update.getCompressionFormat());
+        if (update.getFileExtension() != null) current.setFileExtension(update.getFileExtension());
+        if (update.getCustomTimeZone() != null) current.setCustomTimeZone(update.getCustomTimeZone());
         if (update.getBufferingHints() != null) current.setBufferingHints(update.getBufferingHints());
         if (update.getEncryptionConfiguration() != null) current.setEncryptionConfiguration(update.getEncryptionConfiguration());
     }
@@ -209,7 +298,11 @@ public class FirehoseService {
     public void deleteDeliveryStream(String name) {
         describeDeliveryStream(name);
         streamStore.delete(name);
+        // Pending records are discarded, not flushed: verified against real AWS
+        // (2026-07-13, eu-west-1) — 3 records buffered under a 300s/5MB hint never
+        // reached the bucket after DeleteDeliveryStream completed.
         buffers.remove(name);
+        bufferSince.remove(name);
         LOG.infov("Deleted Firehose delivery stream: {0}", name);
     }
 
@@ -219,25 +312,39 @@ public class FirehoseService {
     }
 
     public void putRecord(String streamName, Record record) {
-        DeliveryStreamDescription stream = describeDeliveryStream(streamName);
-        buffers.computeIfAbsent(streamName, k -> Collections.synchronizedList(new ArrayList<>()))
-               .add(record.getData());
-
-        if (buffers.get(streamName).size() >= DEFAULT_FLUSH_COUNT) {
-            flush(streamName, stream);
-        }
+        putRecordBatch(streamName, List.of(record));
     }
 
     public void putRecordBatch(String streamName, List<Record> records) {
         DeliveryStreamDescription stream = describeDeliveryStream(streamName);
         List<byte[]> buffer = buffers.computeIfAbsent(
                 streamName, k -> Collections.synchronizedList(new ArrayList<>()));
-        for (Record r : records) {
-            buffer.add(r.getData());
+        long bufferedBytes = 0;
+        int bufferedCount;
+        // Records and their buffering-start timestamp move together under the
+        // buffer lock so the flusher never sees one without the other.
+        synchronized (buffer) {
+            for (Record r : records) {
+                buffer.add(r.getData());
+            }
+            bufferSince.putIfAbsent(streamName, clock.instant());
+            bufferedCount = buffer.size();
+            for (byte[] data : buffer) {
+                bufferedBytes += data.length;
+            }
         }
-        if (buffer.size() >= DEFAULT_FLUSH_COUNT) {
+        if ((flushRecordCount > 0 && bufferedCount >= flushRecordCount)
+                || bufferedBytes >= bufferingSizeLimitBytes(stream)) {
             flush(streamName, stream);
         }
+    }
+
+    private static long bufferingSizeLimitBytes(DeliveryStreamDescription stream) {
+        S3Destination s3 = stream.s3Destination();
+        int sizeInMBs = (s3 == null || s3.getBufferingHints() == null || s3.getBufferingHints().getSizeInMBs() == null)
+                ? DEFAULT_BUFFERING_SIZE_MBS
+                : s3.getBufferingHints().getSizeInMBs();
+        return sizeInMBs * 1024L * 1024L;
     }
 
     public void flush(String streamName) {
@@ -254,27 +361,42 @@ public class FirehoseService {
         synchronized (buffer) {
             toFlush = new ArrayList<>(buffer);
             buffer.clear();
+            bufferSince.remove(streamName);
+        }
+        if (toFlush.isEmpty()) {
+            // Lost the race against a concurrent flush; nothing left to deliver.
+            return;
         }
 
         try {
             String bucket = resolveBucket(stream);
-            String prefix = resolvePrefix(stream);
-            String key = prefix + UUID.randomUUID() + ".json";
+            S3Destination s3 = stream.s3Destination();
+            FirehoseCompression compression =
+                    FirehoseCompression.forDelivery(s3 == null ? null : s3.getCompressionFormat());
+            String key = S3ObjectKeyResolver.resolveKey(s3, stream.getDeliveryStreamName(),
+                    stream.getVersionId(), clock.instant(), compression);
 
             ensureBucket(bucket);
 
-            StringBuilder sb = new StringBuilder();
+            // Records are arbitrary bytes, so they are concatenated as bytes: routing
+            // them through a String would corrupt any payload that is not valid UTF-8.
+            // The appended newline is a deliberate deviation kept from before this
+            // method compressed anything: real AWS inserts no separator at all
+            // (verified: three "abc" records arrive as the 9 bytes "abcabcabc").
+            // See the deviation noted in docs/services/firehose.md.
+            ByteArrayOutputStream payload = new ByteArrayOutputStream();
             for (byte[] data : toFlush) {
-                sb.append(new String(data, StandardCharsets.UTF_8));
-                if (!sb.isEmpty() && sb.charAt(sb.length() - 1) != '\n') {
-                    sb.append('\n');
+                payload.writeBytes(data);
+                if (data.length > 0 && data[data.length - 1] != '\n') {
+                    payload.write('\n');
                 }
             }
 
-            byte[] body = sb.toString().getBytes(StandardCharsets.UTF_8);
-            s3Service.putObject(bucket, key, body, "application/x-ndjson", Map.of());
-            LOG.infov("Flushed {0} records from stream {1} to s3://{2}/{3}",
-                    toFlush.size(), streamName, bucket, key);
+            byte[] body = compression.compress(payload.toByteArray());
+            s3Service.putObject(bucket, key, body, "application/octet-stream", Map.of(),
+                    new PutObjectOptions().withContentEncoding(compression.contentEncoding()));
+            LOG.infov("Flushed {0} records from stream {1} to s3://{2}/{3} ({4})",
+                    toFlush.size(), streamName, bucket, key, compression.wireValue());
         } catch (Exception e) {
             LOG.errorv("Failed to flush Firehose stream {0}: {1}", streamName, e.getMessage());
         }
@@ -286,21 +408,6 @@ public class FirehoseService {
             return s3.bucketName();
         }
         return DEFAULT_BUCKET;
-    }
-
-    private String resolvePrefix(DeliveryStreamDescription stream) {
-        S3Destination s3 = stream.s3Destination();
-        String prefix = (s3 != null && s3.getPrefix() != null) ? s3.getPrefix() : stream.getDeliveryStreamName() + "/";
-
-        // Substitute time-based placeholders matching real Firehose
-        ZonedDateTime now = ZonedDateTime.now(ZoneOffset.UTC);
-        prefix = prefix
-                .replace("{year}", String.format("%04d", now.getYear()))
-                .replace("{month}", String.format("%02d", now.getMonthValue()))
-                .replace("{day}", String.format("%02d", now.getDayOfMonth()))
-                .replace("{hour}", String.format("%02d", now.getHour()));
-
-        return prefix.endsWith("/") ? prefix : prefix + "/";
     }
 
     private void ensureBucket(String bucket) {
