@@ -68,6 +68,16 @@ public class EfsService implements Resettable {
         synchronized (lockFor(region + "::create::" + token)) {
         for (FileSystem existing : fileSystemStore.scan(k -> k.startsWith(region + "::"))) {
             if (token.equals(existing.getCreationToken())) {
+                boolean match = true;
+                if (request.getEncrypted() != null && !request.getEncrypted().equals(existing.getEncrypted())) match = false;
+                if (request.getKmsKeyId() != null && !request.getKmsKeyId().equals(existing.getKmsKeyId())) match = false;
+                if (request.getPerformanceMode() != null && !request.getPerformanceMode().name().equals(existing.getPerformanceMode())) match = false;
+                if (request.getThroughputMode() != null && !request.getThroughputMode().name().equals(existing.getThroughputMode())) match = false;
+                if (request.getProvisionedThroughputInMibps() != null && !request.getProvisionedThroughputInMibps().equals(existing.getProvisionedThroughputInMibps())) match = false;
+                
+                if (!match) {
+                    throw EfsException.idempotentParameterMismatch();
+                }
                 return existing;
             }
         }
@@ -284,7 +294,25 @@ public class EfsService implements Resettable {
 
                 for (AccessPointDescription existing : accessPointStore.scan(k -> k.startsWith(region + "::"))) {
                     if (token.equals(existing.getClientToken())) {
-                        if (!request.getFileSystemId().equals(existing.getFileSystemId())) {
+                        boolean match = true;
+                        if (!request.getFileSystemId().equals(existing.getFileSystemId())) match = false;
+                        
+                        // Compare PosixUser
+                        if (request.getPosixUser() != null && existing.getPosixUser() == null) match = false;
+                        if (request.getPosixUser() == null && existing.getPosixUser() != null) match = false;
+                        if (request.getPosixUser() != null && existing.getPosixUser() != null) {
+                            if (!java.util.Objects.equals(request.getPosixUser().getUid(), existing.getPosixUser().getUid())) match = false;
+                            if (!java.util.Objects.equals(request.getPosixUser().getGid(), existing.getPosixUser().getGid())) match = false;
+                        }
+                        
+                        // Compare RootDirectory
+                        if (request.getRootDirectory() != null && existing.getRootDirectory() == null) match = false;
+                        if (request.getRootDirectory() == null && existing.getRootDirectory() != null) match = false;
+                        if (request.getRootDirectory() != null && existing.getRootDirectory() != null) {
+                            if (!java.util.Objects.equals(request.getRootDirectory().getPath(), existing.getRootDirectory().getPath())) match = false;
+                        }
+                        
+                        if (!match) {
                             throw EfsException.idempotentParameterMismatch();
                         }
                         return existing;
