@@ -872,7 +872,7 @@ public class Ec2Service implements ContainerTeardown {
         return region + "::" + id;
     }
 
-    // Default resource ids must be derived per region (#21): every region seeds its own
+    // Default resource ids must be derived per region (lex00/floci#21): every region seeds its own
     // default VPC/subnets/security group independently, but a literal id like "vpc-default"
     // is identical text in every region's response even though storage itself is already
     // correctly keyed by region. RdsService derives the same ids from these methods so its
@@ -890,7 +890,7 @@ public class Ec2Service implements ContainerTeardown {
     }
 
     // Resolves the default VPC/security-group id actually on file for a region, falling back to
-    // the pre-#21 unscoped literal ("vpc-default"/"sg-default") when storage was persisted before
+    // the pre-lex00/floci#21 unscoped literal ("vpc-default"/"sg-default") when storage was persisted before
     // ids were made region-scoped. Seeding (ensureDefaultResources) always assigns the new
     // region-scoped id going forward; these resolvers only cover lookups against what may already
     // be on disk. Without this, a region seeded under the old scheme would silently lose its
