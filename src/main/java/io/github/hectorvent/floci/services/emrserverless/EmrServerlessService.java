@@ -149,6 +149,9 @@ public class EmrServerlessService {
         if (request.getIdentityCenterConfiguration() != null) {
             app.setIdentityCenterConfiguration(request.getIdentityCenterConfiguration());
         }
+        if (request.getJobLevelCostAllocationConfiguration() != null) {
+            app.setJobLevelCostAllocationConfiguration(request.getJobLevelCostAllocationConfiguration());
+        }
 
         app.setUpdatedAt(System.currentTimeMillis());
         storage.put(applicationId, app);

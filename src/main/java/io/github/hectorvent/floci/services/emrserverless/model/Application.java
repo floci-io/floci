@@ -32,6 +32,7 @@ public class Application {
     private DiskEncryptionConfiguration diskEncryptionConfiguration;
     private InteractiveConfiguration interactiveConfiguration;
     private IdentityCenterConfiguration identityCenterConfiguration;
+    private JobLevelCostAllocationConfiguration jobLevelCostAllocationConfiguration;
 
     public String getApplicationId() { return applicationId; }
     public void setApplicationId(String applicationId) { this.applicationId = applicationId; }
@@ -83,4 +84,6 @@ public class Application {
     public void setInteractiveConfiguration(InteractiveConfiguration interactiveConfiguration) { this.interactiveConfiguration = interactiveConfiguration; }
     public IdentityCenterConfiguration getIdentityCenterConfiguration() { return identityCenterConfiguration; }
     public void setIdentityCenterConfiguration(IdentityCenterConfiguration identityCenterConfiguration) { this.identityCenterConfiguration = identityCenterConfiguration; }
+    public JobLevelCostAllocationConfiguration getJobLevelCostAllocationConfiguration() { return jobLevelCostAllocationConfiguration; }
+    public void setJobLevelCostAllocationConfiguration(JobLevelCostAllocationConfiguration jobLevelCostAllocationConfiguration) { this.jobLevelCostAllocationConfiguration = jobLevelCostAllocationConfiguration; }
 }
