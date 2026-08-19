@@ -24,3 +24,14 @@ Either route `CloudTrailLogWriter`'s delivery write through `S3Controller`/whate
 ## Status: Fixed
 
 `CloudTrailLogWriter.flushTrail()` now calls `cloudTrailService.emitS3DataEvent(...)` immediately after each successful delivery write, using the same evaluation path (`trailsMatching`/selector matching) that API-driven S3 writes go through. Regression test: `CloudTrailSelfDeliveryTest.trailWithBlanketSelectorCapturesItsOwnLogDeliveryAsDataEvent` — creates a trail with a blanket selector pointed at its own destination bucket, forces two flushes, and asserts the second delivery contains a `PutObject` record for the first delivery's own log key. RED confirmed before the fix (only 1 log file delivered instead of 2); GREEN after (48/48 CloudTrail tests passing, no regressions). Fixed commit: `ad229a6b`.
+
+## Live verification on `1160-ct`
+
+Deployed the fix to a live parent and drove the full lifecycle end-to-end, not just unit tests:
+
+1. **Loop confirmed live and unbounded.** Blanket `EventSelectors` (all S3 buckets, no exclusions), one seeded write. Every 60s flush cycle drained exactly one pending record and generated exactly one new one — steady ~722-727 byte deliveries, running unbounded over 36+ cycles / 35+ minutes with no natural termination. Fixed-point loop, not exponential.
+2. **Compounding confirmed.** Burst-wrote 400 then 600 objects (varied sizes) to unrelated buckets while the loop ran. Every external write landed losslessly inside whichever flush cycle it fell into, alongside the self-referential record — verified by exact record-count arithmetic on both bursts (400 → 211+189; 600 → 172+294+134).
+3. **Real-world fix confirmed to stop the loop.** Applied `AdvancedEventSelectors` with `resources.ARN NotStartsWith arn:aws:s3:::<log-bucket>/` (the standard remediation for AWS issue #1192) to the live trail. Self-write loop stopped: last self-referential delivery `02:17:32Z`, zero further organic deliveries.
+4. **One gap found and fixed in the same pass**, filed separately as issue 0035: a bucket-level `ListObjects` call (no object key) against the excluded bucket still slipped through, because `resources.type` was hardcoded to `AWS::S3::Object` for every event regardless of whether it was object- or bucket-level. Fixed in the same rebuild.
+
+Image `localhost/floci-lza:local` rebuilt 2026-08-19 with both fixes.

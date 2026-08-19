@@ -348,21 +348,25 @@ public class CloudTrailService {
 
     private boolean matchesAnyAdvancedSelector(List<AdvancedEventSelector> selectors, S3EventInput in) {
         String arn = "arn:aws:s3:::" + in.bucketName() + (in.key() != null ? "/" + in.key() : "");
+        // Bucket-level operations (e.g. ListObjects) have no object key and are reported
+        // by CloudTrail as AWS::S3::Bucket resources, not AWS::S3::Object — matching real
+        // AWS behavior, an AWS::S3::Object DataResource selector must never match them.
+        String resourceType = in.key() != null ? "AWS::S3::Object" : "AWS::S3::Bucket";
         for (AdvancedEventSelector sel : selectors) {
-            if (matchesAdvancedSelector(sel, arn)) {
+            if (matchesAdvancedSelector(sel, arn, resourceType)) {
                 return true;
             }
         }
         return false;
     }
 
-    private boolean matchesAdvancedSelector(AdvancedEventSelector selector, String s3ObjectArn) {
+    private boolean matchesAdvancedSelector(AdvancedEventSelector selector, String s3ObjectArn, String resourceType) {
         List<AdvancedFieldSelector> fieldSelectors = selector.fieldSelectors();
         if (fieldSelectors == null || fieldSelectors.isEmpty()) {
             return false;
         }
         for (AdvancedFieldSelector fs : fieldSelectors) {
-            if (!matchesAdvancedFieldSelector(fs, s3ObjectArn)) {
+            if (!matchesAdvancedFieldSelector(fs, s3ObjectArn, resourceType)) {
                 return false;
             }
         }
@@ -371,10 +375,10 @@ public class CloudTrailService {
 
     // Package-private for unit testing. Only the fields CloudTrail evaluates for S3 data events
     // are supported: eventCategory, resources.type, resources.ARN.
-    static boolean matchesAdvancedFieldSelector(AdvancedFieldSelector fs, String s3ObjectArn) {
+    static boolean matchesAdvancedFieldSelector(AdvancedFieldSelector fs, String s3ObjectArn, String resourceType) {
         String value = switch (fs.field()) {
             case "eventCategory" -> "Data";
-            case "resources.type" -> "AWS::S3::Object";
+            case "resources.type" -> resourceType;
             case "resources.ARN" -> s3ObjectArn;
             default -> null;
         };
