@@ -160,10 +160,18 @@ public class Ec2IpamService {
 
     public IpamPool createIpamPool(String region, String ipamScopeId, String locale,
                                    String sourceIpamPoolId, String addressFamily, String description) {
+        return createIpamPool(region, ipamScopeId, locale, sourceIpamPoolId, addressFamily,
+                description, config.defaultAccountId());
+    }
+
+    /** Overload for callers (e.g. CloudFormation provisioning) that already have the real
+     *  owning account resolved, instead of falling back to this service's ambient default. */
+    public IpamPool createIpamPool(String region, String ipamScopeId, String locale,
+                                   String sourceIpamPoolId, String addressFamily, String description,
+                                   String ownerId) {
         if (sourceIpamPoolId != null) {
             requirePool(region, sourceIpamPoolId);
         }
-        String ownerId = config.defaultAccountId();
         IpamPool pool = new IpamPool();
         pool.setIpamPoolId("ipam-pool-" + randomHex(17));
         pool.setIpamPoolArn("arn:aws:ec2::" + ownerId + ":ipam-pool/" + pool.getIpamPoolId());
