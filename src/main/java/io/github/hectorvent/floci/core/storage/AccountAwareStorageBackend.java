@@ -330,6 +330,54 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
                 .collect(Collectors.toUnmodifiableSet());
     }
 
+    /** A value together with the account partition that owns it, as recovered by {@link #findAnyAccountEntry}. */
+    public record OwnedEntry<V>(String account, V value) {}
+
+    /**
+     * Resolves a logical key across every account's partition, modelling a globally-unique
+     * namespace — as S3 bucket names are in AWS, where a bucket lives in one account but is
+     * legitimately reachable cross-account. Tries the current caller's partition first (via
+     * {@link #get}, which also covers pre-multi-account un-prefixed data), then falls back to any
+     * other account that owns the key. Returns the first match, or empty if no account has it.
+     *
+     * <p>Unlike {@link #get}, a cross-account hit is <em>not</em> migrated into the caller's
+     * partition: the entry legitimately belongs to its owning account and must stay there.
+     */
+    public Optional<V> findAnyAccount(String key) {
+        return findAnyAccountEntry(key).map(OwnedEntry::value);
+    }
+
+    /**
+     * Like {@link #findAnyAccount}, but also reports the owning account so a cross-account
+     * <em>mutation</em> can write the value back to its owner's partition (via
+     * {@link #putForAccount}) instead of forking a phantom copy into the caller's partition.
+     * The caller's own hit is owned by the current account context; a scanned hit's owner is
+     * the account segment of its raw key (or {@code defaultAccountId} for pre-multi-account,
+     * un-prefixed data).
+     */
+    public Optional<OwnedEntry<V>> findAnyAccountEntry(String key) {
+        Optional<V> own = get(key);
+        if (own.isPresent()) {
+            return Optional.of(new OwnedEntry<>(prefix(), own.get()));
+        }
+        String suffix = "/" + key;
+        for (String rawKey : delegate.keys()) {
+            if (rawKey.equals(key)) {
+                Optional<V> value = delegate.get(rawKey);
+                if (value.isPresent()) {
+                    return Optional.of(new OwnedEntry<>(defaultAccountId, value.get()));
+                }
+            } else if (rawKey.endsWith(suffix)) {
+                Optional<V> value = delegate.get(rawKey);
+                if (value.isPresent()) {
+                    String account = rawKey.substring(0, rawKey.length() - suffix.length());
+                    return Optional.of(new OwnedEntry<>(account, value.get()));
+                }
+            }
+        }
+        return Optional.empty();
+    }
+
     // ---
 
     private String prefix() {
