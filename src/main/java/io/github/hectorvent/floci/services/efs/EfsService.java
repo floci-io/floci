@@ -228,24 +228,26 @@ public class EfsService implements Resettable {
 
     public void deleteMountTarget(String region, String mountTargetId) {
         String key = regionKey(region, mountTargetId);
-        MountTarget mt = mountTargetStore.get(key).orElse(null);
-        if (mt == null) {
-            throw EfsException.mountTargetNotFound(mountTargetId);
-        }
-        
-        try {
-            synchronized (lockFor(regionKey(region, mt.getFileSystemId()))) {
-                FileSystem fs = getFileSystem(region, mt.getFileSystemId());
-            fs.setNumberOfMountTargets(Math.max(0, fs.getNumberOfMountTargets() - 1));
-                fileSystemStore.put(regionKey(region, fs.getFileSystemId()), fs);
+        synchronized (lockFor(key)) {
+            MountTarget mt = mountTargetStore.get(key).orElse(null);
+            if (mt == null) {
+                throw EfsException.mountTargetNotFound(mountTargetId);
             }
-        } catch (EfsException e) {
-            LOG.debug("File system " + mt.getFileSystemId() + " already deleted, skipping parent count update during mount target deletion");
-        } catch (Exception e) {
-            LOG.error("Failed to update parent file system " + mt.getFileSystemId() + " count during mount target deletion", e);
+            
+            try {
+                synchronized (lockFor(regionKey(region, mt.getFileSystemId()))) {
+                    FileSystem fs = getFileSystem(region, mt.getFileSystemId());
+                fs.setNumberOfMountTargets(Math.max(0, fs.getNumberOfMountTargets() - 1));
+                    fileSystemStore.put(regionKey(region, fs.getFileSystemId()), fs);
+                }
+            } catch (EfsException e) {
+                LOG.debug("File system " + mt.getFileSystemId() + " already deleted, skipping parent count update during mount target deletion");
+            } catch (Exception e) {
+                LOG.error("Failed to update parent file system " + mt.getFileSystemId() + " count during mount target deletion", e);
+            }
+            
+            mountTargetStore.delete(key);
         }
-        
-        mountTargetStore.delete(key);
     }
 
     public DescribeMountTargetSecurityGroupsResponse describeMountTargetSecurityGroups(String region, String mountTargetId) {
@@ -259,30 +261,32 @@ public class EfsService implements Resettable {
     }
 
     public void modifyMountTargetSecurityGroups(String region, String mountTargetId, ModifyMountTargetSecurityGroupsRequest request) {
-        MountTarget mt = mountTargetStore.get(regionKey(region, mountTargetId)).orElse(null);
-        if (mt == null) {
-            throw EfsException.mountTargetNotFound(mountTargetId);
+        synchronized (lockFor(regionKey(region, mountTargetId))) {
+            MountTarget mt = mountTargetStore.get(regionKey(region, mountTargetId)).orElse(null);
+            if (mt == null) {
+                throw EfsException.mountTargetNotFound(mountTargetId);
+            }
+            if (request.getSecurityGroups() != null) {
+                mt.setSecurityGroups(new ArrayList<>(request.getSecurityGroups()));
+            }
+            mountTargetStore.put(regionKey(region, mountTargetId), mt);
         }
-        if (request.getSecurityGroups() != null) {
-            mt.setSecurityGroups(new ArrayList<>(request.getSecurityGroups()));
-        }
-        mountTargetStore.put(regionKey(region, mountTargetId), mt);
     }
 
     // --- Access Points ---
 
     public AccessPointDescription createAccessPoint(String region, CreateAccessPointRequest request) {
-        synchronized (lockFor(regionKey(region, request.getFileSystemId()))) {
-            // Validate file system exists
-            getFileSystem(region, request.getFileSystemId());
-
         String token = request.getClientToken() != null ? request.getClientToken() : UUID.randomUUID().toString();
+        synchronized (lockFor(regionKey(region, "ap-token::" + token))) {
+            synchronized (lockFor(regionKey(region, request.getFileSystemId()))) {
+                // Validate file system exists
+                getFileSystem(region, request.getFileSystemId());
 
-        for (AccessPointDescription existing : accessPointStore.scan(k -> k.startsWith(region + "::"))) {
-            if (token.equals(existing.getClientToken())) {
-                return existing;
-            }
-        }
+                for (AccessPointDescription existing : accessPointStore.scan(k -> k.startsWith(region + "::"))) {
+                    if (token.equals(existing.getClientToken())) {
+                        return existing;
+                    }
+                }
 
         String apId = "fsap-" + UUID.randomUUID().toString().replace("-", "").substring(0, 17);
         
@@ -301,6 +305,7 @@ public class EfsService implements Resettable {
         
         accessPointStore.put(regionKey(region, apId), ap);
         return ap;
+            }
         }
     }
 
