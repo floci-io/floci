@@ -171,7 +171,7 @@ class ScheduleInvokerTest {
 
     @Test
     void lambdaTargetPreservesArnAccount() {
-        String arn = "arn:aws:lambda:ap-south-1:100000000012:function:samva-api-dev-saatvik";
+        String arn = "arn:aws:lambda:ap-south-1:100000000012:function:cross-account-function";
         Target target = new Target();
         target.setArn(arn);
         target.setInput("{\"detail\":{\"job\":\"workflow-recovery\"}}");

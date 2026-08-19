@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.lambda;
 
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -77,7 +78,10 @@ public class LambdaAliasStore {
     public Optional<LambdaAlias> getForAccount(
             String accountId, String region, String functionName, String aliasName) {
         if (backend instanceof AccountAwareStorageBackend<LambdaAlias> aware) {
-            return aware.getForAccount(accountId, key(region, functionName, aliasName));
+            return aware.getForAccountMigratingLegacy(
+                    accountId,
+                    key(region, functionName, aliasName),
+                    alias -> accountId.equals(AwsArnUtils.accountOrDefault(alias.getAliasArn(), "")));
         }
         return backend.get(key(region, functionName, aliasName));
     }

@@ -63,7 +63,7 @@ class EventBridgeInvokerTest {
 
     @Test
     void invokeTarget_lambdaTargetPreservesArnAccount() {
-        String arn = "arn:aws:lambda:ap-south-1:100000000012:function:samva-api-dev-saatvik";
+        String arn = "arn:aws:lambda:ap-south-1:100000000012:function:cross-account-function";
         Target target = new Target("id1", arn, "{\"detail\":{\"job\":\"workflow-recovery\"}}", null);
 
         invoker.invokeTarget(target, "{\"ignored\":true}", "ap-south-1");
