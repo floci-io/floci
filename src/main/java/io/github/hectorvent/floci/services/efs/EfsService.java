@@ -13,8 +13,12 @@ import java.util.List;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
+import org.jboss.logging.Logger;
+
 @ApplicationScoped
 public class EfsService implements Resettable {
+
+    private static final Logger LOG = Logger.getLogger(EfsService.class);
 
     private final StorageBackend<String, FileSystem> fileSystemStore;
     private final StorageBackend<String, MountTarget> mountTargetStore;
@@ -126,6 +130,23 @@ public class EfsService implements Resettable {
         if (fileSystemStore.get(key).isEmpty()) {
             throw EfsException.fileSystemNotFound(fileSystemId);
         }
+
+        List<MountTarget> mountTargets = describeMountTargets(region, fileSystemId);
+        if (!mountTargets.isEmpty()) {
+            throw EfsException.fileSystemInUse(fileSystemId);
+        }
+
+        // Clean up access points
+        List<AccessPointDescription> accessPoints = describeAccessPoints(region, fileSystemId, null);
+        for (AccessPointDescription ap : accessPoints) {
+            accessPointStore.delete(regionKey(region, ap.getAccessPointId()));
+        }
+
+        // Clean up policies
+        fileSystemPolicyStore.delete(key);
+        backupPolicyStore.delete(key);
+        lifecycleConfigurationStore.delete(key);
+
         fileSystemStore.delete(key);
     }
 
@@ -197,8 +218,10 @@ public class EfsService implements Resettable {
             FileSystem fs = getFileSystem(region, mt.getFileSystemId());
             fs.setNumberOfMountTargets(Math.max(0, fs.getNumberOfMountTargets() - 1));
             fileSystemStore.put(regionKey(region, fs.getFileSystemId()), fs);
+        } catch (EfsException e) {
+            LOG.debug("File system " + mt.getFileSystemId() + " already deleted, skipping parent count update during mount target deletion");
         } catch (Exception e) {
-            // ignore if fs is already deleted
+            LOG.error("Failed to update parent file system " + mt.getFileSystemId() + " count during mount target deletion", e);
         }
         
         mountTargetStore.delete(key);
@@ -228,6 +251,9 @@ public class EfsService implements Resettable {
     // --- Access Points ---
 
     public AccessPointDescription createAccessPoint(String region, CreateAccessPointRequest request) {
+        // Validate file system exists
+        getFileSystem(region, request.getFileSystemId());
+
         String token = request.getClientToken() != null ? request.getClientToken() : UUID.randomUUID().toString();
 
         for (AccessPointDescription existing : accessPointStore.scan(k -> k.startsWith(region + "::"))) {

@@ -13,6 +13,10 @@ public class EfsException extends AwsException {
         return new EfsException(Status.NOT_FOUND, "FileSystemNotFound", "File system " + fileSystemId + " does not exist.");
     }
 
+    public static EfsException fileSystemInUse(String fileSystemId) {
+        return new EfsException(Status.CONFLICT, "FileSystemInUse", "File system " + fileSystemId + " is in use.");
+    }
+
     public static EfsException mountTargetNotFound(String mountTargetId) {
         return new EfsException(Status.NOT_FOUND, "MountTargetNotFound", "Mount target " + mountTargetId + " does not exist.");
     }
