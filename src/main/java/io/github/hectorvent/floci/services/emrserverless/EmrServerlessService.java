@@ -98,7 +98,7 @@ public class EmrServerlessService {
             all = all.stream().filter(app -> request.getStates().contains(app.getState())).collect(Collectors.toList());
         }
         
-        PaginatedResult<Application> page = Pagination.paginate(all, Application::getApplicationId, request.getMaxResults(), request.getNextToken(), 100, "ValidationException");
+        PaginatedResult<Application> page = Pagination.paginate(all, Application::getApplicationId, request.getMaxResults(), request.getNextToken(), 50, "ValidationException");
         
         return new PaginatedResult<>(
                 page.items().stream().map(this::toSummary).collect(Collectors.toList()),
