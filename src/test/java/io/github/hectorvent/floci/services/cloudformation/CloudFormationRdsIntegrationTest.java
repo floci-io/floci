@@ -171,7 +171,7 @@ class CloudFormationRdsIntegrationTest {
                       "Properties": {
                         "DBSubnetGroupName": "%s",
                         "DBSubnetGroupDescription": "managed by cfn",
-                        "SubnetIds": ["subnet-default-a", "subnet-default-b"]
+                        "SubnetIds": ["%s", "%s"]
                       }
                     }
                   },
@@ -179,6 +179,7 @@ class CloudFormationRdsIntegrationTest {
                     "GroupName": {"Value": {"Ref": "DbSubnets"}}
                   }
                 }
-                """.formatted(groupName);
+                """.formatted(groupName, Ec2Service.defaultSubnetId("us-east-1", "a"),
+                Ec2Service.defaultSubnetId("us-east-1", "b"));
     }
 }
