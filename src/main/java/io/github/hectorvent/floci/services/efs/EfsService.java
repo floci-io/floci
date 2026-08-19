@@ -303,6 +303,14 @@ public class EfsService implements Resettable {
                         if (request.getPosixUser() != null && existing.getPosixUser() != null) {
                             if (!java.util.Objects.equals(request.getPosixUser().getUid(), existing.getPosixUser().getUid())) match = false;
                             if (!java.util.Objects.equals(request.getPosixUser().getGid(), existing.getPosixUser().getGid())) match = false;
+                            
+                            java.util.List<Long> reqGids = request.getPosixUser().getSecondaryGids();
+                            java.util.List<Long> extGids = existing.getPosixUser().getSecondaryGids();
+                            if (reqGids != null && extGids == null) match = false;
+                            if (reqGids == null && extGids != null) match = false;
+                            if (reqGids != null && extGids != null) {
+                                if (reqGids.size() != extGids.size() || !reqGids.containsAll(extGids)) match = false;
+                            }
                         }
                         
                         // Compare RootDirectory
@@ -310,6 +318,16 @@ public class EfsService implements Resettable {
                         if (request.getRootDirectory() == null && existing.getRootDirectory() != null) match = false;
                         if (request.getRootDirectory() != null && existing.getRootDirectory() != null) {
                             if (!java.util.Objects.equals(request.getRootDirectory().getPath(), existing.getRootDirectory().getPath())) match = false;
+                            
+                            io.github.hectorvent.floci.services.efs.model.CreationInfo reqCi = request.getRootDirectory().getCreationInfo();
+                            io.github.hectorvent.floci.services.efs.model.CreationInfo extCi = existing.getRootDirectory().getCreationInfo();
+                            if (reqCi != null && extCi == null) match = false;
+                            if (reqCi == null && extCi != null) match = false;
+                            if (reqCi != null && extCi != null) {
+                                if (!java.util.Objects.equals(reqCi.getOwnerUid(), extCi.getOwnerUid())) match = false;
+                                if (!java.util.Objects.equals(reqCi.getOwnerGid(), extCi.getOwnerGid())) match = false;
+                                if (!java.util.Objects.equals(reqCi.getPermissions(), extCi.getPermissions())) match = false;
+                            }
                         }
                         
                         if (!match) {
