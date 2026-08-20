@@ -245,6 +245,9 @@ public class MemoryLakeFormationStorage implements LakeFormationStorage {
                 sb.append(":cols:").append(String.join(",", r.getTableWithColumns().getColumnNames()));
             } else if (r.getTableWithColumns().getColumnWildcard() != null) {
                 sb.append(":cols:*");
+                if (r.getTableWithColumns().getColumnWildcard().getExcludedColumnNames() != null && !r.getTableWithColumns().getColumnWildcard().getExcludedColumnNames().isEmpty()) {
+                    sb.append(":excl:").append(String.join(",", r.getTableWithColumns().getColumnWildcard().getExcludedColumnNames()));
+                }
             }
             return sb.toString();
         }
