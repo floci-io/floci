@@ -6,7 +6,6 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
-import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -36,7 +35,7 @@ class FisCatalogTargetValidationTest {
         mapper = new ObjectMapper();
         RegionResolver resolver = new RegionResolver(REGION, ACCOUNT_ID);
         catalog = new FisCatalog(mapper, resolver);
-        service = new FisService(new InMemoryStorage<>(), mapper, resolver, catalog);
+        service = new FisService(FisStores.inMemory(), mapper, resolver, catalog);
     }
 
     @Test
@@ -202,7 +201,7 @@ class FisCatalogTargetValidationTest {
     void countSelectionSamplesArnsInsteadOfTakingRequestOrder() throws Exception {
         RegionResolver resolver = new RegionResolver(REGION, ACCOUNT_ID);
         service = new FisService(
-                new InMemoryStorage<>(), mapper, resolver, catalog, new Random(12345L));
+                FisStores.inMemory(), mapper, resolver, catalog, new Random(12345L));
         ObjectNode request = ec2Template("COUNT(1)");
         String firstArn = request.path("targets").path("instances")
                 .path("resourceArns").path(0).asText();

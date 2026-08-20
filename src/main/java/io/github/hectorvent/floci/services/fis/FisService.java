@@ -1,6 +1,5 @@
 package io.github.hectorvent.floci.services.fis;
 
-import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -11,6 +10,12 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.TagHandler;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.fis.model.Experiment;
+import io.github.hectorvent.floci.services.fis.model.ExperimentTemplate;
+import io.github.hectorvent.floci.services.fis.model.IdempotencyRecord;
+import io.github.hectorvent.floci.services.fis.model.ResolvedTarget;
+import io.github.hectorvent.floci.services.fis.model.SafetyLever;
+import io.github.hectorvent.floci.services.fis.model.TargetAccountConfiguration;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -66,7 +71,7 @@ public class FisService implements TagHandler {
             Pattern.compile("^[\\p{L}\\p{Z}\\p{N}_.:/=+\\-@]+$");
     private static final Pattern TAG_VALUE = Pattern.compile("^[A-Za-z0-9 _.:/=+\\-@]*$");
 
-    private final StorageBackend<String, ObjectNode> store;
+    private final FisStores stores;
     private final ObjectMapper mapper;
     private final RegionResolver regionResolver;
     private final FisCatalog catalog;
@@ -75,19 +80,17 @@ public class FisService implements TagHandler {
     @Inject
     public FisService(StorageFactory storageFactory, ObjectMapper mapper,
                       RegionResolver regionResolver, FisCatalog catalog) {
-        this(storageFactory.create(SERVICE, "fis-state.json",
-                        new TypeReference<Map<String, ObjectNode>>() {}),
-                mapper, regionResolver, catalog, new Random());
+        this(new FisStores(storageFactory), mapper, regionResolver, catalog, new Random());
     }
 
-    FisService(StorageBackend<String, ObjectNode> store, ObjectMapper mapper,
+    FisService(FisStores stores, ObjectMapper mapper,
                RegionResolver regionResolver, FisCatalog catalog) {
-        this(store, mapper, regionResolver, catalog, new Random());
+        this(stores, mapper, regionResolver, catalog, new Random());
     }
 
-    FisService(StorageBackend<String, ObjectNode> store, ObjectMapper mapper,
+    FisService(FisStores stores, ObjectMapper mapper,
                RegionResolver regionResolver, FisCatalog catalog, RandomGenerator random) {
-        this.store = store;
+        this.stores = stores;
         this.mapper = mapper;
         this.regionResolver = regionResolver;
         this.catalog = catalog;
@@ -102,7 +105,7 @@ public class FisService implements TagHandler {
             return existing;
         }
         validateCreateTemplate(input);
-        if (copiedScan(templatePrefix(region)).size() >= MAX_EXPERIMENT_TEMPLATES) {
+        if (copiedScan(stores.templates, templatePrefix(region)).size() >= MAX_EXPERIMENT_TEMPLATES) {
             throw new AwsException("ServiceQuotaExceededException",
                     "The experiment template quota has been exceeded.", 402);
         }
@@ -125,7 +128,7 @@ public class FisService implements TagHandler {
         copyIfPresent(input, template, "logConfiguration");
         copyIfPresent(input, template, "experimentReportConfiguration");
 
-        store.put(templateKey(region, id), template.deepCopy());
+        putTemplate(region, id, template);
         ObjectNode response = wrap("experimentTemplate", template);
         saveIdempotentResponse(region, "create-template", clientToken, input, response);
         return response;
@@ -145,7 +148,7 @@ public class FisService implements TagHandler {
         if (!"multi-account".equals(template.path("experimentOptions").path("accountTargeting").asText())) {
             throw conflict("Target account configurations require accountTargeting to be multi-account.");
         }
-        if (store.get(targetAccountKey(region, experimentTemplateId, accountId)).isPresent()) {
+        if (stores.targetAccounts.get(targetAccountKey(region, experimentTemplateId, accountId)).isPresent()) {
             throw conflict("A target account configuration already exists for account " + accountId + ".");
         }
         if (targetAccountConfigurations(region, experimentTemplateId).size() >= MAX_TARGET_ACCOUNTS) {
@@ -163,7 +166,8 @@ public class FisService implements TagHandler {
         if (input.has("description")) {
             configuration.put("description", input.path("description").asText());
         }
-        store.put(targetAccountKey(region, experimentTemplateId, accountId), configuration.deepCopy());
+        putTargetAccountConfiguration(
+                targetAccountKey(region, experimentTemplateId, accountId), configuration);
         updateTemplateTargetAccountCount(region, experimentTemplateId);
         ObjectNode response = wrap("targetAccountConfiguration", configuration);
         saveIdempotentResponse(region, operation, token, input, response);
@@ -172,8 +176,8 @@ public class FisService implements TagHandler {
 
     public synchronized ObjectNode deleteExperimentTemplate(String region, String id) {
         ObjectNode template = requireTemplate(region, id);
-        store.delete(templateKey(region, id));
-        deleteByPrefix(targetAccountPrefix(region, id));
+        stores.templates.delete(templateKey(region, id));
+        deleteByPrefix(stores.targetAccounts, targetAccountPrefix(region, id));
         return wrap("experimentTemplate", template);
     }
 
@@ -181,7 +185,7 @@ public class FisService implements TagHandler {
             String region, String experimentTemplateId, String accountId) {
         requireTemplate(region, experimentTemplateId);
         ObjectNode configuration = requireTargetAccountConfiguration(region, experimentTemplateId, accountId);
-        store.delete(targetAccountKey(region, experimentTemplateId, accountId));
+        stores.targetAccounts.delete(targetAccountKey(region, experimentTemplateId, accountId));
         updateTemplateTargetAccountCount(region, experimentTemplateId);
         return wrap("targetAccountConfiguration", configuration);
     }
@@ -202,7 +206,9 @@ public class FisService implements TagHandler {
     public ObjectNode getExperimentTargetAccountConfiguration(
             String region, String experimentId, String accountId) {
         requireExperiment(region, experimentId);
-        ObjectNode configuration = store.get(experimentTargetAccountKey(region, experimentId, accountId))
+        ObjectNode configuration = stores.targetAccounts
+                .get(experimentTargetAccountKey(region, experimentId, accountId))
+                .map(this::toObjectNode)
                 .orElseThrow(() -> notFound("Experiment target account configuration", accountId));
         return wrap("targetAccountConfiguration", configuration);
     }
@@ -243,7 +249,8 @@ public class FisService implements TagHandler {
         if (targetName != null) {
             validateName(targetName, "targetName");
         }
-        List<ObjectNode> resolvedTargets = copiedScan(resolvedTargetPrefix(region, experimentId));
+        List<ObjectNode> resolvedTargets =
+                copiedScan(stores.resolvedTargets, resolvedTargetPrefix(region, experimentId));
         if (targetName != null) {
             resolvedTargets.removeIf(target -> !targetName.equals(target.path("targetName").asText()));
         }
@@ -255,14 +262,15 @@ public class FisService implements TagHandler {
     public ObjectNode listExperimentTargetAccountConfigurations(
             String region, String experimentId, String nextToken) {
         requireExperiment(region, experimentId);
-        List<ObjectNode> configurations = copiedScan(experimentTargetAccountPrefix(region, experimentId));
+        List<ObjectNode> configurations =
+                copiedScan(stores.targetAccounts, experimentTargetAccountPrefix(region, experimentId));
         return page("targetAccountConfigurations", configurations, null, nextToken,
                 scope(region, "experiment-target-accounts:" + experimentId),
                 node -> node.path("accountId").asText());
     }
 
     public ObjectNode listExperimentTemplates(String region, Integer maxResults, String nextToken) {
-        List<ObjectNode> summaries = copiedScan(templatePrefix(region)).stream()
+        List<ObjectNode> summaries = copiedScan(stores.templates, templatePrefix(region)).stream()
                 .map(this::templateSummary).toList();
         return page("experimentTemplates", summaries, maxResults, nextToken,
                 scope(region, "templates"), node -> node.path("id").asText());
@@ -270,7 +278,7 @@ public class FisService implements TagHandler {
 
     public ObjectNode listExperiments(
             String region, Integer maxResults, String nextToken, String experimentTemplateId) {
-        List<ObjectNode> experiments = copiedScan(experimentPrefix(region));
+        List<ObjectNode> experiments = copiedScan(stores.experiments, experimentPrefix(region));
         if (experimentTemplateId != null) {
             validateName(experimentTemplateId, "experimentTemplateId");
             experiments.removeIf(experiment ->
@@ -334,9 +342,9 @@ public class FisService implements TagHandler {
         copyIfPresent(template, experiment, "experimentReportConfiguration");
 
         experiment.put("targetAccountConfigurationsCount", configurations.size());
-        configurations.forEach(configuration -> store.put(
+        configurations.forEach(configuration -> putTargetAccountConfiguration(
                 experimentTargetAccountKey(region, id, configuration.path("accountId").asText()),
-                configuration.deepCopy()));
+                configuration));
         Set<String> unresolvedTargets = persistResolvedTargets(region, id, experiment.path("targets"));
 
         ObjectNode safetyLever = requireSafetyLever(region, "default");
@@ -403,7 +411,7 @@ public class FisService implements TagHandler {
             experiment.put("startTime", timestamp);
         }
 
-        store.put(experimentKey(region, id), experiment.deepCopy());
+        putExperiment(region, id, experiment);
         ObjectNode response = wrap("experiment", experiment);
         saveIdempotentResponse(region, "start-experiment", clientToken, input, response);
         return response;
@@ -414,7 +422,7 @@ public class FisService implements TagHandler {
         String current = experiment.path("state").path("status").asText();
         if (!TERMINAL_EXPERIMENT_STATES.contains(current)) {
             stopExperimentNode(experiment, "The experiment was stopped by the user.");
-            store.put(experimentKey(region, id), experiment.deepCopy());
+            putExperiment(region, id, experiment);
         }
         return wrap("experiment", experiment);
     }
@@ -453,7 +461,7 @@ public class FisService implements TagHandler {
         }
         validateStoredTemplate(template);
         template.put("lastUpdateTime", now());
-        store.put(templateKey(region, id), template.deepCopy());
+        putTemplate(region, id, template);
         return wrap("experimentTemplate", template);
     }
 
@@ -471,16 +479,16 @@ public class FisService implements TagHandler {
             throw validation("Safety lever status must be engaged or disengaged.");
         }
         if ("engaged".equals(status)) {
-            for (ObjectNode experiment : copiedScan(experimentPrefix(region))) {
+            for (ObjectNode experiment : copiedScan(stores.experiments, experimentPrefix(region))) {
                 String experimentStatus = experiment.path("state").path("status").asText();
                 if (!TERMINAL_EXPERIMENT_STATES.contains(experimentStatus)) {
                     stopExperimentNode(experiment, "The experiment was stopped because the safety lever was engaged.");
-                    store.put(experimentKey(region, experiment.path("id").asText()), experiment.deepCopy());
+                    putExperiment(region, experiment.path("id").asText(), experiment);
                 }
             }
         }
         ObjectNode lever = safetyLever(region, status, reason);
-        store.put(safetyLeverKey(region, id), lever.deepCopy());
+        putSafetyLever(region, id, lever);
         return wrap("safetyLever", lever);
     }
 
@@ -502,7 +510,8 @@ public class FisService implements TagHandler {
         if (!changed) {
             throw validation("description or roleArn must be supplied.");
         }
-        store.put(targetAccountKey(region, experimentTemplateId, accountId), configuration.deepCopy());
+        putTargetAccountConfiguration(
+                targetAccountKey(region, experimentTemplateId, accountId), configuration);
         return wrap("targetAccountConfiguration", configuration);
     }
 
@@ -1119,7 +1128,7 @@ public class FisService implements TagHandler {
                 for (String arn : arns.subList(0, Math.min(count, arns.size()))) {
                     ObjectNode resolved = resolvedTarget(targetName, resourceType);
                     resolved.putObject("targetInformation").put("arn", arn);
-                    store.put(resolvedTargetKey(region, experimentId, index++), resolved);
+                    putResolvedTarget(region, experimentId, index++, resolved);
                 }
             }
             if (index == resolvedBeforeTarget) {
@@ -1219,9 +1228,9 @@ public class FisService implements TagHandler {
         if (!"default".equals(id)) {
             throw notFound("Safety lever", id);
         }
-        return store.get(safetyLeverKey(region, id)).map(ObjectNode::deepCopy).orElseGet(() -> {
+        return stores.safetyLevers.get(safetyLeverKey(region, id)).map(this::toObjectNode).orElseGet(() -> {
             ObjectNode lever = safetyLever(region, "disengaged", "The safety lever is disengaged.");
-            store.put(safetyLeverKey(region, id), lever.deepCopy());
+            putSafetyLever(region, id, lever);
             return lever;
         });
     }
@@ -1325,14 +1334,15 @@ public class FisService implements TagHandler {
         if (token == null) {
             return null;
         }
-        ObjectNode record = store.get(idempotencyKey(region, operation, token)).orElse(null);
+        IdempotencyRecord record = stores.idempotency
+                .get(idempotencyKey(region, operation, token)).orElse(null);
         if (record == null) {
             return null;
         }
-        if (!record.path("request").equals(request)) {
+        if (!record.getRequest().equals(request)) {
             throw conflict("The clientToken was already used with different request parameters.");
         }
-        return record.path("response").deepCopy();
+        return record.getResponse().deepCopy();
     }
 
     private void saveIdempotentResponse(String region, String operation, String token,
@@ -1340,10 +1350,8 @@ public class FisService implements TagHandler {
         if (token == null) {
             return;
         }
-        ObjectNode record = mapper.createObjectNode();
-        record.set("request", request.deepCopy());
-        record.set("response", response.deepCopy());
-        store.put(idempotencyKey(region, operation, token), record);
+        IdempotencyRecord record = new IdempotencyRecord(request.deepCopy(), response.deepCopy());
+        stores.idempotency.put(idempotencyKey(region, operation, token), record);
     }
 
     private ResourceRef parseTaggableArn(String region, String arn) {
@@ -1375,29 +1383,26 @@ public class FisService implements TagHandler {
     private void saveResourceTags(String region, ResourceRef resource, ObjectNode tags) {
         switch (resource.type()) {
             case "action" -> {
-                ObjectNode record = mapper.createObjectNode();
-                record.put("id", resource.id());
-                record.set("tags", tags.deepCopy());
-                store.put(actionTagsKey(region, resource.id()), record);
+                stores.actionTags.put(actionTagsKey(region, resource.id()), tagsMap(tags));
             }
             case "experiment" -> {
                 ObjectNode experiment = requireExperiment(region, resource.id());
                 experiment.set("tags", tags.deepCopy());
-                store.put(experimentKey(region, resource.id()), experiment);
+                putExperiment(region, resource.id(), experiment);
             }
             case "experiment-template" -> {
                 ObjectNode template = requireTemplate(region, resource.id());
                 template.set("tags", tags.deepCopy());
                 template.put("lastUpdateTime", now());
-                store.put(templateKey(region, resource.id()), template);
+                putTemplate(region, resource.id(), template);
             }
             default -> throw validation("The ARN does not identify a taggable AWS FIS resource.");
         }
     }
 
     private ObjectNode actionTags(String region, String actionId) {
-        return store.get(actionTagsKey(region, actionId))
-                .map(record -> copyObject(record.path("tags"))).orElseGet(mapper::createObjectNode);
+        return stores.actionTags.get(actionTagsKey(region, actionId))
+                .map(this::tagsNode).orElseGet(mapper::createObjectNode);
     }
 
     private Map<String, String> readTagsInput(JsonNode tags) {
@@ -1463,34 +1468,35 @@ public class FisService implements TagHandler {
     }
 
     private ObjectNode requireTemplate(String region, String id) {
-        return store.get(templateKey(region, id)).map(ObjectNode::deepCopy)
+        return stores.templates.get(templateKey(region, id)).map(this::toObjectNode)
                 .orElseThrow(() -> notFound("Experiment template", id));
     }
 
     private ObjectNode requireExperiment(String region, String id) {
-        return store.get(experimentKey(region, id)).map(ObjectNode::deepCopy)
+        return stores.experiments.get(experimentKey(region, id)).map(this::toObjectNode)
                 .orElseThrow(() -> notFound("Experiment", id));
     }
 
     private ObjectNode requireTargetAccountConfiguration(String region, String templateId, String accountId) {
-        return store.get(targetAccountKey(region, templateId, accountId)).map(ObjectNode::deepCopy)
+        return stores.targetAccounts.get(targetAccountKey(region, templateId, accountId))
+                .map(this::toObjectNode)
                 .orElseThrow(() -> notFound("Target account configuration", accountId));
     }
 
     private List<ObjectNode> targetAccountConfigurations(String region, String templateId) {
-        return copiedScan(targetAccountPrefix(region, templateId));
+        return copiedScan(stores.targetAccounts, targetAccountPrefix(region, templateId));
     }
 
     private long activeExperimentCount(String region) {
-        return copiedScan(experimentPrefix(region)).stream()
+        return copiedScan(stores.experiments, experimentPrefix(region)).stream()
                 .filter(experiment -> !TERMINAL_EXPERIMENT_STATES.contains(
                         experiment.path("state").path("status").asText()))
                 .count();
     }
 
-    private List<ObjectNode> copiedScan(String prefix) {
+    private <T> List<ObjectNode> copiedScan(StorageBackend<String, T> store, String prefix) {
         List<ObjectNode> result = new ArrayList<>();
-        store.scan(key -> key.startsWith(prefix)).forEach(node -> result.add(node.deepCopy()));
+        store.scan(key -> key.startsWith(prefix)).forEach(value -> result.add(toObjectNode(value)));
         return result;
     }
 
@@ -1498,10 +1504,10 @@ public class FisService implements TagHandler {
         ObjectNode template = requireTemplate(region, templateId);
         template.put("targetAccountConfigurationsCount", targetAccountConfigurations(region, templateId).size());
         template.put("lastUpdateTime", now());
-        store.put(templateKey(region, templateId), template);
+        putTemplate(region, templateId, template);
     }
 
-    private void deleteByPrefix(String prefix) {
+    private <T> void deleteByPrefix(StorageBackend<String, T> store, String prefix) {
         for (String key : new HashSet<>(store.keys())) {
             if (key.startsWith(prefix)) {
                 store.delete(key);
@@ -1513,8 +1519,43 @@ public class FisService implements TagHandler {
         String id;
         do {
             id = prefix + UUID.randomUUID().toString().replace("-", "").substring(0, 17);
-        } while (store.get(key(region, type, id)).isPresent());
+        } while (resourceIdExists(region, type, id));
         return id;
+    }
+
+    private boolean resourceIdExists(String region, String type, String id) {
+        return switch (type) {
+            case "template" -> stores.templates.get(templateKey(region, id)).isPresent();
+            case "experiment" -> stores.experiments.get(experimentKey(region, id)).isPresent();
+            default -> throw new IllegalArgumentException("Unsupported FIS resource type: " + type);
+        };
+    }
+
+    private void putTemplate(String region, String id, ObjectNode template) {
+        stores.templates.put(templateKey(region, id),
+                mapper.convertValue(template, ExperimentTemplate.class));
+    }
+
+    private void putExperiment(String region, String id, ObjectNode experiment) {
+        stores.experiments.put(experimentKey(region, id), mapper.convertValue(experiment, Experiment.class));
+    }
+
+    private void putTargetAccountConfiguration(String key, ObjectNode configuration) {
+        stores.targetAccounts.put(key, mapper.convertValue(configuration, TargetAccountConfiguration.class));
+    }
+
+    private void putResolvedTarget(String region, String experimentId, int index, ObjectNode resolvedTarget) {
+        stores.resolvedTargets.put(resolvedTargetKey(region, experimentId, index),
+                mapper.convertValue(resolvedTarget, ResolvedTarget.class));
+    }
+
+    private void putSafetyLever(String region, String id, ObjectNode safetyLever) {
+        stores.safetyLevers.put(safetyLeverKey(region, id),
+                mapper.convertValue(safetyLever, SafetyLever.class));
+    }
+
+    private ObjectNode toObjectNode(Object value) {
+        return mapper.valueToTree(value);
     }
 
     private ObjectNode requireRequest(JsonNode request) {
