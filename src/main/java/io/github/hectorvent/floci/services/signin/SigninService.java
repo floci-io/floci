@@ -105,14 +105,27 @@ public class SigninService {
         if (grant == null || grant.expiresAt().isBefore(Instant.now()) || !clientId.equals(grant.clientId())) {
             throw new SigninException("invalid_grant", "The refresh token is invalid or expired");
         }
-        return issueTokens(clientId, grant.resource(), false, refreshToken);
+        synchronized (grant) {
+            Instant now = Instant.now();
+            if (grant.accessToken() != null && grant.accessTokenExpiresAt().isAfter(now)) {
+                return grant.accessToken();
+            }
+            TokenResult result = issueAccessToken(clientId, grant.resource(), false, refreshToken);
+            grant.cacheAccessToken(result, now.plusSeconds(ACCESS_TOKEN_TTL_SECONDS));
+            return result;
+        }
     }
 
     private TokenResult issueTokens(String clientId, String resource, boolean includeIdToken) {
-        return issueTokens(clientId, resource, includeIdToken, randomToken(48));
+        String refreshToken = randomToken(48);
+        TokenResult result = issueAccessToken(clientId, resource, includeIdToken, refreshToken);
+        refreshGrants.put(refreshToken, new RefreshGrant(
+                clientId, resource, Instant.now().plusSeconds(REFRESH_TOKEN_TTL_SECONDS)));
+        return result;
     }
 
-    private TokenResult issueTokens(String clientId, String resource, boolean includeIdToken, String refreshToken) {
+    private TokenResult issueAccessToken(String clientId, String resource, boolean includeIdToken,
+                                         String refreshToken) {
         String accessKeyId = "ASIA" + randomAlphaNumeric(16);
         String secretAccessKey = randomAlphaNumeric(40);
         String sessionToken = randomAlphaNumeric(200);
@@ -121,8 +134,6 @@ public class SigninService {
         String principalArn = "arn:aws:iam::" + accountId + ":root";
         iamService.registerSession(accessKeyId, secretAccessKey, principalArn, expiration, null, accountId);
 
-        refreshGrants.putIfAbsent(refreshToken, new RefreshGrant(
-                clientId, resource, Instant.now().plusSeconds(REFRESH_TOKEN_TTL_SECONDS)));
         Map<String, String> accessToken = Map.of(
                 "accessKeyId", accessKeyId,
                 "secretAccessKey", secretAccessKey,
@@ -208,7 +219,43 @@ public class SigninService {
                                      String resource, Instant expiresAt) {
     }
 
-    private record RefreshGrant(String clientId, String resource, Instant expiresAt) {
+    private static final class RefreshGrant {
+        private final String clientId;
+        private final String resource;
+        private final Instant expiresAt;
+        private TokenResult accessToken;
+        private Instant accessTokenExpiresAt;
+
+        private RefreshGrant(String clientId, String resource, Instant expiresAt) {
+            this.clientId = clientId;
+            this.resource = resource;
+            this.expiresAt = expiresAt;
+        }
+
+        private String clientId() {
+            return clientId;
+        }
+
+        private String resource() {
+            return resource;
+        }
+
+        private Instant expiresAt() {
+            return expiresAt;
+        }
+
+        private TokenResult accessToken() {
+            return accessToken;
+        }
+
+        private Instant accessTokenExpiresAt() {
+            return accessTokenExpiresAt;
+        }
+
+        private void cacheAccessToken(TokenResult token, Instant tokenExpiresAt) {
+            this.accessToken = token;
+            this.accessTokenExpiresAt = tokenExpiresAt;
+        }
     }
 
     public record TokenResult(Map<String, String> accessToken, int expiresIn,

@@ -100,7 +100,7 @@ class SigninIntegrationTest {
     }
 
     @Test
-    void refreshTokenReturnsFreshCredentialsWithoutIdToken() throws Exception {
+    void refreshTokenReturnsStableCredentialsWithinAccessTokenLifetime() throws Exception {
         String verifier = verifier();
         String code = queryParams(URI.create(authorize(verifier, UUID.randomUUID().toString())).getRawQuery())
                 .get("code");
@@ -119,7 +119,7 @@ class SigninIntegrationTest {
                 .extract()
                 .path("refreshToken");
 
-        request()
+        var firstRefresh = request()
                 .contentType("application/json")
                 .body(Map.of(
                         "clientId", CLIENT_ID,
@@ -132,6 +132,24 @@ class SigninIntegrationTest {
                 .body("accessToken.accessKeyId", notNullValue())
                 .body("tokenType", equalTo("aws_sigv4"))
                 .body("expiresIn", equalTo(900))
+                .body("refreshToken", equalTo(refreshToken))
+                .body("idToken", equalTo(null))
+                .extract()
+                .response();
+
+        request()
+                .contentType("application/json")
+                .body(Map.of(
+                        "clientId", CLIENT_ID,
+                        "grantType", "refresh_token",
+                        "refreshToken", refreshToken))
+                .when()
+                .post("/v1/token")
+                .then()
+                .statusCode(200)
+                .body("accessToken.accessKeyId", equalTo(firstRefresh.path("accessToken.accessKeyId")))
+                .body("accessToken.secretAccessKey", equalTo(firstRefresh.path("accessToken.secretAccessKey")))
+                .body("accessToken.sessionToken", equalTo(firstRefresh.path("accessToken.sessionToken")))
                 .body("refreshToken", equalTo(refreshToken))
                 .body("idToken", equalTo(null));
     }
