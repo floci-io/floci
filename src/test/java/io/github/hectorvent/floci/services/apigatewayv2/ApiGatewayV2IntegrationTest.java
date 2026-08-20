@@ -243,7 +243,7 @@ class ApiGatewayV2IntegrationTest {
         given()
                 .contentType(ContentType.JSON)
                 .body("""
-                        {"stageName":"prod","deploymentId":"%s","autoDeploy":false,"tags":{"environment":"test","owner":"platform"}}
+                        {"stageName":"prod","deploymentId":"%s","autoDeploy":false,"tags":{"environment":"test","owner":"platform","floci:internal":"hidden"}}
                         """.formatted(deploymentId))
                 .when().post("/v2/apis/" + apiId + "/stages")
                 .then()
@@ -252,7 +252,8 @@ class ApiGatewayV2IntegrationTest {
                 .body("autoDeploy", equalTo(false))
                 .body("deploymentId", equalTo(deploymentId))
                 .body("tags.environment", equalTo("test"))
-                .body("tags.owner", equalTo("platform"));
+                .body("tags.owner", equalTo("platform"))
+                .body("tags", not(hasKey("floci:internal")));
     }
 
     @Test @Order(51)
