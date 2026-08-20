@@ -27,6 +27,7 @@ import software.amazon.awssdk.services.iam.model.DeleteRolePolicyRequest;
 import software.amazon.awssdk.services.iam.model.DeleteUserRequest;
 import software.amazon.awssdk.services.iam.model.DetachRolePolicyRequest;
 import software.amazon.awssdk.services.iam.model.DetachUserPolicyRequest;
+import software.amazon.awssdk.services.iam.model.GetAccountSummaryResponse;
 import software.amazon.awssdk.services.iam.model.GetGroupRequest;
 import software.amazon.awssdk.services.iam.model.GetGroupResponse;
 import software.amazon.awssdk.services.iam.model.GetInstanceProfileRequest;
@@ -408,6 +409,20 @@ class IamTest {
             assertThat(group.groupId()).isNotBlank();
         });
         assertThat(response.isTruncated()).isFalse();
+    }
+
+    @Test
+    @Order(101)
+    void getAccountSummary() {
+        GetAccountSummaryResponse response = iam.getAccountSummary();
+
+        assertThat(response.summaryMap()).hasSize(34);
+        assertThat(response.summaryMap().get("UsersQuota")).isEqualTo(5000);
+        assertThat(response.summaryMap().get("GroupsQuota")).isEqualTo(100);
+        assertThat(response.summaryMap().get("RolesQuota")).isEqualTo(250);
+        assertThat(response.summaryMap().get("PoliciesQuota")).isEqualTo(1000);
+        assertThat(response.summaryMap().get("InstanceProfilesQuota")).isEqualTo(100);
+        assertThat(response.summaryMap().get("PolicySizeQuota")).isEqualTo(5120);
     }
 
     @Test
