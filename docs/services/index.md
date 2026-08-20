@@ -47,6 +47,7 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [Amazon MQ](amazonmq.md) | `/v1/brokers/...` + RabbitMQ broker | REST JSON + AMQP | 5 |
 | [Athena](athena.md) | `POST /` + `X-Amz-Target: AmazonAthena.*` | JSON 1.1 | 4 |
 | [Glue](glue.md) | `POST /` + `X-Amz-Target: AWSGlue.*` | JSON 1.1 | 38 |
+| [Lake Formation](lakeformation.md) | `POST /` + `X-Amz-Target: AWSLakeFormation.*` | JSON 1.1 | 16 |
 | [Neptune](neptune.md) | `POST /` with `Action=` param + Gremlin TCP proxy | Query + WebSocket | 8 |
 | [DocumentDB](docdb.md) | `POST /` with `Action=` param + MongoDB container | Query + MongoDB wire | 8 |
 | [EMR](emr.md) | `POST /` + `X-Amz-Target: ElasticMapReduce.*` | JSON 1.1 | 24 |
