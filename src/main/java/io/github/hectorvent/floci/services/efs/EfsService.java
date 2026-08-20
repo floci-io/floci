@@ -286,16 +286,17 @@ public class EfsService implements Resettable {
             try {
                 synchronized (lockFor(regionKey(region, mt.getFileSystemId()))) {
                     FileSystem fs = getFileSystem(region, mt.getFileSystemId());
-                fs.setNumberOfMountTargets(Math.max(0, fs.getNumberOfMountTargets() - 1));
+                    fs.setNumberOfMountTargets(Math.max(0, fs.getNumberOfMountTargets() - 1));
                     fileSystemStore.put(regionKey(region, fs.getFileSystemId()), fs);
+                    mountTargetStore.delete(key);
                 }
             } catch (EfsException e) {
                 LOG.debug("File system " + mt.getFileSystemId() + " already deleted, skipping parent count update during mount target deletion");
+                mountTargetStore.delete(key);
             } catch (Exception e) {
                 LOG.error("Failed to update parent file system " + mt.getFileSystemId() + " count during mount target deletion", e);
+                mountTargetStore.delete(key);
             }
-            
-            mountTargetStore.delete(key);
         }
     }
 
