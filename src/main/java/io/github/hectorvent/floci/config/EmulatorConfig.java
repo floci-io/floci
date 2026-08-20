@@ -607,6 +607,12 @@ public interface EmulatorConfig {
         SageMakerServiceConfig sagemaker();
         AppRunnerServiceConfig apprunner();
         RedshiftServiceConfig redshift();
+        AccessAnalyzerServiceConfig accessanalyzer();
+    }
+
+    interface AccessAnalyzerServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
     }
 
     interface RedshiftServiceConfig {

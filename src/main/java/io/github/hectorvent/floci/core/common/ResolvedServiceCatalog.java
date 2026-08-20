@@ -477,7 +477,12 @@ public class ResolvedServiceCatalog {
                 descriptor("apprunner", "apprunner", config.services().apprunner().enabled(), true,
                         "apprunner", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
-                        Set.of("AppRunner."), Set.of("apprunner"), Set.of(), Set.of())
+                        Set.of("AppRunner."), Set.of("apprunner"), Set.of(), Set.of()),
+                descriptor("access-analyzer", "accessanalyzer", config.services().accessanalyzer().enabled(), true,
+                        "accessanalyzer", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON),
+                        Set.of(), Set.of("access-analyzer"), Set.of(),
+                        Set.of(io.github.hectorvent.floci.services.accessanalyzer.AccessAnalyzerController.class))
         ));
     }
 
