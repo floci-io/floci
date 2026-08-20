@@ -261,17 +261,14 @@ setup() {
 # field still applies cleanly, and only shows up later as perpetual drift. Asserting an
 # empty second plan is what actually catches that class of bug.
 #
-# Scoped to the Application Auto Scaling resources deliberately. A whole-config re-plan
-# currently reports drift on aws_cognito_user_pool, aws_db_instance
-# (auto_minor_version_upgrade) and aws_kinesis_firehose_delivery_stream
-# (s3_backup_mode) — pre-existing and unrelated to these resources. Widen this to the
-# full configuration once those are fixed.
-@test "Terraform: re-planning Application Auto Scaling reports no changes" {
+# Whole-config: this used to be scoped to just the Application Auto Scaling resources
+# because a full re-plan reported drift on aws_cognito_user_pool (device_configuration,
+# email_configuration, user_pool_add_ons), aws_db_instance (auto_minor_version_upgrade)
+# and aws_kinesis_firehose_delivery_stream (s3_backup_mode) - see #2200. Now that those
+# are fixed, this guards every resource in the fixture instead of a hand-picked subset.
+@test "Terraform: re-planning the full configuration reports no changes" {
     cd "$TF_DIR"
-    run terraform plan -var="endpoint=${FLOCI_ENDPOINT}" -input=false -no-color -detailed-exitcode \
-        -target=aws_appautoscaling_target.ecs_service \
-        -target=aws_appautoscaling_policy.ecs_cpu \
-        -target=aws_appautoscaling_policy.ecs_alb_requests
+    run terraform plan -var="endpoint=${FLOCI_ENDPOINT}" -input=false -no-color -detailed-exitcode
     if [ "$status" -eq 2 ]; then
         echo "# drift detected on re-plan:" >&3
         echo "$output" >&3

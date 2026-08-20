@@ -1,6 +1,9 @@
 # CloudFront
 
-CloudFront management-plane and local content-delivery emulation. Supports distribution lifecycle, cache policies, origin request policies, response headers policies, origin access controls, origin access identities, public keys, trusted key groups, CloudFront Functions, invalidations, tagging, and GET/HEAD delivery from S3 or custom origins.
+CloudFront management-plane and local content-delivery emulation. Supports distribution lifecycle,
+cache policies, origin request policies, response headers policies, origin access controls, origin
+access identities, public keys, trusted key groups, CloudFront Functions, invalidations, tagging, and
+GET/HEAD/OPTIONS delivery from S3 or custom origins.
 
 **Protocol:** REST XML  
 **API version:** `2020-05-31`  
@@ -131,7 +134,7 @@ CloudFront management-plane and local content-delivery emulation. Supports distr
 - Invalidations are immediately marked `Completed`.
 - `DeleteDistribution` returns `DistributionNotDisabled` (409) if `Enabled` is `true` in the config.
 - All mutating operations (`PUT`, `DELETE`) require an `If-Match` header containing the current
-  `ETag`. Public key and key group updates and deletions distinguish a missing header
+  `ETag`. Response headers policies, public keys, and key groups distinguish a missing header
   (`InvalidIfMatchVersion`, 400) from a stale `ETag` (`PreconditionFailed`, 412). Other CloudFront
   resources currently return `InvalidIfMatchVersion` (400) for either case.
 - All `GET` and `POST` (create) responses include an `ETag` response header.
@@ -142,11 +145,11 @@ CloudFront management-plane and local content-delivery emulation. Supports distr
 - CNAME aliases are globally unique. `AssociateAlias` atomically transfers an alias from its current
   owner to the target distribution. Exact aliases take precedence over the most-specific matching
   wildcard alias.
-- Viewer GET/HEAD requests addressed to an enabled distribution's generated domain or alias are
-  routed to the matching S3 or custom origin. Origin forwarding preserves the raw path;
-  custom-origin redirects are not followed.
+- Viewer GET/HEAD requests, and OPTIONS requests allowed by the matched cache behavior, addressed to
+  an enabled distribution's generated domain or alias are routed to the matching S3 or custom
+  origin. Origin forwarding preserves the raw path; custom-origin redirects are not followed.
 - Origin custom headers are persisted through the CloudFront API and CloudFormation. They replace
-  same-named viewer headers on custom-origin GET/HEAD requests. For in-process S3 origins, a
+  same-named viewer headers on custom-origin GET/HEAD/OPTIONS requests. For in-process S3 origins, a
   configured `Origin` header is used for S3 CORS evaluation. AWS-prohibited names, malformed
   values, inconsistent quantities, duplicates, and quota violations are rejected with modeled
   CloudFront errors when the distribution is created or updated.
@@ -171,6 +174,16 @@ CloudFront management-plane and local content-delivery emulation. Supports distr
   implemented yet. Viewer query strings therefore follow CloudFront's default behavior and are not
   forwarded to origins.
 - Custom origins that resolve to loopback, private, link-local, carrier-grade NAT, or other non-routable addresses are rejected by default. Development-only private origins must be explicitly allowlisted by exact hostname.
+- Response headers policies validate the AWS configuration shape and are applied after the origin
+  response, including CORS preflight fields, origin override behavior, custom headers, security
+  headers, allowed header removals, and sampled `Server-Timing` metrics. `Pragma: server-timing`
+  forces those metrics for enabled policies. Distribution writes reject unknown policy IDs, and
+  policies attached to a cache behavior cannot be deleted.
+- Up to 20 custom response headers policies can be created, and one policy can be associated with
+  up to 100 distributions.
+- The five AWS managed response headers policy IDs are available and can be selected with
+  `ListResponseHeadersPolicies?Type=managed`; `Type` uses the AWS lowercase `managed` or `custom`
+  values.
 
 ## Configuration
 
@@ -275,4 +288,6 @@ aws cloudfront delete-distribution --id E1Z2X3C4V5B6N7 --if-match "$ETAG"
 - Streaming distributions (RTMP — deprecated by AWS)
 - VPC origins, Anycast IP lists, key value stores
 - Monitoring subscriptions
+- CloudFormation provisioning of custom `AWS::CloudFront::ResponseHeadersPolicy` resources
+  (literal custom or managed policy IDs are supported on distributions)
 - Persistent edge caching and global CDN propagation

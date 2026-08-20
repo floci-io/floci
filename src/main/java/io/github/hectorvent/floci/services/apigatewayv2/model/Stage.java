@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.apigatewayv2.model;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
+import java.util.HashMap;
 import java.util.Map;
 
 @RegisterForReflection
@@ -14,6 +15,7 @@ public class Stage {
     private long createdDate;
     private long lastUpdatedDate;
     private Map<String, String> stageVariables;
+    private Map<String, String> tags = new HashMap<>();
 
     public Stage() {}
 
@@ -34,4 +36,7 @@ public class Stage {
 
     public Map<String, String> getStageVariables() { return stageVariables; }
     public void setStageVariables(Map<String, String> stageVariables) { this.stageVariables = stageVariables; }
+
+    public Map<String, String> getTags() { return tags; }
+    public void setTags(Map<String, String> tags) { this.tags = tags; }
 }

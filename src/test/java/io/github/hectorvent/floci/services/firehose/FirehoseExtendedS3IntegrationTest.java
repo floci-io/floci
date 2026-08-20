@@ -15,6 +15,7 @@ import java.util.Base64;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
@@ -122,7 +123,10 @@ class FirehoseExtendedS3IntegrationTest {
             .body("DeliveryStreamDescription.Destinations[0].ExtendedS3DestinationDescription.CompressionFormat", equalTo("UNCOMPRESSED"))
             .body("DeliveryStreamDescription.Destinations[0].ExtendedS3DestinationDescription.BufferingHints.SizeInMBs", equalTo(5))
             .body("DeliveryStreamDescription.Destinations[0].ExtendedS3DestinationDescription.BufferingHints.IntervalInSeconds", equalTo(300))
-            .body("DeliveryStreamDescription.Destinations[0].ExtendedS3DestinationDescription.EncryptionConfiguration.NoEncryptionConfig", equalTo("NoEncryption"));
+            .body("DeliveryStreamDescription.Destinations[0].ExtendedS3DestinationDescription.EncryptionConfiguration.NoEncryptionConfig", equalTo("NoEncryption"))
+            // #2200: a create response that omits S3BackupMode, followed by a later describe
+            // that fills it in, applied cleanly and then re-planned dirty forever in Terraform.
+            .body("DeliveryStreamDescription.Destinations[0].ExtendedS3DestinationDescription.S3BackupMode", equalTo("Disabled"));
     }
 
     @Test
@@ -156,7 +160,13 @@ class FirehoseExtendedS3IntegrationTest {
             .statusCode(200)
             .body("DeliveryStreamDescription.Destinations[0].S3DestinationDescription.BucketARN", equalTo(BUCKET_ARN))
             .body("DeliveryStreamDescription.Destinations[0].ExtendedS3DestinationDescription.BucketARN", equalTo(BUCKET_ARN))
-            .body("DeliveryStreamDescription.Destinations[0].ExtendedS3DestinationDescription.Prefix", equalTo("legacy/"));
+            .body("DeliveryStreamDescription.Destinations[0].ExtendedS3DestinationDescription.Prefix", equalTo("legacy/"))
+            // #2420 review: S3BackupMode (and the other extended-only fields, FileExtension and
+            // CustomTimeZone) belong only to the extended shape - AWS's S3DestinationDescription
+            // reference doesn't list any of them. The standard mirror must not carry them just
+            // because it shares storage with the extended description.
+            .body("DeliveryStreamDescription.Destinations[0].S3DestinationDescription.S3BackupMode", nullValue())
+            .body("DeliveryStreamDescription.Destinations[0].ExtendedS3DestinationDescription.S3BackupMode", equalTo("Disabled"));
     }
 
     @Test
@@ -193,7 +203,8 @@ class FirehoseExtendedS3IntegrationTest {
                       "DestinationId": "destinationId-000000000001",
                       "ExtendedS3DestinationUpdate": {
                         "CompressionFormat": "Snappy",
-                        "BufferingHints": { "SizeInMBs": 128, "IntervalInSeconds": 60 }
+                        "BufferingHints": { "SizeInMBs": 128, "IntervalInSeconds": 60 },
+                        "S3BackupMode": "Enabled"
                       }
                     }
                     """.formatted(STREAM_NAME))
@@ -215,7 +226,10 @@ class FirehoseExtendedS3IntegrationTest {
             .body("DeliveryStreamDescription.Destinations[0].ExtendedS3DestinationDescription.CompressionFormat", equalTo("Snappy"))
             .body("DeliveryStreamDescription.Destinations[0].ExtendedS3DestinationDescription.BufferingHints.SizeInMBs", equalTo(128))
             .body("DeliveryStreamDescription.Destinations[0].ExtendedS3DestinationDescription.RoleARN", equalTo(ROLE_ARN))
-            .body("DeliveryStreamDescription.Destinations[0].ExtendedS3DestinationDescription.Prefix", equalTo("events/data/"));
+            .body("DeliveryStreamDescription.Destinations[0].ExtendedS3DestinationDescription.Prefix", equalTo("events/data/"))
+            // #2420 review: mergeDestination silently dropped S3BackupMode updates, so a real
+            // change here would apply cleanly but describe would keep reporting the old value.
+            .body("DeliveryStreamDescription.Destinations[0].ExtendedS3DestinationDescription.S3BackupMode", equalTo("Enabled"));
     }
 
     @Test

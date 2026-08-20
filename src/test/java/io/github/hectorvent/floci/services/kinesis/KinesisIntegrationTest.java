@@ -120,7 +120,8 @@ class KinesisIntegrationTest {
                 .path("StreamDescription")
                 .path("StreamCreationTimestamp");
         assertTrue(timestampNode.isNumber());
-        assertEquals(timestamp, timestampNode.decimalValue());
+        assertEquals(0, timestamp.compareTo(timestampNode.decimalValue()),
+                "serialized timestamp must preserve the numeric value");
         assertFalse(timestampLexeme.contains("E"));
         assertFalse(timestampLexeme.contains("e"));
     }

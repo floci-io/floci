@@ -263,17 +263,22 @@ public class S3VectorsService {
         LOG.infov("Deleted {0} vectors from index {1}", keys.size(), indexName);
     }
 
-    public List<QueryResult> queryVectors(String bucketName, String indexName, List<Float> queryVector, int topK, String region) {
+    public List<QueryResult> queryVectors(String bucketName, String indexName, List<Float> queryVector,
+                                          Object filter, int topK, String region) {
         VectorIndex index = getIndex(bucketName, indexName, region);
         if (queryVector.size() != index.getDimension()) {
             throw new AwsException("ValidationException",
                     "Query vector dimension " + queryVector.size() + " does not match index dimension " + index.getDimension(), 400);
         }
 
+        S3VectorsMetadataFilter metadataFilter = S3VectorsMetadataFilter.compile(filter);
         String metric = index.getDistanceMetric() != null ? index.getDistanceMetric().toLowerCase() : "cosine";
         List<QueryResult> results = new ArrayList<>();
 
         for (VectorData v : index.getVectors().values()) {
+            if (!metadataFilter.matches(v.getMetadata())) {
+                continue;
+            }
             double distance = 0.0;
             switch (metric) {
                 case "euclidean":

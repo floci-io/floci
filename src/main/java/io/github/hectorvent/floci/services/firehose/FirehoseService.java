@@ -233,6 +233,7 @@ public class FirehoseService {
         if (update.getCustomTimeZone() != null) current.setCustomTimeZone(update.getCustomTimeZone());
         if (update.getBufferingHints() != null) current.setBufferingHints(update.getBufferingHints());
         if (update.getEncryptionConfiguration() != null) current.setEncryptionConfiguration(update.getEncryptionConfiguration());
+        if (update.getS3BackupMode() != null) current.setS3BackupMode(update.getS3BackupMode());
     }
 
     public void tagDeliveryStream(String name, List<DeliveryStreamDescription.Tag> tagsToTag) {

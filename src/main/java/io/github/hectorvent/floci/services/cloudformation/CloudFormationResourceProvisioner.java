@@ -1682,18 +1682,33 @@ public class CloudFormationResourceProvisioner {
             cluster = rdsService.modifyDbCluster(
                     id,
                     resolveDynamicReferences(resolveOptional(props, "MasterUserPassword", engine), region, true),
-                    parseBoolProp(props, "EnableIAMDatabaseAuthentication", engine));
-        } else {
-            cluster = rdsService.createDbCluster(
-                    id,
-                    resolveOptional(props, "Engine", engine),
-                    resolveOptional(props, "EngineVersion", engine),
-                    resolveDynamicReferences(resolveOptional(props, "MasterUsername", engine), region, false),
-                    resolveDynamicReferences(resolveOptional(props, "MasterUserPassword", engine), region, true),
-                    resolveOptional(props, "DatabaseName", engine),
                     parseBoolProp(props, "EnableIAMDatabaseAuthentication", engine),
-                    resolveOptional(props, "DBClusterParameterGroupName", engine),
-                    null, null, false, region);
+                    parseServerlessV2Capacity(props, "MinCapacity", engine),
+                    parseServerlessV2Capacity(props, "MaxCapacity", engine),
+                    parseServerlessV2SecondsUntilAutoPause(props, engine), region);
+        } else {
+            Double serverlessV2MinCapacity = parseServerlessV2Capacity(props, "MinCapacity", engine);
+            Double serverlessV2MaxCapacity = parseServerlessV2Capacity(props, "MaxCapacity", engine);
+            Integer serverlessV2SecondsUntilAutoPause =
+                    parseServerlessV2SecondsUntilAutoPause(props, engine);
+            String engineName = resolveOptional(props, "Engine", engine);
+            String engineVersion = resolveOptional(props, "EngineVersion", engine);
+            String masterUsername = resolveDynamicReferences(
+                    resolveOptional(props, "MasterUsername", engine), region, false);
+            String masterPassword = resolveDynamicReferences(
+                    resolveOptional(props, "MasterUserPassword", engine), region, true);
+            String databaseName = resolveOptional(props, "DatabaseName", engine);
+            boolean iamEnabled = parseBoolProp(props, "EnableIAMDatabaseAuthentication", engine);
+            String parameterGroup = resolveOptional(props, "DBClusterParameterGroupName", engine);
+            if (serverlessV2MinCapacity == null && serverlessV2MaxCapacity == null
+                    && serverlessV2SecondsUntilAutoPause == null) {
+                cluster = rdsService.createDbCluster(id, engineName, engineVersion, masterUsername,
+                        masterPassword, databaseName, iamEnabled, parameterGroup, null, null, false, region);
+            } else {
+                cluster = rdsService.createDbCluster(id, engineName, engineVersion, masterUsername,
+                        masterPassword, databaseName, iamEnabled, parameterGroup, null, null, false, region,
+                        serverlessV2MinCapacity, serverlessV2MaxCapacity, serverlessV2SecondsUntilAutoPause);
+            }
             deleteRenamedResource(priorPhysicalId, id, rdsService::deleteDbCluster, "DB cluster");
         }
         r.setPhysicalId(cluster.getDbClusterIdentifier());
@@ -1707,6 +1722,42 @@ public class CloudFormationResourceProvisioner {
         }
         if (cluster.getDbClusterArn() != null) {
             r.getAttributes().put("DBClusterArn", cluster.getDbClusterArn());
+        }
+    }
+
+    private Double parseServerlessV2Capacity(JsonNode props, String field,
+                                             CloudFormationTemplateEngine engine) {
+        JsonNode config = props.get("ServerlessV2ScalingConfiguration");
+        if (config == null || config.isNull()) {
+            return null;
+        }
+        String resolved = resolveOptional(config, field, engine);
+        if (resolved == null || resolved.isBlank()) {
+            return null;
+        }
+        try {
+            return Double.valueOf(resolved.trim());
+        } catch (NumberFormatException e) {
+            throw new AwsException("ValidationError",
+                    "ServerlessV2ScalingConfiguration " + field + " must be a number.", 400);
+        }
+    }
+
+    private Integer parseServerlessV2SecondsUntilAutoPause(
+            JsonNode props, CloudFormationTemplateEngine engine) {
+        JsonNode config = props.get("ServerlessV2ScalingConfiguration");
+        if (config == null || config.isNull()) {
+            return null;
+        }
+        String resolved = resolveOptional(config, "SecondsUntilAutoPause", engine);
+        if (resolved == null || resolved.isBlank()) {
+            return null;
+        }
+        try {
+            return Integer.valueOf(resolved.trim());
+        } catch (NumberFormatException e) {
+            throw new AwsException("ValidationError",
+                    "ServerlessV2ScalingConfiguration SecondsUntilAutoPause must be an integer.", 400);
         }
     }
 
@@ -6410,6 +6461,7 @@ public class CloudFormationResourceProvisioner {
         if (node != null && !node.isMissingNode() && !node.isNull()) {
             dcb.setTargetOriginId(cfnText(node, "TargetOriginId", engine));
             dcb.setViewerProtocolPolicy(cfnTextOrDefault(node, "ViewerProtocolPolicy", engine, "allow-all"));
+            dcb.setResponseHeadersPolicyId(cfnText(node, "ResponseHeadersPolicyId", engine));
             List<String> trustedKeyGroups = cfnStringList(node.path("TrustedKeyGroups"), engine);
             if (!trustedKeyGroups.isEmpty()) {
                 dcb.setTrustedKeyGroups(trustedKeyGroups);
@@ -6427,6 +6479,7 @@ public class CloudFormationResourceProvisioner {
                 cb.setPathPattern(cfnText(node, "PathPattern", engine));
                 cb.setTargetOriginId(cfnText(node, "TargetOriginId", engine));
                 cb.setViewerProtocolPolicy(cfnTextOrDefault(node, "ViewerProtocolPolicy", engine, "allow-all"));
+                cb.setResponseHeadersPolicyId(cfnText(node, "ResponseHeadersPolicyId", engine));
                 List<String> trustedKeyGroups = cfnStringList(node.path("TrustedKeyGroups"), engine);
                 if (!trustedKeyGroups.isEmpty()) {
                     cb.setTrustedKeyGroups(trustedKeyGroups);

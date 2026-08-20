@@ -593,6 +593,12 @@ public class ApiGatewayV2Service {
         Map<String, String> stageVariables = (Map<String, String>) request.get("stageVariables");
         stage.setStageVariables(stageVariables);
 
+        @SuppressWarnings("unchecked")
+        Map<String, String> tags = (Map<String, String>) request.get("tags");
+        if (tags != null) {
+            stage.setTags(ReservedTags.stripApiGatewayReservedTags(tags));
+        }
+
         stageStore.put(stageKey(region, apiId, stage.getStageName()), stage);
         LOG.infov("Created stage: {0} for API {1}", stage.getStageName(), apiId);
         return stage;

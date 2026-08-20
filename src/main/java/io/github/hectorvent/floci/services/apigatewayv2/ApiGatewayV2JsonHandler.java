@@ -632,6 +632,10 @@ public class ApiGatewayV2JsonHandler {
             ObjectNode stageVariables = node.putObject("StageVariables");
             s.getStageVariables().forEach(stageVariables::put);
         }
+        if (s.getTags() != null && !s.getTags().isEmpty()) {
+            ObjectNode tags = node.putObject("Tags");
+            s.getTags().forEach(tags::put);
+        }
         return node;
     }
 
@@ -711,7 +715,8 @@ public class ApiGatewayV2JsonHandler {
             if (!key.isEmpty() && Character.isUpperCase(key.charAt(0))) {
                 key = Character.toLowerCase(key.charAt(0)) + key.substring(1);
             }
-            result.put(key, normalizeValue(entry.getValue()));
+            Object value = "tags".equals(key) ? entry.getValue() : normalizeValue(entry.getValue());
+            result.put(key, value);
         }
         return result;
     }

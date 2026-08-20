@@ -33,6 +33,7 @@ import java.time.Duration;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -62,6 +63,7 @@ class Ec2ContainerManagerTest {
     private static final String TEST_USER_DATA_OUTPUT = "test-output";
     private static final String TEST_CONTAINER_ID = "container-1";
     private static final String TEST_LOG_STREAM_NAME = "yyyy/MM/dd/user-data";
+    private static final String TEST_SSH_PUBLIC_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest test@floci";
 
     @org.junit.jupiter.api.AfterEach
     void resetBridgeIpPolling() {
@@ -393,6 +395,30 @@ class Ec2ContainerManagerTest {
     }
 
     @Test
+    void launchCreatesSshdPrivilegeSeparationDirectoryBeforeStartingSshd() throws Exception {
+        Ec2ContainerManager.containerBridgeIpAttempts = 1;
+        Ec2ContainerManager.containerBridgeIpPollMillis = 1;
+        LaunchHarness harness = launchHarness();
+        InspectContainerCmd inspect = mock(InspectContainerCmd.class);
+        InspectContainerResponse withIp = inspectResponse("172.18.0.12");
+        when(harness.dockerClient.inspectContainerCmd(TEST_CONTAINER_ID)).thenReturn(inspect);
+        when(inspect.exec()).thenReturn(withIp);
+        harness.stubSuccessfulExecs(new CountDownLatch(0), new CountDownLatch(0));
+
+        harness.manager.launch(instance("i-sshd"), "ubuntu:24.04", TEST_SSH_PUBLIC_KEY, "us-west-2");
+
+        awaitUntil(() -> commandIndex(harness.executedCommands, "/usr/sbin/sshd") >= 0, Duration.ofSeconds(2));
+
+        int mkdirIndex = commandIndex(harness.executedCommands, "mkdir", "-p", "/run/sshd");
+        int sshdIndex = commandIndex(harness.executedCommands, "/usr/sbin/sshd");
+        assertTrue(mkdirIndex >= 0,
+                "sshd startup should create the /run/sshd privilege-separation directory");
+        assertTrue(mkdirIndex < sshdIndex,
+                "/run/sshd must be created before sshd starts, otherwise sshd exits with "
+                        + "\"Missing privilege separation directory\"");
+    }
+
+    @Test
     void launchWithoutKeyPairStillStartsSshd() throws Exception {
         // Regression for #2184: sshd previously only started when a key pair was supplied, so
         // run-instances without --key-name left no daemon listening at all ("connection refused")
@@ -527,7 +553,20 @@ class Ec2ContainerManagerTest {
                 config,
                 metadataServer,
                 mock(Ec2PortForwardManager.class));
-        return new LaunchHarness(manager, dockerClient, metadataServer, logStreamer, builder);
+        return new LaunchHarness(manager, dockerClient, metadataServer, logStreamer, builder,
+                new CopyOnWriteArrayList<>());
+    }
+
+    /**
+     * Index of the first exec matching {@code expected} exactly, or -1 when it was never run.
+     */
+    private static int commandIndex(List<String[]> executedCommands, String... expected) {
+        for (int i = 0; i < executedCommands.size(); i++) {
+            if (Arrays.equals(executedCommands.get(i), expected)) {
+                return i;
+            }
+        }
+        return -1;
     }
 
     private static Instance instance(String instanceId) {
@@ -562,7 +601,8 @@ class Ec2ContainerManagerTest {
                                  DockerClient dockerClient,
                                  Ec2MetadataServer metadataServer,
                                  ContainerLogStreamer logStreamer,
-                                 ContainerBuilder.Builder builder) {
+                                 ContainerBuilder.Builder builder,
+                                 List<String[]> executedCommands) {
         void stubSuccessfulExecs(CountDownLatch userDataStarted, CountDownLatch finishUserData) throws Exception {
             AtomicReference<String[]> currentCommand = new AtomicReference<>();
             ExecCreateCmd execCreate = mock(ExecCreateCmd.class, withSettings().defaultAnswer(RETURNS_SELF));
@@ -578,6 +618,7 @@ class Ec2ContainerManagerTest {
                 } else {
                     currentCommand.set(Arrays.copyOf(args, args.length, String[].class));
                 }
+                executedCommands.add(currentCommand.get());
                 return execCreate;
             });
             when(execCreate.exec()).thenAnswer(invocation -> {

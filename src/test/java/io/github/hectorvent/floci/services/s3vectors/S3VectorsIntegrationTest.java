@@ -150,7 +150,8 @@ class S3VectorsIntegrationTest {
                                 "float32": [1.0, 0.0, 0.0]
                             },
                             "metadata": {
-                                "label": "first"
+                                "label": "first",
+                                "tenant": "tenant-a"
                             }
                         },
                         {
@@ -159,7 +160,8 @@ class S3VectorsIntegrationTest {
                                 "float32": [0.0, 1.0, 0.0]
                             },
                             "metadata": {
-                                "label": "second"
+                                "label": "second",
+                                "tenant": "tenant-b"
                             }
                         }
                     ]
@@ -225,6 +227,87 @@ class S3VectorsIntegrationTest {
 
     @Test
     @Order(10)
+    void queryVectorsFiltersByMetadataEquality() {
+        given()
+            .contentType(JSON_CONTENT_TYPE)
+            .body("""
+                {
+                    "vectorBucketName": "%s",
+                    "indexName": "%s",
+                    "queryVector": {
+                        "float32": [1.0, 0.0, 0.0]
+                    },
+                    "topK": 2,
+                    "filter": {
+                        "tenant": {
+                            "$eq": "tenant-a"
+                        }
+                    },
+                    "returnMetadata": true
+                }
+                """.formatted(BUCKET_NAME, INDEX_NAME))
+        .when()
+            .post("/QueryVectors")
+        .then()
+            .statusCode(200)
+            .body("vectors", hasSize(1))
+            .body("vectors[0].key", equalTo("v1"))
+            .body("vectors[0].metadata.tenant", equalTo("tenant-a"));
+    }
+
+    @Test
+    @Order(11)
+    void queryVectorsReturnsEmptyWhenFilterDoesNotMatch() {
+        given()
+            .contentType(JSON_CONTENT_TYPE)
+            .body("""
+                {
+                    "vectorBucketName": "%s",
+                    "indexName": "%s",
+                    "queryVector": {
+                        "float32": [1.0, 0.0, 0.0]
+                    },
+                    "topK": 2,
+                    "filter": {
+                        "tenant": "tenant-c"
+                    }
+                }
+                """.formatted(BUCKET_NAME, INDEX_NAME))
+        .when()
+            .post("/QueryVectors")
+        .then()
+            .statusCode(200)
+            .body("vectors", empty());
+    }
+
+    @Test
+    @Order(12)
+    void queryVectorsFiltersBeforeApplyingTopK() {
+        given()
+            .contentType(JSON_CONTENT_TYPE)
+            .body("""
+                {
+                    "vectorBucketName": "%s",
+                    "indexName": "%s",
+                    "queryVector": {
+                        "float32": [1.0, 0.0, 0.0]
+                    },
+                    "topK": 1,
+                    "filter": {
+                        "tenant": "tenant-b"
+                    }
+                }
+                """.formatted(BUCKET_NAME, INDEX_NAME))
+        .when()
+            .post("/QueryVectors")
+        .then()
+            .statusCode(200)
+            .body("vectors", hasSize(1))
+            .body("vectors[0].key", equalTo("v2"));
+    }
+
+    @Test
+    @Order(13)
     void queryVectors_withoutReturnDistance_omitsDistance() {
         given()
             .contentType(JSON_CONTENT_TYPE)
@@ -243,11 +326,12 @@ class S3VectorsIntegrationTest {
         .then()
             .statusCode(200)
             .body("vectors", hasSize(1))
-            .body("vectors[0]", not(hasKey("distance")));
+            .body("vectors[0]", not(hasKey("distance")))
+            .body("vectors[0]", not(hasKey("metadata")));
     }
 
     @Test
-    @Order(11)
+    @Order(14)
     void listVectors() {
         // Reproduces #2161: ListVectors previously had no route and fell through to the S3
         // REST-XML controller, returning an S3 <Error>InvalidArgument</Error> instead of a
@@ -275,7 +359,7 @@ class S3VectorsIntegrationTest {
     }
 
     @Test
-    @Order(12)
+    @Order(15)
     void listVectorsPaginatesWithMaxResultsAndNextToken() {
         String firstPageNextToken =
             given()
@@ -316,7 +400,7 @@ class S3VectorsIntegrationTest {
     }
 
     @Test
-    @Order(13)
+    @Order(16)
     void deleteVectors() {
         given()
             .contentType(JSON_CONTENT_TYPE)
@@ -351,7 +435,7 @@ class S3VectorsIntegrationTest {
     }
 
     @Test
-    @Order(14)
+    @Order(17)
     void deleteIndex() {
         given()
             .contentType(JSON_CONTENT_TYPE)
@@ -382,7 +466,7 @@ class S3VectorsIntegrationTest {
     }
 
     @Test
-    @Order(15)
+    @Order(18)
     void deleteVectorBucket() {
         given()
             .contentType(JSON_CONTENT_TYPE)

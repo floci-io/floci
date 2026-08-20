@@ -105,6 +105,24 @@ public final class CloudFrontRequestRouter {
     }
 
     /**
+     * Returns the {@code ResponseHeadersPolicyId} of the cache behavior that serves a normalized path,
+     * evaluating ordered behaviors first (first match wins) and the default behavior last, or
+     * {@code null} when the matched behavior references no response-headers policy.
+     */
+    public static String matchResponseHeadersPolicyId(DistributionConfig config, String normalizedPath) {
+        List<CacheBehavior> behaviors = config.getCacheBehaviors();
+        if (behaviors != null) {
+            for (CacheBehavior behavior : behaviors) {
+                if (pathPatternMatches(behavior.getPathPattern(), normalizedPath)) {
+                    return behavior.getResponseHeadersPolicyId();
+                }
+            }
+        }
+        DefaultCacheBehavior dflt = config.getDefaultCacheBehavior();
+        return dflt != null ? dflt.getResponseHeadersPolicyId() : null;
+    }
+
+    /**
      * Returns the trusted key group IDs of the cache behavior that matches {@code normalizedPath} (the
      * same ordered-first, default-last resolution as {@link #matchTargetOriginId}). An empty list means
      * the matched behavior serves public content — no request signature is required.
@@ -128,6 +146,28 @@ public final class CloudFrontRequestRouter {
             return dflt.getTrustedKeyGroups();
         }
         return List.of();
+    }
+
+    /**
+     * Returns the viewer HTTP methods accepted by the cache behavior that serves a normalized path.
+     * Legacy persisted configurations without an explicit list retain CloudFront's minimum
+     * GET/HEAD behavior.
+     */
+    public static List<String> matchAllowedMethods(DistributionConfig config, String normalizedPath) {
+        List<CacheBehavior> behaviors = config.getCacheBehaviors();
+        if (behaviors != null) {
+            for (CacheBehavior behavior : behaviors) {
+                if (pathPatternMatches(behavior.getPathPattern(), normalizedPath)) {
+                    return allowedMethodsOrDefault(behavior.getAllowedMethods());
+                }
+            }
+        }
+        DefaultCacheBehavior dflt = config.getDefaultCacheBehavior();
+        return allowedMethodsOrDefault(dflt != null ? dflt.getAllowedMethods() : null);
+    }
+
+    private static List<String> allowedMethodsOrDefault(List<String> methods) {
+        return methods == null || methods.isEmpty() ? List.of("GET", "HEAD") : methods;
     }
 
     /**

@@ -512,6 +512,15 @@ public class Ec2ContainerManager {
                         instanceId, keygen.summary());
                 return;
             }
+            // Modern OpenSSH refuses to start without its privilege-separation directory, and /run
+            // is a fresh tmpfs in most container images, so /run/sshd genuinely isn't there yet.
+            ContainerExecResult mkdir = execInContainerForResult(containerId,
+                    new String[]{"mkdir", "-p", "/run/sshd"}, 5);
+            if (mkdir.exitCode() != 0) {
+                LOG.warnv("Could not create /run/sshd for EC2 instance {0}: {1}",
+                        instanceId, mkdir.summary());
+                return;
+            }
             // Start sshd without -D so it daemonizes itself and survives this exec session. Since sshd
             // requires execution with an absolute path, several paths are tried until it starts
             for (String sshdPath : ALLOWED_SSHD_PATHS) {
