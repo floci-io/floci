@@ -31,6 +31,52 @@ public class EmrServerlessIntegrationTest {
 
     @Test
     @Order(1)
+    void createApplicationValidation() {
+        // Missing releaseLabel
+        givenReq()
+            .body("""
+                {
+                    "name": "my-test-app",
+                    "type": "SPARK",
+                    "clientToken": "test-token"
+                }
+                """)
+        .when()
+            .post("/applications")
+        .then()
+            .statusCode(400);
+
+        // Missing type
+        givenReq()
+            .body("""
+                {
+                    "name": "my-test-app",
+                    "releaseLabel": "emr-6.6.0",
+                    "clientToken": "test-token"
+                }
+                """)
+        .when()
+            .post("/applications")
+        .then()
+            .statusCode(400);
+
+        // Missing clientToken
+        givenReq()
+            .body("""
+                {
+                    "name": "my-test-app",
+                    "releaseLabel": "emr-6.6.0",
+                    "type": "SPARK"
+                }
+                """)
+        .when()
+            .post("/applications")
+        .then()
+            .statusCode(400);
+    }
+
+    @Test
+    @Order(2)
     void createApplication() {
         applicationId = givenReq()
             .body("""
@@ -70,7 +116,7 @@ public class EmrServerlessIntegrationTest {
     }
 
     @Test
-    @Order(2)
+    @Order(3)
     void getApplication() {
         givenReq()
         .when()
@@ -83,7 +129,7 @@ public class EmrServerlessIntegrationTest {
     }
 
     @Test
-    @Order(3)
+    @Order(4)
     void listApplications() {
         givenReq()
         .when()
@@ -122,7 +168,7 @@ public class EmrServerlessIntegrationTest {
     }
 
     @Test
-    @Order(4)
+    @Order(5)
     void startApplication() {
         givenReq()
         .when()
@@ -139,7 +185,7 @@ public class EmrServerlessIntegrationTest {
     }
 
     @Test
-    @Order(5)
+    @Order(6)
     void stopApplication() {
         givenReq()
         .when()
@@ -156,7 +202,7 @@ public class EmrServerlessIntegrationTest {
     }
 
     @Test
-    @Order(6)
+    @Order(7)
     void updateApplication() {
         givenReq()
             .body("""
@@ -199,7 +245,7 @@ public class EmrServerlessIntegrationTest {
     }
 
     @Test
-    @Order(7)
+    @Order(8)
     void deleteApplication() {
         givenReq()
         .when()
