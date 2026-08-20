@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.kinesis;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -9,10 +10,16 @@ import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.math.BigDecimal;
+import java.time.Instant;
+import java.util.Base64;
+
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.is;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class KinesisJsonHandlerTest {
 
@@ -21,11 +28,12 @@ class KinesisJsonHandlerTest {
     private static final String STREAM_ARN = "arn:aws:kinesis:us-east-1:123456789012:stream/test-stream";
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
+    private KinesisService service;
     private KinesisJsonHandler handler;
 
     @BeforeEach
     void setUp() {
-        KinesisService service = new KinesisService(
+        service = new KinesisService(
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new RegionResolver(REGION, ACCOUNT)
@@ -54,6 +62,59 @@ class KinesisJsonHandlerTest {
         assertThat(resp.getStatus(), is(200));
         ObjectNode desc = (ObjectNode) responseEntity(resp).get("StreamDescription");
         assertEquals("test-stream", desc.get("StreamName").asText());
+    }
+
+    @Test
+    void describeStreamSerializesCreationTimestampAsPlainDecimal() throws Exception {
+        createStream("test-stream");
+        service.describeStream("test-stream", REGION)
+                .setStreamCreationTimestamp(Instant.ofEpochMilli(1_785_732_980_986L));
+
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("StreamName", "test-stream");
+        ObjectNode desc = (ObjectNode) responseEntity(handler.handle("DescribeStream", req, REGION))
+                .get("StreamDescription");
+
+        assertPlainDecimalTimestamp(desc, "1785732980.986");
+    }
+
+    @Test
+    void describeStreamSummarySerializesCreationTimestampAsPlainDecimal() throws Exception {
+        createStream("test-stream");
+        service.describeStream("test-stream", REGION)
+                .setStreamCreationTimestamp(Instant.ofEpochMilli(1_785_732_980_986L));
+
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("StreamName", "test-stream");
+        ObjectNode summary = (ObjectNode) responseEntity(handler.handle("DescribeStreamSummary", req, REGION))
+                .get("StreamDescriptionSummary");
+
+        assertPlainDecimalTimestamp(summary, "1785732980.986");
+    }
+
+    @Test
+    void wholeSecondCreationTimestampRemainsNumeric() throws Exception {
+        createStream("test-stream");
+        service.describeStream("test-stream", REGION)
+                .setStreamCreationTimestamp(Instant.ofEpochMilli(1_785_732_980_000L));
+
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("StreamName", "test-stream");
+        ObjectNode desc = (ObjectNode) responseEntity(handler.handle("DescribeStream", req, REGION))
+                .get("StreamDescription");
+
+        assertPlainDecimalTimestamp(desc, "1785732980.000");
+    }
+
+    private void assertPlainDecimalTimestamp(ObjectNode description, String expected) throws Exception {
+        var timestamp = description.get("StreamCreationTimestamp");
+        assertTrue(timestamp.isNumber());
+        assertEquals(new BigDecimal(expected), timestamp.decimalValue());
+
+        String serialized = MAPPER.writeValueAsString(timestamp);
+        assertEquals(expected, serialized);
+        assertFalse(serialized.contains("E"));
+        assertFalse(serialized.contains("e"));
     }
 
     @Test
@@ -340,6 +401,98 @@ class KinesisJsonHandlerTest {
         updateReq.putObject("StreamModeDetails").put("StreamMode", "ON_DEMAND");
         AwsException ex = assertThrows(AwsException.class,
                 () -> handler.handle("UpdateStreamMode", updateReq, REGION));
+        assertEquals("ResourceNotFoundException", ex.getErrorCode());
+    }
+
+    @Test
+    void putRecordRejectsRecordOverSizeLimit() {
+        createStream("test-stream");
+
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("StreamName", "test-stream");
+        // 1_048_574 data bytes + 3-byte partition key = 1_048_577, one over the limit
+        req.put("Data", Base64.getEncoder().encodeToString(new byte[1_048_574]));
+        req.put("PartitionKey", "pk1");
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("PutRecord", req, REGION));
+        assertEquals("InvalidArgumentException", ex.getErrorCode());
+    }
+
+    @Test
+    void putRecordAcceptsRecordAtSizeLimit() {
+        createStream("test-stream");
+
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("StreamName", "test-stream");
+        // 1_048_573 data bytes + 3-byte partition key = exactly 1_048_576
+        req.put("Data", Base64.getEncoder().encodeToString(new byte[1_048_573]));
+        req.put("PartitionKey", "pk1");
+        assertThat(handler.handle("PutRecord", req, REGION).getStatus(), is(200));
+    }
+
+    @Test
+    void putRecordsRejectsWholeBatchOnOversizedRecord() {
+        createStream("test-stream");
+
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("StreamName", "test-stream");
+        ArrayNode records = req.putArray("Records");
+        records.addObject().put("Data", "dGVzdA==").put("PartitionKey", "pk1");
+        records.addObject()
+                .put("Data", Base64.getEncoder().encodeToString(new byte[1_048_574]))
+                .put("PartitionKey", "pk1");
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("PutRecords", req, REGION));
+        assertEquals("InvalidArgumentException", ex.getErrorCode());
+
+        // The valid first record must not have landed either
+        ObjectNode descReq = MAPPER.createObjectNode();
+        descReq.put("StreamName", "test-stream");
+        String shardId = responseEntity(handler.handle("DescribeStream", descReq, REGION))
+                .get("StreamDescription").get("Shards").get(0).get("ShardId").asText();
+
+        ObjectNode iterReq = MAPPER.createObjectNode();
+        iterReq.put("StreamName", "test-stream");
+        iterReq.put("ShardId", shardId);
+        iterReq.put("ShardIteratorType", "TRIM_HORIZON");
+        String iterator = responseEntity(handler.handle("GetShardIterator", iterReq, REGION))
+                .get("ShardIterator").asText();
+
+        ObjectNode recReq = MAPPER.createObjectNode();
+        recReq.put("ShardIterator", iterator);
+        assertEquals(0, responseEntity(handler.handle("GetRecords", recReq, REGION))
+                .get("Records").size());
+    }
+
+    @Test
+    void putRecordsKeepsMalformedDataAsPerRecordFailure() {
+        createStream("test-stream");
+
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("StreamName", "test-stream");
+        ArrayNode records = req.putArray("Records");
+        records.addObject().put("Data", "dGVzdA==").put("PartitionKey", "pk1");
+        records.addObject().put("Data", "!!!not-base64!!!").put("PartitionKey", "pk2");
+        records.addObject().put("Data", "dGVzdA==").put("PartitionKey", "pk3");
+
+        Response resp = handler.handle("PutRecords", req, REGION);
+        assertThat(resp.getStatus(), is(200));
+        ObjectNode body = responseEntity(resp);
+        assertEquals(1, body.get("FailedRecordCount").asInt());
+
+        ArrayNode results = (ArrayNode) body.get("Records");
+        assertThat(results.get(0).has("SequenceNumber"), is(true));
+        assertEquals("InternalFailure", results.get(1).get("ErrorCode").asText());
+        assertThat(results.get(2).has("SequenceNumber"), is(true));
+    }
+
+    @Test
+    void putRecordsRejectsUnknownStream() {
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("StreamName", "missing-stream");
+        req.putArray("Records").addObject().put("Data", "dGVzdA==").put("PartitionKey", "pk1");
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("PutRecords", req, REGION));
         assertEquals("ResourceNotFoundException", ex.getErrorCode());
     }
 }

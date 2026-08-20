@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.lambda;
 
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.lambda.model.LambdaAlias;
@@ -31,7 +33,10 @@ public class LambdaAliasStore {
     }
 
     private void loadIndex() {
-        backend.scan(k -> true).forEach(this::indexAlias);
+        List<LambdaAlias> all = backend instanceof AccountAwareStorageBackend<LambdaAlias> aware
+                ? aware.scanAllAccounts()
+                : backend.scan(k -> true);
+        all.forEach(this::indexAlias);
     }
 
     private void indexAlias(LambdaAlias alias) {
@@ -67,6 +72,17 @@ public class LambdaAliasStore {
     }
 
     public Optional<LambdaAlias> get(String region, String functionName, String aliasName) {
+        return backend.get(key(region, functionName, aliasName));
+    }
+
+    public Optional<LambdaAlias> getForAccount(
+            String accountId, String region, String functionName, String aliasName) {
+        if (backend instanceof AccountAwareStorageBackend<LambdaAlias> aware) {
+            return aware.getForAccountMigratingLegacy(
+                    accountId,
+                    key(region, functionName, aliasName),
+                    alias -> accountId.equals(AwsArnUtils.accountOrDefault(alias.getAliasArn(), "")));
+        }
         return backend.get(key(region, functionName, aliasName));
     }
 

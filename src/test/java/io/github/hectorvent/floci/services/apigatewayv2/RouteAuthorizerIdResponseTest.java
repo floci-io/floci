@@ -71,6 +71,61 @@ class RouteAuthorizerIdResponseTest {
     }
 
     @Test
+    void authorizationScopesPersistedAndReturned() {
+        String apiId = given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"name":"authz-route-scopes","protocolType":"HTTP"}
+                        """)
+                .when().post("/v2/apis")
+                .then().statusCode(201)
+                .extract().path("apiId");
+
+        String authorizerId = given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {
+                          "authorizerType":"JWT",
+                          "name":"jwt-authz-scopes",
+                          "identitySource":["$request.header.Authorization"],
+                          "jwtConfiguration":{"issuer":"https://example.com","audience":["api"]}
+                        }
+                        """)
+                .when().post("/v2/apis/" + apiId + "/authorizers")
+                .then().statusCode(201)
+                .extract().path("authorizerId");
+
+        String routeId = given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {
+                          "routeKey":"GET /scoped",
+                          "authorizationType":"JWT",
+                          "authorizerId":"%s",
+                          "authorizationScopes":["orders/read","orders/write"]
+                        }
+                        """.formatted(authorizerId))
+                .when().post("/v2/apis/" + apiId + "/routes")
+                .then().statusCode(201)
+                .body("authorizationScopes", equalTo(java.util.List.of("orders/read", "orders/write")))
+                .extract().path("routeId");
+
+        given()
+                .when().get("/v2/apis/" + apiId + "/routes/" + routeId)
+                .then().statusCode(200)
+                .body("authorizationScopes", equalTo(java.util.List.of("orders/read", "orders/write")));
+
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"authorizationScopes":["orders/admin"]}
+                        """)
+                .when().patch("/v2/apis/" + apiId + "/routes/" + routeId)
+                .then().statusCode(200)
+                .body("authorizationScopes", equalTo(java.util.List.of("orders/admin")));
+    }
+
+    @Test
     void authorizerIdReturnedAfterUpdate() {
         String apiId = given()
                 .contentType(ContentType.JSON)

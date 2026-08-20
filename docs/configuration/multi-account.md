@@ -4,10 +4,12 @@ Floci supports full per-account resource isolation out of the box. Resources cre
 
 ## How It Works
 
-Every incoming request carries an AWS SigV4 `Authorization` header. Floci reads the **Access Key ID** (AKID) from that header and applies one simple rule:
+Every incoming request carries an AWS SigV4 `Authorization` header. Floci reads the **Access Key ID** (AKID) from that header and resolves the account in this order:
 
-> **If the AKID is exactly 12 digits, it is used as the account ID.**  
-> Any other key format (e.g. `AKIAIOSFODNN7EXAMPLE`) falls back to `FLOCI_DEFAULT_ACCOUNT_ID`.
+1. An exactly 12-digit AKID is used directly as the account ID.
+2. An active long-term IAM access key resolves to the account that owns it.
+3. A live STS temporary credential resolves to its recorded account.
+4. Any other key falls back to `FLOCI_DEFAULT_ACCOUNT_ID`.
 
 ```
 Authorization: AWS4-HMAC-SHA256 Credential=111111111111/20260510/us-east-1/sqs/aws4_request, ...
@@ -19,6 +21,12 @@ Once the account ID is determined, every storage read and write is transparently
 
 !!! note "Same convention as LocalStack"
     This 12-digit AKID → account ID rule matches LocalStack's multi-account behavior, so existing multi-account test setups work without changes.
+
+## Long-Term IAM Credentials
+
+Active access keys created through IAM route requests back to the account that owns the key. This lets a client keep using its generated `AKIA…` credentials instead of replacing the access key ID with a synthetic 12-digit account ID.
+
+Account selection is AKID-based and is not proof that the caller possesses the corresponding secret. This extends Floci's existing local-emulator trust model for 12-digit AKIDs; do not treat account namespaces as a security boundary between mutually untrusted clients.
 
 ## Temporary Credentials (AssumeRole)
 
@@ -33,11 +41,11 @@ Account 111111111111 ──AssumeRole arn:aws:iam::222222222222:role/Deployer─
 ASIA… temp key ──CreateTable orders──▶ stored as 222222222222/...::orders  ◀──┘
 ```
 
-This makes the cross-account `AssumeRole`-then-provision pattern (e.g. CloudFormation deploying into a target account) work locally exactly as it does in AWS. Resolution precedence is: **12-digit AKID → account ID; otherwise temporary-session lookup → `FLOCI_DEFAULT_ACCOUNT_ID`.**
+This makes the cross-account `AssumeRole`-then-provision pattern (e.g. CloudFormation deploying into a target account) work locally exactly as it does in AWS.
 
 ## Default Behavior (Single Account)
 
-If you use any non-12-digit credentials (e.g. `test`, `AKIA…`), all requests resolve to the default account ID:
+If a credential is not a 12-digit account ID, an active IAM access key, or a live STS session (for example, `test`), requests resolve to the default account ID:
 
 ```bash
 FLOCI_DEFAULT_ACCOUNT_ID=000000000000   # default
@@ -151,16 +159,16 @@ Background workers (Lambda event-source pollers, DynamoDB TTL sweeper, MSK readi
 
 ## Signature Validation
 
-By default Floci **does not** validate SigV4 signatures — only the access key ID matters for account resolution. The secret access key can be any non-empty string.
+Floci does not currently perform general SigV4 validation for `Authorization` headers. Only the access key ID matters for account resolution, so the secret access key can be any non-empty string.
 
-To enforce real signature validation:
+`FLOCI_AUTH_VALIDATE_SIGNATURES` currently applies only to S3 presigned URL validation. It does not authenticate general service requests or protect IAM and STS account routing. To validate S3 presigned URLs:
 
 ```bash
 FLOCI_AUTH_VALIDATE_SIGNATURES=true
 FLOCI_AUTH_PRESIGN_SECRET=your-secret   # for pre-signed URL verification
 ```
 
-When `validate-signatures` is `false` (the default), account isolation still works correctly — the AKID is extracted from the `Authorization` header regardless of whether the signature itself is verified.
+When `validate-signatures` is `false` (the default), S3 presigned URL signatures are not verified. Account routing remains AKID-based regardless of this setting.
 
 ## Persistence and Account Isolation
 
@@ -170,6 +178,6 @@ Storage keys are namespaced per account at the persistence layer. When using `pe
 
 | Variable | Default | Description |
 |---|---|---|
-| `FLOCI_DEFAULT_ACCOUNT_ID` | `000000000000` | Account ID used when the AKID is not exactly 12 digits |
+| `FLOCI_DEFAULT_ACCOUNT_ID` | `000000000000` | Account ID used when the AKID does not resolve directly or through a stored credential |
 | `FLOCI_DEFAULT_REGION` | `us-east-1` | Region used when not derivable from the `Authorization` header |
-| `FLOCI_AUTH_VALIDATE_SIGNATURES` | `false` | Enforce SigV4 signature verification |
+| `FLOCI_AUTH_VALIDATE_SIGNATURES` | `false` | Verify S3 presigned URL signatures |

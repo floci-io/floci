@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.stepfunctions;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbJsonHandler;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
 import io.github.hectorvent.floci.services.lambda.LambdaExecutorService;
@@ -14,7 +15,10 @@ import io.github.hectorvent.floci.services.sqs.SqsJsonHandler;
 import io.github.hectorvent.floci.services.stepfunctions.model.Execution;
 import io.github.hectorvent.floci.services.stepfunctions.model.HistoryEvent;
 import io.github.hectorvent.floci.services.stepfunctions.model.StateMachine;
+import io.quarkus.test.junit.QuarkusTest;
+import io.vertx.mutiny.core.Vertx;
 import jakarta.enterprise.inject.Instance;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -32,6 +36,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+@QuarkusTest
 class AslExecutorCatchTest {
 
     private static final String REGION = "us-east-2";
@@ -47,6 +52,9 @@ class AslExecutorCatchTest {
     private LambdaFunction failingFunction;
     private LambdaFunction cleanupFunction;
     private AslExecutor executor;
+
+    @Inject
+    Vertx vertx;
 
     @BeforeEach
     void setUp() throws Exception {
@@ -82,7 +90,7 @@ class AslExecutorCatchTest {
                 mock(io.github.hectorvent.floci.services.ecs.EcsJsonHandler.class),
                 objectMapper,
                 new JsonataEvaluator(objectMapper),
-                mock(Instance.class));
+                mock(Instance.class), mock(EmulatorConfig.class), vertx);
     }
 
     @Test

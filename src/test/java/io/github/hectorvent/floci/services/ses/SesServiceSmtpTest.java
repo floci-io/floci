@@ -3,9 +3,12 @@ package io.github.hectorvent.floci.services.ses;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.ses.model.AccountSuppressionAttributes;
+import io.github.hectorvent.floci.services.ses.model.AccountVdmAttributes;
 import io.github.hectorvent.floci.services.ses.model.ConfigurationSet;
 import io.github.hectorvent.floci.services.ses.model.ContactList;
 import io.github.hectorvent.floci.services.ses.model.Contact;
+import io.github.hectorvent.floci.services.ses.model.ReceiptRuleSet;
+import io.github.hectorvent.floci.services.ses.model.CustomVerificationEmailTemplate;
 import io.github.hectorvent.floci.services.ses.model.DedicatedIpPool;
 import io.github.hectorvent.floci.services.ses.model.EmailTemplate;
 import io.github.hectorvent.floci.services.ses.model.Identity;
@@ -36,15 +39,16 @@ class SesServiceSmtpTest {
         emailStore = new InMemoryStorage<>();
         service = new SesService(
                 new InMemoryStorage<String, Identity>(),
-                emailStore,
-                new InMemoryStorage<String, Boolean>(),
-                new InMemoryStorage<String, EmailTemplate>(),
+                new SesSentEmailService(emailStore),
+                new SesAccountService(new InMemoryStorage<String, Boolean>(), new InMemoryStorage<String, AccountVdmAttributes>()),
+                new SesTemplateService(new InMemoryStorage<String, EmailTemplate>()),
                 new InMemoryStorage<String, ConfigurationSet>(),
-                new InMemoryStorage<String, SuppressedDestination>(),
-                new InMemoryStorage<String, AccountSuppressionAttributes>(),
-                new InMemoryStorage<String, DedicatedIpPool>(),
-                new InMemoryStorage<String, ContactList>(),
-                new InMemoryStorage<String, Contact>(),
+                new SesSuppressionService(new InMemoryStorage<String, SuppressedDestination>(), new InMemoryStorage<String, AccountSuppressionAttributes>()),
+                new SesDedicatedIpService(new InMemoryStorage<String, DedicatedIpPool>()),
+                new SesContactService(new InMemoryStorage<String, ContactList>(), new InMemoryStorage<String, Contact>(), Clock.systemUTC()),
+                new SesPolicyService(new InMemoryStorage<String, String>(), new ObjectMapper()),
+                new SesReceiptRuleService(new InMemoryStorage<String, ReceiptRuleSet>(), Clock.systemUTC()),
+                new SesCvetService(new InMemoryStorage<String, CustomVerificationEmailTemplate>()),
                 smtpRelay,
                 new ObjectMapper(),
                 Clock.systemUTC());
@@ -57,7 +61,7 @@ class SesServiceSmtpTest {
                 List.of("cc@example.com"),
                 List.of("bcc@example.com"),
                 List.of("reply@example.com"),
-                "Subject", "text body", "<p>html</p>", null, List.of(), List.of(), "us-east-1");
+                "Subject", "text body", "<p>html</p>", null, List.of(), List.of(), null, "us-east-1");
 
         verify(smtpRelay).relay(
                 "from@example.com",
@@ -65,24 +69,24 @@ class SesServiceSmtpTest {
                 List.of("cc@example.com"),
                 List.of("bcc@example.com"),
                 List.of("reply@example.com"),
-                "Subject", "text body", "<p>html</p>");
+                "Subject", "text body", "<p>html</p>", List.of());
     }
 
     @Test
     void sendEmail_storesAndRelays() {
         String messageId = service.sendEmail("from@example.com",
                 List.of("to@example.com"), null, null, null,
-                "Subject", "text", null, null, List.of(), List.of(), "us-east-1");
+                "Subject", "text", null, null, List.of(), List.of(), null, "us-east-1");
 
         assertNotNull(messageId);
         assertFalse(emailStore.scan(k -> true).isEmpty());
-        verify(smtpRelay).relay(any(), any(), any(), any(), any(), any(), any(), any());
+        verify(smtpRelay).relay(any(), any(), any(), any(), any(), any(), any(), any(), any());
     }
 
     @Test
     void sendRawEmail_callsRelayRaw() {
         service.sendRawEmail("from@example.com",
-                List.of("to@example.com"), "raw MIME", null, List.of(), "us-east-1");
+                List.of("to@example.com"), "raw MIME", null, List.of(), null, "us-east-1");
 
         verify(smtpRelay).relayRaw(
                 "from@example.com",
@@ -93,7 +97,7 @@ class SesServiceSmtpTest {
     @Test
     void sendRawEmail_storesAndRelays() {
         String messageId = service.sendRawEmail("from@example.com",
-                List.of("to@example.com"), "raw", null, List.of(), "us-east-1");
+                List.of("to@example.com"), "raw", null, List.of(), null, "us-east-1");
 
         assertNotNull(messageId);
         assertFalse(emailStore.scan(k -> true).isEmpty());
@@ -105,13 +109,13 @@ class SesServiceSmtpTest {
         service.sendEmail("from@example.com",
                 List.of("to@example.com"),
                 null, null, null,
-                "Subject", null, "<p>html only</p>", null, List.of(), List.of(), "us-east-1");
+                "Subject", null, "<p>html only</p>", null, List.of(), List.of(), null, "us-east-1");
 
         verify(smtpRelay).relay(
                 "from@example.com",
                 List.of("to@example.com"),
                 null, null, null,
-                "Subject", null, "<p>html only</p>");
+                "Subject", null, "<p>html only</p>", List.of());
     }
 
     @Test
@@ -123,12 +127,12 @@ class SesServiceSmtpTest {
                 List.of("to@example.com"),
                 List.of("cc@example.com"),
                 null, null,
-                "Subject", "text body", null, null, List.of(), List.of(), "us-east-1");
+                "Subject", "text body", null, null, List.of(), List.of(), null, "us-east-1");
 
         assertNotNull(messageId);
         assertFalse(emailStore.scan(k -> true).isEmpty(),
                 "stored SentEmail should still record the original recipient list");
-        verify(smtpRelay, never()).relay(any(), any(), any(), any(), any(), any(), any(), any());
+        verify(smtpRelay, never()).relay(any(), any(), any(), any(), any(), any(), any(), any(), any());
     }
 
     @Test
@@ -140,7 +144,7 @@ class SesServiceSmtpTest {
                 List.of("to@example.com", "suppressed@example.com"),
                 List.of("cc-keep@example.com"),
                 null, null,
-                "Subject", "text body", null, null, List.of(), List.of(), "us-east-1");
+                "Subject", "text body", null, null, List.of(), List.of(), null, "us-east-1");
 
         verify(smtpRelay).relay(
                 "from@example.com",
@@ -148,7 +152,7 @@ class SesServiceSmtpTest {
                 List.of("cc-keep@example.com"),
                 null,
                 null,
-                "Subject", "text body", null);
+                "Subject", "text body", null, List.of());
     }
 
     @Test
@@ -156,7 +160,7 @@ class SesServiceSmtpTest {
         service.putSuppressedDestination("us-east-1", "to@example.com", "BOUNCE");
 
         String messageId = service.sendRawEmail("from@example.com",
-                List.of("to@example.com"), "raw MIME", null, List.of(), "us-east-1");
+                List.of("to@example.com"), "raw MIME", null, List.of(), null, "us-east-1");
 
         assertNotNull(messageId);
         assertFalse(emailStore.scan(k -> true).isEmpty());
@@ -169,7 +173,7 @@ class SesServiceSmtpTest {
 
         service.sendRawEmail("from@example.com",
                 List.of("to@example.com", "suppressed@example.com"),
-                "raw MIME", null, List.of(), "us-east-1");
+                "raw MIME", null, List.of(), null, "us-east-1");
 
         verify(smtpRelay).relayRaw(
                 "from@example.com",
@@ -191,13 +195,13 @@ class SesServiceSmtpTest {
 
         service.sendEmail("from@example.com",
                 List.of("to@example.com"), null, null, null,
-                "Subject", "text body", null, "cs-no-suppression", List.of(), List.of(), "us-east-1");
+                "Subject", "text body", null, "cs-no-suppression", List.of(), List.of(), null, "us-east-1");
 
         verify(smtpRelay).relay(
                 "from@example.com",
                 List.of("to@example.com"),
                 null, null, null,
-                "Subject", "text body", null);
+                "Subject", "text body", null, List.of());
     }
 
     @Test
@@ -211,13 +215,13 @@ class SesServiceSmtpTest {
 
         service.sendEmail("from@example.com",
                 List.of("complainer@example.com"), null, null, null,
-                "Subject", "text body", null, "cs-bounce-only", List.of(), List.of(), "us-east-1");
+                "Subject", "text body", null, "cs-bounce-only", List.of(), List.of(), null, "us-east-1");
 
         verify(smtpRelay).relay(
                 "from@example.com",
                 List.of("complainer@example.com"),
                 null, null, null,
-                "Subject", "text body", null);
+                "Subject", "text body", null, List.of());
     }
 
     @Test
@@ -230,9 +234,9 @@ class SesServiceSmtpTest {
 
         service.sendEmail("from@example.com",
                 List.of("to@example.com"), null, null, null,
-                "Subject", "text body", null, "cs-default", List.of(), List.of(), "us-east-1");
+                "Subject", "text body", null, "cs-default", List.of(), List.of(), null, "us-east-1");
 
-        verify(smtpRelay, never()).relay(any(), any(), any(), any(), any(), any(), any(), any());
+        verify(smtpRelay, never()).relay(any(), any(), any(), any(), any(), any(), any(), any(), any());
     }
 
     @Test
@@ -242,7 +246,7 @@ class SesServiceSmtpTest {
         service.putConfigurationSetSuppressionOptions("cs-no-suppression-raw", List.of(), "us-east-1");
 
         service.sendRawEmail("from@example.com",
-                List.of("to@example.com"), "raw MIME", "cs-no-suppression-raw", List.of(), "us-east-1");
+                List.of("to@example.com"), "raw MIME", "cs-no-suppression-raw", List.of(), null, "us-east-1");
 
         verify(smtpRelay).relayRaw(
                 "from@example.com",

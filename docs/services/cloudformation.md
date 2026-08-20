@@ -22,6 +22,7 @@
 | `DescribeStackResources` | Get all resources in a stack |
 | `ListStackResources` | List resource summaries |
 | `GetTemplate` | Retrieve the template body |
+| `GetTemplateSummary` | Summarize a template's Parameters, Resources and Transform sections, by StackName, TemplateBody or TemplateURL |
 | `ValidateTemplate` | Accepted; returns success without validating (stub) |
 | `ListStacks` | List stacks by status |
 | `ListExports` | - |
@@ -47,31 +48,35 @@ Resource types provisioned during `CreateStack` / `UpdateStack` / `DeleteStack`.
 the backing service and sets a real physical ID plus the `Ref` / `Fn::GetAtt` attributes used by
 cross-resource references.
 
+> Adding a type? See [Adding a CloudFormation Resource Type](../../CONTRIBUTING.md#adding-a-cloudformation-resource-type).
+> Types live in per-service provisioners under `services/cloudformation/provisioners/`; keep this
+> table in step with them.
+
 | Service | Resource types |
 |---|---|
 | S3 | `Bucket`, `BucketPolicy` (accepted; policy not enforced) |
 | SQS | `Queue`, `QueuePolicy` (accepted; policy not enforced) |
 | SNS | `Topic`, `Subscription` |
 | DynamoDB | `Table`, `GlobalTable` |
-| Lambda | `Function` (Zip via S3/inline `ZipFile`, and Image), `LayerVersion`, `EventSourceMapping` (SQS, Kinesis, DynamoDB Streams) |
+| Lambda | `Function` (Zip via S3/inline `ZipFile`, and Image), `LayerVersion`, `EventSourceMapping` (SQS, Kinesis, DynamoDB Streams), `Version`, `Alias` (also what SAM's `AutoPublishAlias` expands into) |
 | IAM | `Role`, `User`, `AccessKey`, `Policy`, `ManagedPolicy`, `InstanceProfile` |
 | SSM | `Parameter` |
 | KMS | `Key`, `Alias` |
-| Secrets Manager | `Secret` |
+| Secrets Manager | `Secret`, `SecretTargetAttachment` |
 | ECR | `Repository` |
 | ECS | `Cluster`, `TaskDefinition`, `Service` |
 | EKS | `Cluster`, `Nodegroup` |
 | RDS | `DBInstance`, `DBCluster`, `DBSubnetGroup`, `DBParameterGroup`, `DBClusterParameterGroup` (DBInstance/DBCluster start real containers) |
-| EC2 | `VPC`, `Subnet`, `SecurityGroup`, `InternetGateway`, `RouteTable`, `SubnetRouteTableAssociation`, `Route`, `NatGateway`, `EIP`, `Instance` |
+| EC2 | `VPC`, `Subnet`, `SecurityGroup` (including inline `SecurityGroupIngress`/`SecurityGroupEgress`), `SecurityGroupIngress`, `SecurityGroupEgress`, `InternetGateway`, `RouteTable`, `SubnetRouteTableAssociation`, `Route`, `NatGateway`, `EIP`, `Instance`, `LaunchTemplate`, `VPCGatewayAttachment`, `NetworkAcl`, `NetworkAclEntry`, `SubnetNetworkAclAssociation`, `FlowLog` |
 | Elastic Load Balancing v2 | `LoadBalancer`, `TargetGroup`, `Listener`, `ListenerRule` |
-| Auto Scaling | `LaunchConfiguration`, `AutoScalingGroup` |
+| Auto Scaling | `LaunchConfiguration`, `AutoScalingGroup`, `LifecycleHook` |
 | Route 53 | `HostedZone`, `RecordSet` |
-| API Gateway (v1) | `RestApi`, `Resource`, `Authorizer`, `Method`, `Deployment`, `Stage` |
+| API Gateway (v1) | `RestApi`, `Resource`, `Authorizer`, `Method`, `Deployment`, `Stage`, `Account` |
 | API Gateway v2 | `Api`, `Route`, `Integration`, `Stage`, `Deployment` |
 | Step Functions | `StateMachine` |
 | Batch | `ComputeEnvironment`, `JobQueue`, `JobDefinition` |
 | Cognito | `UserPool`, `UserPoolClient` |
-| EventBridge | `Events::Rule` |
+| EventBridge | `Rule`, `EventBus`, `EventBusPolicy` |
 | Pipes | `Pipe` |
 | Kinesis | `Stream` |
 | Kinesis Data Firehose | `DeliveryStream` |
@@ -84,6 +89,54 @@ All other resource types are accepted without error and assigned a synthetic phy
 `arn:aws:stub:::<logicalId>` ARN attribute), so templates with unsupported types still reach
 `CREATE_COMPLETE` rather than failing.
 
+## EventBridge Event Buses
+
+`AWS::Events::EventBus` creates a real custom EventBridge bus. `Name` is required, `Ref` returns
+the bus name, and `Fn::GetAtt` supports `Arn` and `Name`. `Description` and `Tags` are applied when
+the bus is created. Rules that reference the bus are removed before stack deletion.
+
+The current implementation is limited to custom buses with the `Name`, `Description`, `Tags`, and
+`Policy` properties. `EventSourceName`, `KmsKeyIdentifier`, `DeadLetterConfig`, and `LogConfig` are
+rejected with `ValidationError` instead of being silently ignored. AWS models a `Name` change as
+resource replacement; Floci currently rejects that update until generic replacement handling is
+available. `Policy` is applied when the bus is created. Changing `Description`, `Tags`, or `Policy`
+during `UpdateStack` is rejected until transactional resource rollback is available; this prevents a
+failed stack update from leaving the live bus in the rejected configuration.
+
+## Secrets Manager Target Attachments
+
+`AWS::SecretsManager::SecretTargetAttachment` adds the target's database connection fields to the
+referenced secret while preserving credentials and custom fields. `Ref` and `Fn::GetAtt Id` return
+the complete secret ARN, only one attachment can own a secret, and deleting the attachment removes
+only its managed connection fields.
+
+Supported target types are:
+
+- `AWS::RDS::DBInstance`
+- `AWS::RDS::DBCluster`
+- `AWS::DocDB::DBInstance`
+- `AWS::DocDB::DBCluster`
+
+Redshift clusters, Redshift Serverless namespaces, and DocumentDB Elastic clusters are not supported
+because their backing services are not implemented. A `SecretId` change is applied in place rather
+than reproducing CloudFormation's replacement event sequence; failed changes restore affected secret
+data and attachment ownership.
+
+## Auto Scaling Launch Template Resolution
+
+`AWS::AutoScaling::AutoScalingGroup` resolves its launch template through any of the shapes AWS
+accepts, not only by name:
+
+- `LaunchTemplate` with `LaunchTemplateId` **or** `LaunchTemplateName` (plus an optional `Version`).
+  The id and name are distinct lookup keys, so an `lt-` id is matched as an id rather than being
+  treated as a name.
+- A `Ref` to an in-stack `AWS::EC2::LaunchTemplate`, whose `Ref` returns the `lt-` id and whose
+  `Fn::GetAtt LatestVersionNumber` supplies the version.
+- `MixedInstancesPolicy` → `LaunchTemplate` → `LaunchTemplateSpecification`, including
+  `Overrides[].InstanceType` and `InstancesDistribution` (`OnDemandBaseCapacity`,
+  `OnDemandPercentageAboveBaseCapacity`, `SpotAllocationStrategy`). A non-integer where AWS expects
+  a number fails the stack rather than being dropped.
+
 ## Lambda Stack Updates
 
 `AWS::Lambda::Function` resources are reconciled during `UpdateStack` in the same shape as CloudFormation/CDK deployments:
@@ -93,11 +146,52 @@ All other resource types are accepted without error and assigned a synthetic phy
 - Replacement-only changes such as `FunctionName` or `PackageType` changes create a replacement function and remove the old one.
 - S3-backed code stays linked through `S3Bucket` / `S3Key`, so Lambda's reactive S3 sync continues to work for functions created by CloudFormation or CDK.
 
+## RDS Credential Dynamic References
+
+`AWS::RDS::DBInstance` and `AWS::RDS::DBCluster` resolve CloudFormation dynamic
+references in `MasterUsername` and `MasterUserPassword` during resource creation:
+
+- `secretsmanager` references support whole secret strings, JSON keys, version stages, and version IDs.
+- `ssm` references accept `String` and `StringList` parameters, using either the latest value or an explicit positive version.
+- `ssm-secure` references require a `SecureString` parameter and are supported only for `MasterUserPassword`, matching the AWS resource-property allowlist.
+
+Dynamic-reference expansion is currently scoped to these RDS credential properties.
+
 ## Account-Aware Provisioning
 
 Resources provisioned by `CreateStack` / `UpdateStack` land in the **caller's account** namespace
 (determined from the request's access key — see [Multi-Account Isolation](../configuration/multi-account.md)).
 Deleting the stack removes them from that same account.
+
+## Deletion Policies
+
+A resource's [`DeletionPolicy`](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-attribute-deletionpolicy.html)
+attribute is honored on `DeleteStack` and on the rollback of a failed `CreateStack`:
+
+| Value | `DeleteStack` | Rollback of the create that made the resource |
+|---|---|---|
+| `Delete` (default) | deleted | deleted |
+| `Retain` | kept | kept |
+| `RetainExceptOnCreate` | kept | deleted |
+
+A kept resource is reported as `DELETE_SKIPPED` in `DescribeStackEvents` and does not fail the
+deletion — the stack still reaches `DELETE_COMPLETE` while the resource keeps existing. This also
+lets a stack owning a non-empty S3 bucket be deleted, since the bucket is never touched.
+
+Deviations from AWS to be aware of:
+
+- `Snapshot` deletes the resource without taking a snapshot; floci has no snapshot support for the
+  types AWS allows it on.
+- Every resource defaults to `Delete`. AWS instead defaults `AWS::RDS::DBCluster`, and
+  `AWS::RDS::DBInstance` without a `DBClusterIdentifier`, to `Snapshot`.
+- Unrecognized values are treated as `Delete`.
+- An update that removes a resource from the template does not delete it (or consult its policy);
+  only the new template's resources are provisioned. AWS applies `DeletionPolicy` to update-time
+  removals as well.
+- After `DeleteStack` completes, a retained resource's `DELETE_SKIPPED` record is only visible
+  through `DescribeStackEvents` for the deleted stack, not `DescribeStackResources`.
+- `UpdateReplacePolicy`, and the `RetainExceptOnCreate` request parameter of `CreateStack` /
+  `UpdateStack`, are not implemented.
 
 ## StackSets
 

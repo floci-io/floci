@@ -24,6 +24,10 @@ public class CacheBehavior {
     private long defaultTTL;
     private long minTTL;
     private long maxTTL;
+    // Private-content key group IDs whose public keys may sign requests.
+    // Explicit enablement controls signature enforcement.
+    private Boolean trustedKeyGroupsEnabled;
+    private List<String> trustedKeyGroups;
 
     public CacheBehavior() {}
 
@@ -74,4 +78,16 @@ public class CacheBehavior {
 
     public long getMaxTTL() { return maxTTL; }
     public void setMaxTTL(long maxTTL) { this.maxTTL = maxTTL; }
+
+    public boolean isTrustedKeyGroupsEnabled() {
+        return trustedKeyGroupsEnabled != null
+                ? trustedKeyGroupsEnabled
+                : trustedKeyGroups != null && !trustedKeyGroups.isEmpty();
+    }
+    public void setTrustedKeyGroupsEnabled(boolean trustedKeyGroupsEnabled) {
+        this.trustedKeyGroupsEnabled = trustedKeyGroupsEnabled;
+    }
+
+    public List<String> getTrustedKeyGroups() { return trustedKeyGroups; }
+    public void setTrustedKeyGroups(List<String> trustedKeyGroups) { this.trustedKeyGroups = trustedKeyGroups; }
 }

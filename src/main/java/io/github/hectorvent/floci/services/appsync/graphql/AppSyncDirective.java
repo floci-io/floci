@@ -10,7 +10,7 @@ public enum AppSyncDirective {
     AWS_OIDC("aws_oidc", "directive @aws_oidc on OBJECT | FIELD_DEFINITION"),
     AWS_LAMBDA("aws_lambda", "directive @aws_lambda on OBJECT | FIELD_DEFINITION"),
     AWS_SUBSCRIBE("aws_subscribe", "directive @aws_subscribe(mutations: [String!]!) on FIELD_DEFINITION"),
-    AWS_AUTH("aws_auth", "directive @aws_auth(cognito_groups: [String!]!) on OBJECT"),
+    AWS_AUTH("aws_auth", "directive @aws_auth(cognito_groups: [String!]!) on OBJECT | FIELD_DEFINITION"),
     AWS_DELTA_SYNC("aws_delta_sync",
         "directive @aws_delta_sync(tableName: String!, deltaSyncTableTTL: Int!, baseTableTTL: Int!) on OBJECT");
 

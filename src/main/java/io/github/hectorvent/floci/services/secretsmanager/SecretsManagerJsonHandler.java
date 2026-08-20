@@ -302,6 +302,9 @@ public class SecretsManagerJsonHandler {
         if (secret.getDeletedDate() != null) {
             response.put("DeletedDate", secret.getDeletedDate().toEpochMilli() / 1000.0);
         }
+        if (secret.getOwningService() != null) {
+            response.put("OwningService", secret.getOwningService());
+        }
 
         ArrayNode tagsArray = objectMapper.createArrayNode();
         if (secret.getTags() != null) {
@@ -403,6 +406,9 @@ public class SecretsManagerJsonHandler {
             if (secret.getLastAccessedDate() != null) {
                 node.put("LastAccessedDate", secret.getLastAccessedDate().toEpochMilli() / 1000.0);
             }
+            if (secret.getOwningService() != null) {
+                node.put("OwningService", secret.getOwningService());
+            }
             ArrayNode tagsArray = objectMapper.createArrayNode();
             if (secret.getTags() != null) {
                 for (Secret.Tag tag : secret.getTags()) {
@@ -479,7 +485,11 @@ public class SecretsManagerJsonHandler {
         ObjectNode response = objectMapper.createObjectNode();
         response.put("ARN", secret.getArn());
         response.put("Name", secret.getName());
-        response.put("VersionId", clientRequestToken);
+        // A service-managed secret is rotated in place by its owning service, staging no version
+        // for the request token, so report the version that exists rather than one that would
+        // resolve to nothing.
+        boolean serviceManaged = secret.getOwningService() != null && secret.getCurrentVersionId() != null;
+        response.put("VersionId", serviceManaged ? secret.getCurrentVersionId() : clientRequestToken);
         return Response.ok(response).build();
     }
 

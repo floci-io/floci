@@ -1,14 +1,18 @@
 package io.github.hectorvent.floci.services.lambda;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.path.json.config.JsonPathConfig;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.math.BigDecimal;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -29,6 +33,8 @@ class EsmIntegrationTest {
             "arn:aws:sqs:" + REGION + ":" + ACCOUNT_ID + ":" + QUEUE_NAME;
     private static final String FUNCTION_ARN =
             "arn:aws:lambda:" + REGION + ":" + ACCOUNT_ID + ":function:" + FUNCTION_NAME;
+    private static final String STREAM_ARN =
+            "arn:aws:kinesis:" + REGION + ":" + ACCOUNT_ID + ":stream/esm-test-stream";
     private static final String NON_DEFAULT_ACCOUNT = "000000000001";
     private static final String MULTI_ACCOUNT_QUEUE_NAME = "esm-multi-account-queue";
     private static final String MULTI_ACCOUNT_FUNCTION_NAME = "esm-multi-account-fn";
@@ -721,6 +727,176 @@ class EsmIntegrationTest {
         } catch (NumberFormatException e) {
             return 0;
         }
+    }
+
+    // ──────────────────────────── StartingPosition ────────────────────────────
+
+    @Test
+    @Order(70)
+    void createEventSourceMappingWithStartingPositionRoundTrips() {
+        String uuid = given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "FunctionName": "%s",
+                    "EventSourceArn": "%s",
+                    "StartingPosition": "LATEST"
+                }
+                """.formatted(FUNCTION_NAME, STREAM_ARN))
+        .when()
+            .post(LAMBDA_BASE + "/event-source-mappings")
+        .then()
+            .statusCode(202)
+            .body("StartingPosition", equalTo("LATEST"))
+        .extract()
+            .path("UUID");
+
+        given()
+        .when()
+            .get(LAMBDA_BASE + "/event-source-mappings/" + uuid)
+        .then()
+            .statusCode(200)
+            .body("StartingPosition", equalTo("LATEST"));
+
+        // List has its own response-building path, and Terraform refreshes through it too.
+        given()
+            .queryParam("FunctionName", FUNCTION_NAME)
+        .when()
+            .get(LAMBDA_BASE + "/event-source-mappings")
+        .then()
+            .statusCode(200)
+            .body("EventSourceMappings.find { it.UUID == '" + uuid + "' }.StartingPosition",
+                    equalTo("LATEST"));
+
+        given().delete(LAMBDA_BASE + "/event-source-mappings/" + uuid).then().statusCode(202);
+    }
+
+    @Test
+    @Order(71)
+    void createEventSourceMappingWithAtTimestampRoundTripsItsTimestamp() {
+        double startingPositionTimestamp = 1787036486.712;
+
+        String uuid = given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "FunctionName": "%s",
+                    "EventSourceArn": "%s",
+                    "StartingPosition": "AT_TIMESTAMP",
+                    "StartingPositionTimestamp": %s
+                }
+                """.formatted(FUNCTION_NAME, STREAM_ARN, startingPositionTimestamp))
+        .when()
+            .post(LAMBDA_BASE + "/event-source-mappings")
+        .then()
+            .statusCode(202)
+            .body("StartingPosition", equalTo("AT_TIMESTAMP"))
+        .extract()
+            .path("UUID");
+
+        // Lambda is a restJson1 service, so the timestamp goes out as epoch seconds — the same
+        // convention it came in on, and the one LastModified already uses. Read as BigDecimal
+        // because RestAssured's default float mapping cannot hold millisecond precision at this
+        // magnitude, and would report a passing round-trip as a ~57s drift.
+        BigDecimal returned = given()
+        .when()
+            .get(LAMBDA_BASE + "/event-source-mappings/" + uuid)
+        .then()
+            .statusCode(200)
+            .body("StartingPosition", equalTo("AT_TIMESTAMP"))
+        .extract()
+            .jsonPath(new JsonPathConfig(JsonPathConfig.NumberReturnType.BIG_DECIMAL))
+            .get("StartingPositionTimestamp");
+        assertEquals(startingPositionTimestamp, returned.doubleValue(), 0.001);
+
+        given().delete(LAMBDA_BASE + "/event-source-mappings/" + uuid).then().statusCode(202);
+    }
+
+    @Test
+    @Order(72)
+    void responseOmitsStartingPositionWhenUnset() {
+        // AWS omits the field on mappings that have none (SQS sources never do) rather than
+        // returning it as null.
+        String uuid = given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "FunctionName": "%s",
+                    "EventSourceArn": "%s"
+                }
+                """.formatted(FUNCTION_NAME, QUEUE_ARN))
+        .when()
+            .post(LAMBDA_BASE + "/event-source-mappings")
+        .then()
+            .statusCode(202)
+            .body("$", not(hasKey("StartingPosition")))
+            .body("$", not(hasKey("StartingPositionTimestamp")))
+        .extract()
+            .path("UUID");
+
+        given().delete(LAMBDA_BASE + "/event-source-mappings/" + uuid).then().statusCode(202);
+    }
+
+    @Test
+    @Order(73)
+    void createEventSourceMappingRejectsUnknownStartingPosition() {
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "FunctionName": "%s",
+                    "EventSourceArn": "%s",
+                    "StartingPosition": "AT_SEQUENCE_NUMBER"
+                }
+                """.formatted(FUNCTION_NAME, STREAM_ARN))
+        .when()
+            .post(LAMBDA_BASE + "/event-source-mappings")
+        .then()
+            .statusCode(400)
+            .body("message", containsString("TRIM_HORIZON, LATEST, AT_TIMESTAMP"));
+    }
+
+    @Test
+    @Order(74)
+    void createEventSourceMappingRejectsAtTimestampWithoutATimestamp() {
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "FunctionName": "%s",
+                    "EventSourceArn": "%s",
+                    "StartingPosition": "AT_TIMESTAMP"
+                }
+                """.formatted(FUNCTION_NAME, STREAM_ARN))
+        .when()
+            .post(LAMBDA_BASE + "/event-source-mappings")
+        .then()
+            .statusCode(400)
+            .body("message", containsString("StartingPositionTimestamp is required"));
+    }
+
+    @Test
+    @Order(75)
+    void createEventSourceMappingRejectsAtTimestampOnANonKinesisSource() {
+        String dynamoStreamArn =
+                "arn:aws:dynamodb:" + REGION + ":" + ACCOUNT_ID
+                        + ":table/esm-at-timestamp-table/stream/2026-01-01T00:00:00.000";
+
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "FunctionName": "%s",
+                    "EventSourceArn": "%s",
+                    "StartingPosition": "AT_TIMESTAMP",
+                    "StartingPositionTimestamp": 1787036486.712
+                }
+                """.formatted(FUNCTION_NAME, dynamoStreamArn))
+        .when()
+            .post(LAMBDA_BASE + "/event-source-mappings")
+        .then()
+            .statusCode(400)
+            .body("message", containsString("only supported for Amazon Kinesis"));
     }
 
     // ──────────────────────────── Multi-account ESM ────────────────────────────

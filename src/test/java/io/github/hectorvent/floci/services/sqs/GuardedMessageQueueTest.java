@@ -218,6 +218,27 @@ class GuardedMessageQueueTest {
         assertTrue(second.claimed().isEmpty());
     }
 
+    @Test
+    void fifoDelayedMessageDoesNotLockItsMessageGroup() {
+        // Only in-flight messages (claimed, within their visibility timeout)
+        // lock a FIFO message group. A message still waiting out its
+        // DelaySeconds was never claimed — no receipt handle — and must not
+        // make an already-visible message in the same group unreceivable.
+        Message visible = new Message("visible");
+        visible.setMessageGroupId("group1");
+        Message delayed = new Message("delayed");
+        delayed.setMessageGroupId("group1");
+        delayed.setVisibleAt(Instant.now().plusSeconds(60));
+
+        queue.addMessage(visible);
+        queue.addMessage(delayed);
+
+        var result = queue.claimVisibleMessages(10, 30, true, -1, null);
+        assertEquals(1, result.claimed().size(),
+                "A delayed message must not block its message group");
+        assertEquals("visible", result.claimed().get(0).getBody());
+    }
+
     // --- DLQ ---
 
     @Test

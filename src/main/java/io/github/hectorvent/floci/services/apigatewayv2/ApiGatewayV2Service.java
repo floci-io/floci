@@ -4,6 +4,8 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.ReservedTags;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -14,6 +16,7 @@ import org.jboss.logging.Logger;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.regex.Pattern;
 
@@ -22,7 +25,7 @@ public class ApiGatewayV2Service {
 
     private static final Logger LOG = Logger.getLogger(ApiGatewayV2Service.class);
 
-    private final StorageBackend<String, Api> apiStore;
+    private final AccountAwareStorageBackend<Api> apiStore;
     private final StorageBackend<String, Route> routeStore;
     private final StorageBackend<String, Integration> integrationStore;
     private final StorageBackend<String, Authorizer> authorizerStore;
@@ -33,6 +36,8 @@ public class ApiGatewayV2Service {
     private final StorageBackend<String, Model> modelStore;
     private final StorageBackend<String, VpcLink> vpcLinkStore;
     private final RegionResolver regionResolver;
+
+    public record ApiOwner(String accountId, String region) {}
 
     @Inject
     public ApiGatewayV2Service(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver) {
@@ -81,14 +86,24 @@ public class ApiGatewayV2Service {
             routeSelectionExpression = "${request.method} ${request.path}";
         }
 
+        @SuppressWarnings("unchecked")
+        Map<String, String> tags = (Map<String, String>) request.get("tags");
+        String overrideId = ReservedTags.extractOverrideApiId(tags);
+        String apiId = overrideId != null ? overrideId : shortId(10);
+        if (findApiOwner(apiId).isPresent()) {
+            throw new AwsException("ConflictException",
+                    "API with id '" + apiId + "' already exists", 409);
+        }
+
         Api api = new Api();
-        api.setApiId(shortId(10));
+        api.setApiId(apiId);
         api.setName(name);
         api.setProtocolType(protocolType);
         api.setCreatedDate(System.currentTimeMillis());
         api.setRouteSelectionExpression(routeSelectionExpression);
         api.setDescription(description);
         api.setApiKeySelectionExpression(apiKeySelectionExpression);
+        api.setDisableExecuteApiEndpoint(booleanValue(request.get("disableExecuteApiEndpoint")));
 
         if ("WEBSOCKET".equals(protocolType)) {
             api.setApiEndpoint(String.format("wss://%s.execute-api.%s.amazonaws.com", api.getApiId(), region));
@@ -96,10 +111,8 @@ public class ApiGatewayV2Service {
             api.setApiEndpoint(String.format("https://%s.execute-api.%s.amazonaws.com", api.getApiId(), region));
         }
 
-        @SuppressWarnings("unchecked")
-        Map<String, String> tags = (Map<String, String>) request.get("tags");
         if (tags != null) {
-            api.setTags(tags);
+            api.setTags(ReservedTags.stripApiGatewayReservedTags(tags));
         }
 
         @SuppressWarnings("unchecked")
@@ -116,6 +129,44 @@ public class ApiGatewayV2Service {
     public Api getApi(String region, String apiId) {
         return apiStore.get(apiKey(region, apiId))
                 .orElseThrow(() -> new AwsException("NotFoundException", "Invalid API id specified", 404));
+    }
+
+    /**
+     * Mirrors ApiGatewayService#resolveRestApiRegion: unsigned data-plane requests carry no
+     * region, so preferredRegion is whatever RegionResolver defaults to, which need not match
+     * where the API was actually created. Falls back to scanning stored keys for the apiId.
+     */
+    public String resolveApiRegion(String preferredRegion, String apiId) {
+        if (apiStore.get(apiKey(preferredRegion, apiId)).isPresent()) {
+            return preferredRegion;
+        }
+
+        return apiStore.keys().stream()
+                .filter(k -> k.endsWith("::" + apiId))
+                .map(k -> k.substring(0, k.indexOf("::")))
+                .findFirst()
+                .orElse(preferredRegion);
+    }
+
+    /** Resolves the account and region that own an API ID for data-plane requests. */
+    public Optional<ApiOwner> findApiOwner(String apiId) {
+        List<AccountAwareStorageBackend.AccountEntry<Api>> matches = apiStore
+                .scanAllAccountEntries(key -> key.endsWith("::" + apiId));
+        if (matches.size() > 1) {
+            throw new AwsException("ConflictException",
+                    "API id '" + apiId + "' is ambiguous across accounts", 409);
+        }
+        return matches.stream()
+                .findFirst()
+                .map(entry -> new ApiOwner(entry.accountId(), regionFromApiKey(entry.key())));
+    }
+
+    private static String regionFromApiKey(String key) {
+        int delimiter = key.indexOf("::");
+        if (delimiter <= 0) {
+            throw new IllegalStateException("Invalid API storage key: " + key);
+        }
+        return key.substring(0, delimiter);
     }
 
     public List<Api> getApis(String region) {
@@ -159,9 +210,14 @@ public class ApiGatewayV2Service {
         if (request.containsKey("apiKeySelectionExpression") && request.get("apiKeySelectionExpression") != null) {
             api.setApiKeySelectionExpression((String) request.get("apiKeySelectionExpression"));
         }
+        if (request.containsKey("disableExecuteApiEndpoint")
+                && request.get("disableExecuteApiEndpoint") != null) {
+            api.setDisableExecuteApiEndpoint(booleanValue(request.get("disableExecuteApiEndpoint")));
+        }
         if (request.containsKey("tags")) {
             @SuppressWarnings("unchecked")
             Map<String, String> tags = (Map<String, String>) request.get("tags");
+            ReservedTags.rejectApiGatewayReservedTagsOnUpdate(tags);
             api.setTags(tags);
         }
         if (request.containsKey("corsConfiguration")) {
@@ -172,6 +228,10 @@ public class ApiGatewayV2Service {
 
         apiStore.put(apiKey(region, apiId), api);
         return api;
+    }
+
+    private static boolean booleanValue(Object value) {
+        return value != null && Boolean.parseBoolean(String.valueOf(value));
     }
 
     private static Api.Cors toCors(Map<String, Object> m) {
@@ -301,6 +361,9 @@ public class ApiGatewayV2Service {
         route.setRouteKey((String) request.get("routeKey"));
         route.setAuthorizationType((String) request.getOrDefault("authorizationType", "NONE"));
         route.setAuthorizerId((String) request.get("authorizerId"));
+        @SuppressWarnings("unchecked")
+        List<String> authorizationScopes = (List<String>) request.get("authorizationScopes");
+        route.setAuthorizationScopes(authorizationScopes);
         route.setTarget((String) request.get("target"));
         route.setRouteResponseSelectionExpression((String) request.get("routeResponseSelectionExpression"));
 
@@ -335,6 +398,11 @@ public class ApiGatewayV2Service {
         }
         if (request.containsKey("authorizerId") && request.get("authorizerId") != null) {
             route.setAuthorizerId((String) request.get("authorizerId"));
+        }
+        if (request.containsKey("authorizationScopes") && request.get("authorizationScopes") != null) {
+            @SuppressWarnings("unchecked")
+            List<String> authorizationScopes = (List<String>) request.get("authorizationScopes");
+            route.setAuthorizationScopes(authorizationScopes);
         }
         if (request.containsKey("target") && request.get("target") != null) {
             route.setTarget((String) request.get("target"));
@@ -884,6 +952,7 @@ public class ApiGatewayV2Service {
     }
 
     public void tagResource(String resourceArn, Map<String, String> tags) {
+        ReservedTags.rejectApiGatewayReservedTagsOnUpdate(tags);
         String[] parsed = parseArn(resourceArn);
         String region = parsed[0];
         String apiId  = parsed[1];

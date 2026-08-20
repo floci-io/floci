@@ -9,17 +9,29 @@ import io.github.hectorvent.floci.services.bedrockruntime.BedrockRuntimeControll
 import io.github.hectorvent.floci.services.cognito.CognitoOAuthController;
 import io.github.hectorvent.floci.services.cognito.CognitoWellKnownController;
 import io.github.hectorvent.floci.services.eks.EksController;
+import io.github.hectorvent.floci.services.mwaa.MwaaController;
 import io.github.hectorvent.floci.services.iot.IotController;
 import io.github.hectorvent.floci.services.iot.IotDataController;
+import io.github.hectorvent.floci.services.bedrockagentcore.BedrockAgentCoreController;
+import io.github.hectorvent.floci.services.bedrockagentcorecontrol.BedrockAgentCoreControlController;
+import io.github.hectorvent.floci.services.bedrockagentcorecontrol.BedrockAgentCoreGatewayController;
+import io.github.hectorvent.floci.services.bedrockagentcorecontrol.BedrockAgentCoreIdentityController;
+import io.github.hectorvent.floci.services.bedrockagentcorecontrol.BedrockAgentCoreMemoryController;
 import io.github.hectorvent.floci.services.pipes.PipesController;
 import io.github.hectorvent.floci.services.lambda.LambdaController;
+import io.github.hectorvent.floci.services.lambdamicrovms.LambdaMicrovmsController;
+import io.github.hectorvent.floci.services.lambdamicrovms.LambdaNetworkConnectorsController;
 import io.github.hectorvent.floci.services.opensearch.OpenSearchController;
 import io.github.hectorvent.floci.services.cloudfront.CloudFrontController;
+import io.github.hectorvent.floci.services.cloudfront.CloudFrontServingController;
 import io.github.hectorvent.floci.services.route53.Route53Controller;
 import io.github.hectorvent.floci.services.ses.SesController;
 import io.github.hectorvent.floci.services.appsync.AppSyncController;
 import io.github.hectorvent.floci.services.rdsdata.RdsDataController;
+import io.github.hectorvent.floci.services.guardduty.GuardDutyController;
+import io.github.hectorvent.floci.services.rum.RumController;
 import io.github.hectorvent.floci.services.s3vectors.S3VectorsController;
+import io.github.hectorvent.floci.services.s3tables.S3TablesController;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -31,6 +43,18 @@ import java.util.Set;
 
 @ApplicationScoped
 public class ResolvedServiceCatalog {
+
+    /**
+     * Signing scopes that share another service's IAM namespace. S3 Express One Zone clients sign
+     * directory-bucket requests as {@code s3express} while the actions, ARNs and condition keys
+     * remain {@code s3}; the IoT Jobs Data Plane signs as {@code iot-jobs-data} while its actions
+     * are {@code iot:} ({@code iot:DescribeJobExecution} and peers in the Service Authorization
+     * Reference). Keep this minimal: every entry suppresses a distinct IAM namespace.
+     */
+    private static final java.util.Map<String, String> CREDENTIAL_SCOPE_ALIASES =
+            java.util.Map.of(
+                    "s3express", "s3",
+                    "iot-jobs-data", "iot");
 
     private final ServiceCatalog catalog;
 
@@ -51,7 +75,8 @@ public class ResolvedServiceCatalog {
                         "s3", storageMode(config.storage().services().s3().mode(), config.storage().mode()),
                         5000L, AwsNamespaces.S3, ServiceProtocol.REST_XML,
                         protocols(ServiceProtocol.REST_XML),
-                        Set.of(), Set.of("s3"), Set.of(), Set.of()),
+                        // s3express: directory-bucket (S3 Express One Zone) clients sign with it
+                        Set.of(), Set.of("s3", "s3express"), Set.of(), Set.of()),
                 descriptor("dynamodb", "dynamodb", config.services().dynamodb().enabled(), true,
                         "dynamodb", storageMode(config.storage().services().dynamodb().mode(), config.storage().mode()),
                         config.storage().services().dynamodb().flushIntervalMs(), null, ServiceProtocol.JSON,
@@ -67,7 +92,10 @@ public class ResolvedServiceCatalog {
                         "lambda", storageMode(config.storage().services().lambda().mode(), config.storage().mode()),
                         config.storage().services().lambda().flushIntervalMs(), null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
-                        Set.of(), Set.of("lambda"), Set.of(), Set.of(LambdaController.class)),
+                        Set.of(), Set.of("lambda"), Set.of(),
+                        Set.of(LambdaController.class,
+                                LambdaMicrovmsController.class,
+                                LambdaNetworkConnectorsController.class)),
                 descriptor("apigateway", "apigateway", config.services().apigateway().enabled(), true,
                         "apigateway", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
@@ -163,6 +191,11 @@ public class ResolvedServiceCatalog {
                         "kinesis", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON, ServiceProtocol.CBOR),
                         Set.of("Kinesis_20131202."), Set.of("kinesis"), Set.of(), Set.of()),
+                descriptor("kinesisanalytics", "kinesisanalytics",
+                        config.services().kinesisAnalytics().enabled(), true,
+                        "kinesisanalytics", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
+                        protocols(ServiceProtocol.JSON),
+                        Set.of("KinesisAnalytics_20180523."), Set.of("kinesisanalytics"), Set.of(), Set.of()),
                 descriptor("kms", "kms", config.services().kms().enabled(), true,
                         "kms", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
@@ -176,6 +209,10 @@ public class ResolvedServiceCatalog {
                         "stepfunctions", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON, ServiceProtocol.CBOR),
                         Set.of("AWSStepFunctions."), Set.of("states"), Set.of("SFN"), Set.of()),
+                descriptor("swf", "swf", config.services().swf().enabled(), true,
+                        "swf", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
+                        protocols(ServiceProtocol.JSON),
+                        Set.of("SimpleWorkflowService."), Set.of("swf"), Set.of(), Set.of()),
                 descriptor("cloudformation", "cloudformation", config.services().cloudformation().enabled(), true,
                         null, null, 5000L, null, ServiceProtocol.QUERY,
                         protocols(ServiceProtocol.QUERY),
@@ -250,10 +287,34 @@ public class ResolvedServiceCatalog {
                         "eks", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
                         Set.of(), Set.of("eks"), Set.of(), Set.of(EksController.class)),
+                descriptor("mwaa", "mwaa", config.services().mwaa().enabled(), true,
+                        "mwaa", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON),
+                        Set.of(),
+                        // Register both the signing name and the endpoint id. botocore's service
+                        // model declares signingName=airflow for mwaa (endpointPrefix=airflow too);
+                        // register the "mwaa" config/external key as well as a safety net, same
+                        // double-registration technique as bedrock-runtime/bedrock above.
+                        Set.of("airflow", "mwaa"),
+                        Set.of(),
+                        Set.of(MwaaController.class)),
                 descriptor("pipes", "pipes", config.services().pipes().enabled(), true,
                         "pipes", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
                         Set.of(), Set.of("pipes"), Set.of(), Set.of(PipesController.class)),
+                descriptor("bedrock-agentcore-control", "bedrock-agentcore-control",
+                        config.services().bedrockAgentCoreControl().enabled(), true,
+                        "bedrockagentcore", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON),
+                        Set.of(), Set.of("bedrock-agentcore"), Set.of(),
+                        Set.of(BedrockAgentCoreControlController.class, BedrockAgentCoreIdentityController.class,
+                                BedrockAgentCoreGatewayController.class, BedrockAgentCoreMemoryController.class)),
+                descriptor("bedrock-agentcore", "bedrock-agentcore",
+                        config.services().bedrockAgentCore().enabled(), true,
+                        null, null, 5000L, null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON),
+                        Set.of(), Set.of(), Set.of(),
+                        Set.of(BedrockAgentCoreController.class)),
                 descriptor("elasticloadbalancing", "elbv2", config.services().elbv2().enabled(), true,
                         "elbv2", config.storage().mode(), 5000L, AwsNamespaces.ELB_V2, ServiceProtocol.QUERY,
                         protocols(ServiceProtocol.QUERY),
@@ -285,9 +346,11 @@ public class ResolvedServiceCatalog {
                         protocols(ServiceProtocol.JSON),
                         Set.of("StarlingDoveService."), Set.of("config"), Set.of(), Set.of()),
                 descriptor("cloudtrail", "cloudtrail", config.services().cloudtrail().enabled(), true,
-                        "cloudtrail", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
+                        "cloudtrail", storageMode(config.storage().services().cloudtrail().mode(), config.storage().mode()),
+                        config.storage().services().cloudtrail().flushIntervalMs(), null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
-                        Set.of("com.amazonaws.cloudtrail.v20131101.CloudTrail_20131101."),
+                        Set.of("CloudTrail_20131101.",
+                               "com.amazonaws.cloudtrail.v20131101.CloudTrail_20131101."),
                         Set.of("cloudtrail"), Set.of(), Set.of()),
                 descriptor("lightsail", "lightsail", config.services().lightsail().enabled(), true,
                         "lightsail", storageMode(config.storage().services().lightsail().mode(), config.storage().mode()),
@@ -302,6 +365,12 @@ public class ResolvedServiceCatalog {
                         "autoscaling", config.storage().mode(), 5000L, AwsNamespaces.AUTOSCALING, ServiceProtocol.QUERY,
                         protocols(ServiceProtocol.QUERY),
                         Set.of(), Set.of("autoscaling"), Set.of(), Set.of()),
+                descriptor("application-autoscaling", "applicationautoscaling",
+                        config.services().applicationautoscaling().enabled(), true,
+                        "applicationautoscaling", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
+                        protocols(ServiceProtocol.JSON),
+                        Set.of("AnyScaleFrontendService."), Set.of("application-autoscaling"),
+                        Set.of(), Set.of()),
                 descriptor("elasticbeanstalk", "elasticbeanstalk",
                         config.services().elasticbeanstalk().enabled(), true,
                         "elasticbeanstalk",
@@ -356,25 +425,51 @@ public class ResolvedServiceCatalog {
                         "cloudfront", storageMode(config.storage().services().cloudfront().mode(), config.storage().mode()),
                         5000L, AwsNamespaces.CLOUDFRONT, ServiceProtocol.REST_XML,
                         protocols(ServiceProtocol.REST_XML),
-                        Set.of(), Set.of("cloudfront"), Set.of(), Set.of(CloudFrontController.class)),
+                        Set.of(), Set.of("cloudfront"), Set.of(),
+                        Set.of(CloudFrontController.class, CloudFrontServingController.class)),
                 descriptor("appsync", "appsync", config.services().appsync().enabled(), true,
                         "appsync", storageMode(config.storage().services().appsync().mode(), config.storage().mode()),
                         config.storage().services().appsync().flushIntervalMs(), null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
-                        Set.of(), Set.of("appsync"), Set.of(), Set.of(AppSyncController.class)),
+                        Set.of(), Set.of("appsync"), Set.of(), Set.of(AppSyncController.class,
+                                io.github.hectorvent.floci.services.appsync.graphql.AppSyncExecutionController.class)),
                 descriptor("s3vectors", "s3vectors", config.services().s3vectors().enabled(), true,
                         "s3vectors", storageMode(config.storage().services().s3vectors().mode(), config.storage().mode()),
                         config.storage().services().s3vectors().flushIntervalMs(), null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
                         Set.of(), Set.of("s3vectors"), Set.of(), Set.of(S3VectorsController.class)),
+                descriptor("s3tables", "s3tables", config.services().s3tables().enabled(), true,
+                        "s3tables", storageMode(config.storage().services().s3tables().mode(), config.storage().mode()),
+                        config.storage().services().s3tables().flushIntervalMs(), null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON),
+                        Set.of(), Set.of("s3tables"), Set.of(), Set.of(S3TablesController.class)),
                 descriptor("iot", "iot", config.services().iot().enabled(), true,
                         "iot", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
-                        Set.of(), Set.of("iot", "execute-api"), Set.of(), Set.of(IotController.class)),
+                        // iot-jobs-data: the IoT Jobs Data Plane (GetPendingJobExecutions,
+                        // DescribeJobExecution, StartNextPendingJobExecution, UpdateJobExecution)
+                        // signs under its own name while IotController serves its /things/*/jobs routes
+                        Set.of(), Set.of("iot", "execute-api", "iot-jobs-data"), Set.of(),
+                        Set.of(IotController.class)),
                 descriptor("iotdata", "iotdata", config.services().iotdata().enabled(), true,
                         "iot", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
-                        Set.of(), Set.of("iotdata"), Set.of(), Set.of(IotDataController.class))
+                        Set.of(), Set.of("iotdata"), Set.of(), Set.of(IotDataController.class)),
+                descriptor("cloudhsmv2", "cloudhsmv2", config.services().cloudhsmv2().enabled(), true,
+                        "cloudhsmv2", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
+                        protocols(ServiceProtocol.JSON),
+                        Set.of("BaldrApiService."), Set.of("cloudhsm"), Set.of(), Set.of()),
+                descriptor("rum", "rum", config.services().rum().enabled(), true,
+                        "rum", storageMode(config.storage().services().rum().mode(), config.storage().mode()),
+                        config.storage().services().rum().flushIntervalMs(), null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON),
+                        Set.of(), Set.of("rum"), Set.of(), Set.of(RumController.class)),
+                descriptor("guardduty", "guardduty", config.services().guardduty().enabled(), true,
+                        "guardduty",
+                        storageMode(config.storage().services().guardduty().mode(), config.storage().mode()),
+                        config.storage().services().guardduty().flushIntervalMs(), null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON),
+                        Set.of(), Set.of("guardduty"), Set.of(), Set.of(GuardDutyController.class))
         ));
     }
 
@@ -396,6 +491,23 @@ public class ResolvedServiceCatalog {
 
     public Optional<ServiceDescriptor> byCredentialScope(String credentialScope) {
         return catalog.byCredentialScope(credentialScope);
+    }
+
+    /**
+     * Canonical IAM namespace for a credential scope. A service may answer requests signed
+     * under more than one scope (S3 also accepts {@code s3express}), but IAM action rules,
+     * resource ARNs and condition keys are all keyed by the canonical one — an alias left
+     * unnormalised resolves to no action, which the enforcement filter treats as ALLOW.
+     *
+     * <p>Deliberately an explicit table rather than something derived from the descriptor:
+     * a descriptor's external key is a routing key, not an IAM namespace. SES routes under
+     * {@code email} and Bedrock Runtime under {@code bedrock-runtime}, while their IAM
+     * namespaces are {@code ses:} and {@code bedrock:} — deriving from the external key would
+     * rewrite valid scopes onto prefixes AWS never issues, and silently skip enforcement for
+     * those services. Add an entry here only when two scopes genuinely share one namespace.
+     */
+    public String canonicalCredentialScope(String credentialScope) {
+        return CREDENTIAL_SCOPE_ALIASES.getOrDefault(credentialScope, credentialScope);
     }
 
     public Optional<ServiceDescriptor> byResourceClass(Class<?> resourceClass) {

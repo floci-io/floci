@@ -23,7 +23,7 @@ class AslExecutorIntrinsicContextTest {
     /** Only ObjectMapper is exercised by the path/intrinsic resolution methods under test. */
     private AslExecutor newExecutor() {
         return new AslExecutor(null, null, null, null, null, null, null, null,
-                null, null, mapper, null, null);
+                null, null, mapper, null, null, null, null);
     }
 
     @Test

@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.services.kms.model.KmsMessageType;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
@@ -501,6 +502,102 @@ class KmsServiceTest {
     }
 
     @Test
+    void updateAlias() {
+        KmsKey keyA = kmsService.createKey(null, REGION);
+        KmsKey keyB = kmsService.createKey(null, REGION);
+        kmsService.createAlias("alias/my-key", keyA.getKeyId(), REGION);
+
+        kmsService.updateAlias("alias/my-key", keyB.getKeyId(), REGION);
+
+        List<KmsAlias> aliases = kmsService.listAliases(REGION);
+        assertEquals(1, aliases.size());
+        assertEquals(keyB.getKeyId(), aliases.getFirst().getTargetKeyId());
+    }
+
+    @Test
+    void updateAliasNotFoundThrows() {
+        KmsKey key = kmsService.createKey(null, REGION);
+        AwsException ex = assertThrows(AwsException.class, () ->
+                kmsService.updateAlias("alias/missing", key.getKeyId(), REGION));
+
+        assertEquals("NotFoundException", ex.getErrorCode());
+    }
+
+    @Test
+    void updateAliasForNonExistentTargetKeyThrows() {
+        KmsKey key = kmsService.createKey(null, REGION);
+        kmsService.createAlias("alias/my-key", key.getKeyId(), REGION);
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                kmsService.updateAlias("alias/my-key", "no-such-key", REGION));
+
+        assertEquals("NotFoundException", ex.getErrorCode());
+        assertEquals(key.getKeyId(), kmsService.listAliases(REGION).getFirst().getTargetKeyId());
+    }
+
+    @Test
+    void updateAliasForPendingDeletionTargetThrows() {
+        KmsKey keyA = kmsService.createKey(null, REGION);
+        KmsKey keyB = kmsService.createKey(null, REGION);
+        kmsService.createAlias("alias/my-key", keyA.getKeyId(), REGION);
+        kmsService.scheduleKeyDeletion(keyB.getKeyId(), 7, REGION);
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                kmsService.updateAlias("alias/my-key", keyB.getKeyId(), REGION));
+
+        assertEquals("KMSInvalidStateException", ex.getErrorCode());
+        assertEquals(keyA.getKeyId(), kmsService.listAliases(REGION).getFirst().getTargetKeyId());
+    }
+
+    @Test
+    void updateAliasForIncompatibleKeyUsageThrows() {
+        KmsKey symmetricKey = kmsService.createKey(null, REGION);
+        KmsKey hmacKey = kmsService.createKey("hmac key", "GENERATE_VERIFY_MAC", "HMAC_256", null, Map.of(), REGION);
+        kmsService.createAlias("alias/my-key", symmetricKey.getKeyId(), REGION);
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                kmsService.updateAlias("alias/my-key", hmacKey.getKeyId(), REGION));
+
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals(symmetricKey.getKeyId(), kmsService.listAliases(REGION).getFirst().getTargetKeyId());
+    }
+
+    @Test
+    void updateAliasAllowsSameTypeDifferentSpec() {
+        KmsKey rsa2048 = kmsService.createKey("rsa 2048", "SIGN_VERIFY", "RSA_2048", null, Map.of(), REGION);
+        KmsKey rsa3072 = kmsService.createKey("rsa 3072", "SIGN_VERIFY", "RSA_3072", null, Map.of(), REGION);
+        kmsService.createAlias("alias/my-key", rsa2048.getKeyId(), REGION);
+
+        kmsService.updateAlias("alias/my-key", rsa3072.getKeyId(), REGION);
+
+        assertEquals(rsa3072.getKeyId(), kmsService.listAliases(REGION).getFirst().getTargetKeyId());
+    }
+
+    @Test
+    void updateAliasAllowsSameUsageDifferentAsymmetricFamily() {
+        KmsKey rsaKey = kmsService.createKey("rsa key", "SIGN_VERIFY", "RSA_2048", null, Map.of(), REGION);
+        KmsKey eccKey = kmsService.createKey("ecc key", "SIGN_VERIFY", "ECC_NIST_P256", null, Map.of(), REGION);
+        kmsService.createAlias("alias/my-key", rsaKey.getKeyId(), REGION);
+
+        kmsService.updateAlias("alias/my-key", eccKey.getKeyId(), REGION);
+
+        assertEquals(eccKey.getKeyId(), kmsService.listAliases(REGION).getFirst().getTargetKeyId());
+    }
+
+    @Test
+    void updateAliasRejectsSymmetricToAsymmetricEvenWithSameUsage() {
+        KmsKey symmetricKey = kmsService.createKey(null, REGION);
+        KmsKey rsaEncryptKey = kmsService.createKey("rsa encrypt key", "ENCRYPT_DECRYPT", "RSA_2048", null, Map.of(), REGION);
+        kmsService.createAlias("alias/my-key", symmetricKey.getKeyId(), REGION);
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                kmsService.updateAlias("alias/my-key", rsaEncryptKey.getKeyId(), REGION));
+
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals(symmetricKey.getKeyId(), kmsService.listAliases(REGION).getFirst().getTargetKeyId());
+    }
+
+    @Test
     void deleteAlias() {
         KmsKey key = kmsService.createKey(null, REGION);
         kmsService.createAlias("alias/to-delete", key.getKeyId(), REGION);
@@ -629,6 +726,179 @@ class KmsServiceTest {
     void decryptInvalidCiphertextThrows() {
         assertThrows(AwsException.class, () ->
                 kmsService.decrypt("not-valid-ciphertext".getBytes(StandardCharsets.UTF_8), REGION));
+    }
+
+    @Test
+    void encryptWithDisabledKeyThrowsDisabledException() {
+        KmsKey key = kmsService.createKey(null, REGION);
+        kmsService.disableKey(key.getKeyId(), REGION);
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                kmsService.encrypt(key.getKeyId(), "hello".getBytes(StandardCharsets.UTF_8), REGION));
+
+        assertEquals("DisabledException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void encryptWithPendingDeletionKeyThrowsKmsInvalidStateException() {
+        KmsKey key = kmsService.createKey(null, REGION);
+        kmsService.scheduleKeyDeletion(key.getKeyId(), 7, REGION);
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                kmsService.encrypt(key.getKeyId(), "hello".getBytes(StandardCharsets.UTF_8), REGION));
+
+        assertEquals("KMSInvalidStateException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Nested
+    class DecryptAndReEncryptTests {
+
+        @Test
+        void decryptAndResolveKeyWithMatchingKeyIdSucceeds() {
+            KmsKey key = kmsService.createKey(null, REGION);
+            byte[] plaintext = "hello".getBytes(StandardCharsets.UTF_8);
+            byte[] ciphertext = kmsService.encrypt(key.getKeyId(), plaintext, REGION);
+
+            KmsService.DecryptResult result = kmsService.decryptAndResolveKey(ciphertext, Map.of(), REGION, key.getKeyId());
+
+            assertArrayEquals(plaintext, result.plaintext());
+            assertEquals(key.getArn(), result.keyArn());
+        }
+
+        @Test
+        void decryptAndResolveKeyWithMismatchedKeyIdThrowsIncorrectKeyException() {
+            KmsKey keyA = kmsService.createKey(null, REGION);
+            KmsKey keyB = kmsService.createKey(null, REGION);
+            byte[] ciphertext = kmsService.encrypt(keyA.getKeyId(), "hello".getBytes(StandardCharsets.UTF_8), REGION);
+
+            AwsException ex = assertThrows(
+                    AwsException.class,
+                    () -> kmsService.decryptAndResolveKey(ciphertext, Map.of(), REGION, keyB.getKeyId())
+            );
+
+            assertEquals("IncorrectKeyException", ex.getErrorCode());
+        }
+
+        @Test
+        void decryptAndResolveKeyWithMismatchedAliasKeyIdThrowsIncorrectKeyException() {
+            KmsKey keyA = kmsService.createKey(null, REGION);
+            KmsKey keyB = kmsService.createKey(null, REGION);
+            String aliasB = "alias/other-key";
+            kmsService.createAlias(aliasB, keyB.getKeyId(), REGION);
+            byte[] ciphertext = kmsService.encrypt(keyA.getKeyId(), "hello".getBytes(StandardCharsets.UTF_8), REGION);
+
+            AwsException ex = assertThrows(
+                    AwsException.class,
+                    () -> kmsService.decryptAndResolveKey(ciphertext, Map.of(), REGION, aliasB)
+            );
+
+            assertEquals("IncorrectKeyException", ex.getErrorCode());
+        }
+
+        @Test
+        void decryptAndResolveKeyWithMatchingAliasKeyIdSucceeds() {
+            KmsKey keyA = kmsService.createKey(null, REGION);
+            String aliasA = "alias/my-alias";
+            kmsService.createAlias(aliasA, keyA.getKeyId(), REGION);
+            byte[] plaintext = "hello".getBytes(StandardCharsets.UTF_8);
+            byte[] ciphertext = kmsService.encrypt(keyA.getKeyId(), plaintext, REGION);
+
+            KmsService.DecryptResult result = kmsService.decryptAndResolveKey(ciphertext, Map.of(), REGION, aliasA);
+
+            assertArrayEquals(plaintext, result.plaintext());
+            assertEquals(keyA.getArn(), result.keyArn());
+        }
+
+        @Test
+        void decryptAndResolveKeyWithNullKeyIdBehavesAsSelfDescribing() {
+            KmsKey key = kmsService.createKey(null, REGION);
+            byte[] plaintext = "hello".getBytes(StandardCharsets.UTF_8);
+            byte[] ciphertext = kmsService.encrypt(key.getKeyId(), plaintext, REGION);
+
+            KmsService.DecryptResult result = kmsService.decryptAndResolveKey(ciphertext, Map.of(), REGION, null);
+
+            assertArrayEquals(plaintext, result.plaintext());
+            assertEquals(key.getArn(), result.keyArn());
+        }
+
+        @Test
+        void decryptAndResolveKeyWithDisabledKeyThrowsDisabledException() {
+            KmsKey key = kmsService.createKey(null, REGION);
+            byte[] ciphertext = kmsService.encrypt(key.getKeyId(),
+                    "hello".getBytes(StandardCharsets.UTF_8), REGION);
+            kmsService.disableKey(key.getKeyId(), REGION);
+
+            AwsException ex = assertThrows(
+                    AwsException.class,
+                    () -> kmsService.decryptAndResolveKey(ciphertext, Map.of(), REGION, key.getKeyId())
+            );
+
+            assertEquals("DisabledException", ex.getErrorCode());
+            assertEquals(400, ex.getHttpStatus());
+        }
+
+        @Test
+        void decryptAndResolveKeyWithPendingDeletionKeyThrowsKmsInvalidStateException() {
+            KmsKey key = kmsService.createKey(null, REGION);
+            byte[] ciphertext = kmsService.encrypt(key.getKeyId(),
+                    "hello".getBytes(StandardCharsets.UTF_8), REGION);
+            kmsService.scheduleKeyDeletion(key.getKeyId(), 7, REGION);
+
+            AwsException ex = assertThrows(
+                    AwsException.class,
+                    () -> kmsService.decryptAndResolveKey(ciphertext, Map.of(), REGION, key.getKeyId())
+            );
+
+            assertEquals("KMSInvalidStateException", ex.getErrorCode());
+            assertEquals(400, ex.getHttpStatus());
+        }
+
+        @Test
+        void decryptAndResolveKeySelfDescribingWithDisabledKeyThrowsDisabledException() {
+            KmsKey key = kmsService.createKey(null, REGION);
+            byte[] ciphertext = kmsService.encrypt(key.getKeyId(),
+                    "hello".getBytes(StandardCharsets.UTF_8), REGION);
+            kmsService.disableKey(key.getKeyId(), REGION);
+
+            AwsException ex = assertThrows(
+                    AwsException.class,
+                    () -> kmsService.decryptAndResolveKey(ciphertext, Map.of(), REGION, null)
+            );
+
+            assertEquals("DisabledException", ex.getErrorCode());
+        }
+
+        @Test
+        void decryptAndResolveKeySelfDescribingWithPendingDeletionKeyThrowsKmsInvalidStateException() {
+            KmsKey key = kmsService.createKey(null, REGION);
+            byte[] ciphertext = kmsService.encrypt(key.getKeyId(),
+                    "hello".getBytes(StandardCharsets.UTF_8), REGION);
+            kmsService.scheduleKeyDeletion(key.getKeyId(), 7, REGION);
+
+            AwsException ex = assertThrows(
+                    AwsException.class,
+                    () -> kmsService.decryptAndResolveKey(ciphertext, Map.of(), REGION, null)
+            );
+
+            assertEquals("KMSInvalidStateException", ex.getErrorCode());
+        }
+
+        @Test
+        void reEncryptSourceKeyIdMismatchThrowsIncorrectKeyException() {
+            KmsKey sourceKey = kmsService.createKey(null, REGION);
+            KmsKey wrongKey = kmsService.createKey(null, REGION);
+            byte[] ciphertext = kmsService.encrypt(sourceKey.getKeyId(),
+                    "hello".getBytes(StandardCharsets.UTF_8), REGION);
+
+            AwsException ex = assertThrows(
+                    AwsException.class,
+                    () -> kmsService.decryptAndResolveKey(ciphertext, Map.of(), REGION, wrongKey.getKeyId())
+            );
+
+            assertEquals("IncorrectKeyException", ex.getErrorCode());
+        }
     }
 
     @Test
@@ -1052,6 +1322,40 @@ class KmsServiceTest {
     void putKeyPolicyOnNonExistentKeyThrows() {
         assertThrows(AwsException.class, () ->
                 kmsService.putKeyPolicy("non-existent", "{}", REGION));
+    }
+
+    // ── Issue #1528 — ListKeyPolicies ────────────────────────────────────────
+
+    @Test
+    void listKeyPoliciesReturnsDefaultPolicy() {
+        KmsKey key = kmsService.createKey("list-policy-key", REGION);
+
+        Map<String, Object> result = kmsService.listKeyPolicies(key.getKeyId(), REGION);
+
+        @SuppressWarnings("unchecked")
+        List<String> policyNames = (List<String>) result.get("PolicyNames");
+        assertEquals(1, policyNames.size());
+        assertEquals("default", policyNames.getFirst());
+        assertFalse((Boolean) result.get("Truncated"));
+        // Truncated is always false, so NextMarker must not be emitted at all.
+        assertFalse(result.containsKey("NextMarker"));
+    }
+
+    @Test
+    void listKeyPoliciesResolvesByArn() {
+        // The model documents KeyId for this operation as key ID or key ARN only; alias
+        // acceptance is a Floci-wide resolveKey superset, not this operation's AWS contract.
+        KmsKey key = kmsService.createKey("list-policy-arn", REGION);
+
+        assertEquals(List.of("default"),
+                kmsService.listKeyPolicies(key.getArn(), REGION).get("PolicyNames"));
+    }
+
+    @Test
+    void listKeyPoliciesOnNonExistentKeyThrows() {
+        AwsException ex = assertThrows(AwsException.class, () ->
+                kmsService.listKeyPolicies("non-existent", REGION));
+        assertEquals("NotFoundException", ex.getErrorCode());
     }
 
     // ── Issue #290 — Key Rotation ───────────────────────────────────────────

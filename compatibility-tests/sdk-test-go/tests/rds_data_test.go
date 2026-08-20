@@ -355,13 +355,30 @@ func TestRdsDataApiGoSdkV1(t *testing.T) {
 		ResourceArn: awsV1.String(resourceArn),
 		SecretArn:   awsV1.String(secretArn),
 		Database:    awsV1.String(database),
-		Sql:         awsV1.String("select :id"),
-		Parameters: []*rdsdataservice.SqlParameter{{
-			Name:  awsV1.String("id"),
-			Value: &rdsdataservice.Field{LongValue: awsV1.Int64(1)},
-		}},
+		Sql:         awsV1.String("insert into data_api_items (id, title, score) values (:id, :title, :score)"),
+		Parameters: []*rdsdataservice.SqlParameter{
+			{Name: awsV1.String("id"), Value: &rdsdataservice.Field{StringValue: awsV1.String("param-1")}},
+			{Name: awsV1.String("title"), Value: &rdsdataservice.Field{StringValue: awsV1.String("parameterized")}},
+			{Name: awsV1.String("score"), Value: &rdsdataservice.Field{LongValue: awsV1.Int64(42)}},
+		},
 	})
-	assertAwsErrorCode(t, err, "BadRequestException")
+	require.NoError(t, err)
+
+	paramOut, err := dataSvc.ExecuteStatement(&rdsdataservice.ExecuteStatementInput{
+		ResourceArn:           awsV1.String(resourceArn),
+		SecretArn:             awsV1.String(secretArn),
+		Database:              awsV1.String(database),
+		Sql:                   awsV1.String("select title, score from data_api_items where id = :id and score = :score"),
+		IncludeResultMetadata: awsV1.Bool(true),
+		Parameters: []*rdsdataservice.SqlParameter{
+			{Name: awsV1.String("id"), Value: &rdsdataservice.Field{StringValue: awsV1.String("param-1")}},
+			{Name: awsV1.String("score"), Value: &rdsdataservice.Field{LongValue: awsV1.Int64(42)}},
+		},
+	})
+	require.NoError(t, err)
+	require.Len(t, paramOut.Records, 1)
+	assert.Equal(t, "parameterized", awsV1.StringValue(paramOut.Records[0][0].StringValue))
+	assert.Equal(t, int64(42), awsV1.Int64Value(paramOut.Records[0][1].LongValue))
 
 	_, err = dataSvc.ExecuteStatement(&rdsdataservice.ExecuteStatementInput{
 		ResourceArn: awsV1.String(resourceArn),
@@ -713,13 +730,30 @@ func TestRdsDataApiGoSdkPostgresV1(t *testing.T) {
 		ResourceArn: awsV1.String(resourceArn),
 		SecretArn:   awsV1.String(secretArn),
 		Database:    awsV1.String(database),
-		Sql:         awsV1.String("select :id"),
-		Parameters: []*rdsdataservice.SqlParameter{{
-			Name:  awsV1.String("id"),
-			Value: &rdsdataservice.Field{LongValue: awsV1.Int64(1)},
-		}},
+		Sql:         awsV1.String("insert into data_api_items (id, title, score) values (:id, :title, :score)"),
+		Parameters: []*rdsdataservice.SqlParameter{
+			{Name: awsV1.String("id"), Value: &rdsdataservice.Field{StringValue: awsV1.String("param-1")}},
+			{Name: awsV1.String("title"), Value: &rdsdataservice.Field{StringValue: awsV1.String("parameterized")}},
+			{Name: awsV1.String("score"), Value: &rdsdataservice.Field{LongValue: awsV1.Int64(42)}},
+		},
 	})
-	assertAwsErrorCode(t, err, "BadRequestException")
+	require.NoError(t, err)
+
+	paramOut, err := dataSvc.ExecuteStatement(&rdsdataservice.ExecuteStatementInput{
+		ResourceArn:           awsV1.String(resourceArn),
+		SecretArn:             awsV1.String(secretArn),
+		Database:              awsV1.String(database),
+		Sql:                   awsV1.String("select title, score from data_api_items where id = :id and score = :score"),
+		IncludeResultMetadata: awsV1.Bool(true),
+		Parameters: []*rdsdataservice.SqlParameter{
+			{Name: awsV1.String("id"), Value: &rdsdataservice.Field{StringValue: awsV1.String("param-1")}},
+			{Name: awsV1.String("score"), Value: &rdsdataservice.Field{LongValue: awsV1.Int64(42)}},
+		},
+	})
+	require.NoError(t, err)
+	require.Len(t, paramOut.Records, 1)
+	assert.Equal(t, "parameterized", awsV1.StringValue(paramOut.Records[0][0].StringValue))
+	assert.Equal(t, int64(42), awsV1.Int64Value(paramOut.Records[0][1].LongValue))
 
 	_, err = dataSvc.ExecuteStatement(&rdsdataservice.ExecuteStatementInput{
 		ResourceArn: awsV1.String(resourceArn),
@@ -895,13 +929,30 @@ func TestRdsDataApiGoSdkV2(t *testing.T) {
 		ResourceArn: awsV2.String(resourceArn),
 		SecretArn:   awsV2.String(secretArn),
 		Database:    awsV2.String(database),
-		Sql:         awsV2.String("select :id"),
-		Parameters: []rdsdatatypes.SqlParameter{{
-			Name:  awsV2.String("id"),
-			Value: &rdsdatatypes.FieldMemberLongValue{Value: 1},
-		}},
+		Sql:         awsV2.String("insert into data_api_v2_items (id, name, qty) values (:id, :name, :qty)"),
+		Parameters: []rdsdatatypes.SqlParameter{
+			{Name: awsV2.String("id"), Value: &rdsdatatypes.FieldMemberStringValue{Value: "v2-param"}},
+			{Name: awsV2.String("name"), Value: &rdsdatatypes.FieldMemberStringValue{Value: "parameterized"}},
+			{Name: awsV2.String("qty"), Value: &rdsdatatypes.FieldMemberLongValue{Value: 42}},
+		},
 	})
-	assertSmithyErrorCode(t, err, "BadRequestException")
+	require.NoError(t, err)
+
+	paramOut, err := dataSvc.ExecuteStatement(ctx, &rdsdata.ExecuteStatementInput{
+		ResourceArn:           awsV2.String(resourceArn),
+		SecretArn:             awsV2.String(secretArn),
+		Database:              awsV2.String(database),
+		Sql:                   awsV2.String("select name, qty from data_api_v2_items where id = :id and qty = :qty"),
+		IncludeResultMetadata: true,
+		Parameters: []rdsdatatypes.SqlParameter{
+			{Name: awsV2.String("id"), Value: &rdsdatatypes.FieldMemberStringValue{Value: "v2-param"}},
+			{Name: awsV2.String("qty"), Value: &rdsdatatypes.FieldMemberLongValue{Value: 42}},
+		},
+	})
+	require.NoError(t, err)
+	require.Len(t, paramOut.Records, 1)
+	assert.Equal(t, "parameterized", fieldStringValue(t, paramOut.Records[0][0]))
+	assert.Equal(t, int64(42), fieldLongValue(t, paramOut.Records[0][1]))
 
 	_, err = dataSvc.ExecuteSql(ctx, &rdsdata.ExecuteSqlInput{
 		DbClusterOrInstanceArn: awsV2.String(resourceArn),
@@ -1068,13 +1119,30 @@ func TestRdsDataApiGoSdkPostgresV2(t *testing.T) {
 		ResourceArn: awsV2.String(resourceArn),
 		SecretArn:   awsV2.String(secretArn),
 		Database:    awsV2.String(database),
-		Sql:         awsV2.String("select :id"),
-		Parameters: []rdsdatatypes.SqlParameter{{
-			Name:  awsV2.String("id"),
-			Value: &rdsdatatypes.FieldMemberLongValue{Value: 1},
-		}},
+		Sql:         awsV2.String("insert into data_api_v2_items (id, name, qty) values (:id, :name, :qty)"),
+		Parameters: []rdsdatatypes.SqlParameter{
+			{Name: awsV2.String("id"), Value: &rdsdatatypes.FieldMemberStringValue{Value: "v2-param"}},
+			{Name: awsV2.String("name"), Value: &rdsdatatypes.FieldMemberStringValue{Value: "parameterized"}},
+			{Name: awsV2.String("qty"), Value: &rdsdatatypes.FieldMemberLongValue{Value: 42}},
+		},
 	})
-	assertSmithyErrorCode(t, err, "BadRequestException")
+	require.NoError(t, err)
+
+	paramOut, err := dataSvc.ExecuteStatement(ctx, &rdsdata.ExecuteStatementInput{
+		ResourceArn:           awsV2.String(resourceArn),
+		SecretArn:             awsV2.String(secretArn),
+		Database:              awsV2.String(database),
+		Sql:                   awsV2.String("select name, qty from data_api_v2_items where id = :id and qty = :qty"),
+		IncludeResultMetadata: true,
+		Parameters: []rdsdatatypes.SqlParameter{
+			{Name: awsV2.String("id"), Value: &rdsdatatypes.FieldMemberStringValue{Value: "v2-param"}},
+			{Name: awsV2.String("qty"), Value: &rdsdatatypes.FieldMemberLongValue{Value: 42}},
+		},
+	})
+	require.NoError(t, err)
+	require.Len(t, paramOut.Records, 1)
+	assert.Equal(t, "parameterized", fieldStringValue(t, paramOut.Records[0][0]))
+	assert.Equal(t, int64(42), fieldLongValue(t, paramOut.Records[0][1]))
 
 	_, err = dataSvc.ExecuteSql(ctx, &rdsdata.ExecuteSqlInput{
 		DbClusterOrInstanceArn: awsV2.String(resourceArn),

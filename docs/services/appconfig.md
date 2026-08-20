@@ -18,10 +18,14 @@ The management plane allows you to create and manage applications, environments,
 - `CreateConfigurationProfile`
 - `GetConfigurationProfile`
 - `ListConfigurationProfiles`
+- `DeleteConfigurationProfile`
 - `CreateHostedConfigurationVersion`
 - `GetHostedConfigurationVersion`
+- `DeleteHostedConfigurationVersion`
 - `CreateDeploymentStrategy`
 - `GetDeploymentStrategy`
+- `ListDeploymentStrategies`
+- `DeleteDeploymentStrategy`
 - `StartDeployment`
 - `GetDeployment`
 

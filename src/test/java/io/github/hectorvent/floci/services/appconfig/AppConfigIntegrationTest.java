@@ -317,7 +317,51 @@ class AppConfigIntegrationTest {
                 .body("Tags", anEmptyMap());
     }
 
+    // ──────────── Tags on top-level (non-application-nested) resource ARNs ────────────
+    // deploymentstrategy/extension/extensionassociation are real, taggable AppConfig resource
+    // types per the API - unlike environment/deployment above, their ARNs don't nest under
+    // application/..., so they need their own top-level branch in AppConfigTagHandler#parseArn.
+    // Regression coverage for that ARN-shape acceptance; no tag storage exists for these types
+    // yet (same no-op precedent as environment/deployment above), so only 200-not-400 is asserted.
+
     @Test @Order(22)
+    void listTagsForDeploymentStrategyArnIsAcceptedNotRejected() {
+        String arn = "arn:aws:appconfig:us-east-1:000000000000:deploymentstrategy/" + strategyId;
+        given()
+                .when().get("/tags/" + arn)
+                .then()
+                .statusCode(200)
+                .body("Tags", anEmptyMap());
+    }
+
+    @Test @Order(23)
+    void tagDeploymentStrategyArnIsAcceptedNotRejected() {
+        String arn = "arn:aws:appconfig:us-east-1:000000000000:deploymentstrategy/" + strategyId;
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"Tags\": {\"env\": \"local\"}}")
+                .when().post("/tags/" + arn)
+                .then()
+                .statusCode(204);
+    }
+
+    @Test @Order(24)
+    void listTagsForExtensionAndExtensionAssociationArnsIsAcceptedNotRejected() {
+        String extensionArn = "arn:aws:appconfig:us-east-1:000000000000:extension/some-extension-id";
+        String associationArn = "arn:aws:appconfig:us-east-1:000000000000:extensionassociation/some-association-id";
+        given()
+                .when().get("/tags/" + extensionArn)
+                .then()
+                .statusCode(200)
+                .body("Tags", anEmptyMap());
+        given()
+                .when().get("/tags/" + associationArn)
+                .then()
+                .statusCode(200)
+                .body("Tags", anEmptyMap());
+    }
+
+    @Test @Order(25)
     void emptyConfigurationReturnsEmptyPayload() {
         emptyAppId = given()
                 .contentType(ContentType.JSON)
@@ -361,5 +405,126 @@ class AppConfigIntegrationTest {
                 // SDK deserializes this as null (see AppConfigTest).
                 .header("Version-Label", equalTo(""))
                 .body(equalTo(""));
+    }
+
+    // ──────────────────────────── Delete/list operations that previously 404'd ────────────────────────────
+    // DeleteConfigurationProfile, DeleteHostedConfigurationVersion, ListDeploymentStrategies, and
+    // DeleteDeploymentStrategy had no route at all, so requests fell through to S3's generic
+    // path-style catch-all (GET/DELETE /{bucket}[/{key}]) and returned a misleading NoSuchBucket
+    // 404 instead of a real AppConfig response.
+
+    @Test @Order(26)
+    void deleteConfigurationProfileRemovesIt() {
+        String throwawayProfileId = given()
+                .contentType(ContentType.JSON)
+                .body("{\"Name\": \"throwaway-profile\", \"LocationUri\": \"hosted\", \"Type\": \"AWS.Freeform\"}")
+                .when().post("/applications/" + appId + "/configurationprofiles")
+                .then()
+                .statusCode(201)
+                .extract().path("Id");
+
+        given()
+                .when().delete("/applications/" + appId + "/configurationprofiles/" + throwawayProfileId)
+                .then()
+                .statusCode(204);
+
+        given()
+                .when().get("/applications/" + appId + "/configurationprofiles/" + throwawayProfileId)
+                .then()
+                .statusCode(404);
+    }
+
+    @Test @Order(27)
+    void deleteHostedConfigurationVersionRemovesIt() {
+        String versionNumberHeader = given()
+                .header("Content-Type", "application/json")
+                .body("{\"throwaway\": true}".getBytes())
+                .when().post("/applications/" + appId + "/configurationprofiles/" + profileId + "/hostedconfigurationversions")
+                .then()
+                .statusCode(201)
+                .extract().header("Version-Number");
+        int versionNumber = Integer.parseInt(versionNumberHeader);
+
+        given()
+                .when().delete("/applications/" + appId + "/configurationprofiles/" + profileId
+                        + "/hostedconfigurationversions/" + versionNumber)
+                .then()
+                .statusCode(204);
+
+        given()
+                .when().get("/applications/" + appId + "/configurationprofiles/" + profileId
+                        + "/hostedconfigurationversions/" + versionNumber)
+                .then()
+                .statusCode(404);
+    }
+
+    @Test @Order(28)
+    void listDeploymentStrategiesIncludesBuiltinsAndCustom() {
+        given()
+                .when().get("/deploymentstrategies")
+                .then()
+                .statusCode(200)
+                .body("Items.Id", hasItems("AppConfig.AllAtOnce", "AppConfig.Linear50PercentEvery30Seconds",
+                        "AppConfig.Canary10Percent20Minutes", strategyId));
+    }
+
+    @Test @Order(29)
+    void deleteDeploymentStrategyRemovesIt() {
+        String throwawayStrategyId = given()
+                .contentType(ContentType.JSON)
+                .body("{\"Name\": \"throwaway-strategy\", \"DeploymentDurationInMinutes\": 0, \"GrowthFactor\": 100, \"FinalBakeTimeInMinutes\": 0}")
+                .when().post("/deploymentstrategies")
+                .then()
+                .statusCode(201)
+                .extract().path("Id");
+
+        // AWS's own API model spells DeleteDeploymentStrategy's path "deployementstrategies"
+        // (extra "e") - every other deployment-strategy operation correctly uses
+        // "deploymentstrategies". Confirmed against the real API reference and reproduced
+        // against the real AWS SDK for Java v2 (see AppConfigController#deleteDeploymentStrategy).
+        given()
+                .when().delete("/deployementstrategies/" + throwawayStrategyId)
+                .then()
+                .statusCode(204);
+
+        given()
+                .when().get("/deploymentstrategies/" + throwawayStrategyId)
+                .then()
+                .statusCode(404);
+
+        // Deleting an already-deleted (or never-existing) strategy is idempotent, matching
+        // DeleteApplication's existing convention - not an error.
+        given()
+                .when().delete("/deployementstrategies/" + throwawayStrategyId)
+                .then()
+                .statusCode(204);
+    }
+
+    @Test @Order(30)
+    void deleteConfigurationProfileUnderWrongApplicationIsRejectedNotDeleted() {
+        // emptyProfileId belongs to emptyAppId (created in @Order(25)), not appId - a caller
+        // guessing/reusing a profileId under the wrong application must not be able to delete it.
+        given()
+                .when().delete("/applications/" + appId + "/configurationprofiles/" + emptyProfileId)
+                .then()
+                .statusCode(404);
+
+        given()
+                .when().get("/applications/" + emptyAppId + "/configurationprofiles/" + emptyProfileId)
+                .then()
+                .statusCode(200);
+    }
+
+    @Test @Order(31)
+    void deleteDeploymentStrategyOnPredefinedStrategyIsRejected() {
+        given()
+                .when().delete("/deployementstrategies/AppConfig.AllAtOnce")
+                .then()
+                .statusCode(400);
+
+        given()
+                .when().get("/deploymentstrategies/AppConfig.AllAtOnce")
+                .then()
+                .statusCode(200);
     }
 }

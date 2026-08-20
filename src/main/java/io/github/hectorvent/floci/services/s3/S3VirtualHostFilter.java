@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.s3;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
+import io.github.hectorvent.floci.services.cloudfront.CloudFrontDistributionFilter;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.container.ContainerRequestContext;
@@ -12,6 +13,10 @@ import jakarta.ws.rs.core.UriBuilder;
 import jakarta.ws.rs.ext.Provider;
 
 import java.net.URI;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Optional;
+import java.util.Set;
 
 @Provider
 @PreMatching
@@ -20,21 +25,56 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
 
     private final String baseHostname;
 
+    /**
+     * Hostname suffixes for which a bare {@code s3.<suffix>} Host header is Floci's own
+     * S3 service endpoint (bucketless) rather than a bucket literally named {@code s3}.
+     * Derived from the same source of truth the embedded DNS server uses: the always-on
+     * builtins ({@code localhost.floci.io}, {@code localhost.localstack.cloud}) plus the
+     * configured {@code floci.hostname} and any {@code floci.dns.extra-suffixes},
+     * alongside plain {@code localhost}. Stored lowercase for case-insensitive matching.
+     */
+    private final Set<String> serviceHostSuffixes;
+
     @Inject
     public S3VirtualHostFilter(EmulatorConfig config, ContainerDetector containerDetector) {
         this.baseHostname = config.hostname()
                 .orElseGet(() -> containerDetector.isRunningInContainer()
                         ? EmbeddedDnsServer.DEFAULT_SUFFIX
                         : extractHostnameFromUrl(config.baseUrl()));
+        this.serviceHostSuffixes = buildServiceHostSuffixes(config.hostname(), config.dns().extraSuffixes());
     }
 
     S3VirtualHostFilter() {
         this.baseHostname = "localhost";
+        this.serviceHostSuffixes = buildServiceHostSuffixes(Optional.empty(), Optional.empty());
+    }
+
+    /**
+     * Builds the service-host suffix set from the DNS source of truth rather than
+     * re-hardcoding it: {@code {"localhost"}} plus the {@link EmbeddedDnsServer} builtins
+     * plus the configured hostname and any extra suffixes. The three configured inputs
+     * mirror what {@code EmbeddedDnsServer} makes resolvable, so a host that reaches Floci
+     * by wildcard DNS is routed by the same rules it resolved under. Package-private so
+     * tests reuse the same derivation instead of duplicating the builtin list.
+     */
+    static Set<String> buildServiceHostSuffixes(Optional<String> hostname, Optional<List<String>> extraSuffixes) {
+        Set<String> suffixes = new HashSet<>();
+        suffixes.add("localhost");
+        EmbeddedDnsServer.BUILTIN_SUFFIXES.forEach(s -> suffixes.add(s.toLowerCase()));
+        hostname.ifPresent(h -> suffixes.add(h.toLowerCase()));
+        extraSuffixes.ifPresent(list -> list.forEach(s -> suffixes.add(s.toLowerCase())));
+        return Set.copyOf(suffixes);
     }
 
     @Override
     public void filter(ContainerRequestContext requestContext) {
-        String host = requestContext.getHeaderString("Host");
+        URI uri = requestContext.getUriInfo().getRequestUri();
+
+        // HTTP/2 (RFC 9113) has no "Host" header — the authority travels in the
+        // ":authority" pseudo-header, surfaced here as the request URI authority.
+        // Falling back to it keeps virtual-hosted-style routing working when a
+        // browser negotiates HTTP/2 over HTTPS (where the Host header is absent).
+        String host = resolveHost(requestContext.getHeaderString("Host"), uri);
         if (host == null) return;
 
         // Do not hijack requests meant for other AWS services
@@ -52,15 +92,20 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
             return;
         }
 
-        String bucket = extractBucket(host, baseHostname);
+        String bucket = extractBucket(host, baseHostname, serviceHostSuffixes);
         if (bucket == null) return;
 
-        URI uri = requestContext.getUriInfo().getRequestUri();
         String path = uri.getRawPath();
 
         // Do not rewrite S3 Control API paths — the account ID appears as a host label
         // in the S3ControlClient but the path belongs to the S3 Control service, not S3.
         if (path.startsWith("/v20180820/")) {
+            return;
+        }
+
+        // A higher-priority CloudFront distribution filter may have already routed this request.
+        // Use its server-side marker rather than trusting a user-controlled path prefix.
+        if (Boolean.TRUE.equals(requestContext.getProperty(CloudFrontDistributionFilter.ROUTED_PROPERTY))) {
             return;
         }
 
@@ -72,6 +117,26 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
                 .build();
 
         requestContext.setRequestUri(newUri);
+    }
+
+    /**
+     * Resolves the effective request authority used for virtual-host detection.
+     *
+     * <p>HTTP/1.1 carries it in the {@code Host} header. HTTP/2 (RFC 9113) has no
+     * {@code Host} header — the authority is in the {@code :authority} pseudo-header,
+     * which the container exposes as the request URI authority. When the {@code Host}
+     * header is absent we fall back to the URI authority so virtual-hosted-style
+     * requests are recognized on both protocol versions.
+     *
+     * @param hostHeader the value of the {@code Host} header, or {@code null}
+     * @param requestUri the request URI, or {@code null}
+     * @return the effective authority ({@code host[:port]}), or {@code null} if neither is available
+     */
+    static String resolveHost(String hostHeader, URI requestUri) {
+        if (hostHeader != null) {
+            return hostHeader;
+        }
+        return requestUri != null ? requestUri.getAuthority() : null;
     }
 
     /**
@@ -93,7 +158,7 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
      *
      * Returns null if the host does not match a virtual-hosted pattern.
      */
-    static String extractBucket(String host, String baseHostname) {
+    static String extractBucket(String host, String baseHostname, Set<String> serviceHostSuffixes) {
         if (host == null) {
             return null;
         }
@@ -115,7 +180,7 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
         String firstLabel = hostname.substring(0, firstDot);
         String remainder  = hostname.substring(firstDot + 1);
 
-        if (isS3ServiceEndpointHost(firstLabel, remainder, baseHostname)) {
+        if (isS3ServiceEndpointHost(firstLabel, remainder, baseHostname, serviceHostSuffixes)) {
             return null;
         }
 
@@ -130,20 +195,45 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
             return firstLabel;
         }
 
+        // Configured Floci DNS suffixes (builtins + floci.dns.extra-suffixes): route
+        // bucket.<suffix>, bucket.s3.<suffix> and bucket.s3.<region>.<suffix> the same
+        // way the always-on wildcard-DNS builtins resolve.
+        if (matchesConfiguredSuffixHost(remainder, serviceHostSuffixes)) {
+            return firstLabel;
+        }
+
         return null;
     }
 
-    private static boolean isS3ServiceEndpointHost(String firstLabel, String remainder, String baseHostname) {
+    /**
+     * Matches the virtual-hosted bucket forms for a configured DNS suffix {@code S}
+     * (a builtin, {@code floci.hostname}, or a {@code floci.dns.extra-suffix}): {@code bucket.S},
+     * {@code bucket.s3.S}, and the region-qualified {@code bucket.s3.<region>.S}.
+     * Plain {@code localhost} is skipped here — it keeps its dedicated
+     * {@link #matchesEndpointHost} handling via {@link #isAwsS3Domain}.
+     */
+    private static boolean matchesConfiguredSuffixHost(String remainder, Set<String> serviceHostSuffixes) {
+        String lower = remainder.toLowerCase();
+        for (String suffix : serviceHostSuffixes) {
+            if ("localhost".equals(suffix)) {
+                continue;
+            }
+            if (lower.equals(suffix) || (lower.startsWith("s3.") && lower.endsWith("." + suffix))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static boolean isS3ServiceEndpointHost(String firstLabel, String remainder, String baseHostname,
+                                           Set<String> serviceHostSuffixes) {
         if (!"s3".equalsIgnoreCase(firstLabel)) {
             return false;
         }
         if (baseHostname != null && matchesEndpointHost(remainder, baseHostname)) {
             return true;
         }
-        String lowerRemainder = remainder.toLowerCase();
-        return "localhost".equals(lowerRemainder)
-                || "localhost.localstack.cloud".equals(lowerRemainder)
-                || "localhost.floci.io".equals(lowerRemainder);
+        return serviceHostSuffixes.contains(remainder.toLowerCase());
     }
 
     /**
@@ -198,7 +288,13 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
         return true;
     }
 
-    /** Returns true for *.s3.amazonaws.com and other well-known S3 domains. */
+    /**
+     * Returns true for well-known AWS S3 domains and the always-on {@code localhost}
+     * endpoint. The Floci wildcard-DNS builtins ({@code localhost.floci.io},
+     * {@code localhost.localstack.cloud}) and any configured {@code floci.dns.extra-suffixes}
+     * are handled by {@link #matchesConfiguredSuffixHost} instead, so they stay derived
+     * from the DNS source of truth rather than hardcoded here.
+     */
     private static boolean isAwsS3Domain(String remainder) {
         if ("s3.amazonaws.com".equals(remainder)) {
             return true;
@@ -213,14 +309,6 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
         // Also accept the region-qualified s3.<region>.localhost form (e.g. bucket.s3.us-east-1.localhost).
         if (matchesEndpointHost(remainder, "localhost")) {
             return true;
-        }
-        // LocalStack public wildcard DNS: bucket.s3.localhost.localstack.cloud and bucket.localhost.localstack.cloud
-        if (remainder.endsWith(".localstack.cloud")) {
-            return remainder.startsWith("s3.") || "localhost.localstack.cloud".equals(remainder);
-        }
-        // Floci public wildcard DNS: bucket.s3.localhost.floci.io and bucket.localhost.floci.io → 127.0.0.1
-        if (remainder.endsWith(".localhost.floci.io") || "localhost.floci.io".equals(remainder)) {
-            return remainder.startsWith("s3.") || "localhost.floci.io".equals(remainder);
         }
         // S3 website endpoints: bucket.s3-website-<region>.amazonaws.com, bucket.s3-website-<region>.localhost, etc.
         if (remainder.startsWith("s3-website")) {

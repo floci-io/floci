@@ -67,6 +67,7 @@ public class CognitoJsonHandler {
             case "AdminUserGlobalSignOut" -> handleAdminUserGlobalSignOut(request);
             case "AdminEnableUser" -> handleAdminEnableUser(request);
             case "AdminDisableUser" -> handleAdminDisableUser(request);
+            case "AdminLinkProviderForUser" -> handleAdminLinkProviderForUser(request);
             case "ListUsers" -> handleListUsers(request);
             case "InitiateAuth" -> handleInitiateAuth(request);
             case "AdminInitiateAuth" -> handleAdminInitiateAuth(request);
@@ -74,11 +75,13 @@ public class CognitoJsonHandler {
             case "AdminRespondToAuthChallenge" -> handleAdminRespondToAuthChallenge(request);
             case "SignUp" -> handleSignUp(request);
             case "ConfirmSignUp" -> handleConfirmSignUp(request);
+            case "ResendConfirmationCode" -> handleResendConfirmationCode(request);
             case "AdminConfirmSignUp" -> handleAdminConfirmSignUp(request);
             case "ChangePassword" -> handleChangePassword(request);
             case "ForgotPassword" -> handleForgotPassword(request);
             case "ConfirmForgotPassword" -> handleConfirmForgotPassword(request);
             case "GetUser" -> handleGetUser(request);
+            case "GetUserAttributeVerificationCode" -> handleGetUserAttributeVerificationCode(request);
             case "UpdateUserAttributes" -> handleUpdateUserAttributes(request);
             case "DeleteUserAttributes" -> handleDeleteUserAttributes(request);
             case "GlobalSignOut" -> handleGlobalSignOut(request);
@@ -435,6 +438,16 @@ public class CognitoJsonHandler {
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
+    private Response handleAdminLinkProviderForUser(JsonNode request) {
+        JsonNode sourceUser = request.path("SourceUser");
+        service.adminLinkProviderForUser(
+                request.path("UserPoolId").asText(),
+                request.path("DestinationUser").path("ProviderAttributeValue").asText(),
+                sourceUser.path("ProviderName").asText(),
+                sourceUser.path("ProviderAttributeValue").asText());
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
     private Response handleListUsers(JsonNode request) {
         String filter = request.path("Filter").isMissingNode() ? null : request.path("Filter").asText(null);
         List<CognitoUser> users = service.listUsers(request.path("UserPoolId").asText(), filter);
@@ -559,6 +572,19 @@ public class CognitoJsonHandler {
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
+    private Response handleResendConfirmationCode(JsonNode request) {
+        Map<String, String> deliveryDetails = service.resendConfirmationCode(
+                request.path("ClientId").asText(),
+                request.path("Username").asText()
+        );
+        ObjectNode response = objectMapper.createObjectNode();
+        ObjectNode delivery = response.putObject("CodeDeliveryDetails");
+        delivery.put("AttributeName", deliveryDetails.get("AttributeName"));
+        delivery.put("DeliveryMedium", deliveryDetails.get("DeliveryMedium"));
+        delivery.put("Destination", deliveryDetails.get("Destination"));
+        return Response.ok(response).build();
+    }
+
     private Response handleAdminConfirmSignUp(JsonNode request) {
         service.adminConfirmSignUp(
                 request.path("UserPoolId").asText(),
@@ -602,6 +628,19 @@ public class CognitoJsonHandler {
     private Response handleGetUser(JsonNode request) {
         Map<String, Object> result = service.getUser(request.path("AccessToken").asText());
         return Response.ok(objectMapper.valueToTree(result)).build();
+    }
+
+    private Response handleGetUserAttributeVerificationCode(JsonNode request) {
+        Map<String, Object> deliveryDetails = service.getUserAttributeVerificationCode(
+                request.path("AccessToken").asText(),
+                request.path("AttributeName").asText()
+        );
+        ObjectNode response = objectMapper.createObjectNode();
+        ObjectNode delivery = response.putObject("CodeDeliveryDetails");
+        delivery.put("AttributeName", (String) deliveryDetails.get("AttributeName"));
+        delivery.put("DeliveryMedium", (String) deliveryDetails.get("DeliveryMedium"));
+        delivery.put("Destination", (String) deliveryDetails.get("Destination"));
+        return Response.ok(response).build();
     }
 
     private Response handleUpdateUserAttributes(JsonNode request) {

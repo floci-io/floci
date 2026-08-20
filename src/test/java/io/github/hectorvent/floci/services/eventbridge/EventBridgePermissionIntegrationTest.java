@@ -230,4 +230,63 @@ class EventBridgePermissionIntegrationTest {
             .statusCode(200)
             .body("Policy", containsString("default-stmt"));
     }
+
+    @Test
+    @Order(8)
+    void putPermissionWithMalformedPolicyIsValidationException() {
+        // Regression: a malformed Policy was stored unvalidated, and every later
+        // permission call parsing it fell into the catch-all and surfaced as 500.
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", "AWSEvents.PutPermission")
+            .body("""
+                {
+                    "EventBusName": "perm-test-bus",
+                    "Policy": "{\\"Version\\": not-valid"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
+
+        // The malformed policy must not have been stored: subsequent permission
+        // operations on the bus keep working instead of failing on parse.
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", "AWSEvents.PutPermission")
+            .body("""
+                {
+                    "EventBusName": "perm-test-bus",
+                    "Action": "events:PutEvents",
+                    "Principal": "*",
+                    "StatementId": "after-bad-policy"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    void putPermissionPolicyWithTrailingContentIsValidationException() {
+        // A lenient readTree accepts '{} garbage' by stopping at the first value;
+        // the policy must be parsed with trailing-token validation enabled.
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", "AWSEvents.PutPermission")
+            .body("""
+                {
+                    "EventBusName": "perm-test-bus",
+                    "Policy": "{} trailing-garbage"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
+    }
 }

@@ -28,6 +28,9 @@ public class Secret {
     private RotationRules rotationRules;
     private Instant lastRotatedDate;
     private Instant nextRotationDate;
+    private String targetAttachmentOwner;
+    /** The AWS service that owns this secret and rotates it itself, such as {@code rds}. */
+    private String owningService;
 
     @RegisterForReflection
     public record RotationRules(
@@ -171,5 +174,21 @@ public class Secret {
 
     public void setNextRotationDate(Instant nextRotationDate) {
         this.nextRotationDate = nextRotationDate;
+    }
+
+    public String getTargetAttachmentOwner() {
+        return targetAttachmentOwner;
+    }
+
+    public void setTargetAttachmentOwner(String targetAttachmentOwner) {
+        this.targetAttachmentOwner = targetAttachmentOwner;
+    }
+
+    public String getOwningService() {
+        return owningService;
+    }
+
+    public void setOwningService(String owningService) {
+        this.owningService = owningService;
     }
 }

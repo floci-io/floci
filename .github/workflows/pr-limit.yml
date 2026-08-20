@@ -1,0 +1,112 @@
+name: PR Limit Notice
+
+# Advisory guard: contributors may have at most 5 open PRs at a time. When one
+# is opened (or reopened) beyond that, this posts a polite reminder and adds
+# the `over-pr-limit` label. It never closes PRs or fails checks.
+#
+# Exempt: bot accounts (dependabot alone may hold many PRs) and maintainers
+# (OWNER/MEMBER/COLLABORATOR association). The label is removed automatically
+# only when this same PR is re-evaluated while the author is back under the
+# limit; stale labels on other PRs are cleaned up manually by maintainers.
+
+on:
+  # pull_request_target so the token has write access on fork PRs. This
+  # workflow never checks out or executes PR code — it only calls the GitHub
+  # API — so the elevated context is not exposed.
+  pull_request_target:
+    types: [opened, reopened]
+  # Manual test hook: evaluate an arbitrary PR (bypasses the exemptions).
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to evaluate'
+        required: true
+
+permissions:
+  issues: write
+  pull-requests: write
+
+concurrency:
+  # github.ref is the base branch under pull_request_target, so key on the PR
+  # number instead — otherwise every PR run would cancel every other.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || inputs.pr_number }}
+  cancel-in-progress: true
+
+env:
+  PR_LIMIT: 5
+  LABEL: over-pr-limit
+
+jobs:
+  check-pr-limit:
+    name: Check author open-PR count
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Manual dispatch skips exemptions (it is a maintainer-driven test).
+    # Over-exempting via author_association is fine: the check is advisory.
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.user.type != 'Bot' &&
+       !contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association))
+
+    steps:
+      - name: Evaluate open-PR count and notify
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_PR_NUMBER: ${{ github.event.pull_request.number }}
+          EVENT_AUTHOR: ${{ github.event.pull_request.user.login }}
+          INPUT_PR_NUMBER: ${{ inputs.pr_number }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            PR_NUMBER="$INPUT_PR_NUMBER"
+            AUTHOR=$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json author --jq .author.login)
+          else
+            PR_NUMBER="$EVENT_PR_NUMBER"
+            AUTHOR="$EVENT_AUTHOR"
+          fi
+
+          # Live list endpoint, not the search API — search indexing lags and
+          # can miss the PR that was just opened. The count includes the
+          # current PR, so "max 5 open" triggers at COUNT > 5.
+          COUNT=$(gh pr list --repo "$GITHUB_REPOSITORY" --author "$AUTHOR" \
+                    --state open --limit 100 --json number --jq 'length')
+          echo "Author $AUTHOR has $COUNT open PR(s); limit is $PR_LIMIT."
+
+          if [ "$COUNT" -le "$PR_LIMIT" ]; then
+            gh api -X DELETE \
+              "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels/$LABEL" \
+              > /dev/null 2>&1 || true
+            exit 0
+          fi
+
+          # Ensure the label exists (idempotent; self-heals if deleted).
+          gh label create "$LABEL" --repo "$GITHUB_REPOSITORY" --force \
+            --color fbca04 \
+            --description "Author has more than $PR_LIMIT open PRs — advisory only"
+
+          gh pr edit "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --add-label "$LABEL"
+
+          # Post the notice at most once per PR: skip when the marker comment
+          # already exists (e.g. the PR was closed and reopened).
+          if gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
+               --paginate --jq '.[].body' | grep -qF 'pr-limit-notice'; then
+            echo "Notice already posted; skipping comment."
+            exit 0
+          fi
+
+          PR_LIST_URL="https://github.com/$GITHUB_REPOSITORY/pulls?q=is%3Apr+is%3Aopen+author%3A$AUTHOR"
+
+          # One paragraph per line: GitHub renders a single newline in a
+          # comment as a hard line break.
+          BODY=$(cat <<EOF
+          <!-- pr-limit-notice -->
+          👋 Thanks for the pull request!
+
+          It looks like you now have **$COUNT open pull requests** in this repository, which is above our advisory limit of **$PR_LIMIT**. To keep the review backlog focused and make sure every contribution gets proper attention, we ask contributors to shepherd their existing PRs to the finish line before opening new ones — responding to review feedback, rebasing, or closing any that are no longer needed.
+
+          Here is [your list of open PRs]($PR_LIST_URL). Nothing is blocked and this PR stays open — this is just a friendly nudge. The \`$LABEL\` label helps maintainers see at a glance which PRs to prioritize.
+
+          If some of these PRs are stacked or intentionally related, just say so here and a maintainer will take that into account.
+          EOF
+          )
+
+          gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body "$BODY"

@@ -17,6 +17,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue;
+import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -127,6 +128,11 @@ public class SqsService implements Resettable {
         this.snsService = snsService;
         loadPersistedMessages();
         loadPersistedDedup();
+    }
+
+    @PreDestroy
+    void stop() {
+        moveTaskExecutor.shutdownNow();
     }
 
     public void clear() {
@@ -479,8 +485,10 @@ public class SqsService implements Resettable {
             return message;
         }
 
-        // Standard queue
+        // Standard queue. MessageGroupId is retained for ReceiveMessage to
+        // return (fair queues); it has no effect on standard-queue delivery.
         Message message = new Message(body);
+        message.setMessageGroupId(messageGroupId);
         message.setAwsTraceHeader(awsTraceHeader);
         if (effectiveDelaySeconds > 0) {
             message.setVisibleAt(Instant.now().plusSeconds(effectiveDelaySeconds));

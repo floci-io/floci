@@ -16,6 +16,8 @@ class EksTest {
     private static EksClient eks;
     private static String clusterName;
     private static String clusterArn;
+    private static String nodegroupName;
+    private static String fargateProfileName;
 
     @BeforeAll
     static void setup() {
@@ -26,6 +28,24 @@ class EksTest {
     @AfterAll
     static void cleanup() {
         if (eks != null) {
+            if (clusterName != null) {
+                if (nodegroupName != null) {
+                    try {
+                        eks.deleteNodegroup(DeleteNodegroupRequest.builder()
+                                .clusterName(clusterName)
+                                .nodegroupName(nodegroupName)
+                                .build());
+                    } catch (Exception ignored) {}
+                }
+                if (fargateProfileName != null) {
+                    try {
+                        eks.deleteFargateProfile(DeleteFargateProfileRequest.builder()
+                                .clusterName(clusterName)
+                                .fargateProfileName(fargateProfileName)
+                                .build());
+                    } catch (Exception ignored) {}
+                }
+            }
             try {
                 eks.deleteCluster(DeleteClusterRequest.builder()
                         .name(clusterName)
@@ -145,7 +165,7 @@ class EksTest {
 
     @Test
     @Order(10)
-    void createNodegroup() {
+    void createNodeGroup() {
         CreateNodegroupResponse response = eks.createNodegroup(CreateNodegroupRequest.builder()
                 .clusterName(clusterName)
                 .nodegroupName(NODEGROUP)
@@ -159,14 +179,13 @@ class EksTest {
         assertThat(response.nodegroup().clusterName()).isEqualTo(clusterName);
         assertThat(response.nodegroup().nodegroupArn())
                 .contains("nodegroup/" + clusterName + "/" + NODEGROUP);
-        assertThat(response.nodegroup().status())
-                .isIn(NodegroupStatus.CREATING, NodegroupStatus.ACTIVE);
+        assertThat(response.nodegroup().status()).isEqualTo(NodegroupStatus.ACTIVE);
         assertThat(response.nodegroup().scalingConfig().desiredSize()).isEqualTo(2);
     }
 
     @Test
     @Order(11)
-    void listNodegroups() {
+    void listNodeGroups() {
         ListNodegroupsResponse response = eks.listNodegroups(ListNodegroupsRequest.builder()
                 .clusterName(clusterName).build());
         assertThat(response.nodegroups()).contains(NODEGROUP);
@@ -174,7 +193,7 @@ class EksTest {
 
     @Test
     @Order(12)
-    void describeNodegroup() {
+    void describeNodeGroup() {
         DescribeNodegroupResponse response = eks.describeNodegroup(DescribeNodegroupRequest.builder()
                 .clusterName(clusterName).nodegroupName(NODEGROUP).build());
         assertThat(response.nodegroup().nodegroupName()).isEqualTo(NODEGROUP);
@@ -192,10 +211,117 @@ class EksTest {
 
     @Test
     @Order(14)
-    void deleteNodegroup() {
+    void deleteNodeGroup() {
         DeleteNodegroupResponse response = eks.deleteNodegroup(DeleteNodegroupRequest.builder()
                 .clusterName(clusterName).nodegroupName(NODEGROUP).build());
         assertThat(response.nodegroup().status()).isEqualTo(NodegroupStatus.DELETING);
+    }
+
+    @Test
+    @Order(8)
+    void nodegroupLifecycle() {
+        nodegroupName = "sdk-test-nodegroup-" + (System.currentTimeMillis() % 100000);
+
+        CreateNodegroupResponse createResponse = eks.createNodegroup(CreateNodegroupRequest.builder()
+                .clusterName(clusterName)
+                .nodegroupName(nodegroupName)
+                .nodeRole("arn:aws:iam::000000000000:role/eks-node-role")
+                .subnets("subnet-12345678", "subnet-87654321")
+                .scalingConfig(NodegroupScalingConfig.builder()
+                        .minSize(1)
+                        .maxSize(3)
+                        .desiredSize(2)
+                        .build())
+                .instanceTypes("t3.medium")
+                .labels(Map.of("workload", "api"))
+                .tags(Map.of("env", "test"))
+                .build());
+
+        assertThat(createResponse.nodegroup()).isNotNull();
+        assertThat(createResponse.nodegroup().clusterName()).isEqualTo(clusterName);
+        assertThat(createResponse.nodegroup().nodegroupName()).isEqualTo(nodegroupName);
+        assertThat(createResponse.nodegroup().nodegroupArn()).contains("nodegroup/" + clusterName + "/" + nodegroupName);
+        assertThat(createResponse.nodegroup().status()).isEqualTo(NodegroupStatus.ACTIVE);
+        assertThat(createResponse.nodegroup().scalingConfig().desiredSize()).isEqualTo(2);
+        assertThat(createResponse.nodegroup().labels()).containsEntry("workload", "api");
+        assertThat(createResponse.nodegroup().tags()).containsEntry("env", "test");
+
+        ListNodegroupsResponse listResponse = eks.listNodegroups(ListNodegroupsRequest.builder()
+                .clusterName(clusterName)
+                .build());
+        assertThat(listResponse.nodegroups()).contains(nodegroupName);
+
+        DescribeNodegroupResponse describeResponse = eks.describeNodegroup(DescribeNodegroupRequest.builder()
+                .clusterName(clusterName)
+                .nodegroupName(nodegroupName)
+                .build());
+        assertThat(describeResponse.nodegroup().nodegroupName()).isEqualTo(nodegroupName);
+        assertThat(describeResponse.nodegroup().subnets()).containsExactly("subnet-12345678", "subnet-87654321");
+
+        DeleteNodegroupResponse deleteResponse = eks.deleteNodegroup(DeleteNodegroupRequest.builder()
+                .clusterName(clusterName)
+                .nodegroupName(nodegroupName)
+                .build());
+        assertThat(deleteResponse.nodegroup().status()).isEqualTo(NodegroupStatus.DELETING);
+        assertThatThrownBy(() -> eks.describeNodegroup(DescribeNodegroupRequest.builder()
+                        .clusterName(clusterName)
+                        .nodegroupName(nodegroupName)
+                        .build()))
+                .isInstanceOf(ResourceNotFoundException.class);
+        nodegroupName = null;
+    }
+
+    @Test
+    @Order(9)
+    void fargateProfileLifecycle() {
+        fargateProfileName = "sdk-test-fargate-" + (System.currentTimeMillis() % 100000);
+
+        CreateFargateProfileResponse createResponse = eks.createFargateProfile(CreateFargateProfileRequest.builder()
+                .clusterName(clusterName)
+                .fargateProfileName(fargateProfileName)
+                .podExecutionRoleArn("arn:aws:iam::000000000000:role/eks-fargate-role")
+                .subnets("subnet-12345678", "subnet-87654321")
+                .selectors(FargateProfileSelector.builder()
+                        .namespace("default")
+                        .labels(Map.of("app", "api"))
+                        .build())
+                .tags(Map.of("env", "test"))
+                .build());
+
+        assertThat(createResponse.fargateProfile()).isNotNull();
+        assertThat(createResponse.fargateProfile().clusterName()).isEqualTo(clusterName);
+        assertThat(createResponse.fargateProfile().fargateProfileName()).isEqualTo(fargateProfileName);
+        assertThat(createResponse.fargateProfile().fargateProfileArn())
+                .matches("arn:aws:eks:[^:]+:[0-9]+:fargateprofile/" + clusterName + "/" + fargateProfileName + "/.+");
+        assertThat(createResponse.fargateProfile().status()).isEqualTo(FargateProfileStatus.ACTIVE);
+        assertThat(createResponse.fargateProfile().selectors()).hasSize(1);
+        assertThat(createResponse.fargateProfile().selectors().get(0).labels()).containsEntry("app", "api");
+        assertThat(createResponse.fargateProfile().tags()).containsEntry("env", "test");
+
+        ListFargateProfilesResponse listResponse = eks.listFargateProfiles(ListFargateProfilesRequest.builder()
+                .clusterName(clusterName)
+                .build());
+        assertThat(listResponse.fargateProfileNames()).contains(fargateProfileName);
+
+        DescribeFargateProfileResponse describeResponse = eks.describeFargateProfile(
+                DescribeFargateProfileRequest.builder()
+                        .clusterName(clusterName)
+                        .fargateProfileName(fargateProfileName)
+                        .build());
+        assertThat(describeResponse.fargateProfile().fargateProfileName()).isEqualTo(fargateProfileName);
+        assertThat(describeResponse.fargateProfile().subnets()).containsExactly("subnet-12345678", "subnet-87654321");
+
+        DeleteFargateProfileResponse deleteResponse = eks.deleteFargateProfile(DeleteFargateProfileRequest.builder()
+                .clusterName(clusterName)
+                .fargateProfileName(fargateProfileName)
+                .build());
+        assertThat(deleteResponse.fargateProfile().status()).isEqualTo(FargateProfileStatus.DELETING);
+        assertThatThrownBy(() -> eks.describeFargateProfile(DescribeFargateProfileRequest.builder()
+                        .clusterName(clusterName)
+                        .fargateProfileName(fargateProfileName)
+                        .build()))
+                .isInstanceOf(ResourceNotFoundException.class);
+        fargateProfileName = null;
     }
 
     @Test

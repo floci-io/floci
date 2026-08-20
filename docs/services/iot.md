@@ -123,6 +123,8 @@ Supported rule behavior:
 - SQL topic filter extraction for rules shaped like `SELECT * FROM 'topic/filter'`.
 - MQTT-style topic filter matching for exact topics, `+`, and terminal `#`.
 - IoT Data `Publish` and MQTT publishes use the same rule dispatch path.
+- Rule matching is region-scoped: an IoT Data `Publish` evaluates the rules of the region named by its SigV4 credential, and a rule's actions target the rule's own region.
+- Publishes that carry no region — MQTT, or an IoT Data `Publish` whose `Authorization` header is absent or not SigV4 — are evaluated against every region's rules.
 - `republish` action republishes the original payload to another MQTT topic through `IotMqttBrokerService`.
 - `sqs` action sends the original payload to an SQS queue through Floci's SQS service boundary.
 - `sns` action publishes the original payload to an SNS topic through Floci's SNS service boundary.

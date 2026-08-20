@@ -1,6 +1,6 @@
 # Services Overview
 
-Floci emulates 68 AWS services on a single port (`4566`). All services use the real AWS wire protocol, your existing AWS CLI commands and SDK clients work without modification.
+Floci emulates 71 AWS services on a single port (`4566`). All services use the real AWS wire protocol, your existing AWS CLI commands and SDK clients work without modification.
 
 This page is the canonical reference for supported service and operation counts. Some services expose separate control-plane and data-plane rows below. Other docs (and the README) should link here rather than duplicating the table.
 
@@ -15,16 +15,20 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [SNS](sns.md) | `POST /` with `Action=` param | Query / JSON | 17 |
 | [S3](s3.md) | `/{bucket}/{key}` | REST XML | 58 |
 | [S3 Vectors](s3vectors.md) | `POST /{OperationName}` | REST JSON | 12 |
+| [S3 Tables](s3tables.md) | `/buckets`, `/namespaces/*`, `/tables/*` | REST JSON | 25 |
 | [DynamoDB](dynamodb.md) | `POST /` + `X-Amz-Target: DynamoDB_20120810.*` | JSON 1.1 | 28 |
 | [DynamoDB Streams](dynamodb.md#streams) | `POST /` + `X-Amz-Target: DynamoDBStreams_20120810.*` | JSON 1.1 | 4 |
 | [Lambda](lambda.md) | `/2015-03-31/functions/...` | REST JSON | 30 |
+| [Lambda MicroVMs](lambda-microvms.md) | `/2025-09-09/...` + `/2026-04-04/...` | REST JSON | 22 |
 | [API Gateway v1](api-gateway.md) | `/restapis/...` | REST JSON | 64 |
 | [API Gateway v2](api-gateway.md#v2) | `/v2/apis/...` | REST JSON | 48 + data-plane |
 | [IAM](iam.md) | `POST /` with `Action=` param | Query | 76 |
 | [STS](sts.md) | `POST /` with `Action=` param | Query | 7 |
 | [Cognito](cognito.md) | `POST /` + `X-Amz-Target: AWSCognitoIdentityProviderService.*` | JSON 1.1 | 43 |
 | [KMS](kms.md) | `POST /` + `X-Amz-Target: TrentService.*` | JSON 1.1 | 34 |
+| [CloudHSM v2](cloudhsmv2.md) | `POST /` + `X-Amz-Target: BaldrApiService.*` | JSON 1.1 | 18 |
 | [Kinesis](kinesis.md) | `POST /` + `X-Amz-Target: Kinesis_20131202.*` | JSON 1.1 | 24 |
+| [Managed Service for Apache Flink](kinesisanalytics.md) | `POST /` + `X-Amz-Target: KinesisAnalytics_20180523.*` | JSON 1.1 | 7 |
 | [Secrets Manager](secrets-manager.md) | `POST /` + `X-Amz-Target: secretsmanager.*` | JSON 1.1 | 16 |
 | [Step Functions](step-functions.md) | `POST /` + `X-Amz-Target: AmazonStatesService.*` | JSON 1.1 | 19 |
 | [CloudFormation](cloudformation.md) | `POST /` with `Action=` param | Query | 19 |
@@ -33,6 +37,8 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [EventBridge Pipes](pipes.md) | `/v1/pipes/*` | REST JSON | 7 |
 | [CloudWatch Logs](cloudwatch.md) | `POST /` + `X-Amz-Target: Logs.*` | JSON 1.1 | 17 |
 | [CloudWatch Metrics](cloudwatch.md#metrics) | `POST /` with `Action=` or JSON 1.1 | Query / JSON | 11 |
+| [CloudWatch RUM](rum.md) | `/appmonitor`, `/appmonitor/{name}`, `/appmonitors` | REST JSON | 5 |
+| [GuardDuty](guardduty.md) | `/detector`, `/detector/{detectorId}`, `/detector/{detectorId}/admin`, `/admin/*`, `/tags/*` | REST JSON | 13 |
 | [ElastiCache](elasticache.md) | `POST /` with `Action=` param + TCP proxy | Query + RESP | 8 |
 | [MemoryDB](memorydb.md) | `POST /` + `X-Amz-Target: AmazonMemoryDB.*` + TCP proxy | JSON 1.1 + RESP | 7 |
 | [RDS](rds.md) | `POST /` with `Action=` param + TCP proxy | Query + wire | 14 |
@@ -62,6 +68,7 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [ELB v2](elb.md) | `POST /` with `Action=` param | Query | 34 |
 | [WAF v2](wafv2.md) | `POST /` + `X-Amz-Target: AWSWAF_20190729.*` | JSON 1.1 | 35 |
 | [Auto Scaling](autoscaling.md) | `POST /` with `Action=` param | Query | 33 |
+| [Application Auto Scaling](applicationautoscaling.md) | `POST /` + `X-Amz-Target: AnyScaleFrontendService.*` | JSON 1.1 | 9 |
 | [Elastic Beanstalk](elastic-beanstalk.md) | `POST /` with `Action=` or `Operation=` param | Query | 14 |
 | [CodeBuild](codebuild.md) | `POST /` + `X-Amz-Target: CodeBuild_20161006.*` | JSON 1.1 | 20 |
 | [AWS Batch](batch.md) | `/v1/...` | REST JSON | 10 |
@@ -72,7 +79,7 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [Route53](route53.md) | `/2013-04-01/hostedzone/*`, `/2013-04-01/healthcheck/*`, `/2013-04-01/change/*` | REST XML | 17 |
 | [Cloud Map](cloudmap.md) | `POST /` + `X-Amz-Target: Route53AutoNaming_v20170314.*` | JSON 1.1 | 22 |
 | [AWS Config](config.md) | `POST /` + `X-Amz-Target: StarlingDoveService.*` | JSON 1.1 | 20 |
-| [CloudTrail](cloudtrail.md) | `POST /` + `X-Amz-Target: com.amazonaws.cloudtrail.v20131101.CloudTrail_20131101.*` | JSON 1.1 | 8 |
+| [CloudTrail](cloudtrail.md) | `POST /` + `X-Amz-Target: com.amazonaws.cloudtrail.v20131101.CloudTrail_20131101.*` | JSON 1.1 | 9 |
 | [Textract](textract.md) | `POST /` + `X-Amz-Target: Textract.*` | JSON 1.1 | 6 |
 | [Transcribe](transcribe.md) | `POST /` + `X-Amz-Target: Transcribe.*` | JSON 1.1 | 8 |
 | [Pricing](pricing.md) | `POST /` + `X-Amz-Target: AWSPriceListService.*` | JSON 1.1 | 5 |

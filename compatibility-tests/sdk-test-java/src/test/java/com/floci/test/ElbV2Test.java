@@ -70,6 +70,7 @@ import software.amazon.awssdk.services.elasticloadbalancingv2.model.TargetDescri
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.TargetGroup;
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.TargetGroupAttribute;
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.TargetHealthDescription;
+import software.amazon.awssdk.services.elasticloadbalancingv2.model.TargetHealthReasonEnum;
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.TargetHealthStateEnum;
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.TargetTypeEnum;
 
@@ -312,7 +313,29 @@ class ElbV2Test {
         assertThat(resp.targetHealthDescriptions()).hasSize(2);
         for (TargetHealthDescription thd : resp.targetHealthDescriptions()) {
             assertThat(thd.targetHealth().state()).isEqualTo(TargetHealthStateEnum.INITIAL);
+            assertThat(thd.targetHealth().reason()).isEqualTo(TargetHealthReasonEnum.ELB_REGISTRATION_IN_PROGRESS);
+            assertThat(thd.targetHealth().description()).isEqualTo("Target registration is in progress");
         }
+    }
+
+    @Test
+    @Order(16)
+    @DisplayName("DescribeTargetHealth - reports unused for explicit unregistered target")
+    void describeTargetHealthForUnregisteredTarget() {
+        DescribeTargetHealthResponse resp = elb.describeTargetHealth(
+                DescribeTargetHealthRequest.builder()
+                        .targetGroupArn(tgArn)
+                        .targets(TargetDescription.builder()
+                                .id("i-1234567890abcdef0")
+                                .port(8080)
+                                .build())
+                        .build());
+
+        assertThat(resp.targetHealthDescriptions()).hasSize(1);
+        TargetHealthDescription health = resp.targetHealthDescriptions().get(0);
+        assertThat(health.targetHealth().state()).isEqualTo(TargetHealthStateEnum.UNUSED);
+        assertThat(health.targetHealth().reason()).isEqualTo(TargetHealthReasonEnum.TARGET_NOT_REGISTERED);
+        assertThat(health.targetHealth().description()).isEqualTo("Target is not registered to the target group");
     }
 
     // ─── Listeners ───────────────────────────────────────────────────────────

@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.amazonmq.container.RabbitMqManager;
 import io.github.hectorvent.floci.services.amazonmq.model.Broker;
@@ -26,7 +27,7 @@ class AmazonMqServiceTest {
     void setUp() {
         StorageFactory storageFactory = Mockito.mock(StorageFactory.class);
         when(storageFactory.create(Mockito.anyString(), Mockito.anyString(), Mockito.any()))
-                .thenReturn(new InMemoryStorage<>());
+                .thenReturn(AccountAwareStorageBackend.inMemory("000000000000"));
 
         EmulatorConfig config = Mockito.mock(EmulatorConfig.class);
         var servicesConfig = Mockito.mock(EmulatorConfig.ServicesConfig.class);
@@ -173,7 +174,7 @@ class AmazonMqServiceTest {
     private AmazonMqService realModeServiceWithFailingManager() {
         StorageFactory storageFactory = Mockito.mock(StorageFactory.class);
         when(storageFactory.create(Mockito.anyString(), Mockito.anyString(), Mockito.any()))
-                .thenReturn(new InMemoryStorage<>());
+                .thenReturn(AccountAwareStorageBackend.inMemory("000000000000"));
 
         EmulatorConfig config = Mockito.mock(EmulatorConfig.class);
         var servicesConfig = Mockito.mock(EmulatorConfig.ServicesConfig.class);
