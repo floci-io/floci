@@ -64,6 +64,8 @@ public class Ec2QueryHandler {
                 case "DescribeInstanceStatus" -> handleDescribeInstanceStatus(params, region);
                 case "DescribeInstanceAttribute" -> handleDescribeInstanceAttribute(params, region);
                 case "ModifyInstanceAttribute" -> handleModifyInstanceAttribute(params, region);
+                case "ModifyInstanceMetadataDefaults" -> handleModifyInstanceMetadataDefaults(params, region);
+                case "GetInstanceMetadataDefaults" -> handleGetInstanceMetadataDefaults(params, region);
                 // VPCs
                 case "CreateVpc" -> handleCreateVpc(params, region);
                 case "DescribeVpcs" -> handleDescribeVpcs(params, region);
@@ -825,6 +827,33 @@ public class Ec2QueryHandler {
             service.modifyInstanceGroups(region, instanceId, groupIds);
         }
         return booleanResponse("ModifyInstanceAttribute");
+    }
+
+    // lex00/floci#76: region-level defaults new instances inherit unless they set their own
+    // metadata options (aws_ec2_instance_metadata_defaults) - one singleton per region, no
+    // resource id, the same shape as ModifyVpcAttribute/DescribeVpcAttribute above but scoped to
+    // the region rather than to a single resource.
+    private Response handleModifyInstanceMetadataDefaults(MultivaluedMap<String, String> p, String region) {
+        service.modifyInstanceMetadataDefaults(region, p.getFirst("HttpTokens"),
+                p.containsKey("HttpPutResponseHopLimit") ? parseIntParam(p, "HttpPutResponseHopLimit", -1) : null,
+                p.getFirst("HttpEndpoint"), p.getFirst("InstanceMetadataTags"));
+        return booleanResponse("ModifyInstanceMetadataDefaults");
+    }
+
+    private Response handleGetInstanceMetadataDefaults(MultivaluedMap<String, String> p, String region) {
+        InstanceMetadataDefaults defaults = service.getInstanceMetadataDefaults(region);
+        XmlBuilder xml = new XmlBuilder()
+                .start("GetInstanceMetadataDefaultsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("accountLevel")
+                .elem("httpTokens", defaults.getHttpTokens())
+                .elem("httpPutResponseHopLimit", String.valueOf(defaults.getHttpPutResponseHopLimit()))
+                .elem("httpEndpoint", defaults.getHttpEndpoint())
+                .elem("instanceMetadataTags", defaults.getInstanceMetadataTags())
+                .elem("managedBy", defaults.getManagedBy())
+                .end("accountLevel")
+                .end("GetInstanceMetadataDefaultsResponse");
+        return xmlResponse(xml.build());
     }
 
     // ─── VPC handlers ─────────────────────────────────────────────────────────

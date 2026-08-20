@@ -41,6 +41,7 @@ import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
 import io.github.hectorvent.floci.services.ec2.model.Image;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
+import io.github.hectorvent.floci.services.ec2.model.InstanceMetadataDefaults;
 import io.github.hectorvent.floci.services.ec2.model.InstanceNetworkInterface;
 import io.github.hectorvent.floci.services.ec2.model.InstanceState;
 import io.github.hectorvent.floci.services.ec2.model.NetworkInterface;
@@ -3371,6 +3372,45 @@ public class Ec2Service implements ContainerTeardown {
                     "The customer gateway ID '" + customerGatewayId + "' does not exist", 400);
         }
         return gateway;
+    }
+
+    // ─── Instance Metadata Defaults ────────────────────────────────────────────
+
+    /**
+     * Region-level defaults new instances inherit unless they set their own metadata options
+     * (lex00/floci#76, {@code aws_ec2_instance_metadata_defaults}). Only the fields the caller
+     * actually supplied are changed - {@code null} means "leave this one as it is", matching real
+     * {@code ModifyInstanceMetadataDefaults}, which lets a single call touch just
+     * {@code http_tokens} without resetting the others back to "no preference".
+     */
+    public void modifyInstanceMetadataDefaults(String region, String httpTokens,
+            Integer httpPutResponseHopLimit, String httpEndpoint, String instanceMetadataTags) {
+        InstanceMetadataDefaults defaults = instanceMetadataDefaults.computeIfAbsent(region,
+                r -> new InstanceMetadataDefaults());
+        if (httpTokens != null) {
+            defaults.setHttpTokens(httpTokens);
+        }
+        if (httpPutResponseHopLimit != null) {
+            defaults.setHttpPutResponseHopLimit(httpPutResponseHopLimit);
+        }
+        if (httpEndpoint != null) {
+            defaults.setHttpEndpoint(httpEndpoint);
+        }
+        if (instanceMetadataTags != null) {
+            defaults.setInstanceMetadataTags(instanceMetadataTags);
+        }
+        defaults.setManagedBy("account");
+    }
+
+    /**
+     * A region absent from {@link #instanceMetadataDefaults} has never had
+     * {@code ModifyInstanceMetadataDefaults} called against it, so this returns AWS's own
+     * "nothing configured" answer (every field {@code "no-preference"}/{@code -1}, {@code
+     * managedBy="none"}) rather than throwing - {@code GetInstanceMetadataDefaults} on a fresh
+     * account is a normal, successful call in real AWS.
+     */
+    public InstanceMetadataDefaults getInstanceMetadataDefaults(String region) {
+        return instanceMetadataDefaults.getOrDefault(region, new InstanceMetadataDefaults());
     }
 
     // ─── Capacity Reservations ────────────────────────────────────────────────
