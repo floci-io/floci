@@ -14,7 +14,6 @@ import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
-import java.util.List;
 import java.util.Map;
 
 @Path("/")
@@ -455,35 +454,12 @@ public class AppSyncController {
     }
 
     // ──────────────────────────── Tags ────────────────────────────
-
-    @POST
-    @Path("/v1/tags/{resourceArn: .+}")
-    public Response tagResource(@PathParam("resourceArn") String resourceArn, String body) throws IOException {
-        @SuppressWarnings("unchecked")
-        Map<String, Object> request = objectMapper.readValue(body, Map.class);
-        @SuppressWarnings("unchecked")
-        Map<String, String> tags = (Map<String, String>) request.get("tags");
-        service.tagResource(resourceArn, tags);
-        return Response.noContent().build();
-    }
-
-    @DELETE
-    @Path("/v1/tags/{resourceArn: .+}")
-    public Response untagResource(@PathParam("resourceArn") String resourceArn,
-                                  @QueryParam("tagKeys") List<String> tagKeys) {
-        service.untagResource(resourceArn, tagKeys);
-        return Response.noContent().build();
-    }
-
-    @GET
-    @Path("/v1/tags/{resourceArn: .+}")
-    public Response listTagsForResource(@PathParam("resourceArn") String resourceArn) {
-        Map<String, String> tags = service.getTags(resourceArn);
-        ObjectNode root = objectMapper.createObjectNode();
-        ObjectNode tagsNode = root.putObject("tags");
-        tags.forEach(tagsNode::put);
-        return Response.ok(root).build();
-    }
+    //
+    // AppSync's TagResource/UntagResource/ListTagsForResource are served by
+    // SharedTagsV1Controller via AppSyncTagHandler. They used to live here, on
+    // @Path("/v1/tags/{resourceArn: .+}") - a path AWS Batch shares, so every Batch
+    // TagResource call landed in AppSync's handler and came back 404 "GraphQL API not
+    // found" (lex00/floci#72).
 
     // ──────────────────────────── Environment Variables ────────────────────────────
 

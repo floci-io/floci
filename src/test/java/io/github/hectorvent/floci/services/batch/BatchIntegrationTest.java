@@ -457,6 +457,98 @@ class BatchIntegrationTest {
             .body("jobs", hasSize(0));
     }
 
+    @Test
+    void tagUntagAndListTagsAcrossEveryTaggableBatchResource() {
+        String suffix = uniqueSuffix();
+        String computeEnvironmentArn = createComputeEnvironment("batch-tag-ce-" + suffix);
+        String queueArn = createQueue("batch-tag-queue-" + suffix, computeEnvironmentArn);
+        String definitionArn = registerJobDefinition("batch-tag-def-" + suffix,
+                "[\"echo\"]", "[]");
+
+        for (String arn : java.util.List.of(computeEnvironmentArn, queueArn, definitionArn)) {
+            givenJson("{\"tags\":{\"tofu-estate\":\"crossing\"}}")
+            .when()
+                .post("/v1/tags/" + arn)
+            .then()
+                .statusCode(204);
+
+            // A second TagResource must MERGE, not replace: a marker silently dropped by an
+            // incremental tag write is invisible to every plan-level check.
+            givenJson("{\"tags\":{\"tofu-address\":\"aws_batch_job_queue.tiles\"}}")
+            .when()
+                .post("/v1/tags/" + arn)
+            .then()
+                .statusCode(204);
+
+            given()
+                .header("Authorization", AUTH)
+            .when()
+                .get("/v1/tags/" + arn)
+            .then()
+                .statusCode(200)
+                .body("tags.'tofu-estate'", equalTo("crossing"))
+                .body("tags.'tofu-address'", equalTo("aws_batch_job_queue.tiles"));
+
+            given()
+                .header("Authorization", AUTH)
+                .queryParam("tagKeys", "tofu-address")
+            .when()
+                .delete("/v1/tags/" + arn)
+            .then()
+                .statusCode(204);
+
+            given()
+                .header("Authorization", AUTH)
+            .when()
+                .get("/v1/tags/" + arn)
+            .then()
+                .statusCode(200)
+                .body("tags.'tofu-estate'", equalTo("crossing"))
+                .body("tags.'tofu-address'", nullValue());
+        }
+    }
+
+    @Test
+    void createTimeTagsSurviveAnIncrementalTagResource() {
+        String suffix = uniqueSuffix();
+        String computeEnvironmentArn = givenJson("""
+                {
+                  "computeEnvironmentName": "batch-tag-merge-ce-%s",
+                  "type": "MANAGED",
+                  "computeResources": {"type":"FARGATE","maxvCpus":4},
+                  "tags": {"Name": "created-at-create-time"}
+                }
+                """.formatted(suffix))
+        .when()
+            .post("/v1/createcomputeenvironment")
+        .then()
+            .statusCode(200)
+            .extract().<String>path("computeEnvironmentArn");
+
+        givenJson("{\"tags\":{\"tofu-estate\":\"crossing\"}}")
+        .when()
+            .post("/v1/tags/" + computeEnvironmentArn)
+        .then()
+            .statusCode(204);
+
+        given()
+            .header("Authorization", AUTH)
+        .when()
+            .get("/v1/tags/" + computeEnvironmentArn)
+        .then()
+            .statusCode(200)
+            .body("tags.Name", equalTo("created-at-create-time"))
+            .body("tags.'tofu-estate'", equalTo("crossing"));
+
+        givenJson("{\"computeEnvironments\":[\"%s\"]}".formatted(computeEnvironmentArn))
+        .when()
+            .post("/v1/describecomputeenvironments")
+        .then()
+            .statusCode(200)
+            .body("computeEnvironments[0].tags.Name", equalTo("created-at-create-time"))
+            .body("computeEnvironments[0].tags.'tofu-estate'", equalTo("crossing"));
+    }
+
     private static io.restassured.specification.RequestSpecification givenJson(String body) {
         return given()
                 .header("Authorization", AUTH)

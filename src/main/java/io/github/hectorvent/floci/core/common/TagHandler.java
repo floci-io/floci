@@ -42,6 +42,21 @@ public interface TagHandler {
     String serviceKey();
 
     /**
+     * The REST path prefix this service's tag endpoints hang off. Defaults to {@code "/tags"},
+     * which is where API Gateway v1, EKS, Scheduler and most others serve them. Services on a
+     * versioned prefix override it - AppSync and Batch both use {@code "/v1/tags"}.
+     *
+     * <p>This is part of the dispatcher's lookup key, not decoration: two services may share a
+     * service-key-free path only because they sit on different prefixes, and a handler
+     * registered under the wrong prefix is simply never reached. Each prefix has its own
+     * controller ({@code SharedTagsController}, {@code SharedTagsV1Controller}); a new prefix
+     * needs a new one, modelled on those.
+     */
+    default String tagPathPrefix() {
+        return "/tags";
+    }
+
+    /**
      * JSON key for the tag payload on {@code TagResource} and {@code ListTagsForResource}.
      * Defaults to lowercase {@code "tags"}. Override to {@code "Tags"} for services whose
      * AWS spec capitalizes the key. EventBridge Scheduler is the only floci-registered

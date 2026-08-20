@@ -40,6 +40,8 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Consumer;
+import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
@@ -576,6 +578,89 @@ public class BatchService {
             job.setStartedAt(now());
         }
         putJobForAccount(accountId, job);
+    }
+
+    // ──────────────────────────── Tags ────────────────────────────
+    //
+    // Batch serves TagResource/UntagResource/ListTagsForResource on
+    // POST|DELETE|GET /v1/tags/{resourceArn}, resolved by BatchTagHandler through
+    // SharedTagsV1Controller. The ARN's own resource segment says which store holds the
+    // tags; a Batch ARN naming anything else is a ClientException, as on real AWS.
+
+    public synchronized Map<String, String> listTags(String resourceArn) {
+        return new LinkedHashMap<>(resolveTagTarget(resourceArn).read());
+    }
+
+    public synchronized void tagResource(String resourceArn, Map<String, String> tags) {
+        TagTarget target = resolveTagTarget(resourceArn);
+        // Merge, never replace: an incremental tag write must not drop tags set at create
+        // time, which is how a resource silently loses an ownership marker.
+        Map<String, String> merged = new LinkedHashMap<>(target.read());
+        if (tags != null) {
+            merged.putAll(tags);
+        }
+        validateTags(merged);
+        target.write(merged);
+    }
+
+    public synchronized void untagResource(String resourceArn, List<String> tagKeys) {
+        TagTarget target = resolveTagTarget(resourceArn);
+        Map<String, String> remaining = new LinkedHashMap<>(target.read());
+        if (tagKeys != null) {
+            tagKeys.forEach(remaining::remove);
+        }
+        target.write(remaining);
+    }
+
+    /** A tag map plus the store write that persists it, so the three verbs share one resolver. */
+    private record TagTarget(Supplier<Map<String, String>> reader, Consumer<Map<String, String>> writer) {
+        Map<String, String> read() {
+            Map<String, String> tags = reader.get();
+            return tags == null ? Map.of() : tags;
+        }
+
+        void write(Map<String, String> tags) {
+            writer.accept(tags);
+        }
+    }
+
+    private TagTarget resolveTagTarget(String resourceArn) {
+        String resource;
+        try {
+            resource = AwsArnUtils.parse(resourceArn).resource();
+        } catch (RuntimeException e) {
+            throw client("Invalid resource ARN: " + resourceArn);
+        }
+        if (resource.startsWith("compute-environment/")) {
+            BatchComputeEnvironment env = resolveComputeEnvironment(resourceArn);
+            return new TagTarget(env::getTags, tags -> {
+                env.setTags(tags);
+                computeEnvironmentStore.put(env.getComputeEnvironmentArn(), env);
+            });
+        }
+        if (resource.startsWith("job-queue/")) {
+            BatchJobQueue queue = resolveJobQueue(resourceArn);
+            return new TagTarget(queue::getTags, tags -> {
+                queue.setTags(tags);
+                jobQueueStore.put(queue.getJobQueueArn(), queue);
+            });
+        }
+        if (resource.startsWith("job-definition/")) {
+            BatchJobDefinition def = resolveJobDefinition(resourceArn, true);
+            return new TagTarget(def::getTags, tags -> {
+                def.setTags(tags);
+                putJobDefinition(def);
+            });
+        }
+        if (resource.startsWith("job/")) {
+            String jobId = resource.substring("job/".length());
+            BatchJob job = getJob(jobId).orElseThrow(() -> client("Job not found: " + resourceArn));
+            return new TagTarget(job::getTags, tags -> {
+                job.setTags(tags);
+                putJob(job);
+            });
+        }
+        throw client("Invalid resource ARN: " + resourceArn);
     }
 
     private void sleepQuietly() {
