@@ -87,7 +87,7 @@ floci:
     #   - localhost.localstack.cloud
 
   auth:
-    validate-signatures: false               # Set to true to enforce AWS SigV4 validation
+    validate-signatures: false               # Set to true to verify S3 presigned URL signatures
     presign-secret: local-emulator-secret    # HMAC secret for S3 pre-signed URL verification
 
   tls:

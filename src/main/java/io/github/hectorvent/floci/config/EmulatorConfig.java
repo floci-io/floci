@@ -272,6 +272,7 @@ public interface EmulatorConfig {
         LightsailStorageConfig lightsail();
         CodePipelineStorageConfig codepipeline();
         S3VectorsStorageConfig s3vectors();
+        S3TablesStorageConfig s3tables();
         EcsStorageConfig ecs();
         CodeBuildStorageConfig codebuild();
         ConfigStorageConfig config();
@@ -281,6 +282,7 @@ public interface EmulatorConfig {
         ElasticBeanstalkStorageConfig elasticbeanstalk();
         CloudTrailStorageConfig cloudtrail();
         RumStorageConfig rum();
+        GuardDutyStorageConfig guardduty();
     }
 
     interface SsmStorageConfig {
@@ -440,6 +442,13 @@ public interface EmulatorConfig {
         long flushIntervalMs();
     }
 
+    interface S3TablesStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+
     interface EcsStorageConfig {
         Optional<String> mode();
 
@@ -490,6 +499,13 @@ public interface EmulatorConfig {
     }
 
     interface RumStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+
+    interface GuardDutyStorageConfig {
         Optional<String> mode();
 
         @WithDefault("5000")
@@ -550,6 +566,7 @@ public interface EmulatorConfig {
         KmsServiceConfig kms();
         CognitoServiceConfig cognito();
         StepFunctionsServiceConfig stepfunctions();
+        SwfServiceConfig swf();
         CloudFormationServiceConfig cloudformation();
         AcmServiceConfig acm();
         AthenaServiceConfig athena();
@@ -566,6 +583,8 @@ public interface EmulatorConfig {
         EksServiceConfig eks();
         MwaaServiceConfig mwaa();
         PipesServiceConfig pipes();
+        BedrockAgentCoreControlServiceConfig bedrockAgentCoreControl();
+        BedrockAgentCoreServiceConfig bedrockAgentCore();
         ElbV2ServiceConfig elbv2();
         CodeBuildServiceConfig codebuild();
         CodeDeployServiceConfig codedeploy();
@@ -594,9 +613,12 @@ public interface EmulatorConfig {
         LightsailServiceConfig lightsail();
         UiServiceConfig ui();
         S3VectorsServiceConfig s3vectors();
+        S3TablesServiceConfig s3tables();
         IotServiceConfig iot();
         IotDataServiceConfig iotdata();
+        CloudHsmV2ServiceConfig cloudhsmv2();
         RumServiceConfig rum();
+        GuardDutyServiceConfig guardduty();
     }
 
     interface IotServiceConfig {
@@ -630,6 +652,11 @@ public interface EmulatorConfig {
         boolean enabled();
     }
 
+    interface GuardDutyServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
     interface LightsailServiceConfig {
         @WithDefault("true")
         boolean enabled();
@@ -640,6 +667,11 @@ public interface EmulatorConfig {
         boolean enabled();
     }
     interface S3VectorsServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface S3TablesServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }
@@ -789,6 +821,13 @@ public interface EmulatorConfig {
 
         @WithDefault("false")
         boolean seedDeployerPrincipal();
+
+        /**
+         * Alias to seed for the default account at startup, so callers that read the account
+         * alias find one without creating it first. Unset means the account has no alias, which
+         * is the AWS default.
+         */
+        Optional<String> accountAlias();
     }
 
     interface MskServiceConfig {
@@ -1059,6 +1098,22 @@ public interface EmulatorConfig {
     interface FirehoseServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        /**
+         * How often the buffer flusher checks for streams whose buffering
+         * interval (BufferingHints.IntervalInSeconds) has elapsed.
+         */
+        @WithDefault("10")
+        long tickIntervalSeconds();
+
+        /**
+         * Emulator-only volume trigger: number of buffered records that forces
+         * an immediate flush, complementing the stream's BufferingHints.
+         * Disabled by default (0) so out-of-the-box delivery matches real AWS;
+         * set to 1 for LocalStack-style record-at-a-time delivery in local dev.
+         */
+        @WithDefault("0")
+        int flushRecordCount();
     }
 
     interface KmsServiceConfig {
@@ -1080,6 +1135,26 @@ public interface EmulatorConfig {
         boolean allowPlaintextHttp();
     }
 
+    interface SwfServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        /**
+         * Run the background sweep that expires activity, decision, workflow and timer
+         * timeouts. Setting this to {@code false} leaves timeouts recorded but never
+         * fired, which is useful for tests that drive the clock themselves.
+         */
+        @WithDefault("true")
+        boolean timeoutSweepEnabled();
+
+        /**
+         * How often the timeout sweep runs. SWF timeouts are specified in whole seconds,
+         * so a 1s sweep bounds the observable lateness of an expiry at one second.
+         */
+        @WithDefault("1")
+        long timeoutSweepIntervalSeconds();
+    }
+
     interface CloudFormationServiceConfig {
         @WithDefault("true")
         boolean enabled();
@@ -1095,6 +1170,11 @@ public interface EmulatorConfig {
         /** Seconds to wait before transitioning from PENDING_VALIDATION to ISSUED (0 = immediate) */
         @WithDefault("0")
         int validationWaitSeconds();
+    }
+
+    interface CloudHsmV2ServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
     }
 
     interface AthenaServiceConfig {
@@ -1434,6 +1514,17 @@ public interface EmulatorConfig {
         Optional<String> dockerNetwork();
 
         /**
+         * Base name prefix for the containers and code volumes Lambda spawns, replacing the
+         * default {@code floci} (e.g. prefix {@code acme} names containers
+         * {@code acme-<function>-<id>} and code volumes {@code acme-code-<function>-<hash>}).
+         * Must be a valid Docker name segment ({@code [A-Za-z0-9][A-Za-z0-9_.-]*}); invalid
+         * values are ignored with a warning. Unset or blank falls back to {@code floci}.
+         *
+         * Env var: FLOCI_SERVICES_LAMBDA_CONTAINER_NAME_PREFIX
+         */
+        Optional<String> containerNamePrefix();
+
+        /**
          * Extra /etc/hosts entries added to every Lambda container, as "hostname:ip" pairs.
          * The ip may be the literal "host-gateway" to map to the Docker host, mirroring
          * {@code docker run --add-host hostname:host-gateway}.
@@ -1463,8 +1554,9 @@ public interface EmulatorConfig {
          * When set, no AWS credential env vars are injected; instead
          * AWS_SHARED_CREDENTIALS_FILE and AWS_CONFIG_FILE are set to point at
          * the mounted files, ensuring SDK discovery works regardless of container HOME.
-         * When absent, Floci injects credentials from its own environment
-         * (AWS_ACCESS_KEY_ID, etc.) or falls back to test/test/test.
+         * When absent, a function whose execution role exists in Floci receives temporary
+         * credentials for that role. Functions with an unknown role retain the compatibility
+         * fallback to Floci's own AWS credential environment or test/test/test.
          * Blank values are treated as absent.
          *
          * Env var: FLOCI_SERVICES_LAMBDA_AWS_CONFIG_PATH
@@ -1500,6 +1592,18 @@ public interface EmulatorConfig {
     interface Ec2ServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        /**
+         * When true, DescribeInstances and IMDS report each instance's CFN- and
+         * subnet-allocated private IP (AWS-faithful) instead of the Docker
+         * container's bridge IP (#1983). Default false keeps the bridge IP as the
+         * reported private address, which lets instances reach each other at that
+         * address on the shared Docker network. Routing/IMDS always use the
+         * container bridge IP regardless of this flag; only the reported
+         * PrivateIpAddress changes.
+         */
+        @WithDefault("false")
+        boolean awsFaithfulPrivateIp();
 
         /** Port on the Floci host for the IMDS HTTP server (169.254.169.254 equivalent). */
         @WithDefault("9169")
@@ -1559,6 +1663,22 @@ public interface EmulatorConfig {
     interface PipesServiceConfig {
         @WithDefault("true")
         boolean enabled();
+    }
+
+    interface BedrockAgentCoreControlServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface BedrockAgentCoreServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        @WithDefault("{\"output\":\"yes\"}")
+        String invokeResponse();
+
+        @WithDefault("false")
+        boolean validateRuntimeExists();
     }
 
     interface ElbV2ServiceConfig {
@@ -1807,6 +1927,23 @@ public interface EmulatorConfig {
             String server();
             String username();
             String password();
+        }
+
+        /**
+         * Extra Docker labels applied to every container and volume Floci creates,
+         * alongside the reserved {@code floci}, {@code floci_emulator} and
+         * {@code floci_namespace} labels (entries using a reserved key are ignored).
+         * A list of key/value entries rather than a {@code Map} so label keys with
+         * characters outside SmallRye's env-var naming convention (dots, colons,
+         * mixed case) survive:
+         * {@code FLOCI_DOCKER_EXTRA_LABELS_0__KEY} / {@code FLOCI_DOCKER_EXTRA_LABELS_0__VALUE}.
+         */
+        @WithDefault("")
+        List<LabelEntry> extraLabels();
+
+        interface LabelEntry {
+            String key();
+            String value();
         }
     }
 }

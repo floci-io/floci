@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.core.common.docker;
 
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.lambda.launcher.ImageCacheService;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.CreateContainerCmd;
@@ -45,6 +46,7 @@ public class ContainerLifecycleManager {
     private final ImageCacheService imageCacheService;
     private final ContainerDetector containerDetector;
     private final PortAllocator portAllocator;
+    private final EmulatorConfig config;
 
     /** Volumes whose shared-ownership root has already been initialised this process (run-once guard). */
     private final ConcurrentHashMap<String, Boolean> initializedSharedVolumes = new ConcurrentHashMap<>();
@@ -53,11 +55,13 @@ public class ContainerLifecycleManager {
     public ContainerLifecycleManager(DockerClient dockerClient,
                                      ImageCacheService imageCacheService,
                                      ContainerDetector containerDetector,
-                                     PortAllocator portAllocator) {
+                                     PortAllocator portAllocator,
+                                     EmulatorConfig config) {
         this.dockerClient = dockerClient;
         this.imageCacheService = imageCacheService;
         this.containerDetector = containerDetector;
         this.portAllocator = portAllocator;
+        this.config = config;
     }
 
     /**
@@ -123,6 +127,7 @@ public class ContainerLifecycleManager {
                     .toArray(ExposedPort[]::new);
             createCmd.withExposedPorts(exposed);
         }
+        createCmd.withLabels(mergedLabels(spec.labels()));
 
         CreateContainerResponse response = createCmd.exec();
         String containerId = response.getId();
@@ -222,18 +227,76 @@ public class ContainerLifecycleManager {
     }
 
     /**
+     * Stops and removes a container, failing when Docker cannot confirm removal.
+     *
+     * <p>Most emulator shutdown paths intentionally use best-effort cleanup through
+     * {@link #stopAndRemove(String, Closeable)}. Resource-deletion paths that must retain their
+     * persisted record for a retry use this stricter variant instead.
+     */
+    public void stopAndRemoveStrict(String containerId, Closeable logStream) {
+        LOG.infov("Stopping container {0}", containerId);
+
+        if (logStream != null) {
+            try {
+                logStream.close();
+            } catch (Exception e) {
+                LOG.debugv("Error closing log stream: {0}", e.getMessage());
+            }
+        }
+
+        Exception stopFailure = null;
+        try {
+            dockerClient.stopContainerCmd(containerId).withTimeout(5).exec();
+        } catch (NotFoundException e) {
+            LOG.debugv("Container {0} not found (already removed)", containerId);
+            return;
+        } catch (Exception e) {
+            stopFailure = e;
+            LOG.warnv("Error stopping container {0}: {1}", containerId, e.getMessage());
+        }
+
+        try {
+            dockerClient.removeContainerCmd(containerId).withForce(true).exec();
+            LOG.debugv("Removed container {0}", containerId);
+        } catch (NotFoundException e) {
+            // Already gone, so cleanup succeeded.
+        } catch (Exception e) {
+            IllegalStateException cleanupFailure = new IllegalStateException(
+                    "Failed to remove container " + containerId, e);
+            if (stopFailure != null) {
+                cleanupFailure.addSuppressed(stopFailure);
+            }
+            throw cleanupFailure;
+        }
+    }
+
+    /**
      * Creates a named volume if it does not already exist. Idempotent — safe to call on every
-     * container start. Labels the volume {@code floci=true} so
-     * {@code docker volume prune --filter label=floci} works.
+     * container start. Labels the volume {@code floci=true} and
+     * {@code floci_emulator=floci-aws} (plus {@code floci_namespace} when configured) so both
+     * {@code docker volume prune --filter label=floci=true} (all emulators) and
+     * {@code --filter label=floci_emulator=floci-aws} (this emulator only) work.
      */
     public void ensureVolume(String volumeName) {
         if (!volumeExists(volumeName)) {
             dockerClient.createVolumeCmd()
                     .withName(volumeName)
-                    .withLabels(Map.of("floci", "true"))
+                    .withLabels(ContainerStorageHelper.defaultLabels(config))
                     .exec();
             LOG.debugv("Created volume {0}", volumeName);
         }
+    }
+
+    /**
+     * Default emulator labels overlaid with the spec's labels; a per-spec label
+     * wins on key conflicts.
+     */
+    private Map<String, String> mergedLabels(Map<String, String> specLabels) {
+        Map<String, String> labels = ContainerStorageHelper.defaultLabels(config);
+        if (specLabels != null) {
+            labels.putAll(specLabels);
+        }
+        return labels;
     }
 
     /**
@@ -314,6 +377,7 @@ public class ContainerLifecycleManager {
         CreateContainerResponse created = dockerClient.createContainerCmd(image)
                 .withHostConfig(hostConfig)
                 .withCmd("sh", "-c", script.toString())
+                .withLabels(ContainerStorageHelper.defaultLabels(config))
                 .exec();
         String helperId = created.getId();
         try {
@@ -356,6 +420,18 @@ public class ContainerLifecycleManager {
         } catch (Exception e) {
             LOG.warnv("Error removing volume {0}: {1}", volumeName, e.getMessage());
             return false;
+        }
+    }
+
+    /** Removes a named Docker volume and propagates failures so callers can retry safely. */
+    public void removeVolumeStrict(String volumeName) {
+        try {
+            dockerClient.removeVolumeCmd(volumeName).exec();
+            LOG.debugv("Removed volume {0}", volumeName);
+        } catch (NotFoundException e) {
+            // Already gone — nothing to do.
+        } catch (Exception e) {
+            throw new IllegalStateException("Failed to remove volume " + volumeName, e);
         }
     }
 
@@ -456,6 +532,25 @@ public class ContainerLifecycleManager {
             // Not found - normal case
         } catch (Exception e) {
             LOG.debugv("Could not remove container {0}: {1}", name, e.getMessage());
+        }
+    }
+
+    /**
+     * Removes a container by name, failing when Docker cannot confirm removal.
+     *
+     * <p>Callers that are about to reuse a fixed container name must use this variant so a
+     * daemon failure cannot be mistaken for successful stale-container cleanup.
+     *
+     * @param name the container name to remove
+     */
+    public void removeIfExistsStrict(String name) {
+        try {
+            dockerClient.removeContainerCmd(name).withForce(true).exec();
+            LOG.infov("Removed stale container {0}", name);
+        } catch (NotFoundException e) {
+            // Not found means the fixed name is available.
+        } catch (Exception e) {
+            throw new IllegalStateException("Failed to remove stale container " + name, e);
         }
     }
 

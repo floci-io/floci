@@ -23,6 +23,7 @@ public class DbInstance {
     private DbEndpoint endpoint;
     private boolean iamDatabaseAuthenticationEnabled;
     private String parameterGroupName;
+    private String optionGroupName;
     private String dbSubnetGroupName;
     private String dbClusterIdentifier;
     private String vpcId;
@@ -41,6 +42,7 @@ public class DbInstance {
 
     private String dockerVolumeName;
     private String volumeId;
+    private String containerStorageResourceId;
 
     private transient String containerId;
     private transient String containerHost;
@@ -109,6 +111,9 @@ public class DbInstance {
     public String getParameterGroupName() { return parameterGroupName; }
     public void setParameterGroupName(String parameterGroupName) { this.parameterGroupName = parameterGroupName; }
 
+    public String getOptionGroupName() { return optionGroupName; }
+    public void setOptionGroupName(String optionGroupName) { this.optionGroupName = optionGroupName; }
+
     public String getDbSubnetGroupName() { return dbSubnetGroupName; }
     public void setDbSubnetGroupName(String dbSubnetGroupName) { this.dbSubnetGroupName = dbSubnetGroupName; }
 
@@ -165,6 +170,11 @@ public class DbInstance {
 
     public String getVolumeId() { return volumeId; }
     public void setVolumeId(String volumeId) { this.volumeId = volumeId; }
+
+    public String getContainerStorageResourceId() { return containerStorageResourceId; }
+    public void setContainerStorageResourceId(String containerStorageResourceId) {
+        this.containerStorageResourceId = containerStorageResourceId;
+    }
 
     public String getContainerId() { return containerId; }
     public void setContainerId(String containerId) { this.containerId = containerId; }

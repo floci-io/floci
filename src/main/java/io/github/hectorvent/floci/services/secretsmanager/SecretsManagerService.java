@@ -2,8 +2,10 @@ package io.github.hectorvent.floci.services.secretsmanager;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
@@ -31,6 +33,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.function.Predicate;
 
 @ApplicationScoped
 public class SecretsManagerService {
@@ -82,6 +85,17 @@ public class SecretsManagerService {
 
     public Secret createSecret(String name, String secretString, String secretBinary,
                                String description, String kmsKeyId, List<Secret.Tag> tags, String region) {
+        return createSecret(name, secretString, secretBinary, description, kmsKeyId, tags, null, region);
+    }
+
+    /**
+     * Creates a secret, optionally owned by an AWS service such as {@code rds}. A service-owned
+     * secret is rotated by that service rather than by a rotation Lambda, so callers cannot supply
+     * one for it. Only other floci services set {@code owningService}; the wire API cannot.
+     */
+    public Secret createSecret(String name, String secretString, String secretBinary,
+                               String description, String kmsKeyId, List<Secret.Tag> tags,
+                               String owningService, String region) {
         String storageKey = regionKey(region, name);
         Secret existing = store.get(storageKey).orElse(null);
 
@@ -115,6 +129,7 @@ public class SecretsManagerService {
         secret.setTags(tags != null ? new ArrayList<>(tags) : new ArrayList<>());
         secret.setVersions(versions);
         secret.setCurrentVersionId(versionId);
+        secret.setOwningService(owningService);
 
         store.put(storageKey, secret);
         LOG.infov("Created secret: {0} in region {1}", name, region);
@@ -295,6 +310,57 @@ public class SecretsManagerService {
     }
 
     /**
+     * Marks the secret with this ARN as owned by an AWS service, so that it rotates the way a
+     * service-managed secret does. Ownership is normally set when the owning service creates the
+     * secret; this backfills secrets persisted before floci tracked it. A secret that is already
+     * owned, or that no longer exists, is left as it is.
+     *
+     * <p>A backfill runs outside any request, so the account cannot come from the request context:
+     * the secret's own ARN names the account whose store holds it, and that is the store this
+     * addresses. Passing a name instead of an ARN would read the wrong account.
+     */
+    public void markOwnedByService(String secretArn, String owningService) {
+        if (secretArn == null || !secretArn.startsWith("arn:")) {
+            return;
+        }
+        AwsArnUtils.Arn arn;
+        try {
+            arn = AwsArnUtils.parse(secretArn);
+        } catch (IllegalArgumentException e) {
+            LOG.debugv("Ignoring malformed secret ARN during ownership backfill: {0}", secretArn);
+            return;
+        }
+
+        synchronized (lockFor(secretArn)) {
+            Secret secret = findByArnInAccount(secretArn, arn);
+            if (secret == null || secret.getOwningService() != null) {
+                return;
+            }
+            secret.setOwningService(owningService);
+            String key = regionKey(arn.region(), secret.getName());
+            if (store instanceof AccountAwareStorageBackend<Secret> aware) {
+                aware.putForAccount(arn.accountId(), key, secret);
+            } else {
+                store.put(key, secret);
+            }
+            LOG.infov("Marked secret {0} in account {1} as owned by {2}",
+                    secret.getName(), arn.accountId(), owningService);
+        }
+    }
+
+    /** Finds a secret by full ARN within the account and region that ARN names. */
+    private Secret findByArnInAccount(String secretArn, AwsArnUtils.Arn arn) {
+        Predicate<String> inRegion = key -> key.startsWith(arn.region() + "::");
+        List<Secret> candidates = store instanceof AccountAwareStorageBackend<Secret> aware
+                ? aware.scanForAccount(arn.accountId(), inRegion)
+                : store.scan(inRegion);
+        return candidates.stream()
+                .filter(s -> secretArn.equals(s.getArn()))
+                .findFirst()
+                .orElse(null);
+    }
+
+    /**
      * Claims the single Secrets Manager target-attachment slot for a CloudFormation resource.
      *
      * @return {@code true} when this call created the claim, or {@code false} when the same
@@ -466,8 +532,8 @@ public class SecretsManagerService {
             // IS the region it lives in — comparing the request region is equivalent to a
             // per-secret attribute here (all match when the prefix fits, none otherwise).
             case "primary-region" -> region != null && region.startsWith(targetVal);
-            // owning-service is a valid Filter.Key enum value but is currently deferred (always returning false)
-            case "owning-service" -> false;
+            case "owning-service" -> secret.getOwningService() != null
+                    && secret.getOwningService().startsWith(targetVal);
             case "all" -> {
                 String lowerVal = targetVal.toLowerCase();
                 boolean nameMatch = secret.getName() != null && secret.getName().toLowerCase().startsWith(lowerVal);
@@ -534,14 +600,22 @@ public class SecretsManagerService {
                     "RotationRules can't include both AutomaticallyAfterDays and ScheduleExpression.", 400);
         }
 
+        // A service-managed secret is rotated by its owning service, so it has no rotation Lambda:
+        // AWS rejects one here, and does not require one to enable rotation.
+        boolean serviceManaged = secret.getOwningService() != null;
+        if (serviceManaged && rotationLambdaArn != null) {
+            throw new AwsException("InvalidRequestException",
+                    "Rotation Lambda ARN is not supported for a service-managed secret.", 400);
+        }
+
         String finalLambdaArn = rotationLambdaArn != null ? rotationLambdaArn : secret.getRotationLambdaArn();
-        if (finalLambdaArn == null) {
+        if (!serviceManaged && finalLambdaArn == null) {
             throw new AwsException("InvalidRequestException",
                     "You tried to enable rotation on a secret that doesn't already have a Lambda function ARN configured and you didn't include such an ARN as a parameter in this call.", 400);
         }
 
         // Validate Lambda exists synchronously
-        if (lambdaService != null) {
+        if (!serviceManaged && lambdaService != null) {
             try {
                 lambdaService.getFunction(region, finalLambdaArn);
             } catch (AwsException e) {
@@ -571,8 +645,17 @@ public class SecretsManagerService {
             }
             secret.setRotationEnabled(true);
             secret.setLastChangedDate(Instant.now());
+            // A service-managed secret is rotated by its owning service, which floci does not
+            // emulate: the master password is not re-issued here, so nothing sets LastRotatedDate.
+            // Reporting a rotation that did not happen would leave GetSecretValue and the database
+            // holding a credential the secret claims to have replaced.
 
             store.put(regionKey(region, secret.getName()), secret);
+        }
+
+        if (serviceManaged) {
+            LOG.infov("Enabled service-managed rotation for secret: {0}", secret.getName());
+            return secret;
         }
 
         String arn = secret.getArn();

@@ -25,8 +25,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
@@ -65,7 +65,14 @@ public class ContainerLogStreamer {
      */
     public Closeable attach(String containerId, String logGroup, String logStream,
                             String region, String logPrefix) {
-        ensureLogGroupAndStream(logGroup, logStream, region);
+        return attachForAccount(
+                null, containerId, logGroup, logStream, region, logPrefix);
+    }
+
+    public Closeable attachForAccount(
+            String accountId, String containerId, String logGroup, String logStream,
+            String region, String logPrefix) {
+        ensureLogGroupAndStreamForAccount(accountId, logGroup, logStream, region);
 
         // Trim trailing whitespace and drop blank lines, then fan each reassembled line out to the
         // console logger and CloudWatch Logs.
@@ -73,7 +80,7 @@ public class ContainerLogStreamer {
             String trimmed = line.stripTrailing();
             if (!trimmed.isEmpty()) {
                 LOG.infov("[{0}] {1}", logPrefix, trimmed);
-                forwardToCloudWatchLogs(logGroup, logStream, region, trimmed);
+                forwardToCloudWatchLogs(accountId, logGroup, logStream, region, trimmed);
             }
         };
 
@@ -111,12 +118,17 @@ public class ContainerLogStreamer {
      */
     public ResultCallback.Adapter<Frame> execLogCallback(String logGroup, String logStream,
                                                         String region, String logPrefix) {
-        return frameCallback(logGroup, logStream, region, logPrefix);
+        return frameCallback(null, logGroup, logStream, region, logPrefix);
     }
 
-    /** Shared frame handling for both the container log stream and exec streams. */
-    private ResultCallback.Adapter<Frame> frameCallback(String logGroup, String logStream,
-                                                       String region, String logPrefix) {
+    /**
+     * Shared frame handling for both the container log stream and exec streams.
+     *
+     * @param accountId account that owns the destination log stream, or {@code null} for the
+     *                  default account
+     */
+    private ResultCallback.Adapter<Frame> frameCallback(String accountId, String logGroup, String logStream,
+                                                        String region, String logPrefix) {
         return new ResultCallback.Adapter<>() {
             @Override
             public void onNext(Frame frame) {
@@ -126,7 +138,7 @@ public class ContainerLogStreamer {
                 String line = new String(frame.getPayload(), StandardCharsets.UTF_8).stripTrailing();
                 if (!line.isEmpty()) {
                     LOG.infov("[{0}] {1}", logPrefix, line);
-                    forwardToCloudWatchLogs(logGroup, logStream, region, line);
+                    forwardToCloudWatchLogs(accountId, logGroup, logStream, region, line);
                 }
             }
         };
@@ -136,8 +148,14 @@ public class ContainerLogStreamer {
      * Creates a CloudWatch log group and stream if they don't already exist.
      */
     public void ensureLogGroupAndStream(String logGroup, String logStream, String region) {
+        ensureLogGroupAndStreamForAccount(null, logGroup, logStream, region);
+    }
+
+    public void ensureLogGroupAndStreamForAccount(
+            String accountId, String logGroup, String logStream, String region) {
         try {
-            cloudWatchLogsService.createLogGroup(logGroup, null, null, region);
+            cloudWatchLogsService.createLogGroupForAccount(
+                    accountId, logGroup, null, null, region);
         } catch (AwsException ignored) {
             // Already exists
         } catch (Exception e) {
@@ -145,7 +163,8 @@ public class ContainerLogStreamer {
         }
 
         try {
-            cloudWatchLogsService.createLogStream(logGroup, logStream, region);
+            cloudWatchLogsService.createLogStreamForAccount(
+                    accountId, logGroup, logStream, region);
         } catch (AwsException ignored) {
             // Already exists
         } catch (Exception e) {
@@ -164,15 +183,17 @@ public class ContainerLogStreamer {
     }
 
     public void streamToCloudWatchLogs(String logGroup, String logStream, String region, String line) {
-        forwardToCloudWatchLogs(logGroup, logStream, region, line);
+        forwardToCloudWatchLogs(null, logGroup, logStream, region, line);
     }
 
-    private void forwardToCloudWatchLogs(String logGroup, String logStream, String region, String line) {
+    private void forwardToCloudWatchLogs(
+            String accountId, String logGroup, String logStream, String region, String line) {
         try {
             Map<String, Object> event = new HashMap<>();
             event.put("timestamp", System.currentTimeMillis());
             event.put("message", line);
-            cloudWatchLogsService.putLogEvents(logGroup, logStream, List.of(event), region);
+            cloudWatchLogsService.putLogEventsForAccount(
+                    accountId, logGroup, logStream, List.of(event), region);
         } catch (Exception e) {
             LOG.debugv("Could not forward log line to CloudWatch Logs: {0}", e.getMessage());
         }
@@ -186,12 +207,21 @@ public class ContainerLogStreamer {
      */
     static final class LogReassemblyCallback extends ResultCallback.Adapter<Frame> {
 
-        private static final ScheduledExecutorService CLOSE_DRAIN_SCHEDULER =
-                Executors.newSingleThreadScheduledExecutor(runnable -> {
-                    Thread thread = new Thread(runnable, "floci-container-log-close");
-                    thread.setDaemon(true);
-                    return thread;
-                });
+        // The idle core thread must time out. A permanent thread would keep executing-class
+        // references alive and pin the whole application classloader after shutdown, which
+        // accumulates across the many app restarts of a profile-switching test run.
+        private static final ScheduledExecutorService CLOSE_DRAIN_SCHEDULER = closeDrainScheduler();
+
+        private static ScheduledExecutorService closeDrainScheduler() {
+            var scheduler = new ScheduledThreadPoolExecutor(1, runnable -> {
+                Thread thread = new Thread(runnable, "floci-container-log-close");
+                thread.setDaemon(true);
+                return thread;
+            });
+            scheduler.setKeepAliveTime(5, TimeUnit.SECONDS);
+            scheduler.allowCoreThreadTimeOut(true);
+            return scheduler;
+        }
         private static final long DEFAULT_CLOSE_GRACE_MILLIS = 2_000;
 
         private final Map<StreamType, LogLineBuffer> buffers = new EnumMap<>(StreamType.class);

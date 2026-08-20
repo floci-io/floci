@@ -6,6 +6,11 @@ quarkus:
       max-body-size: ${floci.max-request-size}M
   datasource:
     active: false
+  # Groovy (a REST Assured dependency) starts DFA-cache-cleaner threads that never stop.
+  # Loaded parent-first they live in the shared system classloader, so they cannot pin a
+  # per-profile application classloader across the many app restarts of a test run.
+  class-loading:
+    parent-first-artifacts: org.apache.groovy:groovy
 
 floci:
   base-url: "http://localhost:4566"
@@ -44,6 +49,8 @@ floci:
         flush-interval-ms: 60000
       s3vectors:
         flush-interval-ms: 60000
+      s3tables:
+        flush-interval-ms: 60000
       ecs:
         flush-interval-ms: 60000
       codebuild:
@@ -62,6 +69,8 @@ floci:
       appsync:
         flush-interval-ms: 60000
       rum:
+        flush-interval-ms: 60000
+      guardduty:
         flush-interval-ms: 60000
 
   auth:
@@ -175,6 +184,8 @@ floci:
       enabled: true
     firehose:
       enabled: true
+      tick-interval-seconds: 10
+      flush-record-count: 0
     kms:
       enabled: true
     cognito:
@@ -182,6 +193,10 @@ floci:
     stepfunctions:
       enabled: true
       allow-plaintext-http: true
+    swf:
+      enabled: true
+      timeout-sweep-enabled: true
+      timeout-sweep-interval-seconds: 1
     cloudformation:
       enabled: true
     acm:
@@ -210,6 +225,7 @@ floci:
       max-published-ports-per-instance: 20
       socat-image: alpine/socat
       mock: true
+      aws-faithful-private-ip: false
     ecs:
       enabled: true
       mock: true
@@ -284,6 +300,8 @@ floci:
       schema-worker-shutdown-timeout-seconds: 30
     s3vectors:
       enabled: true
+    s3tables:
+      enabled: true
     iot:
       enabled: true
       mqtt:
@@ -293,5 +311,8 @@ floci:
         port: 1883
     iotdata:
       enabled: true
+    cloudhsmv2:
     rum:
+      enabled: true
+    guardduty:
       enabled: true

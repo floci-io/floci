@@ -22,12 +22,14 @@ import java.util.Map;
 import org.mockito.ArgumentCaptor;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.AdditionalMatchers.aryEq;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
 class EventBridgeInvokerTest {
 
     private EventBridgeInvoker invoker;
+    private LambdaService lambdaService;
     private SqsService sqsService;
     private BatchService batchService;
     private FirehoseService firehoseService;
@@ -36,7 +38,7 @@ class EventBridgeInvokerTest {
 
     @BeforeEach
     void setUp() {
-        LambdaService lambdaService = mock(LambdaService.class);
+        lambdaService = mock(LambdaService.class);
         sqsService = mock(SqsService.class);
         SnsService snsService = mock(SnsService.class);
         batchService = mock(BatchService.class);
@@ -57,6 +59,19 @@ class EventBridgeInvokerTest {
                 new ObjectMapper(),
                 mock(io.github.hectorvent.floci.config.EmulatorConfig.class)
         );
+    }
+
+    @Test
+    void invokeTarget_lambdaTargetPreservesArnAccount() {
+        String arn = "arn:aws:lambda:ap-south-1:100000000012:function:cross-account-function";
+        Target target = new Target("id1", arn, "{\"detail\":{\"job\":\"workflow-recovery\"}}", null);
+
+        invoker.invokeTarget(target, "{\"ignored\":true}", "ap-south-1");
+
+        verify(lambdaService).invokeArn(
+                eq(arn),
+                aryEq("{\"detail\":{\"job\":\"workflow-recovery\"}}".getBytes()),
+                eq(io.github.hectorvent.floci.services.lambda.model.InvocationType.Event));
     }
 
     @Test

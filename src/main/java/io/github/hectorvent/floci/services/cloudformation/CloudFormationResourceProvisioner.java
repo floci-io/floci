@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnRollba
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudFormationResourceRegistry;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.ProvisionContext;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResourceProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.Ec2SecurityGroupRuleCfnProvisioner;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import io.github.hectorvent.floci.services.eventbridge.model.BatchParameters;
@@ -34,14 +35,24 @@ import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService
 import io.github.hectorvent.floci.services.cloudwatch.metrics.CloudWatchMetricsService;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.Dimension;
 import io.github.hectorvent.floci.services.autoscaling.AutoScalingService;
+import io.github.hectorvent.floci.services.autoscaling.model.AutoScalingGroup;
+import io.github.hectorvent.floci.services.autoscaling.model.LaunchConfiguration;
+import io.github.hectorvent.floci.services.autoscaling.model.MixedInstancesPolicy;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricAlarm;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.kinesis.KinesisService;
+import io.github.hectorvent.floci.services.kinesis.model.KinesisStream;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.ecs.EcsService;
 import io.github.hectorvent.floci.services.firehose.FirehoseService;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription;
 import io.github.hectorvent.floci.services.rds.RdsService;
+import io.github.hectorvent.floci.services.rds.model.DbCluster;
+import io.github.hectorvent.floci.services.rds.model.DbClusterParameterGroup;
+import io.github.hectorvent.floci.services.rds.model.DbInstance;
+import io.github.hectorvent.floci.services.rds.model.DbParameterGroup;
+import io.github.hectorvent.floci.services.rds.model.DbProxyAuth;
+import io.github.hectorvent.floci.services.rds.model.DbSubnetGroup;
 import io.github.hectorvent.floci.services.eks.EksService;
 import io.github.hectorvent.floci.services.eks.model.CreateClusterRequest;
 import io.github.hectorvent.floci.services.eks.model.Nodegroup;
@@ -399,11 +410,16 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::EC2::Instance" -> provisionEc2Instance(resource, properties, engine, region);
                 // RDS. DBInstance/DBCluster start real RDS containers (same as the direct API).
                 case "AWS::RDS::DBSubnetGroup" -> provisionDbSubnetGroup(resource, properties, engine, stackName, region);
-                case "AWS::RDS::DBParameterGroup" -> provisionDbParameterGroup(resource, properties, engine, stackName);
+                case "AWS::RDS::DBParameterGroup" ->
+                        provisionDbParameterGroup(resource, properties, engine, stackName, region);
                 case "AWS::RDS::DBClusterParameterGroup" ->
-                        provisionDbClusterParameterGroup(resource, properties, engine, stackName);
+                        provisionDbClusterParameterGroup(
+                                resource, properties, engine, stackName, region);
                 case "AWS::RDS::DBInstance" -> provisionDbInstance(resource, properties, engine, stackName, region);
                 case "AWS::RDS::DBCluster" -> provisionDbCluster(resource, properties, engine, stackName, region);
+                case "AWS::RDS::DBProxy" -> provisionDbProxy(resource, properties, engine, region);
+                case "AWS::RDS::DBProxyTargetGroup" ->
+                        provisionDbProxyTargetGroup(resource, properties, engine, region);
                 case "AWS::EKS::Cluster" -> provisionEksCluster(resource, properties, engine, stackName);
                 case "AWS::EKS::Nodegroup" -> provisionEksNodegroup(resource, properties, engine, stackName);
                 case "AWS::Logs::LogGroup" -> provisionLogGroup(resource, properties, engine, region, accountId, stackName);
@@ -551,6 +567,14 @@ public class CloudFormationResourceProvisioner {
             deleteEventBusSafe(resource, region);
             return;
         }
+        // Extracted provisioners get the whole resource, so the ones whose delete needs more than
+        // the physical id can read their create-time attributes instead of guessing. Placed after
+        // the special cases above so extracting one of those types later cannot silently bypass them.
+        CfnResourceProvisioner extractedForDelete = resourceRegistry.forType(resourceType).orElse(null);
+        if (extractedForDelete != null) {
+            extractedForDelete.delete(resource, region);
+            return;
+        }
         delete(resourceType, resource.getPhysicalId(), region);
     }
 
@@ -613,11 +637,16 @@ public class CloudFormationResourceProvisioner {
             case "AWS::KinesisFirehose::DeliveryStream" -> firehoseService.deleteDeliveryStream(physicalId);
             case "AWS::EC2::SecurityGroup" -> ec2Service.deleteSecurityGroup(region, physicalId);
             case "AWS::EC2::Instance" -> ec2Service.terminateInstances(region, List.of(physicalId));
-            case "AWS::RDS::DBInstance" -> rdsService.deleteDbInstance(physicalId);
-            case "AWS::RDS::DBCluster" -> rdsService.deleteDbCluster(physicalId);
-            case "AWS::RDS::DBSubnetGroup" -> rdsService.deleteDbSubnetGroup(physicalId);
-            case "AWS::RDS::DBParameterGroup" -> rdsService.deleteDbParameterGroup(physicalId);
-            case "AWS::RDS::DBClusterParameterGroup" -> rdsService.deleteDbClusterParameterGroup(physicalId);
+            case "AWS::RDS::DBInstance" -> rdsService.deleteDbInstance(physicalId, region);
+            case "AWS::RDS::DBCluster" -> rdsService.deleteDbCluster(physicalId, region);
+            case "AWS::RDS::DBProxy" -> deleteDbProxySafe(physicalId, region);
+            case "AWS::RDS::DBProxyTargetGroup" -> clearDbProxyTargetGroupSafe(physicalId, region);
+            case "AWS::RDS::DBSubnetGroup" ->
+                    rdsService.deleteDbSubnetGroup(physicalId, region);
+            case "AWS::RDS::DBParameterGroup" ->
+                    rdsService.deleteDbParameterGroup(physicalId, region);
+            case "AWS::RDS::DBClusterParameterGroup" ->
+                    rdsService.deleteDbClusterParameterGroup(physicalId, region);
             case "AWS::EKS::Cluster" -> eksService.deleteCluster(physicalId);
             case "AWS::Logs::LogGroup" -> logsService.deleteLogGroup(physicalId, region);
             case "AWS::Kinesis::Stream" -> kinesisService.deleteStream(physicalId, region);
@@ -742,6 +771,22 @@ public class CloudFormationResourceProvisioner {
         if (sg.getVpcId() != null) {
             r.getAttributes().put("VpcId", sg.getVpcId());
         }
+
+        // Inline rule properties — previously dropped, leaving the group empty. The mapping is
+        // shared with the standalone SecurityGroupIngress/Egress resource types, which live in
+        // Ec2SecurityGroupRuleCfnProvisioner; this arm joins them when it is extracted.
+        if (props != null && props.has("SecurityGroupIngress")) {
+            for (JsonNode rule : props.get("SecurityGroupIngress")) {
+                ec2Service.authorizeSecurityGroupIngress(region, sg.getGroupId(),
+                        List.of(Ec2SecurityGroupRuleCfnProvisioner.toIpPermission(rule, engine)));
+            }
+        }
+        if (props != null && props.has("SecurityGroupEgress")) {
+            for (JsonNode rule : props.get("SecurityGroupEgress")) {
+                ec2Service.authorizeSecurityGroupEgress(region, sg.getGroupId(),
+                        List.of(Ec2SecurityGroupRuleCfnProvisioner.toIpPermission(rule, engine)));
+            }
+        }
     }
 
     private void provisionInternetGateway(StackResource r, String region) {
@@ -800,9 +845,9 @@ public class CloudFormationResourceProvisioner {
         String previousNameMode = r.getAttributes().get(LOG_GROUP_NAME_MODE_ATTR);
         if (previousNameMode == null && r.getPhysicalId() != null) {
             // Stacks persisted before FlociLogGroupNameMode existed have no recorded mode, but an
-            // auto-generated name always has the deterministic <stackName>-<logicalId>-<12 hex chars>
-            // shape generatePhysicalName produces, so anything else must have been explicit.
-            previousNameMode = isGeneratedLogGroupName(r.getPhysicalId(), stackName, r.getLogicalId())
+            // auto-generated name always has the deterministic shape generatePhysicalName produces,
+            // so anything else must have been explicit.
+            previousNameMode = isGeneratedName(r.getPhysicalId(), stackName, r.getLogicalId(), 512)
                     ? NAME_MODE_GENERATED
                     : NAME_MODE_EXPLICIT;
         }
@@ -878,20 +923,20 @@ public class CloudFormationResourceProvisioner {
 
     /**
      * Whether {@code physicalId} matches the exact shape {@link #generatePhysicalName} produces for
-     * this stack/logical id: {@code <stackName>-<logicalId>-} followed by exactly 12 lowercase hex
-     * characters. Doesn't account for the (practically unreachable at a 512-character limit)
-     * truncation path in {@link #generatePhysicalName}, so a truncated legacy name is conservatively
-     * treated as explicit rather than misdetected as generated.
+     * this stack/logical id/maxLength: its base-and-truncation logic (minus the random suffix itself)
+     * followed by exactly 12 lowercase hex characters. Used to infer a legacy resource's name mode
+     * (explicit vs. generated) when it predates whatever attribute would otherwise record that.
+     *
+     * <p>Assumes the {@code generatePhysicalName} call this mirrors used {@code lowercase=false} (true
+     * of both current callers, LogGroup and Lambda) and a {@code maxLength} large enough that the
+     * truncated prefix is never empty, i.e. {@code maxLength > 13} (also true of both: 512 and 64). A
+     * future caller with {@code lowercase=true} or a smaller limit would need this generalized further.
      */
-    private boolean isGeneratedLogGroupName(String physicalId, String stackName, String logicalId) {
-        String prefix = stackName + "-" + logicalId + "-";
-        if (!physicalId.startsWith(prefix)) {
+    private boolean isGeneratedName(String physicalId, String stackName, String logicalId, int maxLength) {
+        if (physicalId == null || physicalId.length() < 13) {
             return false;
         }
-        String suffix = physicalId.substring(prefix.length());
-        if (suffix.length() != 12) {
-            return false;
-        }
+        String suffix = physicalId.substring(physicalId.length() - 12);
         for (int i = 0; i < suffix.length(); i++) {
             char c = suffix.charAt(i);
             boolean hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
@@ -899,7 +944,25 @@ public class CloudFormationResourceProvisioner {
                 return false;
             }
         }
-        return true;
+        if (physicalId.charAt(physicalId.length() - 13) != '-') {
+            return false;
+        }
+        String actualPrefix = physicalId.substring(0, physicalId.length() - 13);
+        return actualPrefix.equals(expectedGeneratedNamePrefix(stackName, logicalId, maxLength));
+    }
+
+    /** Mirrors {@link #generatePhysicalName}'s base-and-truncation logic, without the random suffix. */
+    private String expectedGeneratedNamePrefix(String stackName, String logicalId, int maxLength) {
+        String base = stackName + "-" + logicalId;
+        if (maxLength <= 0 || base.length() + 1 + 12 <= maxLength) {
+            return base;
+        }
+        int keep = Math.max(0, maxLength - 12 - 1);
+        String prefix = base.length() > keep ? base.substring(0, keep) : base;
+        while (prefix.endsWith("-")) {
+            prefix = prefix.substring(0, prefix.length() - 1);
+        }
+        return prefix;
     }
 
     private void reconcileLogGroup(String name, Integer retentionInDays, Map<String, String> tags, String region) {
@@ -924,8 +987,14 @@ public class CloudFormationResourceProvisioner {
 
     private void provisionKinesisStream(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
                                         String region, String stackName) {
-        String name = resolveOptional(props, "Name", engine);
-        if (name == null || name.isBlank()) {
+        String explicitName = resolveOptional(props, "Name", engine);
+        String priorPhysicalId = r.getPhysicalId();
+        String name;
+        if (explicitName != null && !explicitName.isBlank()) {
+            name = explicitName;
+        } else if (priorPhysicalId != null) {
+            name = priorPhysicalId;
+        } else {
             name = generatePhysicalName(stackName, r.getLogicalId(), 128, false);
         }
         String streamMode = null;
@@ -945,24 +1014,60 @@ public class CloudFormationResourceProvisioner {
                 // keep default
             }
         }
-
-        var stream = kinesisService.createStream(name, shardCount, streamMode, region);
-
-        String retention = resolveOptional(props, "RetentionPeriodHours", engine);
-        if (retention != null && !retention.isBlank()) {
+        Integer retention = null;
+        String retentionProp = resolveOptional(props, "RetentionPeriodHours", engine);
+        if (retentionProp != null && !retentionProp.isBlank()) {
             try {
-                stream.setRetentionPeriodHours(Integer.parseInt(retention.trim()));
+                retention = Integer.parseInt(retentionProp.trim());
             } catch (NumberFormatException ignored) {
                 // leave default
             }
         }
+        Map<String, String> tags = new LinkedHashMap<>();
         if (props != null && props.has("Tags") && props.get("Tags").isArray()) {
             for (JsonNode tag : props.get("Tags")) {
                 String key = engine.resolve(tag.path("Key"));
                 if (!key.isEmpty()) {
-                    stream.getTags().put(key, engine.resolve(tag.path("Value")));
+                    tags.put(key, engine.resolve(tag.path("Value")));
                 }
             }
+        }
+
+        // provision() re-runs on every UpdateStack, so a same-named stream already on file must be
+        // reconciled instead of re-created (createStream throws ResourceInUseException). ShardCount
+        // changes aren't reconciled here: KinesisService has no UpdateShardCount support to call into.
+        KinesisStream stream =
+                sameNameExistingResource(priorPhysicalId, name, n -> kinesisService.describeStream(n, region));
+        if (stream != null) {
+            kinesisService.updateStreamMode(name, streamMode != null ? streamMode : "PROVISIONED", region);
+            if (retention != null) {
+                if (retention > stream.getRetentionPeriodHours()) {
+                    kinesisService.increaseStreamRetentionPeriod(name, retention, region);
+                } else if (retention < stream.getRetentionPeriodHours()) {
+                    kinesisService.decreaseStreamRetentionPeriod(name, retention, region);
+                }
+            }
+            Map<String, String> existingTags = kinesisService.listTagsForStream(name, region);
+            List<String> tagsToRemove = existingTags.keySet().stream()
+                    .filter(key -> !tags.containsKey(key))
+                    .toList();
+            if (!tagsToRemove.isEmpty()) {
+                kinesisService.removeTagsFromStream(name, tagsToRemove, region);
+            }
+            if (!tags.isEmpty()) {
+                kinesisService.addTagsToStream(name, tags, region);
+            }
+            stream = kinesisService.describeStream(name, region);
+        } else {
+            stream = kinesisService.createStream(name, shardCount, streamMode, region);
+            if (retention != null) {
+                stream.setRetentionPeriodHours(retention);
+            }
+            if (!tags.isEmpty()) {
+                stream.getTags().putAll(tags);
+            }
+            deleteRenamedResource(priorPhysicalId, name, id -> kinesisService.deleteStream(id, region),
+                    "Kinesis stream");
         }
 
         // Ref returns the stream name; Fn::GetAtt Arn returns the stream ARN.
@@ -1038,66 +1143,194 @@ public class CloudFormationResourceProvisioner {
 
     private void provisionLaunchConfiguration(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
                                               String region, String stackName) {
-        String name = resolveOptional(props, "LaunchConfigurationName", engine);
-        if (name == null || name.isBlank()) {
+        String explicitName = resolveOptional(props, "LaunchConfigurationName", engine);
+        String priorPhysicalId = r.getPhysicalId();
+        String name;
+        if (explicitName != null && !explicitName.isBlank()) {
+            name = explicitName;
+        } else if (priorPhysicalId != null) {
+            name = priorPhysicalId;
+        } else {
             name = generatePhysicalName(stackName, r.getLogicalId(), 255, false);
         }
-        String associatePublicIp = resolveOptional(props, "AssociatePublicIpAddress", engine);
-        var lc = autoScalingService.createLaunchConfiguration(region, name,
-                resolveOptional(props, "InstanceId", engine),
-                resolveOptional(props, "ImageId", engine),
-                resolveOptional(props, "InstanceType", engine),
-                resolveOptional(props, "KeyName", engine),
-                resolveStringList(props, "SecurityGroups", engine),
-                resolveOptional(props, "UserData", engine),
-                resolveOptional(props, "IamInstanceProfile", engine),
-                // Absent in the template means the subnet default applies, so
-                // it stays null rather than collapsing to false.
-                associatePublicIp == null || associatePublicIp.isBlank()
-                        ? null
-                        : Boolean.parseBoolean(associatePublicIp));
+
+        // Launch configurations have no update API on real AWS at all (any property change replaces
+        // the resource), so provision() being re-invoked on every UpdateStack means a same-named one
+        // already on file must be left alone rather than re-created (createLaunchConfiguration throws
+        // AlreadyExists).
+        LaunchConfiguration lc = sameNameExistingResource(priorPhysicalId, name,
+                n -> requireLaunchConfiguration(region, n));
+        if (lc == null) {
+            String associatePublicIp = resolveOptional(props, "AssociatePublicIpAddress", engine);
+            lc = autoScalingService.createLaunchConfiguration(region, name,
+                    resolveOptional(props, "InstanceId", engine),
+                    resolveOptional(props, "ImageId", engine),
+                    resolveOptional(props, "InstanceType", engine),
+                    resolveOptional(props, "KeyName", engine),
+                    resolveStringList(props, "SecurityGroups", engine),
+                    resolveOptional(props, "UserData", engine),
+                    resolveOptional(props, "IamInstanceProfile", engine),
+                    // Absent in the template means the subnet default applies, so
+                    // it stays null rather than collapsing to false.
+                    associatePublicIp == null || associatePublicIp.isBlank()
+                            ? null
+                            : Boolean.parseBoolean(associatePublicIp));
+            deleteRenamedResource(priorPhysicalId, name, n -> autoScalingService.deleteLaunchConfiguration(region, n),
+                    "launch configuration");
+        }
         // Ref returns the launch configuration name.
         r.setPhysicalId(name);
         r.getAttributes().put("Arn", lc.getLaunchConfigurationArn());
     }
 
+    private LaunchConfiguration requireLaunchConfiguration(String region, String name) {
+        List<LaunchConfiguration> found = autoScalingService.describeLaunchConfigurations(region, List.of(name));
+        if (found.isEmpty()) {
+            throw new AwsException("ValidationError", "Launch configuration '" + name + "' not found.", 400);
+        }
+        return found.getFirst();
+    }
+
     private void provisionAutoScalingGroup(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
                                            String region, String stackName) {
-        String name = resolveOptional(props, "AutoScalingGroupName", engine);
-        if (name == null || name.isBlank()) {
+        String explicitName = resolveOptional(props, "AutoScalingGroupName", engine);
+        String priorPhysicalId = r.getPhysicalId();
+        String name;
+        if (explicitName != null && !explicitName.isBlank()) {
+            name = explicitName;
+        } else if (priorPhysicalId != null) {
+            name = priorPhysicalId;
+        } else {
             name = generatePhysicalName(stackName, r.getLogicalId(), 255, false);
         }
         String launchConfigName = resolveOptional(props, "LaunchConfigurationName", engine);
+        String launchTemplateId = null;
         String launchTemplateName = null;
         String launchTemplateVersion = null;
         if (props != null && props.has("LaunchTemplate")) {
             JsonNode lt = props.get("LaunchTemplate");
+            // Id and name are distinct lookup keys in Auto Scaling: passing an lt- id in the name slot
+            // never matches a stored template.
+            launchTemplateId = engine.resolve(lt.path("LaunchTemplateId"));
             launchTemplateName = engine.resolve(lt.path("LaunchTemplateName"));
-            if (launchTemplateName == null || launchTemplateName.isBlank()) {
-                launchTemplateName = engine.resolve(lt.path("LaunchTemplateId"));
-            }
             launchTemplateVersion = engine.resolve(lt.path("Version"));
         }
+        MixedInstancesPolicy mixedInstancesPolicy = resolveMixedInstancesPolicy(props, engine);
+        int minSize = parseIntProp(props, "MinSize", engine, 0);
+        int maxSize = parseIntProp(props, "MaxSize", engine, 0);
+        int desiredCapacity = parseIntProp(props, "DesiredCapacity", engine, 0);
+        int cooldown = parseIntProp(props, "Cooldown", engine, 0);
+        List<String> availabilityZones = resolveStringList(props, "AvailabilityZones", engine);
+        List<String> subnetIds = resolveStringList(props, "VPCZoneIdentifier", engine);
+        String healthCheckType = resolveOptional(props, "HealthCheckType", engine);
+        int healthCheckGracePeriod = parseIntProp(props, "HealthCheckGracePeriod", engine, 0);
+        List<String> terminationPolicies = resolveStringList(props, "TerminationPolicies", engine);
 
-        var asg = autoScalingService.createAutoScalingGroup(region, name,
-                blankToNull(launchConfigName), null, blankToNull(launchTemplateName), blankToNull(launchTemplateVersion),
-                null,
-                parseIntProp(props, "MinSize", engine, 0),
-                parseIntProp(props, "MaxSize", engine, 0),
-                parseIntProp(props, "DesiredCapacity", engine, 0),
-                parseIntProp(props, "Cooldown", engine, 0),
-                resolveStringList(props, "AvailabilityZones", engine),
-                resolveStringList(props, "VPCZoneIdentifier", engine),
-                resolveStringList(props, "TargetGroupARNs", engine),
-                resolveStringList(props, "LoadBalancerNames", engine),
-                resolveOptional(props, "HealthCheckType", engine),
-                parseIntProp(props, "HealthCheckGracePeriod", engine, 0),
-                resolveStringList(props, "TerminationPolicies", engine),
-                resolveAsgTags(props, engine),
-                resolveAsgTagPropagation(props, engine));
+        // provision() re-runs on every UpdateStack, so a same-named group already on file must be
+        // reconciled via UpdateAutoScalingGroup instead of re-created (createAutoScalingGroup throws
+        // AlreadyExists). TargetGroupARNs/LoadBalancerNames/Tags aren't reconciled here: they need
+        // their own attach/detach and tagging APIs that updateAutoScalingGroup doesn't cover.
+        AutoScalingGroup existing = sameNameExistingResource(priorPhysicalId, name,
+                n -> requireAutoScalingGroup(region, n));
+        AutoScalingGroup asg;
+        if (existing != null) {
+            autoScalingService.updateAutoScalingGroup(region, name,
+                    blankToNull(launchConfigName),
+                    blankToNull(launchTemplateId), blankToNull(launchTemplateName), blankToNull(launchTemplateVersion),
+                    mixedInstancesPolicy, minSize, maxSize, desiredCapacity, cooldown,
+                    availabilityZones, subnetIds, healthCheckType, healthCheckGracePeriod, terminationPolicies);
+            asg = requireAutoScalingGroup(region, name);
+        } else {
+            asg = autoScalingService.createAutoScalingGroup(region, name,
+                    blankToNull(launchConfigName),
+                    blankToNull(launchTemplateId), blankToNull(launchTemplateName), blankToNull(launchTemplateVersion),
+                    mixedInstancesPolicy, minSize, maxSize, desiredCapacity, cooldown,
+                    availabilityZones, subnetIds,
+                    resolveStringList(props, "TargetGroupARNs", engine),
+                    resolveStringList(props, "LoadBalancerNames", engine),
+                    healthCheckType, healthCheckGracePeriod, terminationPolicies,
+                    resolveAsgTags(props, engine),
+                    resolveAsgTagPropagation(props, engine));
+            deleteRenamedResource(priorPhysicalId, name, n -> autoScalingService.deleteAutoScalingGroup(region, n, true),
+                    "Auto Scaling group");
+        }
         // Ref returns the Auto Scaling group name; Fn::GetAtt Arn returns the ASG ARN.
         r.setPhysicalId(name);
         r.getAttributes().put("Arn", asg.getAutoScalingGroupArn());
+    }
+
+    private AutoScalingGroup requireAutoScalingGroup(String region, String name) {
+        List<AutoScalingGroup> found = autoScalingService.describeAutoScalingGroups(region, List.of(name));
+        if (found.isEmpty()) {
+            throw new AwsException("ValidationError", "Auto Scaling group '" + name + "' not found.", 400);
+        }
+        return found.getFirst();
+    }
+
+    /**
+     * Builds the {@code MixedInstancesPolicy} of an Auto Scaling group from template properties, in the
+     * same shape the Query API parser produces. Returns {@code null} when the property is absent, so
+     * that the group falls back to its {@code LaunchTemplate} or {@code LaunchConfigurationName}.
+     */
+    private MixedInstancesPolicy resolveMixedInstancesPolicy(JsonNode props,
+                                                             CloudFormationTemplateEngine engine) {
+        if (props == null || !props.has("MixedInstancesPolicy") || props.get("MixedInstancesPolicy").isNull()) {
+            return null;
+        }
+        JsonNode policyNode = props.get("MixedInstancesPolicy");
+        MixedInstancesPolicy policy = new MixedInstancesPolicy();
+
+        JsonNode launchTemplateNode = policyNode.path("LaunchTemplate");
+        if (launchTemplateNode.isObject()) {
+            MixedInstancesPolicy.LaunchTemplate launchTemplate = new MixedInstancesPolicy.LaunchTemplate();
+            JsonNode specNode = launchTemplateNode.path("LaunchTemplateSpecification");
+            if (specNode.isObject()) {
+                var specification = new MixedInstancesPolicy.LaunchTemplateSpecification();
+                specification.setLaunchTemplateId(blankToNull(engine.resolve(specNode.path("LaunchTemplateId"))));
+                specification.setLaunchTemplateName(blankToNull(engine.resolve(specNode.path("LaunchTemplateName"))));
+                specification.setVersion(blankToNull(engine.resolve(specNode.path("Version"))));
+                launchTemplate.setLaunchTemplateSpecification(specification);
+            }
+            for (JsonNode overrideNode : launchTemplateNode.path("Overrides")) {
+                String instanceType = engine.resolve(overrideNode.path("InstanceType"));
+                if (instanceType != null && !instanceType.isBlank()) {
+                    var override = new MixedInstancesPolicy.LaunchTemplateOverride();
+                    override.setInstanceType(instanceType);
+                    launchTemplate.getOverrides().add(override);
+                }
+            }
+            policy.setLaunchTemplate(launchTemplate);
+        }
+
+        JsonNode distributionNode = policyNode.path("InstancesDistribution");
+        if (distributionNode.isObject()) {
+            var distribution = new MixedInstancesPolicy.InstancesDistribution();
+            distribution.setOnDemandBaseCapacity(parseOptionalInt("OnDemandBaseCapacity",
+                    engine.resolve(distributionNode.path("OnDemandBaseCapacity"))));
+            distribution.setOnDemandPercentageAboveBaseCapacity(
+                    parseOptionalInt("OnDemandPercentageAboveBaseCapacity",
+                            engine.resolve(distributionNode.path("OnDemandPercentageAboveBaseCapacity"))));
+            distribution.setSpotAllocationStrategy(
+                    blankToNull(engine.resolve(distributionNode.path("SpotAllocationStrategy"))));
+            policy.setInstancesDistribution(distribution);
+        }
+        return policy;
+    }
+
+    /**
+     * Reads an optional integer property. A value that is present but not a number is a template
+     * error, and AWS rejects it rather than treating it as absent.
+     */
+    private Integer parseOptionalInt(String field, String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            return Integer.valueOf(value.trim());
+        } catch (NumberFormatException e) {
+            throw new AwsException("ValidationError",
+                    "Value of property " + field + " must be an integer.", 400);
+        }
     }
 
     private Map<String, String> resolveAsgTags(JsonNode props, CloudFormationTemplateEngine engine) {
@@ -1234,8 +1467,16 @@ public class CloudFormationResourceProvisioner {
 
     private void provisionDbSubnetGroup(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
                                         String stackName, String region) {
-        String name = resolveOptional(props, "DBSubnetGroupName", engine);
-        if (name == null || name.isBlank()) {
+        String explicitName = resolveOptional(props, "DBSubnetGroupName", engine);
+        String priorPhysicalId = r.getPhysicalId();
+        String name;
+        if (explicitName != null && !explicitName.isBlank()) {
+            name = explicitName;
+        } else if (priorPhysicalId != null) {
+            // No explicit name: keep the name RDS already has on file instead of generating a fresh
+            // one on every update, which would otherwise orphan the previously provisioned group.
+            name = priorPhysicalId;
+        } else {
             name = generatePhysicalName(stackName, r.getLogicalId(), 60, true);
         }
         String description = firstNonBlank(resolveOptional(props, "DBSubnetGroupDescription", engine),
@@ -1246,59 +1487,170 @@ public class CloudFormationResourceProvisioner {
                 subnetIds.add(engine.resolve(subnet));
             }
         }
-        var group = rdsService.createDbSubnetGroup(name, description, subnetIds, region);
+
+        // On UpdateStack, provision() is re-invoked for every resource regardless of whether its
+        // properties actually changed, so a same-named group already on file must be reconciled in
+        // place rather than re-created (createDbSubnetGroup throws DBSubnetGroupAlreadyExists).
+        DbSubnetGroup existing = sameNameExistingResource(priorPhysicalId, name, n -> rdsService.getDbSubnetGroup(n, region));
+        DbSubnetGroup group;
+        if (existing != null) {
+            group = rdsService.modifyDbSubnetGroup(name, subnetIds, region);
+        } else {
+            group = rdsService.createDbSubnetGroup(name, description, subnetIds, region);
+            deleteRenamedResource(priorPhysicalId, name, id -> rdsService.deleteDbSubnetGroup(id), "DB subnet group");
+        }
         r.setPhysicalId(group.getDbSubnetGroupName());
         r.getAttributes().put("DBSubnetGroupName", group.getDbSubnetGroupName());
     }
 
     private void provisionDbParameterGroup(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
-                                           String stackName) {
-        String name = resolveOptional(props, "DBParameterGroupName", engine);
-        if (name == null || name.isBlank()) {
+                                           String stackName, String region) {
+        String explicitName = resolveOptional(props, "DBParameterGroupName", engine);
+        String priorPhysicalId = r.getPhysicalId();
+        String name;
+        if (explicitName != null && !explicitName.isBlank()) {
+            name = explicitName;
+        } else if (priorPhysicalId != null) {
+            name = priorPhysicalId;
+        } else {
             name = generatePhysicalName(stackName, r.getLogicalId(), 60, true);
         }
         String family = resolveOptional(props, "Family", engine);
         String description = firstNonBlank(resolveOptional(props, "Description", engine),
                 "Managed by CloudFormation");
-        var group = rdsService.createDbParameterGroup(name, family, description);
+
+        // DBParameterGroupName, Family and Description are all immutable on real AWS (any change
+        // replaces the resource), so a same-named group already on file is a no-op, not a re-create.
+        DbParameterGroup existing = sameNameExistingResource(priorPhysicalId, name,
+                n -> rdsService.getDbParameterGroup(n, region));
+        DbParameterGroup group;
+        if (existing != null) {
+            group = existing;
+        } else {
+            group = rdsService.createDbParameterGroup(name, family, description, region);
+            deleteRenamedResource(priorPhysicalId, name, id -> rdsService.deleteDbParameterGroup(id, region),
+                    "DB parameter group");
+        }
         r.setPhysicalId(group.getDbParameterGroupName());
         r.getAttributes().put("DBParameterGroupName", group.getDbParameterGroupName());
     }
 
     private void provisionDbClusterParameterGroup(StackResource r, JsonNode props,
-                                                  CloudFormationTemplateEngine engine, String stackName) {
-        String name = resolveOptional(props, "DBClusterParameterGroupName", engine);
-        if (name == null || name.isBlank()) {
+                                                  CloudFormationTemplateEngine engine,
+                                                  String stackName, String region) {
+        String explicitName = resolveOptional(props, "DBClusterParameterGroupName", engine);
+        String priorPhysicalId = r.getPhysicalId();
+        String name;
+        if (explicitName != null && !explicitName.isBlank()) {
+            name = explicitName;
+        } else if (priorPhysicalId != null) {
+            name = priorPhysicalId;
+        } else {
             name = generatePhysicalName(stackName, r.getLogicalId(), 60, true);
         }
         String family = resolveOptional(props, "Family", engine);
         String description = firstNonBlank(resolveOptional(props, "Description", engine),
                 "Managed by CloudFormation");
-        var group = rdsService.createDbClusterParameterGroup(name, family, description);
+
+        // Same immutability rationale as provisionDbParameterGroup above.
+        DbClusterParameterGroup existing = sameNameExistingResource(priorPhysicalId, name,
+                n -> rdsService.getDbClusterParameterGroup(n, region));
+        DbClusterParameterGroup group;
+        if (existing != null) {
+            group = existing;
+        } else {
+            group = rdsService.createDbClusterParameterGroup(name, family, description, region);
+            deleteRenamedResource(priorPhysicalId, name, id -> rdsService.deleteDbClusterParameterGroup(id, region),
+                    "DB cluster parameter group");
+        }
         r.setPhysicalId(group.getDbClusterParameterGroupName());
         r.getAttributes().put("DBClusterParameterGroupName", group.getDbClusterParameterGroupName());
     }
 
+    /**
+     * Looks up {@code name} via {@code lookup} when this is an update re-invocation for the same
+     * physical resource (i.e. {@code priorPhysicalId} is set and unchanged), returning {@code null}
+     * either when this is a fresh create, a rename (handled as a replacement by the caller), or the
+     * resource is missing on the backend despite the stack still remembering a physical id (e.g. it
+     * was deleted out of band; the caller then falls back to creating it fresh).
+     */
+    private <T> T sameNameExistingResource(String priorPhysicalId, String name, java.util.function.Function<String, T> lookup) {
+        if (priorPhysicalId == null || !priorPhysicalId.equals(name)) {
+            return null;
+        }
+        try {
+            return lookup.apply(name);
+        } catch (AwsException notFound) {
+            // Expected when the resource was deleted out of band since the prior update; the
+            // caller falls back to creating it fresh under the same name.
+            LOG.debugv(notFound, "No existing {0} found on file, falling back to create", name);
+            return null;
+        }
+    }
+
+    /**
+     * Best-effort cleanup of the previous physical resource after a rename forced a fresh create
+     * under the new name (mirrors provisionLogGroup's create-new-then-delete-old handling). Failures
+     * are logged, not thrown: the new resource was already created successfully, so surfacing a
+     * delete failure here would report the update as failed despite the stack now being in a usable
+     * (if slightly leaky) state.
+     */
+    private void deleteRenamedResource(String priorPhysicalId, String newName, java.util.function.Consumer<String> delete,
+                                       String resourceKind) {
+        if (priorPhysicalId == null || priorPhysicalId.equals(newName)) {
+            return;
+        }
+        try {
+            delete.accept(priorPhysicalId);
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "Failed to delete renamed {0} {1} after replacement by {2}",
+                    resourceKind, priorPhysicalId, newName);
+        }
+    }
+
     private void provisionDbInstance(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
                                      String stackName, String region) {
-        String id = resolveOptional(props, "DBInstanceIdentifier", engine);
-        if (id == null || id.isBlank()) {
+        String explicitId = resolveOptional(props, "DBInstanceIdentifier", engine);
+        String priorPhysicalId = r.getPhysicalId();
+        String id;
+        if (explicitId != null && !explicitId.isBlank()) {
+            id = explicitId;
+        } else if (priorPhysicalId != null) {
+            id = priorPhysicalId;
+        } else {
             id = generatePhysicalName(stackName, r.getLogicalId(), 60, true);
         }
-        var instance = rdsService.createDbInstance(
-                id,
-                resolveOptional(props, "Engine", engine),
-                resolveOptional(props, "EngineVersion", engine),
-                resolveDynamicReferences(resolveOptional(props, "MasterUsername", engine), region, false),
-                resolveDynamicReferences(resolveOptional(props, "MasterUserPassword", engine), region, true),
-                resolveOptional(props, "DBName", engine),
-                firstNonBlank(resolveOptional(props, "DBInstanceClass", engine), "db.t3.micro"),
-                parseIntProp(props, "AllocatedStorage", engine, 20),
-                parseBoolProp(props, "EnableIAMDatabaseAuthentication", engine),
-                resolveOptional(props, "DBParameterGroupName", engine),
-                resolveOptional(props, "DBSubnetGroupName", engine),
-                resolveOptional(props, "DBClusterIdentifier", engine),
-                null, false, false, null, Map.of(), region);
+
+        // provision() is re-invoked on every UpdateStack for every resource, so a same-id instance
+        // already on file must be reconciled rather than re-created (createDbInstance throws
+        // DBInstanceAlreadyExists). Only the properties RdsService.modifyDbInstance actually supports
+        // (password, IAM auth, subnet group) are reconciled here; other property changes (engine,
+        // instance class, allocated storage, ...) are a pre-existing gap in that method, not addressed
+        // by this fix.
+        DbInstance instance = sameNameExistingResource(priorPhysicalId, id, rdsService::getDbInstance);
+        if (instance != null) {
+            instance = rdsService.modifyDbInstance(
+                    id,
+                    resolveDynamicReferences(resolveOptional(props, "MasterUserPassword", engine), region, true),
+                    parseBoolProp(props, "EnableIAMDatabaseAuthentication", engine),
+                    resolveOptional(props, "DBSubnetGroupName", engine));
+        } else {
+            instance = rdsService.createDbInstance(
+                    id,
+                    resolveOptional(props, "Engine", engine),
+                    resolveOptional(props, "EngineVersion", engine),
+                    resolveDynamicReferences(resolveOptional(props, "MasterUsername", engine), region, false),
+                    resolveDynamicReferences(resolveOptional(props, "MasterUserPassword", engine), region, true),
+                    resolveOptional(props, "DBName", engine),
+                    firstNonBlank(resolveOptional(props, "DBInstanceClass", engine), "db.t3.micro"),
+                    parseIntProp(props, "AllocatedStorage", engine, 20),
+                    parseBoolProp(props, "EnableIAMDatabaseAuthentication", engine),
+                    resolveOptional(props, "DBParameterGroupName", engine),
+                    resolveOptional(props, "DBSubnetGroupName", engine),
+                    resolveOptional(props, "DBClusterIdentifier", engine),
+                    null, false, false, null, Map.of(), region);
+            deleteRenamedResource(priorPhysicalId, id, rdsService::deleteDbInstance, "DB instance");
+        }
         r.setPhysicalId(instance.getDbInstanceIdentifier());
         r.getAttributes().put("DBInstanceIdentifier", instance.getDbInstanceIdentifier());
         if (instance.getEndpoint() != null) {
@@ -1312,20 +1664,38 @@ public class CloudFormationResourceProvisioner {
 
     private void provisionDbCluster(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
                                     String stackName, String region) {
-        String id = resolveOptional(props, "DBClusterIdentifier", engine);
-        if (id == null || id.isBlank()) {
+        String explicitId = resolveOptional(props, "DBClusterIdentifier", engine);
+        String priorPhysicalId = r.getPhysicalId();
+        String id;
+        if (explicitId != null && !explicitId.isBlank()) {
+            id = explicitId;
+        } else if (priorPhysicalId != null) {
+            id = priorPhysicalId;
+        } else {
             id = generatePhysicalName(stackName, r.getLogicalId(), 60, true);
         }
-        var cluster = rdsService.createDbCluster(
-                id,
-                resolveOptional(props, "Engine", engine),
-                resolveOptional(props, "EngineVersion", engine),
-                resolveDynamicReferences(resolveOptional(props, "MasterUsername", engine), region, false),
-                resolveDynamicReferences(resolveOptional(props, "MasterUserPassword", engine), region, true),
-                resolveOptional(props, "DatabaseName", engine),
-                parseBoolProp(props, "EnableIAMDatabaseAuthentication", engine),
-                resolveOptional(props, "DBClusterParameterGroupName", engine),
-                null, null, false, region);
+
+        // Same re-invocation rationale as provisionDbInstance above; modifyDbCluster only reconciles
+        // password and IAM auth, mirroring that method's existing scope.
+        DbCluster cluster = sameNameExistingResource(priorPhysicalId, id, rdsService::getDbCluster);
+        if (cluster != null) {
+            cluster = rdsService.modifyDbCluster(
+                    id,
+                    resolveDynamicReferences(resolveOptional(props, "MasterUserPassword", engine), region, true),
+                    parseBoolProp(props, "EnableIAMDatabaseAuthentication", engine));
+        } else {
+            cluster = rdsService.createDbCluster(
+                    id,
+                    resolveOptional(props, "Engine", engine),
+                    resolveOptional(props, "EngineVersion", engine),
+                    resolveDynamicReferences(resolveOptional(props, "MasterUsername", engine), region, false),
+                    resolveDynamicReferences(resolveOptional(props, "MasterUserPassword", engine), region, true),
+                    resolveOptional(props, "DatabaseName", engine),
+                    parseBoolProp(props, "EnableIAMDatabaseAuthentication", engine),
+                    resolveOptional(props, "DBClusterParameterGroupName", engine),
+                    null, null, false, region);
+            deleteRenamedResource(priorPhysicalId, id, rdsService::deleteDbCluster, "DB cluster");
+        }
         r.setPhysicalId(cluster.getDbClusterIdentifier());
         r.getAttributes().put("DBClusterIdentifier", cluster.getDbClusterIdentifier());
         if (cluster.getEndpoint() != null) {
@@ -1337,6 +1707,184 @@ public class CloudFormationResourceProvisioner {
         }
         if (cluster.getDbClusterArn() != null) {
             r.getAttributes().put("DBClusterArn", cluster.getDbClusterArn());
+        }
+    }
+
+    private void provisionDbProxy(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
+                                  String region) {
+        String name = resolveOptional(props, "DBProxyName", engine);
+        String engineFamily = resolveOptional(props, "EngineFamily", engine);
+        String defaultAuthScheme = resolveOptional(props, "DefaultAuthScheme", engine);
+        if (defaultAuthScheme == null) {
+            defaultAuthScheme = "NONE";
+        } else if (defaultAuthScheme.isBlank()) {
+            throw new AwsException("InvalidParameterValue",
+                    "DefaultAuthScheme must be NONE or IAM_AUTH.", 400);
+        }
+        String endpointNetworkType = resolveOptional(props, "EndpointNetworkType", engine);
+        String targetConnectionNetworkType = resolveOptional(
+                props, "TargetConnectionNetworkType", engine);
+        validateIpv4DbProxyNetworkType(endpointNetworkType,
+                "EndpointNetworkType", true, "IPV4, IPV6, or DUAL");
+        validateIpv4DbProxyNetworkType(targetConnectionNetworkType,
+                "TargetConnectionNetworkType", false, "IPV4 or IPV6");
+        boolean requireTls = parseBoolProp(props, "RequireTLS", engine);
+        boolean debugLogging = parseBoolProp(props, "DebugLogging", engine);
+        Integer configuredIdleClientTimeout = parseOptionalIntProp(props, "IdleClientTimeout", engine);
+        int idleClientTimeout = configuredIdleClientTimeout != null ? configuredIdleClientTimeout : 1800;
+        String roleArn = resolveOptional(props, "RoleArn", engine);
+        List<String> subnetIds = resolveStringList(props, "VpcSubnetIds", engine);
+        if (subnetIds.stream().distinct().count() < 2) {
+            throw new AwsException("InvalidParameterValue",
+                    "AWS::RDS::DBProxy VpcSubnetIds must contain at least two distinct subnet IDs.", 400);
+        }
+        List<String> sgIds = resolveStringList(props, "VpcSecurityGroupIds", engine);
+        List<DbProxyAuth> auth = parseProxyAuth(props, engine);
+        boolean iamAuth = "IAM_AUTH".equalsIgnoreCase(defaultAuthScheme)
+                || auth.stream().anyMatch(a ->
+                "REQUIRED".equalsIgnoreCase(a.getIamAuth())
+                        || "ENABLED".equalsIgnoreCase(a.getIamAuth()));
+        Map<String, String> tags = parseCfnTags(props != null ? props.get("Tags") : null, engine);
+        var proxy = r.getPhysicalId() == null
+                ? rdsService.createDbProxy(name, engineFamily, requireTls, iamAuth,
+                defaultAuthScheme, roleArn, subnetIds, sgIds, auth, idleClientTimeout,
+                debugLogging, tags, region)
+                : updateDbProxy(r, name, engineFamily, defaultAuthScheme, requireTls,
+                idleClientTimeout, debugLogging, roleArn, subnetIds, sgIds, auth, tags, region);
+        r.setPhysicalId(proxy.getDbProxyName());              // Ref -> DBProxyName
+        r.getAttributes().put("Endpoint", proxy.getEndpoint());   // GetAtt "Endpoint" (bare host)
+        r.getAttributes().put("DBProxyArn", proxy.getDbProxyArn());
+        if (proxy.getVpcId() != null) {
+            r.getAttributes().put("VpcId", proxy.getVpcId());
+        }
+    }
+
+    private io.github.hectorvent.floci.services.rds.model.DbProxy updateDbProxy(
+            StackResource resource, String name, String engineFamily, String defaultAuthScheme,
+            boolean requireTls, int idleClientTimeout, boolean debugLogging, String roleArn,
+            List<String> subnetIds, List<String> securityGroupIds, List<DbProxyAuth> auth,
+            Map<String, String> tags, String region) {
+        var existing = rdsService.getDbProxy(resource.getPhysicalId(), region);
+        if (!Objects.equals(existing.getDbProxyName(), name)
+                || engineFamily == null
+                || !existing.getEngineFamily().equalsIgnoreCase(engineFamily)
+                || !Set.copyOf(existing.getVpcSubnetIds()).equals(Set.copyOf(subnetIds))) {
+            throw new AwsException("UnsupportedOperation",
+                    "Changing DBProxyName, EngineFamily, or VpcSubnetIds requires CloudFormation "
+                            + "replacement, which is not yet supported by Floci.", 400);
+        }
+        return rdsService.modifyDbProxy(existing.getDbProxyName(), defaultAuthScheme, auth,
+                requireTls, idleClientTimeout, debugLogging, roleArn,
+                securityGroupIds, tags, region);
+    }
+
+    private void provisionDbProxyTargetGroup(StackResource r, JsonNode props,
+                                             CloudFormationTemplateEngine engine, String region) {
+        String dbProxyName = resolveOptional(props, "DBProxyName", engine);
+        String targetGroupName = resolveOptional(props, "TargetGroupName", engine);
+        if (!"default".equals(targetGroupName)) {
+            throw new AwsException("InvalidParameterValue",
+                    "AWS::RDS::DBProxyTargetGroup TargetGroupName must be default.", 400);
+        }
+        List<String> clusterIds = resolveStringList(props, "DBClusterIdentifiers", engine);
+        List<String> instanceIds = resolveStringList(props, "DBInstanceIdentifiers", engine);
+        Integer maxConn = null;
+        Integer maxIdle = null;
+        Integer connectionBorrowTimeout = null;
+        String initQuery = null;
+        List<String> sessionPinningFilters = List.of();
+        if (props != null && props.has("ConnectionPoolConfigurationInfo")) {
+            JsonNode cpc = props.get("ConnectionPoolConfigurationInfo");
+            maxConn = parseOptionalIntProp(cpc, "MaxConnectionsPercent", engine);
+            maxIdle = parseOptionalIntProp(cpc, "MaxIdleConnectionsPercent", engine);
+            connectionBorrowTimeout = parseOptionalIntProp(cpc, "ConnectionBorrowTimeout", engine);
+            initQuery = resolveOptional(cpc, "InitQuery", engine);
+            sessionPinningFilters = resolveStringList(cpc, "SessionPinningFilters", engine);
+        }
+        if (maxIdle != null && maxConn == null) {
+            throw new AwsException("InvalidParameterValue",
+                    "MaxConnectionsPercent is required when MaxIdleConnectionsPercent is specified.",
+                    400);
+        }
+        if (r.getPhysicalId() != null) {
+            var existing = rdsService.getDbProxyTargetGroupByArn(r.getPhysicalId(), region);
+            if (!Objects.equals(existing.getDbProxyName(), dbProxyName)
+                    || !Objects.equals(existing.getTargetGroupName(), targetGroupName)) {
+                throw new AwsException("UnsupportedOperation",
+                        "Changing DBProxyName or TargetGroupName requires CloudFormation replacement.",
+                        400);
+            }
+        }
+        var proxy = rdsService.getDbProxy(dbProxyName, region);
+        int effectiveMaxConnections = maxConn != null ? maxConn
+                : ("SQLSERVER".equals(proxy.getEngineFamily()) ? 10 : 100);
+        int effectiveMaxIdle = maxIdle != null ? maxIdle : effectiveMaxConnections / 2;
+        int effectiveBorrowTimeout = connectionBorrowTimeout != null ? connectionBorrowTimeout : 120;
+        var tg = rdsService.reconcileDbProxyTargetGroup(
+                dbProxyName, targetGroupName, clusterIds, instanceIds,
+                effectiveMaxConnections, effectiveMaxIdle, effectiveBorrowTimeout,
+                initQuery, sessionPinningFilters, region);
+        r.setPhysicalId(tg.getTargetGroupArn());              // Ref -> TargetGroupArn
+        r.getAttributes().put("TargetGroupArn", tg.getTargetGroupArn());
+        r.getAttributes().put("DBProxyName", tg.getDbProxyName());
+    }
+
+    private List<DbProxyAuth> parseProxyAuth(JsonNode props, CloudFormationTemplateEngine engine) {
+        List<DbProxyAuth> auth = new ArrayList<>();
+        if (props != null && props.has("Auth") && props.get("Auth").isArray()) {
+            for (JsonNode a : props.get("Auth")) {
+                DbProxyAuth entry = new DbProxyAuth();
+                entry.setAuthScheme(resolveOptional(a, "AuthScheme", engine));
+                entry.setSecretArn(resolveOptional(a, "SecretArn", engine));
+                entry.setIamAuth(resolveOptional(a, "IAMAuth", engine));
+                entry.setClientPasswordAuthType(resolveOptional(a, "ClientPasswordAuthType", engine));
+                entry.setDescription(resolveOptional(a, "Description", engine));
+                entry.setUserName(resolveOptional(a, "UserName", engine));
+                auth.add(entry);
+            }
+        }
+        return auth;
+    }
+
+    private void validateIpv4DbProxyNetworkType(
+            String value, String propertyName, boolean dualAllowed, String validValues) {
+        if (value == null) {
+            return;
+        }
+        if ("IPV4".equalsIgnoreCase(value)) {
+            return;
+        }
+        boolean supportedAwsValue = "IPV6".equalsIgnoreCase(value)
+                || (dualAllowed && "DUAL".equalsIgnoreCase(value));
+        if (value.isBlank() || !supportedAwsValue) {
+            throw new AwsException("InvalidParameterValue",
+                    propertyName + " must be " + validValues + ".", 400);
+        }
+        throw new AwsException("UnsupportedOperation",
+                propertyName + " " + value.toUpperCase()
+                        + " is not supported because Floci currently exposes IPv4 proxy networking only.",
+                400);
+    }
+
+    private void deleteDbProxySafe(String name, String region) {
+        try {
+            rdsService.deleteDbProxy(name, region);
+        } catch (AwsException e) {
+            if (!"DBProxyNotFoundFault".equals(e.getErrorCode())) {
+                throw e;
+            }
+            LOG.debugv("DB proxy already gone, treating as deleted: {0}", name);
+        }
+    }
+
+    private void clearDbProxyTargetGroupSafe(String targetGroupArn, String region) {
+        try {
+            rdsService.clearDbProxyTargetGroupByArn(targetGroupArn, region);
+        } catch (AwsException e) {
+            if (!"DBProxyTargetGroupNotFoundFault".equals(e.getErrorCode())) {
+                throw e;
+            }
+            LOG.debugv("DB proxy target group already gone, treating as deleted: {0}", targetGroupArn);
         }
     }
 
@@ -1353,6 +1901,18 @@ public class CloudFormationResourceProvisioner {
             return Integer.parseInt(value.trim());
         } catch (NumberFormatException e) {
             return fallback;
+        }
+    }
+
+    private Integer parseOptionalIntProp(JsonNode props, String name, CloudFormationTemplateEngine engine) {
+        String value = resolveOptional(props, name, engine);
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            return Integer.valueOf(value.trim());
+        } catch (NumberFormatException e) {
+            throw new AwsException("InvalidParameterValue", name + " must be an integer.", 400);
         }
     }
 
@@ -1477,7 +2037,7 @@ public class CloudFormationResourceProvisioner {
 
         Map<String, String> attributes = new HashMap<>();
         if (props.has("FilterPolicy") && !props.path("FilterPolicy").isNull()) {
-            attributes.put("FilterPolicy", engine.resolveNode(props.path("FilterPolicy")).toString());
+            attributes.put("FilterPolicy", engine.resolveJsonAttribute(props.path("FilterPolicy")));
         }
         if (props.has("FilterPolicyScope")) {
             attributes.put("FilterPolicyScope", engine.resolve(props.path("FilterPolicyScope")));
@@ -1486,7 +2046,7 @@ public class CloudFormationResourceProvisioner {
             attributes.put("RawMessageDelivery", engine.resolve(props.path("RawMessageDelivery")));
         }
         if (props.has("RedrivePolicy") && !props.path("RedrivePolicy").isNull()) {
-            attributes.put("RedrivePolicy", engine.resolveNode(props.path("RedrivePolicy")).toString());
+            attributes.put("RedrivePolicy", engine.resolveJsonAttribute(props.path("RedrivePolicy")));
         }
 
         var sub = snsService.subscribe(topicArn, protocol, endpoint, region, attributes);
@@ -1630,6 +2190,30 @@ public class CloudFormationResourceProvisioner {
         boolean hasExplicitName = explicitName != null && !explicitName.isBlank();
         String packageType = resolveOrDefault(props, "PackageType", engine, "Zip");
         String previousNameMode = r.getAttributes().get(LAMBDA_NAME_MODE_ATTR);
+        if (previousNameMode == null && r.getPhysicalId() != null) {
+            // Functions persisted before LAMBDA_NAME_MODE_ATTR existed have no recorded mode, but an
+            // auto-generated name always has the deterministic shape generatePhysicalName produces,
+            // so anything else must have been explicit (see #1965/#2152 for the LogGroup precedent
+            // this mirrors, and #2163 for this gap).
+            previousNameMode = isGeneratedName(r.getPhysicalId(), stackName, r.getLogicalId(), 64)
+                    ? NAME_MODE_GENERATED
+                    : NAME_MODE_EXPLICIT;
+            if (NAME_MODE_GENERATED.equals(previousNameMode) && !hasExplicitName) {
+                // This inference is what decides explicitRemoved below, and it's the one direction
+                // that can be wrong with no way for Floci to tell: a legacy FunctionName that was
+                // actually pinned explicitly, but happens to exactly match generatePhysicalName's
+                // shape (e.g. a user who deliberately reused a name Floci had previously generated),
+                // is indistinguishable from a name that really was auto-generated all along - the raw
+                // property value from that far back was never persisted to check against. Logged so
+                // an operator relying on this FunctionName removal to trigger a replacement has a
+                // chance to notice it silently didn't, rather than this being an invisible guess.
+                LOG.warnv("Lambda {0} in stack {1}: inferring legacy FunctionName ''{2}'' as "
+                                + "auto-generated because it matches the generated-name shape; if it "
+                                + "was actually set explicitly, removing FunctionName here will not "
+                                + "trigger the replacement AWS would perform",
+                        r.getLogicalId(), stackName, r.getPhysicalId());
+            }
+        }
         String oldPackageType = r.getAttributes().get(LAMBDA_PACKAGE_TYPE_ATTR);
         boolean packageTypeReplacement = r.getPhysicalId() != null
                 && oldPackageType != null
@@ -3592,6 +4176,30 @@ public class CloudFormationResourceProvisioner {
             try { req.put("BatchSize", Integer.parseInt(batchSize)); } catch (NumberFormatException ignored) {}
         }
 
+        String startingPosition = resolveOptional(props, "StartingPosition", engine);
+        if (startingPosition != null) {
+            req.put("StartingPosition", startingPosition);
+        }
+
+        String startingPositionTimestamp = resolveOptional(props, "StartingPositionTimestamp", engine);
+        if (startingPositionTimestamp != null) {
+            try {
+                double timestamp = Double.parseDouble(startingPositionTimestamp);
+                if (!Double.isFinite(timestamp)) {
+                    throw new NumberFormatException("Non-finite timestamp");
+                }
+                req.put("StartingPositionTimestamp", timestamp);
+            } catch (NumberFormatException e) {
+                // Not swallowed the way BatchSize above is: dropping this one degrades into the
+                // "StartingPositionTimestamp is required" error from the service, which points at
+                // the wrong problem and hides the value that actually failed to parse. Double.parseDouble
+                // accepts "NaN"/"Infinity"/"-Infinity" without throwing, so isFinite is checked explicitly
+                // to keep those from silently becoming epoch-zero or long-extremum timestamps downstream.
+                throw new AwsException("ValidationError",
+                        "Value of property StartingPositionTimestamp must be a number.", 400);
+            }
+        }
+
         var esm = lambdaService.createEventSourceMapping(region, req);
         r.setPhysicalId(esm.getUuid());
         r.getAttributes().put("Id", esm.getUuid());
@@ -4193,7 +4801,7 @@ public class CloudFormationResourceProvisioner {
         if (hasDefinitionString) {
             definition = resolveOptional(props, "DefinitionString", engine);
         } else if (hasDefinition) {
-            definition = engine.resolveNode(props.get("Definition")).toString();
+            definition = engine.resolveJsonAttribute(props.get("Definition"));
         } else {
             JsonNode location = engine.resolveNode(props.get("DefinitionS3Location"));
             String bucket = location.path("Bucket").asText(null);

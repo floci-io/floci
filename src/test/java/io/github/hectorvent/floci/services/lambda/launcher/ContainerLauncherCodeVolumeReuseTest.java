@@ -58,7 +58,8 @@ class ContainerLauncherCodeVolumeReuseTest {
             super(mock(ContainerBuilder.class), lifecycleManager, mock(ContainerLogStreamer.class),
                     mock(ImageResolver.class), mock(RuntimeApiServerFactory.class),
                     mock(DockerHostResolver.class), config, mock(EcrRegistryManager.class),
-                    mock(LambdaLayerService.class), mock(LaunchedContainerAwsEnv.class));
+                    mock(LambdaLayerService.class), mock(LaunchedContainerAwsEnv.class),
+                    mock(LambdaExecutionRoleCredentials.class));
         }
 
         @Override
@@ -76,8 +77,14 @@ class ContainerLauncherCodeVolumeReuseTest {
         lifecycleManager = mock(ContainerLifecycleManager.class);
         EmulatorConfig config = mock(EmulatorConfig.class);
         EmulatorConfig.StorageConfig storage = mock(EmulatorConfig.StorageConfig.class);
+        EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
+        EmulatorConfig.LambdaServiceConfig lambda = mock(EmulatorConfig.LambdaServiceConfig.class);
         when(config.storage()).thenReturn(storage);
         when(storage.persistentPath()).thenReturn(tempDir.toString());
+        // ensureCodeVolume resolves the configured container-name prefix (unset = "floci").
+        when(config.services()).thenReturn(services);
+        when(services.lambda()).thenReturn(lambda);
+        when(lambda.containerNamePrefix()).thenReturn(Optional.empty());
         launcher = new RecordingLauncher(lifecycleManager, config);
     }
 

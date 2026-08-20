@@ -36,11 +36,11 @@ class IamServiceTest {
         return iamService(seedDeployerPrincipal, new InMemoryStorage<>());
     }
 
-    private static IamService iamService(boolean seedDeployerPrincipal, InMemoryStorage<String, AccessKey> accessKeys) {
+    private static IamService iamService(boolean seedDeployerPrincipal, StorageBackend<String, AccessKey> accessKeys) {
         return iamService(seedDeployerPrincipal, accessKeys, new InMemoryStorage<>());
     }
 
-    private static IamService iamService(boolean seedDeployerPrincipal, InMemoryStorage<String, AccessKey> accessKeys,
+    private static IamService iamService(boolean seedDeployerPrincipal, StorageBackend<String, AccessKey> accessKeys,
                                          StorageBackend<String, SessionCredential> sessions) {
         return new IamService(
                 new InMemoryStorage<>(),
@@ -500,12 +500,28 @@ class IamServiceTest {
     }
 
     @Test
-    void resolveAccountIdDoesNotScanSessionsForLongTermAccessKey() {
-        CountingAccountAwareSessionStorage sessions = new CountingAccountAwareSessionStorage();
-        IamService service = iamService(false, new InMemoryStorage<>(), sessions);
+    void resolveAccountIdUsesLongTermAccessKeyOwnerAccount() {
+        AccountAwareStorageBackend<AccessKey> accessKeys = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "000000000000");
+        AccessKey accessKey = new AccessKey("AKIAIOSFODNN7EXAMPLE", "secret", "worker");
+        accessKeys.putForAccount("111122223333", accessKey.getAccessKeyId(), accessKey);
 
-        assertTrue(service.resolveAccountId("AKIAIOSFODNN7EXAMPLE").isEmpty());
-        assertEquals(0, sessions.scanAllAccountsAsMapCalls);
+        IamService service = iamService(false, accessKeys, new InMemoryStorage<>());
+
+        assertEquals("111122223333", service.resolveAccountId(accessKey.getAccessKeyId()).orElseThrow());
+    }
+
+    @Test
+    void resolveAccountIdIgnoresInactiveLongTermAccessKey() {
+        AccountAwareStorageBackend<AccessKey> accessKeys = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "000000000000");
+        AccessKey accessKey = new AccessKey("AKIAINACTIVEEXAMPLE", "secret", "worker");
+        accessKey.setStatus("Inactive");
+        accessKeys.putForAccount("111122223333", accessKey.getAccessKeyId(), accessKey);
+
+        IamService service = iamService(false, accessKeys, new InMemoryStorage<>());
+
+        assertTrue(service.resolveAccountId(accessKey.getAccessKeyId()).isEmpty());
     }
 
     private static final class CountingAccountAwareSessionStorage
@@ -555,6 +571,46 @@ class IamServiceTest {
         assertNull(service.resolveCallerContext(accessKeyId));
 
         assertTrue(sessions.getForAccount("111122223333", accessKeyId).isEmpty());
+    }
+
+    @Test
+    void lambdaExecutionRoleSessionUsesExplicitAccountAndHasNoExpiration() {
+        String accountId = "222233334444";
+        String accessKeyId = "ASIALAMBDAEXPLICIT";
+        AccountAwareStorageBackend<SessionCredential> sessions = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "000000000000");
+        IamService service = iamService(false, new InMemoryStorage<>(), sessions);
+
+        service.registerLambdaExecutionRoleSession(
+                accountId, accessKeyId, "lambda-secret",
+                "arn:aws:iam::222233334444:role/LambdaRole");
+
+        SessionCredential stored = sessions.getForAccount(accountId, accessKeyId).orElseThrow();
+        assertEquals(accountId, stored.getOriginAccountId());
+        assertNull(stored.getExpiration());
+        assertTrue(stored.isLambdaExecutionRole());
+        assertTrue(sessions.getForAccount("000000000000", accessKeyId).isEmpty());
+
+        service.unregisterSession(accountId, accessKeyId);
+        assertTrue(sessions.getForAccount(accountId, accessKeyId).isEmpty());
+    }
+
+    @Test
+    void lambdaExecutionRoleSessionSweepPreservesStsSessions() {
+        AccountAwareStorageBackend<SessionCredential> sessions = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "000000000000");
+        IamService service = iamService(false, new InMemoryStorage<>(), sessions);
+        service.registerLambdaExecutionRoleSession(
+                "222233334444", "ASIALAMBDAORPHAN", "lambda-secret",
+                "arn:aws:iam::222233334444:role/LambdaRole");
+        service.registerSession(
+                "ASIASTSSESSION", "sts-secret", "arn:aws:iam::000000000000:role/StsRole",
+                Instant.now().plusSeconds(3600), null, "000000000000");
+
+        assertEquals(1, service.sweepOrphanedLambdaExecutionRoleSessions());
+
+        assertTrue(sessions.getForAccount("222233334444", "ASIALAMBDAORPHAN").isEmpty());
+        assertTrue(sessions.getForAccount("000000000000", "ASIASTSSESSION").isPresent());
     }
 
     // =========================================================================
@@ -1072,5 +1128,112 @@ class IamServiceTest {
         Map<String, String> remaining = iamService.listOpenIDConnectProviderTags(provider.getArn());
         assertEquals(1, remaining.size());
         assertEquals("platform", remaining.get("team"));
+    }
+    // =========================================================================
+    // Account Aliases
+    // =========================================================================
+
+    @Test
+    void createAndGetAccountAlias() {
+        assertTrue(iamService.getAccountAlias().isEmpty());
+
+        iamService.createAccountAlias("my-account");
+
+        assertEquals("my-account", iamService.getAccountAlias().orElseThrow());
+    }
+
+    /**
+     * Verified against a live AWS account: creating a free alias while another is set replaces it
+     * rather than failing, which is how the one-alias-per-account rule is actually enforced.
+     */
+    @Test
+    void createAccountAliasReplacesAnExistingOne() {
+        iamService.createAccountAlias("my-account");
+
+        iamService.createAccountAlias("other-account");
+
+        assertEquals("other-account", iamService.getAccountAlias().orElseThrow());
+    }
+
+    /** Re-creating the alias the account already holds is the case AWS rejects. */
+    @Test
+    void createAccountAliasRejectsTheAliasAlreadyHeld() {
+        iamService.createAccountAlias("my-account");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> iamService.createAccountAlias("my-account"));
+        assertEquals("EntityAlreadyExists", ex.getErrorCode());
+        assertTrue(ex.getMessage().contains("my-account"));
+        assertEquals("my-account", iamService.getAccountAlias().orElseThrow());
+    }
+
+    @Test
+    void deleteAccountAliasRejectsAMalformedValue() {
+        iamService.createAccountAlias("my-account");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> iamService.deleteAccountAlias("Bad_Alias"));
+        assertEquals("ValidationError", ex.getErrorCode());
+        assertEquals("my-account", iamService.getAccountAlias().orElseThrow());
+    }
+
+    @Test
+    void deleteAccountAlias() {
+        iamService.createAccountAlias("my-account");
+
+        iamService.deleteAccountAlias("my-account");
+
+        assertTrue(iamService.getAccountAlias().isEmpty());
+    }
+
+    @Test
+    void deleteAccountAliasWithMismatchedNameFails() {
+        iamService.createAccountAlias("my-account");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> iamService.deleteAccountAlias("some-other-alias"));
+        assertEquals("NoSuchEntity", ex.getErrorCode());
+        assertEquals("my-account", iamService.getAccountAlias().orElseThrow());
+    }
+
+    @Test
+    void deleteAccountAliasWhenNoneSetFails() {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> iamService.deleteAccountAlias("my-account"));
+        assertEquals("NoSuchEntity", ex.getErrorCode());
+    }
+
+    @Test
+    void malformedAccountAliasesAreRejected() {
+        for (String alias : List.of("ab", "-leading", "trailing-", "Upper", "under_score", "a".repeat(64))) {
+            AwsException ex = assertThrows(AwsException.class,
+                    () -> iamService.createAccountAlias(alias), "expected rejection for: " + alias);
+            assertEquals("ValidationError", ex.getErrorCode(), "wrong code for: " + alias);
+        }
+        assertThrows(AwsException.class, () -> iamService.createAccountAlias(null));
+    }
+
+    /**
+     * AWS documents the pattern as {@code ^[a-z0-9]([a-z0-9]|-(?!-)){1,61}[a-z0-9]$} — consecutive
+     * dashes are rejected, which a plain character class would let through.
+     */
+    @Test
+    void accountAliasRejectsConsecutiveDashes() {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> iamService.createAccountAlias("my--account"));
+        assertEquals("ValidationError", ex.getErrorCode());
+        assertTrue(iamService.getAccountAlias().isEmpty());
+
+        iamService.createAccountAlias("my-account");
+        assertEquals("my-account", iamService.getAccountAlias().orElseThrow());
+    }
+
+    @Test
+    void accountAliasBoundaryLengthsAreAccepted() {
+        iamService.createAccountAlias("abc");
+        iamService.deleteAccountAlias("abc");
+
+        iamService.createAccountAlias("a".repeat(63));
+        assertEquals("a".repeat(63), iamService.getAccountAlias().orElseThrow());
     }
 }

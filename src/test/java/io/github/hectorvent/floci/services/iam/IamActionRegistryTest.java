@@ -147,6 +147,72 @@ class IamActionRegistryTest {
         assertEquals("s3:GetBucketAcl", registry.resolve("s3", ctx));
     }
 
+    @Test
+    void s3AccelerateResolvesToItsOwnActions() {
+        // Without the override, PUT ?accelerate resolves to s3:CreateBucket — a
+        // principal allowed only to create buckets could reconfigure acceleration.
+        MultivaluedMap<String, String> accelerate = new MultivaluedHashMap<>();
+        accelerate.add("accelerate", "");
+        assertEquals("s3:PutAccelerateConfiguration",
+                registry.resolve("s3", mockCtx("PUT", "/bucket", accelerate, null, "")));
+        assertEquals("s3:GetAccelerateConfiguration",
+                registry.resolve("s3", mockCtx("GET", "/bucket", accelerate, null, "")));
+        // AWS defines no DELETE for the subresource, so it stays on the rule table.
+        assertEquals("s3:DeleteBucket",
+                registry.resolve("s3", mockCtx("DELETE", "/bucket", accelerate, null, "")));
+    }
+
+    @Test
+    void s3AccelerateOnAnObjectPathKeepsTheObjectActions() {
+        // The object routes ignore ?accelerate, so mapping it there would let a
+        // principal with only accelerate permissions read or write arbitrary objects.
+        MultivaluedMap<String, String> accelerate = new MultivaluedHashMap<>();
+        accelerate.add("accelerate", "");
+        assertEquals("s3:GetObject",
+                registry.resolve("s3", mockCtx("GET", "/bucket/secret.txt", accelerate, null, "")));
+        assertEquals("s3:PutObject",
+                registry.resolve("s3", mockCtx("PUT", "/bucket/key.txt", accelerate, null, "")));
+    }
+
+    @Test
+    void s3AccelerateYieldsToSubresourcesDispatchedFirst() {
+        // The controller executes the requestPayment operation for this request, so the
+        // accelerate mapping must not claim it; resolution falls back to the rule table,
+        // exactly like a plain ?requestPayment request today.
+        MultivaluedMap<String, String> withRequestPayment = new MultivaluedHashMap<>();
+        withRequestPayment.add("requestPayment", "");
+        withRequestPayment.add("accelerate", "");
+        assertEquals("s3:CreateBucket",
+                registry.resolve("s3", mockCtx("PUT", "/bucket", withRequestPayment, null, "")));
+        MultivaluedMap<String, String> withLocation = new MultivaluedHashMap<>();
+        withLocation.add("location", "");
+        withLocation.add("accelerate", "");
+        assertEquals("s3:ListBucket",
+                registry.resolve("s3", mockCtx("GET", "/bucket", withLocation, null, "")));
+        // uploads is a GET-only dispatch branch; on PUT it is inert and accelerate executes,
+        // so the mapping must still claim the request there.
+        MultivaluedMap<String, String> withUploads = new MultivaluedHashMap<>();
+        withUploads.add("uploads", "");
+        withUploads.add("accelerate", "");
+        assertEquals("s3:PutAccelerateConfiguration",
+                registry.resolve("s3", mockCtx("PUT", "/bucket", withUploads, null, "")));
+    }
+
+    @Test
+    void s3AccelerateDoesNotPreemptAclOrTagging() {
+        // Appending an inert ?accelerate must not downgrade a stricter resolution.
+        MultivaluedMap<String, String> withAcl = new MultivaluedHashMap<>();
+        withAcl.add("accelerate", "");
+        withAcl.add("acl", "");
+        assertEquals("s3:PutBucketAcl",
+                registry.resolve("s3", mockCtx("PUT", "/bucket", withAcl, null, "")));
+        MultivaluedMap<String, String> withTagging = new MultivaluedHashMap<>();
+        withTagging.add("accelerate", "");
+        withTagging.add("tagging", "");
+        assertEquals("s3:DeleteObjectTagging",
+                registry.resolve("s3", mockCtx("DELETE", "/bucket/key.txt", withTagging, null, "")));
+    }
+
     // -------------------------------------------------------------------------
 
     private static ContainerRequestContext mockCtx(String method, String path,

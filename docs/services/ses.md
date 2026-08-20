@@ -43,7 +43,9 @@ Floci exposes the classic Amazon SES Query API used by `aws ses ...` commands an
 | `SetIdentityHeadersInNotificationsEnabled` | Toggle headers-in-notifications per notification type |
 | `SetIdentityMailFromDomain`         | Set or clear the MAIL FROM domain for an identity         |
 | `GetIdentityMailFromDomainAttributes` | Read MAIL FROM domain settings                          |
-| `GetIdentityDkimAttributes`         | Return DKIM status for identities                         |
+| `GetIdentityDkimAttributes`         | Return DKIM status for identities (an email inherits its domain's DKIM) |
+| `SetIdentityDkimEnabled`            | Enable or disable DKIM signing for an identity            |
+| `VerifyDomainDkim`                  | Return a domain's (stable) DKIM CNAME tokens              |
 | `PutIdentityPolicy`                 | Create or replace a sending-authorization policy on an identity |
 | `GetIdentityPolicies`               | Return the requested policies for an identity             |
 | `ListIdentityPolicies`              | List an identity's policy names                           |
@@ -193,6 +195,7 @@ Alongside the classic Query API, Floci implements a subset of the SES v2 REST JS
 | `GET` | `/v2/email/identities/{emailIdentity}` | `GetEmailIdentity` |
 | `DELETE` | `/v2/email/identities/{emailIdentity}` | `DeleteEmailIdentity` |
 | `PUT` | `/v2/email/identities/{emailIdentity}/dkim` | `PutEmailIdentityDkimAttributes` |
+| `PUT` | `/v2/email/identities/{emailIdentity}/dkim/signing` | `PutEmailIdentityDkimSigningAttributes` (Easy DKIM / BYODKIM) |
 | `PUT` | `/v2/email/identities/{emailIdentity}/feedback` | `PutEmailIdentityFeedbackAttributes` |
 | `PUT` | `/v2/email/identities/{emailIdentity}/mail-from` | `PutEmailIdentityMailFromAttributes` |
 | `PUT` | `/v2/email/identities/{emailIdentity}/configuration-set` | `PutEmailIdentityConfigurationSetAttributes` |
@@ -205,6 +208,7 @@ Alongside the classic Query API, Floci implements a subset of the SES v2 REST JS
 | `GET` | `/v2/email/account` | `GetAccount` |
 | `PUT` | `/v2/email/account/sending` | `PutAccountSendingAttributes` |
 | `PUT` | `/v2/email/account/suppression` | `PutAccountSuppressionAttributes` |
+| `PUT` | `/v2/email/account/vdm` | `PutAccountVdmAttributes` |
 | `POST` | `/v2/email/templates` | `CreateEmailTemplate` |
 | `GET` | `/v2/email/templates` | `ListEmailTemplates` |
 | `GET` | `/v2/email/templates/{templateName}` | `GetEmailTemplate` |
@@ -269,6 +273,8 @@ Floci recognises the AWS [mailbox simulator addresses](https://docs.aws.amazon.c
 
 A successful send without a simulator-address recipient emits only the `Send` event.
 
+Account-level VDM (Virtual Deliverability Manager) attributes are stored per region. `PutAccountVdmAttributes` sets `VdmEnabled` (opt-in, defaults `DISABLED`) plus the optional `DashboardAttributes.EngagementMetrics` and `GuardianAttributes.OptimizedSharedDelivery`. `GetAccount` omits `VdmAttributes` until VDM has been configured for the region, then returns `VdmEnabled`, adding the `DashboardAttributes`/`GuardianAttributes` sub-objects only while `VdmEnabled` is `ENABLED`. Floci stores the settings but does not run VDM analytics.
+
 Suppression list entries are stored per region with `Reason` ∈ {`BOUNCE`, `COMPLAINT`}. At send time, a recipient is suppressed when it appears on the suppression list AND its stored `Reason` is contained in the **effective** `SuppressedReasons` for the send. The effective list is the configuration set's `SuppressionOptions.SuppressedReasons` (set via `PutConfigurationSetSuppressionOptions`) when present — an **empty list is preserved as an explicit "no suppression filtering for this configuration set"** — otherwise it falls back to the account-level `AccountSuppressionAttributes.SuppressedReasons` (set via `PutAccountSuppressionAttributes`, default `[BOUNCE, COMPLAINT]`). Following the AWS V2 contract, there is no dedicated `GetConfigurationSetSuppressionOptions` action; once set, the block is read back through `GetConfigurationSet`'s response (the field is omitted when the configuration set has no override).
 
 Suppressed recipients are filtered out of the SMTP relay step (non-suppressed recipients on the same send still reach the relay normally), and the configuration set's event destinations receive a synthetic `Bounce` or `Complaint` event alongside the always-emitted `Send` event. The `SendEmail` API response (`200` + `MessageId`), the stored `SentEmail` visible at `GET /_aws/ses`, and the published event's `mail.destination` all retain the original recipient list — matching the AWS contract that the message is "accepted, just not sent" for suppressed addresses.
@@ -280,3 +286,5 @@ For a **single-recipient** list-managed send, Floci injects a functional unsubsc
 Tag operations support these ARN forms: `arn:aws:ses:<region>:<account>:configuration-set/<name>`, `arn:aws:ses:<region>:<account>:template/<name>`, and `arn:aws:ses:<region>:<account>:identity/<email-or-domain>`. Tags supplied to `CreateConfigurationSet`, `CreateEmailTemplate`, and `CreateEmailIdentity` are reachable through `ListTagsForResource`; `UpdateEmailTemplate` does not modify tags. Other resource types return `NotFoundException`.
 
 Identity, identity-policy, template, custom-verification-template, configuration-set, and sent-message state is shared between the v1 Query API and the v2 REST JSON API, so a template created with `CreateTemplate` resolves through `SendEmail` on v2 (and vice versa), a policy written with `PutIdentityPolicy` (v1) is returned by `GetEmailIdentityPolicies` (v2), a custom verification email template created with `CreateCustomVerificationEmailTemplate` (v1) is returned by `GetCustomVerificationEmailTemplate` (v2), a configuration set created with `CreateConfigurationSet` is visible to both `DescribeConfigurationSet` (v1) and `GetConfigurationSet` (v2), and every send appears in the same `GET /_aws/ses` inspection mailbox.
+
+DKIM follows AWS's domain-centric model. A **domain** identity carries DKIM tokens (generated at verification, stable across `VerifyDomainDkim` calls); its `DkimVerificationStatus` tracks **DNS record detection** — it transitions to `Success` when the expected `<token>._domainkey.<domain>` CNAMEs are present in the Route53 emulation, not when DKIM is enabled. An **email** identity has no DKIM of its own: its `DkimAttributes` (`SigningEnabled`, `Status`, `Tokens`) are inherited from its parent domain identity when one is registered. The parent is the exact domain after the `@` (verified against AWS): a verified `example.com` covers `user@example.com` but not `user@mail.example.com` unless `mail.example.com` is itself a registered identity. `SetIdentityDkimEnabled` / `PutEmailIdentityDkimAttributes` only toggle the signing flag (they no longer force the verification status); `PutEmailIdentityDkimSigningAttributes` sets the signing origin (`AWS_SES` Easy DKIM — regenerating tokens when the key length changes — or `EXTERNAL` BYODKIM).

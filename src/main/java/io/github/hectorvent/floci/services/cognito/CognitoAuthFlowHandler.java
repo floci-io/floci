@@ -234,6 +234,13 @@ final class CognitoAuthFlowHandler {
         if (parts == null) {
             throw new AwsException("NotAuthorizedException", "Invalid Refresh Token", 400);
         }
+        // Scope the token to the pool that minted it. HMAC verification only proves the token
+        // was signed by parts[0]'s pool, not that parts[0] is the pool serving this request, so
+        // a token legitimately issued for pool A must not be replayed against pool B's client.
+        // Mirrors getTokensFromRefreshToken's pool-id check.
+        if (!pool.getId().equals(parts[0])) {
+            throw new AwsException("NotAuthorizedException", "Invalid Refresh Token", 400);
+        }
         String username = parts[1];
         long iat;
         try {
@@ -242,6 +249,10 @@ final class CognitoAuthFlowHandler {
             throw new AwsException("NotAuthorizedException", "Invalid Refresh Token", 400);
         }
         String refreshTokenUuid = parts.length > 4 ? parts[4] : null;
+
+        if (service.isRefreshTokenExpired(client, parts)) {
+            throw new AwsException("NotAuthorizedException", "Refresh Token has expired", 400);
+        }
 
         // Check revocation before issuing new tokens
         service.validateRefreshTokenNotRevoked(refreshTokenUuid, pool.getId(), username, iat);

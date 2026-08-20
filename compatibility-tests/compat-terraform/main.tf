@@ -115,13 +115,13 @@ resource "aws_secretsmanager_secret_version" "db_creds" {
 
 # -- RDS DB Instance -----------------------------------------------------------
 resource "aws_db_instance" "app" {
-  identifier        = "floci-compat-db"
-  engine            = "postgres"
-  engine_version    = "15"
-  instance_class    = "db.t3.micro"
-  allocated_storage = 20
-  username          = "admin"
-  password          = "Password1!"
+  identifier          = "floci-compat-db"
+  engine              = "postgres"
+  engine_version      = "15"
+  instance_class      = "db.t3.micro"
+  allocated_storage   = 20
+  username            = "admin"
+  password            = "Password1!"
   skip_final_snapshot = true
 }
 
@@ -457,4 +457,113 @@ resource "aws_iam_role_policy_attachment" "emr_service_role" {
 
 output "managed_policy_role_arn" {
   value = aws_iam_role.managed_policy_attach.arn
+}
+
+# The provider reads tags off the GetRole/GetPolicy/GetFunction response rather than by calling
+# List*Tags, so a tagged resource that does not echo them back applies cleanly and then diffs on
+# every subsequent plan. The re-plan assertion below is what catches that.
+resource "aws_iam_role" "tagged" {
+  name               = "floci-compat-tagged-role"
+  assume_role_policy = data.aws_iam_policy_document.lambda_assume_role.json
+
+  tags = {
+    Environment = "compat"
+    Owner       = "floci"
+  }
+}
+
+resource "aws_iam_policy" "tagged" {
+  name        = "floci-compat-tagged-policy"
+  description = "Tagged policy used to assert tags survive a round trip"
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = "s3:GetObject"
+      Resource = "*"
+    }]
+  })
+
+  tags = {
+    Environment = "compat"
+  }
+}
+
+output "tagged_role_arn" {
+  value = aws_iam_role.tagged.arn
+}
+
+output "tagged_policy_arn" {
+  value = aws_iam_policy.tagged.arn
+}
+
+# -- GuardDuty -----------------------------------------------------------------
+# Detector, per-feature configuration, and organization configuration mirror the
+# resource set an org security-baseline stack manages. additional_configuration
+# is an ordered list block: Floci must echo it back in submitted order or every
+# re-plan proposes a replacement.
+resource "aws_guardduty_detector" "compat" {
+  enable                       = true
+  finding_publishing_frequency = "SIX_HOURS"
+
+  tags = {
+    Environment = "compat-test"
+  }
+}
+
+resource "aws_guardduty_detector_feature" "runtime_monitoring" {
+  detector_id = aws_guardduty_detector.compat.id
+  name        = "RUNTIME_MONITORING"
+  status      = "ENABLED"
+
+  additional_configuration {
+    name   = "ECS_FARGATE_AGENT_MANAGEMENT"
+    status = "ENABLED"
+  }
+
+  additional_configuration {
+    name   = "EC2_AGENT_MANAGEMENT"
+    status = "ENABLED"
+  }
+
+  additional_configuration {
+    name   = "EKS_ADDON_MANAGEMENT"
+    status = "DISABLED"
+  }
+}
+
+resource "aws_guardduty_organization_configuration" "compat" {
+  detector_id                      = aws_guardduty_detector.compat.id
+  auto_enable_organization_members = "ALL"
+}
+
+resource "aws_guardduty_organization_configuration_feature" "runtime_monitoring" {
+  detector_id = aws_guardduty_detector.compat.id
+  name        = "RUNTIME_MONITORING"
+  auto_enable = "ALL"
+
+  additional_configuration {
+    name        = "ECS_FARGATE_AGENT_MANAGEMENT"
+    auto_enable = "ALL"
+  }
+
+  additional_configuration {
+    name        = "EC2_AGENT_MANAGEMENT"
+    auto_enable = "ALL"
+  }
+
+  additional_configuration {
+    name        = "EKS_ADDON_MANAGEMENT"
+    auto_enable = "NONE"
+  }
+
+  depends_on = [aws_guardduty_organization_configuration.compat]
+}
+
+output "guardduty_detector_id" {
+  value = aws_guardduty_detector.compat.id
+}
+
+output "guardduty_detector_arn" {
+  value = aws_guardduty_detector.compat.arn
 }

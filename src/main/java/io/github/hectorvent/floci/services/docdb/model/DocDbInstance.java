@@ -2,10 +2,13 @@ package io.github.hectorvent.floci.services.docdb.model;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
+import java.util.LinkedHashMap;
+import java.util.Map;
 @RegisterForReflection
 public class DocDbInstance {
 
     private String dbInstanceIdentifier;
+    private Map<String, String> tags = new LinkedHashMap<>();
     private String dbClusterIdentifier;
     private String dbInstanceClass;
     private String engineVersion;
@@ -55,4 +58,11 @@ public class DocDbInstance {
     public void setCreatedAt(Instant createdAt) { this.createdAt = createdAt; }
 
 
+
+    public Map<String, String> getTags() { return tags; }
+
+    /** Normalizes null: a record persisted before tags were stored deserializes without them. */
+    public void setTags(Map<String, String> tags) {
+        this.tags = tags == null ? new LinkedHashMap<>() : new LinkedHashMap<>(tags);
+    }
 }

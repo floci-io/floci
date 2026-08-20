@@ -25,4 +25,13 @@ public interface CfnResourceProvisioner {
     default void delete(String resourceType, String physicalId, String region) {
         // no-op by default: some resource types have no backing delete
     }
+
+    /**
+     * Delete with the resource's create-time attributes in hand. Override this when the physical id
+     * alone cannot identify what to delete — a lifecycle hook name is unique only within its Auto
+     * Scaling group, for instance. The default drops to the id-only form above.
+     */
+    default void delete(StackResource resource, String region) {
+        delete(resource.getResourceType(), resource.getPhysicalId(), region);
+    }
 }

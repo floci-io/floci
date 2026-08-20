@@ -220,13 +220,13 @@ Floci supports local emulation for application services, data services, eventing
 | Category | Services |
 |---|---|
 | Core app services | S3, SQS, SNS, DynamoDB, Lambda, IAM, KMS, Secrets Manager, SSM |
-| Events and workflows | EventBridge, EventBridge Pipes, EventBridge Scheduler, Step Functions, CloudWatch Logs, CloudWatch Metrics |
+| Events and workflows | EventBridge, EventBridge Pipes, EventBridge Scheduler, Step Functions, SWF, CloudWatch Logs, CloudWatch Metrics |
 | API and identity | API Gateway REST, API Gateway v2, AppSync, Cognito, ACM, Route53, Cloud Map |
 | Containers and compute | ECS, EC2, Lightsail, EKS, MWAA, ECR, CodeBuild, CodeDeploy, CodePipeline, AWS Batch, Auto Scaling, Application Auto Scaling, Elastic Beanstalk, ELB v2 |
-| Data, analytics, and AI | Athena, Glue, EMR, Firehose, Managed Service for Apache Flink, OpenSearch, S3 Vectors, Textract, Transcribe, Bedrock Runtime |
+| Data, analytics, and AI | Athena, Glue, EMR, Firehose, Managed Service for Apache Flink, OpenSearch, S3 Tables, S3 Vectors, Textract, Transcribe, Bedrock Runtime |
 | Databases and caching | RDS, RDS Data API, Neptune, DocumentDB, MemoryDB, ElastiCache |
 | Messaging and transfer | SES, Kinesis, MSK, Amazon MQ, Transfer Family, IoT Core |
-| Security and governance | WAF v2, CloudTrail, CloudFront, Resource Groups Tagging API |
+| Security and governance | WAF v2, CloudTrail, CloudFront, Resource Groups Tagging API, CloudHSM v2 |
 | Cost and billing | Pricing, Cost Explorer, Cost and Usage Reports, BCM Data Exports |
 | Backup and config | AWS Backup, AWS Config, AppConfig, AppConfigData, CloudFormation, Cloud Control API |
 
@@ -253,6 +253,7 @@ For operation-level compatibility, see the [Services Overview](https://floci.io/
 | Kinesis | In-process | Streams, shards, enhanced fan-out, split and merge |
 | Secrets Manager | In-process | Versioning, resource policies, tagging |
 | Step Functions | In-process | ASL execution, task tokens, execution history |
+| SWF | In-process | Decision and activity tasks, timers, child workflows, timeouts, real Lambda invocation |
 | CloudFormation | In-process | Stacks, change sets, resource provisioning, StackSets (cross-account instances) |
 | EventBridge | In-process | Custom buses, rules, SQS, SNS and Lambda targets |
 | EventBridge Pipes | In-process | Poller-based integration connecting SQS, Kinesis, DynamoDB, and MSK sources to targets with optional filtering |
@@ -270,7 +271,7 @@ For operation-level compatibility, see the [Services Overview](https://floci.io/
 | Athena | In-process with DuckDB sidecar | Real SQL execution over S3 and Glue-backed views |
 | Glue | In-process | Data Catalog, Schema Registry, tables consumed by Athena |
 | EMR | In-process | Cluster (job flow) lifecycle, instance groups and fleets, steps, security configurations, tagging |
-| Data Firehose | In-process | Streaming delivery, NDJSON flush to S3 |
+| Data Firehose | In-process | Streaming delivery, buffered flush to S3 with GZIP/ZIP/Snappy compression |
 | Managed Service for Apache Flink | Real Docker | Kinesis Analytics V2 control plane; StartApplication runs a real Flink cluster (JobManager + TaskManager, image per RuntimeEnvironment), pulls the application JAR from local S3, and submits the job |
 | ECS | Real Docker | Clusters, task definitions, tasks, services, capacity providers, task sets |
 | EC2 | Real Docker | RunInstances launches containers, SSH key injection, UserData, IMDS, VPC resources |

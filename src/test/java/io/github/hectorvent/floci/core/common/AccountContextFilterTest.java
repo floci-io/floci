@@ -105,6 +105,29 @@ class AccountContextFilterTest {
     }
 
     @Test
+    void resolvesIamAccessKeyToOwningAccount() {
+        sessionAccounts.put("AKIAEXAMPLEACCESSKEY", "333344445555");
+        ContainerRequestContext ctx = mockContext(
+            "AWS4-HMAC-SHA256 Credential=AKIAEXAMPLEACCESSKEY/20260617/us-west-2/kms/aws4_request, "
+                + "SignedHeaders=host, Signature=abc",
+            null
+        );
+        filter.filter(ctx);
+        assertEquals("333344445555", requestContext.getAccountId());
+        assertEquals("us-west-2", requestContext.getRegion());
+    }
+
+    @Test
+    void resolvesIamAccessKeyFromPresignedCredential() {
+        sessionAccounts.put("AKIAPRESIGNEDACCESSKEY", "444455556666");
+        ContainerRequestContext ctx = mockContext(null,
+            "AKIAPRESIGNEDACCESSKEY/20260617/eu-central-1/s3/aws4_request");
+        filter.filter(ctx);
+        assertEquals("444455556666", requestContext.getAccountId());
+        assertEquals("eu-central-1", requestContext.getRegion());
+    }
+
+    @Test
     void twelveDigitAkidWinsOverSessionLookup() {
         sessionAccounts.put("000000000001", "999999999999");
         ContainerRequestContext ctx = mockContext(
