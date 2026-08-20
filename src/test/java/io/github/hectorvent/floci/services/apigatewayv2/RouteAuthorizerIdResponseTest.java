@@ -126,6 +126,34 @@ class RouteAuthorizerIdResponseTest {
     }
 
     @Test
+    void authorizationScopesNonStringElementsNormalizedToStrings() {
+        // Route scopes arrive as a JSON array; a non-string element (legal JSON, invalid input)
+        // used to survive the unchecked List<String> cast and blow up with ClassCastException
+        // when the response was serialized. They are now normalized to strings at ingestion.
+        String apiId = given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"name":"authz-route-scope-norm","protocolType":"HTTP"}
+                        """)
+                .when().post("/v2/apis")
+                .then().statusCode(201)
+                .extract().path("apiId");
+
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {
+                          "routeKey":"GET /norm",
+                          "authorizationType":"JWT",
+                          "authorizationScopes":["orders/read", 42]
+                        }
+                        """)
+                .when().post("/v2/apis/" + apiId + "/routes")
+                .then().statusCode(201)
+                .body("authorizationScopes", equalTo(java.util.List.of("orders/read", "42")));
+    }
+
+    @Test
     void authorizerIdReturnedAfterUpdate() {
         String apiId = given()
                 .contentType(ContentType.JSON)

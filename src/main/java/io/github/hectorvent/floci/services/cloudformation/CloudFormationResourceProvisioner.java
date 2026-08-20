@@ -5222,6 +5222,9 @@ public class CloudFormationResourceProvisioner {
         req.put("routeKey", resolveOptional(props, "RouteKey", engine));
         req.put("authorizationType", resolveOrDefault(props, "AuthorizationType", engine, "NONE"));
         req.put("authorizerId", resolveOptional(props, "AuthorizerId", engine));
+        // Always present (empty when the property is absent) so an UpdateStack that removes
+        // AuthorizationScopes from the template clears the route's scopes instead of keeping them.
+        req.put("authorizationScopes", resolveStringListOrEmpty(props, "AuthorizationScopes", engine));
         req.put("target", resolveOptional(props, "Target", engine));
 
         Route route;
