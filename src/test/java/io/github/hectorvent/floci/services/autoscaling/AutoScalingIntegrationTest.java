@@ -964,10 +964,71 @@ class AutoScalingIntegrationTest {
                 .body(containsString("DeleteAutoScalingGroupResponse"));
     }
 
-    // ── Cleanup ───────────────────────────────────────────────────────────────
+    // ── Warm pools ──────────────────────────────────────────────────────────────
 
     @Test
     @Order(36)
+    void putWarmPool() {
+        given()
+                .formParam("Action", "PutWarmPool")
+                .formParam("AutoScalingGroupName", "my-asg")
+                .formParam("PoolState", "Stopped")
+                .formParam("MinSize", "1")
+                .formParam("MaxGroupPreparedCapacity", "2")
+                .formParam("InstanceReusePolicy.ReuseOnScaleIn", "true")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("PutWarmPoolResponse"));
+    }
+
+    @Test
+    @Order(37)
+    void describeWarmPool() {
+        given()
+                .formParam("Action", "DescribeWarmPool")
+                .formParam("AutoScalingGroupName", "my-asg")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("<PoolState>Stopped</PoolState>"))
+                .body(containsString("<MinSize>1</MinSize>"))
+                .body(containsString("<MaxGroupPreparedCapacity>2</MaxGroupPreparedCapacity>"))
+                .body(containsString("<ReuseOnScaleIn>true</ReuseOnScaleIn>"));
+    }
+
+    @Test
+    @Order(38)
+    void deleteWarmPool() {
+        given()
+                .formParam("Action", "DeleteWarmPool")
+                .formParam("AutoScalingGroupName", "my-asg")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("DeleteWarmPoolResponse"));
+
+        given()
+                .formParam("Action", "DescribeWarmPool")
+                .formParam("AutoScalingGroupName", "my-asg")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(not(containsString("<WarmPoolConfiguration>")));
+    }
+
+    // ── Cleanup ───────────────────────────────────────────────────────────────
+
+    @Test
+    @Order(39)
     void deleteAutoScalingGroup() {
         given()
                 .formParam("Action", "DeleteAutoScalingGroup")
@@ -982,7 +1043,7 @@ class AutoScalingIntegrationTest {
     }
 
     @Test
-    @Order(37)
+    @Order(40)
     void deleteMixedInstancesAutoScalingGroup() {
         given()
                 .formParam("Action", "DeleteAutoScalingGroup")
@@ -997,7 +1058,7 @@ class AutoScalingIntegrationTest {
     }
 
     @Test
-    @Order(38)
+    @Order(41)
     void deleteLaunchConfiguration() {
         given()
                 .formParam("Action", "DeleteLaunchConfiguration")
@@ -1011,7 +1072,7 @@ class AutoScalingIntegrationTest {
     }
 
     @Test
-    @Order(39)
+    @Order(42)
     void describeAutoScalingGroupsEmpty() {
         given()
                 .formParam("Action", "DescribeAutoScalingGroups")

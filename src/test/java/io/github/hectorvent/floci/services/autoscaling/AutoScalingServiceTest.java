@@ -718,6 +718,96 @@ class AutoScalingServiceTest {
                 java.util.Map.of(), java.util.Map.of());
     }
 
+    // ── Warm pools (lex00/floci#84) ────────────────────────────────────────────
+
+    @Test
+    void putWarmPoolAppliesDocumentedDefaultsForOmittedFields() {
+        var pool = service.putWarmPool(REGION, "test-asg", null, null, null, null);
+
+        assertNull(pool.getMaxGroupPreparedCapacity());
+        assertEquals(0, pool.getMinSize());
+        assertEquals("Stopped", pool.getPoolState());
+        assertFalse(pool.isReuseOnScaleIn());
+    }
+
+    @Test
+    void putWarmPoolStoresExplicitValues() {
+        var pool = service.putWarmPool(REGION, "test-asg", 2, 1, "Running", true);
+
+        assertEquals(2, pool.getMaxGroupPreparedCapacity());
+        assertEquals(1, pool.getMinSize());
+        assertEquals("Running", pool.getPoolState());
+        assertTrue(pool.isReuseOnScaleIn());
+        assertEquals(pool, service.describeWarmPool(REGION, "test-asg"));
+    }
+
+    @Test
+    void putWarmPoolIsAFullReplaceNotAMerge() {
+        service.putWarmPool(REGION, "test-asg", 5, 3, "Running", true);
+
+        // A second Put that omits every optional field resets each one to its
+        // own documented default rather than carrying the first call's values
+        // forward - PutWarmPool is a replace, not a partial update.
+        var pool = service.putWarmPool(REGION, "test-asg", null, null, null, null);
+
+        assertNull(pool.getMaxGroupPreparedCapacity());
+        assertEquals(0, pool.getMinSize());
+        assertEquals("Stopped", pool.getPoolState());
+        assertFalse(pool.isReuseOnScaleIn());
+    }
+
+    @Test
+    void putWarmPoolTreatsMaxGroupPreparedCapacityOfNegativeOneAsClearingIt() {
+        service.putWarmPool(REGION, "test-asg", 4, null, null, null);
+
+        var pool = service.putWarmPool(REGION, "test-asg", -1, null, null, null);
+
+        assertNull(pool.getMaxGroupPreparedCapacity());
+    }
+
+    @Test
+    void describeWarmPoolReturnsNullWhenNoneConfigured() {
+        assertNull(service.describeWarmPool(REGION, "test-asg"));
+    }
+
+    @Test
+    void deleteWarmPoolRemovesTheConfiguration() {
+        service.putWarmPool(REGION, "test-asg", 2, 1, "Running", true);
+
+        service.deleteWarmPool(REGION, "test-asg", false);
+
+        assertNull(service.describeWarmPool(REGION, "test-asg"));
+    }
+
+    @Test
+    void deleteWarmPoolIsIdempotentWhenNoneExists() {
+        assertDoesNotThrow(() -> service.deleteWarmPool(REGION, "test-asg", false));
+    }
+
+    @Test
+    void putWarmPoolRequiresAnExistingAutoScalingGroup() {
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.putWarmPool(REGION, "no-such-asg", null, null, null, null));
+
+        assertEquals("ValidationError", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+    }
+
+    @Test
+    void deleteAutoScalingGroupCascadesToItsWarmPool() {
+        service.putWarmPool(REGION, "test-asg", 2, 1, "Running", true);
+
+        service.deleteAutoScalingGroup(REGION, "test-asg", true);
+
+        // The group is gone, so describeWarmPool's own requireGroup check is what
+        // fires now - proof the warm pool row was actually removed and not just
+        // orphaned, since a stale row would instead have made this call succeed.
+        service.createAutoScalingGroup(REGION, "test-asg", null, "lt-original", null, "1", null,
+                0, 3, 1, 300, List.of("us-east-1a"), List.of("subnet-12345678"),
+                List.of(), List.of(), "EC2", 0, List.of("Default"), Map.of(), Map.of());
+        assertNull(service.describeWarmPool(REGION, "test-asg"));
+    }
+
     private static final class AutoScalingGroupFixture {
         private static void addInstance(AutoScalingService service, String region, String name, String instanceId,
                 String lifecycleState, String launchTemplateId, String launchTemplateVersion) {

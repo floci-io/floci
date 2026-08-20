@@ -51,6 +51,10 @@ public class AutoScalingQueryHandler {
                 case "DescribeInstanceRefreshes"    -> handleDescribeInstanceRefreshes(p, region);
                 case "CreateOrUpdateTags"           -> handleCreateOrUpdateTags(p, region);
                 case "DeleteTags"                   -> handleDeleteTags(p, region);
+                // Warm pools
+                case "PutWarmPool"                  -> handlePutWarmPool(p, region);
+                case "DescribeWarmPool"             -> handleDescribeWarmPool(p, region);
+                case "DeleteWarmPool"               -> handleDeleteWarmPool(p, region);
                 // Instances
                 case "DescribeAutoScalingInstances" -> handleDescribeAutoScalingInstances(p, region);
                 case "AttachInstances"              -> handleAttachInstances(p, region);
@@ -477,6 +481,63 @@ public class AutoScalingQueryHandler {
                 .start("DeleteTagsResponse", NS)
                   .raw(AwsQueryResponse.responseMetadata())
                 .end("DeleteTagsResponse").build());
+    }
+
+    // ── Warm pools ──────────────────────────────────────────────────────────────
+    // Wire shapes verified directly against botocore's own
+    // autoscaling/2011-01-01/service-2.json (PutWarmPoolType, DescribeWarmPoolType,
+    // DescribeWarmPoolAnswer, DeleteWarmPoolType, WarmPoolConfiguration,
+    // InstanceReusePolicy) rather than docs prose, per lex00/floci#84 - see
+    // AutoScalingService's warm-pool section for the full-replace-with-defaults
+    // rationale behind PutWarmPool's parsing here.
+
+    private Response handlePutWarmPool(MultivaluedMap<String, String> p, String region) {
+        service.putWarmPool(region,
+                p.getFirst("AutoScalingGroupName"),
+                nullableIntParam(p, "MaxGroupPreparedCapacity"),
+                nullableIntParam(p, "MinSize"),
+                p.getFirst("PoolState"),
+                nullableBoolParam(p, "InstanceReusePolicy.ReuseOnScaleIn"));
+        return ok(new XmlBuilder()
+                .start("PutWarmPoolResponse", NS)
+                  .start("PutWarmPoolResult").end("PutWarmPoolResult")
+                  .raw(AwsQueryResponse.responseMetadata())
+                .end("PutWarmPoolResponse").build());
+    }
+
+    private Response handleDescribeWarmPool(MultivaluedMap<String, String> p, String region) {
+        WarmPoolConfiguration pool = service.describeWarmPool(region, p.getFirst("AutoScalingGroupName"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeWarmPoolResponse", NS)
+                  .start("DescribeWarmPoolResult");
+        if (pool != null) {
+            xml.start("WarmPoolConfiguration");
+            if (pool.getMaxGroupPreparedCapacity() != null) {
+                xml.elem("MaxGroupPreparedCapacity", String.valueOf(pool.getMaxGroupPreparedCapacity()));
+            }
+            xml.elem("MinSize", String.valueOf(pool.getMinSize()))
+               .elem("PoolState", pool.getPoolState())
+               .start("InstanceReusePolicy")
+                 .elem("ReuseOnScaleIn", String.valueOf(pool.isReuseOnScaleIn()))
+               .end("InstanceReusePolicy")
+               .end("WarmPoolConfiguration");
+        }
+        xml.start("Instances").end("Instances")
+           .end("DescribeWarmPoolResult")
+           .raw(AwsQueryResponse.responseMetadata())
+           .end("DescribeWarmPoolResponse");
+        return ok(xml.build());
+    }
+
+    private Response handleDeleteWarmPool(MultivaluedMap<String, String> p, String region) {
+        service.deleteWarmPool(region,
+                p.getFirst("AutoScalingGroupName"),
+                "true".equalsIgnoreCase(p.getFirst("ForceDelete")));
+        return ok(new XmlBuilder()
+                .start("DeleteWarmPoolResponse", NS)
+                  .start("DeleteWarmPoolResult").end("DeleteWarmPoolResult")
+                  .raw(AwsQueryResponse.responseMetadata())
+                .end("DeleteWarmPoolResponse").build());
     }
 
     // ── Instances ─────────────────────────────────────────────────────────────

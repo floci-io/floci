@@ -49,6 +49,7 @@ public class AutoScalingService {
     private Map<String, ScalingActivity> activities = new ConcurrentHashMap<>();
     private Map<String, InstanceRefresh> instanceRefreshes = new ConcurrentHashMap<>();
     private Map<String, ScheduledAction> scheduledActions = new ConcurrentHashMap<>();
+    private Map<String, WarmPoolConfiguration> warmPools = new ConcurrentHashMap<>();
 
     @PostConstruct
     void initializeStorage()
@@ -63,6 +64,7 @@ public class AutoScalingService {
         this.activities = storageBacked("autoscaling-activities.json", new TypeReference<Map<String, ScalingActivity>>() {});
         this.instanceRefreshes = storageBacked("autoscaling-instance-refreshes.json", new TypeReference<Map<String, InstanceRefresh>>() {});
         this.scheduledActions = storageBacked("autoscaling-scheduled-actions.json", new TypeReference<Map<String, ScheduledAction>>() {});
+        this.warmPools = storageBacked("autoscaling-warm-pools.json", new TypeReference<Map<String, WarmPoolConfiguration>>() {});
     }
 
     private <V> Map<String, V> storageBacked(String fileName, TypeReference<Map<String, V>> typeReference)
@@ -303,6 +305,7 @@ public class AutoScalingService {
         hooks.entrySet().removeIf(e -> e.getValue().getAutoScalingGroupName().equals(name));
         policies.entrySet().removeIf(e -> e.getValue().getAutoScalingGroupName().equals(name));
         instanceRefreshes.entrySet().removeIf(e -> e.getValue().getAutoScalingGroupName().equals(name));
+        warmPools.remove(warmPoolKey(region, name));
     }
 
     public List<AutoScalingGroup> describeAutoScalingGroups(String region, List<String> names) {
@@ -751,6 +754,65 @@ public class AutoScalingService {
                 .filter(a -> asgName == null || asgName.equals(a.getAutoScalingGroupName()))
                 .filter(a -> actionNames == null || actionNames.isEmpty() || actionNames.contains(a.getScheduledActionName()))
                 .collect(Collectors.toList());
+    }
+
+    // ── Warm pools ──────────────────────────────────────────────────────────────
+    // PutWarmPool/DescribeWarmPool/DeleteWarmPool - aws_autoscaling_group's
+    // warm_pool block. Verified directly against botocore's
+    // autoscaling/2011-01-01/service-2.json wire model rather than docs prose
+    // (lex00/floci#84): PutWarmPoolType/DeleteWarmPoolType/DescribeWarmPoolType
+    // and their *Answer response shapes, WarmPoolConfiguration, WarmPoolState,
+    // InstanceReusePolicy. PutWarmPool is a full replace: MinSize's own shape
+    // doc says "Defaults to 0 if not specified" and PoolState's says "Default is
+    // Stopped" - an omitted field resets to that default, it does not carry the
+    // prior value forward, which is why putWarmPool always rebuilds the
+    // configuration from scratch rather than mutating the stored one in place.
+    // MaxGroupPreparedCapacity has no default (absent unless set), and the shape
+    // doc calls out -1 as the caller's own documented sentinel for "clear a
+    // previously-set value" - not a real capacity, so it maps back to null and
+    // is never rendered as -1.
+    //
+    // Floci has no scaling loop that actually launches pre-initialized instances
+    // into the pool, so DescribeWarmPool's own Instances list is always empty
+    // and WarmPoolConfiguration.Status ("PendingDelete") is never set - the
+    // "accept and remember" shape scaling policies and scheduled actions above
+    // already use for AWS features with no local reconciler. DeleteWarmPool
+    // removes the stored configuration outright and is silently idempotent when
+    // no warm pool exists, matching deletePolicy above rather than throwing.
+
+    public WarmPoolConfiguration putWarmPool(String region, String asgName,
+                                              Integer maxGroupPreparedCapacity,
+                                              Integer minSize,
+                                              String poolState,
+                                              Boolean reuseOnScaleIn) {
+        requireGroup(region, asgName);
+        WarmPoolConfiguration pool = new WarmPoolConfiguration();
+        pool.setAutoScalingGroupName(asgName);
+        pool.setRegion(region);
+        // -1 is the wire model's own documented sentinel for "remove a
+        // previously-set value" - not a literal capacity.
+        pool.setMaxGroupPreparedCapacity(
+                maxGroupPreparedCapacity != null && maxGroupPreparedCapacity != -1
+                        ? maxGroupPreparedCapacity : null);
+        pool.setMinSize(minSize != null ? minSize : 0);
+        pool.setPoolState(poolState != null && !poolState.isBlank() ? poolState : "Stopped");
+        pool.setReuseOnScaleIn(Boolean.TRUE.equals(reuseOnScaleIn));
+        warmPools.put(warmPoolKey(region, asgName), pool);
+        return pool;
+    }
+
+    public WarmPoolConfiguration describeWarmPool(String region, String asgName) {
+        requireGroup(region, asgName);
+        return warmPools.get(warmPoolKey(region, asgName));
+    }
+
+    public void deleteWarmPool(String region, String asgName, boolean forceDelete) {
+        requireGroup(region, asgName);
+        warmPools.remove(warmPoolKey(region, asgName));
+    }
+
+    private static String warmPoolKey(String region, String asgName) {
+        return region + "::" + asgName;
     }
 
     // ── Scaling activities ─────────────────────────────────────────────────────
