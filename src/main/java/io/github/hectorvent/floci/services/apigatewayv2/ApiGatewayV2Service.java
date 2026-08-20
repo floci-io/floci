@@ -413,10 +413,16 @@ public class ApiGatewayV2Service {
 
     // JSON bodies can carry non-string elements (numbers, booleans); downstream code
     // (response serialization, scope enforcement) assumes String elements, so normalize
-    // at ingestion instead of unchecked-casting.
+    // at ingestion instead of unchecked-casting. A present-but-non-array value must be
+    // rejected, not treated as absent — silently returning null would create the route
+    // without scope enforcement (or clear it on update).
     private static List<String> toStringList(Object value) {
-        if (!(value instanceof List<?> list)) {
+        if (value == null) {
             return null;
+        }
+        if (!(value instanceof List<?> list)) {
+            throw new AwsException("BadRequestException",
+                    "authorizationScopes must be a list of strings", 400);
         }
         return list.stream()
                 .filter(java.util.Objects::nonNull)

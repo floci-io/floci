@@ -154,6 +154,59 @@ class RouteAuthorizerIdResponseTest {
     }
 
     @Test
+    void nonArrayAuthorizationScopesRejectedWithoutClearingEnforcement() {
+        // A present-but-non-array value must 400, not be treated as absent: silently
+        // mapping it to null would create the route without scope enforcement, or
+        // clear the scopes of an existing route on update.
+        String apiId = given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"name":"authz-route-scope-badreq","protocolType":"HTTP"}
+                        """)
+                .when().post("/v2/apis")
+                .then().statusCode(201)
+                .extract().path("apiId");
+
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {
+                          "routeKey":"GET /bad",
+                          "authorizationType":"JWT",
+                          "authorizationScopes":"orders/read"
+                        }
+                        """)
+                .when().post("/v2/apis/" + apiId + "/routes")
+                .then().statusCode(400);
+
+        String routeId = given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {
+                          "routeKey":"GET /guarded",
+                          "authorizationType":"JWT",
+                          "authorizationScopes":["orders/read"]
+                        }
+                        """)
+                .when().post("/v2/apis/" + apiId + "/routes")
+                .then().statusCode(201)
+                .extract().path("routeId");
+
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"authorizationScopes":"orders/write"}
+                        """)
+                .when().patch("/v2/apis/" + apiId + "/routes/" + routeId)
+                .then().statusCode(400);
+
+        given()
+                .when().get("/v2/apis/" + apiId + "/routes/" + routeId)
+                .then().statusCode(200)
+                .body("authorizationScopes", equalTo(java.util.List.of("orders/read")));
+    }
+
+    @Test
     void authorizerIdReturnedAfterUpdate() {
         String apiId = given()
                 .contentType(ContentType.JSON)
