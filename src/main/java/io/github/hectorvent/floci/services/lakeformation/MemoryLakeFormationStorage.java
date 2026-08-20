@@ -242,11 +242,11 @@ public class MemoryLakeFormationStorage implements LakeFormationStorage {
         if (r.getTableWithColumns() != null) {
             StringBuilder sb = new StringBuilder("tableWithColumns:" + r.getTableWithColumns().getDatabaseName() + ":" + r.getTableWithColumns().getName());
             if (r.getTableWithColumns().getColumnNames() != null && !r.getTableWithColumns().getColumnNames().isEmpty()) {
-                sb.append(":cols:").append(String.join(",", r.getTableWithColumns().getColumnNames()));
+                sb.append(":cols:").append(r.getTableWithColumns().getColumnNames().stream().sorted().collect(Collectors.joining(",")));
             } else if (r.getTableWithColumns().getColumnWildcard() != null) {
                 sb.append(":cols:*");
                 if (r.getTableWithColumns().getColumnWildcard().getExcludedColumnNames() != null && !r.getTableWithColumns().getColumnWildcard().getExcludedColumnNames().isEmpty()) {
-                    sb.append(":excl:").append(String.join(",", r.getTableWithColumns().getColumnWildcard().getExcludedColumnNames()));
+                    sb.append(":excl:").append(r.getTableWithColumns().getColumnWildcard().getExcludedColumnNames().stream().sorted().collect(Collectors.joining(",")));
                 }
             }
             return sb.toString();
@@ -255,10 +255,13 @@ public class MemoryLakeFormationStorage implements LakeFormationStorage {
             return "dataLocation:" + r.getDataLocation().getResourceArn();
         }
         if (r.getDataCellsFilter() != null) {
-            return "dataCellsFilter:" + r.getDataCellsFilter().getDatabaseName() + ":" + r.getDataCellsFilter().getTableName() + ":" + r.getDataCellsFilter().getName();
+            return "dataCellsFilter:" + r.getDataCellsFilter().getTableCatalogId() + ":" + r.getDataCellsFilter().getDatabaseName() + ":" + r.getDataCellsFilter().getTableName() + ":" + r.getDataCellsFilter().getName();
         }
         if (r.getLfTag() != null) {
             return "lfTag:" + r.getLfTag().getTagKey();
+        }
+        if (r.getLfTagExpression() != null) {
+            return "lfTagExpression:" + r.getLfTagExpression().getName();
         }
         if (r.getLfTagPolicy() != null) {
             StringBuilder sb = new StringBuilder("lfTagPolicy:" + r.getLfTagPolicy().getResourceType());
@@ -266,12 +269,14 @@ public class MemoryLakeFormationStorage implements LakeFormationStorage {
                 sb.append(":exprName:").append(r.getLfTagPolicy().getExpressionName());
             }
             if (r.getLfTagPolicy().getExpression() != null) {
-                for (io.github.hectorvent.floci.services.lakeformation.model.LFTag tag : r.getLfTagPolicy().getExpression()) {
-                    sb.append(":tag:").append(tag.getTagKey()).append("=");
-                    if (tag.getTagValues() != null) {
-                        sb.append(String.join(",", tag.getTagValues()));
-                    }
-                }
+                r.getLfTagPolicy().getExpression().stream()
+                        .sorted(java.util.Comparator.comparing(io.github.hectorvent.floci.services.lakeformation.model.LFTag::getTagKey))
+                        .forEach(tag -> {
+                            sb.append(":tag:").append(tag.getTagKey()).append("=");
+                            if (tag.getTagValues() != null) {
+                                sb.append(tag.getTagValues().stream().sorted().collect(Collectors.joining(",")));
+                            }
+                        });
             }
             return sb.toString();
         }
