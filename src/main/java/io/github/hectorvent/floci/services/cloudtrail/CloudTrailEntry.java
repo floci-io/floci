@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.services.cloudtrail.model.Trail;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.util.List;
+import java.util.Map;
 
 @RegisterForReflection
 @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -16,10 +17,17 @@ public record CloudTrailEntry(
         List<EventSelector> selectors,
         boolean logging,
         Long startLoggingTime,
-        Long stopLoggingTime) {
+        Long stopLoggingTime,
+        Map<String, String> tags) {
+
+    // A record persisted before lex00/floci#77 added the tags field deserializes it as null;
+    // normalize to empty here once rather than at every read site.
+    public CloudTrailEntry {
+        tags = tags != null ? tags : Map.of();
+    }
 
     public CloudTrailEntry withTrail(Trail updated) {
-        return new CloudTrailEntry(updated, selectors, logging, startLoggingTime, stopLoggingTime);
+        return new CloudTrailEntry(updated, selectors, logging, startLoggingTime, stopLoggingTime, tags);
     }
 
     public CloudTrailEntry withSelectors(List<EventSelector> updated, boolean hasCustomSelectors) {
@@ -28,14 +36,18 @@ public record CloudTrailEntry(
                 trail.snsTopicArn(), trail.includeGlobalServiceEvents(), trail.isMultiRegionTrail(),
                 trail.homeRegion(), trail.logFileValidationEnabled(), hasCustomSelectors,
                 trail.hasInsightSelectors(), trail.isOrganizationTrail());
-        return new CloudTrailEntry(updatedTrail, updated, logging, startLoggingTime, stopLoggingTime);
+        return new CloudTrailEntry(updatedTrail, updated, logging, startLoggingTime, stopLoggingTime, tags);
     }
 
     public CloudTrailEntry startLogging(long time) {
-        return new CloudTrailEntry(trail, selectors, true, time, stopLoggingTime);
+        return new CloudTrailEntry(trail, selectors, true, time, stopLoggingTime, tags);
     }
 
     public CloudTrailEntry stopLogging(long time) {
-        return new CloudTrailEntry(trail, selectors, false, startLoggingTime, time);
+        return new CloudTrailEntry(trail, selectors, false, startLoggingTime, time, tags);
+    }
+
+    public CloudTrailEntry withTags(Map<String, String> updated) {
+        return new CloudTrailEntry(trail, selectors, logging, startLoggingTime, stopLoggingTime, updated);
     }
 }

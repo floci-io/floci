@@ -12,7 +12,9 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 @ApplicationScoped
 public class CloudTrailJsonHandler {
@@ -38,6 +40,9 @@ public class CloudTrailJsonHandler {
             case "StopLogging" -> stopLogging(request, region);
             case "GetTrailStatus" -> getTrailStatus(request, region);
             case "LookupEvents" -> lookupEvents(request, region);
+            case "AddTags" -> addTags(request);
+            case "RemoveTags" -> removeTags(request);
+            case "ListTags" -> listTags(request);
             default -> throw new AwsException(
                     "InvalidAction", "Could not find operation " + action, 400);
         };
@@ -53,9 +58,10 @@ public class CloudTrailJsonHandler {
         boolean isMultiRegion = req.path("IsMultiRegionTrail").asBoolean(false);
         boolean enableLogFileValidation = req.path("EnableLogFileValidation").asBoolean(false);
         boolean isOrganizationTrail = req.path("IsOrganizationTrail").asBoolean(false);
+        Map<String, String> tags = extractTagsList(req.path("TagsList"));
 
         Trail trail = service.createTrail(region, name, s3BucketName, s3KeyPrefix, snsTopicArn,
-                includeGlobal, isMultiRegion, enableLogFileValidation, isOrganizationTrail);
+                includeGlobal, isMultiRegion, enableLogFileValidation, isOrganizationTrail, tags);
 
         ObjectNode resp = mapper.createObjectNode();
         resp.put("Name", trail.name());
@@ -77,6 +83,61 @@ public class CloudTrailJsonHandler {
         String name = req.path("Name").asText(null);
         service.deleteTrail(region, name);
         return Response.ok(mapper.createObjectNode()).build();
+    }
+
+    // lex00/floci#77: the AWS provider's aws_cloudtrail Read always calls ListTags, regardless of
+    // whether the config sets any tags, so a trail with no tagging arm here couldn't be created at
+    // all. ResourceId is always the trail's ARN (CreateTrailRequest/AddTagsRequest/etc. document
+    // this - never a bare trail name), matching TagsList's {Key, Value} shape everywhere it appears.
+
+    private Response addTags(JsonNode req) {
+        String resourceId = req.path("ResourceId").asText(null);
+        service.addTags(resourceId, extractTagsList(req.path("TagsList")));
+        return Response.ok(mapper.createObjectNode()).build();
+    }
+
+    private Response removeTags(JsonNode req) {
+        String resourceId = req.path("ResourceId").asText(null);
+        List<String> keys = new ArrayList<>();
+        for (JsonNode tag : req.path("TagsList")) {
+            String key = tag.path("Key").asText(null);
+            if (key != null) keys.add(key);
+        }
+        service.removeTags(resourceId, keys);
+        return Response.ok(mapper.createObjectNode()).build();
+    }
+
+    private Response listTags(JsonNode req) {
+        ObjectNode resp = mapper.createObjectNode();
+        com.fasterxml.jackson.databind.node.ArrayNode resourceTagList = resp.putArray("ResourceTagList");
+        for (JsonNode idNode : req.path("ResourceIdList")) {
+            String resourceId = idNode.asText(null);
+            ObjectNode resourceTag = mapper.createObjectNode();
+            resourceTag.put("ResourceId", resourceId);
+            com.fasterxml.jackson.databind.node.ArrayNode tagsList = resourceTag.putArray("TagsList");
+            service.listTags(resourceId).forEach((k, v) -> {
+                ObjectNode tag = mapper.createObjectNode();
+                tag.put("Key", k);
+                if (v != null) tag.put("Value", v);
+                tagsList.add(tag);
+            });
+            resourceTagList.add(resourceTag);
+        }
+        return Response.ok(resp).build();
+    }
+
+    /** {@code [{"Key": "...", "Value": "..."}, ...]} → an ordered key/value map, empty when absent. */
+    private Map<String, String> extractTagsList(JsonNode tagsListNode) {
+        Map<String, String> tags = new LinkedHashMap<>();
+        if (tagsListNode != null && tagsListNode.isArray()) {
+            for (JsonNode tag : tagsListNode) {
+                String key = tag.path("Key").asText(null);
+                if (key != null) {
+                    tags.put(key, tag.has("Value") ? tag.path("Value").asText(null) : null);
+                }
+            }
+        }
+        return tags;
     }
 
     private Response updateTrail(JsonNode req, String region) {

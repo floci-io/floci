@@ -60,7 +60,7 @@ public class CloudTrailService {
     public Trail createTrail(String region, String name, String s3BucketName, String s3KeyPrefix,
                              String snsTopicArn, boolean includeGlobalServiceEvents,
                              boolean isMultiRegionTrail, boolean enableLogFileValidation,
-                             boolean isOrganizationTrail) {
+                             boolean isOrganizationTrail, Map<String, String> tags) {
         validateTrailName(name);
         if (s3BucketName == null || s3BucketName.isEmpty()) {
             throw new AwsException("S3BucketDoesNotExistException", "S3 bucket name is required.", 400);
@@ -76,7 +76,8 @@ public class CloudTrailService {
                 name, arn, s3BucketName, s3KeyPrefix, snsTopicArn,
                 includeGlobalServiceEvents, isMultiRegionTrail, region,
                 enableLogFileValidation, false, false, isOrganizationTrail);
-        store.put(key, new CloudTrailEntry(trail, List.of(), false, null, null));
+        store.put(key, new CloudTrailEntry(trail, List.of(), false, null, null,
+                tags != null ? Map.copyOf(tags) : Map.of()));
         return trail;
     }
 
@@ -465,6 +466,53 @@ public class CloudTrailService {
                     "Unknown trail: " + nameOrArn, 400);
         }
         return t;
+    }
+
+    // --- Tags (lex00/floci#77) ---
+    //
+    // The AWS provider's aws_cloudtrail resource always calls ListTags as part of its
+    // post-create Read, regardless of whether the config sets any tags - so a trail was
+    // unusable outright with no tagging arm here at all, even untagged.
+    //
+    // CloudTrail's own ResourceId is always the trail's ARN (never a bare name, unlike
+    // findTrail's callers above), so resolution here is a straight store scan rather than the
+    // name-vs-ARN branch findTrail needs.
+
+    public Map<String, String> listTags(String resourceId) {
+        return resolveEntryKey(resourceId)
+                .map(key -> store.get(key).orElseThrow().tags())
+                .orElseThrow(() -> notFound(resourceId));
+    }
+
+    public void addTags(String resourceId, Map<String, String> newTags) {
+        String key = resolveEntryKey(resourceId).orElseThrow(() -> notFound(resourceId));
+        CloudTrailEntry entry = store.get(key).orElseThrow();
+        Map<String, String> updated = new java.util.LinkedHashMap<>(entry.tags());
+        updated.putAll(newTags);
+        store.put(key, entry.withTags(updated));
+    }
+
+    public void removeTags(String resourceId, List<String> tagKeys) {
+        String key = resolveEntryKey(resourceId).orElseThrow(() -> notFound(resourceId));
+        CloudTrailEntry entry = store.get(key).orElseThrow();
+        Map<String, String> updated = new java.util.LinkedHashMap<>(entry.tags());
+        tagKeys.forEach(updated::remove);
+        store.put(key, entry.withTags(updated));
+    }
+
+    private java.util.Optional<String> resolveEntryKey(String trailArn) {
+        for (String k : store.keys()) {
+            CloudTrailEntry entry = store.get(k).orElse(null);
+            if (entry != null && trailArn != null && trailArn.equals(entry.trail().trailArn())) {
+                return java.util.Optional.of(k);
+            }
+        }
+        return java.util.Optional.empty();
+    }
+
+    private static AwsException notFound(String resourceId) {
+        return new AwsException("ResourceNotFoundException",
+                "Resource not found for ARN: " + resourceId, 400);
     }
 
     private static void validateTrailName(String name) {
