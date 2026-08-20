@@ -15,6 +15,7 @@ import java.util.UUID;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -33,7 +34,7 @@ class SigninIntegrationTest {
                 .redirects().follow(false)
                 .queryParam("client_id", CLIENT_ID)
                 .queryParam("code_challenge", challenge(verifier))
-                .queryParam("code_challenge_method", "S256")
+                .queryParam("code_challenge_method", "SHA-256")
                 .queryParam("redirect_uri", REDIRECT_URI)
                 .queryParam("response_type", "code")
                 .queryParam("scope", "openid")
@@ -50,6 +51,23 @@ class SigninIntegrationTest {
         Map<String, String> params = queryParams(redirect.getRawQuery());
         assertTrue(params.get("code").length() >= 1);
         assertEquals(state, params.get("state"));
+    }
+
+    @Test
+    void authorizeRejectsOauthS256Alias() throws Exception {
+        request()
+                .queryParam("client_id", CLIENT_ID)
+                .queryParam("code_challenge", challenge(verifier()))
+                .queryParam("code_challenge_method", "S256")
+                .queryParam("redirect_uri", REDIRECT_URI)
+                .queryParam("response_type", "code")
+                .queryParam("scope", "openid")
+                .queryParam("state", UUID.randomUUID().toString())
+                .when()
+                .get("/v1/authorize")
+                .then()
+                .statusCode(400)
+                .body("error", equalTo("invalid_request"));
     }
 
     @Test
@@ -132,10 +150,12 @@ class SigninIntegrationTest {
                 .body("accessToken.accessKeyId", notNullValue())
                 .body("tokenType", equalTo("aws_sigv4"))
                 .body("expiresIn", equalTo(900))
-                .body("refreshToken", equalTo(refreshToken))
+                .body("refreshToken", not(equalTo(refreshToken)))
                 .body("idToken", equalTo(null))
                 .extract()
                 .response();
+
+        String rotatedRefreshToken = firstRefresh.path("refreshToken");
 
         request()
                 .contentType("application/json")
@@ -150,7 +170,7 @@ class SigninIntegrationTest {
                 .body("accessToken.accessKeyId", equalTo(firstRefresh.path("accessToken.accessKeyId")))
                 .body("accessToken.secretAccessKey", equalTo(firstRefresh.path("accessToken.secretAccessKey")))
                 .body("accessToken.sessionToken", equalTo(firstRefresh.path("accessToken.sessionToken")))
-                .body("refreshToken", equalTo(refreshToken))
+                .body("refreshToken", equalTo(rotatedRefreshToken))
                 .body("idToken", equalTo(null));
     }
 
@@ -180,7 +200,7 @@ class SigninIntegrationTest {
                 .redirects().follow(false)
                 .queryParam("client_id", CLIENT_ID)
                 .queryParam("code_challenge", challenge(verifier))
-                .queryParam("code_challenge_method", "S256")
+                .queryParam("code_challenge_method", "SHA-256")
                 .queryParam("redirect_uri", REDIRECT_URI)
                 .queryParam("response_type", "code")
                 .queryParam("scope", "openid")
