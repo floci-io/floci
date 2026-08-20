@@ -73,6 +73,8 @@ floci:
         flush-interval-ms: 60000
       rum:
         flush-interval-ms: 60000
+      fis:
+        flush-interval-ms: 60000
       guardduty:
         flush-interval-ms: 60000
       emrserverless:
@@ -277,6 +279,8 @@ floci:
     backup:
       enabled: true
       job-completion-delay-seconds: 1
+    fis:
+      enabled: true
     route53:
       enabled: true
     textract:
