@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.storage.PersistentStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.ec2.model.Address;
+import io.github.hectorvent.floci.services.ec2.model.CapacityReservation;
 import io.github.hectorvent.floci.services.ec2.model.BlockDeviceMapping;
 import io.github.hectorvent.floci.services.ec2.model.CustomerGateway;
 import io.github.hectorvent.floci.services.ec2.model.DhcpOptions;
@@ -207,6 +208,7 @@ class Ec2ServicePersistenceTest {
                 load(dir, "ec2-dhcp-options.json", new TypeReference<Map<String, DhcpOptions>>() {}),
                 load(dir, "ec2-customer-gateways.json", new TypeReference<Map<String, CustomerGateway>>() {}),
                 load(dir, "ec2-vpn-gateways.json", new TypeReference<Map<String, VpnGateway>>() {}),
+                load(dir, "ec2-capacity-reservations.json", new TypeReference<Map<String, CapacityReservation>>() {}),
                 load(dir, "ec2-tags.json", new TypeReference<Map<String, List<Tag>>>() {}));
     }
 

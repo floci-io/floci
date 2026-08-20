@@ -166,6 +166,8 @@ public class AwsQueryController {
             "CreateCustomerGateway", "DescribeCustomerGateways", "DeleteCustomerGateway",
             "CreateVpnGateway", "DescribeVpnGateways", "DeleteVpnGateway",
             "AttachVpnGateway", "DetachVpnGateway",
+            "CreateCapacityReservation", "DescribeCapacityReservations",
+            "ModifyCapacityReservation", "CancelCapacityReservation",
             "AllocateAddress", "AssociateAddress", "DisassociateAddress", "ReleaseAddress", "DescribeAddresses",
             "DescribeAddressesAttribute",
             "DescribeIamInstanceProfileAssociations",

@@ -32,6 +32,7 @@ import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.model.Address;
 import io.github.hectorvent.floci.services.ec2.model.BlockDeviceMapping;
+import io.github.hectorvent.floci.services.ec2.model.CapacityReservation;
 import io.github.hectorvent.floci.services.ec2.model.CustomerGateway;
 import io.github.hectorvent.floci.services.ec2.model.DhcpConfiguration;
 import io.github.hectorvent.floci.services.ec2.model.DhcpOptions;
@@ -128,11 +129,16 @@ public class Ec2Service implements ContainerTeardown {
     private final StorageBackend<String, DhcpOptions> dhcpOptionsSets;
     private final StorageBackend<String, CustomerGateway> customerGateways;
     private final StorageBackend<String, VpnGateway> vpnGateways;
+    private final StorageBackend<String, CapacityReservation> capacityReservations;
     // resourceId → List<Tag>
     private final StorageBackend<String, List<Tag>> tags;
     private final Set<String> seededRegions = ConcurrentHashMap.newKeySet();
     // subnetId → counter for IP assignment (runtime-only, not persisted)
     private final Map<String, AtomicInteger> subnetIpCounters = new ConcurrentHashMap<>();
+    // region → the region's instance metadata defaults (runtime-only, not persisted - same
+    // choice as subnetIpCounters above; a region absent from this map reads as AWS's own
+    // "never configured" defaults, see InstanceMetadataDefaults's own no-arg field values).
+    private final Map<String, InstanceMetadataDefaults> instanceMetadataDefaults = new ConcurrentHashMap<>();
 
     @Inject
     public Ec2Service(EmulatorConfig config, Ec2ContainerManager containerManager,
@@ -161,6 +167,7 @@ public class Ec2Service implements ContainerTeardown {
                 storageFactory.create("ec2", "ec2-dhcp-options.json", new TypeReference<Map<String, DhcpOptions>>() {}),
                 storageFactory.create("ec2", "ec2-customer-gateways.json", new TypeReference<Map<String, CustomerGateway>>() {}),
                 storageFactory.create("ec2", "ec2-vpn-gateways.json", new TypeReference<Map<String, VpnGateway>>() {}),
+                storageFactory.create("ec2", "ec2-capacity-reservations.json", new TypeReference<Map<String, CapacityReservation>>() {}),
                 storageFactory.create("ec2", "ec2-tags.json", new TypeReference<Map<String, List<Tag>>>() {}));
     }
 
@@ -190,6 +197,7 @@ public class Ec2Service implements ContainerTeardown {
                StorageBackend<String, DhcpOptions> dhcpOptionsSets,
                StorageBackend<String, CustomerGateway> customerGateways,
                StorageBackend<String, VpnGateway> vpnGateways,
+               StorageBackend<String, CapacityReservation> capacityReservations,
                StorageBackend<String, List<Tag>> tags) {
         this.accountId = config.defaultAccountId();
         this.config = config;
@@ -219,6 +227,7 @@ public class Ec2Service implements ContainerTeardown {
         this.dhcpOptionsSets = dhcpOptionsSets;
         this.customerGateways = customerGateways;
         this.vpnGateways = vpnGateways;
+        this.capacityReservations = capacityReservations;
         this.tags = tags;
     }
 
@@ -3054,7 +3063,8 @@ public class Ec2Service implements ContainerTeardown {
                 new TagTarget<>(registeredImages, Image::getTags, Image::setTags),
                 new TagTarget<>(spotInstanceRequests, SpotInstanceRequest::getTags, SpotInstanceRequest::setTags),
                 new TagTarget<>(customerGateways, CustomerGateway::getTags, CustomerGateway::setTags),
-                new TagTarget<>(vpnGateways, VpnGateway::getTags, VpnGateway::setTags));
+                new TagTarget<>(vpnGateways, VpnGateway::getTags, VpnGateway::setTags),
+                new TagTarget<>(capacityReservations, CapacityReservation::getTags, CapacityReservation::setTags));
     }
 
     private void updateResourceTags(String region, String resourceId, List<Tag> tagList) {
@@ -3072,8 +3082,13 @@ public class Ec2Service implements ContainerTeardown {
      * tags supplied inline on a create ({@code TagSpecification}) land. They are unioned rather
      * than one being preferred, because either can hold tags the other has never seen — which is
      * why {@code CreateTags} on a volume used to drop the tags it was created with.
+     *
+     * <p>Public because it is also the whole answer for a resource type whose model lives in a
+     * different service and so cannot be registered in {@link #tagTargets()} here (VPC Flow Logs,
+     * owned by {@code FlowLogService}) — for those, the side-store is the only place tags are
+     * ever kept, and this still returns exactly that.
      */
-    private List<Tag> effectiveTags(String region, String resourceId) {
+    public List<Tag> effectiveTags(String region, String resourceId) {
         Map<String, String> merged = new LinkedHashMap<>();
         for (Tag tag : tags.get(resourceId).orElse(List.of())) {
             merged.put(tag.getKey(), tag.getValue());
@@ -3356,6 +3371,116 @@ public class Ec2Service implements ContainerTeardown {
                     "The customer gateway ID '" + customerGatewayId + "' does not exist", 400);
         }
         return gateway;
+    }
+
+    // ─── Capacity Reservations ────────────────────────────────────────────────
+
+    /**
+     * Reserves EC2 instance capacity in a specific Availability Zone. Real AWS transitions a
+     * Capacity Reservation through {@code payment-pending}/{@code assessing} before
+     * {@code active}; nothing here is slow, so it is {@code active} on the create response and
+     * on the first describe, the same simplification {@link #createCustomerGateway} makes.
+     */
+    public CapacityReservation createCapacityReservation(String region, String instanceType,
+            String instancePlatform, String availabilityZone, Integer instanceCount, String tenancy,
+            Boolean ebsOptimized, Boolean ephemeralStorage, String endDateType, java.time.Instant endDate,
+            String instanceMatchCriteria, String outpostArn, String placementGroupArn) {
+        ensureDefaultResources(region);
+        if (instanceType == null || instanceType.isBlank()) {
+            throw new AwsException("MissingParameter",
+                    "The request must contain the parameter InstanceType.", 400);
+        }
+        if (availabilityZone == null || availabilityZone.isBlank()) {
+            throw new AwsException("MissingParameter",
+                    "The request must contain the parameter AvailabilityZone.", 400);
+        }
+        int count = instanceCount != null ? instanceCount : 1;
+        CapacityReservation reservation = new CapacityReservation();
+        reservation.setCapacityReservationId("cr-" + randomHex(17));
+        reservation.setOwnerId(accountId);
+        reservation.setRegion(region);
+        reservation.setCapacityReservationArn(
+                AwsArnUtils.Arn.of("ec2", region, accountId, "capacity-reservation/" + reservation.getCapacityReservationId()).toString());
+        reservation.setAvailabilityZone(availabilityZone);
+        reservation.setInstanceType(instanceType);
+        reservation.setInstancePlatform(instancePlatform != null ? instancePlatform : "Linux/UNIX");
+        reservation.setTenancy(tenancy != null ? tenancy : "default");
+        reservation.setTotalInstanceCount(count);
+        reservation.setAvailableInstanceCount(count);
+        reservation.setEbsOptimized(Boolean.TRUE.equals(ebsOptimized));
+        reservation.setEphemeralStorage(Boolean.TRUE.equals(ephemeralStorage));
+        reservation.setState("active");
+        reservation.setStartDate(Instant.now());
+        reservation.setCreateDate(Instant.now());
+        reservation.setEndDate(endDate);
+        reservation.setEndDateType(endDateType != null ? endDateType : "unlimited");
+        reservation.setInstanceMatchCriteria(instanceMatchCriteria != null ? instanceMatchCriteria : "open");
+        reservation.setOutpostArn(outpostArn);
+        reservation.setPlacementGroupArn(placementGroupArn);
+        capacityReservations.put(key(region, reservation.getCapacityReservationId()), reservation);
+        return reservation;
+    }
+
+    public List<CapacityReservation> describeCapacityReservations(String region, List<String> ids,
+            Map<String, List<String>> filters) {
+        ensureDefaultResources(region);
+        for (String id : ids) {
+            getRequiredCapacityReservation(region, id);
+        }
+        return capacityReservations.scan(k -> true).stream()
+                .filter(r -> r.getRegion().equals(region))
+                .filter(r -> ids.isEmpty() || ids.contains(r.getCapacityReservationId()))
+                .filter(r -> matchesFilters(r, filters, region))
+                .collect(Collectors.toList());
+    }
+
+    /**
+     * Applies an in-place update. AWS forbids changing instance type, EBS optimization,
+     * platform, instance store, Availability Zone or tenancy after creation — the caller
+     * (the AWS provider's own update path) never asks for that, so nothing here re-checks it.
+     */
+    public CapacityReservation modifyCapacityReservation(String region, String capacityReservationId,
+            Integer instanceCount, java.time.Instant endDate, String endDateType, String instanceMatchCriteria) {
+        ensureDefaultResources(region);
+        CapacityReservation reservation = getRequiredCapacityReservation(region, capacityReservationId);
+        if (instanceCount != null) {
+            int delta = instanceCount - reservation.getTotalInstanceCount();
+            reservation.setTotalInstanceCount(instanceCount);
+            reservation.setAvailableInstanceCount(Math.max(0, reservation.getAvailableInstanceCount() + delta));
+        }
+        if (endDateType != null) {
+            reservation.setEndDateType(endDateType);
+        }
+        // AWS clears EndDate when EndDateType moves back to "unlimited"; ModifyCapacityReservation
+        // has no way to explicitly clear EndDate otherwise (CancelCapacityReservation is the only
+        // other transition), so mirror that here rather than leaving a stale date behind.
+        if ("unlimited".equals(reservation.getEndDateType())) {
+            reservation.setEndDate(null);
+        } else if (endDate != null) {
+            reservation.setEndDate(endDate);
+        }
+        if (instanceMatchCriteria != null) {
+            reservation.setInstanceMatchCriteria(instanceMatchCriteria);
+        }
+        capacityReservations.put(key(region, capacityReservationId), reservation);
+        return reservation;
+    }
+
+    public void cancelCapacityReservation(String region, String capacityReservationId) {
+        ensureDefaultResources(region);
+        CapacityReservation reservation = getRequiredCapacityReservation(region, capacityReservationId);
+        reservation.setState("cancelled");
+        reservation.setAvailableInstanceCount(0);
+        capacityReservations.put(key(region, capacityReservationId), reservation);
+    }
+
+    private CapacityReservation getRequiredCapacityReservation(String region, String capacityReservationId) {
+        CapacityReservation reservation = capacityReservations.get(key(region, capacityReservationId)).orElse(null);
+        if (reservation == null) {
+            throw new AwsException("InvalidCapacityReservationId.NotFound",
+                    "The Capacity Reservation '" + capacityReservationId + "' does not exist.", 400);
+        }
+        return reservation;
     }
 
     // ─── Route Tables ──────────────────────────────────────────────────────────
@@ -4032,6 +4157,17 @@ public class Ec2Service implements ContainerTeardown {
                 default -> true;
             };
         }
+        if (resource instanceof CapacityReservation cr) {
+            return switch (filterName) {
+                case "capacity-reservation-id" -> matchesValue(values, cr.getCapacityReservationId());
+                case "instance-type" -> matchesValue(values, cr.getInstanceType());
+                case "availability-zone" -> matchesValue(values, cr.getAvailabilityZone());
+                case "tenancy" -> matchesValue(values, cr.getTenancy());
+                case "state" -> matchesValue(values, cr.getState());
+                case "instance-platform" -> matchesValue(values, cr.getInstancePlatform());
+                default -> true;
+            };
+        }
         return true;
     }
 
@@ -4054,6 +4190,7 @@ public class Ec2Service implements ContainerTeardown {
         if (resource instanceof SpotInstanceRequest sir) return sir.getTags();
         if (resource instanceof CustomerGateway cgw) return cgw.getTags();
         if (resource instanceof VpnGateway vgw) return vgw.getTags();
+        if (resource instanceof CapacityReservation cr) return cr.getTags();
         return Collections.emptyList();
     }
 

@@ -163,6 +163,11 @@ public class Ec2QueryHandler {
                 case "CreateCustomerGateway" -> handleCreateCustomerGateway(params, region);
                 case "DescribeCustomerGateways" -> handleDescribeCustomerGateways(params, region);
                 case "DeleteCustomerGateway" -> handleDeleteCustomerGateway(params, region);
+                // Capacity Reservations
+                case "CreateCapacityReservation" -> handleCreateCapacityReservation(params, region);
+                case "DescribeCapacityReservations" -> handleDescribeCapacityReservations(params, region);
+                case "ModifyCapacityReservation" -> handleModifyCapacityReservation(params, region);
+                case "CancelCapacityReservation" -> handleCancelCapacityReservation(params, region);
                 // Elastic IPs
                 case "AllocateAddress" -> handleAllocateAddress(params, region);
                 case "AssociateAddress" -> handleAssociateAddress(params, region);
@@ -1057,6 +1062,12 @@ public class Ec2QueryHandler {
         for (String resourceId : resourceIds) {
             FlowLog fl = flowLogService.createFlowLog(region, resourceId, resourceType, trafficType,
                     logDestinationType, logDestination, logFormat, maxAgg);
+            // TagSpecification.N with ResourceType=vpc-flow-log, same shape every other
+            // create handler in this file applies via applyResourceTags. FlowLog itself has no
+            // model store registered in Ec2Service#tagTargets (it lives in FlowLogService), so
+            // this lands in the generic CreateTags side-store, which handleDescribeFlowLogs
+            // below reads back via Ec2Service#effectiveTags.
+            applyResourceTags(p, region, "vpc-flow-log", fl.getFlowLogId());
             xml.elem("item", fl.getFlowLogId());
         }
         xml.end("flowLogIdSet")
@@ -1086,6 +1097,7 @@ public class Ec2QueryHandler {
                     .elem("deliverLogsStatus", fl.getDeliverLogsStatus())
                     .elem("maxAggregationInterval", String.valueOf(fl.getMaxAggregationInterval()))
                     .elem("creationTime", ISO_FMT.format(fl.getCreationTime()))
+                    .raw(tagSetXml(service.effectiveTags(region, fl.getFlowLogId())))
                     .end("item");
         }
         xml.end("flowLogSet").end("DescribeFlowLogsResponse");
@@ -1907,6 +1919,101 @@ public class Ec2QueryHandler {
                 .elem("deviceName", gateway.getDeviceName())
                 .raw(tagSetXml(gateway.getTags()));
         return xml.build();
+    }
+
+    // ─── Capacity Reservation handlers ─────────────────────────────────────────
+
+    private Response handleCreateCapacityReservation(MultivaluedMap<String, String> p, String region) {
+        CapacityReservation reservation = service.createCapacityReservation(
+                region,
+                p.getFirst("InstanceType"),
+                p.getFirst("InstancePlatform"),
+                p.getFirst("AvailabilityZone"),
+                intOrNull(p, "InstanceCount"),
+                p.getFirst("Tenancy"),
+                p.getFirst("EbsOptimized") != null ? Boolean.valueOf(p.getFirst("EbsOptimized")) : null,
+                p.getFirst("EphemeralStorage") != null ? Boolean.valueOf(p.getFirst("EphemeralStorage")) : null,
+                p.getFirst("EndDateType"),
+                instantOrNull(p, "EndDate"),
+                p.getFirst("InstanceMatchCriteria"),
+                p.getFirst("OutpostArn"),
+                p.getFirst("PlacementGroupArn"));
+        applyResourceTags(p, region, "capacity-reservation", reservation.getCapacityReservationId());
+        XmlBuilder xml = new XmlBuilder()
+                .start("CreateCapacityReservationResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("capacityReservation").raw(capacityReservationXml(reservation)).end("capacityReservation")
+                .end("CreateCapacityReservationResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDescribeCapacityReservations(MultivaluedMap<String, String> p, String region) {
+        List<String> ids = getList(p, "CapacityReservationId");
+        Map<String, List<String>> filters = getFilters(p);
+        List<CapacityReservation> reservations = service.describeCapacityReservations(region, ids, filters);
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeCapacityReservationsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("capacityReservationSet");
+        for (CapacityReservation reservation : reservations) {
+            xml.start("item").raw(capacityReservationXml(reservation)).end("item");
+        }
+        xml.end("capacityReservationSet").end("DescribeCapacityReservationsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleModifyCapacityReservation(MultivaluedMap<String, String> p, String region) {
+        service.modifyCapacityReservation(
+                region,
+                p.getFirst("CapacityReservationId"),
+                intOrNull(p, "InstanceCount"),
+                instantOrNull(p, "EndDate"),
+                p.getFirst("EndDateType"),
+                p.getFirst("InstanceMatchCriteria"));
+        return booleanResponse("ModifyCapacityReservation");
+    }
+
+    private Response handleCancelCapacityReservation(MultivaluedMap<String, String> p, String region) {
+        service.cancelCapacityReservation(region, p.getFirst("CapacityReservationId"));
+        return booleanResponse("CancelCapacityReservation");
+    }
+
+    private String capacityReservationXml(CapacityReservation reservation) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("capacityReservationId", reservation.getCapacityReservationId())
+                .elem("ownerId", reservation.getOwnerId())
+                .elem("capacityReservationArn", reservation.getCapacityReservationArn())
+                .elem("availabilityZone", reservation.getAvailabilityZone())
+                .elem("instanceType", reservation.getInstanceType())
+                .elem("instancePlatform", reservation.getInstancePlatform())
+                .elem("tenancy", reservation.getTenancy())
+                .elem("totalInstanceCount", reservation.getTotalInstanceCount())
+                .elem("availableInstanceCount", reservation.getAvailableInstanceCount())
+                .elem("ebsOptimized", reservation.isEbsOptimized())
+                .elem("ephemeralStorage", reservation.isEphemeralStorage())
+                .elem("state", reservation.getState())
+                .elem("startDate", reservation.getStartDate() != null ? ISO_FMT.format(reservation.getStartDate()) : null)
+                .elem("endDate", reservation.getEndDate() != null ? ISO_FMT.format(reservation.getEndDate()) : null)
+                .elem("endDateType", reservation.getEndDateType())
+                .elem("instanceMatchCriteria", reservation.getInstanceMatchCriteria())
+                .elem("createDate", reservation.getCreateDate() != null ? ISO_FMT.format(reservation.getCreateDate()) : null)
+                .elem("outpostArn", reservation.getOutpostArn())
+                .elem("placementGroupArn", reservation.getPlacementGroupArn())
+                .raw(tagSetXml(reservation.getTags()));
+        return xml.build();
+    }
+
+    private java.time.Instant instantOrNull(MultivaluedMap<String, String> p, String name) {
+        String value = p.getFirst(name);
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            return java.time.Instant.parse(value);
+        } catch (java.time.format.DateTimeParseException e) {
+            throw new AwsException("InvalidParameterValue",
+                    "The specified value for " + name + " is not valid.", 400);
+        }
     }
 
     private Response handleDescribeRouteTables(MultivaluedMap<String, String> p, String region) {
