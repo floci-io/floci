@@ -10,6 +10,7 @@ import jakarta.ws.rs.DELETE;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.HeaderParam;
 import jakarta.ws.rs.POST;
+import jakarta.ws.rs.PUT;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
@@ -180,6 +181,67 @@ public class S3ControlController {
         } catch (AwsException e) {
             return xmlErrorResponse(e);
         }
+    }
+
+    /**
+     * PutPublicAccessBlock — sets the account-level S3 Block Public Access configuration.
+     *
+     * <p>Distinct from the bucket-level {@code PutBucketPublicAccessBlock} in
+     * {@link S3Controller}: this one is account-scoped — {@code /configuration/publicAccessBlock},
+     * no bucket anywhere in the path. Before this route existed, {@code aws_s3_account_public_access_block}
+     * 404'd on create (lex00/floci#73). Like {@link S3Controller}'s bucket-level handler, the
+     * request body is stored and echoed back verbatim rather than parsed field-by-field —
+     * the same {@code <PublicAccessBlockConfiguration>} XML the AWS provider sends is exactly
+     * what it expects back from Get.
+     *
+     * PUT /v20180820/configuration/publicAccessBlock
+     * Header: x-amz-account-id
+     * Body: XML {@code <PublicAccessBlockConfiguration>...</PublicAccessBlockConfiguration>}
+     */
+    @PUT
+    @Path("/configuration/publicAccessBlock")
+    @Consumes(MediaType.WILDCARD)
+    public Response putPublicAccessBlock(
+            @HeaderParam("x-amz-account-id") String accountId,
+            byte[] body) {
+        try {
+            s3Service.putAccountPublicAccessBlock(new String(body, StandardCharsets.UTF_8));
+            return Response.ok().build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    /**
+     * GetPublicAccessBlock — returns the account-level S3 Block Public Access configuration.
+     * Errors {@code NoSuchPublicAccessBlockConfiguration} (404) when the account has never
+     * called PutPublicAccessBlock, the same not-configured signal the bucket-level Get uses.
+     *
+     * GET /v20180820/configuration/publicAccessBlock
+     * Header: x-amz-account-id
+     */
+    @GET
+    @Path("/configuration/publicAccessBlock")
+    public Response getPublicAccessBlock(@HeaderParam("x-amz-account-id") String accountId) {
+        try {
+            return Response.ok(s3Service.getAccountPublicAccessBlock()).build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    /**
+     * DeletePublicAccessBlock — removes the account-level S3 Block Public Access configuration.
+     * Idempotent, matching real AWS: succeeds whether or not a configuration is currently set.
+     *
+     * DELETE /v20180820/configuration/publicAccessBlock
+     * Header: x-amz-account-id
+     */
+    @DELETE
+    @Path("/configuration/publicAccessBlock")
+    public Response deletePublicAccessBlock(@HeaderParam("x-amz-account-id") String accountId) {
+        s3Service.deleteAccountPublicAccessBlock();
+        return Response.noContent().build();
     }
 
     /**

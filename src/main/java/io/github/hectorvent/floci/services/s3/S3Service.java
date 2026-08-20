@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.core.common.Resettable;
+import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.iam.IamService;
@@ -71,6 +72,15 @@ public class S3Service implements Resettable {
 
     private final StorageBackend<String, Bucket> bucketStore;
     private final StorageBackend<String, S3Object> objectStore;
+    /**
+     * S3 Control's account-level Block Public Access configuration — distinct from
+     * {@link Bucket#getPublicAccessBlockConfiguration()}, the bucket-level equivalent set
+     * through plain S3's {@code PutBucketPublicAccessBlock}. Holds at most one entry per
+     * account under {@link #ACCOUNT_PUBLIC_ACCESS_BLOCK_KEY}, the same one-value-per-account
+     * shape IAM's account alias uses, since the store is already account-namespaced.
+     */
+    private final StorageBackend<String, String> accountPublicAccessBlockStore;
+    private static final String ACCOUNT_PUBLIC_ACCESS_BLOCK_KEY = "account-public-access-block";
     private final Path dataRoot;
     private final boolean inMemory;
     private final ConcurrentHashMap<String, byte[]> memoryDataStore = new ConcurrentHashMap<>();
@@ -119,6 +129,9 @@ public class S3Service implements Resettable {
                 storageFactory.create("s3", "s3-objects.json",
                         new TypeReference<Map<String, S3Object>>() {
                         }),
+                storageFactory.create("s3", "s3-account-public-access-block.json",
+                        new TypeReference<Map<String, String>>() {
+                        }),
                 Path.of(config.storage().persistentPath()).resolve("s3"),
                 "memory".equals(config.storage().services().s3().mode().orElse(config.storage().mode())),
                 sqsService, snsService, null, lambdaServiceProvider, null,
@@ -135,7 +148,7 @@ public class S3Service implements Resettable {
     S3Service(StorageBackend<String, Bucket> bucketStore,
               StorageBackend<String, S3Object> objectStore,
               Path dataRoot, boolean inMemory) {
-        this(bucketStore, objectStore, dataRoot, inMemory, null, null, null, null, null, null, null,
+        this(bucketStore, objectStore, new InMemoryStorage<>(), dataRoot, inMemory, null, null, null, null, null, null, null,
                 null, "http://localhost:4566", new ObjectMapper(), false, null);
     }
 
@@ -144,7 +157,7 @@ public class S3Service implements Resettable {
               Path dataRoot, boolean inMemory,
               LambdaService lambdaService,
               RegionResolver regionResolver) {
-        this(bucketStore, objectStore, dataRoot, inMemory, null, null, lambdaService, null, null, null, null,
+        this(bucketStore, objectStore, new InMemoryStorage<>(), dataRoot, inMemory, null, null, lambdaService, null, null, null, null,
                 regionResolver, "http://localhost:4566", new ObjectMapper(), false, null);
     }
 
@@ -153,12 +166,13 @@ public class S3Service implements Resettable {
               Path dataRoot, boolean inMemory,
               LambdaInvoker lambdaInvoker,
               RegionResolver regionResolver) {
-        this(bucketStore, objectStore, dataRoot, inMemory, null, null, null, null, lambdaInvoker, null, null,
+        this(bucketStore, objectStore, new InMemoryStorage<>(), dataRoot, inMemory, null, null, null, null, lambdaInvoker, null, null,
                 regionResolver, "http://localhost:4566", new ObjectMapper(), false, null);
     }
 
     private S3Service(StorageBackend<String, Bucket> bucketStore,
                       StorageBackend<String, S3Object> objectStore,
+                      StorageBackend<String, String> accountPublicAccessBlockStore,
                       Path dataRoot, boolean inMemory, SqsService sqsService, SnsService snsService,
                       LambdaService lambdaService,
                       Instance<LambdaService> lambdaServiceProvider,
@@ -169,6 +183,7 @@ public class S3Service implements Resettable {
                       boolean enforceAuth, IamService iamService) {
         this.bucketStore = bucketStore;
         this.objectStore = objectStore;
+        this.accountPublicAccessBlockStore = accountPublicAccessBlockStore;
         this.dataRoot = dataRoot;
         this.inMemory = inMemory;
         this.sqsService = sqsService;
@@ -2070,6 +2085,31 @@ public class S3Service implements Resettable {
                 .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
         bucket.setPublicAccessBlockConfiguration(null);
         bucketStore.put(bucketName, bucket);
+    }
+
+    /**
+     * S3 Control's account-level Block Public Access configuration (backs
+     * {@code aws_s3_account_public_access_block}) — account-scoped, no bucket in the path,
+     * distinct from {@link #getPublicAccessBlock} above. There is no account equivalent of
+     * "the bucket doesn't exist": the account always exists, so a miss here means only that
+     * the configuration was never set.
+     */
+    public String getAccountPublicAccessBlock() {
+        return accountPublicAccessBlockStore.get(ACCOUNT_PUBLIC_ACCESS_BLOCK_KEY)
+                .orElseThrow(() -> new AwsException("NoSuchPublicAccessBlockConfiguration",
+                        "The public access block configuration was not found", 404));
+    }
+
+    public void putAccountPublicAccessBlock(String xml) {
+        accountPublicAccessBlockStore.put(ACCOUNT_PUBLIC_ACCESS_BLOCK_KEY, xml);
+    }
+
+    /**
+     * Idempotent, matching real AWS: {@code DeletePublicAccessBlock} succeeds whether or not
+     * a configuration is currently set.
+     */
+    public void deleteAccountPublicAccessBlock() {
+        accountPublicAccessBlockStore.delete(ACCOUNT_PUBLIC_ACCESS_BLOCK_KEY);
     }
 
     public String getBucketOwnershipControls(String bucketName) {
