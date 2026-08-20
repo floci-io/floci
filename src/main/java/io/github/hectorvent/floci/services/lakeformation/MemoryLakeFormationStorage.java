@@ -70,21 +70,72 @@ public class MemoryLakeFormationStorage implements LakeFormationStorage {
 
     @Override
     public void grantPermissions(String catalogId, PrincipalResourcePermissions permissions) {
-        // We use a composite key for permissions to keep them unique per principal/resource combination
         String key = buildPermissionsKey(catalogId, permissions);
-        permissionsStorage.put(key, permissions);
+        PrincipalResourcePermissions existing = permissionsStorage.get(key).orElse(null);
+        if (existing != null) {
+            if (permissions.getPermissions() != null) {
+                List<String> current = new ArrayList<>(existing.getPermissions() != null ? existing.getPermissions() : List.of());
+                for (String p : permissions.getPermissions()) {
+                    if (!current.contains(p)) {
+                        current.add(p);
+                    }
+                }
+                existing.setPermissions(current);
+            }
+            if (permissions.getPermissionsWithGrantOption() != null) {
+                List<String> current = new ArrayList<>(existing.getPermissionsWithGrantOption() != null ? existing.getPermissionsWithGrantOption() : List.of());
+                for (String p : permissions.getPermissionsWithGrantOption()) {
+                    if (!current.contains(p)) {
+                        current.add(p);
+                    }
+                }
+                existing.setPermissionsWithGrantOption(current);
+            }
+            permissionsStorage.put(key, existing);
+        } else {
+            permissionsStorage.put(key, permissions);
+        }
     }
 
     @Override
     public void revokePermissions(String catalogId, PrincipalResourcePermissions permissions) {
         String key = buildPermissionsKey(catalogId, permissions);
-        permissionsStorage.delete(key);
+        permissionsStorage.get(key).ifPresent(existing -> {
+            boolean empty = true;
+            if (existing.getPermissions() != null && permissions.getPermissions() != null) {
+                List<String> current = new ArrayList<>(existing.getPermissions());
+                current.removeAll(permissions.getPermissions());
+                existing.setPermissions(current);
+                if (!current.isEmpty()) {
+                    empty = false;
+                }
+            } else if (existing.getPermissions() != null && !existing.getPermissions().isEmpty()) {
+                empty = false;
+            }
+            
+            if (existing.getPermissionsWithGrantOption() != null && permissions.getPermissionsWithGrantOption() != null) {
+                List<String> current = new ArrayList<>(existing.getPermissionsWithGrantOption());
+                current.removeAll(permissions.getPermissionsWithGrantOption());
+                existing.setPermissionsWithGrantOption(current);
+                if (!current.isEmpty()) {
+                    empty = false;
+                }
+            } else if (existing.getPermissionsWithGrantOption() != null && !existing.getPermissionsWithGrantOption().isEmpty()) {
+                empty = false;
+            }
+
+            if (empty) {
+                permissionsStorage.delete(key);
+            } else {
+                permissionsStorage.put(key, existing);
+            }
+        });
     }
 
     @Override
     public List<PrincipalResourcePermissions> listPermissions(String catalogId, DataLakePrincipal principal, Resource resource, String resourceType, boolean includeRelated, Integer maxResults, String nextToken) {
         // Return all explicit grants for now to satisfy Terraform state syncing
-        return new ArrayList<>(permissionsStorage.scan(k -> true));
+        return new ArrayList<>(permissionsStorage.scan(k -> k.startsWith(catalogId + ":")));
     }
 
     @Override
@@ -92,18 +143,18 @@ public class MemoryLakeFormationStorage implements LakeFormationStorage {
         LFTag tag = new LFTag();
         tag.setTagKey(tagKey);
         tag.setTagValues(tagValues);
-        lfTagsStorage.put(tagKey, tag);
+        lfTagsStorage.put(catalogId + ":" + tagKey, tag);
     }
 
     @Override
     public Optional<LFTag> getLFTag(String catalogId, String tagKey) {
-        return lfTagsStorage.get(tagKey);
+        return lfTagsStorage.get(catalogId + ":" + tagKey);
     }
 
     @Override
     public void updateLFTag(String catalogId, String tagKey, List<String> tagValuesToAdd, List<String> tagValuesToDelete) {
-        lfTagsStorage.get(tagKey).ifPresent(tag -> {
-            List<String> currentValues = new ArrayList<>(tag.getTagValues());
+        lfTagsStorage.get(catalogId + ":" + tagKey).ifPresent(tag -> {
+            List<String> currentValues = new ArrayList<>(tag.getTagValues() != null ? tag.getTagValues() : List.of());
             if (tagValuesToDelete != null) {
                 currentValues.removeAll(tagValuesToDelete);
             }
@@ -115,18 +166,18 @@ public class MemoryLakeFormationStorage implements LakeFormationStorage {
                 }
             }
             tag.setTagValues(currentValues);
-            lfTagsStorage.put(tagKey, tag);
+            lfTagsStorage.put(catalogId + ":" + tagKey, tag);
         });
     }
 
     @Override
     public void deleteLFTag(String catalogId, String tagKey) {
-        lfTagsStorage.delete(tagKey);
+        lfTagsStorage.delete(catalogId + ":" + tagKey);
     }
 
     @Override
     public List<LFTagPair> listLFTags(String catalogId, String resourceShareType, Integer maxResults, String nextToken) {
-        return lfTagsStorage.scan(k -> true).stream()
+        return lfTagsStorage.scan(k -> k.startsWith(catalogId + ":")).stream()
                 .map(tag -> {
                     LFTagPair pair = new LFTagPair();
                     pair.setCatalogId(catalogId);
@@ -139,7 +190,7 @@ public class MemoryLakeFormationStorage implements LakeFormationStorage {
 
     @Override
     public void addLFTagsToResource(String catalogId, Resource resource, List<LFTagPair> lfTags) {
-        String resourceKey = getResourceKey(resource);
+        String resourceKey = catalogId + ":" + getResourceKey(resource);
         List<LFTagPair> currentTags = resourceTagsStorage.get(resourceKey).orElse(new ArrayList<>());
         
         for (LFTagPair newTag : lfTags) {
@@ -153,10 +204,19 @@ public class MemoryLakeFormationStorage implements LakeFormationStorage {
 
     @Override
     public void removeLFTagsFromResource(String catalogId, Resource resource, List<LFTagPair> lfTags) {
-        String resourceKey = getResourceKey(resource);
+        String resourceKey = catalogId + ":" + getResourceKey(resource);
         resourceTagsStorage.get(resourceKey).ifPresent(currentTags -> {
             for (LFTagPair tagToRemove : lfTags) {
-                currentTags.removeIf(t -> t.getTagKey().equals(tagToRemove.getTagKey()));
+                for (LFTagPair currentTag : currentTags) {
+                    if (currentTag.getTagKey().equals(tagToRemove.getTagKey())) {
+                        if (currentTag.getTagValues() != null && tagToRemove.getTagValues() != null) {
+                            List<String> updatedValues = new ArrayList<>(currentTag.getTagValues());
+                            updatedValues.removeAll(tagToRemove.getTagValues());
+                            currentTag.setTagValues(updatedValues);
+                        }
+                    }
+                }
+                currentTags.removeIf(t -> t.getTagValues() != null && t.getTagValues().isEmpty());
             }
             resourceTagsStorage.put(resourceKey, currentTags);
         });
@@ -170,14 +230,48 @@ public class MemoryLakeFormationStorage implements LakeFormationStorage {
 
     private String getResourceKey(Resource r) {
         // Basic unique string representation of the resource union
-        if (r.getCatalog() != null) return "catalog:" + r.getCatalog().getId();
-        if (r.getDatabase() != null) return "database:" + r.getDatabase().getName();
-        if (r.getTable() != null) return "table:" + r.getTable().getDatabaseName() + ":" + r.getTable().getName();
-        if (r.getTableWithColumns() != null) return "tableWithColumns:" + r.getTableWithColumns().getDatabaseName() + ":" + r.getTableWithColumns().getName();
-        if (r.getDataLocation() != null) return "dataLocation:" + r.getDataLocation().getResourceArn();
-        if (r.getDataCellsFilter() != null) return "dataCellsFilter:" + r.getDataCellsFilter().getDatabaseName() + ":" + r.getDataCellsFilter().getTableName() + ":" + r.getDataCellsFilter().getName();
-        if (r.getLfTag() != null) return "lfTag:" + r.getLfTag().getTagKey();
-        if (r.getLfTagPolicy() != null) return "lfTagPolicy:" + r.getLfTagPolicy().getResourceType();
+        if (r.getCatalog() != null) {
+            return "catalog:" + r.getCatalog().getId();
+        }
+        if (r.getDatabase() != null) {
+            return "database:" + r.getDatabase().getName();
+        }
+        if (r.getTable() != null) {
+            return "table:" + r.getTable().getDatabaseName() + ":" + r.getTable().getName();
+        }
+        if (r.getTableWithColumns() != null) {
+            StringBuilder sb = new StringBuilder("tableWithColumns:" + r.getTableWithColumns().getDatabaseName() + ":" + r.getTableWithColumns().getName());
+            if (r.getTableWithColumns().getColumnNames() != null && !r.getTableWithColumns().getColumnNames().isEmpty()) {
+                sb.append(":cols:").append(String.join(",", r.getTableWithColumns().getColumnNames()));
+            } else if (r.getTableWithColumns().getColumnWildcard() != null) {
+                sb.append(":cols:*");
+            }
+            return sb.toString();
+        }
+        if (r.getDataLocation() != null) {
+            return "dataLocation:" + r.getDataLocation().getResourceArn();
+        }
+        if (r.getDataCellsFilter() != null) {
+            return "dataCellsFilter:" + r.getDataCellsFilter().getDatabaseName() + ":" + r.getDataCellsFilter().getTableName() + ":" + r.getDataCellsFilter().getName();
+        }
+        if (r.getLfTag() != null) {
+            return "lfTag:" + r.getLfTag().getTagKey();
+        }
+        if (r.getLfTagPolicy() != null) {
+            StringBuilder sb = new StringBuilder("lfTagPolicy:" + r.getLfTagPolicy().getResourceType());
+            if (r.getLfTagPolicy().getExpressionName() != null) {
+                sb.append(":exprName:").append(r.getLfTagPolicy().getExpressionName());
+            }
+            if (r.getLfTagPolicy().getExpression() != null) {
+                for (io.github.hectorvent.floci.services.lakeformation.model.LFTag tag : r.getLfTagPolicy().getExpression()) {
+                    sb.append(":tag:").append(tag.getTagKey()).append("=");
+                    if (tag.getTagValues() != null) {
+                        sb.append(String.join(",", tag.getTagValues()));
+                    }
+                }
+            }
+            return sb.toString();
+        }
         return "unknown";
     }
 }
