@@ -134,7 +134,7 @@ class IamGetAccountSummaryIntegrationTest {
     }
 
     @Test
-    void reportsAccountAccessKeysPresentWhenAKeyExists() {
+    void userAccessKeysDoNotSetRootAccountAccessKeySignal() {
         String userName = "gas-key-user-" + Long.toString(System.nanoTime(), 36);
 
         given()
@@ -155,6 +155,6 @@ class IamGetAccountSummaryIntegrationTest {
         .then()
             .statusCode(200);
 
-        assertSummaryValue("AccountAccessKeysPresent", 1);
+        assertSummaryValue("AccountAccessKeysPresent", 0);
     }
 }

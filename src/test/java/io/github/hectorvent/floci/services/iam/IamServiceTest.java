@@ -72,7 +72,7 @@ class IamServiceTest {
     }
 
     @Test
-    void accountSummaryUsesAwsDefaultQuotasAndTracksAccessKeys() {
+    void accountSummaryUsesAwsDefaultQuotasAndTracksProviders() {
         Map<String, Long> empty = iamService.getAccountSummary();
 
         assertEquals(100L, empty.get("GroupsQuota"));
@@ -91,8 +91,8 @@ class IamServiceTest {
         iamService.createOpenIDConnectProvider(
                 "https://oidc.example.com/id/SUMMARY", List.of(), List.of("thumbprint"), Map.of());
 
-        assertEquals(1L, iamService.getAccountSummary().get("AccountAccessKeysPresent"));
         assertEquals(1L, iamService.getAccountSummary().get("Providers"));
+        assertEquals(0L, iamService.getAccountSummary().get("AccountAccessKeysPresent"));
     }
 
     @Test
