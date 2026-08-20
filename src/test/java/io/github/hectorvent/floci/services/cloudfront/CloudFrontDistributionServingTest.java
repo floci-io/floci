@@ -1004,7 +1004,9 @@ class CloudFrontDistributionServingTest {
         DistributionConfig cfg = new DistributionConfig();
         cfg.setEnabled(true);
         cfg.setOrigins(List.of(origin));
-        cfg.setDefaultCacheBehavior(defaultBehavior(origin.getId()));
+        DefaultCacheBehavior behavior = defaultBehavior(origin.getId());
+        behavior.setAllowedMethods(List.of("GET", "HEAD", "OPTIONS"));
+        cfg.setDefaultCacheBehavior(behavior);
         Distribution dist = cloudFrontService.createDistribution(distribution(cfg), Map.of());
 
         given()
@@ -1012,6 +1014,20 @@ class CloudFrontDistributionServingTest {
             .header("Origin", "https://viewer.example")
         .when()
             .get("/asset.txt")
+        .then()
+            .statusCode(200)
+            .header("Access-Control-Allow-Origin", equalTo("*"))
+            .header("Access-Control-Allow-Methods", equalTo("GET, HEAD"))
+            .header("Access-Control-Max-Age", equalTo("600"))
+            .header("Access-Control-Allow-Credentials", nullValue())
+            .header("Vary", nullValue());
+
+        given()
+            .header("Host", dist.getDomainName())
+            .header("Origin", "https://viewer.example")
+            .header("Access-Control-Request-Method", "GET")
+        .when()
+            .options("/asset.txt")
         .then()
             .statusCode(200)
             .header("Access-Control-Allow-Origin", equalTo("*"))
@@ -1119,7 +1135,11 @@ class CloudFrontDistributionServingTest {
                 .then().statusCode(200)
                 .header("Access-Control-Allow-Origin", equalTo("https://configured.example"))
                 .header("Access-Control-Allow-Methods", equalTo("GET"))
-                .header("Access-Control-Allow-Headers", equalTo("Authorization"));
+                .header("Access-Control-Allow-Headers", equalTo("Authorization"))
+                .header("Access-Control-Allow-Credentials", equalTo("true"))
+                .header("Vary", containsString("Origin"))
+                .header("Vary", containsString("Access-Control-Request-Headers"))
+                .header("Vary", containsString("Access-Control-Request-Method"));
     }
 
     private static String distributionWithOriginCustomHeaders(int quantity, String items) {

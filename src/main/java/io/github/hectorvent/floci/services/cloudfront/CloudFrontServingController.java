@@ -457,9 +457,13 @@ public class CloudFrontServingController {
         return s3Service.evaluateCors(bucket, originHeader, requestMethod, requestedHeaders)
                 .map(cors -> {
                     Map<String, List<String>> headers = new LinkedHashMap<>();
+                    boolean wildcardOrigin = "*".equals(cors.allowedOrigin());
                     putHeader(headers, "Access-Control-Allow-Origin", cors.allowedOrigin());
                     putHeader(headers, "Access-Control-Allow-Methods",
                             String.join(", ", cors.allowedMethods()));
+                    if (!wildcardOrigin) {
+                        putHeader(headers, "Access-Control-Allow-Credentials", "true");
+                    }
                     if (cors.maxAgeSeconds() > 0) {
                         putHeader(headers, "Access-Control-Max-Age",
                                 Integer.toString(cors.maxAgeSeconds()));
@@ -471,6 +475,14 @@ public class CloudFrontServingController {
                     if (!cors.exposeHeaders().isEmpty()) {
                         putHeader(headers, "Access-Control-Expose-Headers",
                                 String.join(", ", cors.exposeHeaders()));
+                    }
+                    if (!wildcardOrigin) {
+                        mergeVary(
+                                headers,
+                                List.of(
+                                        "Origin",
+                                        "Access-Control-Request-Headers",
+                                        "Access-Control-Request-Method"));
                     }
                     return new OriginResponse(200, null, new byte[0], 0, headers);
                 })
