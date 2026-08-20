@@ -33,11 +33,11 @@ public class SigninService {
     static final int ACCESS_TOKEN_TTL_SECONDS = 900;
     private static final long AUTHORIZATION_CODE_TTL_SECONDS = 300;
     private static final long REFRESH_TOKEN_TTL_SECONDS = 12 * 60 * 60;
-    private static final SecureRandom RANDOM = new SecureRandom();
 
     private final IamService iamService;
     private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
+    private final SecureRandom random;
     private final ConcurrentHashMap<String, AuthorizationCode> authorizationCodes = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, RefreshGrant> refreshGrants = new ConcurrentHashMap<>();
 
@@ -46,6 +46,7 @@ public class SigninService {
         this.iamService = iamService;
         this.regionResolver = regionResolver;
         this.objectMapper = objectMapper;
+        this.random = new SecureRandom();
     }
 
     public String authorize(String clientId, String codeChallenge, String codeChallengeMethod,
@@ -184,17 +185,17 @@ public class SigninService {
         return result.toString();
     }
 
-    private static String randomToken(int bytes) {
+    private String randomToken(int bytes) {
         byte[] value = new byte[bytes];
-        RANDOM.nextBytes(value);
+        random.nextBytes(value);
         return Base64.getUrlEncoder().withoutPadding().encodeToString(value);
     }
 
-    private static String randomAlphaNumeric(int length) {
+    private String randomAlphaNumeric(int length) {
         final String alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
         StringBuilder value = new StringBuilder(length);
         while (value.length() < length) {
-            value.append(alphabet.charAt(RANDOM.nextInt(alphabet.length())));
+            value.append(alphabet.charAt(random.nextInt(alphabet.length())));
         }
         return value.toString();
     }
