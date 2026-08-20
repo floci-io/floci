@@ -418,11 +418,11 @@ class IamTest {
         GetAccountSummaryResponse response = iam.getAccountSummary();
         assertThat(response.summaryMap()).hasSize(34);
         assertThat(response.summaryMap().get(SummaryKeyType.USERS_QUOTA)).isEqualTo(5000);
-        assertThat(response.summaryMap().get(SummaryKeyType.GROUPS_QUOTA)).isEqualTo(100);
-        assertThat(response.summaryMap().get(SummaryKeyType.ROLES_QUOTA)).isEqualTo(250);
-        assertThat(response.summaryMap().get(SummaryKeyType.POLICIES_QUOTA)).isEqualTo(1000);
-        assertThat(response.summaryMap().get(SummaryKeyType.INSTANCE_PROFILES_QUOTA)).isEqualTo(100);
-        assertThat(response.summaryMap().get(SummaryKeyType.POLICY_SIZE_QUOTA)).isEqualTo(5120);
+        assertThat(response.summaryMap().get(SummaryKeyType.GROUPS_QUOTA)).isEqualTo(300);
+        assertThat(response.summaryMap().get(SummaryKeyType.ROLES_QUOTA)).isEqualTo(1000);
+        assertThat(response.summaryMap().get(SummaryKeyType.POLICIES_QUOTA)).isEqualTo(1500);
+        assertThat(response.summaryMap().get(SummaryKeyType.INSTANCE_PROFILES_QUOTA)).isEqualTo(1000);
+        assertThat(response.summaryMap().get(SummaryKeyType.POLICY_SIZE_QUOTA)).isEqualTo(6144);
     }
 
     @Test

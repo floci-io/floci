@@ -110,21 +110,21 @@ class IamGetAccountSummaryIntegrationTest {
             .body("GetAccountSummaryResponse.GetAccountSummaryResult.SummaryMap.entry"
                     + ".find { it.key == 'UsersQuota' }.value", equalTo("5000"))
             .body("GetAccountSummaryResponse.GetAccountSummaryResult.SummaryMap.entry"
-                    + ".find { it.key == 'GroupsQuota' }.value", equalTo("100"))
+                    + ".find { it.key == 'GroupsQuota' }.value", equalTo("300"))
             .body("GetAccountSummaryResponse.GetAccountSummaryResult.SummaryMap.entry"
-                    + ".find { it.key == 'RolesQuota' }.value", equalTo("250"))
+                    + ".find { it.key == 'RolesQuota' }.value", equalTo("1000"))
             .body("GetAccountSummaryResponse.GetAccountSummaryResult.SummaryMap.entry"
-                    + ".find { it.key == 'PoliciesQuota' }.value", equalTo("1000"))
+                    + ".find { it.key == 'PoliciesQuota' }.value", equalTo("1500"))
             .body("GetAccountSummaryResponse.GetAccountSummaryResult.SummaryMap.entry"
-                    + ".find { it.key == 'InstanceProfilesQuota' }.value", equalTo("100"))
+                    + ".find { it.key == 'InstanceProfilesQuota' }.value", equalTo("1000"))
             .body("GetAccountSummaryResponse.GetAccountSummaryResult.SummaryMap.entry"
-                    + ".find { it.key == 'AttachedPoliciesPerUserQuota' }.value", equalTo("2"))
+                    + ".find { it.key == 'AttachedPoliciesPerUserQuota' }.value", equalTo("10"))
             .body("GetAccountSummaryResponse.GetAccountSummaryResult.SummaryMap.entry"
-                    + ".find { it.key == 'AttachedPoliciesPerGroupQuota' }.value", equalTo("2"))
+                    + ".find { it.key == 'AttachedPoliciesPerGroupQuota' }.value", equalTo("10"))
             .body("GetAccountSummaryResponse.GetAccountSummaryResult.SummaryMap.entry"
-                    + ".find { it.key == 'AttachedPoliciesPerRoleQuota' }.value", equalTo("2"))
+                    + ".find { it.key == 'AttachedPoliciesPerRoleQuota' }.value", equalTo("10"))
             .body("GetAccountSummaryResponse.GetAccountSummaryResult.SummaryMap.entry"
-                    + ".find { it.key == 'PolicySizeQuota' }.value", equalTo("5120"))
+                    + ".find { it.key == 'PolicySizeQuota' }.value", equalTo("6144"))
             .body("GetAccountSummaryResponse.GetAccountSummaryResult.SummaryMap.entry"
                     + ".find { it.key == 'AssumeRolePolicySizeQuota' }.value", equalTo("2048"))
             .body("GetAccountSummaryResponse.GetAccountSummaryResult.SummaryMap.entry"

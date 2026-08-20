@@ -75,14 +75,14 @@ class IamServiceTest {
     void accountSummaryUsesAwsDefaultQuotasAndTracksProviders() {
         Map<String, Long> empty = iamService.getAccountSummary();
 
-        assertEquals(100L, empty.get("GroupsQuota"));
-        assertEquals(250L, empty.get("RolesQuota"));
-        assertEquals(1000L, empty.get("PoliciesQuota"));
-        assertEquals(100L, empty.get("InstanceProfilesQuota"));
-        assertEquals(2L, empty.get("AttachedPoliciesPerUserQuota"));
-        assertEquals(2L, empty.get("AttachedPoliciesPerGroupQuota"));
-        assertEquals(2L, empty.get("AttachedPoliciesPerRoleQuota"));
-        assertEquals(5120L, empty.get("PolicySizeQuota"));
+        assertEquals(300L, empty.get("GroupsQuota"));
+        assertEquals(1000L, empty.get("RolesQuota"));
+        assertEquals(1500L, empty.get("PoliciesQuota"));
+        assertEquals(1000L, empty.get("InstanceProfilesQuota"));
+        assertEquals(10L, empty.get("AttachedPoliciesPerUserQuota"));
+        assertEquals(10L, empty.get("AttachedPoliciesPerGroupQuota"));
+        assertEquals(10L, empty.get("AttachedPoliciesPerRoleQuota"));
+        assertEquals(6144L, empty.get("PolicySizeQuota"));
         assertEquals(0L, empty.get("Providers"));
         assertEquals(0L, empty.get("AccountAccessKeysPresent"));
 
