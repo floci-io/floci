@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.signin;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.signin.model.TokenResult;
 import io.github.hectorvent.floci.testing.MutableClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -64,12 +65,12 @@ class SigninServiceTest {
     void issuesSingleUsePkceCodeAndRegistersAwsSessionCredentials() throws Exception {
         String code = authorizeCode(VERIFIER);
 
-        SigninService.TokenResult tokens = exchangeCode(code, VERIFIER);
+        TokenResult tokens = exchangeCode(code, VERIFIER);
 
-        assertTrue(tokens.accessToken().get("accessKeyId").startsWith("ASIA"));
+        assertTrue(tokens.accessToken().accessKeyId().startsWith("ASIA"));
         assertEquals(900, tokens.expiresIn());
-        verify(iam).registerSessionForAccount(eq(ACCOUNT_A), eq(tokens.accessToken().get("accessKeyId")),
-                eq(tokens.accessToken().get("secretAccessKey")),
+        verify(iam).registerSessionForAccount(eq(ACCOUNT_A), eq(tokens.accessToken().accessKeyId()),
+                eq(tokens.accessToken().secretAccessKey()),
                 eq("arn:aws:iam::" + ACCOUNT_A + ":root"), any(), isNull());
         assertThrows(SigninService.SigninException.class, () -> exchangeCode(code, VERIFIER));
     }
@@ -140,7 +141,7 @@ class SigninServiceTest {
         assertInvalidRequest(() -> service.authorize(CLIENT_ID, challengeUnchecked(VERIFIER), "SHA-256",
                 REDIRECT_URI, "code", "openid", "state", "r".repeat(2049)));
 
-        SigninService.TokenResult result = service.exchange(CLIENT_ID, "authorization_code", code,
+        TokenResult result = service.exchange(CLIENT_ID, "authorization_code", code,
                 REDIRECT_URI, VERIFIER, null, "r".repeat(2048));
         assertEquals(900, result.expiresIn());
     }
@@ -168,13 +169,13 @@ class SigninServiceTest {
 
     @Test
     void refreshRotationIsIdempotentUnderConcurrency() throws Exception {
-        SigninService.TokenResult initial = issueInitialTokens();
+        TokenResult initial = issueInitialTokens();
         int callers = 8;
         ExecutorService executor = Executors.newFixedThreadPool(callers);
         CountDownLatch ready = new CountDownLatch(callers);
         CountDownLatch start = new CountDownLatch(1);
         try {
-            List<Future<SigninService.TokenResult>> futures = java.util.stream.IntStream.range(0, callers)
+            List<Future<TokenResult>> futures = java.util.stream.IntStream.range(0, callers)
                     .mapToObj(ignored -> executor.submit(() -> {
                         ready.countDown();
                         start.await();
@@ -184,10 +185,10 @@ class SigninServiceTest {
             assertTrue(ready.await(5, TimeUnit.SECONDS));
             start.countDown();
 
-            SigninService.TokenResult first = futures.getFirst().get(5, TimeUnit.SECONDS);
+            TokenResult first = futures.getFirst().get(5, TimeUnit.SECONDS);
             assertNotEquals(initial.refreshToken(), first.refreshToken());
-            for (Future<SigninService.TokenResult> future : futures) {
-                SigninService.TokenResult result = future.get(5, TimeUnit.SECONDS);
+            for (Future<TokenResult> future : futures) {
+                TokenResult result = future.get(5, TimeUnit.SECONDS);
                 assertEquals(first.accessToken(), result.accessToken());
                 assertEquals(first.refreshToken(), result.refreshToken());
                 assertEquals(900, result.expiresIn());
@@ -201,27 +202,27 @@ class SigninServiceTest {
 
     @Test
     void predecessorReplayReportsRemainingLifetimeAndExpires() throws Exception {
-        SigninService.TokenResult initial = issueInitialTokens();
-        SigninService.TokenResult first = refresh(initial.refreshToken());
+        TokenResult initial = issueInitialTokens();
+        TokenResult first = refresh(initial.refreshToken());
 
         clock.advance(Duration.ofMinutes(10));
-        SigninService.TokenResult replay = refresh(initial.refreshToken());
+        TokenResult replay = refresh(initial.refreshToken());
         assertEquals(first.accessToken(), replay.accessToken());
         assertEquals(first.refreshToken(), replay.refreshToken());
         assertEquals(300, replay.expiresIn());
 
         clock.advance(Duration.ofMinutes(5).plusSeconds(1));
         assertInvalidRefresh(initial.refreshToken());
-        SigninService.TokenResult successor = refresh(first.refreshToken());
+        TokenResult successor = refresh(first.refreshToken());
         assertNotEquals(first.refreshToken(), successor.refreshToken());
     }
 
     @Test
     void rotatedRefreshTokenKeepsOriginalAbsoluteExpiry() throws Exception {
-        SigninService.TokenResult initial = issueInitialTokens();
+        TokenResult initial = issueInitialTokens();
         clock.advance(Duration.ofHours(11).plusMinutes(59));
 
-        SigninService.TokenResult rotated = refresh(initial.refreshToken());
+        TokenResult rotated = refresh(initial.refreshToken());
         clock.advance(Duration.ofMinutes(2));
 
         assertInvalidRefresh(rotated.refreshToken());
@@ -229,7 +230,7 @@ class SigninServiceTest {
 
     @Test
     void expiryCleanupWaitsForInFlightRotation() throws Exception {
-        SigninService.TokenResult initial = issueInitialTokens();
+        TokenResult initial = issueInitialTokens();
         clock.advance(Duration.ofHours(12).minusMillis(2));
         CountDownLatch issuanceStarted = new CountDownLatch(1);
         CountDownLatch allowIssuance = new CountDownLatch(1);
@@ -242,16 +243,16 @@ class SigninServiceTest {
 
         ExecutorService executor = Executors.newFixedThreadPool(2);
         try {
-            Future<SigninService.TokenResult> rotation =
+            Future<TokenResult> rotation =
                     executor.submit(() -> refresh(initial.refreshToken()));
             assertTrue(issuanceStarted.await(5, TimeUnit.SECONDS));
             Future<?> cleanup = executor.submit(() -> assertInvalidRefresh("unknown-refresh-token"));
 
             allowIssuance.countDown();
-            SigninService.TokenResult rotated = rotation.get(5, TimeUnit.SECONDS);
+            TokenResult rotated = rotation.get(5, TimeUnit.SECONDS);
             cleanup.get(5, TimeUnit.SECONDS);
 
-            SigninService.TokenResult replay = refresh(initial.refreshToken());
+            TokenResult replay = refresh(initial.refreshToken());
             assertEquals(rotated.accessToken(), replay.accessToken());
             assertEquals(rotated.refreshToken(), replay.refreshToken());
         } finally {
@@ -264,9 +265,9 @@ class SigninServiceTest {
     void authorizationCodesAndRefreshGrantsIssueOnlyForCapturedAccount() throws Exception {
         String code = authorizeCode(VERIFIER);
         accountId.set(ACCOUNT_B);
-        SigninService.TokenResult initial = exchangeCode(code, VERIFIER);
+        TokenResult initial = exchangeCode(code, VERIFIER);
 
-        SigninService.TokenResult rotated = refresh(initial.refreshToken());
+        TokenResult rotated = refresh(initial.refreshToken());
         assertNotEquals(initial.refreshToken(), rotated.refreshToken());
         verify(iam, times(2)).registerSessionForAccount(eq(ACCOUNT_A), anyString(), anyString(),
                 eq("arn:aws:iam::" + ACCOUNT_A + ":root"), any(), isNull());
@@ -274,7 +275,7 @@ class SigninServiceTest {
                 anyString(), any(), isNull());
     }
 
-    private SigninService.TokenResult issueInitialTokens() throws Exception {
+    private TokenResult issueInitialTokens() throws Exception {
         return exchangeCode(authorizeCode(VERIFIER), VERIFIER);
     }
 
@@ -289,12 +290,12 @@ class SigninServiceTest {
                 "code", "openid", state, null);
     }
 
-    private SigninService.TokenResult exchangeCode(String code, String verifier) {
+    private TokenResult exchangeCode(String code, String verifier) {
         return service.exchange(CLIENT_ID, "authorization_code", code,
                 REDIRECT_URI, verifier, null, null);
     }
 
-    private SigninService.TokenResult refresh(String refreshToken) {
+    private TokenResult refresh(String refreshToken) {
         return service.exchange(CLIENT_ID, "refresh_token", null,
                 null, null, refreshToken, null);
     }

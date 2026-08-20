@@ -4,6 +4,8 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.iam.model.SessionCreds;
+import io.github.hectorvent.floci.services.signin.model.TokenResult;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -194,10 +196,7 @@ public class SigninService {
         iamService.registerSessionForAccount(
                 accountId, accessKeyId, secretAccessKey, principalArn, expiration, null);
 
-        Map<String, String> accessToken = Map.of(
-                "accessKeyId", accessKeyId,
-                "secretAccessKey", secretAccessKey,
-                "sessionToken", sessionToken);
+        SessionCreds accessToken = new SessionCreds(accessKeyId, secretAccessKey, sessionToken);
         String idToken = includeIdToken ? idToken(principalArn, accountId, clientId, issuedAt) : null;
         return new TokenResult(accessToken, ACCESS_TOKEN_TTL_SECONDS, refreshToken, idToken);
     }
@@ -410,10 +409,6 @@ public class SigninService {
             this.replayResult = result;
             this.replayExpiresAt = expiresAt;
         }
-    }
-
-    public record TokenResult(Map<String, String> accessToken, int expiresIn,
-                              String refreshToken, String idToken) {
     }
 
     public static final class SigninException extends RuntimeException {

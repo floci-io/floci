@@ -2,6 +2,8 @@ package io.github.hectorvent.floci.services.signin;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.services.iam.model.SessionCreds;
+import io.github.hectorvent.floci.services.signin.model.TokenResult;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.GET;
@@ -61,7 +63,7 @@ public class SigninController {
     public Response token(String body, @Context HttpHeaders headers) {
         try {
             Map<String, String> values = parseBody(body, headers.getHeaderString(HttpHeaders.CONTENT_TYPE));
-            SigninService.TokenResult result = signinService.exchange(
+            TokenResult result = signinService.exchange(
                     value(values, "clientId", "client_id"),
                     value(values, "grantType", "grant_type"),
                     value(values, "code"),
@@ -70,7 +72,11 @@ public class SigninController {
                     value(values, "refreshToken", "refresh_token"),
                     value(values, "resource"));
             Map<String, Object> response = new LinkedHashMap<>();
-            response.put("accessToken", result.accessToken());
+            SessionCreds accessToken = result.accessToken();
+            response.put("accessToken", Map.of(
+                    "accessKeyId", accessToken.accessKeyId(),
+                    "secretAccessKey", accessToken.secretAccessKey(),
+                    "sessionToken", accessToken.sessionToken()));
             response.put("tokenType", "aws_sigv4");
             response.put("expiresIn", result.expiresIn());
             response.put("refreshToken", result.refreshToken());
