@@ -28,6 +28,9 @@ Floci manages real Valkey/Redis Docker containers and proxies TCP connections to
 | `ModifyCacheSubnetGroup` | - |
 | `DeleteCacheSubnetGroup` | - |
 | `DescribeCacheParameterGroups` | - |
+| `ListTagsForResource` | Read a resource's tags (the provider calls this on every subnet-group read) |
+| `AddTagsToResource` | Add or overwrite tags on a resource |
+| `RemoveTagsFromResource` | Remove the named tag keys from a resource |
 <!-- floci:actions:end -->
 
 ## Configuration

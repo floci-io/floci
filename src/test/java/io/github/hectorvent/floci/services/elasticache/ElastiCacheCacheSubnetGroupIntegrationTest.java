@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.elasticache;
 
+import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -26,8 +28,17 @@ class ElastiCacheCacheSubnetGroupIntegrationTest {
             "AWS4-HMAC-SHA256 Credential=test/20260818/us-east-1/elasticache/aws4_request";
 
     private static final String SUBNET_GROUP_NAME = "it-ec-subnet-group";
+    private static final String SUBNET_GROUP_ARN =
+            "arn:aws:elasticache:us-east-1:000000000000:subnetgroup:" + SUBNET_GROUP_NAME;
     private static final String CIDR_A = "10.72.1.0/24";
     private static final String CIDR_B = "10.72.2.0/24";
+
+    @BeforeAll
+    static void configureRestAssured() {
+        // GetResources is JSON-1.1; RestAssured needs the encoder registered before it
+        // will serialize a body for that content type at all.
+        RestAssuredJsonUtils.configureAwsContentTypes();
+    }
 
     private static String vpcId;
     private static String subnetIdA;
@@ -130,8 +141,120 @@ class ElastiCacheCacheSubnetGroupIntegrationTest {
             .body("ErrorResponse.Error.Code", equalTo("CacheSubnetGroupNotFoundFault"));
     }
 
+    // ── Tags ─────────────────────────────────────────────────────────────────
+    //
+    // The AWS Terraform provider calls ListTagsForResource on every read of an
+    // aws_elasticache_subnet_group, so a group that cannot answer it fails the whole
+    // apply even when nothing in the configuration mentions tags at all.
+
     @Test
     @Order(5)
+    void listTagsForResourceAnswersEmptyForAnUntaggedGroup() {
+        given()
+            .formParam("Action", "ListTagsForResource")
+            .formParam("ResourceName", SUBNET_GROUP_ARN)
+            .header("Authorization", ELASTICACHE_AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body("ListTagsForResourceResponse.ListTagsForResourceResult.TagList", equalTo(""));
+    }
+
+    @Test
+    @Order(6)
+    void addTagsToResourceReturnsTheResultingListAndListReadsItBack() {
+        given()
+            .formParam("Action", "AddTagsToResource")
+            .formParam("ResourceName", SUBNET_GROUP_ARN)
+            .formParam("Tags.Tag.1.Key", "Environment")
+            .formParam("Tags.Tag.1.Value", "dev")
+            .formParam("Tags.Tag.2.Key", "Owner")
+            .formParam("Tags.Tag.2.Value", "platform")
+            .header("Authorization", ELASTICACHE_AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("AddTagsToResourceResponse.AddTagsToResourceResult.TagList.Tag.Key",
+                    hasItems("Environment", "Owner"))
+            .body("AddTagsToResourceResponse.AddTagsToResourceResult.TagList.Tag.Value",
+                    hasItems("dev", "platform"));
+
+        given()
+            .formParam("Action", "ListTagsForResource")
+            .formParam("ResourceName", SUBNET_GROUP_ARN)
+            .header("Authorization", ELASTICACHE_AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ListTagsForResourceResponse.ListTagsForResourceResult.TagList.Tag.Key",
+                    hasItems("Environment", "Owner"));
+    }
+
+    @Test
+    @Order(7)
+    void taggedGroupIsVisibleToResourceGroupsTaggingGetResources() {
+        given()
+                .contentType("application/x-amz-json-1.1")
+                .header("X-Amz-Target", "ResourceGroupsTaggingAPI_20170126.GetResources")
+                .body("{\"ResourceARNList\": [\"" + SUBNET_GROUP_ARN + "\"]}")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body("ResourceTagMappingList.size()", equalTo(1))
+                .body("ResourceTagMappingList[0].ResourceARN", equalTo(SUBNET_GROUP_ARN))
+                .body("ResourceTagMappingList[0].Tags.Key", hasItems("Environment", "Owner"));
+    }
+
+    @Test
+    @Order(8)
+    void modifyCacheSubnetGroupKeepsTheTags() {
+        given()
+            .formParam("Action", "ModifyCacheSubnetGroup")
+            .formParam("CacheSubnetGroupName", SUBNET_GROUP_NAME)
+            .formParam("CacheSubnetGroupDescription", "modified description")
+            .header("Authorization", ELASTICACHE_AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ModifyCacheSubnetGroupResponse.ModifyCacheSubnetGroupResult.CacheSubnetGroup.CacheSubnetGroupDescription",
+                    equalTo("modified description"));
+
+        given()
+            .formParam("Action", "ListTagsForResource")
+            .formParam("ResourceName", SUBNET_GROUP_ARN)
+            .header("Authorization", ELASTICACHE_AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ListTagsForResourceResponse.ListTagsForResourceResult.TagList.Tag.Key",
+                    hasItems("Environment", "Owner"));
+    }
+
+    @Test
+    @Order(9)
+    void removeTagsFromResourceDropsOnlyTheNamedKey() {
+        given()
+            .formParam("Action", "RemoveTagsFromResource")
+            .formParam("ResourceName", SUBNET_GROUP_ARN)
+            .formParam("TagKeys.member.1", "Owner")
+            .header("Authorization", ELASTICACHE_AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("RemoveTagsFromResourceResponse.RemoveTagsFromResourceResult.TagList.Tag.Key",
+                    equalTo("Environment"));
+    }
+
+    @Test
+    @Order(10)
     void deleteCacheSubnetGroupRemovesIt() {
         given()
             .formParam("Action", "DeleteCacheSubnetGroup")
@@ -154,7 +277,7 @@ class ElastiCacheCacheSubnetGroupIntegrationTest {
     }
 
     @Test
-    @Order(6)
+    @Order(11)
     void deleteCacheSubnetGroupFaultsWhenAlreadyGone() {
         given()
             .formParam("Action", "DeleteCacheSubnetGroup")

@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.elasticache;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
@@ -300,6 +301,11 @@ public class ElastiCacheService {
     }
 
     public CacheSubnetGroup createCacheSubnetGroup(String name, String description, List<String> subnetIds, String region) {
+        return createCacheSubnetGroup(name, description, subnetIds, region, Map.of());
+    }
+
+    public CacheSubnetGroup createCacheSubnetGroup(String name, String description, List<String> subnetIds,
+                                                   String region, Map<String, String> tags) {
         if (name == null || name.isBlank()) {
             throw new AwsException("MissingParameter",
                     "The request must contain the parameter CacheSubnetGroupName.", 400);
@@ -314,6 +320,7 @@ public class ElastiCacheService {
         }
 
         CacheSubnetGroup group = buildCacheSubnetGroup(name, description, subnetIds, effectiveRegion(region));
+        group.setTags(tags);
         subnetGroups.put(name, group);
         LOG.infov("Cache subnet group {0} created with {1} subnets", name, String.valueOf(subnetIds.size()));
         return group;
@@ -346,6 +353,11 @@ public class ElastiCacheService {
                 : existing.getSubnetIds();
 
         CacheSubnetGroup group = buildCacheSubnetGroup(name, effectiveDescription, effectiveSubnetIds, effectiveRegion(region));
+        // buildCacheSubnetGroup returns a fresh object, so anything Modify does not itself take
+        // has to be carried over explicitly. Tags are not a ModifyCacheSubnetGroup parameter at
+        // all - AWS changes them only through Add/RemoveTagsToResource - so dropping them here
+        // would silently untag a group on every unrelated modify.
+        group.setTags(existing.getTags());
         subnetGroups.put(name, group);
         return group;
     }
@@ -384,6 +396,82 @@ public class ElastiCacheService {
         CacheSubnetGroup group = new CacheSubnetGroup(name, description, vpcId, subnetIds, subnetAvailabilityZones);
         group.setArn(regionResolver.buildArn("elasticache", region, "subnetgroup:" + name));
         return group;
+    }
+
+    // ── Tags ────────────────────────────────────────────────────────────────────
+
+    public Map<String, String> listTagsForResource(String resourceName) {
+        return Map.copyOf(resolveTagHandle(resourceName).tags());
+    }
+
+    public Map<String, String> addTagsToResource(String resourceName, Map<String, String> tags) {
+        TagHandle handle = resolveTagHandle(resourceName);
+        Map<String, String> updated = new LinkedHashMap<>(handle.tags());
+        if (tags != null) {
+            updated.putAll(tags);
+        }
+        handle.save().accept(updated);
+        return Map.copyOf(updated);
+    }
+
+    public Map<String, String> removeTagsFromResource(String resourceName, Collection<String> tagKeys) {
+        TagHandle handle = resolveTagHandle(resourceName);
+        Map<String, String> updated = new LinkedHashMap<>(handle.tags());
+        if (tagKeys != null) {
+            tagKeys.forEach(updated::remove);
+        }
+        handle.save().accept(updated);
+        return Map.copyOf(updated);
+    }
+
+    /** A resolved tag target: its current tags plus a sink that persists an updated map. */
+    private record TagHandle(Map<String, String> tags, java.util.function.Consumer<Map<String, String>> save) {}
+
+    /**
+     * Resolves an ElastiCache tagging {@code ResourceName} to the resource it names.
+     *
+     * <p>ElastiCache ARNs are {@code arn:aws:elasticache:<region>:<account>:<type>:<name>}, so the
+     * type is read off the ARN rather than guessed: a new taggable ElastiCache resource is one
+     * more branch here plus a {@code tags} field on its model, and needs no change anywhere else
+     * (the query handler and the estate-wide tag scanner are both type-agnostic).
+     *
+     * <p>Only {@code subnetgroup} is resolvable today, because it is the only ElastiCache model
+     * floci stores that carries an ARN of its own; replication groups, users and cache clusters
+     * have no ARN field yet, so there is nothing for a tagging call to name.
+     */
+    private TagHandle resolveTagHandle(String resourceName) {
+        if (resourceName == null || resourceName.isBlank()) {
+            throw new AwsException("InvalidParameterValue",
+                    "The request must contain the parameter ResourceName.", 400);
+        }
+        AwsArnUtils.Arn arn;
+        try {
+            arn = AwsArnUtils.parse(resourceName);
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("InvalidARN",
+                    "ARN " + resourceName + " is malformed.", 400);
+        }
+        if (!"elasticache".equals(arn.service())) {
+            throw new AwsException("InvalidARN",
+                    "ARN " + resourceName + " does not refer to an ElastiCache resource.", 400);
+        }
+        String[] resource = arn.resource().split(":", 2);
+        if (resource.length != 2 || resource[1].isBlank()) {
+            throw new AwsException("InvalidARN",
+                    "ARN " + resourceName + " is malformed.", 400);
+        }
+        String type = resource[0];
+        String name = resource[1];
+        if ("subnetgroup".equals(type)) {
+            CacheSubnetGroup group = getCacheSubnetGroup(name);
+            return new TagHandle(group.getTags(), updated -> {
+                CacheSubnetGroup current = getCacheSubnetGroup(name);
+                current.setTags(updated);
+                subnetGroups.put(name, current);
+            });
+        }
+        throw new AwsException("InvalidARN",
+                "ElastiCache resource type " + type + " does not support tagging in this emulator.", 400);
     }
 
     private String effectiveRegion(String region) {

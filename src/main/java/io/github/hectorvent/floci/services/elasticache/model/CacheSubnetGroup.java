@@ -20,6 +20,7 @@ public class CacheSubnetGroup {
     private String vpcId;
     private List<String> subnetIds = new ArrayList<>();
     private Map<String, String> subnetAvailabilityZones = new LinkedHashMap<>();
+    private Map<String, String> tags = new LinkedHashMap<>();
 
     public CacheSubnetGroup() {}
 
@@ -61,5 +62,17 @@ public class CacheSubnetGroup {
         this.subnetAvailabilityZones = subnetAvailabilityZones != null
                 ? new LinkedHashMap<>(subnetAvailabilityZones)
                 : new LinkedHashMap<>();
+    }
+
+    /**
+     * The resource's own tags. Present on the model rather than in a side store on purpose:
+     * {@code TaggedResourceScanner} finds a resource for Resource Groups Tagging's
+     * {@code GetResources} by looking for a tag collection and an {@code arn} field on the
+     * persisted model, so a {@code tags} field beside the existing {@code arn} is all that is
+     * needed for this group to appear in an estate-wide tag scan.
+     */
+    public Map<String, String> getTags() { return Map.copyOf(tags); }
+    public void setTags(Map<String, String> tags) {
+        this.tags = tags != null ? new LinkedHashMap<>(tags) : new LinkedHashMap<>();
     }
 }

@@ -87,7 +87,7 @@ class ElastiCacheQueryHandlerTest {
         CacheSubnetGroup group = new CacheSubnetGroup("sample-group", "desc", "vpc-123",
                 List.of("subnet-aaa", "subnet-bbb"), Map.of());
         when(service.createCacheSubnetGroup(eq("sample-group"), eq("desc"),
-                eq(List.of("subnet-aaa", "subnet-bbb")), isNull()))
+                eq(List.of("subnet-aaa", "subnet-bbb")), isNull(), eq(Map.of())))
                 .thenReturn(group);
 
         MultivaluedMap<String, String> p = params();

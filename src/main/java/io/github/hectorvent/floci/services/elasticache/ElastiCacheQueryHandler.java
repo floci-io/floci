@@ -21,7 +21,9 @@ import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Query-protocol handler for all ElastiCache actions (form-encoded POST, XML response).
@@ -72,6 +74,9 @@ public class ElastiCacheQueryHandler {
             case "ModifyCacheSubnetGroup"     -> handleModifyCacheSubnetGroup(params, region);
             case "DeleteCacheSubnetGroup"     -> handleDeleteCacheSubnetGroup(params);
             case "DescribeCacheParameterGroups" -> handleDescribeCacheParameterGroups(params);
+            case "ListTagsForResource"        -> handleListTagsForResource(params);
+            case "AddTagsToResource"          -> handleAddTagsToResource(params);
+            case "RemoveTagsFromResource"     -> handleRemoveTagsFromResource(params);
             default -> AwsQueryResponse.error("UnsupportedOperation",
                     "Operation " + action + " is not supported.", AwsNamespaces.EC, 400);
         };
@@ -303,7 +308,8 @@ public class ElastiCacheQueryHandler {
         // SubnetIds.member.N every real client and the CLI actually sends.
         List<String> subnetIds = extractMemberList(params, "SubnetIds.SubnetIdentifier.");
         try {
-            CacheSubnetGroup group = service.createCacheSubnetGroup(name, description, subnetIds, region);
+            CacheSubnetGroup group = service.createCacheSubnetGroup(name, description, subnetIds, region,
+                    parseTags(params));
             return Response.ok(AwsQueryResponse.envelope("CreateCacheSubnetGroup",
                     AwsNamespaces.EC, cacheSubnetGroupXml(group))).build();
         } catch (AwsException e) {
@@ -484,6 +490,88 @@ public class ElastiCacheQueryHandler {
                 .start("UserGroupIds").end("UserGroupIds")
                 .elem("ARN", AwsArnUtils.Arn.of("elasticache", regionResolver.getDefaultRegion(), regionResolver.getAccountId(), "user:" + u.getUserId()).toString())
                 .build();
+    }
+
+    // ── Tags ─────────────────────────────────────────────────────────────────
+    //
+    // ElastiCache serves the same three tagging actions RDS does, on the same Query
+    // protocol, and all three answer with a TagListMessage - Add and Remove return the
+    // resulting tag list rather than an empty body, which is where ElastiCache differs
+    // from RDS and why these do not simply delegate to an empty envelope.
+
+    private Response handleListTagsForResource(MultivaluedMap<String, String> params) {
+        try {
+            return tagListMessage("ListTagsForResource",
+                    service.listTagsForResource(params.getFirst("ResourceName")));
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.EC, e.getHttpStatus());
+        }
+    }
+
+    private Response handleAddTagsToResource(MultivaluedMap<String, String> params) {
+        try {
+            return tagListMessage("AddTagsToResource",
+                    service.addTagsToResource(params.getFirst("ResourceName"), parseTags(params)));
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.EC, e.getHttpStatus());
+        }
+    }
+
+    private Response handleRemoveTagsFromResource(MultivaluedMap<String, String> params) {
+        try {
+            return tagListMessage("RemoveTagsFromResource",
+                    service.removeTagsFromResource(params.getFirst("ResourceName"), parseTagKeys(params)));
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.EC, e.getHttpStatus());
+        }
+    }
+
+    private Response tagListMessage(String action, Map<String, String> tags) {
+        XmlBuilder xml = new XmlBuilder().start("TagList");
+        tags.forEach((key, value) -> xml.start("Tag")
+                .elem("Key", key)
+                .elem("Value", value)
+                .end("Tag"));
+        xml.end("TagList");
+        return Response.ok(AwsQueryResponse.envelope(action, AwsNamespaces.EC, xml.build())).build();
+    }
+
+    /**
+     * ElastiCache's {@code TagList} shape overrides its member locationName to {@code Tag}, so the
+     * wire form the SDK and CLI send is {@code Tags.Tag.N.Key}. The generic {@code Tags.member.N}
+     * and the bare {@code Tag.N} forms are read too: older SDKs and hand-rolled clients send those,
+     * and reading all three costs nothing while a missed one silently drops every tag.
+     */
+    private static Map<String, String> parseTags(MultivaluedMap<String, String> params) {
+        Map<String, String> tags = new LinkedHashMap<>();
+        readTags(params, "Tags.Tag", tags);
+        readTags(params, "Tags.member", tags);
+        readTags(params, "Tag", tags);
+        return tags;
+    }
+
+    private static void readTags(MultivaluedMap<String, String> params, String prefix, Map<String, String> tags) {
+        for (int i = 1; ; i++) {
+            String key = params.getFirst(prefix + "." + i + ".Key");
+            if (key == null) {
+                break;
+            }
+            String value = params.getFirst(prefix + "." + i + ".Value");
+            tags.put(key, value == null ? "" : value);
+        }
+    }
+
+    /**
+     * {@code RemoveTagsFromResource}'s {@code TagKeys} is a plain string list with no locationName
+     * override, so the wire form is {@code TagKeys.member.N}. The bare {@code TagKeys.N} form is
+     * accepted too, for the same reason {@link #parseTags} accepts more than one shape.
+     */
+    private static List<String> parseTagKeys(MultivaluedMap<String, String> params) {
+        List<String> keys = new ArrayList<>(extractMemberList(params, "TagKeys.member."));
+        if (keys.isEmpty()) {
+            keys.addAll(extractMemberList(params, "TagKeys."));
+        }
+        return keys;
     }
 
     private static List<String> extractMemberList(MultivaluedMap<String, String> params, String prefix) {
