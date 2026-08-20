@@ -28,6 +28,7 @@ import software.amazon.awssdk.services.iam.model.DeleteUserRequest;
 import software.amazon.awssdk.services.iam.model.DetachRolePolicyRequest;
 import software.amazon.awssdk.services.iam.model.DetachUserPolicyRequest;
 import software.amazon.awssdk.services.iam.model.GetAccountSummaryResponse;
+import software.amazon.awssdk.services.iam.model.SummaryKeyType;
 import software.amazon.awssdk.services.iam.model.GetGroupRequest;
 import software.amazon.awssdk.services.iam.model.GetGroupResponse;
 import software.amazon.awssdk.services.iam.model.GetInstanceProfileRequest;
@@ -415,14 +416,13 @@ class IamTest {
     @Order(101)
     void getAccountSummary() {
         GetAccountSummaryResponse response = iam.getAccountSummary();
-
         assertThat(response.summaryMap()).hasSize(34);
-        assertThat(response.summaryMap().get("UsersQuota")).isEqualTo(5000);
-        assertThat(response.summaryMap().get("GroupsQuota")).isEqualTo(100);
-        assertThat(response.summaryMap().get("RolesQuota")).isEqualTo(250);
-        assertThat(response.summaryMap().get("PoliciesQuota")).isEqualTo(1000);
-        assertThat(response.summaryMap().get("InstanceProfilesQuota")).isEqualTo(100);
-        assertThat(response.summaryMap().get("PolicySizeQuota")).isEqualTo(5120);
+        assertThat(response.summaryMap().get(SummaryKeyType.USERS_QUOTA)).isEqualTo(5000);
+        assertThat(response.summaryMap().get(SummaryKeyType.GROUPS_QUOTA)).isEqualTo(100);
+        assertThat(response.summaryMap().get(SummaryKeyType.ROLES_QUOTA)).isEqualTo(250);
+        assertThat(response.summaryMap().get(SummaryKeyType.POLICIES_QUOTA)).isEqualTo(1000);
+        assertThat(response.summaryMap().get(SummaryKeyType.INSTANCE_PROFILES_QUOTA)).isEqualTo(100);
+        assertThat(response.summaryMap().get(SummaryKeyType.POLICY_SIZE_QUOTA)).isEqualTo(5120);
     }
 
     @Test
