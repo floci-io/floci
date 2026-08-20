@@ -429,6 +429,7 @@ public class S3VectorsController {
                 request.vectorBucketName(),
                 request.indexName(),
                 queryVector,
+                request.filter(),
                 request.topK() > 0 ? request.topK() : 10,
                 region
         );
