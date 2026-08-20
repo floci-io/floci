@@ -952,6 +952,56 @@ class CloudFrontDistributionServingTest {
     }
 
     @Test
+    void corsOriginOverrideIsGroupWideButDoesNotSuppressCustomHeaders() {
+        String suffix = suffix();
+        String bucket = "cf-cors-origin-override-" + suffix;
+        createBucket(bucket);
+        s3Service.putBucketCors(bucket, """
+                <CORSConfiguration><CORSRule>
+                  <AllowedOrigin>*</AllowedOrigin>
+                  <AllowedMethod>GET</AllowedMethod>
+                </CORSRule></CORSConfiguration>
+                """);
+
+        Map<String, Object> cors = new LinkedHashMap<>();
+        cors.put("AccessControlAllowCredentials", "false");
+        cors.put("AccessControlAllowHeaders", List.of());
+        cors.put("AccessControlAllowMethods", List.of("GET"));
+        cors.put("AccessControlAllowOrigins", List.of("*"));
+        cors.put("AccessControlExposeHeaders", List.of());
+        cors.put("AccessControlMaxAgeSec", "600");
+        cors.put("OriginOverride", "false");
+
+        Map<String, Object> policyConfig = new LinkedHashMap<>();
+        policyConfig.put("CorsConfig", cors);
+        policyConfig.put("CustomHeadersConfig", List.of(
+                policyHeader("Access-Control-X-Floci", "custom", false)));
+        ResponseHeadersPolicy policy = new ResponseHeadersPolicy();
+        policy.setName("cors-origin-override-" + suffix);
+        policy.setConfig(policyConfig);
+        policy = cloudFrontService.createResponseHeadersPolicy(policy);
+
+        DefaultCacheBehavior behavior = defaultBehavior("only-origin");
+        behavior.setAllowedMethods(List.of("GET", "HEAD", "OPTIONS"));
+        behavior.setResponseHeadersPolicyId(policy.getId());
+        DistributionConfig config = new DistributionConfig();
+        config.setEnabled(true);
+        config.setOrigins(List.of(s3Origin("only-origin", bucket)));
+        config.setDefaultCacheBehavior(behavior);
+        Distribution distribution = cloudFrontService.createDistribution(distribution(config), Map.of());
+
+        given()
+                .header("Host", distribution.getDomainName())
+                .header("Origin", "https://viewer.example")
+                .header("Access-Control-Request-Method", "GET")
+                .when().options("/resource")
+                .then().statusCode(200)
+                .header("Access-Control-Allow-Origin", equalTo("*"))
+                .header("Access-Control-Max-Age", nullValue())
+                .header("Access-Control-X-Floci", equalTo("custom"));
+    }
+
+    @Test
     void rejectsOptionsWhenTheMatchedBehaviorDoesNotAllowIt() {
         String suffix = suffix();
         String bucket = "cf-options-" + suffix;

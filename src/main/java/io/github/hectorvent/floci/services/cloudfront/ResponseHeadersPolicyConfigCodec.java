@@ -36,8 +36,8 @@ final class ResponseHeadersPolicyConfigCodec {
     private ResponseHeadersPolicyConfigCodec() {
     }
 
-    /** One header the policy contributes to a response, with its override-the-origin flag. */
-    record PolicyHeader(String name, String value, boolean override) {
+    /** One header the policy contributes, including whether it came from the CORS group. */
+    record PolicyHeader(String name, String value, boolean override, boolean cors) {
     }
 
     /** Headers to add/remove plus whether CloudFront Server-Timing metrics should be synthesized. */
@@ -233,7 +233,7 @@ final class ResponseHeadersPolicyConfigCodec {
                 String name = h.get("Header");
                 if (name != null) {
                     add.add(new PolicyHeader(name, h.getOrDefault("Value", ""),
-                            Boolean.parseBoolean(h.getOrDefault("Override", "false"))));
+                            Boolean.parseBoolean(h.getOrDefault("Override", "false")), false));
                 }
             }
         }
@@ -262,19 +262,19 @@ final class ResponseHeadersPolicyConfigCodec {
             if (Boolean.parseBoolean(hsts.get("Preload"))) {
                 v.append("; preload");
             }
-            add.add(new PolicyHeader("Strict-Transport-Security", v.toString(), override(hsts)));
+            add.add(new PolicyHeader("Strict-Transport-Security", v.toString(), override(hsts), false));
         }
         Map<String, String> cto = (Map<String, String>) security.get("ContentTypeOptions");
         if (cto != null) {
-            add.add(new PolicyHeader("X-Content-Type-Options", "nosniff", override(cto)));
+            add.add(new PolicyHeader("X-Content-Type-Options", "nosniff", override(cto), false));
         }
         Map<String, String> frame = (Map<String, String>) security.get("FrameOptions");
         if (frame != null && frame.get("FrameOption") != null) {
-            add.add(new PolicyHeader("X-Frame-Options", frame.get("FrameOption"), override(frame)));
+            add.add(new PolicyHeader("X-Frame-Options", frame.get("FrameOption"), override(frame), false));
         }
         Map<String, String> referrer = (Map<String, String>) security.get("ReferrerPolicy");
         if (referrer != null && referrer.get("ReferrerPolicy") != null) {
-            add.add(new PolicyHeader("Referrer-Policy", referrer.get("ReferrerPolicy"), override(referrer)));
+            add.add(new PolicyHeader("Referrer-Policy", referrer.get("ReferrerPolicy"), override(referrer), false));
         }
         Map<String, String> xss = (Map<String, String>) security.get("XSSProtection");
         if (xss != null) {
@@ -291,11 +291,11 @@ final class ResponseHeadersPolicyConfigCodec {
                 }
                 value = v.toString();
             }
-            add.add(new PolicyHeader("X-XSS-Protection", value, override(xss)));
+            add.add(new PolicyHeader("X-XSS-Protection", value, override(xss), false));
         }
         Map<String, String> csp = (Map<String, String>) security.get("ContentSecurityPolicy");
         if (csp != null && csp.get("ContentSecurityPolicy") != null) {
-            add.add(new PolicyHeader("Content-Security-Policy", csp.get("ContentSecurityPolicy"), override(csp)));
+            add.add(new PolicyHeader("Content-Security-Policy", csp.get("ContentSecurityPolicy"), override(csp), false));
         }
     }
 
@@ -311,20 +311,20 @@ final class ResponseHeadersPolicyConfigCodec {
             // CloudFront emits CORS policy headers only for a request whose Origin matches the policy.
             return;
         }
-        add.add(new PolicyHeader("Access-Control-Allow-Origin", allowOrigin, override));
+        add.add(new PolicyHeader("Access-Control-Allow-Origin", allowOrigin, override, true));
         if (!exposeHeadersOnlyOnPreflight || preflightRequest) {
             corsListHeader(cors, "AccessControlExposeHeaders",
                     "Access-Control-Expose-Headers", override, add);
         }
         if (Boolean.parseBoolean(String.valueOf(cors.get("AccessControlAllowCredentials")))) {
-            add.add(new PolicyHeader("Access-Control-Allow-Credentials", "true", override));
+            add.add(new PolicyHeader("Access-Control-Allow-Credentials", "true", override, true));
         }
         if (preflightRequest) {
             corsListHeader(cors, "AccessControlAllowHeaders", "Access-Control-Allow-Headers", override, add);
             corsMethodsHeader(cors, override, add);
             Object maxAge = cors.get("AccessControlMaxAgeSec");
             if (maxAge != null) {
-                add.add(new PolicyHeader("Access-Control-Max-Age", maxAge.toString(), override));
+                add.add(new PolicyHeader("Access-Control-Max-Age", maxAge.toString(), override, true));
             }
         }
     }
@@ -463,7 +463,7 @@ final class ResponseHeadersPolicyConfigCodec {
         if (values == null || values.isEmpty()) {
             return;
         }
-        add.add(new PolicyHeader(header, String.join(", ", values), override));
+        add.add(new PolicyHeader(header, String.join(", ", values), override, true));
     }
 
     @SuppressWarnings("unchecked")
@@ -477,7 +477,7 @@ final class ResponseHeadersPolicyConfigCodec {
                 ? List.of("DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT")
                 : configured;
         add.add(new PolicyHeader("Access-Control-Allow-Methods",
-                String.join(", ", methods), override));
+                String.join(", ", methods), override, true));
     }
 
     private static boolean override(Map<String, String> block) {

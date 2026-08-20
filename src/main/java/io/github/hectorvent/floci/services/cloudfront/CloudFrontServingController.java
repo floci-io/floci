@@ -836,7 +836,7 @@ public class CloudFrontServingController {
             }
             // OriginOverride=false is group-wide for CORS: if the origin supplied any CORS header,
             // CloudFront keeps the origin's CORS response and adds none of the policy's CORS fields.
-            if (isCorsHeader(normalized) && !header.override() && hasOriginCorsHeader) {
+            if (header.cors() && !header.override() && hasOriginCorsHeader) {
                 continue;
             }
             if (header.override() || !headers.containsKey(normalized)) {
