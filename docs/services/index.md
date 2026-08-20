@@ -24,6 +24,7 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [API Gateway v2](api-gateway.md#v2) | `/v2/apis/...` | REST JSON | 48 + data-plane |
 | [IAM](iam.md) | `POST /` with `Action=` param | Query | 76 |
 | [STS](sts.md) | `POST /` with `Action=` param | Query | 7 |
+| [AWS Sign-In](iam.md#aws-sign-in-login-credentials) | `/v1/authorize`, `/v1/token` | REST JSON | 2 |
 | [Cognito](cognito.md) | `POST /` + `X-Amz-Target: AWSCognitoIdentityProviderService.*` | JSON 1.1 | 43 |
 | [KMS](kms.md) | `POST /` + `X-Amz-Target: TrentService.*` | JSON 1.1 | 34 |
 | [CloudHSM v2](cloudhsmv2.md) | `POST /` + `X-Amz-Target: BaldrApiService.*` | JSON 1.1 | 18 |
