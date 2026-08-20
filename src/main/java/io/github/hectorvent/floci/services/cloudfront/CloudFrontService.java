@@ -60,7 +60,7 @@ public class CloudFrontService {
     private static final Pattern HTTP_HEADER_NAME =
             Pattern.compile("[!#$%&'*+.^_`|~0-9A-Za-z-]+");
     private static final Set<String> PROHIBITED_ORIGIN_CUSTOM_HEADERS = Set.of(
-            "authorization", "cache-control", "connection", "content-length", "cookie", "host", "if-match",
+            "cache-control", "connection", "content-length", "cookie", "host", "if-match",
             "if-modified-since", "if-none-match", "if-range", "if-unmodified-since",
             "max-forwards", "pragma", "proxy-authenticate", "proxy-authorization",
             "proxy-connection", "range", "request-range", "te", "trailer", "transfer-encoding",

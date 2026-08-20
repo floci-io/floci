@@ -862,13 +862,13 @@ class CloudFrontDistributionServingTest {
     }
 
     @Test
-    void rejectsAuthorizationOriginCustomHeaders() {
+    void acceptsAuthorizationOriginCustomHeaders() {
         String body = distributionWithOriginCustomHeaders(1, """
                 <OriginCustomHeader>
                   <HeaderName>Authorization</HeaderName>
                   <HeaderValue>Bearer secret</HeaderValue>
                 </OriginCustomHeader>
-                """);
+                """).replace("cf-custom-header-validation", "cf-authorization-custom-header");
 
         given()
             .contentType("application/xml")
@@ -876,8 +876,9 @@ class CloudFrontDistributionServingTest {
         .when()
             .post("/2020-05-31/distribution")
         .then()
-            .statusCode(400)
-            .body(containsString("<Code>InvalidArgument</Code>"));
+            .statusCode(201)
+            .body(containsString("<HeaderName>Authorization</HeaderName>"))
+            .body(containsString("<HeaderValue>Bearer secret</HeaderValue>"));
     }
 
     @Test
