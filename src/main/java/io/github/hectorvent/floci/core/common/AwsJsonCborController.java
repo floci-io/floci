@@ -3,6 +3,9 @@ package io.github.hectorvent.floci.core.common;
 import com.fasterxml.jackson.core.JacksonException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.DecimalNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
 import com.fasterxml.jackson.dataformat.cbor.CBORGenerator;
 import com.google.gson.JsonParseException;
@@ -22,6 +25,8 @@ import org.jboss.logging.Logger;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -77,8 +82,10 @@ public class AwsJsonCborController {
 
     /**
      * Serializes a JsonNode to CBOR bytes, encoding timestamp shapes with CBOR tag 1
-     * (epoch seconds, RFC 8949 section 3.4.2) as required by the smithy-rpc-v2-cbor
-     * protocol specification.
+     * (RFC 8949 section 3.4.2) as required by the smithy-rpc-v2-cbor protocol
+     * specification — as epoch <em>milliseconds</em>, AWS's own convention for tag(1)
+     * on this protocol, not the fractional epoch seconds RFC 8949 uses as its own
+     * example. See {@link #writeCborTimestamp} for why.
      * <p>
      * Package-private so the timestamp-tagging behaviour can be unit-tested directly
      * without booting Quarkus.
@@ -153,18 +160,82 @@ public class AwsJsonCborController {
     }
 
     /**
-     * Writes a numeric node as a CBOR tag(1) epoch-seconds timestamp, preserving
-     * integer-ness. Integral epoch seconds are emitted as a tag(1) integer and
-     * fractional values as a tag(1) float; both are spec-valid (RFC 8949 section 3.4.2)
-     * and accepted by AWS SDK decoders.
+     * Writes a numeric node as a CBOR tag(1) timestamp, converting from this codebase's
+     * internal convention (fractional epoch seconds, matching the plain-JSON protocol)
+     * to epoch milliseconds — AWS's legacy CBOR protocol encodes tag(1) timestamps as
+     * epoch milliseconds under CBOR tag(1), not fractional epoch seconds. See
+     * floci-io/floci#2368: without this conversion, an unmodified AWS SDK for Java v2
+     * client (CBOR by default) decodes every timestamp 1000x too small, and an
+     * {@code AT_TIMESTAMP} Kinesis shard iterator built from a corrupted request-side
+     * timestamp never matches any real record.
+     * <p>
+     * {@code BigDecimal} (not double arithmetic) preserves millisecond precision exactly
+     * and avoids reintroducing the same class of float-precision defect fixed on the
+     * read side of this exact value by #2173/#2359 — {@link JsonNode#decimalValue()}
+     * already handles both integral and floating-point nodes correctly.
      */
     private static void writeCborTimestamp(CBORGenerator gen, JsonNode node) throws Exception {
         gen.writeTag(1);
-        if (node.isIntegralNumber()) {
-            gen.writeNumber(node.longValue());
-        } else {
-            gen.writeNumber(node.doubleValue());
+        BigDecimal epochSeconds = node.decimalValue();
+        long epochMillis = epochSeconds.movePointRight(3).setScale(0, RoundingMode.HALF_UP).longValueExact();
+        gen.writeNumber(epochMillis);
+    }
+
+    /**
+     * Converts every timestamp-shaped field's value in a decoded CBOR request/response
+     * tree from epoch milliseconds (the wire representation under CBOR tag(1), per AWS's
+     * legacy CBOR protocol) back to this codebase's internal convention of fractional
+     * epoch seconds — the inverse of {@link #writeCborTimestamp}. See floci-io/floci#2368.
+     * <p>
+     * Jackson's CBOR module does not preserve tag information into the decoded
+     * {@link JsonNode} tree ({@link #bodyToJson} uses a plain {@code readTree}), so by
+     * the time a request reaches this method the CBOR tag(1) marker is already gone and
+     * a decoded timestamp's raw numeric value is indistinguishable from any other number.
+     * This reuses the same schema-less field-name heuristic ({@link #isTimestampField})
+     * {@link #writeNodeToCbor} already relies on for the identical reason on the response
+     * side, so every service handler continues to see the one convention it already
+     * expects regardless of which wire protocol (CBOR or plain JSON) actually carried the
+     * request — no handler needs to change.
+     * <p>
+     * Mutates the given tree in place (both {@link ObjectNode} and {@link ArrayNode} are
+     * mutable) and returns it, purely for convenient chaining at the call site.
+     */
+    static JsonNode normalizeCborTimestampsFromMillis(JsonNode node) {
+        normalizeCborTimestampsFromMillis(node, false);
+        return node;
+    }
+
+    private static void normalizeCborTimestampsFromMillis(JsonNode node, boolean isTimestamp) {
+        if (node.isObject()) {
+            ObjectNode object = (ObjectNode) node;
+            Iterator<Map.Entry<String, JsonNode>> fields = object.fields();
+            while (fields.hasNext()) {
+                Map.Entry<String, JsonNode> entry = fields.next();
+                boolean fieldIsTimestamp = isTimestampField(entry.getKey());
+                JsonNode value = entry.getValue();
+                if (fieldIsTimestamp && value.isNumber()) {
+                    object.set(entry.getKey(), millisToSeconds(value));
+                } else {
+                    normalizeCborTimestampsFromMillis(value, fieldIsTimestamp);
+                }
+            }
+        } else if (node.isArray()) {
+            ArrayNode array = (ArrayNode) node;
+            for (int i = 0; i < array.size(); i++) {
+                JsonNode item = array.get(i);
+                if (isTimestamp && item.isNumber()) {
+                    array.set(i, millisToSeconds(item));
+                } else {
+                    normalizeCborTimestampsFromMillis(item, isTimestamp);
+                }
+            }
         }
+    }
+
+    /** Exact millis-to-seconds conversion (see {@link #normalizeCborTimestampsFromMillis}). */
+    private static JsonNode millisToSeconds(JsonNode millisNode) {
+        BigDecimal epochMillis = millisNode.decimalValue();
+        return DecimalNode.valueOf(epochMillis.movePointLeft(3));
     }
 
     /**
@@ -222,7 +293,7 @@ public class AwsJsonCborController {
             if( httpHeaders.getRequestHeader("Content-encoding") != null && isGZipped(httpHeaders.getRequestHeader("Content-encoding"))) {
                 body = decodeBody(body);
             }
-            request = CBOR_MAPPER.readTree(body);
+            request = normalizeCborTimestampsFromMillis(CBOR_MAPPER.readTree(body));
         } else {
             request = objectMapper.createObjectNode();
         }

@@ -10,13 +10,19 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Fast, schema-less unit test for {@link AwsJsonCborController#nodeToSmithyCbor(JsonNode)}.
+ * Fast, schema-less unit test for {@link AwsJsonCborController#nodeToSmithyCbor(JsonNode)}
+ * and {@link AwsJsonCborController#normalizeCborTimestampsFromMillis(JsonNode)}.
  * <p>
- * Verifies that timestamp shapes are encoded as CBOR tag(1) values per the
- * smithy-rpc-v2-cbor spec, for both scalar timestamps and timestamp lists, and that
- * integral epoch seconds are preserved as CBOR integers (not floats). CBOR tag 1 is the
- * single byte {@code 0xC1} (major type 6, value 1) immediately preceding the encoded
- * number. These assertions are deterministic and do not boot Quarkus.
+ * Verifies that timestamp shapes are encoded as CBOR tag(1) <em>epoch-millisecond</em>
+ * values per AWS's legacy CBOR protocol convention — not the fractional epoch-second
+ * value RFC 8949 section 3.4.2 itself uses as an example, and not the value that was
+ * actually written under tag(1) before floci-io/floci#2368 was fixed (this file's own
+ * assertions previously locked in that bug as intended behaviour: an integral epoch
+ * *second* value round-tripped unchanged, which is exactly what let an unmodified AWS
+ * SDK for Java v2 client — CBOR by default — decode every timestamp 1000x too small).
+ * CBOR tag 1 is the single byte {@code 0xC1} (major type 6, value 1) immediately
+ * preceding the encoded number. These assertions are deterministic and do not boot
+ * Quarkus.
  * <p>
  * The end-to-end acceptance gate that tag(1)+integer is actually accepted by
  * aws-sdk-go-v2 / smithy-go is the OTel awscloudwatch receiver run; this test guards the
@@ -26,7 +32,6 @@ class AwsJsonCborSerializerTest {
 
     private static final byte CBOR_TAG_1 = (byte) 0xC1;
     private static final int CBOR_MAJOR_UNSIGNED_INT = 0; // major type 0
-    private static final int CBOR_MAJOR_FLOAT = 7;         // major type 7 (0xF9/0xFA/0xFB)
 
     private final ObjectMapper jsonMapper = new ObjectMapper();
     private final ObjectMapper cborMapper = new ObjectMapper(new CBORFactory());
@@ -48,7 +53,7 @@ class AwsJsonCborSerializerTest {
     }
 
     @Test
-    void scalarTimestampIsTaggedAsInteger() throws Exception {
+    void scalarTimestampIsTaggedAsIntegerMillis() throws Exception {
         JsonNode node = jsonMapper.readTree("{\"Timestamp\": 1700000000}");
 
         byte[] cbor = AwsJsonCborController.nodeToSmithyCbor(node);
@@ -60,15 +65,18 @@ class AwsJsonCborSerializerTest {
         assertTrue(tagIndex >= 0, "tag(1) byte must be present");
         assertTrue(tagIndex + 1 < cbor.length, "tag(1) byte must not be the last byte in the output");
         assertEquals(CBOR_MAJOR_UNSIGNED_INT, majorType(cbor[tagIndex + 1]),
-                "integral epoch seconds must be encoded as a CBOR integer, not a float");
+                "epoch millis must be encoded as a CBOR integer, not a float");
 
+        // 1700000000 epoch SECONDS (this codebase's internal convention) must be written
+        // under tag(1) as 1700000000000 epoch MILLISECONDS (AWS's real CBOR convention) —
+        // not the same number unchanged, which is exactly the pre-#2368-fix bug.
         JsonNode decoded = cborMapper.readTree(cbor);
         assertTrue(decoded.path("Timestamp").isIntegralNumber(), "decoded timestamp must be integral");
-        assertEquals(1700000000L, decoded.path("Timestamp").asLong());
+        assertEquals(1700000000000L, decoded.path("Timestamp").asLong());
     }
 
     @Test
-    void timestampListTagsEveryElementAsInteger() throws Exception {
+    void timestampListTagsEveryElementAsIntegerMillis() throws Exception {
         // Core regression guard for CloudWatch GetMetricData: every element of a
         // Timestamps list must be tagged (not just a scalar named "Timestamp").
         JsonNode node = jsonMapper.readTree("{\"Timestamps\": [1700000000, 1700000060]}");
@@ -89,8 +97,8 @@ class AwsJsonCborSerializerTest {
         JsonNode ts = decoded.path("Timestamps");
         assertTrue(ts.isArray());
         assertEquals(2, ts.size());
-        assertEquals(1700000000L, ts.get(0).asLong());
-        assertEquals(1700000060L, ts.get(1).asLong());
+        assertEquals(1700000000000L, ts.get(0).asLong());
+        assertEquals(1700000060000L, ts.get(1).asLong());
     }
 
     @Test
@@ -102,22 +110,61 @@ class AwsJsonCborSerializerTest {
         byte[] cbor = AwsJsonCborController.nodeToSmithyCbor(node);
 
         assertEquals(1, countTag1(cbor), "a *Timestamp-suffixed field must be tagged");
-        assertEquals(1700000000L, cborMapper.readTree(cbor).path("StateUpdatedTimestamp").asLong());
+        assertEquals(1700000000000L, cborMapper.readTree(cbor).path("StateUpdatedTimestamp").asLong());
     }
 
     @Test
-    void fractionalTimestampIsTaggedAsFloat() throws Exception {
-        // A non-integral timestamp is a valid tag(1) floating-point value (RFC 8949 3.4.2).
-        JsonNode node = jsonMapper.readTree("{\"Timestamp\": 1700000000.5}");
+    void millisecondPrecisionFractionalTimestampBecomesAnExactIntegerMillisValue() throws Exception {
+        // A fractional epoch-SECONDS value with real AWS's own millisecond-precision limit
+        // (3 decimal places) converts to an EXACT integer number of milliseconds - not a
+        // float - once written under tag(1). This is the realistic case (AWS timestamps
+        // never carry sub-millisecond precision) and the actual reproducer from
+        // floci-io/floci#2368: 1700000000.712s -> 1700000000712ms, exactly.
+        JsonNode node = jsonMapper.readTree("{\"Timestamp\": 1700000000.712}");
 
         byte[] cbor = AwsJsonCborController.nodeToSmithyCbor(node);
 
-        assertEquals(1, countTag1(cbor), "fractional Timestamp must still be tagged");
         int tagIndex = indexOf(cbor, CBOR_TAG_1);
+        assertTrue(tagIndex >= 0, "tag(1) byte must be present");
         assertTrue(tagIndex + 1 < cbor.length, "tag(1) byte must not be the last byte in the output");
-        assertEquals(CBOR_MAJOR_FLOAT, majorType(cbor[tagIndex + 1]),
-                "fractional epoch seconds must be encoded as a CBOR float");
-        assertEquals(1700000000.5, cborMapper.readTree(cbor).path("Timestamp").asDouble());
+        assertEquals(CBOR_MAJOR_UNSIGNED_INT, majorType(cbor[tagIndex + 1]),
+                "millisecond-precision epoch seconds must convert to an exact integer number "
+                        + "of milliseconds, not a float");
+
+        JsonNode decoded = cborMapper.readTree(cbor);
+        assertTrue(decoded.path("Timestamp").isIntegralNumber(), "decoded millis value must be integral");
+        assertEquals(1700000000712L, decoded.path("Timestamp").asLong());
+    }
+
+    @Test
+    void roundTripsThroughEncodeAndDecodeBackToTheOriginalEpochSecondsValue() throws Exception {
+        // The actual end-to-end guarantee that matters: whatever normalizeCborTimestampsFromMillis
+        // decodes back out must equal what nodeToSmithyCbor was given, for both an integral
+        // and a millisecond-precision fractional epoch-seconds value - proving the two
+        // directions are genuine inverses of each other, not just independently plausible.
+        JsonNode integral = jsonMapper.readTree("{\"Timestamp\": 1700000000}");
+        JsonNode fractional = jsonMapper.readTree("{\"Timestamp\": 1700000000.712}");
+
+        JsonNode decodedIntegral = AwsJsonCborController.normalizeCborTimestampsFromMillis(
+                cborMapper.readTree(AwsJsonCborController.nodeToSmithyCbor(integral)));
+        JsonNode decodedFractional = AwsJsonCborController.normalizeCborTimestampsFromMillis(
+                cborMapper.readTree(AwsJsonCborController.nodeToSmithyCbor(fractional)));
+
+        assertEquals(1700000000, decodedIntegral.path("Timestamp").decimalValue().doubleValue());
+        assertEquals(1700000000.712, decodedFractional.path("Timestamp").decimalValue().doubleValue());
+    }
+
+    @Test
+    void nonTimestampFieldIsNotConvertedByNormalization() {
+        // normalizeCborTimestampsFromMillis must use the identical field-name heuristic as
+        // the writer - a plain numeric field (e.g. CloudWatch Period) must pass through
+        // completely unchanged, exactly mirroring nonTimestampNumberIsNotTagged below for
+        // the write direction.
+        JsonNode node = jsonMapper.createObjectNode().put("Period", 60);
+
+        JsonNode normalized = AwsJsonCborController.normalizeCborTimestampsFromMillis(node);
+
+        assertEquals(60L, normalized.path("Period").asLong());
     }
 
     @Test
