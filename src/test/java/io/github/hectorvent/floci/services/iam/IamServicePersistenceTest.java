@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.iam.model.IamRole;
 import io.github.hectorvent.floci.services.iam.model.IamUser;
 import io.github.hectorvent.floci.services.iam.model.InstanceProfile;
 import io.github.hectorvent.floci.services.iam.model.OpenIDConnectProvider;
+import io.github.hectorvent.floci.services.iam.model.PasswordPolicy;
 import io.github.hectorvent.floci.services.iam.model.SessionCredential;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -83,6 +84,20 @@ class IamServicePersistenceTest {
         assertEquals("LambdaExec", restarted.getRole("LambdaExec").getRoleName());
     }
 
+    @Test
+    void accountPasswordPolicySurvivesRestart(@TempDir Path dir) {
+        IamService first = newService(dir);
+        first.updateAccountPasswordPolicy(14, true, true, true, true, true, 90, 5, true);
+
+        IamService restarted = newService(dir);
+
+        PasswordPolicy reloaded = restarted.getAccountPasswordPolicy();
+        assertEquals(14, reloaded.getMinimumPasswordLength());
+        assertEquals(90, reloaded.getMaxPasswordAge());
+        assertEquals(5, reloaded.getPasswordReusePrevention());
+        assertEquals(Boolean.TRUE, reloaded.getHardExpiry());
+    }
+
     private IamService newService(Path dir) {
         return new IamService(
                 load(dir, "iam-users.json", new TypeReference<Map<String, IamUser>>() {}),
@@ -95,6 +110,7 @@ class IamServicePersistenceTest {
                 load(dir, "iam-account-aliases.json", new TypeReference<Map<String, String>>() {}),
                 load(dir, "iam-oidc-providers.json", new TypeReference<Map<String, OpenIDConnectProvider>>() {}),
                 load(dir, "iam-slr-deletions.json", new TypeReference<Map<String, String>>() {}),
+                load(dir, "iam-password-policy.json", new TypeReference<Map<String, PasswordPolicy>>() {}),
                 new RegionResolver("us-east-1", "000000000000"),
                 false,
                 null);

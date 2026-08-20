@@ -16,6 +16,7 @@ import io.github.hectorvent.floci.services.iam.model.IamRole;
 import io.github.hectorvent.floci.services.iam.model.IamUser;
 import io.github.hectorvent.floci.services.iam.model.InstanceProfile;
 import io.github.hectorvent.floci.services.iam.model.OpenIDConnectProvider;
+import io.github.hectorvent.floci.services.iam.model.PasswordPolicy;
 import io.github.hectorvent.floci.services.iam.model.PolicyVersion;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import io.github.hectorvent.floci.services.iam.model.SessionCredential;
@@ -57,6 +58,7 @@ public class IamService implements SessionAccountLookup {
     private static final String DEFAULT_DEPLOYER_ACCESS_KEY_ID = "floci";
     private static final String DEFAULT_DEPLOYER_SECRET_ACCESS_KEY = "floci";
     private static final String ACCOUNT_ALIAS_KEY = "account-alias";
+    private static final String PASSWORD_POLICY_KEY = "password-policy";
     /** As AWS documents it: no leading or trailing dash, and no two dashes in a row. */
     private static final Pattern ACCOUNT_ALIAS_PATTERN =
             Pattern.compile("^[a-z0-9]([a-z0-9]|-(?!-)){1,61}[a-z0-9]$");
@@ -88,6 +90,15 @@ public class IamService implements SessionAccountLookup {
      * single value, and the store is already account-namespaced, so no further keying is needed.
      */
     private final StorageBackend<String, String> accountAliases;
+    /**
+     * Holds at most one entry per account under {@link #PASSWORD_POLICY_KEY} — like
+     * {@link #accountAliases}, the account's password policy is a single value and the
+     * store is already account-namespaced, so no further keying is needed. Unlike an
+     * alias there is no uniqueness check to race on, so this needs no lock: every write
+     * fully replaces the prior policy (UpdateAccountPasswordPolicy is a whole-value PUT,
+     * not a partial patch).
+     */
+    private final StorageBackend<String, PasswordPolicy> passwordPolicies;
     /**
      * Guards the check-then-write in alias create/delete. Unlike a named resource, where two
      * racing creates carry the same name and either winner is equivalent, racing alias creates
@@ -122,6 +133,7 @@ public class IamService implements SessionAccountLookup {
             storageFactory.create("iam", "iam-account-aliases.json", new TypeReference<>() {}),
             storageFactory.create("iam", "iam-oidc-providers.json", new TypeReference<>() {}),
             storageFactory.create("iam", "iam-slr-deletions.json", new TypeReference<>() {}),
+            storageFactory.create("iam", "iam-password-policy.json", new TypeReference<>() {}),
             regionResolver,
             config.services().iam().seedDeployerPrincipal(),
             config.services().iam().accountAlias().orElse(null)
@@ -150,6 +162,7 @@ public class IamService implements SessionAccountLookup {
                boolean seedDeployerPrincipal) {
         this(users, groups, roles, policies, accessKeys, instanceProfiles, sessions,
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
                 regionResolver, seedDeployerPrincipal, null);
     }
 
@@ -163,6 +176,7 @@ public class IamService implements SessionAccountLookup {
                StorageBackend<String, String> accountAliases,
                StorageBackend<String, OpenIDConnectProvider> oidcProviders,
                StorageBackend<String, String> serviceLinkedRoleDeletions,
+               StorageBackend<String, PasswordPolicy> passwordPolicies,
                RegionResolver regionResolver,
                boolean seedDeployerPrincipal,
                String seededAccountAlias) {
@@ -176,6 +190,7 @@ public class IamService implements SessionAccountLookup {
         this.accountAliases = accountAliases;
         this.oidcProviders = oidcProviders;
         this.serviceLinkedRoleDeletions = serviceLinkedRoleDeletions;
+        this.passwordPolicies = passwordPolicies;
         this.regionResolver = regionResolver;
         this.seedDeployerPrincipal = seedDeployerPrincipal;
         this.seededAccountAlias = seededAccountAlias;
@@ -1341,6 +1356,67 @@ public class IamService implements SessionAccountLookup {
                             + "characters and maximum length of 63 characters, contain only digits, lowercase "
                             + "letters, and hyphens (-), but cannot begin or end with a hyphen.", 400);
         }
+    }
+
+    // =========================================================================
+    // Account Password Policy
+    // =========================================================================
+
+    /**
+     * {@code GetAccountPasswordPolicy} errors {@code NoSuchEntity} when the account has never
+     * called {@code UpdateAccountPasswordPolicy} — AWS ships no implicit default policy that a
+     * fresh account can read back, only defaults {@code UpdateAccountPasswordPolicy} itself
+     * applies to any field the caller omits.
+     */
+    public PasswordPolicy getAccountPasswordPolicy() {
+        return passwordPolicies.get(PASSWORD_POLICY_KEY)
+                .orElseThrow(() -> new AwsException("NoSuchEntity",
+                        "The Password Policy with domain name AccountPasswordPolicy cannot be found.", 404));
+    }
+
+    /**
+     * A whole-value replace, matching real IAM: any field the caller omits from the request
+     * reverts to its documented default rather than keeping the prior policy's value, so the
+     * XML-parameter layer above resolves every field to a default before calling this, and
+     * nothing here reads the previous policy.
+     */
+    public void updateAccountPasswordPolicy(int minimumPasswordLength, boolean requireSymbols,
+            boolean requireNumbers, boolean requireUppercaseCharacters, boolean requireLowercaseCharacters,
+            boolean allowUsersToChangePassword, Integer maxPasswordAge, Integer passwordReusePrevention,
+            Boolean hardExpiry) {
+        if (minimumPasswordLength < 6 || minimumPasswordLength > 128) {
+            throw new AwsException("ValidationError",
+                    "MinimumPasswordLength must be between 6 and 128.", 400);
+        }
+        if (maxPasswordAge != null && (maxPasswordAge < 1 || maxPasswordAge > 1095)) {
+            throw new AwsException("ValidationError",
+                    "MaxPasswordAge must be between 1 and 1095.", 400);
+        }
+        if (passwordReusePrevention != null && (passwordReusePrevention < 1 || passwordReusePrevention > 24)) {
+            throw new AwsException("ValidationError",
+                    "PasswordReusePrevention must be between 1 and 24.", 400);
+        }
+        PasswordPolicy policy = new PasswordPolicy();
+        policy.setMinimumPasswordLength(minimumPasswordLength);
+        policy.setRequireSymbols(requireSymbols);
+        policy.setRequireNumbers(requireNumbers);
+        policy.setRequireUppercaseCharacters(requireUppercaseCharacters);
+        policy.setRequireLowercaseCharacters(requireLowercaseCharacters);
+        policy.setAllowUsersToChangePassword(allowUsersToChangePassword);
+        policy.setMaxPasswordAge(maxPasswordAge);
+        policy.setPasswordReusePrevention(passwordReusePrevention);
+        policy.setHardExpiry(hardExpiry);
+        passwordPolicies.put(PASSWORD_POLICY_KEY, policy);
+        LOG.infov("Set IAM account password policy: minLength={0}", minimumPasswordLength);
+    }
+
+    /**
+     * Idempotent, like {@link #deleteAccountAlias} is not: real {@code DeleteAccountPasswordPolicy}
+     * succeeds whether or not a policy is currently set, so this never checks for one first.
+     */
+    public void deleteAccountPasswordPolicy() {
+        passwordPolicies.delete(PASSWORD_POLICY_KEY);
+        LOG.infov("Deleted IAM account password policy");
     }
 
     // OIDC Identity Providers

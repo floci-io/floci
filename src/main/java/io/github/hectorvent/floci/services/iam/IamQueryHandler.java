@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.services.iam.model.IamRole;
 import io.github.hectorvent.floci.services.iam.model.IamUser;
 import io.github.hectorvent.floci.services.iam.model.InstanceProfile;
 import io.github.hectorvent.floci.services.iam.model.OpenIDConnectProvider;
+import io.github.hectorvent.floci.services.iam.model.PasswordPolicy;
 import io.github.hectorvent.floci.services.iam.model.PolicyVersion;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -82,6 +83,11 @@ public class IamQueryHandler {
             case "ListAccountAliases" -> handleListAccountAliases(params);
             case "CreateAccountAlias" -> handleCreateAccountAlias(params);
             case "DeleteAccountAlias" -> handleDeleteAccountAlias(params);
+
+            // Account Password Policy
+            case "UpdateAccountPasswordPolicy" -> handleUpdateAccountPasswordPolicy(params);
+            case "GetAccountPasswordPolicy" -> handleGetAccountPasswordPolicy(params);
+            case "DeleteAccountPasswordPolicy" -> handleDeleteAccountPasswordPolicy(params);
 
             // Groups
             case "CreateGroup" -> handleCreateGroup(params);
@@ -432,6 +438,57 @@ public class IamQueryHandler {
     private Response handleDeleteAccountAlias(MultivaluedMap<String, String> params) {
         iamService.deleteAccountAlias(getParam(params, "AccountAlias"));
         return Response.ok(AwsQueryResponse.envelopeNoResult("DeleteAccountAlias", AwsNamespaces.IAM)).build();
+    }
+
+    // =========================================================================
+    // Account Password Policy
+    // =========================================================================
+
+    // UpdateAccountPasswordPolicy is a whole-value PUT: every field the caller omits from the
+    // request resolves to its documented default here, rather than falling back to whatever the
+    // stored policy already had, matching real IAM's own semantics.
+    private Response handleUpdateAccountPasswordPolicy(MultivaluedMap<String, String> params) {
+        iamService.updateAccountPasswordPolicy(
+                getIntParam(params, "MinimumPasswordLength", 6),
+                getBooleanParam(params, "RequireSymbols", false),
+                getBooleanParam(params, "RequireNumbers", false),
+                getBooleanParam(params, "RequireUppercaseCharacters", false),
+                getBooleanParam(params, "RequireLowercaseCharacters", false),
+                getBooleanParam(params, "AllowUsersToChangePassword", false),
+                getOptionalIntParam(params, "MaxPasswordAge"),
+                getOptionalIntParam(params, "PasswordReusePrevention"),
+                getOptionalBooleanParam(params, "HardExpiry"));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("UpdateAccountPasswordPolicy", AwsNamespaces.IAM)).build();
+    }
+
+    private Response handleGetAccountPasswordPolicy(MultivaluedMap<String, String> params) {
+        PasswordPolicy policy = iamService.getAccountPasswordPolicy();
+        var xml = new XmlBuilder().start("PasswordPolicy")
+                .elem("MinimumPasswordLength", policy.getMinimumPasswordLength())
+                .elem("RequireSymbols", policy.isRequireSymbols())
+                .elem("RequireNumbers", policy.isRequireNumbers())
+                .elem("RequireUppercaseCharacters", policy.isRequireUppercaseCharacters())
+                .elem("RequireLowercaseCharacters", policy.isRequireLowercaseCharacters())
+                .elem("AllowUsersToChangePassword", policy.isAllowUsersToChangePassword())
+                // AWS computes ExpirePasswords rather than storing it: true whenever a max
+                // password age is set, false otherwise — never omitted like the three fields below.
+                .elem("ExpirePasswords", policy.getMaxPasswordAge() != null && policy.getMaxPasswordAge() > 0);
+        if (policy.getMaxPasswordAge() != null) {
+            xml.elem("MaxPasswordAge", policy.getMaxPasswordAge());
+        }
+        if (policy.getPasswordReusePrevention() != null) {
+            xml.elem("PasswordReusePrevention", policy.getPasswordReusePrevention());
+        }
+        if (policy.getHardExpiry() != null) {
+            xml.elem("HardExpiry", policy.getHardExpiry());
+        }
+        xml.end("PasswordPolicy");
+        return Response.ok(AwsQueryResponse.envelope("GetAccountPasswordPolicy", AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    private Response handleDeleteAccountPasswordPolicy(MultivaluedMap<String, String> params) {
+        iamService.deleteAccountPasswordPolicy();
+        return Response.ok(AwsQueryResponse.envelopeNoResult("DeleteAccountPasswordPolicy", AwsNamespaces.IAM)).build();
     }
 
     // =========================================================================
@@ -1279,6 +1336,26 @@ public class IamQueryHandler {
         } catch (NumberFormatException e) {
             return defaultValue;
         }
+    }
+
+    private Integer getOptionalIntParam(MultivaluedMap<String, String> params, String name) {
+        String value = params.getFirst(name);
+        if (value == null) return null;
+        try {
+            return Integer.parseInt(value);
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    private boolean getBooleanParam(MultivaluedMap<String, String> params, String name, boolean defaultValue) {
+        String value = params.getFirst(name);
+        return value == null ? defaultValue : Boolean.parseBoolean(value);
+    }
+
+    private Boolean getOptionalBooleanParam(MultivaluedMap<String, String> params, String name) {
+        String value = params.getFirst(name);
+        return value == null ? null : Boolean.parseBoolean(value);
     }
 
     Response xmlErrorResponse(String code, String message, int status) {
