@@ -28,8 +28,11 @@ public class Bucket {
     private String publicAccessBlockConfiguration; // XML string
     private String ownershipControlsConfiguration; // XML string
     private String requestPaymentPayer; // "BucketOwner" (default) or "Requester"; null until first PUT
+    private String accelerateStatus; // "Enabled" or "Suspended"; null until first PUT
     private String region;
     private WebsiteConfiguration websiteConfiguration;
+    /** CloudWatch request metrics configurations, keyed by the id they were stored under. */
+    private Map<String, String> metricsConfigurations;
 
     public Bucket() {
         this.tags = new HashMap<>();
@@ -108,9 +111,15 @@ public class Bucket {
     public String getRequestPaymentPayer() { return requestPaymentPayer; }
     public void setRequestPaymentPayer(String requestPaymentPayer) { this.requestPaymentPayer = requestPaymentPayer; }
 
+    public String getAccelerateStatus() { return accelerateStatus; }
+    public void setAccelerateStatus(String accelerateStatus) { this.accelerateStatus = accelerateStatus; }
+
     public String getRegion() { return region; }
     public void setRegion(String region) { this.region = region; }
 
     public WebsiteConfiguration getWebsiteConfiguration() { return websiteConfiguration; }
     public void setWebsiteConfiguration(WebsiteConfiguration websiteConfiguration) { this.websiteConfiguration = websiteConfiguration; }
+
+    public Map<String, String> getMetricsConfigurations() { return metricsConfigurations; }
+    public void setMetricsConfigurations(Map<String, String> metricsConfigurations) { this.metricsConfigurations = metricsConfigurations; }
 }

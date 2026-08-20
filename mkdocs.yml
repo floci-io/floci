@@ -65,6 +65,7 @@ nav:
     - Environment Variables: configuration/environment-variables.md
     - Docker Images: configuration/docker-images.md
     - Docker Compose: configuration/docker-compose.md
+    - Docker Configuration: configuration/docker.md
     - Ports Reference: configuration/ports.md
     - Multi-Account Isolation: configuration/multi-account.md
     - Storage Modes: configuration/storage.md
@@ -79,17 +80,21 @@ nav:
     - SNS: services/sns.md
     - SES: services/ses.md
     - S3: services/s3.md
+    - S3 Tables: services/s3tables.md
+    - S3 Vectors: services/s3vectors.md
     - DynamoDB: services/dynamodb.md
     - Lambda: services/lambda.md
     - Lambda MicroVMs: services/lambda-microvms.md
     - API Gateway: services/api-gateway.md
     - Cognito: services/cognito.md
     - KMS: services/kms.md
+    - CloudHSM v2: services/cloudhsmv2.md
     - Kinesis: services/kinesis.md
     - Managed Service for Apache Flink: services/kinesisanalytics.md
     - Secrets Manager: services/secrets-manager.md
     - CloudFormation: services/cloudformation.md
     - Step Functions: services/step-functions.md
+    - SWF: services/swf.md
     - IAM: services/iam.md
     - STS: services/sts.md
     - ElastiCache: services/elasticache.md
@@ -97,6 +102,7 @@ nav:
     - RDS: services/rds.md
     - RDS Data API: services/rds-data.md
     - MSK (Kafka): services/msk.md
+    - Amazon MQ: services/amazonmq.md
     - Glue: services/glue.md
     - Neptune: services/neptune.md
     - DocumentDB: services/docdb.md
@@ -107,6 +113,7 @@ nav:
     - EventBridge Scheduler: services/scheduler.md
     - CloudWatch: services/cloudwatch.md
     - CloudWatch RUM: services/rum.md
+    - GuardDuty: services/guardduty.md
     - ACM: services/acm.md
     - ECS: services/ecs.md
     - ECR: services/ecr.md
@@ -118,8 +125,10 @@ nav:
     - Lightsail: services/lightsail.md
     - AppConfig: services/appconfig.md
     - Bedrock Runtime: services/bedrock-runtime.md
+    - Bedrock AgentCore: services/bedrock-agentcore.md
     - ELB v2: services/elb.md
     - Auto Scaling: services/autoscaling.md
+    - Application Auto Scaling: services/applicationautoscaling.md
     - Elastic Beanstalk: services/elastic-beanstalk.md
     - CodeBuild: services/codebuild.md
     - AWS Batch: services/batch.md

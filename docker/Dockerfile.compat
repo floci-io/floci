@@ -17,10 +17,38 @@ ENV AWS_ACCESS_KEY_ID=test
 ENV AWS_SECRET_ACCESS_KEY=test
 ENV AWS_ENDPOINT_URL="http://localhost:4566"
 ENV AWS_CONFIG_FILE=/etc/floci/aws/config
+ENV AWS_PAGER=""
 
+# AWS CLI v2. v1 (the only version pip3 install awscli can give you) resolves
+# a fixed set of services (SQS, RDS, DocDB, Neptune, EMR, Health) through
+# awscli/customizations/overridesslcommonname.py, which forces the real AWS
+# endpoint whenever no --endpoint-url flag is passed on the command line —
+# no environment variable, including AWS_ENDPOINT_URL and the per-service
+# AWS_ENDPOINT_URL_<SERVICE> overrides, can redirect it (aws/aws-cli#8737).
+# v2 has no equivalent override and resolves every service through the
+# normal endpoint chain, so AWS_ENDPOINT_URL alone is sufficient.
+#
+# v1 also entered maintenance mode 2026-07-15 (EOL 2027-07-15), so this is
+# needed regardless of the endpoint-resolution bug.
+#
+# cli_binary_format has no env var in v2 (its provider chain is config-file,
+# then a base64 constant), so blob params default to base64 here, same as
+# a v2 install against real AWS. A hook passing raw bytes (e.g.
+# aws lambda invoke --payload) needs --cli-binary-format raw-in-base64-out.
+ARG AWSCLI_VERSION=2.36.24
 USER root
-RUN microdnf install -y --nodocs python3 python3-pip \
-    && pip3 install --no-cache-dir awscli boto3 \
+RUN microdnf install -y --nodocs python3 python3-pip unzip \
+    && pip3 install --no-cache-dir boto3 \
+    && case "$(uname -m)" in \
+         x86_64)  arch=x86_64 ;; \
+         aarch64) arch=aarch64 ;; \
+         *) echo "unsupported arch: $(uname -m)" >&2; exit 1 ;; \
+       esac \
+    && curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-${arch}-${AWSCLI_VERSION}.zip" -o /tmp/awscliv2.zip \
+    && unzip -q /tmp/awscliv2.zip -d /tmp \
+    && /tmp/aws/install --bin-dir /usr/bin --install-dir /usr/local/aws-cli \
+    && rm -rf /tmp/awscliv2.zip /tmp/aws \
+    && microdnf remove -y unzip \
     && microdnf clean all \
     && rm -rf /root/.cache/pip
 

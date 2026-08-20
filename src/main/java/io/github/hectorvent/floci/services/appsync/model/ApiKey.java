@@ -11,6 +11,7 @@ public class ApiKey {
     private String id;
     private String description;
     private Long expires;
+    private Long deletes;
     private String apiId;
     private String apiKey;
 
@@ -22,6 +23,9 @@ public class ApiKey {
 
     public Long getExpires() { return expires; }
     public void setExpires(Long expires) { this.expires = expires; }
+
+    public Long getDeletes() { return deletes; }
+    public void setDeletes(Long deletes) { this.deletes = deletes; }
 
     public String getApiId() { return apiId; }
     public void setApiId(String apiId) { this.apiId = apiId; }

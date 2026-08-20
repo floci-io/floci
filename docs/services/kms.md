@@ -28,6 +28,7 @@
 | `GenerateMac` | Generate a MAC with an HMAC key |
 | `VerifyMac` | Verify a MAC with an HMAC key |
 | `CreateAlias` | Create a friendly name for a key |
+| `UpdateAlias` | Repoint an alias at a different key |
 | `DeleteAlias` | Remove an alias |
 | `ListAliases` | List all aliases |
 | `ScheduleKeyDeletion` | Mark a key for deletion |

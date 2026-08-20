@@ -210,7 +210,9 @@ public class CloudFormationQueryHandler {
         List<String> capabilities = extractList(params, "Capabilities.member.");
         Map<String, String> tags = extractTags(params);
 
-        ChangeSet cs = cfnService.createChangeSet(stackName, changeSetName, changeSetType,
+        // The CreateChangeSet operation, unlike the change sets CreateStack/UpdateStack build
+        // internally, may attach a CREATE change set to a stack still in REVIEW_IN_PROGRESS.
+        ChangeSet cs = cfnService.createChangeSetForRequest(stackName, changeSetName, changeSetType,
                 templateBody, templateUrl, parameters, capabilities, tags, region);
 
         String xml = new XmlBuilder()

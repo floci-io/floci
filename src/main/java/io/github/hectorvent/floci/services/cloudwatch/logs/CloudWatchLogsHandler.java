@@ -135,12 +135,17 @@ public class CloudWatchLogsHandler {
     private Response handleDescribeLogStreams(JsonNode request, String region) {
         String groupName = resolveLogGroupName(request);
         String prefix = request.path("logStreamNamePrefix").asText(null);
-        List<LogStream> streams = logsService.describeLogStreams(groupName, prefix, region);
+        String orderBy = request.path("orderBy").asText(null);
+        boolean descending = request.path("descending").asBoolean(false);
+        int limit = request.path("limit").asInt(0);
+        String nextToken = request.has("nextToken") ? request.path("nextToken").asText(null) : null;
+        CloudWatchLogsService.DescribeLogStreamsResult result =
+                logsService.describeLogStreams(groupName, prefix, orderBy, descending, limit, nextToken, region);
 
         String logGroupArn = logsService.buildArn(groupName, region);
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode streamsArray = objectMapper.createArrayNode();
-        for (LogStream s : streams) {
+        for (LogStream s : result.logStreams()) {
             ObjectNode node = objectMapper.createObjectNode();
             node.put("logStreamName", s.getLogStreamName());
             node.put("arn", logGroupArn + ":log-stream:" + s.getLogStreamName());
@@ -157,6 +162,9 @@ public class CloudWatchLogsHandler {
             streamsArray.add(node);
         }
         response.set("logStreams", streamsArray);
+        if (result.nextToken() != null) {
+            response.put("nextToken", result.nextToken());
+        }
         return Response.ok(response).build();
     }
 
@@ -203,12 +211,14 @@ public class CloudWatchLogsHandler {
         Long endTime = request.has("endTime") ? request.path("endTime").asLong() : null;
         String filterPattern = request.path("filterPattern").asText(null);
         int limit = request.path("limit").asInt(0);
+        String nextToken = request.has("nextToken") ? request.path("nextToken").asText(null) : null;
 
         List<String> streamNames = new ArrayList<>();
         request.path("logStreamNames").forEach(n -> streamNames.add(resolveLogStreamName(n.asText(null))));
 
         CloudWatchLogsService.FilteredLogEventsResult result =
-                logsService.filterLogEvents(groupName, streamNames, startTime, endTime, filterPattern, limit, region);
+                logsService.filterLogEvents(groupName, streamNames, startTime, endTime, filterPattern, limit,
+                        nextToken, region);
 
         ObjectNode response = objectMapper.createObjectNode();
         response.set("events", buildFilteredEventsArray(result.events()));

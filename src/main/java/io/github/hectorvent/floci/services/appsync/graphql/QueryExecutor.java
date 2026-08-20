@@ -30,11 +30,17 @@ public class QueryExecutor {
 
     public Map<String, Object> execute(GraphQLSchema schema, String query,
                                        Map<String, Object> variables, String operationName) {
-        return execute(SchemaRegistry.buildGraphQL(schema), query, variables, operationName);
+        return execute(SchemaRegistry.buildGraphQL(schema), query, variables, operationName, Map.of());
     }
 
     public Map<String, Object> execute(GraphQL graphQL, String query,
                                        Map<String, Object> variables, String operationName) {
+        return execute(graphQL, query, variables, operationName, Map.of());
+    }
+
+    public Map<String, Object> execute(GraphQL graphQL, String query,
+                                       Map<String, Object> variables, String operationName,
+                                       Map<Object, Object> graphQLContext) {
         List<OperationDefinition> operations = parseOperations(query);
         if (operations.size() > 1 && (operationName == null || operationName.isBlank())) {
             throw new AppSyncTransportException(400, "BadRequestException",
@@ -58,6 +64,9 @@ public class QueryExecutor {
         }
         if (operationName != null && !operationName.isBlank()) {
             inputBuilder.operationName(operationName);
+        }
+        if (graphQLContext != null && !graphQLContext.isEmpty()) {
+            inputBuilder.graphQLContext(graphQLContext);
         }
 
         ExecutionResult result = graphQL.execute(inputBuilder.build());

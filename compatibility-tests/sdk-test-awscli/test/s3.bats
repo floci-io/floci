@@ -305,3 +305,37 @@ EOF
 
     rm -f "$large_file"
 }
+
+@test "S3: metrics configurations round-trip and never touch the bucket" {
+    aws_cmd s3api create-bucket --bucket "$BUCKET" >/dev/null
+
+    run aws_cmd s3api put-bucket-metrics-configuration \
+        --bucket "$BUCKET" --id EntireBucket --metrics-configuration 'Id=EntireBucket'
+    assert_success
+
+    run aws_cmd s3api get-bucket-metrics-configuration --bucket "$BUCKET" --id EntireBucket
+    assert_success
+    [ "$(json_get "$output" '.MetricsConfiguration.Id')" = "EntireBucket" ]
+
+    run aws_cmd s3api put-bucket-metrics-configuration \
+        --bucket "$BUCKET" --id Filtered \
+        --metrics-configuration 'Id=Filtered,Filter={And={Prefix=logs/,Tags=[{Key=env,Value=prod}]}}'
+    assert_success
+
+    run aws_cmd s3api list-bucket-metrics-configurations --bucket "$BUCKET"
+    assert_success
+    [ "$(json_get "$output" '.MetricsConfigurationList | length')" = "2" ]
+    [ "$(json_get "$output" '.MetricsConfigurationList[1].Filter.And.Prefix')" = "logs/" ]
+    [ "$(json_get "$output" '.MetricsConfigurationList[1].Filter.And.Tags[0].Key')" = "env" ]
+
+    # A sub-resource DELETE removes only that configuration; the bucket must survive it.
+    run aws_cmd s3api delete-bucket-metrics-configuration --bucket "$BUCKET" --id EntireBucket
+    assert_success
+
+    run aws_cmd s3api head-bucket --bucket "$BUCKET"
+    assert_success
+
+    run aws_cmd s3api get-bucket-metrics-configuration --bucket "$BUCKET" --id EntireBucket
+    assert_failure
+    assert_output --partial "NoSuchConfiguration"
+}

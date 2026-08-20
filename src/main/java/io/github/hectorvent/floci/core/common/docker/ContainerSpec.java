@@ -23,6 +23,7 @@ import java.util.Map;
  * @param mounts Volume mounts (named volumes, bind mounts, tmpfs)
  * @param binds Legacy bind mounts (prefer mounts for new code)
  * @param extraHosts Extra /etc/hosts entries as "hostname:ip" strings
+ * @param labels Container labels merged over the default floci-aws labels
  * @param logConfig Docker log driver configuration (null = daemon default)
  * @param privileged Whether to run the container in privileged mode (required for k3s)
  * @param cgroupnsMode Docker cgroup namespace mode (for example, "host")
@@ -44,6 +45,7 @@ public record ContainerSpec(
         List<Mount> mounts,
         List<Bind> binds,
         List<String> extraHosts,
+        Map<String, String> labels,
         LogConfig logConfig,
         boolean privileged,
         String cgroupnsMode,
@@ -57,7 +59,7 @@ public record ContainerSpec(
      * All other fields will be null or empty lists.
      */
     public ContainerSpec(String image) {
-        this(image, null, List.of(), null, null, null, Map.of(), List.of(), null, List.of(), List.of(), List.of(), null, false, null, List.of(), null, null, List.of());
+        this(image, null, List.of(), null, null, null, Map.of(), List.of(), null, List.of(), List.of(), List.of(), Map.of(), null, false, null, List.of(), null, null, List.of());
     }
 
     /**

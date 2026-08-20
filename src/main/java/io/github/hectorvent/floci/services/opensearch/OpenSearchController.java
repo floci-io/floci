@@ -56,6 +56,7 @@ public class OpenSearchController {
             JsonNode req = objectMapper.readTree(body);
             String domainName = req.path("DomainName").asText(null);
             String engineVersion = req.path("EngineVersion").asText(null);
+            String accessPolicies = req.path("AccessPolicies").asText(null);
             ClusterConfig clusterConfig = parseClusterConfig(req.path("ClusterConfig"));
             EbsOptions ebsOptions = parseEbsOptions(req.path("EBSOptions"));
             Map<String, String> tags = parseTags(req.path("TagList"));
@@ -68,7 +69,7 @@ public class OpenSearchController {
                     parseDomainEndpointOptions(req.path("DomainEndpointOptions")));
 
             Domain domain = service.createDomain(domainName, engineVersion, clusterConfig,
-                    ebsOptions, tags, options, region);
+                    ebsOptions, tags, accessPolicies, options, region);
 
             ObjectNode response = objectMapper.createObjectNode();
             response.set("DomainStatus", toDomainStatusNode(domain));
@@ -159,10 +160,10 @@ public class OpenSearchController {
     public Response updateDomainConfig(@Context HttpHeaders headers,
                                         @PathParam("domainName") String domainName,
                                         String body) {
-        String region = regionResolver.resolveRegion(headers);
         try {
             JsonNode req = objectMapper.readTree(body);
             String engineVersion = req.path("EngineVersion").asText(null);
+            String accessPolicies = req.path("AccessPolicies").asText(null);
             ClusterConfig clusterConfig = parseClusterConfig(req.path("ClusterConfig"));
             EbsOptions ebsOptions = parseEbsOptions(req.path("EBSOptions"));
 
@@ -174,7 +175,7 @@ public class OpenSearchController {
                     parseDomainEndpointOptions(req.path("DomainEndpointOptions")));
 
             Domain domain = service.updateDomainConfig(domainName, engineVersion, clusterConfig,
-                    ebsOptions, options, region);
+                    ebsOptions, accessPolicies, options);
 
             long epochSeconds = domain.getCreatedAt() != null ? domain.getCreatedAt().getEpochSecond() : 0;
             ObjectNode response = objectMapper.createObjectNode();
@@ -492,6 +493,9 @@ public class OpenSearchController {
         node.put("Processing", domain.isProcessing());
         node.put("Deleted", domain.isDeleted());
         node.put("Endpoint", domain.getEndpoint() != null ? domain.getEndpoint() : "");
+        if (domain.getAccessPolicies() != null) {
+            node.put("AccessPolicies", domain.getAccessPolicies());
+        }
         node.set("ClusterConfig", toClusterConfigNode(domain.getClusterConfig()));
         node.set("EBSOptions", toEbsOptionsNode(domain.getEbsOptions()));
         if (domain.getVpcOptions() != null) {
@@ -519,6 +523,11 @@ public class OpenSearchController {
      * unset, rather than emitting empty objects.
      */
     private void attachDomainOptionConfigs(ObjectNode domainConfig, Domain domain, long epochSeconds) {
+        if (domain.getAccessPolicies() != null) {
+            ObjectNode section = domainConfig.putObject("AccessPolicies");
+            section.put("Options", domain.getAccessPolicies());
+            section.set("Status", configStatusNode(epochSeconds));
+        }
         if (domain.getVpcOptions() != null) {
             ObjectNode section = domainConfig.putObject("VPCOptions");
             section.set("Options", toVpcOptionsNode(domain.getVpcOptions()));

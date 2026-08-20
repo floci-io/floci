@@ -488,16 +488,27 @@ public class MemoryDbService {
 
         MemoryDbContainerHandle handle = null;
         try {
-            handle = containerManager.start(name, image);
+            // A cluster record is metadata: its name, endpoint host and proxy port are derived
+            // from configuration and need no Docker, so the cluster is created and reaches
+            // 'available' even when no daemon is reachable. Only connecting to the cache needs
+            // the container.
+            handle = containerManager.tryStart(name, image);
             cluster.setClusterEndpoint(new Endpoint(resolveEndpointHost(), proxyPort));
             cluster.setProxyPort(proxyPort);
-            cluster.setContainerId(handle.getContainerId());
-            cluster.setContainerHost(handle.getHost());
-            cluster.setContainerPort(handle.getPort());
 
-            proxyManager.startProxy(name, authRequired, proxyPort,
-                    handle.getHost(), handle.getPort(),
-                    (username, secret) -> authenticate(name, username, secret));
+            if (handle != null) {
+                cluster.setContainerId(handle.getContainerId());
+                cluster.setContainerHost(handle.getHost());
+                cluster.setContainerPort(handle.getPort());
+
+                proxyManager.startProxy(name, authRequired, proxyPort,
+                        handle.getHost(), handle.getPort(),
+                        (username, secret) -> authenticate(name, username, secret));
+            } else {
+                LOG.warnv("MemoryDB cluster {0} created without a backing container: no Docker "
+                        + "daemon is reachable. Metadata operations work; connections to the "
+                        + "cluster do not until a daemon appears.", name);
+            }
         } catch (RuntimeException e) {
             LOG.warnv("MemoryDB cluster {0} provisioning failed, rolling back: {1}", name, e.getMessage());
             rollbackBackend(name, handle, proxyPort);

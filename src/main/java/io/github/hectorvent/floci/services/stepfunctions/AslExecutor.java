@@ -48,6 +48,7 @@ import io.vertx.mutiny.ext.web.client.WebClient;
 import io.quarkus.arc.Arc;
 import io.quarkus.arc.ArcContainer;
 import io.quarkus.arc.ManagedContext;
+import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
@@ -187,6 +188,11 @@ public class AslExecutor {
         } else {
             webClient = null;
         }
+    }
+
+    @PreDestroy
+    void stop() {
+        executor.shutdownNow();
     }
 
     /**

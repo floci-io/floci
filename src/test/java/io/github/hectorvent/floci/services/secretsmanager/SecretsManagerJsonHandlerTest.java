@@ -168,6 +168,107 @@ class SecretsManagerJsonHandlerTest {
     }
 
     @Test
+    void owningServiceIsReportedByDescribeAndList() {
+        service.createSecret("rds!db-1234", "value", null, null, null, null, "rds", REGION);
+
+        ObjectNode describeReq = MAPPER.createObjectNode();
+        describeReq.put("SecretId", "rds!db-1234");
+        ObjectNode described = (ObjectNode) handler
+                .handle("DescribeSecret", describeReq, REGION)
+                .getEntity();
+        ObjectNode listed = (ObjectNode) ((ObjectNode) handler
+                .handle("ListSecrets", MAPPER.createObjectNode(), REGION)
+                .getEntity())
+                .path("SecretList")
+                .path(0);
+
+        assertThat(described.get("OwningService").asText(), is("rds"));
+        assertThat(listed.get("OwningService").asText(), is("rds"));
+    }
+
+    @Test
+    void listSecretsFiltersByOwningService() {
+        service.createSecret("rds!db-1234", "value", null, null, null, null, "rds", REGION);
+        ObjectNode createReq = MAPPER.createObjectNode();
+        createReq.put("Name", "ordinary-secret");
+        handler.handle("CreateSecret", createReq, REGION);
+
+        ObjectNode listReq = MAPPER.createObjectNode();
+        listReq.putArray("Filters").addObject().put("Key", "owning-service").putArray("Values").add("rds");
+        ObjectNode owned = (ObjectNode) handler.handle("ListSecrets", listReq, REGION).getEntity();
+
+        assertThat(owned.get("SecretList").size(), is(1));
+        assertThat(owned.get("SecretList").get(0).get("Name").asText(), is("rds!db-1234"));
+
+        // A leading "!" negates a filter, so this selects the secrets no service owns.
+        ObjectNode negatedReq = MAPPER.createObjectNode();
+        negatedReq.putArray("Filters").addObject().put("Key", "owning-service").putArray("Values").add("!rds");
+        ObjectNode unowned = (ObjectNode) handler.handle("ListSecrets", negatedReq, REGION).getEntity();
+
+        assertThat(unowned.get("SecretList").size(), is(1));
+        assertThat(unowned.get("SecretList").get(0).get("Name").asText(), is("ordinary-secret"));
+    }
+
+    @Test
+    void ownerlessSecretsOmitOwningService() {
+        ObjectNode createReq = MAPPER.createObjectNode();
+        createReq.put("Name", "ordinary-secret");
+        handler.handle("CreateSecret", createReq, REGION);
+
+        ObjectNode describeReq = MAPPER.createObjectNode();
+        describeReq.put("SecretId", "ordinary-secret");
+        ObjectNode described = (ObjectNode) handler
+                .handle("DescribeSecret", describeReq, REGION)
+                .getEntity();
+
+        assertThat(described.has("OwningService"), is(false));
+    }
+
+    @Test
+    void rotateServiceManagedSecretSucceedsOverTheWire() {
+        service.createSecret("rds!db-5678", "value", null, null, null, null, "rds", REGION);
+
+        // The call terraform's aws_secretsmanager_secret_rotation makes for a managed secret:
+        // rotation rules, no RotationLambdaARN.
+        ObjectNode rotateReq = MAPPER.createObjectNode();
+        rotateReq.put("SecretId", "rds!db-5678");
+        rotateReq.putObject("RotationRules").put("AutomaticallyAfterDays", 7);
+        Response response = handler.handle("RotateSecret", rotateReq, REGION);
+
+        assertThat(response.getStatus(), is(200));
+        assertThat(((ObjectNode) response.getEntity()).get("Name").asText(), is("rds!db-5678"));
+
+        ObjectNode describeReq = MAPPER.createObjectNode();
+        describeReq.put("SecretId", "rds!db-5678");
+        ObjectNode described = (ObjectNode) handler
+                .handle("DescribeSecret", describeReq, REGION)
+                .getEntity();
+        assertThat(described.get("RotationEnabled").asBoolean(), is(true));
+        assertThat(described.path("RotationRules").get("AutomaticallyAfterDays").asInt(), is(7));
+        assertThat(described.has("RotationLambdaARN"), is(false));
+    }
+
+    @Test
+    void rotateServiceManagedSecretReturnsAVersionThatResolves() {
+        service.createSecret("rds!db-9012", "value", null, null, null, null, "rds", REGION);
+
+        ObjectNode rotateReq = MAPPER.createObjectNode();
+        rotateReq.put("SecretId", "rds!db-9012");
+        rotateReq.putObject("RotationRules").put("AutomaticallyAfterDays", 7);
+        ObjectNode rotated = (ObjectNode) handler.handle("RotateSecret", rotateReq, REGION).getEntity();
+
+        // Nothing stages a version for the request token here, so the reported VersionId has to be
+        // one a caller can actually read back.
+        ObjectNode getReq = MAPPER.createObjectNode();
+        getReq.put("SecretId", "rds!db-9012");
+        getReq.put("VersionId", rotated.get("VersionId").asText());
+        Response response = handler.handle("GetSecretValue", getReq, REGION);
+
+        assertThat(response.getStatus(), is(200));
+        assertThat(((ObjectNode) response.getEntity()).get("SecretString").asText(), is("value"));
+    }
+
+    @Test
     void listSecretsResponseIncludesKmsKeyId() {
         ObjectNode createReq = MAPPER.createObjectNode();
         createReq.put("Name", "list-kms-secret");

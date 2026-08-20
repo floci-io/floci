@@ -50,7 +50,7 @@ class BuildV2ProxyEventBodyEncodingTest {
         controller = new ApiGatewayExecuteController(
                 null, null, null,
                 regionResolver, objectMapper, null,
-                null, null, null, null, new ApiGatewayExecuteRouteContext()
+                null, null, null, null, new ApiGatewayExecuteRouteContext(), null, null
         );
     }
 

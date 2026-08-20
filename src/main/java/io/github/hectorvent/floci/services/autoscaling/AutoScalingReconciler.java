@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.services.elbv2.model.TargetDescription;
 import io.github.hectorvent.floci.services.elbv2.model.TargetHealth;
 import io.github.hectorvent.floci.services.ssm.SsmCommandService;
 import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
@@ -57,6 +58,11 @@ public class AutoScalingReconciler {
     @PostConstruct
     void start() {
         scheduler.scheduleAtFixedRate(this::reconcileAll, 5, 10, TimeUnit.SECONDS);
+    }
+
+    @PreDestroy
+    void stop() {
+        scheduler.shutdownNow();
     }
 
     void onStart(@Observes StartupEvent event) {

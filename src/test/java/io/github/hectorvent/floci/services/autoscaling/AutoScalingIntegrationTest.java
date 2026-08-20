@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.autoscaling;
 
+import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -37,7 +38,7 @@ class AutoScalingIntegrationTest {
                 .formParam("LaunchConfigurationName", "my-lc")
                 .formParam("ImageId", "ami-12345678")
                 .formParam("InstanceType", "t3.micro")
-                .formParam("SecurityGroups.member.1", "sg-default")
+                .formParam("SecurityGroups.member.1", Ec2Service.defaultSecurityGroupId("us-east-1"))
                 .header("Authorization", AUTH)
             .when()
                 .post("/")

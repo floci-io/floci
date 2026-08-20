@@ -72,7 +72,7 @@ class MemoryDbServiceTest {
                         "000000000000", inv.getArgument(2)).toString());
 
         when(storageFactory.create(anyString(), anyString(), any())).thenAnswer(inv -> AccountAwareStorageBackend.inMemory("000000000000"));
-        when(containerManager.start(anyString(), anyString()))
+        when(containerManager.tryStart(anyString(), anyString()))
                 .thenReturn(new MemoryDbContainerHandle("cid", "cluster", "localhost", 6379));
         doNothing().when(proxyManager).startProxy(anyString(), anyBoolean(), anyInt(), anyString(), anyInt(), any());
 
@@ -332,7 +332,7 @@ class MemoryDbServiceTest {
     void failedProvisioningReleasesProxyPort() {
         when(mdbConfig.proxyBasePort()).thenReturn(16400);
         when(mdbConfig.proxyMaxPort()).thenReturn(16400); // exactly one port available
-        when(containerManager.start(anyString(), anyString()))
+        when(containerManager.tryStart(anyString(), anyString()))
                 .thenThrow(new RuntimeException("docker unavailable"))
                 .thenReturn(new MemoryDbContainerHandle("cid", "c2", "localhost", 6379));
 
@@ -352,7 +352,7 @@ class MemoryDbServiceTest {
     @Test
     void failedProvisioningRollsBackContainerAndReleasesProxyPort() {
         MemoryDbContainerHandle handle = new MemoryDbContainerHandle("cid", "c1", "localhost", 6379);
-        when(containerManager.start(anyString(), anyString())).thenReturn(handle);
+        when(containerManager.tryStart(anyString(), anyString())).thenReturn(handle);
 
         // Proxy startup blows up after the port is reserved and the container is started.
         doThrow(new RuntimeException("proxy boom"))
@@ -387,11 +387,11 @@ class MemoryDbServiceTest {
 
     @Test
     void failedContainerStartupCleansUpContainerByNameAndReleasesPort() {
-        // containerManager.start(...) throws — this models both a container that never started
+        // containerManager.tryStart(...) throws — this models both a container that never started
         // and (crucially) a readiness timeout, where start() created + registered the container
         // before throwing, so no handle ever reaches the service.
         doThrow(new RuntimeException("readiness boom"))
-                .when(containerManager).start(eq("c1"), anyString());
+                .when(containerManager).tryStart(eq("c1"), anyString());
 
         Cluster spec = new Cluster();
         spec.setName("c1");
@@ -407,7 +407,7 @@ class MemoryDbServiceTest {
         verify(containerManager).stopByClusterName("c1");
 
         // The reserved proxy port was still released: a subsequent successful create reuses the base port.
-        when(containerManager.start(anyString(), anyString()))
+        when(containerManager.tryStart(anyString(), anyString()))
                 .thenReturn(new MemoryDbContainerHandle("cid", "c2", "localhost", 6379));
         Cluster second = new Cluster();
         second.setName("c2");
@@ -436,7 +436,7 @@ class MemoryDbServiceTest {
     void concurrentCreateForSameNameIsRejectedWhileFirstIsProvisioning() throws InterruptedException {
         CountDownLatch startedLatch = new CountDownLatch(1);
         CountDownLatch releaseLatch = new CountDownLatch(1);
-        when(containerManager.start(anyString(), anyString())).thenAnswer(inv -> {
+        when(containerManager.tryStart(anyString(), anyString())).thenAnswer(inv -> {
             startedLatch.countDown();
             assertTrue(releaseLatch.await(5, TimeUnit.SECONDS), "test timed out waiting for release");
             return new MemoryDbContainerHandle("cid", "c1", "localhost", 6379);
@@ -462,5 +462,29 @@ class MemoryDbServiceTest {
         firstRequest.join(5000);
 
         assertEquals(ClusterStatus.AVAILABLE, service.getCluster("c1").getStatus());
+    }
+
+    @Test
+    void createWithoutDockerDaemonStillReachesAvailable() {
+        // tryStart() returns null when no Docker daemon is reachable. The cluster record is
+        // metadata, so the create still succeeds, the cluster reaches 'available' on the first
+        // describe (what SDK/Terraform waiters poll), and no auth proxy is started.
+        when(containerManager.tryStart(anyString(), anyString())).thenReturn(null);
+
+        Cluster spec = new Cluster();
+        spec.setName("no-docker-cluster");
+        spec.setAclName("open-access");
+        Cluster created = service.createCluster(spec, "us-east-1");
+
+        assertEquals(ClusterStatus.AVAILABLE, created.getStatus());
+        assertEquals("localhost", created.getClusterEndpoint().address());
+        assertEquals(16400, created.getProxyPort());
+        verify(proxyManager, never()).startProxy(anyString(), anyBoolean(), anyInt(), anyString(), anyInt(), any());
+
+        assertEquals("no-docker-cluster", service.getCluster("no-docker-cluster").getName());
+
+        // Delete must not reach for a container that was never created.
+        service.deleteCluster("no-docker-cluster");
+        verify(containerManager, never()).stop(any());
     }
 }

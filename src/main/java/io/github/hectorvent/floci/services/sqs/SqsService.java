@@ -17,6 +17,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue;
+import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -127,6 +128,11 @@ public class SqsService implements Resettable {
         this.snsService = snsService;
         loadPersistedMessages();
         loadPersistedDedup();
+    }
+
+    @PreDestroy
+    void stop() {
+        moveTaskExecutor.shutdownNow();
     }
 
     public void clear() {

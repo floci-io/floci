@@ -785,26 +785,33 @@ public class DynamoDbService {
         List<JsonNode> evaluatedItems = results;
         JsonNode lastEvaluatedKey = null;
 
-        // Apply Limit (stops at N items)
-        if (limit != null && limit > 0 && evaluatedItems.size() > limit) {
-            JsonNode lastItem = evaluatedItems.get(limit - 1);
-            lastEvaluatedKey = buildKeyNode(table, lastItem, pkName, sortKeyNames, indexName != null);
-            evaluatedItems = new ArrayList<>(evaluatedItems.subList(0, limit));
-        }
-
-        // Apply 1MB response size limit (DynamoDB stops reading when scanned data exceeds 1MB)
-        if (lastEvaluatedKey == null) {
-            final int MAX_RESPONSE_BYTES = 1024 * 1024;
-            int accSize = 0;
-            for (int i = 0; i < evaluatedItems.size(); i++) {
-                int sz = DynamoDbItemSize.calculateItemSize(evaluatedItems.get(i));
-                if (accSize > 0 && accSize + sz > MAX_RESPONSE_BYTES) {
-                    lastEvaluatedKey = buildKeyNode(table, evaluatedItems.get(i - 1), pkName, sortKeyNames, indexName != null);
-                    evaluatedItems = new ArrayList<>(evaluatedItems.subList(0, i));
-                    break;
-                }
-                accSize += sz;
+        // Stop at whichever boundary the read reaches first: the 1 MB cap or Limit.
+        // The size check comes first for each item — per the Query API reference,
+        // "if the processed dataset size exceeds 1 MB before DynamoDB reaches this
+        // limit, it stops the operation", so an item that would cross the 1 MB cap
+        // is not read and does not count toward Limit. DynamoDB does not look ahead
+        // either way: a read that stops at a boundary always returns a
+        // LastEvaluatedKey, even when the boundary happens to be the last item of
+        // the result set ("the absence of LastEvaluatedKey is the only way to know
+        // that you have reached the end of the result set").
+        final int MAX_RESPONSE_BYTES = 1024 * 1024;
+        int accSize = 0;
+        int included = -1; // index one past the last included item; -1 = no boundary hit
+        for (int i = 0; i < evaluatedItems.size(); i++) {
+            int sz = DynamoDbItemSize.calculateItemSize(evaluatedItems.get(i));
+            if (accSize > 0 && accSize + sz > MAX_RESPONSE_BYTES) {
+                included = i; // the 1 MB cap stops the read BEFORE this item
+                break;
             }
+            accSize += sz;
+            if (limit != null && limit > 0 && i + 1 >= limit) {
+                included = i + 1; // the Limit cap stops the read AFTER this item
+                break;
+            }
+        }
+        if (included > 0) {
+            lastEvaluatedKey = buildKeyNode(table, evaluatedItems.get(included - 1), pkName, sortKeyNames, indexName != null);
+            evaluatedItems = new ArrayList<>(evaluatedItems.subList(0, included));
         }
 
         int scannedCount = evaluatedItems.size();
@@ -868,41 +875,50 @@ public class DynamoDbService {
                 ? items.tailMap(buildItemKeyFromNode(exclusiveStartKey, pkName, skName), false).values()
                 : items.values();
 
+        final int MAX_RESPONSE_BYTES = 1024 * 1024;
         int totalScanned = 0;
+        int accSize = 0;
         List<JsonNode> results = new ArrayList<>();
         JsonNode lastEvaluatedKey = null;
-        Iterator<JsonNode> it = source.iterator();
-        while (it.hasNext()) {
-            JsonNode item = it.next();
+        JsonNode lastScanned = null;
+        for (JsonNode item : source) {
+            // Sparse index behavior: a scan of a secondary index reads the index
+            // itself, and base-table items missing any index key attribute do not
+            // exist in the index — they are never read, never counted, and can
+            // never anchor a cursor.
+            if (indexScan && !(hasNonNullAttribute(item, lekPkName)
+                    && (lekSkName == null || hasNonNullAttribute(item, lekSkName)))) {
+                continue;
+            }
+            // Stop at whichever boundary the read reaches first: the 1 MB cap or
+            // Limit. The size check comes first — per the API reference, "if the
+            // processed dataset size exceeds 1 MB before DynamoDB reaches this
+            // limit, it stops the operation" — so an item that would cross the cap
+            // is not read, does not count toward ScannedCount, and the cursor
+            // anchors to the previous scanned item (which, with a filter, may well
+            // be an item that was not returned).
+            int sz = DynamoDbItemSize.calculateItemSize(item);
+            if (accSize > 0 && accSize + sz > MAX_RESPONSE_BYTES) {
+                lastEvaluatedKey = buildKeyNode(table, lastScanned, lekPkName, lekSkName, indexScan);
+                break;
+            }
+            accSize += sz;
             totalScanned++;
+            lastScanned = item;
             if (!isExpired(item, table)) {
                 boolean matched = (filterExpression == null
                         || matchesFilterExpression(item, filterExpression, expressionAttrNames, expressionAttrValues))
                         && (scanFilter == null || matchesScanFilter(item, scanFilter));
                 if (matched) results.add(item);
             }
-            // Limit caps SCANNED items (those read), not matched items. Stop at the
-            // limit and surface a cursor when more items remain to be examined.
+            // Limit caps SCANNED items (those read), not matched items. DynamoDB does
+            // not look ahead when it stops at the Limit boundary: it always surfaces a
+            // cursor, even when the boundary happens to be the last item of the result
+            // set. The client only learns it reached the end when a follow-up request
+            // comes back without a LastEvaluatedKey.
             if (limit != null && limit > 0 && totalScanned >= limit) {
-                if (it.hasNext()) {
-                    lastEvaluatedKey = buildKeyNode(table, item, lekPkName, lekSkName, indexScan);
-                }
+                lastEvaluatedKey = buildKeyNode(table, item, lekPkName, lekSkName, indexScan);
                 break;
-            }
-        }
-
-        // Apply 1MB response size limit (only when not already truncated by Limit)
-        if (lastEvaluatedKey == null) {
-            final int MAX_RESPONSE_BYTES = 1024 * 1024;
-            int accSize = 0;
-            for (int i = 0; i < results.size(); i++) {
-                int sz = DynamoDbItemSize.calculateItemSize(results.get(i));
-                if (accSize > 0 && accSize + sz > MAX_RESPONSE_BYTES) {
-                    lastEvaluatedKey = buildKeyNode(table, results.get(i - 1), lekPkName, lekSkName, indexScan);
-                    results = new ArrayList<>(results.subList(0, i));
-                    break;
-                }
-                accSize += sz;
             }
         }
 

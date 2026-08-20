@@ -47,6 +47,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Answers.RETURNS_SELF;
+import static org.mockito.Answers.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.timeout;
@@ -88,6 +89,27 @@ class Ec2ContainerManagerTest {
     }
 
     @Test
+    void exposeReachablePrivateAddressPreservesAllocatedIpWhenAwsFaithful() {
+        // #1983: with awsFaithfulPrivateIp=true, the CFN/subnet-allocated private
+        // IP set at launch is left untouched — the container bridge IP is not
+        // reported (routing still uses it via containerBridgeIp, tracked elsewhere).
+        Instance instance = new Instance();
+        instance.setPrivateIpAddress("10.82.32.10");
+        instance.setPrivateDnsName("ip-10-82-32-10.ec2.internal");
+
+        InstanceNetworkInterface networkInterface = new InstanceNetworkInterface();
+        networkInterface.setPrivateIpAddress("10.82.32.10");
+        networkInterface.setPrivateDnsName("ip-10-82-32-10.ec2.internal");
+        instance.setNetworkInterfaces(List.of(networkInterface));
+
+        Ec2ContainerManager.exposeReachablePrivateAddress(instance, "192.168.215.21", true);
+
+        assertEquals("10.82.32.10", instance.getPrivateIpAddress());
+        assertEquals("ip-10-82-32-10.ec2.internal", instance.getPrivateDnsName());
+        assertEquals("10.82.32.10", networkInterface.getPrivateIpAddress());
+    }
+
+    @Test
     void restoreMetadataRegistrationRegistersRunningPersistedContainer() {
         ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
         when(lifecycleManager.isContainerRunning(TEST_CONTAINER_ID)).thenReturn(true);
@@ -107,7 +129,7 @@ class Ec2ContainerManagerTest {
                 mock(DockerHostResolver.class),
                 dockerClient,
                 mock(PortAllocator.class),
-                mock(EmulatorConfig.class),
+                mock(EmulatorConfig.class, RETURNS_DEEP_STUBS),
                 metadataServer,
                 mock(Ec2PortForwardManager.class));
 
@@ -388,7 +410,7 @@ class Ec2ContainerManagerTest {
 
         awaitUntil(() -> "running".equals(instance.getState().getName()), Duration.ofSeconds(2));
         ExecCreateCmd execCreate = harness.dockerClient.execCreateCmd(TEST_CONTAINER_ID);
-        verify(execCreate, timeout(2000)).withCmd(eq(new String[]{"sshd"}));
+        verify(execCreate, timeout(2000)).withCmd(eq(new String[]{"/usr/sbin/sshd"}));
         // No key pair was supplied, so nothing should have been written to authorized_keys.
         verify(harness.dockerClient, never()).copyArchiveToContainerCmd(TEST_CONTAINER_ID);
     }
@@ -464,7 +486,7 @@ class Ec2ContainerManagerTest {
         awaitUntil(() -> "running".equals(instance.getState().getName()), Duration.ofSeconds(2));
         verify(execCreate, timeout(2000)).withCmd(eq(SSHD_INSTALL_PROBE_CMD));
         verify(execCreate, never()).withCmd(eq(new String[]{"ssh-keygen", "-A"}));
-        verify(execCreate, never()).withCmd(eq(new String[]{"sshd"}));
+        verify(execCreate, never()).withCmd(eq(new String[]{"/usr/sbin/sshd"}));
     }
 
     private static LaunchHarness launchHarness() {

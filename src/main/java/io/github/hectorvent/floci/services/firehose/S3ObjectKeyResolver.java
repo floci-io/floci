@@ -2,6 +2,8 @@ package io.github.hectorvent.floci.services.firehose;
 
 import org.jboss.logging.Logger;
 
+import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.S3Destination;
+
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
@@ -20,9 +22,10 @@ import java.util.regex.Pattern;
  * {@code !{timestamp:<DateTimeFormatter pattern>}} and
  * {@code !{firehose:random-string}} expressions, {@code yyyy/MM/dd/HH/} is
  * appended by literal concatenation when the prefix holds no expression at all
- * (including the null/empty prefix), and the suffix is
- * {@code <streamName>-<versionId>-<yyyy-MM-dd-HH-mm-ss>-<uuid>} with no file
- * extension.
+ * (including the null/empty prefix), the suffix is
+ * {@code <streamName>-<versionId>-<yyyy-MM-dd-HH-mm-ss>-<uuid>}, and the file
+ * extension comes from the destination's {@code FileExtension} or, failing that,
+ * from its {@code CompressionFormat} (see {@link FirehoseCompression}).
  *
  * Known deviations from AWS: timestamps are evaluated at delivery time instead
  * of the oldest buffered record's arrival time, and expressions AWS would
@@ -43,10 +46,24 @@ final class S3ObjectKeyResolver {
 
     private S3ObjectKeyResolver() {}
 
-    static String resolveKey(String prefix, String streamName, String versionId,
-                             Instant deliveryTime, ZoneId zone) {
-        ZonedDateTime time = ZonedDateTime.ofInstant(deliveryTime, zone);
-        return evaluatePrefix(prefix, time) + objectNameSuffix(streamName, versionId, time);
+    static String resolveKey(S3Destination s3, String streamName, String versionId,
+                             Instant deliveryTime, FirehoseCompression compression) {
+        ZonedDateTime time = ZonedDateTime.ofInstant(
+                deliveryTime, resolveZone(s3 == null ? null : s3.getCustomTimeZone()));
+        return evaluatePrefix(s3 == null ? null : s3.getPrefix(), time)
+                + objectNameSuffix(streamName, versionId, time)
+                + fileExtension(s3, compression);
+    }
+
+    /**
+     * An explicit {@code FileExtension} replaces the extension the compression
+     * format would contribute instead of being appended to it, and the empty string
+     * means "not specified" (both verified against real AWS). It changes only the
+     * key, never how the body is compressed.
+     */
+    private static String fileExtension(S3Destination s3, FirehoseCompression compression) {
+        String fileExtension = s3 == null ? null : s3.getFileExtension();
+        return fileExtension == null || fileExtension.isEmpty() ? compression.extension() : fileExtension;
     }
 
     static String evaluatePrefix(String prefix, ZonedDateTime time) {

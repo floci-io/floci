@@ -11,3 +11,5 @@
 !target/lib/*
 !target/quarkus-app/*
 !native/**
+!.mvn/**
+!mvnw

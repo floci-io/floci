@@ -862,6 +862,25 @@ class CloudFrontDistributionServingTest {
     }
 
     @Test
+    void rejectsAuthorizationOriginCustomHeaders() {
+        String body = distributionWithOriginCustomHeaders(1, """
+                <OriginCustomHeader>
+                  <HeaderName>Authorization</HeaderName>
+                  <HeaderValue>Bearer secret</HeaderValue>
+                </OriginCustomHeader>
+                """);
+
+        given()
+            .contentType("application/xml")
+            .body(body)
+        .when()
+            .post("/2020-05-31/distribution")
+        .then()
+            .statusCode(400)
+            .body(containsString("<Code>InvalidArgument</Code>"));
+    }
+
+    @Test
     void rejectsInconsistentOriginCustomHeaderQuantity() {
         String body = distributionWithOriginCustomHeaders(2, """
                 <OriginCustomHeader>

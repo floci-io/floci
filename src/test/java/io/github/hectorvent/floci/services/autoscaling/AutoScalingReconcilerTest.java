@@ -22,6 +22,7 @@ import java.util.Map;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.mockito.Mockito.anyList;
 import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.mock;
@@ -42,6 +43,25 @@ class AutoScalingReconcilerTest {
         asg.getInstances().add(instance("Detached"));
 
         assertEquals(2, AutoScalingReconciler.activeCapacity(asg));
+    }
+
+    @Test
+    void stopTerminatesReconcilerThread() throws Exception {
+        var asgService = mock(AutoScalingService.class);
+        var ec2Service = mock(Ec2Service.class);
+        var elbV2Service = mock(ElbV2Service.class);
+        var reconciler = new AutoScalingReconciler(asgService, ec2Service, elbV2Service);
+        var preexisting = Thread.getAllStackTraces().keySet();
+
+        reconciler.start();
+        var reconcilerThread = Thread.getAllStackTraces().keySet().stream()
+                .filter(t -> "asg-reconciler".equals(t.getName()) && !preexisting.contains(t))
+                .findFirst().orElseThrow();
+
+        reconciler.stop();
+        reconcilerThread.join(5_000);
+
+        assertFalse(reconcilerThread.isAlive());
     }
 
     @Test

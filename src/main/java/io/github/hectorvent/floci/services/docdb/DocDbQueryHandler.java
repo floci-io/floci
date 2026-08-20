@@ -13,7 +13,11 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
+import java.util.ArrayList;
 import java.util.Collection;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 
 @ApplicationScoped
 public class DocDbQueryHandler {
@@ -36,12 +40,16 @@ public class DocDbQueryHandler {
                 case "CreateDBCluster"    -> handleCreateDbCluster(params);
                 case "DescribeDBClusters" -> handleDescribeDbClusters(params);
                 case "DescribeDBClusterSnapshots" -> handleDescribeDbClusterSnapshots(params);
+                case "DescribeGlobalClusters" -> handleDescribeGlobalClusters(params);
                 case "DeleteDBCluster"    -> handleDeleteDbCluster(params);
                 case "ModifyDBCluster"    -> handleModifyDbCluster(params);
                 case "CreateDBInstance"   -> handleCreateDbInstance(params);
                 case "DescribeDBInstances"-> handleDescribeDbInstances(params);
                 case "DeleteDBInstance"   -> handleDeleteDbInstance(params);
                 case "ModifyDBInstance"   -> handleModifyDbInstance(params);
+                case "ListTagsForResource" -> handleListTagsForResource(params);
+                case "AddTagsToResource"   -> handleAddTagsToResource(params);
+                case "RemoveTagsFromResource" -> handleRemoveTagsFromResource(params);
                 default -> AwsQueryResponse.error("UnsupportedOperation",
                         "Operation " + action + " is not supported by DocDB.", AwsNamespaces.RDS, 400);
             };
@@ -70,6 +78,11 @@ public class DocDbQueryHandler {
 
         DocDbCluster cluster = service.createDbCluster(id, engineVersion,
                 masterUsername, masterPassword, iamEnabled);
+        // Tags given at create are readable back on a live account, so they must not be dropped.
+        Map<String, String> tags = parseTags(params);
+        if (!tags.isEmpty()) {
+            service.addTagsToResource(cluster.getDbClusterArn(), tags);
+        }
         return Response.ok(AwsQueryResponse.envelope("CreateDBCluster", AwsNamespaces.RDS,
                 clusterXml(cluster))).build();
     }
@@ -96,6 +109,42 @@ public class DocDbQueryHandler {
         }
         xml.end("DBClusters").start("Marker").end("Marker");
         return Response.ok(AwsQueryResponse.envelope("DescribeDBClusters", AwsNamespaces.RDS, xml.build())).build();
+    }
+
+    private Response handleDescribeGlobalClusters(MultivaluedMap<String, String> params) {
+        // Global clusters are not modeled; an empty list is what completes the provider's read.
+        // Real SDKs sign DocumentDB with the "rds" scope and land on RdsQueryHandler instead;
+        // this serves the "docdb" scope Floci also accepts, and must answer the same way.
+        // MaxRecords is rejected before the identifier is looked up, and a marker after it —
+        // the order a live account applies them in.
+        String maxRecords = params.getFirst("MaxRecords");
+        if (maxRecords != null && !maxRecords.isBlank()) {
+            int max = -1;
+            try {
+                max = Integer.parseInt(maxRecords.trim());
+            } catch (NumberFormatException e) {
+                LOG.debugv("Non-numeric MaxRecords {0} on DescribeGlobalClusters", maxRecords);
+            }
+            if (max < 20 || max > 100) {
+                throw new AwsException("InvalidParameterValue",
+                        "Invalid value " + maxRecords + " for MaxRecords. Must be between 20 and 100", 400);
+            }
+        }
+        String identifier = params.getFirst("GlobalClusterIdentifier");
+        if (identifier != null && !identifier.isBlank()) {
+            // Naming one is a different question from listing none, and AWS errors on it.
+            throw new AwsException("GlobalClusterNotFoundFault",
+                    "Global cluster '" + identifier + "' not found", 404);
+        }
+        // No page is ever handed out, so any marker a caller presents came from somewhere else.
+        String marker = params.getFirst("Marker");
+        if (marker != null && !marker.isBlank()) {
+            throw new AwsException("InvalidParameterValue", "The request token is invalid.", 400);
+        }
+        // Filters are not validated: the answer is empty for every name AWS accepts, and a partial
+        // list of accepted names would reject filters a live account allows.
+        XmlBuilder xml = new XmlBuilder().start("GlobalClusters").end("GlobalClusters");
+        return Response.ok(AwsQueryResponse.envelope("DescribeGlobalClusters", AwsNamespaces.RDS, xml.build())).build();
     }
 
     private Response handleDescribeDbClusterSnapshots(MultivaluedMap<String, String> params) {
@@ -278,5 +327,65 @@ public class DocDbQueryHandler {
             }
         }
         return null;
+    }
+
+    // ── Tags ──────────────────────────────────────────────────────────────────
+
+    private Response handleListTagsForResource(MultivaluedMap<String, String> params) {
+        // Filters are accepted without validation: a live account rejects an unrecognised filter
+        // name, but Floci carries no list of the names it accepts, and the tags of one named
+        // resource are the same answer either way.
+        Map<String, String> tags = service.listTagsForResource(params.getFirst("ResourceName"));
+        XmlBuilder xml = new XmlBuilder().start("TagList");
+        tags.forEach((key, value) -> xml.start("Tag")
+                .elem("Key", key)
+                .elem("Value", value == null ? "" : value)
+                .end("Tag"));
+        xml.end("TagList");
+        return Response.ok(AwsQueryResponse.envelope("ListTagsForResource",
+                AwsNamespaces.RDS, xml.build())).build();
+    }
+
+    private Response handleAddTagsToResource(MultivaluedMap<String, String> params) {
+        service.addTagsToResource(params.getFirst("ResourceName"), parseTags(params));
+        return Response.ok(AwsQueryResponse.envelope("AddTagsToResource", AwsNamespaces.RDS, "")).build();
+    }
+
+    private Response handleRemoveTagsFromResource(MultivaluedMap<String, String> params) {
+        service.removeTagsFromResource(params.getFirst("ResourceName"), tagKeys(params));
+        return Response.ok(AwsQueryResponse.envelope("RemoveTagsFromResource",
+                AwsNamespaces.RDS, "")).build();
+    }
+
+    /** Every spelling the SDKs and the CLI use for a tag list, as RdsQueryHandler reads them. */
+    private static Map<String, String> parseTags(MultivaluedMap<String, String> params) {
+        Map<String, String> tags = new LinkedHashMap<>();
+        for (String prefix : List.of("Tags.member", "Tags.Tag", "Tag")) {
+            for (int i = 1; ; i++) {
+                String key = params.getFirst(prefix + "." + i + ".Key");
+                if (key == null) {
+                    break;
+                }
+                // A key given without a value is stored as an empty value, as AWS stores it —
+                // a null would also break the immutable copy the read hands back.
+                String value = params.getFirst(prefix + "." + i + ".Value");
+                tags.put(key, value == null ? "" : value);
+            }
+        }
+        return tags;
+    }
+
+    private static List<String> tagKeys(MultivaluedMap<String, String> params) {
+        List<String> keys = new ArrayList<>();
+        for (String prefix : List.of("TagKeys.member", "TagKeys.TagKey", "TagKeys")) {
+            for (int i = 1; ; i++) {
+                String key = params.getFirst(prefix + "." + i);
+                if (key == null) {
+                    break;
+                }
+                keys.add(key);
+            }
+        }
+        return keys;
     }
 }

@@ -58,6 +58,7 @@ public class KmsJsonHandler {
             case "GenerateMac" -> handleGenerateMac(request, region);
             case "VerifyMac" -> handleVerifyMac(request, region);
             case "CreateAlias" -> handleCreateAlias(request, region);
+            case "UpdateAlias" -> handleUpdateAlias(request, region);
             case "DeleteAlias" -> handleDeleteAlias(request, region);
             case "ListAliases" -> handleListAliases(request, region);
             case "ScheduleKeyDeletion" -> handleScheduleKeyDeletion(request, region);
@@ -390,6 +391,11 @@ public class KmsJsonHandler {
 
     private Response handleCreateAlias(JsonNode request, String region) {
         service.createAlias(request.path("AliasName").asText(), request.path("TargetKeyId").asText(), region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleUpdateAlias(JsonNode request, String region) {
+        service.updateAlias(request.path("AliasName").asText(), request.path("TargetKeyId").asText(), region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 

@@ -13,19 +13,22 @@ public class ElastiCacheUser {
     private AuthMode authMode;
     private List<String> passwords;
     private String accessString;
+    // "redis" or "valkey"; the initializer keeps users persisted before this field existed on redis.
+    private String engine = "redis";
     private String status;
     private Instant createdAt;
 
     public ElastiCacheUser() {}
 
     public ElastiCacheUser(String userId, String userName, AuthMode authMode,
-                           List<String> passwords, String accessString,
+                           List<String> passwords, String accessString, String engine,
                            String status, Instant createdAt) {
         this.userId = userId;
         this.userName = userName;
         this.authMode = authMode;
         this.passwords = passwords;
         this.accessString = accessString;
+        this.engine = engine;
         this.status = status;
         this.createdAt = createdAt;
     }
@@ -44,6 +47,9 @@ public class ElastiCacheUser {
 
     public String getAccessString() { return accessString; }
     public void setAccessString(String accessString) { this.accessString = accessString; }
+
+    public String getEngine() { return engine; }
+    public void setEngine(String engine) { this.engine = engine; }
 
     public String getStatus() { return status; }
     public void setStatus(String status) { this.status = status; }

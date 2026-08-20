@@ -101,6 +101,45 @@ floci:
     log-max-file: "3"     # Number of rotated log files to retain per container
 ```
 
+## Container Labels
+
+Every container and volume Floci creates carries three reserved labels for discovery and cleanup:
+
+| Label | Value | Purpose |
+|---|---|---|
+| `floci` | `true` | Umbrella across all Floci emulators — `docker ps --filter label=floci=true` |
+| `floci_emulator` | `floci-aws` | Per-emulator discriminator |
+| `floci_namespace` | *(the configured namespace)* | Only present when `resource-namespace` is set |
+
+Add your own labels with `extra-labels` — they are applied to every container **and** volume Floci creates (Lambda functions and code volumes, RDS databases, ElastiCache, OpenSearch, MSK, ECS, ...):
+
+```yaml
+floci:
+  docker:
+    extra-labels:
+      - key: "com.example.project"
+        value: my-project
+      - key: environment
+        value: dev
+```
+
+Or via environment variables (indexed entries, like `registry-credentials`):
+
+```yaml
+services:
+  floci:
+    environment:
+      FLOCI_DOCKER_EXTRA_LABELS_0__KEY: "com.example.project"
+      FLOCI_DOCKER_EXTRA_LABELS_0__VALUE: my-project
+      FLOCI_DOCKER_EXTRA_LABELS_1__KEY: environment
+      FLOCI_DOCKER_EXTRA_LABELS_1__VALUE: dev
+```
+
+Extra labels are a list of key/value entries rather than a map so that label keys containing dots, colons, or uppercase characters survive the environment-variable naming convention.
+
+!!! note
+    Entries using one of the reserved keys (`floci`, `floci_emulator`, `floci_namespace`) are ignored with a warning — user configuration can never break Floci's own container discovery and volume pruning.
+
 ## Docker Network
 
 Containers spawned by Floci (Lambda, RDS, ElastiCache, OpenSearch, MSK, ECS) need to be on the same Docker network to communicate with each other and with Floci itself.
@@ -184,4 +223,7 @@ What each setting does and why it is needed:
 | `FLOCI_DOCKER_REGISTRY_CREDENTIALS_0__PASSWORD` | _(unset)_ | Password for credential entry 0 |
 | `FLOCI_DOCKER_LOG_MAX_SIZE` | `10m` | Max container log file size before rotation |
 | `FLOCI_DOCKER_LOG_MAX_FILE` | `3` | Number of rotated log files to retain |
+| `FLOCI_DOCKER_EXTRA_LABELS_0__KEY` | _(unset)_ | Label key for extra-label entry 0, applied to every Floci-created container and volume (increment the index for more) |
+| `FLOCI_DOCKER_EXTRA_LABELS_0__VALUE` | _(unset)_ | Label value for extra-label entry 0 |
 | `FLOCI_SERVICES_DOCKER_NETWORK` | _(unset)_ | Shared Docker network for all container-based services |
+| `FLOCI_SERVICES_LAMBDA_CONTAINER_NAME_PREFIX` | `floci` | Base name prefix for spawned Lambda containers and code volumes (e.g. `acme` → `acme-<function>-<id>` containers, `acme-code-<function>-<hash>` volumes). Must be a valid Docker name segment (`[A-Za-z0-9][A-Za-z0-9_.-]*`); invalid values are ignored with a warning. See the [Lambda docs](../services/lambda.md#configuration) |

@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.firehose;
 
+import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.S3Destination;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
@@ -8,6 +9,7 @@ import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -100,17 +102,57 @@ class S3ObjectKeyResolverTest {
         assertTrue(suffix.matches("my-stream-1-2026-07-13-10-42-07-" + UUID_REGEX), suffix);
     }
 
+    private static S3Destination destination(String prefix, String customTimeZone, String fileExtension) {
+        S3Destination s3 = new S3Destination();
+        s3.setPrefix(prefix);
+        s3.setCustomTimeZone(customTimeZone);
+        s3.setFileExtension(fileExtension);
+        return s3;
+    }
+
     @Test
     void resolveKeyConcatenatesEvaluatedPrefixAndSuffix() {
-        String key = S3ObjectKeyResolver.resolveKey("legacy", "my-stream", "3", INSTANT, ZoneOffset.UTC);
+        String key = S3ObjectKeyResolver.resolveKey(destination("legacy", null, null), "my-stream", "3",
+                INSTANT, FirehoseCompression.UNCOMPRESSED);
         assertTrue(key.matches("legacy2026/07/13/10/my-stream-3-2026-07-13-10-42-07-" + UUID_REGEX), key);
     }
 
     @Test
     void customTimeZoneShiftsPrefixAndSuffixAcrossTheDayBoundary() {
-        String key = S3ObjectKeyResolver.resolveKey(null, "s", "1",
-                Instant.parse("2026-01-01T23:30:00Z"), ZoneId.of("Europe/Madrid"));
+        String key = S3ObjectKeyResolver.resolveKey(destination(null, "Europe/Madrid", null), "s", "1",
+                Instant.parse("2026-01-01T23:30:00Z"), FirehoseCompression.UNCOMPRESSED);
         assertTrue(key.matches("2026/01/02/00/s-1-2026-01-02-00-30-00-" + UUID_REGEX), key);
+    }
+
+    @Test
+    void keyEndsWithTheCompressionExtension() {
+        String key = S3ObjectKeyResolver.resolveKey(destination(null, null, null), "s", "1",
+                INSTANT, FirehoseCompression.GZIP);
+        assertTrue(key.endsWith(".gz"), key);
+    }
+
+    /** Verified against real AWS: FileExtension replaces the compression extension. */
+    @Test
+    void fileExtensionReplacesTheCompressionExtension() {
+        String key = S3ObjectKeyResolver.resolveKey(destination(null, null, ".custom.log"), "s", "1",
+                INSTANT, FirehoseCompression.GZIP);
+        assertTrue(key.endsWith(".custom.log"), key);
+        assertFalse(key.contains(".gz"), key);
+    }
+
+    @Test
+    void fileExtensionIsAppendedWhenTheStreamIsUncompressed() {
+        String key = S3ObjectKeyResolver.resolveKey(destination(null, null, ".custom.log"), "s", "1",
+                INSTANT, FirehoseCompression.UNCOMPRESSED);
+        assertTrue(key.endsWith(".custom.log"), key);
+    }
+
+    /** The empty string is a valid FileExtension AWS treats as "not specified". */
+    @Test
+    void emptyFileExtensionFallsBackToTheCompressionExtension() {
+        String key = S3ObjectKeyResolver.resolveKey(destination(null, null, ""), "s", "1",
+                INSTANT, FirehoseCompression.GZIP);
+        assertTrue(key.endsWith(".gz"), key);
     }
 
     @Test

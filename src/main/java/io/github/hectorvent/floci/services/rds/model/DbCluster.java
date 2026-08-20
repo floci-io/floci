@@ -36,6 +36,7 @@ public class DbCluster {
 
     private String dockerVolumeName;
     private String volumeId;
+    private String containerStorageResourceId;
 
     // Transient — not persisted
     private transient String containerId;
@@ -142,6 +143,11 @@ public class DbCluster {
 
     public String getVolumeId() { return volumeId; }
     public void setVolumeId(String volumeId) { this.volumeId = volumeId; }
+
+    public String getContainerStorageResourceId() { return containerStorageResourceId; }
+    public void setContainerStorageResourceId(String containerStorageResourceId) {
+        this.containerStorageResourceId = containerStorageResourceId;
+    }
 
     public String getContainerId() { return containerId; }
     public void setContainerId(String containerId) { this.containerId = containerId; }

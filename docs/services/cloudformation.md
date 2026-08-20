@@ -58,7 +58,7 @@ cross-resource references.
 | SQS | `Queue`, `QueuePolicy` (accepted; policy not enforced) |
 | SNS | `Topic`, `Subscription` |
 | DynamoDB | `Table`, `GlobalTable` |
-| Lambda | `Function` (Zip via S3/inline `ZipFile`, and Image), `LayerVersion`, `EventSourceMapping` (SQS, Kinesis, DynamoDB Streams) |
+| Lambda | `Function` (Zip via S3/inline `ZipFile`, and Image), `LayerVersion`, `EventSourceMapping` (SQS, Kinesis, DynamoDB Streams), `Version`, `Alias` (also what SAM's `AutoPublishAlias` expands into) |
 | IAM | `Role`, `User`, `AccessKey`, `Policy`, `ManagedPolicy`, `InstanceProfile` |
 | SSM | `Parameter` |
 | KMS | `Key`, `Alias` |
@@ -67,11 +67,11 @@ cross-resource references.
 | ECS | `Cluster`, `TaskDefinition`, `Service` |
 | EKS | `Cluster`, `Nodegroup` |
 | RDS | `DBInstance`, `DBCluster`, `DBSubnetGroup`, `DBParameterGroup`, `DBClusterParameterGroup` (DBInstance/DBCluster start real containers) |
-| EC2 | `VPC`, `Subnet`, `SecurityGroup`, `InternetGateway`, `RouteTable`, `SubnetRouteTableAssociation`, `Route`, `NatGateway`, `EIP`, `Instance`, `LaunchTemplate`, `VPCGatewayAttachment` |
+| EC2 | `VPC`, `Subnet`, `SecurityGroup` (including inline `SecurityGroupIngress`/`SecurityGroupEgress`), `SecurityGroupIngress`, `SecurityGroupEgress`, `InternetGateway`, `RouteTable`, `SubnetRouteTableAssociation`, `Route`, `NatGateway`, `EIP`, `Instance`, `LaunchTemplate`, `VPCGatewayAttachment`, `NetworkAcl`, `NetworkAclEntry`, `SubnetNetworkAclAssociation`, `FlowLog` |
 | Elastic Load Balancing v2 | `LoadBalancer`, `TargetGroup`, `Listener`, `ListenerRule` |
-| Auto Scaling | `LaunchConfiguration`, `AutoScalingGroup` |
+| Auto Scaling | `LaunchConfiguration`, `AutoScalingGroup`, `LifecycleHook` |
 | Route 53 | `HostedZone`, `RecordSet` |
-| API Gateway (v1) | `RestApi`, `Resource`, `Authorizer`, `Method`, `Deployment`, `Stage` |
+| API Gateway (v1) | `RestApi`, `Resource`, `Authorizer`, `Method`, `Deployment`, `Stage`, `Account` |
 | API Gateway v2 | `Api`, `Route`, `Integration`, `Stage`, `Deployment` |
 | Step Functions | `StateMachine` |
 | Batch | `ComputeEnvironment`, `JobQueue`, `JobDefinition` |
@@ -121,6 +121,21 @@ Redshift clusters, Redshift Serverless namespaces, and DocumentDB Elastic cluste
 because their backing services are not implemented. A `SecretId` change is applied in place rather
 than reproducing CloudFormation's replacement event sequence; failed changes restore affected secret
 data and attachment ownership.
+
+## Auto Scaling Launch Template Resolution
+
+`AWS::AutoScaling::AutoScalingGroup` resolves its launch template through any of the shapes AWS
+accepts, not only by name:
+
+- `LaunchTemplate` with `LaunchTemplateId` **or** `LaunchTemplateName` (plus an optional `Version`).
+  The id and name are distinct lookup keys, so an `lt-` id is matched as an id rather than being
+  treated as a name.
+- A `Ref` to an in-stack `AWS::EC2::LaunchTemplate`, whose `Ref` returns the `lt-` id and whose
+  `Fn::GetAtt LatestVersionNumber` supplies the version.
+- `MixedInstancesPolicy` → `LaunchTemplate` → `LaunchTemplateSpecification`, including
+  `Overrides[].InstanceType` and `InstancesDistribution` (`OnDemandBaseCapacity`,
+  `OnDemandPercentageAboveBaseCapacity`, `SpotAllocationStrategy`). A non-integer where AWS expects
+  a number fails the stack rather than being dropped.
 
 ## Lambda Stack Updates
 
