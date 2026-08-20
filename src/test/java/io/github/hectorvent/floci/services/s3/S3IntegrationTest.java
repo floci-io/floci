@@ -16,6 +16,11 @@ import java.util.Base64;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -2222,6 +2227,265 @@ class S3IntegrationTest {
     }
 
     @Test
+    @Order(118)
+    void listObjectsV2PreservesPlusCharacter() {
+        String bucket = "plus-test-bucket";
+        given().when().put("/" + bucket).then().statusCode(200);
+        try {
+            // Put object with '+' in key (urlencoded to %2B in PUT request)
+            given()
+                .urlEncodingEnabled(false)
+                .body("data")
+            .when()
+                .put("/" + bucket + "/run_id=2026-06-26T00:00:00%2B00:00/f.log")
+            .then()
+                .statusCode(200);
+
+            // 1. GET/HEAD object using %2B should succeed
+            given()
+                .urlEncodingEnabled(false)
+            .when()
+                .get("/" + bucket + "/run_id=2026-06-26T00:00:00%2B00:00/f.log")
+            .then()
+                .statusCode(200)
+                .body(equalTo("data"));
+
+            // 2. list-objects-v2 without encoding-type should return key with literal '+'
+            given()
+            .when()
+                .get("/" + bucket + "?list-type=2")
+            .then()
+                .statusCode(200)
+                .body(containsString("<Key>run_id=2026-06-26T00:00:00+00:00/f.log</Key>"));
+
+            // 3. list-objects-v2 with encoding-type=url should return key with '%2B'
+            given()
+            .when()
+                .get("/" + bucket + "?list-type=2&encoding-type=url")
+            .then()
+                .statusCode(200)
+                .body(containsString("<Key>run_id%3D2026-06-26T00%3A00%3A00%2B00%3A00%2Ff.log</Key>"));
+
+            // 4. list-objects-v2 with encoding-type=url and prefix/delimiter with '+' should return encoded fields
+            given()
+                .urlEncodingEnabled(false)
+            .when()
+                .get("/" + bucket + "?list-type=2&encoding-type=url&prefix=run_id=2026-06-26T00:00:00%2B00:00/&delimiter=%2B")
+            .then()
+                .statusCode(200)
+                .body(containsString("<Prefix>run_id%3D2026-06-26T00%3A00%3A00%2B00%3A00%2F</Prefix>"))
+                .body(containsString("<Delimiter>%2B</Delimiter>"))
+                .body(containsString("<Key>run_id%3D2026-06-26T00%3A00%3A00%2B00%3A00%2Ff.log</Key>"));
+        } finally {
+            given().urlEncodingEnabled(false).when().delete("/" + bucket + "/run_id=2026-06-26T00:00:00%2B00:00/f.log");
+            given().when().delete("/" + bucket);
+        }
+    }
+
+    @Test
+    @Order(119)
+    void listObjectsV2DoesNotDoubleDecodePercentEscapes() {
+        String bucket = "double-decode-test-bucket";
+        given().when().put("/" + bucket).then().statusCode(200);
+        try {
+            // Put object with literal '%20' in key (urlencoded to %2520 in PUT request)
+            given()
+                .urlEncodingEnabled(false)
+                .body("data")
+            .when()
+                .put("/" + bucket + "/percent%2520test/f.log")
+            .then()
+                .statusCode(200);
+
+            // 1. GET/HEAD object using %2520 should succeed
+            given()
+                .urlEncodingEnabled(false)
+            .when()
+                .get("/" + bucket + "/percent%2520test/f.log")
+            .then()
+                .statusCode(200)
+                .body(equalTo("data"));
+
+            // 2. list-objects-v2 without encoding-type should return key with literal '%20'
+            given()
+            .when()
+                .get("/" + bucket + "?list-type=2")
+            .then()
+                .statusCode(200)
+                .body(containsString("<Key>percent%20test/f.log</Key>"));
+
+            // 3. list-objects-v2 with encoding-type=url should return key with '%2520'
+            given()
+            .when()
+                .get("/" + bucket + "?list-type=2&encoding-type=url")
+            .then()
+                .statusCode(200)
+                .body(containsString("<Key>percent%2520test%2Ff.log</Key>"));
+
+            // 4. list-objects-v2 with prefix with '%20' should return correct fields without double-decoding
+            given()
+                .urlEncodingEnabled(false)
+            .when()
+                .get("/" + bucket + "?list-type=2&encoding-type=url&prefix=percent%2520test/")
+            .then()
+                .statusCode(200)
+                .body(containsString("<Prefix>percent%2520test%2F</Prefix>"))
+                .body(containsString("<Key>percent%2520test%2Ff.log</Key>"));
+        } finally {
+            given().urlEncodingEnabled(false).when().delete("/" + bucket + "/percent%2520test/f.log");
+            given().when().delete("/" + bucket);
+        }
+    }
+
+    @Test
+    @Order(120)
+    void listObjectVersionsSupportsDelimiterAndUrlEncoding() {
+        String bucket = "versions-delimiter-test-bucket";
+        given().when().put("/" + bucket).then().statusCode(200);
+        try {
+            given()
+                .urlEncodingEnabled(false)
+                .body("data1")
+            .when()
+                .put("/" + bucket + "/dir/one.txt")
+            .then()
+                .statusCode(200);
+
+            given()
+                .urlEncodingEnabled(false)
+                .body("data2")
+            .when()
+                .put("/" + bucket + "/root.txt")
+            .then()
+                .statusCode(200);
+
+            given()
+            .when()
+                .get("/" + bucket + "?versions&delimiter=/&encoding-type=url")
+            .then()
+                .statusCode(200)
+                .body(containsString("<Delimiter>%2F</Delimiter>"))
+                .body(containsString("<Prefix>dir%2F</Prefix>"))
+                .body(containsString("<Key>root.txt</Key>"))
+                .body(not(containsString("<Key>dir%2Fone.txt</Key>")));
+        } finally {
+            given().urlEncodingEnabled(false).when().delete("/" + bucket + "/dir/one.txt");
+            given().urlEncodingEnabled(false).when().delete("/" + bucket + "/root.txt");
+            given().when().delete("/" + bucket);
+        }
+    }
+
+    @Test
+    @Order(121)
+    void listObjectVersionsPagesCombinedVersionsAndPrefixes() {
+        String bucket = "versions-pagination-test-bucket";
+        given().when().put("/" + bucket).then().statusCode(200);
+        try {
+            given().urlEncodingEnabled(false).body("data1").when().put("/" + bucket + "/a/one.txt").then().statusCode(200);
+            given().urlEncodingEnabled(false).body("data2").when().put("/" + bucket + "/b/two.txt").then().statusCode(200);
+
+            // With max-keys=1, only 'a/' should be returned, IsTruncated should be true, and NextKeyMarker should be 'a/'
+            given()
+            .when()
+                .get("/" + bucket + "?versions&delimiter=/&max-keys=1")
+            .then()
+                .statusCode(200)
+                .body(containsString("<IsTruncated>true</IsTruncated>"))
+                .body(containsString("<NextKeyMarker>a/</NextKeyMarker>"))
+                .body(containsString("<Prefix>a/</Prefix>"))
+                .body(not(containsString("<Prefix>b/</Prefix>")));
+        } finally {
+            given().urlEncodingEnabled(false).when().delete("/" + bucket + "/a/one.txt");
+            given().urlEncodingEnabled(false).when().delete("/" + bucket + "/b/two.txt");
+            given().when().delete("/" + bucket);
+        }
+    }
+
+    @Test
+    @Order(122)
+    void listObjectVersionsPagesEachVersionEntry() {
+        String bucket = "versions-entry-pagination-test-bucket";
+        String firstVersionId = null;
+        String secondVersionId = null;
+        given().when().put("/" + bucket).then().statusCode(200);
+        try {
+            given()
+                .body("<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>")
+            .when()
+                .put("/" + bucket + "?versioning")
+            .then()
+                .statusCode(200);
+
+            firstVersionId = given()
+                .body("v1")
+            .when()
+                .put("/" + bucket + "/log.txt")
+            .then()
+                .statusCode(200)
+                .header("x-amz-version-id", notNullValue())
+                .extract().header("x-amz-version-id");
+            secondVersionId = given()
+                .body("v2")
+            .when()
+                .put("/" + bucket + "/log.txt")
+            .then()
+                .statusCode(200)
+                .header("x-amz-version-id", notNullValue())
+                .extract().header("x-amz-version-id");
+            assertNotEquals(firstVersionId, secondVersionId);
+
+            // max-keys bounds Version entries, not distinct keys, so the second version of the same
+            // key spills onto the next page instead of riding along on the first one.
+            String firstPage = given()
+            .when()
+                .get("/" + bucket + "?versions&max-keys=1")
+            .then()
+                .statusCode(200)
+                .body(containsString("<IsTruncated>true</IsTruncated>"))
+                .body(containsString("<NextKeyMarker>log.txt</NextKeyMarker>"))
+                .extract().body().asString();
+            assertEquals(1, countOccurrences(firstPage, "<Version>"));
+
+            // Resuming inside a key needs the version id alongside the key marker.
+            String nextVersionIdMarker = xmlElementValue(firstPage, "NextVersionIdMarker");
+            assertNotNull(nextVersionIdMarker);
+            String remainingVersionId =
+                    nextVersionIdMarker.equals(firstVersionId) ? secondVersionId : firstVersionId;
+            assertTrue(firstPage.contains("<VersionId>" + nextVersionIdMarker + "</VersionId>"));
+            assertFalse(firstPage.contains("<VersionId>" + remainingVersionId + "</VersionId>"));
+
+            String secondPage = given()
+            .when()
+                .get("/" + bucket + "?versions&max-keys=1&key-marker=log.txt&version-id-marker="
+                        + nextVersionIdMarker)
+            .then()
+                .statusCode(200)
+                .body(containsString("<IsTruncated>false</IsTruncated>"))
+                .body(containsString("<VersionIdMarker>" + nextVersionIdMarker + "</VersionIdMarker>"))
+                .body(containsString("<VersionId>" + remainingVersionId + "</VersionId>"))
+                .extract().body().asString();
+            assertEquals(1, countOccurrences(secondPage, "<Version>"));
+            assertFalse(secondPage.contains("<VersionId>" + nextVersionIdMarker + "</VersionId>"));
+
+            // A version-id marker on its own has no key to resume within, and AWS rejects it.
+            given()
+            .when()
+                .get("/" + bucket + "?versions&version-id-marker=" + nextVersionIdMarker)
+            .then()
+                .statusCode(400)
+                .body(containsString("<Code>InvalidArgument</Code>"));
+        } finally {
+            if (firstVersionId != null) {
+                given().when().delete("/" + bucket + "/log.txt?versionId=" + firstVersionId);
+            }
+            if (secondVersionId != null) {
+                given().when().delete("/" + bucket + "/log.txt?versionId=" + secondVersionId);
+            }
+            given().when().delete("/" + bucket);
+        }
+    }
+
+    @Test
     @Order(104)
     void cleanupPaginationBucket() {
         given().when().delete("/pag-test-bucket/a.txt");
@@ -2556,5 +2820,24 @@ class S3IntegrationTest {
 
     private static String asciiSlice(byte[] bytes, int start, int length) {
         return new String(bytes, start, length, StandardCharsets.US_ASCII);
+    }
+
+    private static int countOccurrences(String body, String token) {
+        int count = 0;
+        for (int idx = body.indexOf(token); idx >= 0; idx = body.indexOf(token, idx + token.length())) {
+            count++;
+        }
+        return count;
+    }
+
+    /** Text of the first {@code <name>...</name>} element, or {@code null} when the element is absent. */
+    private static String xmlElementValue(String body, String name) {
+        String open = "<" + name + ">";
+        int start = body.indexOf(open);
+        if (start < 0) {
+            return null;
+        }
+        int end = body.indexOf("</" + name + ">", start + open.length());
+        return end < 0 ? null : body.substring(start + open.length(), end);
     }
 }

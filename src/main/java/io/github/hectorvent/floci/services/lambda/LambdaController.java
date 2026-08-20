@@ -104,6 +104,17 @@ public class LambdaController {
             code.put("RepositoryType", "S3");
         }
 
+        // GetFunction carries the function's tags alongside Configuration and Code. Clients read
+        // them from here rather than calling ListTags, so omitting the field makes a tagged
+        // function read back untagged and diff on every plan. Unlike IAM, Lambda has no
+        // list-subset rule to gate this on — ListFunctions returns FunctionConfiguration, which
+        // has no Tags field at all.
+        Map<String, String> tags = fn.getTags();
+        if (tags != null && !tags.isEmpty()) {
+            ObjectNode tagsNode = root.putObject("Tags");
+            tags.forEach(tagsNode::put);
+        }
+
         return Response.ok(root).build();
     }
 
@@ -329,6 +340,15 @@ public class LambdaController {
         node.put("BatchSize", esm.getBatchSize());
         node.put("State", esm.getState());
         node.put("LastModified", (double) esm.getLastModified() / 1000.0);
+        // Omitted rather than nulled when unset, so a mapping created without a starting position
+        // reads back the way AWS returns it - and so Terraform sees the configured value on refresh
+        // instead of treating the field as unset and forcing a replacement on every plan.
+        if (esm.getStartingPosition() != null) {
+            node.put("StartingPosition", esm.getStartingPosition());
+        }
+        if (esm.getStartingPositionTimestamp() != null) {
+            node.put("StartingPositionTimestamp", (double) esm.getStartingPositionTimestamp() / 1000.0);
+        }
         ArrayNode responseTypes = node.putArray("FunctionResponseTypes");
 
         if (esm.getBisectBatchOnFunctionError() != null) {
@@ -479,12 +499,13 @@ public class LambdaController {
     @Path("/functions/{functionName}/policy")
     public Response addPermission(@Context HttpHeaders headers,
                                   @PathParam("functionName") String functionName,
+                                  @QueryParam("Qualifier") String qualifier,
                                   String body) {
         String region = regionResolver.resolveRegion(headers);
         try {
             @SuppressWarnings("unchecked")
             Map<String, Object> request = objectMapper.readValue(body, Map.class);
-            Map<String, Object> statement = lambdaService.addPermission(region, functionName, request);
+            Map<String, Object> statement = lambdaService.addPermission(region, functionName, qualifier, request);
             String statementJson = objectMapper.writeValueAsString(statement);
             ObjectNode root = objectMapper.createObjectNode();
             root.put("Statement", statementJson);
@@ -499,10 +520,11 @@ public class LambdaController {
     @GET
     @Path("/functions/{functionName}/policy")
     public Response getPolicy(@Context HttpHeaders headers,
-                              @PathParam("functionName") String functionName) {
+                              @PathParam("functionName") String functionName,
+                              @QueryParam("Qualifier") String qualifier) {
         String region = regionResolver.resolveRegion(headers);
         try {
-            Map<String, Object> data = lambdaService.getPolicy(region, functionName);
+            Map<String, Object> data = lambdaService.getPolicy(region, functionName, qualifier);
             @SuppressWarnings("unchecked")
             Map<String, Object> policy = (Map<String, Object>) data.get("policy");
             String policyJson = objectMapper.writeValueAsString(policy);
@@ -521,9 +543,10 @@ public class LambdaController {
     @Path("/functions/{functionName}/policy/{statementId}")
     public Response removePermission(@Context HttpHeaders headers,
                                      @PathParam("functionName") String functionName,
-                                     @PathParam("statementId") String statementId) {
+                                     @PathParam("statementId") String statementId,
+                                     @QueryParam("Qualifier") String qualifier) {
         String region = regionResolver.resolveRegion(headers);
-        lambdaService.removePermission(region, functionName, statementId);
+        lambdaService.removePermission(region, functionName, qualifier, statementId);
         return Response.noContent().build();
     }
 
@@ -621,6 +644,13 @@ public class LambdaController {
         // KMSKeyArn — only when set
         if (fn.getKmsKeyArn() != null) {
             node.put("KMSKeyArn", fn.getKmsKeyArn());
+        }
+
+        if (fn.getFileSystemConfigs() != null && !fn.getFileSystemConfigs().isEmpty()) {
+            ArrayNode fileSystems = node.putArray("FileSystemConfigs");
+            fn.getFileSystemConfigs().forEach(fileSystem -> fileSystems.addObject()
+                    .put("Arn", fileSystem.getArn())
+                    .put("LocalMountPath", fileSystem.getLocalMountPath()));
         }
 
         // Environment — always present (SDK expects it even when empty)

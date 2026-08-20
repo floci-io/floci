@@ -210,13 +210,14 @@ class ApiGatewayCustomDomainIntegrationTest {
     @Test @Order(14)
     void createDuplicateDomainName_rejected() {
         // Domain names are globally unique across regions — creating the same
-        // domain name again (even implicitly in the same region) must fail
+        // domain name again (even implicitly in the same region) must fail.
+        // Verified against AWS: both the REST and HTTP APIs answer BadRequestException, not a conflict
         given()
                 .contentType(ContentType.JSON)
                 .body("{\"domainName\":\"api.example.com\",\"certificateArn\":\"arn:aws:acm:us-east-1:123456789012:certificate/dup\"}")
                 .when().post("/domainnames")
                 .then()
-                .statusCode(409);
+                .statusCode(400);
     }
 
     @Test @Order(15)

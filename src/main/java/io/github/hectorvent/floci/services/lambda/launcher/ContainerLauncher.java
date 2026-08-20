@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.common.docker.LaunchedContainerAwsEnv;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
+import io.github.hectorvent.floci.services.iam.model.SessionCreds;
 import io.github.hectorvent.floci.services.lambda.LambdaLayerService;
 import io.github.hectorvent.floci.services.lambda.model.ContainerState;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
@@ -32,18 +33,25 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Starts and stops Docker containers for Lambda function execution.
@@ -59,6 +67,32 @@ public class ContainerLauncher {
     private static final Logger LOG = Logger.getLogger(ContainerLauncher.class);
     private static final String TASK_DIR = "/var/task";
     private static final String RUNTIME_DIR = "/var/runtime";
+
+    /** Default base prefix for the containers and code volumes Lambda spawns. */
+    static final String DEFAULT_NAME_PREFIX = "floci";
+    /** A prefix must be a legal Docker name on its own: names must start alphanumeric. */
+    private static final java.util.regex.Pattern SAFE_NAME_PREFIX =
+            java.util.regex.Pattern.compile("^[A-Za-z0-9][A-Za-z0-9_.-]*$");
+
+    /**
+     * The base name prefix for Lambda containers and code volumes:
+     * {@code floci.services.lambda.container-name-prefix} when set and Docker-safe,
+     * otherwise the default {@code floci}.
+     */
+    static String resolveContainerNamePrefix(EmulatorConfig config) {
+        String configured = config.services().lambda().containerNamePrefix()
+                .map(String::trim).orElse("");
+        if (configured.isEmpty()) {
+            return DEFAULT_NAME_PREFIX;
+        }
+        if (!SAFE_NAME_PREFIX.matcher(configured).matches()) {
+            LOG.warnv("Ignoring floci.services.lambda.container-name-prefix \"{0}\": not a valid "
+                    + "Docker name prefix ([A-Za-z0-9][A-Za-z0-9_.-]*); using \"{1}\"",
+                    configured, DEFAULT_NAME_PREFIX);
+            return DEFAULT_NAME_PREFIX;
+        }
+        return configured;
+    }
 
     /**
      * In-container location of Floci's CA certificate, injected when TLS is enabled so the
@@ -83,6 +117,7 @@ public class ContainerLauncher {
     private final EcrRegistryManager ecrRegistryManager;
     private final LambdaLayerService layerService;
     private final LaunchedContainerAwsEnv awsEnv;
+    private final LambdaExecutionRoleCredentials executionRoleCredentials;
 
     /** Matches an AWS-shaped ECR image URI: {@code <account>.dkr.ecr.<region>.amazonaws.com/<repo>[:tag]}. */
     private static final java.util.regex.Pattern AWS_ECR_URI =
@@ -98,7 +133,8 @@ public class ContainerLauncher {
                              EmulatorConfig config,
                              EcrRegistryManager ecrRegistryManager,
                              LambdaLayerService layerService,
-                             LaunchedContainerAwsEnv awsEnv) {
+                             LaunchedContainerAwsEnv awsEnv,
+                             LambdaExecutionRoleCredentials executionRoleCredentials) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.logStreamer = logStreamer;
@@ -109,6 +145,7 @@ public class ContainerLauncher {
         this.ecrRegistryManager = ecrRegistryManager;
         this.layerService = layerService;
         this.awsEnv = awsEnv;
+        this.executionRoleCredentials = executionRoleCredentials;
     }
 
     @PostConstruct
@@ -149,14 +186,24 @@ public class ContainerLauncher {
 
         // For Zip functions, verify code exists before allocating any resources.
         // Hot-reload functions use a bind-mount; the Docker daemon validates the path at start.
-        if (!fn.isHotReload()) {
-            if (fn.getCodeLocalPath() != null) {
-                Path codePath = Path.of(fn.getCodeLocalPath());
-                if (!Files.exists(codePath)) {
-                    throw new RuntimeException("Code directory not found for function '"
-                            + fn.getFunctionName() + "': " + fn.getCodeLocalPath()
-                            + " (function may have been deleted or updated)");
-                }
+        // Image functions carry an imageUri rather than a local path.
+        if (!fn.isHotReload() && !"Image".equals(fn.getPackageType())) {
+            if (fn.getCodeLocalPath() == null) {
+                // A null path used to skip validation entirely, which made the one state that
+                // always means "no code" the one state never checked: the container started
+                // empty, the runtime logged an ImportModuleError nobody saw, and the caller
+                // waited out the whole function timeout. Failing here surfaces a dropped code
+                // field at its cause instead of as a timeout somewhere else (#1987).
+                throw new RuntimeException("No code location for function '"
+                        + fn.getFunctionName() + "'"
+                        + ("$LATEST".equals(fn.getVersion()) ? "" : " version " + fn.getVersion())
+                        + " (function has no deployed code)");
+            }
+            Path codePath = Path.of(fn.getCodeLocalPath());
+            if (!Files.exists(codePath)) {
+                throw new RuntimeException("Code directory not found for function '"
+                        + fn.getFunctionName() + "': " + fn.getCodeLocalPath()
+                        + " (function may have been deleted or updated)");
             }
         }
 
@@ -176,6 +223,7 @@ public class ContainerLauncher {
         // must be visible in the catch block below to release its in-flight reference on any
         // failure path, not just the one where useCodeVolume's block itself throws.
         String reservedCodeVolume = null;
+        Optional<SessionCreds> roleCredentials = Optional.empty();
         try {
 
         // Resolve image
@@ -192,7 +240,8 @@ public class ContainerLauncher {
 
         // Give the container a human-readable name (needed for log stream name below)
         String shortId = java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 8);
-        String containerName = ContainerStorageHelper.dockerName(config, "floci-" + fn.getFunctionName() + "-" + shortId);
+        String containerName = ContainerStorageHelper.prefixedDockerName(config,
+                resolveContainerNamePrefix(config), fn.getFunctionName() + "-" + shortId);
 
         // CloudWatch log coordinates — computed here so they can be injected as env vars
         String cwLogGroup  = "/aws/lambda/" + fn.getFunctionName();
@@ -218,16 +267,25 @@ public class ContainerLauncher {
         if (fn.getHandler() != null && !fn.getHandler().isBlank()) {
             env.add("_HANDLER=" + fn.getHandler());
         }
-        // Region, credentials and the Floci endpoint the SDK should target — the same baseline
-        // Floci gives every launched container. When the host ~/.aws is mounted (awsConfigPath)
-        // the SDK discovers credentials from /opt/aws-config instead of the placeholders.
+        // Region, credentials and the Floci endpoint the SDK should target: the same baseline
+        // Floci gives every launched container. When the host ~/.aws is mounted (awsConfigPath),
+        // the SDK discovers credentials from /opt/aws-config instead of injected credentials.
         Optional<String> awsConfigPath = config.services().lambda().awsConfigPath()
                 .filter(s -> !s.isBlank());
+        if (awsConfigPath.isEmpty()) {
+            roleCredentials = executionRoleCredentials.forFunction(fn);
+        }
         env.addAll(awsEnv.sdkBaselineEnv(lambdaRegion,
-                awsConfigPath.isPresent() ? Optional.of("/opt/aws-config") : Optional.empty()));
+                awsConfigPath.isPresent() ? Optional.of("/opt/aws-config") : Optional.empty(),
+                roleCredentials));
         env.addAll(flociCaEnv(flociCaCert));
         if (fn.getEnvironment() != null) {
-            fn.getEnvironment().forEach((k, v) -> env.add(k + "=" + v));
+            boolean hasExecutionRoleCredentials = roleCredentials.isPresent();
+            fn.getEnvironment().forEach((k, v) -> {
+                if (!hasExecutionRoleCredentials || !isAwsCredentialVariable(k)) {
+                    env.add(k + "=" + v);
+                }
+            });
         }
 
         ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
@@ -272,6 +330,25 @@ public class ContainerLauncher {
             }
             // Small code takes the original per-container direct copy below (no volume): it's fast
             // enough that a shared volume's helper round-trip would only add cold-start latency.
+        }
+
+        if (fn.getFileSystemConfigs() != null && !fn.getFileSystemConfigs().isEmpty()) {
+            var efsCfg = config.storage().efs();
+            fn.getFileSystemConfigs().forEach(fileSystem -> {
+                String volumeName = efsVolumeName(fileSystem.getArn());
+                lifecycleManager.ensureSharedVolume(volumeName,
+                        efsCfg.ownerUid(), efsCfg.ownerGid(), efsCfg.rootPermissions(),
+                        efsCfg.initImage());
+                specBuilder.withNamedVolume(volumeName, fileSystem.getLocalMountPath(), false);
+            });
+            efsCfg.mountUser().ifPresent(user -> {
+                if (!user.matches("^\\d+(:\\d+)?$")) {
+                    throw new IllegalArgumentException(
+                            "floci.storage.efs.mount-user must be \"uid\" or \"uid:gid\": " + user);
+                }
+                specBuilder.withUser(user);
+            });
+            efsCfg.mountGroupAdd().ifPresent(gid -> specBuilder.withGroupAdd(String.valueOf(gid)));
         }
 
         // For Image package type use ImageConfig.Command/EntryPoint/WorkingDirectory if set, otherwise fall back to Handler (Zip-style)
@@ -389,7 +466,10 @@ public class ContainerLauncher {
         // invocations without a slow extension is strictly better than failing the launch.
         awaitExtensionReadiness(runtimeApiServer, fn.getFunctionName());
 
-        ContainerHandle handle = new ContainerHandle(containerId, fn.getFunctionName(), runtimeApiServer, ContainerState.WARM, fn.isHotReload());
+        ContainerHandle handle = new ContainerHandle(
+                containerId, fn.getFunctionName(), runtimeApiServer, ContainerState.WARM, fn.isHotReload(),
+                roleCredentials.map(SessionCreds::accessKeyId).orElse(null),
+                LambdaExecutionRoleCredentials.sessionAccountId(fn));
 
         // Attach log streaming
         Closeable logHandle = logStreamer.attach(
@@ -407,13 +487,27 @@ public class ContainerLauncher {
             LOG.errorv("Container launch failed for function {0}; cleaning up: {1}",
                     fn.getFunctionName(), e.getMessage());
             if (containerId != null) {
-                try { lifecycleManager.stopAndRemove(containerId, null); } catch (Exception ignore) { /* best effort */ }
+                try {
+                    lifecycleManager.stopAndRemove(containerId, null);
+                } catch (Exception cleanupError) {
+                    LOG.warnv(cleanupError, "Could not remove failed Lambda container {0}", containerId);
+                }
+            }
+            if (roleCredentials.isPresent()) {
+                executionRoleCredentials.unregister(
+                        LambdaExecutionRoleCredentials.sessionAccountId(fn),
+                        roleCredentials.get().accessKeyId());
             }
             // No-op if create() already succeeded and released this above (reservedCodeVolume is
             // null by then); otherwise the failure happened before Docker ever saw the volume, so
             // its in-flight reference must be released here or cleanup would wait on it forever.
             releaseCodeVolumeReference(reservedCodeVolume);
-            try { runtimeApiServerFactory.release(runtimeApiServer); } catch (Exception ignore) { /* best effort */ }
+            try {
+                runtimeApiServerFactory.release(runtimeApiServer);
+            } catch (Exception cleanupError) {
+                LOG.warnv(cleanupError, "Could not release Runtime API server for function {0}",
+                        fn.getFunctionName());
+            }
             throw e;
         }
     }
@@ -422,17 +516,58 @@ public class ContainerLauncher {
         LOG.infov("Stopping container {0}", handle.getContainerId());
         handle.setState(ContainerState.STOPPED);
 
+        RuntimeApiServer server = handle.getRuntimeApiServer();
+
+        // Quiesce first: stop accepting new work, notify extensions, complete pending
+        // invocations. Existing runtime pollers on /invocation/next stay parked.
+        server.quiesce();
+
+        // Then SIGTERM the container. The runtime library's default SIGTERM handler exits
+        // the process while the runtime API socket is still up, matching real AWS Lambda's
+        // shutdown flow.
+        //
+        // stopTimeoutSeconds is the ceiling docker waits for PID 1 to exit before SIGKILL,
+        // not a grace floor: the runtime typically exits promptly, so `docker stop`
+        // returns shortly after and this value rarely matters end-to-end. Sized against
+        // AWS's documented Shutdown-phase tiers as a defensive upper bound only — 2s
+        // when at least one extension is registered (matching AWS's 2000ms
+        // external-extensions budget), else 1s. NOTE: extensions run as sibling
+        // `docker exec`s (not children of PID 1) and are killed when the container
+        // exits; the 2s ceiling does not provide a guaranteed grace window for
+        // extension shutdown work — only that we will not preempt PID 1 for at least
+        // that long if it happens to be slow.
+        int stopTimeoutSeconds = server.hasRegisteredExtensions() ? 2 : 1;
+        lifecycleManager.stopAndRemove(handle.getContainerId(), handle.getLogStream(),
+                stopTimeoutSeconds);
+
+        // Only now close the runtime API socket. Any pollers that were still parked when
+        // the container exited get terminated by their end of the connection closing;
+        // this call releases the port for reuse.
         try {
-            handle.getRuntimeApiServer().stop().get(5, TimeUnit.SECONDS);
+            server.close().get(5, TimeUnit.SECONDS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         } catch (ExecutionException | TimeoutException e) {
             LOG.warnv(e, "RuntimeApiServer did not close cleanly for container {0}",
                     handle.getContainerId());
         } finally {
-            runtimeApiServerFactory.release(handle.getRuntimeApiServer());
+            try {
+                runtimeApiServerFactory.release(server);
+            } finally {
+                // The session is only reachable while the container is alive, so it is retired
+                // here rather than on the launch path's failure branch alone. Runs even if the
+                // release above throws, otherwise a failed release strands the registration and
+                // its credentials stay authorizable for the rest of the process lifetime.
+                executionRoleCredentials.unregister(
+                        handle.getExecutionRoleSessionAccountId(), handle.getExecutionRoleAccessKeyId());
+            }
         }
-        lifecycleManager.stopAndRemove(handle.getContainerId(), handle.getLogStream());
+    }
+
+    private static boolean isAwsCredentialVariable(String name) {
+        return "AWS_ACCESS_KEY_ID".equals(name)
+                || "AWS_SECRET_ACCESS_KEY".equals(name)
+                || "AWS_SESSION_TOKEN".equals(name);
     }
 
     /**
@@ -474,6 +609,7 @@ public class ContainerLauncher {
     // `docker volume prune` would otherwise still read as "populated" here even though Docker has
     // nothing under that name, silently mounting an empty /var/task into the next container.
     // ensureCodeVolume re-checks lifecycleManager.volumeExists() rather than trusting this alone.
+    private static final String CODE_VOLUME_MARKER_DIR = "lambda-codevol-markers";
     private final java.util.Set<String> populatedCodeVolumes = java.util.concurrent.ConcurrentHashMap.newKeySet();
     // Deliberately never pruned: removing an entry while a caller elsewhere still held a reference
     // to its lock object let a third caller's computeIfAbsent create a replacement lock for the same
@@ -483,6 +619,7 @@ public class ContainerLauncher {
     // combinations ever launched, each entry a single Object; negligible next to the disk space the
     // rest of this fix reclaims.
     private final java.util.concurrent.ConcurrentHashMap<String, Object> codeVolumeLocks = new java.util.concurrent.ConcurrentHashMap<>();
+    private final Object codeVolumeMarkerIoLock = new Object();
 
     /** Each function's current code volume, so a redeploy can queue the superseded one for cleanup. */
     private final java.util.concurrent.ConcurrentHashMap<String, String> functionCurrentVolume =
@@ -540,8 +677,8 @@ public class ContainerLauncher {
      * throwaway helper container that has the volume mounted read-write; every real container then
      * just mounts the volume read-only, turning a ~95s per-container copy into a ~0.2s mount.
      */
-    private String ensureCodeVolume(LambdaFunction fn, String image) {
-        String volName = codeVolumeName(fn);
+    String ensureCodeVolume(LambdaFunction fn, String image) {
+        String volName = codeVolumeName(resolveContainerNamePrefix(config), fn);
         // Held for the whole resolve-and-reconcile, not just the populate branch: this is the same
         // lock cleanupSupersededVolumes acquires before claiming a volume for deletion, so a launch
         // that resolves a volume can never race a sweep that's about to delete that exact volume out
@@ -556,15 +693,22 @@ public class ContainerLauncher {
         Object lock = codeVolumeLocks.computeIfAbsent(volName, k -> new Object());
         synchronized (lock) {
             if (!(populatedCodeVolumes.contains(volName) && lifecycleManager.volumeExists(volName))) {
-                // Either never populated, or the bookkeeping says populated but Docker disagrees
-                // (removed out of band). Repopulate rather than trust a stale flag.
-                long t0 = System.currentTimeMillis();
-                LOG.infov("Populating code volume {0} for function {1} (one-time per code version)",
-                        volName, fn.getFunctionName());
-                populateCodeVolume(volName, fn, image);
+                // Either never populated in this process, or the bookkeeping says populated but
+                // Docker disagrees (removed out of band). A completion marker from an earlier run
+                // is authoritative only while its independently persisted volume still exists.
+                if (reusePersistedCodeVolumeOrRemoveStaleMarker(volName)) {
+                    LOG.infov("Reusing code volume {0} populated by a previous run (marker present)",
+                            volName);
+                } else {
+                    long t0 = System.currentTimeMillis();
+                    LOG.infov("Populating code volume {0} for function {1} (one-time per code version)",
+                            volName, fn.getFunctionName());
+                    populateCodeVolume(volName, fn, image);
+                    writeCodeVolumeMarkerAndPruneOrphans(volName);
+                    LOG.infov("Populated code volume {0} in {1}ms; future cold starts mount it instead of copying",
+                            volName, System.currentTimeMillis() - t0);
+                }
                 populatedCodeVolumes.add(volName);
-                LOG.infov("Populated code volume {0} in {1}ms; future cold starts mount it instead of copying",
-                        volName, System.currentTimeMillis() - t0);
             }
             // Reconcile bookkeeping for the resolved volume even when the check above already found
             // it populated: a redeploy rolled back to an older code version resolves a volume name
@@ -681,13 +825,13 @@ public class ContainerLauncher {
         return count == null ? 0 : count.get();
     }
 
-    private void populateCodeVolume(String volName, LambdaFunction fn, String image) {
+    void populateCodeVolume(String volName, LambdaFunction fn, String image) {
         lifecycleManager.ensureVolume(volName);
         String shortId = java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 8);
         // A minimal helper container (sleep) with the volume mounted read-write at /var/task; we
         // tar-copy the code into it, then discard it — the data persists in the volume.
         ContainerSpec helperSpec = containerBuilder.newContainer(image)
-                .withName("floci-codevol-" + fn.getFunctionName() + "-" + shortId)
+                .withName(resolveContainerNamePrefix(config) + "-codevol-" + fn.getFunctionName() + "-" + shortId)
                 .withEnv(java.util.List.of())
                 .withEntrypoint(java.util.List.of("sleep"))
                 .withCmd(java.util.List.of("3600"))
@@ -700,13 +844,115 @@ public class ContainerLauncher {
         try {
             helperId = lifecycleManager.create(helperSpec);
             lifecycleManager.startCreated(helperId, helperSpec);
-            copyDirToContainer(lifecycleManager.getDockerClient(), helperId,
+            copyDirToContainerStrict(lifecycleManager.getDockerClient(), helperId,
                     Path.of(fn.getCodeLocalPath()), TASK_DIR, fn.getFunctionName());
         } finally {
             if (helperId != null) {
-                try { lifecycleManager.stopAndRemove(helperId, null); } catch (Exception ignore) { /* best effort */ }
+                try {
+                    lifecycleManager.stopAndRemove(helperId, null);
+                } catch (Exception e) {
+                    LOG.warnv("Could not remove code-volume helper {0}: {1}", helperId, e.getMessage());
+                }
             }
             POPULATE_SEMAPHORE.release();
+        }
+    }
+
+    // A code volume survives an emulator restart, but the in-process populatedCodeVolumes set does not.
+    // A persisted completion marker lets a later run recognize an already-populated, content-addressed
+    // volume and skip re-copying its files. The marker is stored under storage.persistent-path
+    // regardless of storage mode; reuse still requires the independently persisted Docker volume.
+    private Path codeVolumeMarkerPath(String volName) {
+        return Path.of(config.storage().persistentPath(), CODE_VOLUME_MARKER_DIR, volName);
+    }
+
+    /**
+     * Reuses a completed volume when both marker and volume exist. If the volume is absent or cannot
+     * be verified, removes the marker before repopulation so a failed copy cannot leave the old
+     * completion signal beside partial data.
+     */
+    private boolean reusePersistedCodeVolumeOrRemoveStaleMarker(String volName) {
+        synchronized (codeVolumeMarkerIoLock) {
+            Path marker = codeVolumeMarkerPath(volName);
+            if (!Files.isRegularFile(marker, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+                return false;
+            }
+            java.util.Optional<java.util.Set<String>> volumeNames = lifecycleManager.tryListVolumeNames();
+            boolean inventoryUnavailable = volumeNames.isEmpty();
+            if (!inventoryUnavailable && volumeNames.get().contains(volName)) {
+                return true;
+            }
+            try {
+                Files.deleteIfExists(marker);
+                if (inventoryUnavailable) {
+                    LOG.warnv("Could not verify backing volume {0}; removed its marker and re-populating",
+                            volName);
+                } else {
+                    LOG.debugv("Removed stale code-volume marker {0}; backing volume is absent", marker);
+                }
+            } catch (IOException e) {
+                throw new IllegalStateException("Could not invalidate code-volume marker " + marker, e);
+            }
+            return false;
+        }
+    }
+
+    private void writeCodeVolumeMarkerAndPruneOrphans(String volName) {
+        synchronized (codeVolumeMarkerIoLock) {
+            Path marker = codeVolumeMarkerPath(volName);
+            try {
+                Path markerDir = marker.getParent();
+                Files.createDirectories(markerDir);
+                Path tempMarker = Files.createTempFile(markerDir, marker.getFileName().toString(), ".tmp");
+                try {
+                    Files.writeString(tempMarker, "");
+                    try {
+                        Files.move(tempMarker, marker, StandardCopyOption.REPLACE_EXISTING,
+                                StandardCopyOption.ATOMIC_MOVE);
+                    } catch (AtomicMoveNotSupportedException e) {
+                        Files.move(tempMarker, marker, StandardCopyOption.REPLACE_EXISTING);
+                    }
+                } catch (IOException | RuntimeException e) {
+                    try {
+                        Files.deleteIfExists(tempMarker);
+                    } catch (IOException cleanupError) {
+                        e.addSuppressed(cleanupError);
+                    }
+                    throw e;
+                }
+            } catch (IOException e) {
+                // A missing marker only costs one re-populate on the next boot; never fail a launch over it.
+                LOG.warnv("Could not write code-volume marker {0}: {1}", marker, e.getMessage());
+            }
+            pruneOrphanCodeVolumeMarkers(marker.getParent());
+        }
+    }
+
+    private void pruneOrphanCodeVolumeMarkers(Path markerDir) {
+        java.util.Optional<java.util.Set<String>> volumeNames = lifecycleManager.tryListVolumeNames();
+        if (volumeNames.isEmpty() || !Files.isDirectory(markerDir)) {
+            return;
+        }
+        // Markers are named after their volume, so the prune filter must track the configured
+        // name prefix. Markers written under a previously configured prefix are left alone —
+        // an orphaned marker file is harmless, and pruning only what this configuration could
+        // have written can never delete a concurrent process's live markers.
+        String markerPrefix = resolveContainerNamePrefix(config) + "-code-";
+        try (java.util.stream.Stream<Path> markers = Files.list(markerDir)) {
+            markers.filter(path -> Files.isRegularFile(path, java.nio.file.LinkOption.NOFOLLOW_LINKS))
+                    .filter(path -> path.getFileName().toString().startsWith(markerPrefix))
+                    .filter(path -> !volumeNames.get().contains(path.getFileName().toString()))
+                    .forEach(path -> {
+                        try {
+                            Files.deleteIfExists(path);
+                            LOG.debugv("Pruned orphan code-volume marker {0}", path);
+                        } catch (IOException e) {
+                            LOG.warnv("Could not prune orphan code-volume marker {0}: {1}",
+                                    path, e.getMessage());
+                        }
+                    });
+        } catch (IOException e) {
+            LOG.warnv("Could not scan code-volume marker directory {0}: {1}", markerDir, e.getMessage());
         }
     }
 
@@ -751,6 +997,11 @@ public class ContainerLauncher {
      * Prefers the code SHA-256; falls back to last-modified when the SHA is unavailable.
      */
     static String codeVolumeName(LambdaFunction fn) {
+        return codeVolumeName(DEFAULT_NAME_PREFIX, fn);
+    }
+
+    /** {@link #codeVolumeName(LambdaFunction)} with a configured base prefix in place of {@code floci}. */
+    static String codeVolumeName(String namePrefix, LambdaFunction fn) {
         String key = fn.getCodeSha256();
         if (key == null || key.isBlank()) {
             key = Long.toString(fn.getLastModified());
@@ -763,7 +1014,26 @@ public class ContainerLauncher {
             h = "0";
         }
         String fname = fn.getFunctionName().replaceAll("[^a-zA-Z0-9_.-]", "-");
-        return "floci-code-" + fname + "-" + h;
+        return namePrefix + "-code-" + fname + "-" + h;
+    }
+
+    static String efsVolumeName(String accessPointArn) {
+        int separator = Math.max(accessPointArn.lastIndexOf('/'), accessPointArn.lastIndexOf(':'));
+        String resourceId = separator >= 0 ? accessPointArn.substring(separator + 1) : accessPointArn;
+        if (resourceId.isBlank()) {
+            throw new IllegalArgumentException("File system access point ARN must include a resource id");
+        }
+        return "floci-efs-" + resourceId + "-" + sha256Hex(accessPointArn);
+    }
+
+    private static String sha256Hex(String value) {
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256")
+                    .digest(value.getBytes(StandardCharsets.UTF_8));
+            return HexFormat.of().formatHex(digest);
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 is required but not available", e);
+        }
     }
 
     /**
@@ -775,26 +1045,68 @@ public class ContainerLauncher {
      */
     private static final int TAR_PIPE_BUFFER_BYTES = 16 * 1024 * 1024;
 
+    @FunctionalInterface
+    interface DirectoryTarWriter {
+        void write(Path sourceDir, OutputStream out) throws IOException;
+    }
+
     private void copyDirToContainer(DockerClient dockerClient, String containerId,
                                     Path sourceDir, String remotePath, String functionName) {
+        copyDirToContainer(dockerClient, containerId, sourceDir, remotePath, functionName,
+                ContainerLauncher::createTarFromDir);
+    }
+
+    static void copyDirToContainer(DockerClient dockerClient, String containerId,
+                                   Path sourceDir, String remotePath, String functionName,
+                                   DirectoryTarWriter tarWriter) {
+        copyDirToContainer(dockerClient, containerId, sourceDir, remotePath, functionName,
+                tarWriter, false);
+    }
+
+    private void copyDirToContainerStrict(DockerClient dockerClient, String containerId,
+                                          Path sourceDir, String remotePath, String functionName) {
+        copyDirToContainerStrict(dockerClient, containerId, sourceDir, remotePath, functionName,
+                ContainerLauncher::createTarFromDir);
+    }
+
+    static void copyDirToContainerStrict(DockerClient dockerClient, String containerId,
+                                         Path sourceDir, String remotePath, String functionName,
+                                         DirectoryTarWriter tarWriter) {
+        copyDirToContainer(dockerClient, containerId, sourceDir, remotePath, functionName,
+                tarWriter, true);
+    }
+
+    private static void copyDirToContainer(DockerClient dockerClient, String containerId,
+                                           Path sourceDir, String remotePath, String functionName,
+                                           DirectoryTarWriter tarWriter, boolean failOnTarFailure) {
         // No per-copy gating here: the heavy /var/task populate for large code already holds a
         // POPULATE_SEMAPHORE permit; small-code direct copies and layer copies are light enough
         // to run unthrottled.
         try (java.io.PipedOutputStream pos = new java.io.PipedOutputStream();
              java.io.PipedInputStream pis = new java.io.PipedInputStream(pos, TAR_PIPE_BUFFER_BYTES)) {
 
-            new Thread(() -> {
+            AtomicReference<IOException> tarFailure = new AtomicReference<>();
+            Thread tarStreamer = new Thread(() -> {
                 try (pos) {
-                    createTarFromDir(sourceDir, pos);
+                    tarWriter.write(sourceDir, pos);
                 } catch (IOException e) {
-                    LOG.errorv("Failed to stream tar for function {0}: {1}", functionName, e.getMessage());
+                    if (failOnTarFailure) {
+                        tarFailure.set(e);
+                    } else {
+                        LOG.errorv("Failed to stream directory tar for function {0}: {1}",
+                                functionName, e.getMessage());
+                    }
                 }
-            }, "tar-streamer-dir-" + functionName).start();
+            }, "tar-streamer-dir-" + functionName);
+            tarStreamer.start();
 
             dockerClient.copyArchiveToContainerCmd(containerId)
                     .withRemotePath(remotePath)
                     .withTarInputStream(pis)
                     .exec();
+            if (failOnTarFailure) {
+                waitForTarStreamer(tarStreamer, tarFailure, functionName, sourceDir);
+            }
             LOG.debugv("Copied directory {0} into container {1} at {2}", sourceDir, containerId, remotePath);
         } catch (Exception e) {
             // Fail loudly so launch() cleans up the half-built container instead of leaking it.
@@ -831,6 +1143,22 @@ public class ContainerLauncher {
         } catch (Exception e) {
             throw new RuntimeException("Failed to copy file " + sourceFile + " into container "
                     + containerId + " for function " + functionName + ": " + e.getMessage(), e);
+        }
+    }
+
+    private static void waitForTarStreamer(Thread tarStreamer, AtomicReference<IOException> tarFailure,
+                                           String functionName, Path sourcePath) throws IOException {
+        try {
+            tarStreamer.join();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IOException("Interrupted while streaming tar for function " + functionName
+                    + " from " + sourcePath, e);
+        }
+        IOException failure = tarFailure.get();
+        if (failure != null) {
+            throw new IOException("Failed to stream tar for function " + functionName
+                    + " from " + sourcePath, failure);
         }
     }
 

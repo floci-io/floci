@@ -6,7 +6,7 @@
 
     <groupId>io.github.hectorvent</groupId>
     <artifactId>floci</artifactId>
-    <version>1.6.0</version>
+    <version>1.7.0</version>
     <packaging>jar</packaging>
 
     <name>Floci</name>
@@ -139,6 +139,12 @@
             <version>4.3.0</version>
         </dependency>
 
+        <!-- Snappy for Firehose Snappy/HADOOP_SNAPPY delivery to S3: the only Java
+             library that writes the xerial stream format AWS uses. -->
+        <dependency>
+            <groupId>org.xerial.snappy</groupId>
+            <artifactId>snappy-java</artifactId>
+        </dependency>
 
         <!-- Docker client for Lambda container lifecycle management -->
         <dependency>
@@ -150,6 +156,11 @@
             <groupId>com.github.docker-java</groupId>
             <artifactId>docker-java-transport-httpclient5</artifactId>
             <version>3.7.1</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.httpcomponents.client5</groupId>
+            <artifactId>httpclient5</artifactId>
+            <version>5.5.1</version>
         </dependency>
         <!-- Explicit overrides for Quarkus BOM which pins these at 3.7.0;
              docker-java-core:3.7.1 requires 3.7.1 for ImageHistoryCmd and ExportContainerCmd -->

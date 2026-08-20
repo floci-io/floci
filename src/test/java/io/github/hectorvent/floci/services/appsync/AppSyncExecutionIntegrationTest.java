@@ -29,6 +29,7 @@ class AppSyncExecutionIntegrationTest {
     SchemaRegistry schemaRegistry;
 
     private String apiId;
+    private String apiKey;
 
     @BeforeAll
     static void configureRestAssured() {
@@ -38,6 +39,7 @@ class AppSyncExecutionIntegrationTest {
     @BeforeEach
     void createApiWithSchema() {
         apiId = createApi("exec-" + UUID.randomUUID().toString().substring(0, 8));
+        apiKey = createApiKey(apiId);
         startSchema(apiId, "type Query { hello: String }");
         awaitSchemaSuccess(apiId);
     }
@@ -45,7 +47,7 @@ class AppSyncExecutionIntegrationTest {
     @Test
     void dualContentTypeJsonReturnsNullHello() {
         given()
-            .header("Authorization", AUTH)
+            .header("x-api-key", apiKey)
             .contentType("application/json")
             .body("{\"query\":\"{ hello }\"}")
         .when()
@@ -60,7 +62,7 @@ class AppSyncExecutionIntegrationTest {
     @Test
     void dualContentTypeGraphqlReturnsNullHello() {
         given()
-            .header("Authorization", AUTH)
+            .header("x-api-key", apiKey)
             .contentType("application/graphql")
             .body("{\"query\":\"{ hello }\"}")
         .when()
@@ -170,9 +172,10 @@ class AppSyncExecutionIntegrationTest {
     @Test
     void apiWithoutSchemaReturns502GraphQLSchemaException() {
         String bareApiId = createApi("bare-" + UUID.randomUUID().toString().substring(0, 8));
+        String bareKey = createApiKey(bareApiId);
 
         given()
-            .header("Authorization", AUTH)
+            .header("x-api-key", bareKey)
             .contentType("application/json")
             .body("{\"query\":\"{ hello }\"}")
         .when()
@@ -187,7 +190,7 @@ class AppSyncExecutionIntegrationTest {
     @Test
     void validationErrorReturns200WithTopLevelErrorType() {
         given()
-            .header("Authorization", AUTH)
+            .header("x-api-key", apiKey)
             .contentType("application/json")
             .body("{\"query\":\"{ nope }\"}")
         .when()
@@ -201,7 +204,7 @@ class AppSyncExecutionIntegrationTest {
     @Test
     void syntaxErrorReturns200WithSyntaxError() {
         given()
-            .header("Authorization", AUTH)
+            .header("x-api-key", apiKey)
             .contentType("application/json")
             .body("{\"query\":\"{ hello\"}")
         .when()
@@ -214,7 +217,7 @@ class AppSyncExecutionIntegrationTest {
     @Test
     void introspectionReturnsNonEmptyTypes() {
         Map<String, Object> body = given()
-            .header("Authorization", AUTH)
+            .header("x-api-key", apiKey)
             .contentType("application/json")
             .body("{\"query\":\"{ __schema { types { name } } }\"}")
         .when()
@@ -235,11 +238,12 @@ class AppSyncExecutionIntegrationTest {
     @Test
     void variablesAndOperationNameExecuteSelectedOp() {
         String multiApi = createApi("multi-" + UUID.randomUUID().toString().substring(0, 8));
+        String multiKey = createApiKey(multiApi);
         startSchema(multiApi, "type Query { hello(id: String): String }");
         awaitSchemaSuccess(multiApi);
 
         given()
-            .header("Authorization", AUTH)
+            .header("x-api-key", multiKey)
             .contentType("application/json")
             .body("""
                 {
@@ -258,6 +262,7 @@ class AppSyncExecutionIntegrationTest {
     @Test
     void httpSubscriptionReturns200OperationNotSupported() {
         String subApi = createApi("sub-" + UUID.randomUUID().toString().substring(0, 8));
+        String subKey = createApiKey(subApi);
         startSchema(subApi, """
                 type Query { hello: String }
                 type Subscription { onHello: String }
@@ -265,7 +270,7 @@ class AppSyncExecutionIntegrationTest {
         awaitSchemaSuccess(subApi);
 
         given()
-            .header("Authorization", AUTH)
+            .header("x-api-key", subKey)
             .contentType("application/json")
             .body("{\"query\":\"subscription { onHello }\"}")
         .when()
@@ -278,7 +283,7 @@ class AppSyncExecutionIntegrationTest {
     @Test
     void whitespaceOnlyQueryReturns200SyntaxError() {
         given()
-            .header("Authorization", AUTH)
+            .header("x-api-key", apiKey)
             .contentType("application/json")
             .body("{\"query\":\"   \"}")
         .when()
@@ -291,6 +296,7 @@ class AppSyncExecutionIntegrationTest {
     @Test
     void rehydrateFromSchemaStoreEnablesExecute() {
         String hydrateApi = createApi("hydrate-" + UUID.randomUUID().toString().substring(0, 8));
+        String hydrateKey = createApiKey(hydrateApi);
         startSchema(hydrateApi, "type Query { hello: String }");
         awaitSchemaSuccess(hydrateApi);
 
@@ -298,7 +304,7 @@ class AppSyncExecutionIntegrationTest {
         assertTrue(schemaRegistry.getSchema(hydrateApi).isEmpty());
 
         given()
-            .header("Authorization", AUTH)
+            .header("x-api-key", hydrateKey)
             .contentType("application/json")
             .body("{\"query\":\"{ hello }\"}")
         .when()
@@ -310,7 +316,7 @@ class AppSyncExecutionIntegrationTest {
         rehydrateWorker().rehydrateSchemas();
 
         given()
-            .header("Authorization", AUTH)
+            .header("x-api-key", hydrateKey)
             .contentType("application/json")
             .body("{\"query\":\"{ hello }\"}")
         .when()
@@ -339,6 +345,18 @@ class AppSyncExecutionIntegrationTest {
         .then()
             .statusCode(200)
             .extract().path("graphqlApi.apiId");
+    }
+
+    private static String createApiKey(String apiId) {
+        return given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("{}")
+        .when()
+            .post("/v1/apis/" + apiId + "/apikeys")
+        .then()
+            .statusCode(200)
+            .extract().path("apiKey.apiKey");
     }
 
     private static void startSchema(String apiId, String definition) {

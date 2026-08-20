@@ -37,6 +37,18 @@
 | `UpdateStreamMode` | - |
 <!-- floci:actions:end -->
 
+## Local Inspection Endpoints
+
+These endpoints are Floci-local read-only helpers for the UI and tests. AWS SDK
+traffic should continue to use the JSON 1.1 Kinesis API on `/`.
+
+| Endpoint | Description |
+|---|---|
+| `GET /_aws/kinesis/streams` | List streams in the resolved region with shard, mode, tag, and record counts |
+| `GET /_aws/kinesis/records?StreamName=<name>` | Peek up to 100 stream records with shard attribution without consuming them |
+| `GET /_aws/kinesis/records?StreamName=<name>&Limit=<n>` | Peek up to `n` records, capped at 1000 |
+| `GET /_aws/kinesis/records?StreamName=<name>&ShardId=<id>` | Peek records for one shard |
+
 ## Stream Addressing
 
 Most actions accept either `StreamName` or `StreamARN` to identify a stream. When both are provided, `StreamName` takes precedence. `CreateStream` only accepts `StreamName`.

@@ -37,5 +37,6 @@ provider "aws" {
     ec2            = var.endpoint
     route53        = var.endpoint
     ses            = var.endpoint
+    guardduty      = var.endpoint
   }
 }

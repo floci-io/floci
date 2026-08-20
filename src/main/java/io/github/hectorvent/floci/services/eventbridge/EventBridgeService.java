@@ -11,6 +11,8 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.eventbridge.model.Archive;
 import io.github.hectorvent.floci.services.eventbridge.model.ArchiveState;
 import io.github.hectorvent.floci.services.eventbridge.model.ArchivedEvent;
+import io.github.hectorvent.floci.services.eventbridge.model.Connection;
+import io.github.hectorvent.floci.services.eventbridge.model.ConnectionState;
 import io.github.hectorvent.floci.services.eventbridge.model.EventBus;
 import io.github.hectorvent.floci.services.eventbridge.model.Replay;
 import io.github.hectorvent.floci.services.eventbridge.model.ReplayState;
@@ -36,6 +38,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class EventBridgeService {
@@ -48,6 +51,7 @@ public class EventBridgeService {
     private final StorageBackend<String, Archive> archiveStore;
     private final StorageBackend<String, List<ArchivedEvent>> archivedEventStore;
     private final StorageBackend<String, Replay> replayStore;
+    private final StorageBackend<String, Connection> connectionStore;
     private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
     private final RuleScheduler ruleScheduler;
@@ -77,6 +81,8 @@ public class EventBridgeService {
                         new TypeReference<Map<String, List<ArchivedEvent>>>() {}),
                 storageFactory.create("eventbridge", "eventbridge-replays.json",
                         new TypeReference<Map<String, Replay>>() {}),
+                storageFactory.create("eventbridge", "eventbridge-connections.json",
+                        new TypeReference<Map<String, Connection>>() {}),
                 regionResolver, objectMapper, ruleScheduler, invoker, replayDispatcher,
                 resourceGroupsTaggingService
         );
@@ -88,6 +94,7 @@ public class EventBridgeService {
                        StorageBackend<String, Archive> archiveStore,
                        StorageBackend<String, List<ArchivedEvent>> archivedEventStore,
                        StorageBackend<String, Replay> replayStore,
+                       StorageBackend<String, Connection> connectionStore,
                        RegionResolver regionResolver,
                        ObjectMapper objectMapper,
                        RuleScheduler ruleScheduler,
@@ -100,6 +107,7 @@ public class EventBridgeService {
         this.archiveStore = archiveStore;
         this.archivedEventStore = archivedEventStore;
         this.replayStore = replayStore;
+        this.connectionStore = connectionStore;
         this.regionResolver = regionResolver;
         this.objectMapper = objectMapper;
         this.ruleScheduler = ruleScheduler;
@@ -137,9 +145,8 @@ public class EventBridgeService {
 
     public EventBus createEventBus(String name, String description,
                                    Map<String, String> tags, String region) {
-        if (name == null || name.isBlank()) {
-            throw new AwsException("ValidationException", "EventBus name is required.", 400);
-        }
+        validateCustomEventBusName(name);
+        validateEventBusDescription(description);
         String key = busKey(region, name);
         if (busStore.get(key).isPresent()) {
             throw new AwsException("ResourceAlreadyExistsException",
@@ -166,13 +173,15 @@ public class EventBridgeService {
             throw new AwsException("ValidationException", "EventBus name is required.", 400);
         }
         String effectiveName = resolvedBusName(name);
+        validateEventBusNameForMutation(effectiveName);
         if ("default".equals(effectiveName)) {
             throw new AwsException("ValidationException", "Cannot delete the default event bus.", 400);
         }
         String key = busKey(region, effectiveName);
-        EventBus bus = busStore.get(key)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                        "EventBus not found: " + effectiveName, 404));
+        EventBus bus = busStore.get(key).orElse(null);
+        if (bus == null) {
+            return;
+        }
         String rulePrefix = ruleKeyPrefix(region, effectiveName);
         boolean hasRules = ruleStore.keys().stream().anyMatch(k -> k.startsWith(rulePrefix));
         if (hasRules) {
@@ -192,7 +201,7 @@ public class EventBridgeService {
         }
         return busStore.get(busKey(region, effectiveName))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                        "EventBus not found: " + name, 404));
+                        "EventBus not found: " + name, 400));
     }
 
     public EventBus updateEventBus(String name,
@@ -201,19 +210,22 @@ public class EventBridgeService {
                                    String deadLetterConfig,
                                    String logConfig,
                                    String region) {
+        validateEventBusDescription(description);
+        if (name != null) {
+            validateEventBusNameForMutation(name);
+        }
         // Name identifies the bus; never mutated (AWS does not support rename).
-        String effectiveName = name == null || name.isBlank() ? "default" : name;
+        String effectiveName = name == null ? "default" : name;
         EventBus bus = "default".equals(effectiveName)
                 ? getOrCreateDefaultBus(region)
                 : busStore.get(busKey(region, effectiveName))
                         .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                                "EventBus not found: " + effectiveName, 404));
+                                "EventBus not found: " + effectiveName, 400));
 
-        // Only mark dirty when a field is both non-blank AND different from
-        // the value currently on the bus — re-sending the same value is a no-op.
+        // Description accepts an explicit empty string so callers can clear it. A null value means
+        // the field was omitted and must remain unchanged.
         boolean dirty = false;
-        if (description != null && !description.isBlank()
-                && !description.equals(bus.getDescription())) {
+        if (description != null && !description.equals(bus.getDescription())) {
             bus.setDescription(description);
             dirty = true;
         }
@@ -239,6 +251,34 @@ public class EventBridgeService {
                     effectiveName, bus.getArn(), region);
         }
         return bus;
+    }
+
+    private void validateCustomEventBusName(String name) {
+        if (name == null || name.isBlank()) {
+            throw new AwsException("ValidationException", "EventBus name is required.", 400);
+        }
+        if (name.length() > 256
+                || !name.matches("[.\\-_A-Za-z0-9]+")
+                || "default".equals(name)) {
+            throw new AwsException("ValidationException",
+                    "Invalid custom event bus name: " + name, 400);
+        }
+    }
+
+    private void validateEventBusDescription(String description) {
+        if (description != null && description.length() > 512) {
+            throw new AwsException("ValidationException",
+                    "EventBus description must not exceed 512 characters.", 400);
+        }
+    }
+
+    private void validateEventBusNameForMutation(String name) {
+        if (name.isEmpty()
+                || name.length() > 256
+                || !name.matches("[/\\.\\-_A-Za-z0-9]+")) {
+            throw new AwsException("ValidationException",
+                    "Invalid event bus name: " + name, 400);
+        }
     }
 
     public List<EventBus> listEventBuses(String namePrefix, String region) {
@@ -1177,6 +1217,135 @@ public class EventBridgeService {
         });
     }
 
+    // ──────────────────────────── Connections ────────────────────────────
+
+    private static final Pattern CONNECTION_NAME_PATTERN =
+            Pattern.compile("[\\.\\-_A-Za-z0-9]+");
+
+    public Connection createConnection(String name, String description, String authorizationType,
+                                       String authParameters, String invocationConnectivityParameters,
+                                       String kmsKeyIdentifier, String region) {
+        validateConnectionName(name);
+        validateAuthorizationType(authorizationType);
+        if (authParameters == null) {
+            throw new AwsException("ValidationException", "AuthParameters is required.", 400);
+        }
+        String key = connectionKey(region, name);
+        if (connectionStore.get(key).isPresent()) {
+            throw new AwsException("ResourceAlreadyExistsException",
+                    "Connection " + name + " already exists.", 400);
+        }
+        String connectionId = UUID.randomUUID().toString();
+        Instant now = Instant.now();
+        Connection connection = new Connection();
+        connection.setName(name);
+        connection.setConnectionArn(regionResolver.buildArn("events", region,
+                "connection/" + name + "/" + connectionId));
+        connection.setDescription(description);
+        connection.setAuthorizationType(authorizationType);
+        connection.setAuthParameters(authParameters);
+        connection.setInvocationConnectivityParameters(invocationConnectivityParameters);
+        connection.setKmsKeyIdentifier(kmsKeyIdentifier);
+        connection.setSecretArn(regionResolver.buildArn("secretsmanager", region,
+                "secret:events!connection/" + name + "/" + connectionId));
+        connection.setConnectionState(ConnectionState.AUTHORIZED);
+        connection.setCreationTime(now);
+        connection.setLastModifiedTime(now);
+        connection.setLastAuthorizedTime(now);
+        connectionStore.put(key, connection);
+        LOG.infov("Created connection: {0} with authorization type {1}", name, authorizationType);
+        return connection;
+    }
+
+    public Connection describeConnection(String name, String region) {
+        return connectionStore.get(connectionKey(region, name))
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "Connection " + name + " does not exist.", 404));
+    }
+
+    public Connection updateConnection(String name, String description, String authorizationType,
+                                       String authParameters, String invocationConnectivityParameters,
+                                       String kmsKeyIdentifier, String region) {
+        String key = connectionKey(region, name);
+        Connection connection = connectionStore.get(key)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "Connection " + name + " does not exist.", 404));
+        if (authorizationType != null) {
+            validateAuthorizationType(authorizationType);
+            if (!authorizationType.equals(connection.getAuthorizationType()) && authParameters == null) {
+                throw new AwsException("ValidationException",
+                        "AuthParameters must be provided when changing AuthorizationType.", 400);
+            }
+            connection.setAuthorizationType(authorizationType);
+        }
+        if (description != null) {
+            connection.setDescription(description);
+        }
+        if (authParameters != null) {
+            connection.setAuthParameters(authParameters);
+        }
+        if (invocationConnectivityParameters != null) {
+            connection.setInvocationConnectivityParameters(invocationConnectivityParameters);
+        }
+        if (kmsKeyIdentifier != null) {
+            connection.setKmsKeyIdentifier(kmsKeyIdentifier);
+        }
+        Instant now = Instant.now();
+        connection.setConnectionState(ConnectionState.AUTHORIZED);
+        connection.setLastModifiedTime(now);
+        connection.setLastAuthorizedTime(now);
+        connectionStore.put(key, connection);
+        return connection;
+    }
+
+    public Connection deleteConnection(String name, String region) {
+        String key = connectionKey(region, name);
+        Connection connection = connectionStore.get(key)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "Connection " + name + " does not exist.", 404));
+        connectionStore.delete(key);
+        LOG.infov("Deleted connection: {0}", name);
+        return connection;
+    }
+
+    public List<Connection> listConnections(String namePrefix, ConnectionState state, String region) {
+        String prefix = "connection:" + region + ":";
+        return connectionStore.scan(k -> {
+            if (!k.startsWith(prefix)) return false;
+            Connection c = connectionStore.get(k).orElse(null);
+            if (c == null) return false;
+            if (namePrefix != null && !namePrefix.isBlank()
+                    && !c.getName().startsWith(namePrefix)) {
+                return false;
+            }
+            if (state != null && state != c.getConnectionState()) {
+                return false;
+            }
+            return true;
+        });
+    }
+
+    private static void validateConnectionName(String name) {
+        if (name == null || name.isBlank()) {
+            throw new AwsException("ValidationException", "Connection name is required.", 400);
+        }
+        if (name.length() > 64 || !CONNECTION_NAME_PATTERN.matcher(name).matches()) {
+            throw new AwsException("ValidationException",
+                    "Connection name must match [\\.\\-_A-Za-z0-9]+ and be at most 64 characters.", 400);
+        }
+    }
+
+    private static void validateAuthorizationType(String authorizationType) {
+        if (authorizationType == null || authorizationType.isBlank()) {
+            throw new AwsException("ValidationException", "AuthorizationType is required.", 400);
+        }
+        switch (authorizationType) {
+            case "BASIC", "OAUTH_CLIENT_CREDENTIALS", "API_KEY" -> { }
+            default -> throw new AwsException("ValidationException",
+                    "AuthorizationType must be one of BASIC, OAUTH_CLIENT_CREDENTIALS, API_KEY.", 400);
+        }
+    }
+
     private void captureToArchives(Map<String, Object> entry, String busStoreKey,
                                    String eventId, String region, String accountId) {
         EventBus bus = accountGet(busStore, accountId, busStoreKey).orElse(null);
@@ -1355,6 +1524,10 @@ public class EventBridgeService {
 
     private static String replayKey(String region, String replayName) {
         return "replay:" + region + ":" + replayName;
+    }
+
+    private static String connectionKey(String region, String connectionName) {
+        return "connection:" + region + ":" + connectionName;
     }
 
     private static String archiveNameFromArn(String arn) {

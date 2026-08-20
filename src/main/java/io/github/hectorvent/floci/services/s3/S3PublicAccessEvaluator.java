@@ -8,6 +8,7 @@ import org.jboss.logging.Logger;
 
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 
 final class S3PublicAccessEvaluator {
 
@@ -57,6 +58,46 @@ final class S3PublicAccessEvaluator {
         }
     }
 
+    static PublicAccessDecision principalPolicyDecision(
+            ObjectMapper objectMapper,
+            String policy,
+            String principalType,
+            String principalValue,
+            String action,
+            String resourceArn,
+            Map<String, String> context) {
+        if (policy == null || policy.isBlank()) {
+            return PublicAccessDecision.NEUTRAL;
+        }
+        try {
+            JsonNode statements = objectMapper.readTree(policy).path("Statement");
+            boolean allowed = false;
+            Iterable<JsonNode> iterable = statements.isArray() ? statements : List.of(statements);
+            for (JsonNode statement : iterable) {
+                String effect = statement.path("Effect").asText("");
+                if (!"Allow".equalsIgnoreCase(effect) && !"Deny".equalsIgnoreCase(effect)) {
+                    continue;
+                }
+                if (!principalMatches(statement, principalType, principalValue)
+                        || !actionMatches(statement, action)
+                        || !resourceMatches(statement, resourceArn)) {
+                    continue;
+                }
+                if (!conditionsMatch(statement.path("Condition"), context)) {
+                    continue;
+                }
+                if ("Deny".equalsIgnoreCase(effect)) {
+                    return PublicAccessDecision.DENY;
+                }
+                allowed = true;
+            }
+            return allowed ? PublicAccessDecision.ALLOW : PublicAccessDecision.NEUTRAL;
+        } catch (JsonProcessingException e) {
+            LOG.debugv("Failed to evaluate S3 bucket policy for principal access: {0}", e.getMessage());
+            return PublicAccessDecision.NEUTRAL;
+        }
+    }
+
     static String bucketArn(String bucketName) {
         return "arn:aws:s3:::" + bucketName;
     }
@@ -77,6 +118,118 @@ final class S3PublicAccessEvaluator {
         }
         if (statement.hasNonNull("NotPrincipal")) {
             return !hasPublicPrincipal(statement.path("NotPrincipal"));
+        }
+        return false;
+    }
+
+    private static boolean principalMatches(
+            JsonNode statement, String principalType, String principalValue) {
+        if (statement.hasNonNull("Principal")) {
+            return principalNodeMatches(statement.path("Principal"), principalType, principalValue);
+        }
+        if (statement.hasNonNull("NotPrincipal")) {
+            return !principalNodeMatches(
+                    statement.path("NotPrincipal"), principalType, principalValue);
+        }
+        return false;
+    }
+
+    private static boolean principalNodeMatches(
+            JsonNode principal, String principalType, String principalValue) {
+        if (principal == null || principal.isMissingNode() || principal.isNull()) {
+            return false;
+        }
+        if (principal.isTextual() || principal.isArray()) {
+            return principalValueMatches(principal, principalValue);
+        }
+        if (!principal.isObject()) {
+            return false;
+        }
+        Iterator<Map.Entry<String, JsonNode>> fields = principal.fields();
+        while (fields.hasNext()) {
+            Map.Entry<String, JsonNode> field = fields.next();
+            if (field.getKey().equalsIgnoreCase(principalType)
+                    && principalValueMatches(field.getValue(), principalValue)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean principalValueMatches(JsonNode candidate, String principalValue) {
+        if (candidate == null || candidate.isNull()) {
+            return false;
+        }
+        if (candidate.isTextual()) {
+            String value = candidate.asText();
+            return "*".equals(value) || value.equals(principalValue);
+        }
+        if (candidate.isArray()) {
+            for (JsonNode item : candidate) {
+                if (principalValueMatches(item, principalValue)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static boolean conditionsMatch(JsonNode conditions, Map<String, String> context) {
+        if (conditions == null || conditions.isMissingNode() || conditions.isNull()) {
+            return true;
+        }
+        if (!conditions.isObject()) {
+            return false;
+        }
+        Iterator<Map.Entry<String, JsonNode>> operators = conditions.fields();
+        while (operators.hasNext()) {
+            Map.Entry<String, JsonNode> operator = operators.next();
+            boolean glob = "StringLike".equalsIgnoreCase(operator.getKey())
+                    || "ArnLike".equalsIgnoreCase(operator.getKey());
+            boolean exact = "StringEquals".equalsIgnoreCase(operator.getKey())
+                    || "ArnEquals".equalsIgnoreCase(operator.getKey());
+            if ((!glob && !exact) || !operator.getValue().isObject()) {
+                return false;
+            }
+            Iterator<Map.Entry<String, JsonNode>> entries = operator.getValue().fields();
+            while (entries.hasNext()) {
+                Map.Entry<String, JsonNode> entry = entries.next();
+                String actual = contextValue(context, entry.getKey());
+                if (actual == null || !conditionValueMatches(entry.getValue(), actual, glob)) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    private static String contextValue(Map<String, String> context, String key) {
+        if (context == null) {
+            return null;
+        }
+        for (Map.Entry<String, String> entry : context.entrySet()) {
+            if (entry.getKey().equalsIgnoreCase(key)) {
+                return entry.getValue();
+            }
+        }
+        return null;
+    }
+
+    private static boolean conditionValueMatches(JsonNode expected, String actual, boolean glob) {
+        if (expected == null || expected.isNull()) {
+            return false;
+        }
+        if (expected.isTextual()) {
+            return glob
+                    ? IamPolicyEvaluator.globMatches(expected.asText(), actual)
+                    : expected.asText().equals(actual);
+        }
+        if (expected.isArray()) {
+            for (JsonNode item : expected) {
+                if (conditionValueMatches(item, actual, glob)) {
+                    return true;
+                }
+            }
         }
         return false;
     }

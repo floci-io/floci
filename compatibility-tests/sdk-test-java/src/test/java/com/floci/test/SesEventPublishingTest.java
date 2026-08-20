@@ -56,6 +56,7 @@ import software.amazon.awssdk.services.sqs.model.ReceiveMessageRequest;
 import software.amazon.awssdk.services.sqs.model.ReceiveMessageResponse;
 
 import software.amazon.awssdk.services.firehose.FirehoseClient;
+import software.amazon.awssdk.services.firehose.model.BufferingHints;
 import software.amazon.awssdk.services.firehose.model.CreateDeliveryStreamRequest;
 import software.amazon.awssdk.services.firehose.model.DeleteDeliveryStreamRequest;
 import software.amazon.awssdk.services.firehose.model.S3DestinationConfiguration;
@@ -199,6 +200,12 @@ class SesEventPublishingTest {
                                 .bucketARN("arn:aws:s3:::" + firehoseBucket)
                                 .roleARN("arn:aws:iam::000000000000:role/sdk-evt-fh-role")
                                 .prefix(firehoseStreamName + "/")
+                                // Floci does not enforce AWS's 60s minimum interval, which keeps
+                                // the delivery wait short (would need 60+ against real AWS).
+                                .bufferingHints(BufferingHints.builder()
+                                        .sizeInMBs(1)
+                                        .intervalInSeconds(5)
+                                        .build())
                                 .build())
                         .build())
                 .deliveryStreamARN();
@@ -478,9 +485,9 @@ class SesEventPublishingTest {
 
     @Test
     @Order(5)
-    @DisplayName("Firehose destination: 5 sends trigger auto-flush to S3 as NDJSON")
-    void firehoseDestination_fiveSends_triggerAutoFlushToS3() throws Exception {
-        for (int i = 0; i < 5; i++) {
+    @DisplayName("Firehose destination: send events are delivered to S3 as NDJSON within the buffering interval")
+    void firehoseDestination_sendEvents_deliveredWithinBufferingInterval() throws Exception {
+        for (int i = 0; i < 2; i++) {
             ses.sendEmail(SendEmailRequest.builder()
                     .fromEmailAddress(identity)
                     .destination(Destination.builder()
@@ -498,12 +505,22 @@ class SesEventPublishingTest {
                     .build());
         }
 
-        ListObjectsV2Response listed = s3.listObjectsV2(ListObjectsV2Request.builder()
-                .bucket(firehoseBucket)
-                .prefix(firehoseStreamName + "/")
-                .build());
+        // Two small events stay well below SizeInMBs, so delivery happens on the
+        // stream's IntervalInSeconds plus the emulator's flush tick.
+        ListObjectsV2Response listed = null;
+        long deadline = System.currentTimeMillis() + 30_000;
+        while (System.currentTimeMillis() < deadline) {
+            listed = s3.listObjectsV2(ListObjectsV2Request.builder()
+                    .bucket(firehoseBucket)
+                    .prefix(firehoseStreamName + "/")
+                    .build());
+            if (!listed.contents().isEmpty()) {
+                break;
+            }
+            Thread.sleep(2_000);
+        }
         assertThat(listed.contents())
-                .as("Firehose should have flushed exactly one S3 object after 5 records")
+                .as("Firehose should deliver the buffered events within IntervalInSeconds")
                 .hasSize(1);
 
         S3Object obj = listed.contents().get(0);
@@ -511,7 +528,7 @@ class SesEventPublishingTest {
                         .bucket(firehoseBucket).key(obj.key()).build())
                 .readAllBytes(), StandardCharsets.UTF_8);
         String[] lines = body.split("\\R");
-        assertThat(lines).hasSize(5);
+        assertThat(lines).hasSize(2);
         for (String line : lines) {
             JsonNode event = MAPPER.readTree(line);
             assertThat(event.path("eventType").asText()).isEqualTo("Send");

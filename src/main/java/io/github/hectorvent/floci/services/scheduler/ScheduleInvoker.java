@@ -87,8 +87,7 @@ public class ScheduleInvoker {
             sqsService.sendMessage(queueUrl, payload, 0, messageGroupId, null, targetRegion);
             LOG.debugv("Scheduler delivered to SQS: {0}", arn);
         } else if (arn.contains(":lambda:") || arn.contains(":function:")) {
-            String fnName = arn.substring(arn.lastIndexOf(':') + 1);
-            lambdaService.invoke(targetRegion, fnName, payload.getBytes(), InvocationType.Event);
+            lambdaService.invokeArn(arn, payload.getBytes(), InvocationType.Event);
             LOG.debugv("Scheduler delivered to Lambda: {0}", arn);
         } else if (arn.contains(":sns:")) {
             snsService.publish(arn, null, payload, "Scheduler", targetRegion);

@@ -351,7 +351,8 @@ class EksServiceTest {
                 new EksOidcService(storageFactory, new ObjectMapper()));
 
         ResourcesVpcConfig vpcConfig = new ResourcesVpcConfig();
-        vpcConfig.setSubnetIds(List.of("subnet-default-a", "subnet-default-b"));
+        vpcConfig.setSubnetIds(List.of(Ec2Service.defaultSubnetId("us-east-1", "a"),
+                Ec2Service.defaultSubnetId("us-east-1", "b")));
 
         CreateClusterRequest req = new CreateClusterRequest();
         req.setName("real-subnet-cluster");
@@ -361,7 +362,8 @@ class EksServiceTest {
         Cluster cluster = service.createCluster(req);
 
         assertEquals("real-subnet-cluster", cluster.getName());
-        assertEquals(List.of("subnet-default-a", "subnet-default-b"),
+        assertEquals(List.of(Ec2Service.defaultSubnetId("us-east-1", "a"),
+                Ec2Service.defaultSubnetId("us-east-1", "b")),
                 cluster.getResourcesVpcConfig().getSubnetIds());
     }
 
@@ -384,7 +386,8 @@ class EksServiceTest {
                 realEc2Service(), new EksOidcService(storageFactory, new ObjectMapper()));
 
         ResourcesVpcConfig vpcConfig = new ResourcesVpcConfig();
-        vpcConfig.setSubnetIds(List.of("subnet-default-a", "subnet-default-b"));
+        vpcConfig.setSubnetIds(List.of(Ec2Service.defaultSubnetId("us-east-1", "a"),
+                Ec2Service.defaultSubnetId("us-east-1", "b")));
 
         CreateClusterRequest req = new CreateClusterRequest();
         req.setName("vpc-id-cluster");
@@ -393,7 +396,7 @@ class EksServiceTest {
 
         Cluster cluster = service.createCluster(req);
 
-        assertEquals("vpc-default", cluster.getResourcesVpcConfig().getVpcId());
+        assertEquals(Ec2Service.defaultVpcId("us-east-1"), cluster.getResourcesVpcConfig().getVpcId());
     }
 
     @Test
@@ -413,7 +416,7 @@ class EksServiceTest {
                 realEc2Service(), new EksOidcService(storageFactory, new ObjectMapper()));
 
         ResourcesVpcConfig vpcConfig = new ResourcesVpcConfig();
-        vpcConfig.setSubnetIds(List.of("subnet-default-a"));
+        vpcConfig.setSubnetIds(List.of(Ec2Service.defaultSubnetId("eu-west-2", "a")));
 
         CreateClusterRequest req = new CreateClusterRequest();
         req.setName("cross-region-cluster");
@@ -431,11 +434,12 @@ class EksServiceTest {
         // A subnet that exists in the DEFAULT region and nowhere else.
         //
         // The distinction matters: requireSubnet() calls ensureDefaultResources()
-        // on whatever region it is handed, which seeds subnet-default-a/b/c
-        // there on the spot. So a default subnet id resolves in EVERY region and
-        // cannot discriminate between "validated against the request region" and
-        // "validated against the configured default" — a test written with one
-        // passes with or without the fix.
+        // on whatever region it is handed, which seeds that region's own default
+        // subnets there on the spot. Before #21's fix, those default subnets shared
+        // the same literal id in every region, so a default subnet id resolved in
+        // EVERY region and could not discriminate between "validated against the
+        // request region" and "validated against the configured default" — a test
+        // written with one passes with or without the fix.
         //
         // An explicitly created subnet is not seeded anywhere else, so asking
         // for it from a different region is the only thing that pins the
@@ -450,7 +454,7 @@ class EksServiceTest {
         Ec2Service ec2Service = realEc2Service();
         ec2Service.ensureDefaultResources("us-east-1");
         String usEastOnlySubnet = ec2Service
-                .createSubnet("us-east-1", "vpc-default", "172.31.200.0/24", "us-east-1a")
+                .createSubnet("us-east-1", Ec2Service.defaultVpcId("us-east-1"), "172.31.200.0/24", "us-east-1a")
                 .getSubnetId();
 
         // The request is for eu-west-2, where that subnet does not exist.

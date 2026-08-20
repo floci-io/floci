@@ -45,6 +45,7 @@ public class CloudWatchLogsHandler {
             case "FilterLogEvents" -> handleFilterLogEvents(request, region);
             case "PutRetentionPolicy" -> handlePutRetentionPolicy(request, region);
             case "DeleteRetentionPolicy" -> handleDeleteRetentionPolicy(request, region);
+            case "PutLogGroupDeletionProtection" -> handlePutLogGroupDeletionProtection(request, region);
             case "TagLogGroup" -> handleTagLogGroup(request, region);
             case "UntagLogGroup" -> handleUntagLogGroup(request, region);
             case "ListTagsLogGroup" -> handleListTagsLogGroup(request, region);
@@ -68,14 +69,29 @@ public class CloudWatchLogsHandler {
         String name = request.path("logGroupName").asText();
         Integer retentionInDays = request.has("retentionInDays")
                 ? request.path("retentionInDays").asInt() : null;
+        boolean deletionProtectionEnabled = request.path("deletionProtectionEnabled").asBoolean(false);
         Map<String, String> tags = extractTags(request.path("tags"));
-        logsService.createLogGroup(name, retentionInDays, tags, region);
+        logsService.createLogGroup(name, retentionInDays, tags, deletionProtectionEnabled, region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
     private Response handleDeleteLogGroup(JsonNode request, String region) {
         String name = request.path("logGroupName").asText();
         logsService.deleteLogGroup(name, region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handlePutLogGroupDeletionProtection(JsonNode request, String region) {
+        String identifier = request.path("logGroupIdentifier").asText(null);
+        if (identifier == null || identifier.isBlank()) {
+            throw new AwsException("InvalidParameterException", "logGroupIdentifier is required.", 400);
+        }
+        JsonNode enabled = request.get("deletionProtectionEnabled");
+        if (enabled == null || !enabled.isBoolean()) {
+            throw new AwsException("InvalidParameterException", "deletionProtectionEnabled is required.", 400);
+        }
+        String groupName = extractLogGroupNameFromArn(identifier);
+        logsService.putLogGroupDeletionProtection(groupName, enabled.booleanValue(), region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
@@ -93,6 +109,7 @@ public class CloudWatchLogsHandler {
             if (g.getRetentionInDays() != null) {
                 node.put("retentionInDays", g.getRetentionInDays());
             }
+            node.put("deletionProtectionEnabled", g.isDeletionProtectionEnabled());
             node.put("storedBytes", 0);
             node.put("metricFilterCount", 0);
             groupsArray.add(node);
@@ -118,12 +135,17 @@ public class CloudWatchLogsHandler {
     private Response handleDescribeLogStreams(JsonNode request, String region) {
         String groupName = resolveLogGroupName(request);
         String prefix = request.path("logStreamNamePrefix").asText(null);
-        List<LogStream> streams = logsService.describeLogStreams(groupName, prefix, region);
+        String orderBy = request.path("orderBy").asText(null);
+        boolean descending = request.path("descending").asBoolean(false);
+        int limit = request.path("limit").asInt(0);
+        String nextToken = request.has("nextToken") ? request.path("nextToken").asText(null) : null;
+        CloudWatchLogsService.DescribeLogStreamsResult result =
+                logsService.describeLogStreams(groupName, prefix, orderBy, descending, limit, nextToken, region);
 
         String logGroupArn = logsService.buildArn(groupName, region);
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode streamsArray = objectMapper.createArrayNode();
-        for (LogStream s : streams) {
+        for (LogStream s : result.logStreams()) {
             ObjectNode node = objectMapper.createObjectNode();
             node.put("logStreamName", s.getLogStreamName());
             node.put("arn", logGroupArn + ":log-stream:" + s.getLogStreamName());
@@ -140,6 +162,9 @@ public class CloudWatchLogsHandler {
             streamsArray.add(node);
         }
         response.set("logStreams", streamsArray);
+        if (result.nextToken() != null) {
+            response.put("nextToken", result.nextToken());
+        }
         return Response.ok(response).build();
     }
 
@@ -186,15 +211,17 @@ public class CloudWatchLogsHandler {
         Long endTime = request.has("endTime") ? request.path("endTime").asLong() : null;
         String filterPattern = request.path("filterPattern").asText(null);
         int limit = request.path("limit").asInt(0);
+        String nextToken = request.has("nextToken") ? request.path("nextToken").asText(null) : null;
 
         List<String> streamNames = new ArrayList<>();
         request.path("logStreamNames").forEach(n -> streamNames.add(resolveLogStreamName(n.asText(null))));
 
         CloudWatchLogsService.FilteredLogEventsResult result =
-                logsService.filterLogEvents(groupName, streamNames, startTime, endTime, filterPattern, limit, region);
+                logsService.filterLogEvents(groupName, streamNames, startTime, endTime, filterPattern, limit,
+                        nextToken, region);
 
         ObjectNode response = objectMapper.createObjectNode();
-        response.set("events", buildEventsArray(result.events()));
+        response.set("events", buildFilteredEventsArray(result.events()));
         if (result.nextToken() != null) {
             response.put("nextToken", result.nextToken());
         }
@@ -450,14 +477,34 @@ public class CloudWatchLogsHandler {
     private ArrayNode buildEventsArray(List<LogEvent> events) {
         ArrayNode array = objectMapper.createArrayNode();
         for (LogEvent e : events) {
-            ObjectNode node = objectMapper.createObjectNode();
-            node.put("eventId", e.getEventId());
-            node.put("timestamp", e.getTimestamp());
-            node.put("message", e.getMessage());
-            node.put("ingestionTime", e.getIngestionTime());
+            array.add(buildEventNode(e));
+        }
+        return array;
+    }
+
+    /**
+     * Serializes FilteredLogEvent, which carries {@code logStreamName} on top of the GetLogEvents
+     * shape. The field is what attributes a match back to the stream that emitted it, and real AWS
+     * returns it on every FilterLogEvents result; GetLogEvents omits it, so it stays out of
+     * {@link #buildEventsArray}.
+     */
+    private ArrayNode buildFilteredEventsArray(List<CloudWatchLogsService.FilteredEvent> events) {
+        ArrayNode array = objectMapper.createArrayNode();
+        for (CloudWatchLogsService.FilteredEvent filtered : events) {
+            ObjectNode node = buildEventNode(filtered.event());
+            node.put("logStreamName", filtered.logStreamName());
             array.add(node);
         }
         return array;
+    }
+
+    private ObjectNode buildEventNode(LogEvent e) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("eventId", e.getEventId());
+        node.put("timestamp", e.getTimestamp());
+        node.put("message", e.getMessage());
+        node.put("ingestionTime", e.getIngestionTime());
+        return node;
     }
 
     private Map<String, String> extractTags(JsonNode tagsNode) {

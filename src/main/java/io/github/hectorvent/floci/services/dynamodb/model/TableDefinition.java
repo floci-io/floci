@@ -47,6 +47,9 @@ public class TableDefinition {
     private String tableClass; // "STANDARD" or "STANDARD_INFREQUENT_ACCESS"
     private Integer onDemandMaxReadRequestUnits;
     private Integer onDemandMaxWriteRequestUnits;
+    // Replica regions for a global table (single-process emulator backs them all with this table's
+    // data; the list drives the DescribeTable Replicas/GlobalTableVersion projection).
+    private List<String> replicaRegions;
 
     public TableDefinition() {
         this.keySchema = new ArrayList<>();
@@ -56,6 +59,7 @@ public class TableDefinition {
         this.localSecondaryIndexes = new ArrayList<>();
         this.pointInTimeRecoveryRecoveryPeriodInDays = 35;
         this.kinesisStreamingDestinations = new ArrayList<>();
+        this.replicaRegions = new ArrayList<>();
     }
 
     public TableDefinition(String tableName,
@@ -83,6 +87,7 @@ public class TableDefinition {
         this.localSecondaryIndexes = new ArrayList<>();
         this.pointInTimeRecoveryRecoveryPeriodInDays = 35;
         this.kinesisStreamingDestinations = new ArrayList<>();
+        this.replicaRegions = new ArrayList<>();
     }
 
     public String getTableName() { return tableName; }
@@ -187,6 +192,13 @@ public class TableDefinition {
 
     public String getTableClass() { return tableClass; }
     public void setTableClass(String tableClass) { this.tableClass = tableClass; }
+
+    public List<String> getReplicaRegions() {
+        return replicaRegions != null ? replicaRegions : new ArrayList<>();
+    }
+    public void setReplicaRegions(List<String> replicaRegions) {
+        this.replicaRegions = replicaRegions != null ? replicaRegions : new ArrayList<>();
+    }
 
     public Integer getOnDemandMaxReadRequestUnits() { return onDemandMaxReadRequestUnits; }
     public void setOnDemandMaxReadRequestUnits(Integer v) { this.onDemandMaxReadRequestUnits = v; }

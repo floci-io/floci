@@ -1,11 +1,14 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import io.github.hectorvent.floci.core.common.XmlParser;
+import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
-import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.not;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
  * End-to-end check that CloudFormation provisions RDS resources for real. Uses DBSubnetGroup
@@ -34,7 +37,7 @@ class CloudFormationRdsIntegrationTest {
                       "Properties": {
                         "DBSubnetGroupName": "%s",
                         "DBSubnetGroupDescription": "managed by cfn",
-                        "SubnetIds": ["subnet-default-a", "subnet-default-b"]
+                        "SubnetIds": ["%s", "%s"]
                       }
                     }
                   },
@@ -42,7 +45,8 @@ class CloudFormationRdsIntegrationTest {
                     "GroupName": {"Value": {"Ref": "DbSubnets"}}
                   }
                 }
-                """.formatted(groupName);
+                """.formatted(groupName, Ec2Service.defaultSubnetId("us-east-1", "a"),
+                Ec2Service.defaultSubnetId("us-east-1", "b"));
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -82,90 +86,100 @@ class CloudFormationRdsIntegrationTest {
     }
 
     @Test
-    void rejectsServerlessV2ScalingForNonAuroraDbCluster() throws Exception {
+    void updateStackReconcilesExistingDbSubnetGroupInsteadOfFailing() {
+        // Regression for lex00/floci#16: provision() re-runs on every UpdateStack for every resource
+        // regardless of whether its properties changed, so a fixed-name DBSubnetGroup left unchanged
+        // between deploys used to call CreateDBSubnetGroup again and roll back with
+        // "DB subnet group ... already exists".
         String suffix = Long.toString(System.nanoTime(), 36);
-        String stackName = "cfn-rds-serverless-" + suffix;
-        String template = """
-                {
-                  "Resources": {
-                    "Cluster": {
-                      "Type": "AWS::RDS::DBCluster",
-                      "Properties": {
-                        "DBClusterIdentifier": "standard-cluster-%s",
-                        "Engine": "postgres",
-                        "ServerlessV2ScalingConfiguration": {
-                          "MinCapacity": 0.5,
-                          "MaxCapacity": 16
-                        }
-                      }
-                    }
-                  }
-                }
-                """.formatted(suffix);
+        String groupName = "cfn-rds-subnets-update-" + suffix;
+        String stackName = "cfn-rds-update-stack-" + suffix;
 
         given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", CFN_AUTH)
             .formParam("Action", "CreateStack")
             .formParam("StackName", stackName)
-            .formParam("TemplateBody", template)
+            .formParam("TemplateBody", dbSubnetGroupTemplate(groupName))
         .when()
             .post("/")
         .then()
             .statusCode(200);
 
-        try {
-            String stack = awaitStackStatus(stackName, "ROLLBACK_COMPLETE");
-            assertThat(stack, containsString(
-                    "Parameters that must not be used together were used together"));
-            String events = given()
-                    .contentType("application/x-www-form-urlencoded")
-                    .header("Authorization", CFN_AUTH)
-                    .formParam("Action", "DescribeStackEvents")
-                    .formParam("StackName", stackName)
-                    .when()
-                    .post("/")
-                    .then()
-                    .statusCode(200)
-                    .extract()
-                    .asString();
-            assertThat(events, containsString("<ResourceStatus>CREATE_FAILED</ResourceStatus>"));
-            assertThat(events, containsString(
-                    "Parameters that must not be used together were used together"));
-        } finally {
-            given()
-                .contentType("application/x-www-form-urlencoded")
-                .header("Authorization", CFN_AUTH)
-                .formParam("Action", "DeleteStack")
-                .formParam("StackName", stackName)
-            .when()
-                .post("/")
-            .then()
-                .statusCode(200);
-        }
+        String beforeXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"))
+            .extract().asString();
+        String groupNameBefore = XmlParser.extractPairs(beforeXml, "Outputs", "OutputKey", "OutputValue")
+                .get("GroupName");
+
+        // Redeploy the identical template: on real AWS this is a no-op update.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", "UpdateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", dbSubnetGroupTemplate(groupName))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String afterXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackStatus>UPDATE_COMPLETE</StackStatus>"))
+            .body(not(containsString("ROLLBACK")))
+            .extract().asString();
+        String groupNameAfter = XmlParser.extractPairs(afterXml, "Outputs", "OutputKey", "OutputValue")
+                .get("GroupName");
+
+        // The physical id (Ref, which for a subnet group is its name) is unchanged across the update.
+        assertEquals(groupNameBefore, groupNameAfter);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", RDS_AUTH)
+            .formParam("Action", "DescribeDBSubnetGroups")
+            .formParam("DBSubnetGroupName", groupName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString(groupName));
     }
 
-    private String awaitStackStatus(String stackName, String expectedStatus) throws Exception {
-        long deadline = System.currentTimeMillis() + 10_000;
-        String response = "";
-        while (System.currentTimeMillis() < deadline) {
-            response = given()
-                    .contentType("application/x-www-form-urlencoded")
-                    .header("Authorization", CFN_AUTH)
-                    .formParam("Action", "DescribeStacks")
-                    .formParam("StackName", stackName)
-                    .when()
-                    .post("/")
-                    .then()
-                    .statusCode(200)
-                    .extract()
-                    .asString();
-            if (response.contains("<StackStatus>" + expectedStatus + "</StackStatus>")) {
-                return response;
-            }
-            Thread.sleep(100);
-        }
-        throw new AssertionError(
-                "Stack did not reach " + expectedStatus + ": " + response);
+    private static String dbSubnetGroupTemplate(String groupName) {
+        return """
+                {
+                  "Resources": {
+                    "DbSubnets": {
+                      "Type": "AWS::RDS::DBSubnetGroup",
+                      "Properties": {
+                        "DBSubnetGroupName": "%s",
+                        "DBSubnetGroupDescription": "managed by cfn",
+                        "SubnetIds": ["%s", "%s"]
+                      }
+                    }
+                  },
+                  "Outputs": {
+                    "GroupName": {"Value": {"Ref": "DbSubnets"}}
+                  }
+                }
+                """.formatted(groupName, Ec2Service.defaultSubnetId("us-east-1", "a"),
+                Ec2Service.defaultSubnetId("us-east-1", "b"));
     }
 }

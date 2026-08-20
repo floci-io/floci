@@ -169,7 +169,7 @@ The following **AppSync directives** are pre-defined and recognized in schemas:
 | `@aws_oidc` | OBJECT, FIELD_DEFINITION | Require OIDC auth |
 | `@aws_lambda` | OBJECT, FIELD_DEFINITION | Require Lambda auth |
 | `@aws_subscribe(mutations: [String!]!)` | FIELD_DEFINITION | Link subscription to mutation |
-| `@aws_auth(cognito_groups: [String!]!)` | OBJECT | Require Cognito groups |
+| `@aws_auth(cognito_groups: [String!]!)` | OBJECT, FIELD_DEFINITION | Require Cognito groups (ignored when additional auth modes exist) |
 | `@aws_delta_sync` | OBJECT | Delta sync configuration |
 
 Unknown directives are rejected during schema registration.
@@ -195,10 +195,38 @@ Responses are `application/json` with AWS AppSync wire shapes (`data` / `errors[
 | Unknown `apiId` | 404 | `NotFoundException` |
 | API exists but no executable schema (incl. PROCESSING) | **502** | `GraphQLSchemaException` — `No schema definition exists.` + `x-amzn-errortype` |
 | Unexpected failure | 500 | `InternalFailure` |
+| Missing/invalid/expired credentials, unconfigured mode, Lambda deny | **401** | `UnauthorizedException` — GraphQL does not run; `x-amzn-errortype` is set. Missing headers use message `Missing authorization header`. |
+| Field directive mismatch, Cognito group miss, Lambda `deniedFields`, IAM field DENY | **200** | Field is `null` and `errors[]` contains `Unauthorized` — `Not Authorized to access {field} on type {type}` (no `x-amzn-errortype`) |
 
 **Evidence for data-plane statuses** (empty/`[]`/`{}` → 400; missing schema → 502): AppSync team sample in [graphql/graphql-over-http#81](https://github.com/graphql/graphql-over-http/issues/81) (@robzhu). The management API Reference lists `GraphQLSchemaException` as HTTP 400 for “schema not valid” on management operations — a different surface than the GraphQL execute data plane.
 
-Auth on the execute endpoint, DataFetcher/resolver dispatch, data-source adapters, guardrails, and WebSocket subscriptions are later phases.
+### Execute authentication
+
+Request auth runs after Content-Type and body parse and after API lookup (unknown `apiId` is still 404). It runs before schema lookup, so a missing schema with no credentials is 401, not 502.
+
+Headers are classified by **shape** (not primary-then-fallback). If both `x-api-key` and SigV4 `Authorization` are present, **SigV4 wins**. AppSync does not fall back to the API key when IAM validation fails.
+
+Missing required auth headers return HTTP **401** `UnauthorizedException` with message `Missing authorization header`. Invalid or expired credentials that are present still return 401 with `You are not authorized to make this call.`
+
+| Header shape | Mode |
+|---|---|
+| `Authorization` starts with `AWS4-HMAC-SHA256` | `AWS_IAM` (wins over `x-api-key` if both are present) |
+| `x-api-key` present | `API_KEY` |
+| `Authorization: Bearer <jwt>` | Cognito and/or OIDC (matched by `iss` / `aud` or `azp`) |
+| Other `Authorization` | `AWS_LAMBDA` |
+
+Configured modes are the API default `authenticationType` plus `additionalAuthenticationProviders`. A classified mode that is not configured returns 401.
+
+| Mode | Emulator notes |
+|---|---|
+| API_KEY | Lookup by key value (`da2-…`). Identity is absent (not `{}`). Default key expiry is 7 days when `expires` is omitted; stored `expires` is rounded down to the nearest hour. Create/UpdateApiKey require `expires` between 1 and 365 days from now (`ApiKeyValidityOutOfBoundsException`, 400). `deletes` is `expires` plus 60 days. |
+| AWS_IAM | Parses `Credential=` access key; no HMAC. Known keys evaluate `appsync:GraphQL`. Unknown/`test` keys are emulator ALLOW. |
+| Cognito / OIDC | JWT payload decode only (no JWKS). OIDC as the sole mode skips the `iss` check. OIDC identity is `{sub, issuer, claims}` (no `sourceIp`). |
+| Lambda | AppSync `isAuthorized` contract via `LambdaService.invoke` (not an API Gateway policy document). |
+
+SDL field auth: unmarked fields require the API **default** mode. Additional modes unlock fields tagged `@aws_api_key` / `@aws_iam` / `@aws_oidc` / `@aws_cognito_user_pools` / `@aws_lambda`. Multiple directives on a field are OR. Field-level directives override type-level. `@aws_auth` is allowed on `OBJECT \| FIELD_DEFINITION` and is ignored when additional modes exist.
+
+Duplicate `API_KEY` / `AWS_IAM` / `AWS_LAMBDA` (and the same Cognito pool or OIDC issuer) between default and additional providers is rejected on create/update with management 400 `BadRequestException`: `Authentication type {TYPE} for additional authentication provider {N} already specified on the API. It can only be specified once.` (`N` is 1-based in `additionalAuthenticationProviders`).
 
 ## Pagination
 
@@ -243,7 +271,6 @@ This matches AWS behavior where deleting an API removes its entire configuration
 
 These AWS AppSync capabilities are not yet implemented and are tracked in future phases:
 
-- **Authentication on execute** (Phase 7): API key / IAM / Cognito validation on the GraphQL endpoint
 - **DataFetcher / resolver dispatch** (Phase 8): resolver mapping templates and field resolution with non-null values
 - **Data source adapters** (Phase 9): DynamoDB, Lambda, HTTP, EventBridge, OpenSearch, RDS connectors
 - **Guardrails** (Phase 10): query depth / complexity limits and related errors
@@ -312,9 +339,10 @@ aws appsync associate-api \
   --api-id API_ID \
   --endpoint-url $AWS_ENDPOINT_URL
 
-# Execute a GraphQL query (data-plane; null fields OK until resolvers)
+# Execute a GraphQL query (data-plane; send credentials for the API auth mode)
 curl -s -X POST "$AWS_ENDPOINT_URL/v1/apis/API_ID/graphql" \
   -H "Content-Type: application/json" \
+  -H "x-api-key: da2-YOUR_API_KEY" \
   -d '{"query":"{ hello }"}'
 
 # Create a channel namespace

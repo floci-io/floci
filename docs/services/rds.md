@@ -37,9 +37,22 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | `DeleteDBClusterParameterGroup` | - |
 | `ModifyDBClusterParameterGroup` | - |
 | `DescribeDBClusterParameters` | - |
+| `CreateOptionGroup` | Create an option group |
+| `DescribeOptionGroups` | List option groups, including the implicit `default:` groups |
+| `ModifyOptionGroup` | Add, update, or remove options in an option group |
+| `DeleteOptionGroup` | Delete an option group |
 | `DescribeDBSnapshots` | - |
-| `DescribeDBProxies` | - |
+| `DescribeDBProxies` | List DB proxies |
+| `CreateDBProxy` | Create a DB proxy |
+| `ModifyDBProxy` | Update mutable DB proxy authentication, logging, timeout, TLS, role, and security-group settings |
+| `DeleteDBProxy` | Delete a DB proxy |
+| `RegisterDBProxyTargets` | Register a cluster or instance as a proxy target |
+| `DeregisterDBProxyTargets` | Remove a cluster or instance from a proxy target group |
+| `DescribeDBProxyTargetGroups` | List a proxy's target groups |
+| `ModifyDBProxyTargetGroup` | Update target-group connection-pool configuration |
+| `DescribeDBProxyTargets` | List a proxy target group's registered targets |
 | `DescribeDBClusterSnapshots` | - |
+| `DescribeGlobalClusters` | List global clusters — always empty, as none are modeled |
 | `AddTagsToResource` | Add tags to a DB resource |
 | `ListTagsForResource` | List tags for a DB resource |
 | `RemoveTagsFromResource` | Remove tags from a DB resource |
@@ -51,7 +64,7 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 |---|---|---|
 | `FLOCI_SERVICES_RDS_ENABLED` | `true` | Enable or disable the service |
 | `FLOCI_SERVICES_RDS_MOCK` | `false` | `true` = metadata only (no Docker container or auth proxy) |
-| `FLOCI_SERVICES_RDS_PROXY_BASE_PORT` | `7000` | First host port in the RDS proxy range |
+| `FLOCI_SERVICES_RDS_PROXY_BASE_PORT` | `7001` | First host port in the RDS proxy range |
 | `FLOCI_SERVICES_RDS_PROXY_MAX_PORT` | `7099` | Last host port in the RDS proxy range |
 | `FLOCI_SERVICES_RDS_ENDPOINT_HOST` | _(auto-detected)_ | Hostname advertised in RDS endpoints; when set in Docker, Floci advertises each proxy's published host port |
 | `FLOCI_SERVICES_RDS_DEFAULT_POSTGRES_IMAGE` | `postgres:16-alpine` | Docker image for PostgreSQL instances |
@@ -101,6 +114,27 @@ services:
     best-effort, as with the other mock-capable services: resources created in real mode and
     deleted under mock leave their containers and volumes behind, and resources created in mock
     mode are restored with fresh, empty containers when loaded in real mode.
+
+!!! warning "DB proxy endpoint routing"
+
+    DB proxy control-plane resources and target registration are modeled, but Floci's current
+    single-host TCP relay cannot expose multiple same-engine DB proxies as distinct AWS-style bare
+    hostnames on the same engine-default port. The standard Docker Compose mapping also exposes
+    only the `7001-7099` instance/cluster proxy range, not `1433`, `3306`, or `5432`. Use mock mode
+    for DB proxy provisioning workflows until a dedicated endpoint-routing design is implemented.
+
+!!! note "DB proxy control-plane settings"
+
+    Proxy and target-group settings are persisted and round-trip through the RDS Query API and
+    CloudFormation. Pool sizing, borrow timeout, idle timeout, TLS, init-query, and session-pinning
+    settings are currently control-plane metadata; the TCP relay does not yet implement those data-plane
+    behaviors. `DefaultAuthScheme=IAM_AUTH` is supported for control-plane workflows, but a real-mode
+    proxy using that scheme cannot register a target until backend IAM authentication is implemented.
+    Requests to `RegisterDBProxyTargets`, `DeregisterDBProxyTargets`, and
+    `DescribeDBProxyTargets` use the `default` target group when `TargetGroupName` is omitted,
+    matching the RDS API contract.
+    DB proxies currently support `IPV4` for both endpoint and target connections; `IPV6` and `DUAL`
+    endpoint networking require additional listener and Docker-network support.
 
 ## Aurora Serverless v2 scaling
 
@@ -172,6 +206,55 @@ mysql -h 127.0.0.1 -P 7002 -u root -psecret123
 | `mariadb` | `mariadb:11` |
 
 Override the image per-instance with the `--engine-version` flag or globally via environment variables.
+
+## Option Groups
+
+Option groups are metadata: Floci stores the options you add, returns them on the wire, and
+attaches a group to a DB instance, but it does not install the underlying engine feature in the
+container.
+
+As on AWS, every engine has an implicit `default:<engine>-<major version>` group that
+`DescribeOptionGroups` returns even when you have created none. Floci ships the defaults for the
+engines it can run (`postgres 13`–`18`, `mysql 8.0`/`8.4`, `mariadb 10.11`/`11.2`/`11.4`), so an
+instance created without `--option-group-name` reports the matching default. Default groups can't
+be modified, deleted, or tagged.
+
+`CreateOptionGroup` accepts any `EngineName` AWS accepts — including `oracle-*`, `sqlserver-*`,
+and `db2-*` — so a Terraform `aws_db_option_group` for an engine Floci cannot start still applies.
+Attaching one to a DB instance requires the group's engine and major engine version to match the
+instance, as on AWS: a `mysql 8.0` group can't be attached to a `mysql 8.4` instance. A mismatch
+fails with `InvalidParameterCombination`.
+
+```bash
+aws rds create-option-group \
+  --option-group-name my-og \
+  --engine-name mysql \
+  --major-engine-version 8.0 \
+  --option-group-description "MySQL options" \
+  --endpoint-url $AWS_ENDPOINT_URL
+
+aws rds modify-option-group \
+  --option-group-name my-og \
+  --options OptionName=MEMCACHED,Port=11211 \
+  --apply-immediately \
+  --endpoint-url $AWS_ENDPOINT_URL
+
+aws rds describe-option-groups \
+  --engine-name mysql \
+  --endpoint-url $AWS_ENDPOINT_URL
+```
+
+Deleting a group that is still attached to a DB instance fails with
+`InvalidOptionGroupStateFault`, matching AWS.
+
+Known gaps, all deliberate:
+
+| Behavior | Status |
+|---|---|
+| `CopyOptionGroup`, `DescribeOptionGroupOptions` | Not implemented — separate actions, not part of option group CRUD |
+| `OptionGroupQuotaExceededFault` (AWS caps an account at 20 groups) | Not enforced — capping a local emulator would only get in a test's way |
+| `OptionSetting` metadata (`DataType`, `ApplyType`, `AllowedValues`, `DefaultValue`, `Description`) | Omitted — it would require the per-engine option catalog `DescribeOptionGroupOptions` serves |
+| `MaxRecords` / `Marker` pagination | Every group is returned in one page, as with every other RDS list action |
 
 ## Persistence
 

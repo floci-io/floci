@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.ses;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.ses.model.AccountSuppressionAttributes;
+import io.github.hectorvent.floci.services.ses.model.AccountVdmAttributes;
 import io.github.hectorvent.floci.services.ses.model.ConfigurationSet;
 import io.github.hectorvent.floci.services.ses.model.ContactList;
 import io.github.hectorvent.floci.services.ses.model.Contact;
@@ -38,18 +39,16 @@ class SesServiceSmtpTest {
         emailStore = new InMemoryStorage<>();
         service = new SesService(
                 new InMemoryStorage<String, Identity>(),
-                emailStore,
-                new InMemoryStorage<String, Boolean>(),
-                new InMemoryStorage<String, EmailTemplate>(),
+                new SesSentEmailService(emailStore),
+                new SesAccountService(new InMemoryStorage<String, Boolean>(), new InMemoryStorage<String, AccountVdmAttributes>()),
+                new SesTemplateService(new InMemoryStorage<String, EmailTemplate>()),
                 new InMemoryStorage<String, ConfigurationSet>(),
-                new InMemoryStorage<String, SuppressedDestination>(),
-                new InMemoryStorage<String, AccountSuppressionAttributes>(),
-                new InMemoryStorage<String, DedicatedIpPool>(),
-                new InMemoryStorage<String, ContactList>(),
-                new InMemoryStorage<String, Contact>(),
-                new InMemoryStorage<String, String>(),
-                new InMemoryStorage<String, ReceiptRuleSet>(),
-                new InMemoryStorage<String, CustomVerificationEmailTemplate>(),
+                new SesSuppressionService(new InMemoryStorage<String, SuppressedDestination>(), new InMemoryStorage<String, AccountSuppressionAttributes>()),
+                new SesDedicatedIpService(new InMemoryStorage<String, DedicatedIpPool>()),
+                new SesContactService(new InMemoryStorage<String, ContactList>(), new InMemoryStorage<String, Contact>(), Clock.systemUTC()),
+                new SesPolicyService(new InMemoryStorage<String, String>(), new ObjectMapper()),
+                new SesReceiptRuleService(new InMemoryStorage<String, ReceiptRuleSet>(), Clock.systemUTC()),
+                new SesCvetService(new InMemoryStorage<String, CustomVerificationEmailTemplate>()),
                 smtpRelay,
                 new ObjectMapper(),
                 Clock.systemUTC());

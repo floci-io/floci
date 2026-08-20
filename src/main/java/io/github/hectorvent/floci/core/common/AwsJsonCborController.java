@@ -1,9 +1,11 @@
 package io.github.hectorvent.floci.core.common;
 
+import com.fasterxml.jackson.core.JacksonException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
 import com.fasterxml.jackson.dataformat.cbor.CBORGenerator;
+import com.google.gson.JsonParseException;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.CloudWatchMetricsJsonHandler;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbJsonHandler;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbStreamsJsonHandler;
@@ -19,8 +21,11 @@ import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
+import java.util.zip.GZIPInputStream;
 
 /**
  * Generic dispatcher for all AWS services that use the application/cbor protocol,
@@ -182,9 +187,7 @@ public class AwsJsonCborController {
         LOG.debugv("Smithy RPC v2 CBOR: service={0}, operation={1}", serviceId, operation);
 
         try {
-            JsonNode request = (body != null && body.length > 0)
-                    ? CBOR_MAPPER.readTree(body)
-                    : objectMapper.createObjectNode();
+            JsonNode request = bodyToJson(httpHeaders, body);
             String region = regionResolver.resolveRegion(httpHeaders);
 
             Response delegated = dispatchCbor(serviceId, operation, request, region);
@@ -204,10 +207,39 @@ public class AwsJsonCborController {
                     .build();
         } catch (AwsException e) {
             return cborErrorResponse(e, "smithy-protocol", responseContentType(httpHeaders));
+        } catch (JacksonException e) {
+           return cborErrorResponse(new AwsException("SerializationException", e.getMessage(), 400),
+                    "smithy-protocol", responseContentType(httpHeaders));
         } catch (Exception e) {
             LOG.error("Error processing Smithy CBOR request: " + serviceId + "." + operation, e);
             return Response.status(500).build();
         }
+    }
+
+    JsonNode bodyToJson(HttpHeaders httpHeaders, byte[] body) throws IOException {
+        JsonNode request;
+        if (body != null && body.length > 0) {
+            if( httpHeaders.getRequestHeader("Content-encoding") != null && isGZipped(httpHeaders.getRequestHeader("Content-encoding"))) {
+                body = decodeBody(body);
+            }
+            request = CBOR_MAPPER.readTree(body);
+        } else {
+            request = objectMapper.createObjectNode();
+        }
+        return request;
+    }
+
+    private boolean isGZipped(List<String> contentEncodingHeaders) {
+        if (contentEncodingHeaders == null) {
+            return false;
+        }
+        for (String header : contentEncodingHeaders) {
+            if (header != null && header.toLowerCase(java.util.Locale.ROOT).contains("gzip")) {
+                return true;
+            }
+        }
+        return false;
+
     }
 
     /**
@@ -240,9 +272,7 @@ public class AwsJsonCborController {
         LOG.debugv("{0} CBOR action: {1}", serviceKey, action);
 
         try {
-            JsonNode request = (body != null && body.length > 0)
-                    ? CBOR_MAPPER.readTree(body)
-                    : objectMapper.createObjectNode();
+            JsonNode request = bodyToJson(httpHeaders, body);
             String region = regionResolver.resolveRegion(httpHeaders);
 
             Response delegated = switch (serviceKey) {
@@ -275,9 +305,34 @@ public class AwsJsonCborController {
                     .build();
         } catch (AwsException e) {
             return cborErrorResponse(e, "smithy-protocol", responseContentType(httpHeaders));
+        } catch (JacksonException e) {
+            return cborErrorResponse(new AwsException("SerializationException", e.getMessage(), 400),
+                    "smithy-protocol", responseContentType(httpHeaders));
         } catch (Exception e) {
             LOG.error("Error processing CBOR request: " + serviceKey + "." + action, e);
             return Response.status(500).build();
+        }
+    }
+
+    private byte[] decodeBody(byte[] compressed) {
+        int buffSize = 64 * 1024;
+        byte[] buffer = new byte[buffSize]; // 10 MB limit max over all aws services, to avoid OOM. AWS services should not send more than 10 MB in a single request.
+        int totalRead = 0;
+        int maxRead = 10 * 1024 * 1024; // 10 MB limit max over all aws services, to avoid OOM. AWS services should not send more than 10 MB in a single request.
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        try (GZIPInputStream gis = new GZIPInputStream(new java.io.ByteArrayInputStream(compressed))) {
+            int read;
+            while ((read = gis.read(buffer)) != -1) {
+                totalRead += read;
+                if (totalRead > maxRead) {
+                    throw new AwsException("PayloadTooLargeException", "Payload Too Large", 413);
+                }
+                baos.write(buffer, 0, read);
+            }
+
+            return baos.toByteArray();
+        } catch (IOException e) {
+            throw new AwsException("InvalidRequestException", "Failed to decode request body", 400);
         }
     }
 

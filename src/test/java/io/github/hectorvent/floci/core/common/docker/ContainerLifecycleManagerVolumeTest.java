@@ -5,13 +5,17 @@ import com.github.dockerjava.api.command.CreateContainerCmd;
 import com.github.dockerjava.api.command.CreateContainerResponse;
 import com.github.dockerjava.api.command.InspectVolumeCmd;
 import com.github.dockerjava.api.command.InspectVolumeResponse;
+import com.github.dockerjava.api.command.ListVolumesCmd;
+import com.github.dockerjava.api.command.ListVolumesResponse;
 import com.github.dockerjava.api.command.RemoveContainerCmd;
+import com.github.dockerjava.api.command.RemoveVolumeCmd;
 import com.github.dockerjava.api.command.StartContainerCmd;
 import com.github.dockerjava.api.command.StopContainerCmd;
 import com.github.dockerjava.api.command.WaitContainerCmd;
 import com.github.dockerjava.api.exception.DockerException;
 import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.core.command.WaitContainerResultCallback;
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.lambda.launcher.ImageCacheService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -23,6 +27,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
@@ -42,11 +47,15 @@ class ContainerLifecycleManagerVolumeTest {
     @Mock
     private PortAllocator portAllocator;
 
+    @Mock
+    private EmulatorConfig config;
+
     private ContainerLifecycleManager manager;
 
     @BeforeEach
     void setUp() {
-        manager = new ContainerLifecycleManager(dockerClient, imageCacheService, containerDetector, portAllocator);
+        manager = new ContainerLifecycleManager(
+                dockerClient, imageCacheService, containerDetector, portAllocator, config);
     }
 
     @Test
@@ -153,6 +162,122 @@ class ContainerLifecycleManagerVolumeTest {
         when(cmd.exec()).thenThrow(new DockerException("Connection refused", 500));
 
         assertFalse(manager.volumeExists("some-volume"));
+    }
+
+    @Test
+    void strictContainerCleanupPropagatesRemovalFailure() {
+        StopContainerCmd stop = mock(StopContainerCmd.class, RETURNS_SELF);
+        RemoveContainerCmd remove = mock(RemoveContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.stopContainerCmd("container-id")).thenReturn(stop);
+        when(dockerClient.removeContainerCmd("container-id")).thenReturn(remove);
+        when(remove.exec()).thenThrow(new DockerException("remove failed", 500));
+
+        IllegalStateException exception = assertThrows(IllegalStateException.class, () ->
+                manager.stopAndRemoveStrict("container-id", null));
+
+        assertEquals("Failed to remove container container-id", exception.getMessage());
+    }
+
+    @Test
+    void strictContainerCleanupAcceptsSuccessfulForcedRemovalAfterStopFailure() {
+        StopContainerCmd stop = mock(StopContainerCmd.class, RETURNS_SELF);
+        RemoveContainerCmd remove = mock(RemoveContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.stopContainerCmd("container-id")).thenReturn(stop);
+        when(stop.exec()).thenThrow(new DockerException("stop failed", 500));
+        when(dockerClient.removeContainerCmd("container-id")).thenReturn(remove);
+
+        assertDoesNotThrow(() -> manager.stopAndRemoveStrict("container-id", null));
+
+        verify(remove).exec();
+    }
+
+    @Test
+    void strictStaleContainerCleanupPropagatesRemovalFailure() {
+        RemoveContainerCmd remove = mock(RemoveContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.removeContainerCmd("stale-name")).thenReturn(remove);
+        when(remove.exec()).thenThrow(new DockerException("remove failed", 500));
+
+        IllegalStateException exception = assertThrows(IllegalStateException.class, () ->
+                manager.removeIfExistsStrict("stale-name"));
+
+        assertEquals("Failed to remove stale container stale-name", exception.getMessage());
+    }
+
+    @Test
+    void strictStaleContainerCleanupAcceptsMissingContainer() {
+        RemoveContainerCmd remove = mock(RemoveContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.removeContainerCmd("stale-name")).thenReturn(remove);
+        when(remove.exec()).thenThrow(new NotFoundException("missing"));
+
+        assertDoesNotThrow(() -> manager.removeIfExistsStrict("stale-name"));
+    }
+
+    @Test
+    void strictVolumeCleanupPropagatesRemovalFailure() {
+        RemoveVolumeCmd remove = mock(RemoveVolumeCmd.class);
+        when(dockerClient.removeVolumeCmd("volume-id")).thenReturn(remove);
+        when(remove.exec()).thenThrow(new DockerException("remove failed", 500));
+
+        IllegalStateException exception = assertThrows(IllegalStateException.class, () ->
+                manager.removeVolumeStrict("volume-id"));
+
+        assertEquals("Failed to remove volume volume-id", exception.getMessage());
+    }
+
+    @Test
+    void tryListVolumeNamesReturnsAuthoritativeSnapshot() {
+        ListVolumesCmd cmd = mock(ListVolumesCmd.class);
+        ListVolumesResponse response = mock(ListVolumesResponse.class);
+        InspectVolumeResponse first = mock(InspectVolumeResponse.class);
+        InspectVolumeResponse second = mock(InspectVolumeResponse.class);
+        when(dockerClient.listVolumesCmd()).thenReturn(cmd);
+        when(cmd.exec()).thenReturn(response);
+        when(response.getVolumes()).thenReturn(java.util.List.of(first, second));
+        when(first.getName()).thenReturn("floci-code-first");
+        when(second.getName()).thenReturn("shared-data");
+
+        assertEquals(Optional.of(Set.of("floci-code-first", "shared-data")),
+                manager.tryListVolumeNames());
+    }
+
+    @Test
+    void tryListVolumeNamesDistinguishesEmptyInventory() {
+        ListVolumesCmd cmd = mock(ListVolumesCmd.class);
+        ListVolumesResponse response = mock(ListVolumesResponse.class);
+        when(dockerClient.listVolumesCmd()).thenReturn(cmd);
+        when(cmd.exec()).thenReturn(response);
+        when(response.getVolumes()).thenReturn(java.util.List.of());
+
+        assertEquals(Optional.of(Set.of()), manager.tryListVolumeNames());
+    }
+
+    @Test
+    void tryListVolumeNamesReturnsEmptyOptionalForNullResponse() {
+        ListVolumesCmd cmd = mock(ListVolumesCmd.class);
+        when(dockerClient.listVolumesCmd()).thenReturn(cmd);
+        when(cmd.exec()).thenReturn(null);
+
+        assertEquals(Optional.empty(), manager.tryListVolumeNames());
+    }
+
+    @Test
+    void tryListVolumeNamesReturnsEmptyOptionalForNullVolumeList() {
+        ListVolumesCmd cmd = mock(ListVolumesCmd.class);
+        ListVolumesResponse response = mock(ListVolumesResponse.class);
+        when(dockerClient.listVolumesCmd()).thenReturn(cmd);
+        when(cmd.exec()).thenReturn(response);
+        when(response.getVolumes()).thenReturn(null);
+
+        assertEquals(Optional.empty(), manager.tryListVolumeNames());
+    }
+
+    @Test
+    void tryListVolumeNamesReturnsEmptyOptionalOnDockerFailure() {
+        ListVolumesCmd cmd = mock(ListVolumesCmd.class);
+        when(dockerClient.listVolumesCmd()).thenReturn(cmd);
+        when(cmd.exec()).thenThrow(new DockerException("Connection refused", 500));
+
+        assertEquals(Optional.empty(), manager.tryListVolumeNames());
     }
 
     @Test

@@ -4,11 +4,14 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 @RegisterForReflection
 public class DocDbCluster {
     private String masterUsername;
+    private Map<String, String> tags = new LinkedHashMap<>();
 
     private String dbClusterIdentifier;
     private String status;
@@ -77,6 +80,13 @@ public class DocDbCluster {
 
     public int getContainerPort() { return containerPort; }
     public void setContainerPort(int containerPort) { this.containerPort = containerPort; }
+
+    public Map<String, String> getTags() { return tags; }
+
+    /** Normalizes null: a record persisted before tags were stored deserializes without them. */
+    public void setTags(Map<String, String> tags) {
+        this.tags = tags == null ? new LinkedHashMap<>() : new LinkedHashMap<>(tags);
+    }
 
 
 }

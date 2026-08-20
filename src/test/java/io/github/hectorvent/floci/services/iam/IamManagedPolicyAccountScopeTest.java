@@ -292,4 +292,34 @@ class IamManagedPolicyAccountScopeTest {
         assertTrue(caller.identityPolicies().contains(AwsManagedPolicies.PERMISSIVE_DOCUMENT));
         assertEquals(AwsManagedPolicies.PERMISSIVE_DOCUMENT, caller.boundaryPolicyDocument());
     }
+    /**
+     * The alias is the only IAM entity keyed by a constant rather than a caller-supplied name, so
+     * every account shares one storage key and the separation rests entirely on
+     * AccountAwareStorageBackend prefixing. The failure mode is two-sided and quiet: one account
+     * would read another's alias, and would also be refused an alias it never set.
+     */
+    @Test
+    void accountAliasIsScopedToTheCallingAccount() {
+        InMemoryStorage<String, String> raw = new InMemoryStorage<>();
+        IamService defaultAccount = serviceWithAliases(
+                new AccountAwareStorageBackend<>(raw, requestContextFor(DEFAULT_ACCT), DEFAULT_ACCT));
+        IamService otherAccount = serviceWithAliases(
+                new AccountAwareStorageBackend<>(raw, requestContextFor(REQUEST_ACCT), DEFAULT_ACCT));
+
+        defaultAccount.createAccountAlias("acct-one");
+
+        assertTrue(otherAccount.getAccountAlias().isEmpty(), "the other account must not see it");
+        otherAccount.createAccountAlias("acct-two");
+        assertEquals("acct-one", defaultAccount.getAccountAlias().orElseThrow());
+        assertEquals("acct-two", otherAccount.getAccountAlias().orElseThrow());
+    }
+
+    private static IamService serviceWithAliases(AccountAwareStorageBackend<String> aliases) {
+        return new IamService(
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                aliases, new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new RegionResolver("us-east-1", DEFAULT_ACCT), false, null);
+    }
 }

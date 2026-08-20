@@ -218,7 +218,8 @@ class RdsDataServiceTest {
         ObjectNode insertCommitted = harness.request("insert into data_api_items(id, title, score) values ('commit', 'Commit', 1)");
         insertCommitted.put("transactionId", committedTx);
         harness.service.executeStatement(insertCommitted, REGION);
-        ObjectNode commitResponse = harness.service.commitTransaction(harness.transactionRequest(committedTx));
+        ObjectNode commitResponse = harness.service.commitTransaction(
+                harness.transactionRequest(committedTx), REGION);
         assertEquals("Transaction Committed", commitResponse.get("transactionStatus").asText());
         assertEquals(1L, harness.countById("commit"));
 
@@ -226,7 +227,8 @@ class RdsDataServiceTest {
         ObjectNode insertRolledBack = harness.request("insert into data_api_items(id, title, score) values ('rollback', 'Rollback', 1)");
         insertRolledBack.put("transactionId", rolledBackTx);
         harness.service.executeStatement(insertRolledBack, REGION);
-        ObjectNode rollbackResponse = harness.service.rollbackTransaction(harness.transactionRequest(rolledBackTx));
+        ObjectNode rollbackResponse = harness.service.rollbackTransaction(
+                harness.transactionRequest(rolledBackTx), REGION);
         assertEquals("Rollback Complete", rollbackResponse.get("transactionStatus").asText());
         assertEquals(0L, harness.countById("rollback"));
 
@@ -258,7 +260,12 @@ class RdsDataServiceTest {
                 () -> harness.service.executeStatement(mismatchedDatabase, REGION));
         assertEquals("TransactionNotFoundException", databaseMismatch.getErrorCode());
 
-        harness.service.rollbackTransaction(harness.transactionRequest(mismatchTx));
+        AwsException signedRegionMismatch = assertThrows(AwsException.class,
+                () -> harness.service.commitTransaction(
+                        harness.transactionRequest(mismatchTx), "us-west-2"));
+        assertEquals("TransactionNotFoundException", signedRegionMismatch.getErrorCode());
+
+        harness.service.rollbackTransaction(harness.transactionRequest(mismatchTx), REGION);
     }
 
     @Test
@@ -273,7 +280,8 @@ class RdsDataServiceTest {
         insert.put("transactionId", tx);
         harness.service.executeStatement(insert, REGION);
 
-        ObjectNode commitResponse = harness.service.commitTransaction(harness.transactionRequest(FALLBACK_RESOURCE_ARN, tx));
+        ObjectNode commitResponse = harness.service.commitTransaction(
+                harness.transactionRequest(FALLBACK_RESOURCE_ARN, tx), REGION);
 
         assertEquals("Transaction Committed", commitResponse.get("transactionStatus").asText());
         assertEquals(1L, harness.countById("fallback"));
@@ -292,12 +300,13 @@ class RdsDataServiceTest {
         insert.put("transactionId", tx);
         harness.service.executeStatement(insert, REGION);
         doThrow(new AwsException("BadRequestException", "resource is gone", 400))
-                .when(harness.resolver).resolve(RESOURCE_ARN);
+                .when(harness.resolver).resolve(RESOURCE_ARN, REGION);
 
-        ObjectNode commitResponse = harness.service.commitTransaction(harness.transactionRequest(tx));
+        ObjectNode commitResponse = harness.service.commitTransaction(
+                harness.transactionRequest(tx), REGION);
 
         assertEquals("Transaction Committed", commitResponse.get("transactionStatus").asText());
-        doReturn(harness.target).when(harness.resolver).resolve(RESOURCE_ARN);
+        doReturn(harness.target).when(harness.resolver).resolve(RESOURCE_ARN, REGION);
         assertEquals(1L, harness.countById("deleted-resource"));
     }
 
@@ -324,17 +333,17 @@ class RdsDataServiceTest {
         ObjectNode commitMissingResource = harness.transactionRequest(tx);
         commitMissingResource.remove("resourceArn");
         AwsException missingCommitResource = assertThrows(AwsException.class,
-                () -> harness.service.commitTransaction(commitMissingResource));
+                () -> harness.service.commitTransaction(commitMissingResource, REGION));
         assertEquals("BadRequestException", missingCommitResource.getErrorCode());
         assertEquals("resourceArn is required.", missingCommitResource.getMessage());
 
         ObjectNode rollbackMismatchedResource = harness.transactionRequest(tx);
         rollbackMismatchedResource.put("resourceArn", OTHER_RESOURCE_ARN);
         AwsException rollbackMismatch = assertThrows(AwsException.class,
-                () -> harness.service.rollbackTransaction(rollbackMismatchedResource));
+                () -> harness.service.rollbackTransaction(rollbackMismatchedResource, REGION));
         assertEquals("TransactionNotFoundException", rollbackMismatch.getErrorCode());
 
-        harness.service.rollbackTransaction(harness.transactionRequest(tx));
+        harness.service.rollbackTransaction(harness.transactionRequest(tx), REGION);
     }
 
     @Test
@@ -403,7 +412,7 @@ class RdsDataServiceTest {
         RdsDataResourceResolver resolver = mock(RdsDataResourceResolver.class);
         SecretsManagerService secrets = fallbackSecrets();
         RdsDataResourceResolver.DatabaseTarget target = target();
-        when(resolver.resolve(RESOURCE_ARN)).thenReturn(target);
+        when(resolver.resolve(RESOURCE_ARN, REGION)).thenReturn(target);
         AtomicBoolean closed = new AtomicBoolean(false);
         RdsDataConnectionFactory failingFactory = new RdsDataConnectionFactory() {
             @Override
@@ -524,10 +533,10 @@ class RdsDataServiceTest {
             resolver = mock(RdsDataResourceResolver.class);
             SecretsManagerService secrets = fallbackSecrets();
             target = target();
-            when(resolver.resolve(RESOURCE_ARN)).thenReturn(target);
-            when(resolver.resolve(FALLBACK_RESOURCE_ARN)).thenReturn(target);
-            when(resolver.resolve(OTHER_RESOURCE_ARN)).thenReturn(target(OTHER_RESOURCE_ARN));
-            when(resolver.resolve(UNKNOWN_RESOURCE_ARN))
+            when(resolver.resolve(RESOURCE_ARN, REGION)).thenReturn(target);
+            when(resolver.resolve(FALLBACK_RESOURCE_ARN, REGION)).thenReturn(target);
+            when(resolver.resolve(OTHER_RESOURCE_ARN, REGION)).thenReturn(target(OTHER_RESOURCE_ARN));
+            when(resolver.resolve(UNKNOWN_RESOURCE_ARN, REGION))
                     .thenThrow(new AwsException("BadRequestException", "resource is missing", 400));
             RdsDataConnectionFactory connectionFactory = new RdsDataConnectionFactory() {
                 @Override
