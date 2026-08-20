@@ -190,7 +190,7 @@ flowchart LR
         Router["HTTP Router\nJAX-RS / Vert.x"]
 
         subgraph Stateless ["Stateless Services"]
-            A["SSM · SQS · SNS\nIAM · STS · KMS\nSecrets Manager · SES\nCognito · Kinesis\nEventBridge · Scheduler · AppConfig\nCloudWatch · Step Functions\nCloudFormation · ACM · Config · CloudTrail\nAPI Gateway · AppSync · ELB v2 · Auto Scaling\nElastic Beanstalk · CodeDeploy · CodePipeline · Backup · Bedrock Runtime · Route53 · Transfer"]
+            A["SSM · SQS · SNS\nIAM · STS · KMS\nSecrets Manager · SES\nCognito · Kinesis\nEventBridge · Scheduler · AppConfig\nCloudWatch · Step Functions\nCloudFormation · ACM · Config · CloudTrail\nAPI Gateway · AppSync · ELB v2 · Auto Scaling\nElastic Beanstalk · CodeDeploy · CodePipeline · Backup · Bedrock Runtime · Bedrock AgentCore · Route53 · Transfer"]
         end
 
         subgraph Stateful ["Stateful Services"]
@@ -223,7 +223,7 @@ Floci supports local emulation for application services, data services, eventing
 | Events and workflows | EventBridge, EventBridge Pipes, EventBridge Scheduler, Step Functions, SWF, CloudWatch Logs, CloudWatch Metrics |
 | API and identity | API Gateway REST, API Gateway v2, AppSync, Cognito, ACM, Route53, Cloud Map |
 | Containers and compute | ECS, EC2, Lightsail, EKS, MWAA, ECR, CodeBuild, CodeDeploy, CodePipeline, AWS Batch, Auto Scaling, Application Auto Scaling, Elastic Beanstalk, ELB v2 |
-| Data, analytics, and AI | Athena, Glue, EMR, Firehose, Managed Service for Apache Flink, OpenSearch, S3 Tables, S3 Vectors, Textract, Transcribe, Bedrock Runtime |
+| Data, analytics, and AI | Athena, Glue, EMR, Firehose, Managed Service for Apache Flink, OpenSearch, S3 Tables, S3 Vectors, Textract, Transcribe, Bedrock Runtime, Bedrock AgentCore |
 | Databases and caching | RDS, RDS Data API, Neptune, DocumentDB, MemoryDB, ElastiCache |
 | Messaging and transfer | SES, Kinesis, MSK, Amazon MQ, Transfer Family, IoT Core |
 | Security and governance | WAF v2, CloudTrail, CloudFront, Resource Groups Tagging API, CloudHSM v2 |
@@ -284,6 +284,7 @@ For operation-level compatibility, see the [Services Overview](https://floci.io/
 | AppConfig | In-process | Applications, environments, profiles, hosted versions, deployments |
 | AppConfigData | In-process | Configuration sessions and dynamic configuration retrieval |
 | Bedrock Runtime | In-process stub | Dummy Converse and InvokeModel responses for local development |
+| Bedrock AgentCore | In-process stub | Stateful control plane (agent runtimes, gateways, memory, workload identity); canned InvokeAgentRuntime responses |
 | EKS | Real Docker, mock mode available | k3s clusters with live Kubernetes API server |
 | MWAA | Real Docker, mock mode available | Real Apache Airflow (LocalExecutor) + Postgres metadata DB per environment; web/CLI proxy; S3-backed DAG sync |
 | ELB v2 | In-process | ALB, NLB, target groups, listeners, routing rules, Lambda targets, tags |
