@@ -640,7 +640,15 @@ public class Route53Controller {
             return null;
         }
         Map<String, String> vpc = vpcs.get(0);
-        return new VpcAssociation(vpc.get("VPCId"), vpc.get("VPCRegion"));
+        String vpcId = vpc.get("VPCId");
+        String vpcRegion = vpc.get("VPCRegion");
+        // AWS requires VPCId and VPCRegion together whenever VPC is present; a
+        // half-populated element must not mark the zone private.
+        if (vpcId == null || vpcId.isEmpty() || vpcRegion == null || vpcRegion.isEmpty()) {
+            throw new AwsException(
+                    "InvalidInput", "VPCId and VPCRegion are both required when VPC is specified.", 400);
+        }
+        return new VpcAssociation(vpcId, vpcRegion);
     }
 
     /**

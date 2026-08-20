@@ -56,7 +56,7 @@ class Route53Test {
                     GetHostedZoneRequest.builder().id(zoneId).build());
 
             assertThat(fetched.hostedZone().config().privateZone()).isTrue();
-            assertThat(fetched.vpcs()).singleElement().satisfies(association -> {
+            assertThat(fetched.vpCs()).singleElement().satisfies(association -> {
                 assertThat(association.vpcId()).isEqualTo(vpc.vpcId());
                 assertThat(association.vpcRegion()).isEqualTo(vpc.vpcRegion());
             });
