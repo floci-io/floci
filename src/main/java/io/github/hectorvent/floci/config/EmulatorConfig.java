@@ -515,6 +515,12 @@ public interface EmulatorConfig {
     }
 
     interface EmrServerlessStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+
     interface EfsStorageConfig {
         Optional<String> mode();
 
@@ -670,6 +676,10 @@ public interface EmulatorConfig {
     }
 
     interface EmrServerlessServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
     interface EfsServiceConfig {
         @WithDefault("true")
         boolean enabled();
