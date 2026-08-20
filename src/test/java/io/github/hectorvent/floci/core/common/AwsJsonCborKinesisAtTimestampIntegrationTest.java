@@ -30,19 +30,21 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
  * <p>
  * The {@code GetShardIterator} request's {@code Timestamp} is hand-built with a raw
  * tag(1) epoch-<em>millisecond</em> value via {@link #cborTag1MillisTimestampRequest},
- * deliberately bypassing {@link AwsJsonCborController#nodeToSmithyCbor} for that one
- * field: {@code nodeToSmithyCbor} writes whatever this codebase's internal convention
- * currently is (seconds pre-fix, correctly-converted millis post-fix), so building the
- * request through it would only prove Floci's own encoder and decoder agree with each
- * other - not that Floci actually speaks the real AWS wire format a genuine CBOR-default
- * SDK client sends. Hand-building the millis value directly is what makes this test
- * fail against the pre-fix code and pass against the fix, matching the issue's own wire
- * capture (tag(1) followed by an 8-byte integer, e.g. {@code c1 1b 000001a013accc38}).
+ * deliberately bypassing {@link AwsJsonCborController#nodeToLegacyCbor} (the method that
+ * would normally build this exact request, correctly, for the legacy
+ * {@code application/x-amz-cbor-1.1} dialect Kinesis uses) - building the request
+ * through Floci's own encoder would only prove Floci's own encoder and decoder agree
+ * with each other, not that Floci actually speaks the real AWS wire format a genuine
+ * CBOR-default SDK client sends. Hand-building the millis value directly is what makes
+ * this test fail against the pre-fix code and pass against the fix, matching the
+ * issue's own wire capture (tag(1) followed by an 8-byte integer, e.g.
+ * {@code c1 1b 000001a013accc38}).
  * <p>
- * The other requests here (none carry a timestamp field) go through
- * {@code nodeToSmithyCbor} as normal, and CBOR response bodies are decoded with a plain
- * CBOR {@link ObjectMapper} since the server mirrors the request's own content type back
- * on the response.
+ * The other requests here (none carry a timestamp field, so the choice of encoder makes
+ * no difference to their bytes) go through {@link AwsJsonCborController#nodeToSmithyCbor}
+ * as a matter of convenience, and CBOR response bodies are decoded with a plain CBOR
+ * {@link ObjectMapper} since the server mirrors the request's own content type back on
+ * the response.
  */
 @QuarkusTest
 class AwsJsonCborKinesisAtTimestampIntegrationTest {
