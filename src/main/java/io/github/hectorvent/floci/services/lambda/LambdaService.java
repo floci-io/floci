@@ -1756,15 +1756,19 @@ public class LambdaService {
      * identically named statement on an alias or version and leave that one lost.
      */
     public void restorePermissionStatement(String region, String functionName, Map<String, Object> statement) {
-        LambdaFunction fn = getFunction(region, functionName);
-        String statementId = (String) statement.get("Sid");
-        String resourceArn = policyResourceArn(fn, null);
-        if (statementId != null) {
-            fn.getPolicies().removeIf(s -> statementId.equals(s.get("Sid")) && scopedTo(s, resourceArn));
+        LambdaFunction observed = getFunction(region, functionName);
+        synchronized (lockForPolicyMutation(observed.getFunctionArn())) {
+            LambdaFunction fn = getFunction(region, functionName);
+            String statementId = (String) statement.get("Sid");
+            String resourceArn = policyResourceArn(fn, null);
+            if (statementId != null) {
+                fn.getPolicies().removeIf(existing -> statementId.equals(existing.get("Sid"))
+                        && scopedTo(existing, resourceArn));
+            }
+            fn.getPolicies().add(statement);
+            functionStore.save(region, fn);
+            LOG.infov("Restored permission {0} on function {1}", statementId, functionName);
         }
-        fn.getPolicies().add(statement);
-        functionStore.save(region, fn);
-        LOG.infov("Restored permission {0} on function {1}", statementId, functionName);
     }
 
     public void removePermission(String region, String functionName, String qualifier, String statementId) {
