@@ -2043,7 +2043,8 @@ public class CloudFormationResourceProvisioner {
                     if (fn.getTimeout() != toIntValue(desired, fn.getTimeout())) return true;
                 }
                 case "Environment" -> {
-                    if (!Objects.equals(fn.getEnvironment(), environmentVariables(desired))) return true;
+                    Map<String, String> current = fn.getEnvironment() != null ? fn.getEnvironment() : Map.of();
+                    if (!Objects.equals(current, environmentVariables(desired))) return true;
                 }
                 case "Architectures" -> {
                     if (!Objects.equals(fn.getArchitectures(), desired)) return true;

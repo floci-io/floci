@@ -34,8 +34,20 @@ public class LambdaFunction {
     private String codeLocalPath;
     private String s3Bucket;
     private String s3Key;
-    private Map<String, String> environment = new HashMap<>();
+    // null means "never configured with an Environment block" - real AWS omits
+    // the Environment key entirely from GetFunction/GetFunctionConfiguration in
+    // that case (verified against a real account 2026-08-20, lex00/floci#83).
+    // A non-null (possibly empty) map means the caller explicitly supplied one,
+    // including the "configured then cleared" case, which AWS keeps returning.
+    private Map<String, String> environment;
     private Map<String, String> tags = new HashMap<>();
+    // LoggingConfig - AWS always returns this block, defaulting to Text format
+    // and /aws/lambda/<function-name>. null fields here mean "use the default",
+    // not "omit the block".
+    private String loggingConfigLogFormat;
+    private String loggingConfigLogGroup;
+    private String loggingConfigApplicationLogLevel;
+    private String loggingConfigSystemLogLevel;
     private List<Map<String, Object>> policies = new ArrayList<>();
     private long lastModified;
     private String revisionId;
@@ -126,6 +138,18 @@ public class LambdaFunction {
 
     public Map<String, String> getEnvironment() { return environment; }
     public void setEnvironment(Map<String, String> environment) { this.environment = environment; }
+
+    public String getLoggingConfigLogFormat() { return loggingConfigLogFormat; }
+    public void setLoggingConfigLogFormat(String loggingConfigLogFormat) { this.loggingConfigLogFormat = loggingConfigLogFormat; }
+
+    public String getLoggingConfigLogGroup() { return loggingConfigLogGroup; }
+    public void setLoggingConfigLogGroup(String loggingConfigLogGroup) { this.loggingConfigLogGroup = loggingConfigLogGroup; }
+
+    public String getLoggingConfigApplicationLogLevel() { return loggingConfigApplicationLogLevel; }
+    public void setLoggingConfigApplicationLogLevel(String loggingConfigApplicationLogLevel) { this.loggingConfigApplicationLogLevel = loggingConfigApplicationLogLevel; }
+
+    public String getLoggingConfigSystemLogLevel() { return loggingConfigSystemLogLevel; }
+    public void setLoggingConfigSystemLogLevel(String loggingConfigSystemLogLevel) { this.loggingConfigSystemLogLevel = loggingConfigSystemLogLevel; }
 
     public Map<String, String> getTags() { return tags; }
     public void setTags(Map<String, String> tags) { this.tags = tags; }

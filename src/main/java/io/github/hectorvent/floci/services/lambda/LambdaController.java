@@ -662,11 +662,35 @@ public class LambdaController {
                     Boolean.TRUE.equals(fn.getVpcConfig().get("Ipv6AllowedForDualStack")));
         }
 
-        // Environment — always present (SDK expects it even when empty)
-        ObjectNode envNode = node.putObject("Environment");
-        if (fn.getEnvironment() != null && !fn.getEnvironment().isEmpty()) {
-            ObjectNode vars = envNode.putObject("Variables");
-            fn.getEnvironment().forEach(vars::put);
+        // Environment — present only when the function was configured with one.
+        // Real AWS omits the key entirely for a function that has never had
+        // environment variables set (verified against a real account 2026-08-20,
+        // lex00/floci#83); that is exactly why terraform-provider-aws's read path
+        // is guarded with `if function.Environment != nil { ... }`. A function
+        // explicitly configured and later cleared keeps getting the block back,
+        // empty - LambdaFunction.environment is null only for "never configured".
+        if (fn.getEnvironment() != null) {
+            ObjectNode envNode = node.putObject("Environment");
+            if (!fn.getEnvironment().isEmpty()) {
+                ObjectNode vars = envNode.putObject("Variables");
+                fn.getEnvironment().forEach(vars::put);
+            }
+        }
+
+        // LoggingConfig — always present (verified against a real account
+        // 2026-08-20, lex00/floci#83), defaulting to Text format and
+        // /aws/lambda/<function-name>. ApplicationLogLevel/SystemLogLevel only
+        // apply - and are only emitted - when the format is JSON.
+        ObjectNode loggingConfigNode = node.putObject("LoggingConfig");
+        String logFormat = fn.getLoggingConfigLogFormat() != null ? fn.getLoggingConfigLogFormat() : "Text";
+        loggingConfigNode.put("LogFormat", logFormat);
+        loggingConfigNode.put("LogGroup", fn.getLoggingConfigLogGroup() != null
+                ? fn.getLoggingConfigLogGroup() : "/aws/lambda/" + fn.getFunctionName());
+        if ("JSON".equals(logFormat)) {
+            loggingConfigNode.put("ApplicationLogLevel",
+                    fn.getLoggingConfigApplicationLogLevel() != null ? fn.getLoggingConfigApplicationLogLevel() : "INFO");
+            loggingConfigNode.put("SystemLogLevel",
+                    fn.getLoggingConfigSystemLogLevel() != null ? fn.getLoggingConfigSystemLogLevel() : "INFO");
         }
 
         @SuppressWarnings("unchecked")

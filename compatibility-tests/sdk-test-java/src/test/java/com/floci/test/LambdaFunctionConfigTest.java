@@ -79,7 +79,7 @@ class LambdaFunctionConfigTest {
 
     @Test
     @Order(2)
-    @DisplayName("getFunctionConfiguration returns default Architectures, EphemeralStorage, TracingConfig, Environment")
+    @DisplayName("getFunctionConfiguration returns default Architectures, EphemeralStorage, TracingConfig, LoggingConfig, and omits Environment")
     void getFunctionConfigurationHasDefaults() {
         GetFunctionConfigurationResponse resp = lambda.getFunctionConfiguration(
                 GetFunctionConfigurationRequest.builder().functionName(FN).build());
@@ -102,10 +102,31 @@ class LambdaFunctionConfigTest {
                 .as("default TracingConfig.Mode must be PassThrough")
                 .isEqualTo("PassThrough");
 
-        // Environment block must always be present (even when empty)
+        // lex00/floci#83: verified against a real AWS account 2026-08-20 that
+        // GetFunctionConfiguration omits the Environment key entirely for a
+        // function created with no Environment block - it is not present-but-
+        // empty. terraform-provider-aws's read path relies on exactly this
+        // (`if function.Environment != nil { ... }`), and a present-but-empty
+        // Environment was making every module that never sets one (e.g.
+        // terraform-aws-modules/terraform-aws-lambda's "simple" example)
+        // replan a spurious "- environment {}" forever under plain terraform,
+        // with no choudoufu involved.
         assertThat(resp.environment())
-                .as("Environment must always be present in the response")
+                .as("Environment must be absent for a function that was never configured with one")
+                .isNull();
+
+        // LoggingConfig must always be present (verified against a real AWS
+        // account 2026-08-20, lex00/floci#83's uncontested second half),
+        // defaulting to Text format and /aws/lambda/<function-name>.
+        assertThat(resp.loggingConfig())
+                .as("LoggingConfig must always be present in the response")
                 .isNotNull();
+        assertThat(resp.loggingConfig().logFormatAsString())
+                .as("default LoggingConfig.LogFormat must be Text")
+                .isEqualTo("Text");
+        assertThat(resp.loggingConfig().logGroup())
+                .as("default LoggingConfig.LogGroup must be /aws/lambda/<function-name>")
+                .isEqualTo("/aws/lambda/" + FN);
     }
 
     // ─── UpdateFunctionConfiguration ─────────────────────────────────────────

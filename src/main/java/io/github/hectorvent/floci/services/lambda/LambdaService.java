@@ -287,13 +287,25 @@ public class LambdaService {
         fn.setLastModified(System.currentTimeMillis());
         fn.setRevisionId(UUID.randomUUID().toString());
 
-        // Handle environment variables
+        // Handle environment variables. Presence of the "Environment" key at all -
+        // even with no Variables sub-key - is what real AWS treats as "configured";
+        // leaving it null means the function has never had one, which is how
+        // buildFunctionConfiguration decides whether to emit the key at all.
         @SuppressWarnings("unchecked")
         Map<String, Object> envBlock = (Map<String, Object>) request.get("Environment");
         if (envBlock != null) {
             @SuppressWarnings("unchecked")
             Map<String, String> vars = (Map<String, String>) envBlock.get("Variables");
-            if (vars != null) fn.setEnvironment(vars);
+            fn.setEnvironment(vars != null ? vars : new java.util.HashMap<>());
+        }
+
+        // Handle LoggingConfig - null fields fall back to AWS's own defaults
+        // (Text format, /aws/lambda/<function-name>) in buildFunctionConfiguration.
+        if (request.get("LoggingConfig") instanceof Map<?, ?> lc) {
+            fn.setLoggingConfigLogFormat((String) lc.get("LogFormat"));
+            fn.setLoggingConfigLogGroup((String) lc.get("LogGroup"));
+            fn.setLoggingConfigApplicationLogLevel((String) lc.get("ApplicationLogLevel"));
+            fn.setLoggingConfigSystemLogLevel((String) lc.get("SystemLogLevel"));
         }
 
         // Handle tags
@@ -539,6 +551,15 @@ public class LambdaService {
                 @SuppressWarnings("unchecked")
                 Map<String, String> vars = (Map<String, String>) envBlock.get("Variables");
                 fn.setEnvironment(vars != null ? vars : new java.util.HashMap<>());
+            }
+        }
+
+        if (request.containsKey("LoggingConfig")) {
+            if (request.get("LoggingConfig") instanceof Map<?, ?> lc) {
+                fn.setLoggingConfigLogFormat((String) lc.get("LogFormat"));
+                fn.setLoggingConfigLogGroup((String) lc.get("LogGroup"));
+                fn.setLoggingConfigApplicationLogLevel((String) lc.get("ApplicationLogLevel"));
+                fn.setLoggingConfigSystemLogLevel((String) lc.get("SystemLogLevel"));
             }
         }
 
@@ -1009,6 +1030,10 @@ public class LambdaService {
         snapshot.setState(fn.getState());
         snapshot.setCodeSizeBytes(fn.getCodeSizeBytes());
         snapshot.setEnvironment(fn.getEnvironment());
+        snapshot.setLoggingConfigLogFormat(fn.getLoggingConfigLogFormat());
+        snapshot.setLoggingConfigLogGroup(fn.getLoggingConfigLogGroup());
+        snapshot.setLoggingConfigApplicationLogLevel(fn.getLoggingConfigApplicationLogLevel());
+        snapshot.setLoggingConfigSystemLogLevel(fn.getLoggingConfigSystemLogLevel());
         snapshot.setVpcConfig(fn.getVpcConfig() == null
                 ? null
                 : new java.util.HashMap<>(fn.getVpcConfig()));
