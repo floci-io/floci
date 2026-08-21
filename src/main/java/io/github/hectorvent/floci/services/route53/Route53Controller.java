@@ -180,6 +180,133 @@ public class Route53Controller {
         }
     }
 
+    // ── VPC Associations ──────────────────────────────────────────────────────
+
+    @POST
+    @Path("/hostedzone/{Id}/associatevpc")
+    public Response associateVpcWithHostedZone(@PathParam("Id") String id, String body) {
+        try {
+            VpcAssociation vpc = requireVpcAssociation(body);
+            String comment = XmlParser.extractFirst(body, "Comment", null);
+            ChangeInfo change = service.associateVpcWithHostedZone(id, vpc, comment);
+            String xml = new XmlBuilder()
+                    .start("AssociateVPCWithHostedZoneResponse", NS)
+                    .raw(xmlChangeInfo(change))
+                    .end("AssociateVPCWithHostedZoneResponse")
+                    .build();
+            return Response.ok(xml, XML).build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    @POST
+    @Path("/hostedzone/{Id}/disassociatevpc")
+    public Response disassociateVpcFromHostedZone(@PathParam("Id") String id, String body) {
+        try {
+            VpcAssociation vpc = requireVpcAssociation(body);
+            String comment = XmlParser.extractFirst(body, "Comment", null);
+            ChangeInfo change = service.disassociateVpcFromHostedZone(id, vpc, comment);
+            String xml = new XmlBuilder()
+                    .start("DisassociateVPCFromHostedZoneResponse", NS)
+                    .raw(xmlChangeInfo(change))
+                    .end("DisassociateVPCFromHostedZoneResponse")
+                    .build();
+            return Response.ok(xml, XML).build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    /**
+     * Authorization is only meaningful when the zone and the VPC belong to different
+     * accounts. Zones are not account-scoped here, so this validates the request and
+     * echoes the authorized VPC back without gating a later associate call.
+     */
+    @POST
+    @Path("/hostedzone/{Id}/authorizevpcassociation")
+    public Response createVpcAssociationAuthorization(@PathParam("Id") String id, String body) {
+        try {
+            VpcAssociation vpc = requireVpcAssociation(body);
+            service.getHostedZone(id);
+            String xml = new XmlBuilder()
+                    .start("CreateVPCAssociationAuthorizationResponse", NS)
+                    .elem("HostedZoneId", id)
+                    .raw(xmlVpcAssociation(vpc))
+                    .end("CreateVPCAssociationAuthorizationResponse")
+                    .build();
+            return Response.ok(xml, XML).build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    /** Counterpart to {@link #createVpcAssociationAuthorization}; AWS returns an empty body. */
+    @POST
+    @Path("/hostedzone/{Id}/deauthorizevpcassociation")
+    public Response deleteVpcAssociationAuthorization(@PathParam("Id") String id, String body) {
+        try {
+            requireVpcAssociation(body);
+            service.getHostedZone(id);
+            String xml = new XmlBuilder()
+                    .start("DeleteVPCAssociationAuthorizationResponse", NS)
+                    .end("DeleteVPCAssociationAuthorizationResponse")
+                    .build();
+            return Response.ok(xml, XML).build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    @GET
+    @Path("/hostedzonesbyvpc")
+    public Response listHostedZonesByVpc(@QueryParam("vpcid") String vpcId,
+                                         @QueryParam("vpcregion") String vpcRegion,
+                                         @QueryParam("maxitems") @DefaultValue("100") int maxItems,
+                                         @QueryParam("nexttoken") String nextToken) {
+        try {
+            if (vpcId == null || vpcId.isEmpty()) {
+                throw new AwsException("InvalidInput", "VPCId is required.", 400);
+            }
+            if (vpcRegion == null || vpcRegion.isEmpty()) {
+                throw new AwsException("InvalidInput", "VPCRegion is required.", 400);
+            }
+
+            List<HostedZone> zones = service.listHostedZonesByVpc(vpcId, vpcRegion);
+            if (nextToken != null && !nextToken.isEmpty()) {
+                int idx = 0;
+                for (int i = 0; i < zones.size(); i++) {
+                    if (zones.get(i).getId().equals(nextToken)) {
+                        idx = i + 1;
+                        break;
+                    }
+                }
+                zones = zones.subList(idx, zones.size());
+            }
+            boolean truncated = maxItems > 0 && zones.size() > maxItems;
+            if (truncated) {
+                zones = zones.subList(0, maxItems);
+            }
+
+            XmlBuilder xml = new XmlBuilder()
+                    .start("ListHostedZonesByVPCResponse", NS)
+                    .start("HostedZoneSummaries");
+            for (HostedZone zone : zones) {
+                xml.raw(xmlHostedZoneSummary(zone));
+            }
+            xml.end("HostedZoneSummaries")
+               .elem("MaxItems", String.valueOf(maxItems));
+            if (truncated) {
+                xml.elem("NextToken", zones.get(zones.size() - 1).getId());
+            }
+            xml.end("ListHostedZonesByVPCResponse");
+
+            return Response.ok(xml.build(), XML).build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
     @GET
     @Path("/hostedzonecount")
     public Response getHostedZoneCount() {
@@ -564,6 +691,18 @@ public class Route53Controller {
         return xml.end("VPCs").build();
     }
 
+    private String xmlHostedZoneSummary(HostedZone zone) {
+        return new XmlBuilder()
+                .start("HostedZoneSummary")
+                .elem("HostedZoneId", zone.getId())
+                .elem("Name", zone.getName())
+                .start("Owner")
+                .elem("OwningAccount", service.getDefaultAccountId())
+                .end("Owner")
+                .end("HostedZoneSummary")
+                .build();
+    }
+
     private String xmlResourceRecordSet(ResourceRecordSet rrs) {
         XmlBuilder xml = new XmlBuilder()
                 .start("ResourceRecordSet")
@@ -649,6 +788,18 @@ public class Route53Controller {
                     "InvalidInput", "VPCId and VPCRegion are both required when VPC is specified.", 400);
         }
         return new VpcAssociation(vpcId, vpcRegion);
+    }
+
+    /**
+     * Parses the VPC element for the association operations, where AWS marks VPC as a
+     * required member — unlike CreateHostedZone, where its absence just means a public zone.
+     */
+    private VpcAssociation requireVpcAssociation(String body) {
+        VpcAssociation vpc = parseVpcAssociation(body);
+        if (vpc == null) {
+            throw new AwsException("InvalidInput", "VPC is required.", 400);
+        }
+        return vpc;
     }
 
     /**
