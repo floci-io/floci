@@ -234,53 +234,56 @@ public class MemoryLakeFormationStorage implements LakeFormationStorage {
             return "catalog:" + r.getCatalog().getId();
         }
         if (r.getDatabase() != null) {
-            return "database:" + r.getDatabase().getName();
+            String cat = r.getDatabase().getCatalogId() != null ? "catalog:" + r.getDatabase().getCatalogId() + ":" : "";
+            return cat + "database:" + r.getDatabase().getName();
         }
         if (r.getTable() != null) {
-            return "table:" + r.getTable().getDatabaseName() + ":" + r.getTable().getName();
+            String cat = r.getTable().getCatalogId() != null ? "catalog:" + r.getTable().getCatalogId() + ":" : "";
+            return cat + "table:" + r.getTable().getDatabaseName() + ":" + r.getTable().getName();
         }
         if (r.getTableWithColumns() != null) {
-            StringBuilder sb = new StringBuilder("tableWithColumns:" + r.getTableWithColumns().getDatabaseName() + ":" + r.getTableWithColumns().getName());
+            String cat = r.getTableWithColumns().getCatalogId() != null ? "catalog:" + r.getTableWithColumns().getCatalogId() + ":" : "";
+            StringBuilder sb = new StringBuilder(cat + "tableWithColumns:" + r.getTableWithColumns().getDatabaseName() + ":" + r.getTableWithColumns().getName());
             if (r.getTableWithColumns().getColumnNames() != null && !r.getTableWithColumns().getColumnNames().isEmpty()) {
-                sb.append(":cols:").append(r.getTableWithColumns().getColumnNames().stream().sorted().collect(Collectors.joining(",")));
+                sb.append(":cols:").append(r.getTableWithColumns().getColumnNames().stream().map(c -> java.net.URLEncoder.encode(c, java.nio.charset.StandardCharsets.UTF_8)).sorted().collect(Collectors.joining(",")));
             } else if (r.getTableWithColumns().getColumnWildcard() != null) {
                 sb.append(":cols:*");
                 if (r.getTableWithColumns().getColumnWildcard().getExcludedColumnNames() != null && !r.getTableWithColumns().getColumnWildcard().getExcludedColumnNames().isEmpty()) {
-                    sb.append(":excl:").append(r.getTableWithColumns().getColumnWildcard().getExcludedColumnNames().stream().sorted().collect(Collectors.joining(",")));
+                    sb.append(":excl:").append(r.getTableWithColumns().getColumnWildcard().getExcludedColumnNames().stream().map(c -> java.net.URLEncoder.encode(c, java.nio.charset.StandardCharsets.UTF_8)).sorted().collect(Collectors.joining(",")));
                 }
             }
             return sb.toString();
         }
         if (r.getDataLocation() != null) {
-            return "dataLocation:" + r.getDataLocation().getResourceArn();
+            String cat = r.getDataLocation().getCatalogId() != null ? "catalog:" + r.getDataLocation().getCatalogId() + ":" : "";
+            return cat + "dataLocation:" + r.getDataLocation().getResourceArn();
         }
         if (r.getDataCellsFilter() != null) {
-            return "dataCellsFilter:" + r.getDataCellsFilter().getTableCatalogId() + ":" + r.getDataCellsFilter().getDatabaseName() + ":" + r.getDataCellsFilter().getTableName() + ":" + r.getDataCellsFilter().getName();
+            String cat = r.getDataCellsFilter().getTableCatalogId() != null ? "catalog:" + r.getDataCellsFilter().getTableCatalogId() + ":" : "";
+            return cat + "dataCellsFilter:" + r.getDataCellsFilter().getDatabaseName() + ":" + r.getDataCellsFilter().getTableName() + ":" + r.getDataCellsFilter().getName();
         }
         if (r.getLfTag() != null) {
-            StringBuilder sb = new StringBuilder("lfTag:" + r.getLfTag().getTagKey());
+            String cat = r.getLfTag().getCatalogId() != null ? "catalog:" + r.getLfTag().getCatalogId() + ":" : "";
+            StringBuilder sb = new StringBuilder(cat + "lfTag:" + r.getLfTag().getTagKey());
             if (r.getLfTag().getTagValues() != null) {
-                sb.append("=").append(r.getLfTag().getTagValues().stream().map(v -> "\"" + v + "\"").sorted().collect(Collectors.joining(",")));
+                sb.append("=").append(r.getLfTag().getTagValues().stream().map(v -> java.net.URLEncoder.encode(v, java.nio.charset.StandardCharsets.UTF_8)).sorted().collect(Collectors.joining(",")));
             }
             return sb.toString();
         }
         if (r.getLfTagExpression() != null) {
-            return "lfTagExpression:" + r.getLfTagExpression().getName();
+            String cat = r.getLfTagExpression().getCatalogId() != null ? "catalog:" + r.getLfTagExpression().getCatalogId() + ":" : "";
+            return cat + "lfTagExpression:" + r.getLfTagExpression().getName();
         }
         if (r.getLfTagPolicy() != null) {
-            StringBuilder sb = new StringBuilder("lfTagPolicy:" + r.getLfTagPolicy().getResourceType());
+            String cat = r.getLfTagPolicy().getCatalogId() != null ? "catalog:" + r.getLfTagPolicy().getCatalogId() + ":" : "";
+            StringBuilder sb = new StringBuilder(cat + "lfTagPolicy:" + r.getLfTagPolicy().getResourceType());
             if (r.getLfTagPolicy().getExpressionName() != null) {
                 sb.append(":exprName:").append(r.getLfTagPolicy().getExpressionName());
             }
             if (r.getLfTagPolicy().getExpression() != null) {
-                r.getLfTagPolicy().getExpression().stream()
-                        .sorted(java.util.Comparator.comparing(io.github.hectorvent.floci.services.lakeformation.model.LFTag::getTagKey))
-                        .forEach(tag -> {
-                            sb.append(":tag:").append(tag.getTagKey()).append("=");
-                            if (tag.getTagValues() != null) {
-                                sb.append(tag.getTagValues().stream().sorted().collect(Collectors.joining(",")));
-                            }
-                        });
+                sb.append(":expr:").append(r.getLfTagPolicy().getExpression().stream()
+                        .map(e -> e.getTagKey() + "=" + e.getTagValues().stream().map(v -> java.net.URLEncoder.encode(v, java.nio.charset.StandardCharsets.UTF_8)).sorted().collect(Collectors.joining(",")))
+                        .sorted().collect(Collectors.joining(";")));
             }
             return sb.toString();
         }
