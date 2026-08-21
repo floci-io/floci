@@ -309,7 +309,7 @@ public class CloudFormationService implements ResourceProvider {
      * executed a template) report every resource as an Add.
      */
     public List<ResourceChange> computeChangeSetChanges(ChangeSet cs, String region) {
-        Stack stack = getStackOrThrow(cs.getStackName(), region, regionResolver.getAccountId());
+        Stack stack = getStackOrThrow(cs.getStackName(), region);
         try {
             JsonNode newResources = parseTemplate(cs.getTemplateBody()).path("Resources");
             boolean createType = "CREATE".equalsIgnoreCase(cs.getChangeSetType())
