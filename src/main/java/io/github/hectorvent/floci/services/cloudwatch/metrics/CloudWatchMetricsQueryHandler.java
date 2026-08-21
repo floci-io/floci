@@ -385,7 +385,12 @@ public class CloudWatchMetricsQueryHandler {
     private Response handleTagResource(MultivaluedMap<String, String> params, String region) {
         String arn = params.getFirst("ResourceARN");
         metricsService.tagResource(arn, parseTags(params), region);
-        return Response.ok(AwsQueryResponse.envelopeNoResult("TagResource", null)).build();
+        // CloudWatch's TagResourceOutput is an empty structure, not an absent one - the API
+        // model still declares a `resultWrapper: "TagResourceResult"`. The AWS Go SDK v2
+        // query-protocol unmarshaler requires that wrapper element even when it has no fields
+        // (lex00/floci#88); envelopeNoResult omits it entirely, which only matches operations
+        // whose API model has no output shape at all (e.g. IAM's TagUser/UntagUser).
+        return Response.ok(AwsQueryResponse.envelopeEmptyResult("TagResource", null)).build();
     }
 
     private Response handleUntagResource(MultivaluedMap<String, String> params, String region) {
@@ -397,7 +402,8 @@ public class CloudWatchMetricsQueryHandler {
             keys.add(key);
         }
         metricsService.untagResource(arn, keys, region);
-        return Response.ok(AwsQueryResponse.envelopeNoResult("UntagResource", null)).build();
+        // Same empty-but-declared UntagResourceOutput shape as TagResource above (lex00/floci#88).
+        return Response.ok(AwsQueryResponse.envelopeEmptyResult("UntagResource", null)).build();
     }
 
     // ──────────────────────────── Metric Streams ────────────────────────────
