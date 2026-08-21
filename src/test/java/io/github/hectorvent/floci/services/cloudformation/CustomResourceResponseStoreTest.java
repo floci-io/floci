@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudformation;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.services.lambda.LambdaService;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
@@ -11,6 +12,7 @@ import java.util.concurrent.TimeoutException;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.Mockito.mock;
 
 /**
  * The await budget is an IDLE timeout, not a total one.
@@ -29,7 +31,8 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
  */
 class CustomResourceResponseStoreTest {
 
-    private final CustomResourceResponseStore store = new CustomResourceResponseStore();
+    private final CustomResourceResponseStore store = new CustomResourceResponseStore(
+            new ProviderFrameworkDetector(mock(LambdaService.class)));
     private final ObjectMapper mapper = new ObjectMapper();
 
     private ObjectNode success() {

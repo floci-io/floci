@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudformation;
 import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.core.common.CustomResourceLiveness;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.time.Duration;
@@ -29,6 +30,12 @@ import java.util.concurrent.atomic.AtomicLong;
 public class CustomResourceResponseStore implements CustomResourceLiveness {
     private static final Logger LOG = Logger.getLogger(CustomResourceResponseStore.class);
     private final ConcurrentHashMap<String, Pending> pending = new ConcurrentHashMap<>();
+    private final ProviderFrameworkDetector providerFrameworkDetector;
+
+    @Inject
+    CustomResourceResponseStore(ProviderFrameworkDetector providerFrameworkDetector) {
+        this.providerFrameworkDetector = providerFrameworkDetector;
+    }
 
     /** A waiting caller: the future its callback completes, and when it last saw progress. */
     private static final class Pending {
@@ -66,6 +73,23 @@ public class CustomResourceResponseStore implements CustomResourceLiveness {
         if (entry != null) {
             entry.lastActivity.set(System.nanoTime());
         }
+    }
+
+    /**
+     * Waits for the Lambda's response on the budget that suits the handler behind {@code serviceToken},
+     * then discards the token.
+     *
+     * <p>A CDK Provider-framework {@code framework.onEvent} handler PUTs asynchronously via its waiter
+     * state machine and gets a longer idle budget than {@code synchronousIdleTimeout}; see {@link
+     * ProviderFrameworkDetector#responseTimeout}.
+     *
+     * @param synchronousIdleTimeout the budget for a handler that PUTs during its own invocation
+     * @throws TimeoutException if no response and no liveness arrive within the chosen budget
+     */
+    public JsonNode await(String token, Duration synchronousIdleTimeout, String serviceToken, String region)
+            throws TimeoutException {
+        return await(token,
+                providerFrameworkDetector.responseTimeout(serviceToken, region, synchronousIdleTimeout));
     }
 
     /**

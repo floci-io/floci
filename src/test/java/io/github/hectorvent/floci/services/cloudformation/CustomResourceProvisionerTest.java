@@ -42,7 +42,7 @@ class CustomResourceProvisionerTest {
     @BeforeEach
     void setUp() {
         lambdaService = mock(LambdaService.class);
-        store = new CustomResourceResponseStore();
+        store = new CustomResourceResponseStore(new ProviderFrameworkDetector(lambdaService));
         ContainerReachableEndpoint endpoint = mock(ContainerReachableEndpoint.class);
         when(endpoint.baseUrl()).thenReturn("http://floci:4566");
 

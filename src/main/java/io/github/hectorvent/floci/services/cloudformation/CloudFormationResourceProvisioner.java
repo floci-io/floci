@@ -183,28 +183,6 @@ public class CloudFormationResourceProvisioner {
      * fractionally after the container returns control.
      */
     private static final Duration CR_RESPONSE_TIMEOUT = Duration.ofSeconds(10);
-    /**
-     * How long to wait when the ServiceToken is a CDK Provider-framework {@code framework.onEvent}
-     * Lambda: it does not PUT itself but returns after starting the waiter state machine, so the
-     * ResponseURL callback arrives asynchronously once {@code framework.isComplete} reports done (or
-     * {@code framework.onTimeout} reports failure).
-     *
-     * <p>This is an <em>idle</em> budget, not a total one: every waiter poll resets it (see {@link
-     * CustomResourceResponseStore#touch}). Total time here is a property of the work rather than of
-     * the emulator — {@code Custom::CreateOrganizationAccounts} creates one account per poll, so 15
-     * accounts take five times as long as three — and a total budget would need re-tuning for every
-     * config set while guillotining Lambdas that were succeeding. Measuring idleness still fails a
-     * genuinely hung resource cleanly instead of hanging. Non-final so tests can shorten it.
-     */
-    private Duration asyncCustomResourceTimeout = Duration.ofMinutes(3);
-    /**
-     * Environment variables the CDK Provider framework sets on {@code framework.onEvent} only when an
-     * {@code isComplete} handler is configured — i.e. when the two-phase async waiter is in play. Their
-     * presence distinguishes a Provider-framework onEvent (which PUTs asynchronously via the waiter)
-     * from an onEvent-only provider or a plain single-Lambda handler (which PUT synchronously).
-     */
-    private static final String CR_USER_IS_COMPLETE_ENV = "USER_IS_COMPLETE_FUNCTION_ARN";
-    private static final String CR_WAITER_STATE_MACHINE_ENV = "WAITER_STATE_MACHINE_ARN";
 
     private final S3Service s3Service;
     private final SqsService sqsService;
@@ -6411,8 +6389,6 @@ public class CloudFormationResourceProvisioner {
                                                  ObjectNode resourceProperties, ObjectNode oldResourceProperties,
                                                  String region, String accountId, String stackName) {
         String token = customResourceResponseStore.register();
-        // Declared out here so the timeout message below can name the budget that was exceeded.
-        Duration responseTimeout = CR_RESPONSE_TIMEOUT;
         try {
             ObjectNode event = objectMapper.createObjectNode();
             event.put("RequestType", requestType);
@@ -6431,14 +6407,6 @@ public class CloudFormationResourceProvisioner {
                 event.set("OldResourceProperties", oldResourceProperties);
             }
 
-            // Detect the async Provider framework before invoking: framework.onEvent returns without
-            // PUTting (it starts the waiter state machine, which drives framework.isComplete on a Retry
-            // cadence until it PUTs). So the callback lands asynchronously and needs a longer wait than
-            // the synchronous single-Lambda pattern. onEvent-only providers and plain handlers PUT
-            // during the invoke, so their await returns immediately regardless of this budget.
-            responseTimeout = isProviderFrameworkOnEvent(serviceToken, region)
-                    ? asyncCustomResourceTimeout : CR_RESPONSE_TIMEOUT;
-
             byte[] payload = objectMapper.writeValueAsBytes(event);
             InvokeResult result = lambdaService.invoke(region, serviceToken, payload,
                     InvocationType.RequestResponse);
@@ -6449,49 +6417,17 @@ public class CloudFormationResourceProvisioner {
                         "Custom resource handler errored (" + result.getFunctionError() + "): " + body, 400);
             }
 
-            return customResourceResponseStore.await(token, responseTimeout);
+            return customResourceResponseStore.await(token, CR_RESPONSE_TIMEOUT, serviceToken, region);
         } catch (AwsException e) {
             throw e;
         } catch (TimeoutException e) {
             throw new AwsException("CustomResourceTimeout",
                     "Timed out waiting for custom resource " + logicalId
-                            + " to PUT its response to ResponseURL: no waiter activity for "
-                            + responseTimeout, 504);
+                            + " to PUT its response to ResponseURL: " + e.getMessage(), 504);
         } catch (Exception e) {
             throw new AwsException("CustomResourceFailed",
                     "Failed to invoke custom resource " + logicalId + ": " + e.getMessage(), 500);
         }
-    }
-
-    /**
-     * True when the ServiceToken resolves to a CDK Provider-framework {@code framework.onEvent} Lambda,
-     * i.e. one whose environment carries both {@code USER_IS_COMPLETE_FUNCTION_ARN} and
-     * {@code WAITER_STATE_MACHINE_ARN}. The framework sets these only when a two-phase async waiter is
-     * configured, so their presence means the ResponseURL callback will arrive asynchronously via the
-     * waiter rather than synchronously during the invoke. Best-effort: an unresolvable function (or one
-     * with no environment) is treated as a synchronous handler.
-     */
-    private boolean isProviderFrameworkOnEvent(String serviceToken, String region) {
-        try {
-            LambdaFunction fn = lambdaService.getFunction(region, serviceToken);
-            Map<String, String> env = fn != null ? fn.getEnvironment() : null;
-            if (env == null) {
-                return false;
-            }
-            String isComplete = env.get(CR_USER_IS_COMPLETE_ENV);
-            String waiter = env.get(CR_WAITER_STATE_MACHINE_ENV);
-            return isComplete != null && !isComplete.isBlank()
-                    && waiter != null && !waiter.isBlank();
-        } catch (RuntimeException e) {
-            LOG.debugv("Could not read environment for custom-resource handler {0}: {1}",
-                    serviceToken, e.getMessage());
-            return false;
-        }
-    }
-
-    /** Test hook: shortens the async-callback wait so the timeout bound can be exercised quickly. */
-    void setAsyncCustomResourceTimeoutForTesting(Duration timeout) {
-        this.asyncCustomResourceTimeout = timeout;
     }
 
     private static String nodeToAttributeValue(JsonNode node) {
