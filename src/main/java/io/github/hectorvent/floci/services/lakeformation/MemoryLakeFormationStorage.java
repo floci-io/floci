@@ -258,7 +258,11 @@ public class MemoryLakeFormationStorage implements LakeFormationStorage {
             return "dataCellsFilter:" + r.getDataCellsFilter().getTableCatalogId() + ":" + r.getDataCellsFilter().getDatabaseName() + ":" + r.getDataCellsFilter().getTableName() + ":" + r.getDataCellsFilter().getName();
         }
         if (r.getLfTag() != null) {
-            return "lfTag:" + r.getLfTag().getTagKey();
+            StringBuilder sb = new StringBuilder("lfTag:" + r.getLfTag().getTagKey());
+            if (r.getLfTag().getTagValues() != null) {
+                sb.append("=").append(r.getLfTag().getTagValues().stream().sorted().collect(Collectors.joining(",")));
+            }
+            return sb.toString();
         }
         if (r.getLfTagExpression() != null) {
             return "lfTagExpression:" + r.getLfTagExpression().getName();
