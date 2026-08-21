@@ -1018,6 +1018,18 @@ public class EcsJsonHandler {
             n.set("portMappings", pms);
         }
 
+        if (def.getEntryPoint() != null && !def.getEntryPoint().isEmpty()) {
+            ArrayNode entryPoint = objectMapper.createArrayNode();
+            def.getEntryPoint().forEach(entryPoint::add);
+            n.set("entryPoint", entryPoint);
+        }
+
+        if (def.getCommand() != null && !def.getCommand().isEmpty()) {
+            ArrayNode command = objectMapper.createArrayNode();
+            def.getCommand().forEach(command::add);
+            n.set("command", command);
+        }
+
         if (def.getEnvironment() != null && !def.getEnvironment().isEmpty()) {
             ArrayNode envArr = objectMapper.createArrayNode();
             for (KeyValuePair kv : def.getEnvironment()) {
