@@ -260,7 +260,7 @@ public class MemoryLakeFormationStorage implements LakeFormationStorage {
         if (r.getLfTag() != null) {
             StringBuilder sb = new StringBuilder("lfTag:" + r.getLfTag().getTagKey());
             if (r.getLfTag().getTagValues() != null) {
-                sb.append("=").append(r.getLfTag().getTagValues().stream().sorted().collect(Collectors.joining(",")));
+                sb.append("=").append(r.getLfTag().getTagValues().stream().map(v -> "\"" + v + "\"").sorted().collect(Collectors.joining(",")));
             }
             return sb.toString();
         }
