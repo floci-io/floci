@@ -244,6 +244,26 @@ class TlsConfigSourceCertificateGenerationTest {
     }
 
     /**
+     * A TLS wildcard matches exactly one label (RFC 6125 6.4.3), so the broad
+     * *.amazonaws.com wildcards do not cover virtual-hosted S3 addressing, where the
+     * bucket contributes an extra label. The DNS spoof does route those hostnames to
+     * Floci, so without dedicated SANs the request dies at the handshake.
+     */
+    @Test
+    void testCertificateCoversVirtualHostedS3WhenSpoofEnabled() throws Exception {
+        System.setProperty("floci.dns.spoof-aws-endpoints", "true");
+
+        new TlsConfigSource();
+
+        Path certFile = tempDir.resolve("tls/floci-selfsigned.crt");
+        List<String> sans = extractSansFromCertificate(certFile);
+        assertTrue(sans.contains("*.s3.amazonaws.com"),
+            "Certificate SANs should cover global virtual-hosted S3");
+        assertTrue(sans.contains("*.s3.us-east-1.amazonaws.com"),
+            "Certificate SANs should cover regional virtual-hosted S3");
+    }
+
+    /**
      * Test that the regional AWS wildcard follows the configured default region
      */
     @Test
