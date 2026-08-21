@@ -1576,6 +1576,22 @@ public class IamService implements SessionAccountLookup {
                         sessionPolicyDocument, originAccountId));
     }
 
+    /** Stores a temporary session in an explicit account namespace. */
+    public void registerSessionForAccount(String accountId, String sessionAccessKeyId, String secretAccessKey,
+                                          String roleArn, java.time.Instant expiration,
+                                          String sessionPolicyDocument) {
+        if (accountId == null || accountId.isBlank()) {
+            throw new IllegalArgumentException("Session account ID must not be blank");
+        }
+        SessionCredential session = new SessionCredential(
+                sessionAccessKeyId, secretAccessKey, roleArn, expiration, sessionPolicyDocument, accountId);
+        if (sessions instanceof AccountAwareStorageBackend<SessionCredential> aware) {
+            aware.putForAccount(accountId, sessionAccessKeyId, session);
+        } else {
+            sessions.put(sessionAccessKeyId, session);
+        }
+    }
+
     /**
      * Stores a non-expiring session for a Lambda execution role under the function's account.
      * Lambda launches can happen outside request scope, so the account namespace must be explicit.

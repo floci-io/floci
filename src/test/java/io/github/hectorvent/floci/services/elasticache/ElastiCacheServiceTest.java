@@ -66,6 +66,40 @@ class ElastiCacheServiceTest {
     }
 
     @Test
+    void proxyPortExhaustionSurfacesModeledCapacityFault() {
+        // A one-port range: the first replication group claims it, so the second must fail with
+        // the botocore/smithy-modeled fault for CreateReplicationGroup — wire code
+        // InsufficientCacheClusterCapacity at HTTP 400 (Sender) — not the invented
+        // InsufficientReplicationGroupCapacity/503 that no SDK can map.
+        ElastiCacheContainerManager cm = mock(ElastiCacheContainerManager.class);
+        ElastiCacheProxyManager pm = mock(ElastiCacheProxyManager.class);
+        StorageFactory sf = mock(StorageFactory.class);
+        EmulatorConfig cfg = mock(EmulatorConfig.class);
+        EmulatorConfig.ServicesConfig sc = mock(EmulatorConfig.ServicesConfig.class);
+        EmulatorConfig.ElastiCacheServiceConfig ec = mock(EmulatorConfig.ElastiCacheServiceConfig.class);
+        when(cfg.services()).thenReturn(sc);
+        when(sc.elasticache()).thenReturn(ec);
+        when(ec.proxyBasePort()).thenReturn(17000);
+        when(ec.proxyMaxPort()).thenReturn(17000);
+        when(ec.defaultImage()).thenReturn("valkey/valkey:8");
+        when(cfg.hostname()).thenReturn(java.util.Optional.of("localhost"));
+        when(sf.create(anyString(), anyString(), any())).thenAnswer(inv -> AccountAwareStorageBackend.inMemory("000000000000"));
+        when(cm.start(anyString(), anyString()))
+                .thenReturn(new ElastiCacheContainerHandle("cid", "grp", "localhost", 6379));
+        doNothing().when(pm).startProxy(anyString(), any(), anyInt(), anyString(), anyInt(), any());
+        ElastiCacheService svc = new ElastiCacheService(cm, pm, sf, cfg,
+                org.mockito.Mockito.mock(Ec2Service.class),
+                new RegionResolver("us-east-1", "000000000000"));
+
+        svc.createReplicationGroup("g1", "d", AuthMode.PASSWORD, null);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> svc.createReplicationGroup("g2", "d", AuthMode.PASSWORD, null));
+        assertEquals("InsufficientCacheClusterCapacity", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
     void singleArgAuthMatchesDefaultUserOnly() {
         service.createReplicationGroup("grp", "test", AuthMode.PASSWORD, null);
 

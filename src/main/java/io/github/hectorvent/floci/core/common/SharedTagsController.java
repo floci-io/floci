@@ -101,7 +101,8 @@ public class SharedTagsController {
             throw new AwsException("MethodNotAllowedException",
                     "POST is not supported for " + handler.serviceKey() + " tag resources; use PUT.", 405);
         }
-        return doTagResource(headers, handler, arn, body, Response.noContent().build());
+        return doTagResource(headers, handler, arn, body,
+                Response.status(handler.tagResourceSuccessStatus()).build());
     }
 
     @PUT
@@ -115,7 +116,8 @@ public class SharedTagsController {
             throw new AwsException("MethodNotAllowedException",
                     "PUT is not supported for " + handler.serviceKey() + " tag resources; use POST.", 405);
         }
-        return doTagResource(headers, handler, arn, body, Response.noContent().build());
+        return doTagResource(headers, handler, arn, body,
+                Response.status(handler.tagResourceSuccessStatus()).build());
     }
 
     private Response doTagResource(HttpHeaders headers, TagHandler handler, String arn, String body, Response successResponse) {
@@ -146,11 +148,17 @@ public class SharedTagsController {
     public Response untagResource(@Context HttpHeaders headers,
                                    @Context UriInfo uriInfo,
                                    @PathParam("arn") String arn) {
-        return untagResourceForArn(headers, uriInfo, arn, Response.noContent().build());
+        TagHandler handler = resolveHandler(arn);
+        return untagResourceForArn(headers, uriInfo, arn,
+                Response.status(handler.untagResourceSuccessStatus()).build(), handler);
     }
 
     private Response untagResourceForArn(HttpHeaders headers, UriInfo uriInfo, String arn, Response successResponse) {
-        TagHandler handler = resolveHandler(arn);
+        return untagResourceForArn(headers, uriInfo, arn, successResponse, resolveHandler(arn));
+    }
+
+    private Response untagResourceForArn(HttpHeaders headers, UriInfo uriInfo, String arn,
+                                         Response successResponse, TagHandler handler) {
         String region = regionResolver.resolveRegion(headers);
         List<String> tagKeys = readTagKeys(handler, uriInfo);
         handler.untagResource(region, arn, tagKeys);
@@ -207,6 +215,11 @@ public class SharedTagsController {
                     }
                     continue;
                 }
+                if (handler.strictTagValidation() && (!k.isTextual() || !v.isTextual())) {
+                    throw new AwsException("ValidationException",
+                            "1 validation error detected: Tag entries at '" + key
+                                    + "' must contain string Key and Value members", 400);
+                }
                 tags.put(k.asText(), v.asText());
             }
         } else {
@@ -217,7 +230,13 @@ public class SharedTagsController {
                 }
                 return tags;
             }
-            tagNode.fields().forEachRemaining(e -> tags.put(e.getKey(), e.getValue().asText()));
+            tagNode.fields().forEachRemaining(e -> {
+                if (handler.strictTagValidation() && !e.getValue().isTextual()) {
+                    throw new AwsException("ValidationException",
+                            "1 validation error detected: Tag values at '" + key + "' must be strings", 400);
+                }
+                tags.put(e.getKey(), e.getValue().asText());
+            });
         }
         return tags;
     }
@@ -225,7 +244,8 @@ public class SharedTagsController {
     private List<String> readTagKeys(TagHandler handler, UriInfo uriInfo) {
         String paramName = handler.tagKeysQueryName();
         List<String> values = uriInfo.getQueryParameters().get(paramName);
-        if (handler.strictTagValidation() && (values == null || values.isEmpty())) {
+        if (handler.strictTagValidation() && !handler.allowEmptyTagKeys()
+                && (values == null || values.isEmpty())) {
             throw new AwsException("ValidationException",
                     "1 validation error detected: Value null at '" + paramName + "' failed to satisfy constraint: Member must not be null", 400);
         }

@@ -2,6 +2,23 @@
 
 **Protocol:** Query (XML) — `POST http://localhost:4566/` with `Action=` parameter
 
+## AWS Sign-In login credentials
+
+Floci also implements the AWS Sign-In data-plane flow used by the AWS CLI login credentials
+provider. The local `GET /v1/authorize` endpoint performs the emulator's local sign-in and returns
+a one-time PKCE authorization code. `POST /v1/token` exchanges that code (or a refresh token) for
+15-minute temporary SigV4 credentials registered with the local IAM account.
+
+```bash
+aws login --endpoint-url http://localhost:4566 --region us-east-1
+aws sts get-caller-identity --endpoint-url http://localhost:4566
+```
+
+The browser callback is still handled by the AWS CLI; Floci does not contact AWS or require a real
+AWS account. This follows the AWS Sign-In `AuthorizeOAuth2Access` and `CreateOAuth2Token` wire
+shapes, including one-time codes, PKCE verification, refresh-token expiry, and the `aws_sigv4`
+temporary credential type.
+
 ## Supported Actions
 
 ### Users

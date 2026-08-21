@@ -213,6 +213,12 @@ public class DynamoDbJsonHandler {
             table.setKmsMasterKeyArn(defaultKmsMasterKeyArn(region));
         }
 
+        // Everything above mutates the table AFTER createTable stored it, and a persistent
+        // backend serializes on write rather than holding the live object. Flush once so the
+        // stream, billing, class, tag and SSE settings survive a restart -- stream state
+        // especially, since startup rebuilds streams from the persisted table.
+        dynamoDbService.persistTable(tableName, table, region);
+
         ObjectNode response = objectMapper.createObjectNode();
         response.set("TableDescription", tableToNode(table));
         return Response.ok(response).build();
@@ -1276,6 +1282,11 @@ public class DynamoDbJsonHandler {
                 table.setStreamEnabled(false);
             }
         }
+
+        // Same flush as CreateTable: the stream mutations above land after updateTable's write,
+        // so without this a retargeted view type is rebuilt from the stale persisted value on
+        // restart and records resume the old image shape.
+        dynamoDbService.persistTable(tableName, table, region);
 
         if (!addRegions.isEmpty() || !removeRegions.isEmpty() || !updateRegions.isEmpty()) {
             table = dynamoDbService.applyReplicaUpdates(tableName, addRegions, removeRegions, updateRegions, region);

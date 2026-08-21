@@ -215,7 +215,8 @@ class RdsQueryHandlerTest {
         when(service.rebootDbInstance("mydb", "us-west-2")).thenReturn(instance);
         when(service.listDbClusters(null, "us-west-2")).thenReturn(List.of());
         when(service.getDbCluster("mycluster", "us-west-2")).thenReturn(cluster);
-        when(service.modifyDbCluster("mycluster", null, null, "us-west-2"))
+        when(service.modifyDbCluster("mycluster", null, null,
+                null, null, null, "us-west-2"))
                 .thenReturn(cluster);
 
         handler.handle("DescribeDBInstances", params(), "us-west-2");
@@ -240,7 +241,8 @@ class RdsQueryHandlerTest {
         verify(service).listDbClusters(null, "us-west-2");
         verify(service).getDbCluster("mycluster", "us-west-2");
         verify(service).deleteDbCluster("mycluster", "us-west-2");
-        verify(service).modifyDbCluster("mycluster", null, null, "us-west-2");
+        verify(service).modifyDbCluster("mycluster", null, null,
+                null, null, null, "us-west-2");
     }
 
     @Test

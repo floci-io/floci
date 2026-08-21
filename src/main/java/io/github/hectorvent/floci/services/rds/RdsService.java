@@ -47,6 +47,7 @@ import java.util.Collection;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -134,6 +135,8 @@ public class RdsService implements Resettable {
     private final Set<Integer> usedPorts = ConcurrentHashMap.newKeySet();
     private static final Pattern IMAGE_TAG_VERSION_PATTERN = Pattern.compile("^(\\d+(?:\\.\\d+)*)(.*)$");
     private static final Pattern SAFE_IMAGE_TAG_PATTERN = Pattern.compile("[A-Za-z0-9._-]+");
+    private static final int SERVERLESS_V2_DEFAULT_AUTO_PAUSE_SECONDS = 300;
+    private static final int SERVERLESS_V2_MAX_AUTO_PAUSE_SECONDS = 86_400;
     private static final Pattern DB_PROXY_NAME_PATTERN =
             Pattern.compile("[a-zA-Z](?:-?[a-zA-Z0-9]+)*");
     /**
@@ -1114,6 +1117,29 @@ public class RdsService implements Resettable {
                                      String databaseName, boolean iamEnabled,
                                      String paramGroupName, String dbSubnetGroupName,
                                      String availabilityZone, boolean multiAz, String region) {
+        return createDbCluster(id, engineParam, engineVersion, masterUsername, masterPassword,
+                databaseName, iamEnabled, paramGroupName, dbSubnetGroupName, availabilityZone,
+                multiAz, region, null, null);
+    }
+
+    public DbCluster createDbCluster(String id, String engineParam, String engineVersion,
+                                     String masterUsername, String masterPassword,
+                                     String databaseName, boolean iamEnabled,
+                                     String paramGroupName, String dbSubnetGroupName,
+                                     String availabilityZone, boolean multiAz, String region,
+                                     Double serverlessV2MinCapacity, Double serverlessV2MaxCapacity) {
+        return createDbCluster(id, engineParam, engineVersion, masterUsername, masterPassword,
+                databaseName, iamEnabled, paramGroupName, dbSubnetGroupName, availabilityZone,
+                multiAz, region, serverlessV2MinCapacity, serverlessV2MaxCapacity, null);
+    }
+
+    public DbCluster createDbCluster(String id, String engineParam, String engineVersion,
+                                     String masterUsername, String masterPassword,
+                                     String databaseName, boolean iamEnabled,
+                                     String paramGroupName, String dbSubnetGroupName,
+                                     String availabilityZone, boolean multiAz, String region,
+                                     Double serverlessV2MinCapacity, Double serverlessV2MaxCapacity,
+                                     Integer serverlessV2SecondsUntilAutoPause) {
         String effectiveRegion = effectiveRegion(region);
         String clusterResourceId = "cluster-" + java.util.UUID.randomUUID().toString()
                 .replace("-", "").substring(0, 24).toUpperCase();
@@ -1123,8 +1149,12 @@ public class RdsService implements Resettable {
             throw new AwsException("DBClusterAlreadyExistsFault",
                     "DB cluster " + id + " already exists.", 400);
         }
-
         DatabaseEngine engine = resolveEngine(engineParam);
+        validateServerlessV2Engine(
+                engineParam, serverlessV2MinCapacity, serverlessV2MaxCapacity,
+                serverlessV2SecondsUntilAutoPause);
+        Integer effectiveAutoPauseSeconds = validateServerlessV2ScalingConfiguration(
+                serverlessV2MinCapacity, serverlessV2MaxCapacity, serverlessV2SecondsUntilAutoPause);
         validateClusterParameterGroup(
                 paramGroupName, engineParam, engineVersion, effectiveRegion);
         PlacementResolution placement = resolvePlacement(dbSubnetGroupName, availabilityZone, multiAz, effectiveRegion);
@@ -1137,6 +1167,7 @@ public class RdsService implements Resettable {
         DbCluster cluster = new DbCluster(id, engine, engineVersion, masterUsername, masterPassword,
                 databaseName, DbInstanceStatus.AVAILABLE, endpoint, endpoint,
                 iamEnabled, new ArrayList<>(), paramGroupName, Instant.now(), proxyPort);
+        cluster.setEngineIdentifier(effectiveEngineName(engineParam).toLowerCase(Locale.ROOT));
         cluster.setContainerStorageResourceId(clusterResourceId);
         if (!mock) {
             String image = imageForEngine(engine, engineVersion);
@@ -1174,10 +1205,86 @@ public class RdsService implements Resettable {
                             accountId, clusterRegion, id, user, pw));
         }
 
+        cluster.setServerlessV2MinCapacity(serverlessV2MinCapacity);
+        cluster.setServerlessV2MaxCapacity(serverlessV2MaxCapacity);
+        cluster.setServerlessV2SecondsUntilAutoPause(effectiveAutoPauseSeconds);
         putClusterForScope(currentAccountId(), effectiveRegion, id, cluster);
         LOG.infov("DB cluster {0} created (mock={1}), engine={2}, endpoint={3}:{4}",
                 id, String.valueOf(mock), engine, endpoint.address(), String.valueOf(endpoint.port()));
         return cluster;
+    }
+
+    /**
+     * Validates an Aurora Serverless v2 scaling configuration against the AWS ACU constraints:
+     * capacities are specified in half-step (0.5) increments; MinCapacity ranges 0–256 (0 requires an
+     * auto-pause-capable engine version, otherwise the smallest value is 0.5) and MaxCapacity is
+     * greater than or equal to 1.0 and at most 256, with MaxCapacity at least MinCapacity. A null capacity is left
+     * unset.
+     */
+    void validateServerlessV2Capacity(Double minCapacity, Double maxCapacity) {
+        validateServerlessV2ScalingConfiguration(minCapacity, maxCapacity, null);
+    }
+
+    Integer validateServerlessV2ScalingConfiguration(
+            Double minCapacity, Double maxCapacity, Integer secondsUntilAutoPause) {
+        if (minCapacity == null && maxCapacity == null && secondsUntilAutoPause == null) {
+            return null;
+        }
+        // A complete effective configuration requires both bounds. Modify requests merge omitted
+        // members with the stored configuration before reaching this validation.
+        if (minCapacity == null || maxCapacity == null) {
+            throw new AwsException("InvalidParameterCombination",
+                    "ServerlessV2ScalingConfiguration requires both MinCapacity and MaxCapacity.", 400);
+        }
+        validateAcu("MinCapacity", minCapacity, 0.0);
+        validateAcu("MaxCapacity", maxCapacity, 1.0);
+        if (maxCapacity < minCapacity) {
+            throw new AwsException("InvalidParameterCombination",
+                    "MaxCapacity must be greater than or equal to MinCapacity.", 400);
+        }
+        if (secondsUntilAutoPause != null
+                && (secondsUntilAutoPause < SERVERLESS_V2_DEFAULT_AUTO_PAUSE_SECONDS
+                || secondsUntilAutoPause > SERVERLESS_V2_MAX_AUTO_PAUSE_SECONDS)) {
+            throw new AwsException("InvalidParameterValue",
+                    "SecondsUntilAutoPause must be between 300 and 86400 seconds.", 400);
+        }
+        if (minCapacity > 0.0) {
+            return null;
+        }
+        return secondsUntilAutoPause != null
+                ? secondsUntilAutoPause
+                : SERVERLESS_V2_DEFAULT_AUTO_PAUSE_SECONDS;
+    }
+
+    private static void validateAcu(String field, double value, double smallest) {
+        if (!Double.isFinite(value) || value < smallest || value > 256.0) {
+            throw new AwsException("InvalidParameterValue",
+                    field + " must be between " + smallest + " and 256.0 ACUs.", 400);
+        }
+        // ACUs are only valid in half-step increments (0.5, 1, 1.5, ...).
+        if (Math.abs(value * 2.0 - Math.rint(value * 2.0)) > 1e-9) {
+            throw new AwsException("InvalidParameterValue",
+                    field + " must be specified in half-step (0.5) increments.", 400);
+        }
+    }
+
+    private void validateServerlessV2Engine(
+            String engineIdentifier, Double minCapacity, Double maxCapacity,
+            Integer secondsUntilAutoPause) {
+        boolean hasScalingConfiguration = minCapacity != null
+                || maxCapacity != null
+                || secondsUntilAutoPause != null;
+        if (hasScalingConfiguration && !isAuroraEngine(engineIdentifier)) {
+            throw new AwsException("InvalidParameterCombination",
+                    invalidParameterCombinationMessage(),
+                    400);
+        }
+    }
+
+    private static boolean isAuroraEngine(String engineIdentifier) {
+        return engineIdentifier != null
+                && ("aurora-mysql".equalsIgnoreCase(engineIdentifier)
+                || "aurora-postgresql".equalsIgnoreCase(engineIdentifier));
     }
 
     /**
@@ -1241,19 +1348,62 @@ public class RdsService implements Resettable {
     }
 
     public DbCluster modifyDbCluster(String id, String newPassword, Boolean iamEnabled) {
-        return modifyDbCluster(id, newPassword, iamEnabled,
+        return modifyDbCluster(id, newPassword, iamEnabled, null, null, null,
                 regionResolver.getDefaultRegion());
     }
 
-    public DbCluster modifyDbCluster(
-            String id, String newPassword, Boolean iamEnabled, String region) {
+    public DbCluster modifyDbCluster(String id, String newPassword, Boolean iamEnabled,
+                                     Double serverlessV2MinCapacity, Double serverlessV2MaxCapacity,
+                                     Integer serverlessV2SecondsUntilAutoPause) {
+        return modifyDbCluster(id, newPassword, iamEnabled, serverlessV2MinCapacity,
+                serverlessV2MaxCapacity, serverlessV2SecondsUntilAutoPause,
+                regionResolver.getDefaultRegion());
+    }
+
+    public DbCluster modifyDbCluster(String id, String newPassword, Boolean iamEnabled,
+                                     String region) {
+        return modifyDbCluster(id, newPassword, iamEnabled, null, null, null, region);
+    }
+
+    public DbCluster modifyDbCluster(String id, String newPassword, Boolean iamEnabled,
+                                     Double serverlessV2MinCapacity, Double serverlessV2MaxCapacity,
+                                     Integer serverlessV2SecondsUntilAutoPause, String region) {
         String effectiveRegion = effectiveRegion(region);
         DbCluster cluster = getDbCluster(id, effectiveRegion);
+        boolean modifiesServerlessV2Scaling = serverlessV2MinCapacity != null
+                || serverlessV2MaxCapacity != null
+                || serverlessV2SecondsUntilAutoPause != null;
+        if (modifiesServerlessV2Scaling) {
+            validateServerlessV2Engine(
+                    cluster.getEngineIdentifier(), serverlessV2MinCapacity,
+                    serverlessV2MaxCapacity, serverlessV2SecondsUntilAutoPause);
+        }
+        Double effectiveMinCapacity = serverlessV2MinCapacity;
+        Double effectiveMaxCapacity = serverlessV2MaxCapacity;
+        Integer effectiveAutoPauseSeconds = null;
+        if (modifiesServerlessV2Scaling) {
+            effectiveMinCapacity = serverlessV2MinCapacity != null
+                    ? serverlessV2MinCapacity
+                    : cluster.getServerlessV2MinCapacity();
+            effectiveMaxCapacity = serverlessV2MaxCapacity != null
+                    ? serverlessV2MaxCapacity
+                    : cluster.getServerlessV2MaxCapacity();
+            Integer requestedOrExistingAutoPause = serverlessV2SecondsUntilAutoPause != null
+                    ? serverlessV2SecondsUntilAutoPause
+                    : cluster.getServerlessV2SecondsUntilAutoPause();
+            effectiveAutoPauseSeconds = validateServerlessV2ScalingConfiguration(
+                    effectiveMinCapacity, effectiveMaxCapacity, requestedOrExistingAutoPause);
+        }
         if (newPassword != null && !newPassword.isBlank()) {
             cluster.setMasterPassword(newPassword);
         }
         if (iamEnabled != null) {
             cluster.setIamDatabaseAuthenticationEnabled(iamEnabled);
+        }
+        if (modifiesServerlessV2Scaling) {
+            cluster.setServerlessV2MinCapacity(effectiveMinCapacity);
+            cluster.setServerlessV2MaxCapacity(effectiveMaxCapacity);
+            cluster.setServerlessV2SecondsUntilAutoPause(effectiveAutoPauseSeconds);
         }
         putClusterForScope(currentAccountId(), effectiveRegion, id, cluster);
         LOG.infov("DB cluster {0} modified", id);

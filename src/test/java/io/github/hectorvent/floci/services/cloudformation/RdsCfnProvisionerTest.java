@@ -200,6 +200,49 @@ class RdsCfnProvisionerTest {
     }
 
     @Test
+    void provisionsDbClusterWithServerlessV2Scaling() {
+        DbCluster cluster = mock(DbCluster.class);
+        when(cluster.getDbClusterIdentifier()).thenReturn("mycluster");
+        when(rdsService.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
+                any(), any(), anyBoolean(), any(), any(), any(), any()))
+                .thenReturn(cluster);
+
+        provision("Cluster", "AWS::RDS::DBCluster", """
+                {"DBClusterIdentifier":"mycluster","Engine":"aurora-postgresql",
+                 "ServerlessV2ScalingConfiguration":{
+                   "MinCapacity":0,"MaxCapacity":16,"SecondsUntilAutoPause":600}}
+                """);
+
+        verify(rdsService).createDbCluster("mycluster", "aurora-postgresql", null,
+                null, null, null, false, null, null, null, false, "us-east-1",
+                0.0, 16.0, 600);
+    }
+
+    @Test
+    void rejectsNonNumericServerlessV2Capacity() {
+        // A non-numeric capacity is invalid input, not an absent value: the stack fails rather than
+        // silently dropping the scaling configuration.
+        StackResource r = provision("Cluster", "AWS::RDS::DBCluster", """
+                {"DBClusterIdentifier":"mycluster","Engine":"aurora-postgresql",
+                 "ServerlessV2ScalingConfiguration":{"MinCapacity":"abc","MaxCapacity":16}}
+                """);
+        assertEquals("CREATE_FAILED", r.getStatus());
+        assertTrue(r.getStatusReason().contains("MinCapacity"), r.getStatusReason());
+    }
+
+    @Test
+    void rejectsNonIntegerServerlessV2AutoPauseInterval() {
+        StackResource r = provision("Cluster", "AWS::RDS::DBCluster", """
+                {"DBClusterIdentifier":"mycluster","Engine":"aurora-postgresql",
+                 "ServerlessV2ScalingConfiguration":{
+                   "MinCapacity":0,"MaxCapacity":16,"SecondsUntilAutoPause":"300.5"}}
+                """);
+
+        assertEquals("CREATE_FAILED", r.getStatus());
+        assertTrue(r.getStatusReason().contains("SecondsUntilAutoPause"), r.getStatusReason());
+    }
+
+    @Test
     void resolvesSecretsManagerDynamicReferencesInDbClusterCredentials() {
         SecretVersion version = mock(SecretVersion.class);
         when(version.getSecretString()).thenReturn(
@@ -1100,7 +1143,8 @@ class RdsCfnProvisionerTest {
         when(rdsService.getDbCluster("mycluster")).thenReturn(existing);
         DbCluster reconciled = mock(DbCluster.class);
         when(reconciled.getDbClusterIdentifier()).thenReturn("mycluster");
-        when(rdsService.modifyDbCluster(eq("mycluster"), any(), anyBoolean())).thenReturn(reconciled);
+        when(rdsService.modifyDbCluster(eq("mycluster"), any(), anyBoolean(),
+                any(), any(), any(), eq("us-east-1"))).thenReturn(reconciled);
 
         StackResource r = provisionUpdate("Cluster", "AWS::RDS::DBCluster", """
                 {"DBClusterIdentifier":"mycluster","Engine":"aurora-postgresql",
@@ -1110,7 +1154,8 @@ class RdsCfnProvisionerTest {
         assertEquals("mycluster", r.getPhysicalId());
         verify(rdsService, never()).createDbCluster(any(), any(), any(), any(), any(), any(),
                 anyBoolean(), any(), any(), any(), anyBoolean(), any());
-        verify(rdsService).modifyDbCluster("mycluster", "secret", false);
+        verify(rdsService).modifyDbCluster("mycluster", "secret", false,
+                null, null, null, "us-east-1");
     }
 
     @Test

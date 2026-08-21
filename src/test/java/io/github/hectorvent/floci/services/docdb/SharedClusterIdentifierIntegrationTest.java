@@ -252,9 +252,7 @@ class SharedClusterIdentifierIntegrationTest {
         .when().post("/")
         .then()
             .statusCode(200)
-            // Floci reports the aurora-postgresql request as its postgres engine; what matters
-            // here is that RDS answered at all rather than DocumentDB refusing it as existing.
-            .body(containsString("<Engine>postgres</Engine>"));
+            .body(containsString("<Engine>aurora-postgresql</Engine>"));
 
         // And each region's describe answers from the service that owns the record there.
         queryIn("us-east-1", "DescribeDBClusters")
@@ -262,7 +260,7 @@ class SharedClusterIdentifierIntegrationTest {
         .when().post("/")
         .then()
             .statusCode(200)
-            .body(containsString("<Engine>postgres</Engine>"))
+            .body(containsString("<Engine>aurora-postgresql</Engine>"))
             .body(not(containsString("docdb")));
 
         queryIn("eu-west-1", "DescribeDBClusters")
@@ -309,7 +307,7 @@ class SharedClusterIdentifierIntegrationTest {
         .when().post("/")
         .then()
             .statusCode(200)
-            .body(containsString("<Engine>postgres</Engine>"));
+            .body(containsString("<Engine>aurora-postgresql</Engine>"));
 
         rdsService.deleteDbCluster(id, "us-east-1");
     }

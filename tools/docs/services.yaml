@@ -54,6 +54,19 @@ services:
     doc: docs/services/firehose.md
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/firehose/FirehoseJsonHandler.java, mode: switch }
+  - service: fis
+    doc: docs/services/fis.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/fis/FisController.java, mode: rest }
+      - { path: src/main/java/io/github/hectorvent/floci/core/common/SharedTagsController.java, mode: rest }
+    rename_actions:
+      ListTags: ListTagsForResource
+      TagResourcePost: TagResource
+    exclude_actions:
+      - ListTagsByQuery
+      - TagResourceByBody
+      - TagResourcePut
+      - UntagResourceByQuery
   - service: kinesis
     doc: docs/services/kinesis.md
     sources:
