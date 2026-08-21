@@ -269,6 +269,40 @@ class Ec2ContainerManagerTest {
     }
 
     @Test
+    void sshdInstallProbeHandlesYumForAmazonLinux2() {
+        // public.ecr.aws/amazonlinux/amazonlinux:2 ships only yum -- no dnf, no apt-get, no
+        // apk. It is NOT the default image (image-catalog.yaml pins that to amazonlinux:2023,
+        // which has dnf); it is reached by explicitly requesting ami-amazonlinux2. Without a
+        // yum branch the if/elif chain falls through, the trailing "command -v sshd" fails,
+        // and startSshd() returns early, so such an instance is never reachable over SSH.
+        //
+        // Asserted against the production accessor, not the SSHD_INSTALL_PROBE_CMD copy below,
+        // so removing the yum branch fails THIS test rather than only the withCmd verify.
+        String script = Ec2ContainerManager.sshdInstallProbeCommand()[2];
+
+        assertTrue(script.contains("command -v yum"), script);
+        // The yum branch installs the client package alongside the server, exactly as the dnf
+        // branch does -- an AL2 guest needs scp for the same reason every other guest does.
+        assertTrue(script.contains("yum install -y openssh-server openssh-clients"), script);
+        // dnf must still win where both exist (Amazon Linux 2023, modern Fedora/RHEL), where
+        // yum is only a compatibility shim over dnf.
+        assertTrue(script.indexOf("command -v dnf") < script.indexOf("command -v yum"),
+                "dnf must be probed before yum");
+    }
+
+    @Test
+    void metadataProxyInstallCommandHandlesYumForAmazonLinux2() {
+        // The IMDS proxy dependency install had the same gap, and unlike the sshd probe it
+        // ends in an explicit failure: on an ami-amazonlinux2 instance it reached the else
+        // branch and exited 1 with "No supported package manager found for IMDS proxy
+        // dependencies", leaving the instance without a link-local metadata endpoint.
+        String script = Ec2ContainerManager.metadataProxyInstallCommand()[2];
+
+        assertTrue(script.contains("command -v yum"), script);
+        assertTrue(script.contains("yum install -y iproute socat curl ca-certificates"), script);
+    }
+
+    @Test
     void metadataProxyStartCommandBindsAwsLinkLocalMetadataAddress() {
         String[] command = Ec2ContainerManager.metadataProxyStartCommand("floci", 9169);
 
@@ -467,6 +501,7 @@ class Ec2ContainerManagerTest {
     private static final String[] SSHD_INSTALL_PROBE_CMD = {"sh", "-c",
             "if ! command -v sshd >/dev/null 2>&1 || ! command -v scp >/dev/null 2>&1; then"
             + "  if command -v dnf >/dev/null 2>&1; then dnf install -y openssh-server openssh-clients >/dev/null 2>&1;"
+            + "  elif command -v yum >/dev/null 2>&1; then yum install -y openssh-server openssh-clients >/dev/null 2>&1;"
             + "  elif command -v apt-get >/dev/null 2>&1; then DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-server openssh-client >/dev/null 2>&1;"
             + "  elif command -v apk >/dev/null 2>&1; then apk add --no-cache openssh >/dev/null 2>&1;"
             + "  fi;"
