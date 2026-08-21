@@ -247,6 +247,7 @@ public class CloudWatchMetricsJsonHandler {
             });
             node.put("Period", a.getPeriod());
             node.put("EvaluationPeriods", a.getEvaluationPeriods());
+            node.put("DatapointsToAlarm", a.getDatapointsToAlarm());
             node.put("Threshold", a.getThreshold());
             if (a.getComparisonOperator() != null) node.put("ComparisonOperator", a.getComparisonOperator());
             node.put("ActionsEnabled", a.isActionsEnabled());

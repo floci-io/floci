@@ -171,4 +171,57 @@ class CloudWatchMetricsJsonHandlerTest {
         assertEquals(0, oldResult.get("Datapoints").size(),
                 "metric from 24h ago must not be returned for a 20-second window around now");
     }
+
+    private ObjectNode putAlarmReq(String alarmName, int evaluationPeriods, Integer datapointsToAlarm) {
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("AlarmName", alarmName);
+        req.put("MetricName", "M");
+        req.put("Namespace", "NS");
+        req.put("ComparisonOperator", "GreaterThanThreshold");
+        req.put("Period", 60);
+        req.put("Statistic", "Sum");
+        req.put("Threshold", 100.0);
+        req.put("EvaluationPeriods", evaluationPeriods);
+        if (datapointsToAlarm != null) {
+            req.put("DatapointsToAlarm", datapointsToAlarm);
+        }
+        return req;
+    }
+
+    private ObjectNode describeAlarm(String alarmName) {
+        ObjectNode req = MAPPER.createObjectNode();
+        req.putArray("AlarmNames").add(alarmName);
+        Response resp = handler.handle("DescribeAlarms", req, REGION);
+        assertEquals(200, resp.getStatus());
+        return (ObjectNode) ((ObjectNode) resp.getEntity()).get("MetricAlarms").get(0);
+    }
+
+    /**
+     * lex00/floci#93: creating an alarm with no explicit DatapointsToAlarm must default
+     * it to EvaluationPeriods (real AWS create-time semantics), and DescribeAlarms must
+     * echo that value back. Before the fix, DescribeAlarms' JSON/CBOR response builder
+     * simply omitted the field, so the AWS provider's own create-time default of
+     * datapoints_to_alarm = evaluation_periods never matched the (missing) read value,
+     * producing an endless "1 -> null" drift.
+     */
+    @Test
+    void describeAlarms_noExplicitDatapointsToAlarm_defaultsToEvaluationPeriods() {
+        Response putResp = handler.handle("PutMetricAlarm", putAlarmReq("NoDatapointsAlarm", 3, null), REGION);
+        assertEquals(200, putResp.getStatus());
+
+        ObjectNode alarm = describeAlarm("NoDatapointsAlarm");
+        assertTrue(alarm.has("DatapointsToAlarm"), "DescribeAlarms must always report DatapointsToAlarm");
+        assertEquals(3, alarm.get("DatapointsToAlarm").asInt());
+        assertEquals(3, alarm.get("EvaluationPeriods").asInt());
+    }
+
+    @Test
+    void describeAlarms_explicitDatapointsToAlarm_roundTrips() {
+        Response putResp = handler.handle("PutMetricAlarm", putAlarmReq("ExplicitDatapointsAlarm", 5, 2), REGION);
+        assertEquals(200, putResp.getStatus());
+
+        ObjectNode alarm = describeAlarm("ExplicitDatapointsAlarm");
+        assertEquals(2, alarm.get("DatapointsToAlarm").asInt());
+        assertEquals(5, alarm.get("EvaluationPeriods").asInt());
+    }
 }
