@@ -135,6 +135,15 @@ public class DynamoDbJsonHandler {
                     gsi.getProvisionedThroughput().setReadCapacityUnits(gsiPt.path("ReadCapacityUnits").asLong(0));
                     gsi.getProvisionedThroughput().setWriteCapacityUnits(gsiPt.path("WriteCapacityUnits").asLong(0));
                 }
+                JsonNode gsiOnDemand = gsiNode.path("OnDemandThroughput");
+                if (gsiOnDemand.isObject()) {
+                    if (gsiOnDemand.has("MaxReadRequestUnits")) {
+                        gsi.setOnDemandMaxReadRequestUnits(gsiOnDemand.get("MaxReadRequestUnits").asInt());
+                    }
+                    if (gsiOnDemand.has("MaxWriteRequestUnits")) {
+                        gsi.setOnDemandMaxWriteRequestUnits(gsiOnDemand.get("MaxWriteRequestUnits").asInt());
+                    }
+                }
                 gsis.add(gsi);
             }
         }
@@ -1208,6 +1217,15 @@ public class DynamoDbJsonHandler {
                         newGsi.getProvisionedThroughput().setReadCapacityUnits(newGsiPt.path("ReadCapacityUnits").asLong(0));
                         newGsi.getProvisionedThroughput().setWriteCapacityUnits(newGsiPt.path("WriteCapacityUnits").asLong(0));
                     }
+                    JsonNode newGsiOnDemand = createNode.path("OnDemandThroughput");
+                    if (newGsiOnDemand.isObject()) {
+                        if (newGsiOnDemand.has("MaxReadRequestUnits")) {
+                            newGsi.setOnDemandMaxReadRequestUnits(newGsiOnDemand.get("MaxReadRequestUnits").asInt());
+                        }
+                        if (newGsiOnDemand.has("MaxWriteRequestUnits")) {
+                            newGsi.setOnDemandMaxWriteRequestUnits(newGsiOnDemand.get("MaxWriteRequestUnits").asInt());
+                        }
+                    }
                     gsiCreates.add(newGsi);
                 }
                 JsonNode deleteNode = update.path("Delete");
@@ -2096,6 +2114,18 @@ public class DynamoDbJsonHandler {
                 gsiNode.set("ProvisionedThroughput", gsiPt);
                 gsiNode.put("IndexSizeBytes", gsi.getIndexSizeBytes());
                 gsiNode.put("ItemCount", gsi.getItemCount());
+
+                if (gsi.getOnDemandMaxReadRequestUnits() != null
+                        || gsi.getOnDemandMaxWriteRequestUnits() != null) {
+                    ObjectNode gsiOdt = objectMapper.createObjectNode();
+                    if (gsi.getOnDemandMaxReadRequestUnits() != null) {
+                        gsiOdt.put("MaxReadRequestUnits", gsi.getOnDemandMaxReadRequestUnits());
+                    }
+                    if (gsi.getOnDemandMaxWriteRequestUnits() != null) {
+                        gsiOdt.put("MaxWriteRequestUnits", gsi.getOnDemandMaxWriteRequestUnits());
+                    }
+                    gsiNode.set("OnDemandThroughput", gsiOdt);
+                }
 
                 gsiArray.add(gsiNode);
             }

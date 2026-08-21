@@ -390,4 +390,64 @@ class DynamoDbJsonHandlerTest {
                 () -> handler.handle("PutResourcePolicy", putRequest, "eu-west-1"));
         assertEquals("ValidationException", ex.getErrorCode());
     }
+
+    // Reproduces lex00/floci#91: a GSI created with an explicit OnDemandThroughput never had
+    // that value stored, so DescribeTable could never report it back. Real terraform-aws
+    // provider refreshes populate state without on_demand_throughput on the GSI as a result,
+    // then propose replacing the GSI on every subsequent plan even though nothing drifted.
+    @Test
+    void createTableWithGsiOnDemandThroughputRoundTripsThroughDescribeTable() throws Exception {
+        ObjectNode createRequest = mapper.createObjectNode();
+        createRequest.put("TableName", "gsi-odt-table");
+        createRequest.put("BillingMode", "PAY_PER_REQUEST");
+
+        ArrayNode attrDefs = mapper.createArrayNode();
+        attrDefs.add(mapper.createObjectNode().put("AttributeName", "id").put("AttributeType", "S"));
+        attrDefs.add(mapper.createObjectNode().put("AttributeName", "title").put("AttributeType", "S"));
+        attrDefs.add(mapper.createObjectNode().put("AttributeName", "age").put("AttributeType", "S"));
+        createRequest.set("AttributeDefinitions", attrDefs);
+
+        ArrayNode keySchema = mapper.createArrayNode();
+        keySchema.add(mapper.createObjectNode().put("AttributeName", "id").put("KeyType", "HASH"));
+        createRequest.set("KeySchema", keySchema);
+
+        ObjectNode gsi = mapper.createObjectNode();
+        gsi.put("IndexName", "TitleIndex");
+        ArrayNode gsiKeySchema = mapper.createArrayNode();
+        gsiKeySchema.add(mapper.createObjectNode().put("AttributeName", "title").put("KeyType", "HASH"));
+        gsiKeySchema.add(mapper.createObjectNode().put("AttributeName", "age").put("KeyType", "RANGE"));
+        gsi.set("KeySchema", gsiKeySchema);
+        ObjectNode projection = mapper.createObjectNode();
+        projection.put("ProjectionType", "INCLUDE");
+        projection.set("NonKeyAttributes", mapper.createArrayNode().add("id"));
+        gsi.set("Projection", projection);
+        ObjectNode gsiOnDemand = mapper.createObjectNode();
+        gsiOnDemand.put("MaxReadRequestUnits", 1);
+        gsiOnDemand.put("MaxWriteRequestUnits", 1);
+        gsi.set("OnDemandThroughput", gsiOnDemand);
+        createRequest.set("GlobalSecondaryIndexes", mapper.createArrayNode().add(gsi));
+
+        Response createResponse = handler.handle("CreateTable", createRequest, "eu-west-1");
+        assertEquals(200, createResponse.getStatus());
+        JsonNode createBody = mapper.convertValue(createResponse.getEntity(), JsonNode.class);
+        JsonNode createdGsi = createBody.get("TableDescription").get("GlobalSecondaryIndexes").get(0);
+        assertTrue(createdGsi.has("OnDemandThroughput"),
+                "CreateTable response must echo the GSI's OnDemandThroughput");
+        assertEquals(1, createdGsi.get("OnDemandThroughput").get("MaxReadRequestUnits").asInt());
+        assertEquals(1, createdGsi.get("OnDemandThroughput").get("MaxWriteRequestUnits").asInt());
+
+        ObjectNode describeRequest = mapper.createObjectNode();
+        describeRequest.put("TableName", "gsi-odt-table");
+
+        Response describeResponse = handler.handle("DescribeTable", describeRequest, "eu-west-1");
+        assertEquals(200, describeResponse.getStatus());
+        JsonNode describeBody = mapper.convertValue(describeResponse.getEntity(), JsonNode.class);
+        JsonNode describedGsi = describeBody.get("Table").get("GlobalSecondaryIndexes").get(0);
+
+        assertTrue(describedGsi.has("OnDemandThroughput"),
+                "DescribeTable must report the GSI's OnDemandThroughput (lex00/floci#91)");
+        JsonNode odt = describedGsi.get("OnDemandThroughput");
+        assertEquals(1, odt.get("MaxReadRequestUnits").asInt());
+        assertEquals(1, odt.get("MaxWriteRequestUnits").asInt());
+    }
 }
