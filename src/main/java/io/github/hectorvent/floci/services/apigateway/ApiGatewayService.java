@@ -790,7 +790,16 @@ public class ApiGatewayService {
             } else if ("/identitySource".equals(path)) {
                 authorizer.setIdentitySource(value);
             } else if ("/authorizerResultTtlInSeconds".equals(path)) {
-                authorizer.setAuthorizerResultTtlInSeconds(value);
+                // Validate before writing: the store hands back live objects, and an unparseable TTL
+                // would break serialisation on every later GetAuthorizer/GetAuthorizers.
+                String ttl = value.trim();
+                try {
+                    Integer.parseInt(ttl);
+                } catch (NumberFormatException e) {
+                    throw new AwsException("BadRequestException",
+                            "authorizerResultTtlInSeconds must be an integer", 400);
+                }
+                authorizer.setAuthorizerResultTtlInSeconds(ttl);
             } else {
                 throw new AwsException("BadRequestException", "Unsupported path: " + path, 400);
             }
@@ -986,23 +995,49 @@ public class ApiGatewayService {
                 .orElseThrow(() -> new AwsException("NotFoundException", "Usage Plan not found", 404));
     }
 
-    public UsagePlan updateUsagePlan(String region, String usagePlanId, Map<String, Object> request) {
-        if (request == null) {
-            throw new AwsException("BadRequestException", "Request body cannot be null", 400);
-        }
+    public UsagePlan updateUsagePlan(String region, String usagePlanId, List<Map<String, String>> patchOperations) {
         UsagePlan plan = getUsagePlan(region, usagePlanId);
-        if (request.containsKey("name") && request.get("name") != null) {
-            plan.setName((String) request.get("name"));
-        }
-        if (request.containsKey("description") && request.get("description") != null) {
-            plan.setDescription((String) request.get("description"));
-        }
-        if (request.containsKey("apiStages") && request.get("apiStages") != null) {
-            @SuppressWarnings("unchecked")
-            List<Map<String, Object>> apiStages = (List<Map<String, Object>>) request.get("apiStages");
-            plan.getApiStages().clear();
-            for (Map<String, Object> as : apiStages) {
-                plan.getApiStages().add(new UsagePlan.ApiStage((String) as.get("apiId"), (String) as.get("stage")));
+        if (patchOperations != null) {
+            for (Map<String, String> op : patchOperations) {
+                if (op == null) {
+                    throw new AwsException("BadRequestException", "Invalid patch operation", 400);
+                }
+                String opType = op.get("op");
+                String path = op.get("path");
+                String value = op.get("value");
+                if (path == null || value == null) {
+                    throw new AwsException("BadRequestException", "Missing path or value", 400);
+                }
+                if ("/apiStages".equals(path)) {
+                    // AWS models stage membership as add/remove of an "apiId:stage" pair.
+                    if (!"add".equals(opType) && !"remove".equals(opType)) {
+                        throw new AwsException("BadRequestException", "Invalid operation", 400);
+                    }
+                    String[] parts = value.split(":", 2);
+                    if (parts.length != 2 || parts[0].isEmpty() || parts[1].isEmpty()) {
+                        throw new AwsException("BadRequestException",
+                                "apiStages value must be in the form apiId:stage", 400);
+                    }
+                    UsagePlan.ApiStage stage = new UsagePlan.ApiStage(parts[0], parts[1]);
+                    if ("add".equals(opType)) {
+                        if (!plan.getApiStages().contains(stage)) {
+                            plan.getApiStages().add(stage);
+                        }
+                    } else {
+                        plan.getApiStages().remove(stage);
+                    }
+                    continue;
+                }
+                if (!"add".equals(opType) && !"replace".equals(opType)) {
+                    throw new AwsException("BadRequestException", "Invalid operation", 400);
+                }
+                if ("/name".equals(path)) {
+                    plan.setName(value);
+                } else if ("/description".equals(path)) {
+                    plan.setDescription(value);
+                } else {
+                    throw new AwsException("BadRequestException", "Unsupported path: " + path, 400);
+                }
             }
         }
         usagePlanStore.put(usagePlanKey(region, usagePlanId), plan);
@@ -1149,19 +1184,38 @@ public class ApiGatewayService {
                 .orElseThrow(() -> new AwsException("NotFoundException", "Invalid model name specified", 404));
     }
 
-    public Model updateModel(String region, String apiId, String modelName, Map<String,Object> request) {
-        if (request == null) {
-            throw new AwsException("BadRequestException", "Request body is null", 400);
-        }
+    public Model updateModel(String region, String apiId, String modelName, List<Map<String, String>> patchOperations) {
         Model model = getModel(region, apiId, modelName);
-        if (request.containsKey("name") && request.get("name") != null) model.setName((String) request.get("name"));
-        if (request.containsKey("description") && request.get("description") != null) model.setDescription((String) request.get("description"));
-        if (request.containsKey("contentType") && request.get("contentType") != null) model.setContentType((String) request.get("contentType"));
-        if (request.containsKey("schema") && request.get("schema") != null) model.setSchema((String) request.get("schema"));
-        String oldKey = modelKey(region, apiId, modelName);
-        String newKey = modelKey(region, apiId, model.getName());
-        if (!oldKey.equals(newKey)) modelStore.delete(oldKey);
-        modelStore.put(newKey, model);
+        if (patchOperations != null) {
+            for (Map<String, String> op : patchOperations) {
+                if (op == null) {
+                    throw new AwsException("BadRequestException", "Invalid patch operation", 400);
+                }
+                String opType = op.get("op");
+                String path = op.get("path");
+                String value = op.get("value");
+                if (!"add".equals(opType) && !"replace".equals(opType)) {
+                    throw new AwsException("BadRequestException", "Invalid operation", 400);
+                }
+                if (path == null || value == null) {
+                    throw new AwsException("BadRequestException", "Missing path or value", 400);
+                }
+                if ("/description".equals(path)) {
+                    model.setDescription(value);
+                } else if ("/schema".equals(path)) {
+                    model.setSchema(value);
+                } else if ("/contentType".equals(path)) {
+                    model.setContentType(value);
+                } else if ("/name".equals(path)) {
+                    // AWS treats the model name as an immutable identifier.
+                    throw new AwsException("BadRequestException",
+                            "Model name cannot be changed", 400);
+                } else {
+                    throw new AwsException("BadRequestException", "Unsupported path: " + path, 400);
+                }
+            }
+        }
+        modelStore.put(modelKey(region, apiId, modelName), model);
         return model;
     }
 

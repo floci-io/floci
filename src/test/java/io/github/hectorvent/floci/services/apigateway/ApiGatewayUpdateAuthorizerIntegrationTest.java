@@ -80,4 +80,70 @@ class ApiGatewayUpdateAuthorizerIntegrationTest {
                 .body("name", equalTo("after-update"))
                 .body("identitySource", equalTo("method.request.header.X-Token"));
     }
+
+    /**
+     * A non-numeric /authorizerResultTtlInSeconds must be rejected before any mutation, otherwise the
+     * stored value can no longer be serialised and every later GET/ListAuthorizers fails permanently.
+     */
+    @Test
+    void shouldRejectNonNumericAuthorizerResultTtlAndLeaveAuthorizerReadable() {
+        Map<String, Object> createApiBody = new HashMap<>();
+        createApiBody.put("name", "ttl-validation-api");
+
+        String apiId = given()
+                .contentType("application/json")
+                .body(createApiBody)
+                .when()
+                .post("/restapis")
+                .then()
+                .statusCode(201)
+                .extract()
+                .path("id");
+
+        Map<String, Object> createAuthorizerBody = new HashMap<>();
+        createAuthorizerBody.put("name", "ttl-authorizer");
+        createAuthorizerBody.put("type", "TOKEN");
+        createAuthorizerBody.put("authorizerUri", "arn:aws:lambda:us-east-1:123456789012:function:my-authorizer");
+        createAuthorizerBody.put("identitySource", "method.request.header.Authorization");
+        createAuthorizerBody.put("authorizerResultTtlInSeconds", 300);
+
+        String authorizerId = given()
+                .contentType("application/json")
+                .body(createAuthorizerBody)
+                .when()
+                .post("/restapis/" + apiId + "/authorizers")
+                .then()
+                .statusCode(201)
+                .extract()
+                .path("id");
+
+        Map<String, Object> badOp = new HashMap<>();
+        badOp.put("op", "replace");
+        badOp.put("path", "/authorizerResultTtlInSeconds");
+        badOp.put("value", "not-a-number");
+
+        Map<String, Object> patchBody = new HashMap<>();
+        patchBody.put("patchOperations", new Object[]{badOp});
+
+        given()
+                .contentType("application/json")
+                .body(patchBody)
+                .when()
+                .patch("/restapis/" + apiId + "/authorizers/" + authorizerId)
+                .then()
+                .statusCode(400);
+
+        given()
+                .when()
+                .get("/restapis/" + apiId + "/authorizers/" + authorizerId)
+                .then()
+                .statusCode(200)
+                .body("authorizerResultTtlInSeconds", equalTo(300));
+
+        given()
+                .when()
+                .get("/restapis/" + apiId + "/authorizers")
+                .then()
+                .statusCode(200);
+    }
 }

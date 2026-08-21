@@ -816,8 +816,10 @@ public class ApiGatewayController {
     public Response updateUsagePlan(@Context HttpHeaders headers, @PathParam("usagePlanId") String usagePlanId, String body) {
         String region = regionResolver.resolveRegion(headers);
         try {
-            Map<String, Object> request = objectMapper.readValue(body, Map.class);
-            UsagePlan plan = service.updateUsagePlan(region, usagePlanId, request);
+            com.fasterxml.jackson.databind.JsonNode node = objectMapper.readTree(body).path("patchOperations");
+            @SuppressWarnings("unchecked")
+            List<Map<String, String>> patchOperations = objectMapper.convertValue(node, List.class);
+            UsagePlan plan = service.updateUsagePlan(region, usagePlanId, patchOperations);
             return Response.ok(toUsagePlanNode(plan).toString()).type(MediaType.APPLICATION_JSON).build();
         } catch (IOException e) {
             throw new AwsException("BadRequestException", "Malformed JSON", 400);
@@ -976,13 +978,16 @@ public class ApiGatewayController {
     @Path("/restapis/{apiId}/models/{modelName}")
     public Response updateModel(@Context HttpHeaders headers, @PathParam("apiId") String apiId, @PathParam("modelName") String modelName, String body) {
         String region = regionResolver.resolveRegion(headers);
-        Map<String, Object> request;
+        List<Map<String, String>> patchOperations;
         try {
-            request = objectMapper.readValue(body, Map.class);
+            com.fasterxml.jackson.databind.JsonNode node = objectMapper.readTree(body).path("patchOperations");
+            @SuppressWarnings("unchecked")
+            List<Map<String, String>> parsed = objectMapper.convertValue(node, List.class);
+            patchOperations = parsed;
         } catch (IOException e) {
             throw new AwsException("BadRequestException", "Invalid request body", 400);
         }
-        io.github.hectorvent.floci.services.apigateway.model.Model model = service.updateModel(region, apiId, modelName, request);
+        io.github.hectorvent.floci.services.apigateway.model.Model model = service.updateModel(region, apiId, modelName, patchOperations);
         return Response.ok(toModelNode(model).toString()).type(MediaType.APPLICATION_JSON).build();
     }
 
