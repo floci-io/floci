@@ -311,6 +311,7 @@ public class ApiGatewayService {
         getRestApi(region, apiId);
         ApiGatewayResource parent = getResource(region, apiId, parentId);
         String pathPart = (String) request.get("pathPart");
+        assertNoSiblingPathCollision(region, apiId, parentId, pathPart, null);
 
         ApiGatewayResource resource = new ApiGatewayResource();
         resource.setId(shortId(8));
@@ -1585,9 +1586,10 @@ public class ApiGatewayService {
             throw new AwsException("BadRequestException", "Invalid patch operation", 400);
         }
         ApiGatewayResource resource = getResource(region, apiId, resourceId);
-        if (resource == null) {
-            throw new AwsException("BadRequestException", "Invalid patch operation", 400);
-        }
+        // The store hands back live objects, so every op is validated against pending values first and
+        // only applied once the whole patch (including the sibling-collision check) is known to be good.
+        String newParentId = resource.getParentId();
+        String newPathPart = resource.getPathPart();
         for (Map<String, String> op : patchOperations) {
             if (op == null || !op.containsKey("op") || !op.containsKey("path") || !op.containsKey("value")) {
                 throw new AwsException("BadRequestException", "Invalid patch operation", 400);
@@ -1595,46 +1597,69 @@ public class ApiGatewayService {
             String opStr = op.get("op");
             String path = op.get("path");
             String value = op.get("value");
-            if ("replace".equals(opStr)) {
-                if (path == null || path.isEmpty()) {
+            if (!"replace".equals(opStr)) {
+                throw new AwsException("BadRequestException", "Invalid patch operation", 400);
+            }
+            if (path == null || path.isEmpty()) {
+                throw new AwsException("BadRequestException", "Invalid patch operation", 400);
+            }
+            if ("/pathPart".equals(path)) {
+                if (value == null || value.isEmpty()) {
                     throw new AwsException("BadRequestException", "Invalid patch operation", 400);
                 }
-                if ("/pathPart".equals(path)) {
-                    if (value == null || value.isEmpty()) {
+                newPathPart = value;
+            } else if ("/parentId".equals(path)) {
+                if (value == null) {
+                    throw new AwsException("BadRequestException", "Invalid patch operation", 400);
+                }
+                if (resourceId.equals(value)) {
+                    throw new AwsException("BadRequestException", "Invalid patch operation", 400);
+                }
+                if (value.isEmpty()) {
+                    if (resource.getParentId() != null) {
                         throw new AwsException("BadRequestException", "Invalid patch operation", 400);
-                    }
-                    resource.setPathPart(value);
-                } else if ("/parentId".equals(path)) {
-                    if (value == null) {
-                        throw new AwsException("BadRequestException", "Invalid patch operation", 400);
-                    }
-                    if (resourceId.equals(value)) {
-                        throw new AwsException("BadRequestException", "Invalid patch operation", 400);
-                    }
-                    if (value.isEmpty()) {
-                        if (resource.getParentId() != null) {
-                            throw new AwsException("BadRequestException", "Invalid patch operation", 400);
-                        }
-                    } else {
-                        ApiGatewayResource parent = getResource(region, apiId, value);
-                        if (parent == null) {
-                            throw new AwsException("BadRequestException", "Invalid patch operation", 400);
-                        }
-                        if (isDescendant(region, apiId, resourceId, value)) {
-                            throw new AwsException("BadRequestException", "Invalid patch operation", 400);
-                        }
-                        resource.setParentId(value);
                     }
                 } else {
-                    throw new AwsException("BadRequestException", "Invalid patch operation", 400);
+                    try {
+                        getResource(region, apiId, value);
+                    } catch (AwsException e) {
+                        // AWS reports an unknown target parent as a bad request on the patch, not as a
+                        // 404 about the resource being patched.
+                        throw new AwsException("BadRequestException", "Invalid parentId: " + value, 400);
+                    }
+                    if (isDescendant(region, apiId, resourceId, value)) {
+                        throw new AwsException("BadRequestException", "Invalid patch operation", 400);
+                    }
+                    newParentId = value;
                 }
             } else {
                 throw new AwsException("BadRequestException", "Invalid patch operation", 400);
             }
         }
+        assertNoSiblingPathCollision(region, apiId, newParentId, newPathPart, resourceId);
+        resource.setParentId(newParentId);
+        resource.setPathPart(newPathPart);
         recomputePaths(region, apiId);
         resourceStore.put(resourceKey(region, apiId, resourceId), resource);
         return resource;
+    }
+
+    /**
+     * AWS rejects two children of the same parent sharing a pathPart, because the resulting resources
+     * would have identical paths and request routing would become order-dependent.
+     */
+    private void assertNoSiblingPathCollision(String region, String apiId, String parentId, String pathPart, String selfId) {
+        if (parentId == null || pathPart == null || pathPart.isEmpty()) {
+            return;
+        }
+        for (ApiGatewayResource sibling : getResources(region, apiId)) {
+            if (selfId != null && selfId.equals(sibling.getId())) continue;
+            if (!parentId.equals(sibling.getParentId())) continue;
+            if (pathPart.equals(sibling.getPathPart())) {
+                throw new AwsException("ConflictException",
+                        "Another resource with the same parent already has this name: " + pathPart, 409);
+            }
+        }
     }
 
     private boolean isDescendant(String region, String apiId, String resourceId, String parentId) {

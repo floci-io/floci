@@ -127,4 +127,125 @@ class ApiGatewayUpdateResourceIntegrationTest {
                 .body("pathPart", equalTo("moved"))
                 .body("path", equalTo("/right/moved"));
     }
+
+    private String createApi(String name) {
+        return given()
+                .contentType("application/json")
+                .body("{\"name\":\"" + name + "\"}")
+                .when()
+                .post("/restapis")
+                .then()
+                .statusCode(201)
+                .extract()
+                .path("id");
+    }
+
+    private String rootResourceId(String apiId) {
+        return given()
+                .pathParam("apiId", apiId)
+                .when()
+                .get("/restapis/{apiId}/resources")
+                .then()
+                .statusCode(200)
+                .extract()
+                .path("item[0].id");
+    }
+
+    private String createChild(String apiId, String parentId, String pathPart) {
+        return given()
+                .pathParam("apiId", apiId)
+                .pathParam("parentId", parentId)
+                .contentType("application/json")
+                .body("{\"pathPart\":\"" + pathPart + "\"}")
+                .when()
+                .post("/restapis/{apiId}/resources/{parentId}")
+                .then()
+                .statusCode(201)
+                .extract()
+                .path("id");
+    }
+
+    /** AWS returns 400 when /parentId names an id that does not exist, not a 404 about the patched resource. */
+    @Test
+    void testUpdateResourceWithUnknownParentIdReturnsBadRequest() {
+        String apiId = createApi("resource-bad-parent");
+        String rootId = rootResourceId(apiId);
+        String childId = createChild(apiId, rootId, "thing");
+
+        given()
+                .pathParam("apiId", apiId)
+                .pathParam("resourceId", childId)
+                .contentType("application/json")
+                .body("{\"patchOperations\":[{\"op\":\"replace\",\"path\":\"/parentId\",\"value\":\"nosuchid\"}]}")
+                .when()
+                .patch("/restapis/{apiId}/resources/{resourceId}")
+                .then()
+                .statusCode(400);
+    }
+
+    /** Two siblings may not share a pathPart; AWS returns ConflictException. */
+    @Test
+    void testUpdateResourceRejectsSiblingPathCollision() {
+        String apiId = createApi("resource-collision-patch");
+        String rootId = rootResourceId(apiId);
+        createChild(apiId, rootId, "alpha");
+        String betaId = createChild(apiId, rootId, "beta");
+
+        given()
+                .pathParam("apiId", apiId)
+                .pathParam("resourceId", betaId)
+                .contentType("application/json")
+                .body("{\"patchOperations\":[{\"op\":\"replace\",\"path\":\"/pathPart\",\"value\":\"alpha\"}]}")
+                .when()
+                .patch("/restapis/{apiId}/resources/{resourceId}")
+                .then()
+                .statusCode(409);
+
+        given()
+                .pathParam("apiId", apiId)
+                .pathParam("resourceId", betaId)
+                .when()
+                .get("/restapis/{apiId}/resources/{resourceId}")
+                .then()
+                .statusCode(200)
+                .body("pathPart", equalTo("beta"))
+                .body("path", equalTo("/beta"));
+    }
+
+    @Test
+    void testUpdateResourceRejectsCollisionAfterReparenting() {
+        String apiId = createApi("resource-collision-reparent");
+        String rootId = rootResourceId(apiId);
+        String leftId = createChild(apiId, rootId, "left");
+        String rightId = createChild(apiId, rootId, "right");
+        createChild(apiId, rightId, "shared");
+        String movingId = createChild(apiId, leftId, "shared");
+
+        given()
+                .pathParam("apiId", apiId)
+                .pathParam("resourceId", movingId)
+                .contentType("application/json")
+                .body("{\"patchOperations\":[{\"op\":\"replace\",\"path\":\"/parentId\",\"value\":\"" + rightId + "\"}]}")
+                .when()
+                .patch("/restapis/{apiId}/resources/{resourceId}")
+                .then()
+                .statusCode(409);
+    }
+
+    @Test
+    void testCreateResourceRejectsDuplicateSiblingPathPart() {
+        String apiId = createApi("resource-collision-create");
+        String rootId = rootResourceId(apiId);
+        createChild(apiId, rootId, "dup");
+
+        given()
+                .pathParam("apiId", apiId)
+                .pathParam("parentId", rootId)
+                .contentType("application/json")
+                .body("{\"pathPart\":\"dup\"}")
+                .when()
+                .post("/restapis/{apiId}/resources/{parentId}")
+                .then()
+                .statusCode(409);
+    }
 }
