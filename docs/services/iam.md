@@ -444,6 +444,49 @@ AWS_ACCESS_KEY_ID=$AKID AWS_SECRET_ACCESS_KEY=$SECRET \
   aws s3 ls
 ```
 
+## Service Control Policies (SCPs)
+
+When `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true` and
+`FLOCI_SERVICES_ORGANIZATIONS_SCP_ENFORCEMENT_ENABLED=true`, service control policies attached to
+the caller account's organization participate in policy evaluation.
+
+The SCP chain is resolved root → OUs on the path → account, and every level must allow the action
+for the request to proceed. SCPs never grant permissions on their own — they are a ceiling applied
+before identity policies are consulted, exactly as on AWS. Organizations is resolved lazily, so IAM
+does not gain a hard dependency on it: with the Organizations service absent or the flag off, the
+chain is skipped entirely and evaluation falls back to identity policies alone.
+
+A member account's own bare 12-digit access key is floci's account-root principal. It is not a
+registered IAM identity, but like the AWS account root it is still bounded by SCPs, so an SCP `Deny`
+(for example a `DenyLeaveOrganization` guardrail) blocks it. What that key does *not* carry is any
+identity policy — it behaves as allow-everything bounded only by the SCP ceiling. To exercise
+**identity-policy** enforcement, use account-routable credentials for the member instead, most
+naturally the `ASIA…` session from assuming its `OrganizationAccountAccessRole`.
+
+Note that `aws:PrincipalArn` is populated only for principals whose ARN is known — IAM users and
+assumed-role sessions. It stays absent for the bare account-id key, so a principal-scoped guardrail
+keyed on `aws:PrincipalArn` does not fire against the account root.
+
+The ceiling is attached by the request filter, which is the only producer of SCP levels. Two
+evaluation paths therefore run without one and are **not** SCP-bounded: `SimulatePrincipalPolicy`,
+and the field-level authorization check on the AppSync GraphQL IAM-auth path (the coarse AppSync
+request itself still passes through the filter). Both are deliberate non-goals — bounding them
+would require IAM to resolve the caller's organization directly, which is the dependency the
+lazily-resolved `ScpProvider` exists to avoid.
+
+## Bypass rules
+
+Enforcement is deliberately permissive in a few cases, so that enabling it does not break workloads
+the emulator cannot reason about:
+
+| Case | Behaviour |
+| --- | --- |
+| Unresolvable action | Allowed. An action the registry cannot resolve is not evaluated. |
+| `sts:GetCallerIdentity` | Always allowed — AWS returns caller identity even when a policy denies it. |
+| Unknown access key | Allowed. A key that resolves to no IAM identity bypasses enforcement. |
+| Bare account-id key with no SCP ceiling | Allowed. With no organization or SCP enforcement off, the account root keeps the historical bypass. |
+| Bare account-id key **with** an SCP ceiling | Enforced as the account root, bounded by the SCP chain. |
+
 ## Service-linked roles
 
 `CreateServiceLinkedRole` puts a role under `/aws-service-role/<principal>/` and marks it as

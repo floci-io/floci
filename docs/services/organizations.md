@@ -112,3 +112,43 @@ call `LeaveOrganization`. An account in no organization gets
 | `ListHandshakesForAccount` | Lists the handshakes that involve the calling account. |
 | `ListHandshakesForOrganization` | Lists the handshakes associated with the organization. |
 <!-- floci:actions:end -->
+
+## Configuration
+
+| Environment variable | Default | Description |
+| --- | --- | --- |
+| `FLOCI_SERVICES_ORGANIZATIONS_ENABLED` | `true` | Enables the service |
+| `FLOCI_SERVICES_ORGANIZATIONS_SCP_ENFORCEMENT_ENABLED` | `false` | When `true` (and IAM enforcement is enabled), attached service control policies participate in IAM policy evaluation |
+| `FLOCI_SERVICES_ORGANIZATIONS_MANAGEMENT_ACCOUNT_EMAIL` | unset | Email reported for the organization's management account (`DescribeOrganization` master account, `ListAccounts`). Unset falls back to the built-in default |
+| `FLOCI_STORAGE_SERVICES_ORGANIZATIONS_MODE` | inherits `FLOCI_STORAGE_MODE` | Storage mode override |
+| `FLOCI_STORAGE_SERVICES_ORGANIZATIONS_FLUSH_INTERVAL_MS` | `5000` | Hybrid/WAL flush interval |
+
+## SCP enforcement
+
+With `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true` and
+`FLOCI_SERVICES_ORGANIZATIONS_SCP_ENFORCEMENT_ENABLED=true`, service control policies attached to
+the root, OUs, and accounts participate in IAM policy evaluation: an action must be allowed at every
+level of the account's chain, before the caller's identity policies are consulted. SCPs never grant
+permissions on their own. See
+[Service Control Policies (SCPs)](iam.md#service-control-policies-scps) for the evaluation order,
+the account-root behaviour, and the cases that bypass enforcement.
+
+The evaluation itself lives in the IAM enforcement layer — this service stores the policies and
+resolves the chain, but with IAM enforcement off the flag has no effect.
+
+## Example
+
+```bash
+aws --endpoint-url http://localhost:4566 organizations create-organization --feature-set ALL
+
+ROOT_ID=$(aws --endpoint-url http://localhost:4566 organizations list-roots \
+  --query 'Roots[0].Id' --output text)
+
+aws --endpoint-url http://localhost:4566 organizations create-organizational-unit \
+  --parent-id "$ROOT_ID" --name workloads
+
+aws --endpoint-url http://localhost:4566 organizations create-account \
+  --email member@example.com --account-name "workload-account"
+
+aws --endpoint-url http://localhost:4566 organizations list-accounts
+```
