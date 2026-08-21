@@ -4,7 +4,10 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 import java.util.List;
 import java.util.Map;
 
+import com.fasterxml.jackson.databind.PropertyNamingStrategies;
+import com.fasterxml.jackson.databind.annotation.JsonNaming;
 @RegisterForReflection
+@JsonNaming(PropertyNamingStrategies.UpperCamelCaseStrategy.class)
 public class DataLakeSettings {
 
     private Boolean allowExternalDataFiltering;

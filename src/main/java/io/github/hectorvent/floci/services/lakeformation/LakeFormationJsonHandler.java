@@ -41,11 +41,13 @@ public class LakeFormationJsonHandler {
                 case "ListLFTags" -> service.listLFTags(mapper.treeToValue(requestNode, ListLFTagsRequest.class));
                 case "AddLFTagsToResource" -> service.addLFTagsToResource(mapper.treeToValue(requestNode, AddLFTagsToResourceRequest.class));
                 case "RemoveLFTagsFromResource" -> service.removeLFTagsFromResource(mapper.treeToValue(requestNode, RemoveLFTagsFromResourceRequest.class));
-                default -> null;
+                default -> throw new AwsException("UnknownOperationException", "Unknown operation: " + action, 400);
             };
 
             if (responseModel == null) {
-                return null;
+                return Response.ok()
+                        .header("x-amzn-RequestId", "floci-" + System.currentTimeMillis())
+                        .build();
             }
 
             return Response.ok()

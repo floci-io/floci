@@ -1,9 +1,8 @@
 package io.github.hectorvent.floci.services.lakeformation;
 
-import io.github.hectorvent.floci.TestFixtures;
+import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.TestMethodOrder;
@@ -15,18 +14,13 @@ import static org.hamcrest.Matchers.*;
 @TestMethodOrder(MethodOrderer.MethodName.class)
 class LakeFormationIntegrationTest {
 
+    @BeforeAll
+    static void configureRestAssured() {
+        RestAssuredJsonUtils.configureAwsContentTypes();
+    }
+
     private static final String CONTENT_TYPE = "application/x-amz-json-1.1";
     private static final String AUTH_HEADER = "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20201022/us-east-1/lakeformation/aws4_request, SignedHeaders=host;x-amz-date, Signature=dummy";
-
-    @BeforeEach
-    void setUp() {
-        TestFixtures.clearStorage();
-    }
-
-    @AfterEach
-    void tearDown() {
-        TestFixtures.clearStorage();
-    }
 
     @Test
     void unknownAction_returnsUnknownOperationError() {
