@@ -209,7 +209,13 @@ public class TlsConfigSource implements ConfigSource {
             return List.of();
         }
         String region = resolveProperty("floci.default-region", "us-east-1");
-        return List.of("*.amazonaws.com", "*." + region + ".amazonaws.com");
+        // A wildcard matches exactly one label (RFC 6125 6.4.3), so the two broad
+        // wildcards miss virtual-hosted addressing, where the bucket adds a label:
+        // my-bucket.s3.amazonaws.com and my-bucket.s3.<region>.amazonaws.com. The DNS
+        // spoof does route those, so without these the handshake fails on a hostname
+        // mismatch rather than the request reaching Floci.
+        return List.of("*.amazonaws.com", "*." + region + ".amazonaws.com",
+                "*.s3.amazonaws.com", "*.s3." + region + ".amazonaws.com");
     }
 
     private void generateSelfSignedCert(Path tlsDir, Path certFile, Path keyFile) {
