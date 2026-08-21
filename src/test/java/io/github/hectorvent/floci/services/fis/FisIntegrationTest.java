@@ -342,6 +342,13 @@ class FisIntegrationTest {
                 .statusCode(400)
                 .body("__type", equalTo("ValidationException"));
 
+        jsonRequest(templateBody(UUID.randomUUID().toString(), "trailing JSON value") + "\n{}")
+                .post("/experimentTemplates")
+                .then()
+                .statusCode(400)
+                .header("X-Amzn-Errortype", "ValidationException")
+                .body("__type", equalTo("ValidationException"));
+
         jsonRequest("{}")
                 .post("/experimentTemplates")
                 .then()

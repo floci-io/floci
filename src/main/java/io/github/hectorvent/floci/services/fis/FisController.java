@@ -1,7 +1,9 @@
 package io.github.hectorvent.floci.services.fis;
 
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectReader;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import jakarta.inject.Inject;
@@ -26,12 +28,15 @@ public class FisController {
 
     private final FisService service;
     private final ObjectMapper objectMapper;
+    private final ObjectReader requestReader;
     private final RegionResolver regionResolver;
 
     @Inject
     public FisController(FisService service, ObjectMapper objectMapper, RegionResolver regionResolver) {
         this.service = service;
         this.objectMapper = objectMapper;
+        this.requestReader = objectMapper.reader()
+                .with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
         this.regionResolver = regionResolver;
     }
 
@@ -230,7 +235,7 @@ public class FisController {
             return objectMapper.createObjectNode();
         }
         try {
-            JsonNode request = objectMapper.readTree(body);
+            JsonNode request = requestReader.readTree(body);
             if (request == null || !request.isObject()) {
                 throw validation("Request body must be a JSON object.");
             }
