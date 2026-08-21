@@ -120,6 +120,9 @@ public class Ec2QueryHandler {
                 case "DeleteTransitGatewayRoute" -> handleDeleteTransitGatewayRoute(params, region);
                 case "ReplaceTransitGatewayRoute" -> handleReplaceTransitGatewayRoute(params, region);
                 case "SearchTransitGatewayRoutes" -> handleSearchTransitGatewayRoutes(params, region);
+                case "DescribeVpcPeeringConnections" -> handleDescribeVpcPeeringConnections(params, region);
+                case "DescribeEgressOnlyInternetGateways" ->
+                        handleDescribeEgressOnlyInternetGateways(params, region);
                 case "CreateDefaultVpc" -> handleCreateDefaultVpc(params, region);
                 case "AssociateVpcCidrBlock" -> handleAssociateVpcCidrBlock(params, region);
                 case "DisassociateVpcCidrBlock" -> handleDisassociateVpcCidrBlock(params, region);
@@ -165,7 +168,7 @@ public class Ec2QueryHandler {
                 // VPN Gateways. There is no VPN gateway model; an empty set is
                 // AWS-accurate for an account without VPN gateways and unblocks the
                 // CDK VPC context provider, which always issues this describe.
-                case "DescribeVpnGateways" -> handleDescribeVpnGateways();
+                case "DescribeVpnGateways" -> handleDescribeVpnGateways(params, region);
 
                 // Route Tables
                 case "CreateRouteTable" -> handleCreateRouteTable(params, region);
@@ -452,7 +455,7 @@ public class Ec2QueryHandler {
                         String key = p.getFirst(prefix + "." + i + ".Tag." + j + ".Key");
                         if (key == null) break;
                         String value = p.getFirst(prefix + "." + i + ".Tag." + j + ".Value");
-                        tags.add(new Tag(key, value));
+                        tags.add(new Tag(key, value == null ? "" : value));
                     }
                 }
             }
@@ -1758,6 +1761,48 @@ public class Ec2QueryHandler {
         }
     }
 
+    private Response handleDescribeVpcPeeringConnections(MultivaluedMap<String, String> p, String region) {
+        validateEmptyDiscoveryPagination(p, 1000);
+        service.describeVpcPeeringConnectionIds(
+                region, getList(p, "VpcPeeringConnectionId"), getFilters(p));
+        return emptyDescribeResponse(
+                "DescribeVpcPeeringConnections", "vpcPeeringConnectionSet");
+    }
+
+    private Response handleDescribeEgressOnlyInternetGateways(
+            MultivaluedMap<String, String> p, String region) {
+        validateEmptyDiscoveryPagination(p, 255);
+        service.describeEgressOnlyInternetGatewayIds(
+                region, getList(p, "EgressOnlyInternetGatewayId"), getFilters(p));
+        return emptyDescribeResponse(
+                "DescribeEgressOnlyInternetGateways", "egressOnlyInternetGatewaySet");
+    }
+
+    private void validateEmptyDiscoveryPagination(MultivaluedMap<String, String> p, int maximum) {
+        String rawMaxResults = p.getFirst("MaxResults");
+        if (rawMaxResults != null) {
+            int maxResults = parseIntParam(p, "MaxResults", 0);
+            if (maxResults < 5 || maxResults > maximum) {
+                throw new AwsException("InvalidMaxResults",
+                        "The specified value for MaxResults is not valid.", 400);
+            }
+        }
+        if (p.getFirst("NextToken") != null) {
+            throw new AwsException("InvalidParameterValue", "Invalid NextToken", 400);
+        }
+    }
+
+    private Response emptyDescribeResponse(String action, String resultSet) {
+        String response = action + "Response";
+        String xml = new XmlBuilder()
+                .start(response, AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start(resultSet).end(resultSet)
+                .end(response)
+                .build();
+        return xmlResponse(xml);
+    }
+
     private Response handleDeleteVpcEndpoints(MultivaluedMap<String, String> p, String region) {
         List<String> endpointIds = getList(p, "VpcEndpointId");
         service.deleteVpcEndpoints(region, endpointIds);
@@ -2352,14 +2397,9 @@ public class Ec2QueryHandler {
         return xmlResponse(xml.build());
     }
 
-    private Response handleDescribeVpnGateways() {
-        XmlBuilder xml = new XmlBuilder()
-                .start("DescribeVpnGatewaysResponse", AwsNamespaces.EC2)
-                .elem("requestId", UUID.randomUUID().toString())
-                .start("vpnGatewaySet")
-                .end("vpnGatewaySet")
-                .end("DescribeVpnGatewaysResponse");
-        return xmlResponse(xml.build());
+    private Response handleDescribeVpnGateways(MultivaluedMap<String, String> p, String region) {
+        service.describeVpnGatewayIds(region, getList(p, "VpnGatewayId"), getFilters(p));
+        return emptyDescribeResponse("DescribeVpnGateways", "vpnGatewaySet");
     }
 
     private Response handleDescribeRouteTables(MultivaluedMap<String, String> p, String region) {

@@ -182,9 +182,17 @@ Floci seeds the following resources on first use in each region so Terraform, th
 | CreateVpcEndpoint | Creates a VPC endpoint record. |
 | DescribeVpcEndpoints | Lists or returns stored VPC endpoints. |
 | DeleteVpcEndpoints | Deletes VPC endpoint records. |
+| DescribeVpcPeeringConnections | Validates filters and returns empty discovery results; explicit IDs return not-found errors. |
+| DescribeVpnGateways | Validates filters and returns empty discovery results; explicit IDs return not-found errors. |
+| DescribeEgressOnlyInternetGateways | Validates filters and returns empty discovery results; explicit IDs return not-found errors. |
 | CreateDefaultVpc | Creates or returns the default VPC for the region. |
 | AssociateVpcCidrBlock | Adds a secondary CIDR block association to a VPC. |
 | DisassociateVpcCidrBlock | Removes a secondary CIDR block association from a VPC. |
+
+The three describe-only network actions above provide discovery compatibility when no
+resources exist. VPC peering and egress-only gateway discovery validate their pagination
+parameters before returning an empty page. They do not model peering, virtual private
+gateway, or egress-only internet gateway lifecycles.
 
 ### Subnets
 
