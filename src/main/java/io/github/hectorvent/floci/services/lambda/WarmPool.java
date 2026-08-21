@@ -3,7 +3,7 @@ package io.github.hectorvent.floci.services.lambda;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.ContainerTeardown;
 import io.github.hectorvent.floci.services.lambda.launcher.ContainerHandle;
-import io.github.hectorvent.floci.services.lambda.launcher.ContainerLauncher;
+import io.github.hectorvent.floci.services.lambda.launcher.LambdaRuntimeLauncher;
 import io.github.hectorvent.floci.services.lambda.model.ContainerState;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import jakarta.annotation.PostConstruct;
@@ -40,7 +40,7 @@ public class WarmPool implements ContainerTeardown {
 
     private static final int DEFAULT_MAX_POOL_SIZE = Math.max(4, Runtime.getRuntime().availableProcessors());
 
-    private final ContainerLauncher containerLauncher;
+    private final LambdaRuntimeLauncher lambdaRuntimeLauncher;
     private final EmulatorConfig config;
     private final int maxPoolSizePerFunction;
     private final ConcurrentHashMap<String, PoolState> poolStates = new ConcurrentHashMap<>();
@@ -57,15 +57,15 @@ public class WarmPool implements ContainerTeardown {
     }
 
     @Inject
-    public WarmPool(ContainerLauncher containerLauncher, EmulatorConfig config) {
-        this.containerLauncher = containerLauncher;
+    public WarmPool(LambdaRuntimeLauncher lambdaRuntimeLauncher, EmulatorConfig config) {
+        this.lambdaRuntimeLauncher = lambdaRuntimeLauncher;
         this.config = config;
         this.maxPoolSizePerFunction = DEFAULT_MAX_POOL_SIZE;
     }
 
     /** Package-private constructor for testing (empty pool, no containers to drain). */
     WarmPool() {
-        this.containerLauncher = null;
+        this.lambdaRuntimeLauncher = null;
         this.config = null;
         this.maxPoolSizePerFunction = DEFAULT_MAX_POOL_SIZE;
     }
@@ -144,7 +144,7 @@ public class WarmPool implements ContainerTeardown {
                     stopQuietly(candidate);
                     continue;
                 }
-                if (containerLauncher.isAlive(candidate)) {
+                if (lambdaRuntimeLauncher.isAlive(candidate)) {
                     handle = candidate;
                     break;
                 }
@@ -157,7 +157,7 @@ public class WarmPool implements ContainerTeardown {
         if (handle == null) {
             LOG.debugv(ephemeral ? "Ephemeral start for function: {0}" : "Cold start for function: {0}",
                     fn.getFunctionName());
-            handle = containerLauncher.launch(fn);
+            handle = lambdaRuntimeLauncher.launch(fn);
         } else {
             LOG.debugv("Reusing warm container for function: {0}", fn.getFunctionName());
         }
@@ -367,7 +367,7 @@ public class WarmPool implements ContainerTeardown {
 
     private void stopQuietly(ContainerHandle handle) {
         try {
-            containerLauncher.stop(handle);
+            lambdaRuntimeLauncher.stop(handle);
         } catch (Exception e) {
             LOG.warnv("Error stopping container {0}: {1}", handle.getContainerId(), e.getMessage());
         }

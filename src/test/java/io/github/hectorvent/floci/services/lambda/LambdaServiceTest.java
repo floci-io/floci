@@ -14,9 +14,15 @@ import org.junit.jupiter.api.Test;
 import java.io.ByteArrayOutputStream;
 import java.nio.file.Path;
 import java.util.Base64;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
@@ -807,5 +813,76 @@ class LambdaServiceTest {
         } finally {
             pool.shutdownNow();
         }
+    }
+
+    @Test
+    void concurrentPolicyRestoreAddAndReadPreserveAllStatements() throws Exception {
+        LambdaFunction function = service.createFunction(REGION, baseRequest("policy-race-fn"));
+        service.addPermission(REGION, function.getFunctionName(), null, Map.of(
+                "StatementId", "baseline",
+                "Action", "lambda:InvokeFunction",
+                "Principal", "events.amazonaws.com"));
+
+        int mutationCount = 16;
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService pool = Executors.newFixedThreadPool(8);
+        List<Future<?>> futures = new java.util.ArrayList<>();
+        Set<String> expectedStatementIds = new HashSet<>();
+        expectedStatementIds.add("baseline");
+
+        try {
+            for (int i = 0; i < mutationCount; i++) {
+                String addedId = "added-" + i;
+                String restoredId = "restored-" + i;
+                expectedStatementIds.add(addedId);
+                expectedStatementIds.add(restoredId);
+
+                futures.add(pool.submit(() -> {
+                    start.await();
+                    service.addPermission(REGION, function.getFunctionName(), null, Map.of(
+                            "StatementId", addedId,
+                            "Action", "lambda:InvokeFunction",
+                            "Principal", "events.amazonaws.com"));
+                    return null;
+                }));
+                futures.add(pool.submit(() -> {
+                    start.await();
+                    service.restorePermissionStatement(REGION, function.getFunctionName(), Map.of(
+                            "Sid", restoredId,
+                            "Effect", "Allow",
+                            "Principal", Map.of("Service", "events.amazonaws.com"),
+                            "Action", "lambda:InvokeFunction",
+                            "Resource", function.getFunctionArn()));
+                    return null;
+                }));
+            }
+            futures.add(pool.submit(() -> {
+                start.await();
+                for (int i = 0; i < mutationCount; i++) {
+                    service.getPolicy(REGION, function.getFunctionName(), null);
+                }
+                return null;
+            }));
+
+            start.countDown();
+            for (Future<?> future : futures) {
+                future.get();
+            }
+        } finally {
+            start.countDown();
+            pool.shutdownNow();
+        }
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> policy = (Map<String, Object>) service
+                .getPolicy(REGION, function.getFunctionName(), null)
+                .get("policy");
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> statements = (List<Map<String, Object>>) policy.get("Statement");
+        Set<String> actualStatementIds = statements.stream()
+                .map(statement -> (String) statement.get("Sid"))
+                .collect(java.util.stream.Collectors.toSet());
+
+        assertEquals(expectedStatementIds, actualStatementIds);
     }
 }

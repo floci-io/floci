@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.services.dynamodb.model.ExportSummary;
 import io.github.hectorvent.floci.services.dynamodb.model.GlobalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.LocalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
+import io.github.hectorvent.floci.services.dynamodb.model.StreamDescription;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 import io.github.hectorvent.floci.services.dynamodb.model.ConditionalCheckFailedException;
 import io.github.hectorvent.floci.services.s3.S3Service;
@@ -57,6 +58,17 @@ public class DynamoDbService {
                     + "Use CreateTable, DeleteTable, or UpdateTable as required.";
 
     private static final Logger LOG = Logger.getLogger(DynamoDbService.class);
+
+    /**
+     * View type applied when a stream is requested without an explicit StreamViewType.
+     *
+     * <p>Not an AWS default: the CloudFormation schema marks StreamViewType required inside
+     * StreamSpecification, and the DynamoDB API documents no default either. This mirrors the
+     * lenient handling {@code DynamoDbJsonHandler} already applies on CreateTable/UpdateTable
+     * ({@code path("StreamViewType").asText("NEW_AND_OLD_IMAGES")}), so an under-specified
+     * template gets a working stream instead of a rejection, and every entry point agrees.
+     */
+    private static final String DEFAULT_STREAM_VIEW_TYPE = "NEW_AND_OLD_IMAGES";
 
     private final StorageBackend<String, TableDefinition> tableStore;
     private final StorageBackend<String, Map<String, JsonNode>> itemStore;
@@ -343,6 +355,56 @@ public class DynamoDbService {
     public void persistTable(String tableName, TableDefinition table, String region) {
         String canonicalTableName = canonicalTableName(region, tableName);
         tableStore.put(regionKey(region, canonicalTableName), table);
+    }
+
+    /**
+     * Turns on the table's stream and persists the result, so DescribeTable reports
+     * StreamSpecification / LatestStreamArn and event source mappings can find the stream.
+     *
+     * <p>Callers that reach DynamoDB through the service rather than the JSON handler — notably
+     * CloudFormation provisioning — need this: the handler enables the stream inline on
+     * CreateTable/UpdateTable, and without an equivalent entry point a table created by any other
+     * path is left streamless. A null {@code viewType} falls back to
+     * {@link #DEFAULT_STREAM_VIEW_TYPE}, matching the leniency the JSON handler already applies
+     * rather than any documented AWS default.
+     *
+     * @return the updated table, or the unchanged table when no stream service is wired.
+     */
+    public TableDefinition enableStream(String tableName, String viewType, String region) {
+        TableDefinition table = describeTable(tableName, region);
+        if (streamService == null) {
+            return table;
+        }
+        String effectiveViewType = (viewType == null || viewType.isBlank())
+                ? DEFAULT_STREAM_VIEW_TYPE
+                : viewType;
+        StreamDescription sd = streamService.enableStream(
+                table.getTableName(), table.getTableArn(), effectiveViewType, region);
+        table.setStreamEnabled(true);
+        table.setStreamArn(sd.getStreamArn());
+        table.setStreamViewType(effectiveViewType);
+        persistTable(tableName, table, region);
+        return table;
+    }
+
+    /**
+     * Turns the table's stream off and persists the result, so it stops producing records.
+     *
+     * <p>The counterpart to {@link #enableStream}, for the same service-layer callers. The stream
+     * ARN is retained on the table, matching what UpdateTable does through the JSON handler: AWS
+     * keeps reporting {@code LatestStreamArn} for a disabled stream.
+     *
+     * @return the updated table, or the unchanged table when no stream service is wired.
+     */
+    public TableDefinition disableStream(String tableName, String region) {
+        TableDefinition table = describeTable(tableName, region);
+        if (streamService == null) {
+            return table;
+        }
+        streamService.disableStream(table.getTableName(), region);
+        table.setStreamEnabled(false);
+        persistTable(tableName, table, region);
+        return table;
     }
 
     public void deleteTable(String tableName, String region) {

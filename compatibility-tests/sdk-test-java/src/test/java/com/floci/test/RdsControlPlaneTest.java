@@ -39,6 +39,7 @@ class RdsControlPlaneTest {
     private static RdsClient rds;
     private static String subnetGroupName;
     private static String proxyName;
+    private static String serverlessClusterName;
     private static List<String> subnetIds;
 
     @BeforeAll
@@ -46,6 +47,7 @@ class RdsControlPlaneTest {
         rds = TestFixtures.rdsClient();
         subnetGroupName = TestFixtures.uniqueName("rds-subnets");
         proxyName = TestFixtures.uniqueName("rds-proxy");
+        serverlessClusterName = TestFixtures.uniqueName("rds-serverless");
         try (Ec2Client ec2 = TestFixtures.ec2Client()) {
             DescribeSubnetsResponse response = ec2.describeSubnets();
             subnetIds = response.subnets().stream()
@@ -61,6 +63,14 @@ class RdsControlPlaneTest {
     static void cleanup() {
         if (rds != null) {
             try {
+                rds.deleteDBCluster(b -> b
+                        .dbClusterIdentifier(serverlessClusterName)
+                        .skipFinalSnapshot(true));
+            } catch (Exception e) {
+                LOG.log(Level.FINE, "RDS Serverless v2 cluster already absent during cleanup "
+                        + serverlessClusterName, e);
+            }
+            try {
                 rds.deleteDBProxy(b -> b.dbProxyName(proxyName));
             } catch (Exception e) {
                 LOG.log(Level.WARNING, "Failed to clean up RDS DB proxy " + proxyName, e);
@@ -72,6 +82,44 @@ class RdsControlPlaneTest {
             }
             rds.close();
         }
+    }
+
+    @Test
+    void sdkRoundTripsAuroraServerlessV2ScalingConfiguration() {
+        var created = rds.createDBCluster(b -> b
+                .dbClusterIdentifier(serverlessClusterName)
+                .engine("aurora-postgresql")
+                .masterUsername("admin")
+                .masterUserPassword("password")
+                .serverlessV2ScalingConfiguration(c -> c
+                        .minCapacity(0.0)
+                        .maxCapacity(16.0)));
+
+        assertThat(created.dbCluster().engine()).isEqualTo("aurora-postgresql");
+        assertThat(created.dbCluster().serverlessV2ScalingConfiguration().minCapacity())
+                .isEqualTo(0.0);
+        assertThat(created.dbCluster().serverlessV2ScalingConfiguration().maxCapacity())
+                .isEqualTo(16.0);
+        assertThat(created.dbCluster().serverlessV2ScalingConfiguration().secondsUntilAutoPause())
+                .isEqualTo(300);
+
+        var modified = rds.modifyDBCluster(b -> b
+                .dbClusterIdentifier(serverlessClusterName)
+                .serverlessV2ScalingConfiguration(c -> c
+                        .secondsUntilAutoPause(600)));
+        assertThat(modified.dbCluster().serverlessV2ScalingConfiguration().minCapacity())
+                .isEqualTo(0.0);
+        assertThat(modified.dbCluster().serverlessV2ScalingConfiguration().maxCapacity())
+                .isEqualTo(16.0);
+        assertThat(modified.dbCluster().serverlessV2ScalingConfiguration().secondsUntilAutoPause())
+                .isEqualTo(600);
+
+        var described = rds.describeDBClusters(b -> b
+                .dbClusterIdentifier(serverlessClusterName)).dbClusters().get(0);
+        assertThat(described.serverlessV2ScalingConfiguration().minCapacity()).isEqualTo(0.0);
+        assertThat(described.serverlessV2ScalingConfiguration().maxCapacity()).isEqualTo(16.0);
+        assertThat(described.serverlessV2ScalingConfiguration().secondsUntilAutoPause())
+                .isEqualTo(600);
     }
 
     @Test

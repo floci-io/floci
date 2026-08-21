@@ -361,9 +361,7 @@ public class ApiGatewayV2Service {
         route.setRouteKey((String) request.get("routeKey"));
         route.setAuthorizationType((String) request.getOrDefault("authorizationType", "NONE"));
         route.setAuthorizerId((String) request.get("authorizerId"));
-        @SuppressWarnings("unchecked")
-        List<String> authorizationScopes = (List<String>) request.get("authorizationScopes");
-        route.setAuthorizationScopes(authorizationScopes);
+        route.setAuthorizationScopes(toStringList(request.get("authorizationScopes")));
         route.setTarget((String) request.get("target"));
         route.setRouteResponseSelectionExpression((String) request.get("routeResponseSelectionExpression"));
 
@@ -400,9 +398,7 @@ public class ApiGatewayV2Service {
             route.setAuthorizerId((String) request.get("authorizerId"));
         }
         if (request.containsKey("authorizationScopes") && request.get("authorizationScopes") != null) {
-            @SuppressWarnings("unchecked")
-            List<String> authorizationScopes = (List<String>) request.get("authorizationScopes");
-            route.setAuthorizationScopes(authorizationScopes);
+            route.setAuthorizationScopes(toStringList(request.get("authorizationScopes")));
         }
         if (request.containsKey("target") && request.get("target") != null) {
             route.setTarget((String) request.get("target"));
@@ -413,6 +409,25 @@ public class ApiGatewayV2Service {
 
         routeStore.put(routeKey(region, apiId, routeId), route);
         return route;
+    }
+
+    // JSON bodies can carry non-string elements (numbers, booleans); downstream code
+    // (response serialization, scope enforcement) assumes String elements, so normalize
+    // at ingestion instead of unchecked-casting. A present-but-non-array value must be
+    // rejected, not treated as absent — silently returning null would create the route
+    // without scope enforcement (or clear it on update).
+    private static List<String> toStringList(Object value) {
+        if (value == null) {
+            return null;
+        }
+        if (!(value instanceof List<?> list)) {
+            throw new AwsException("BadRequestException",
+                    "authorizationScopes must be a list of strings", 400);
+        }
+        return list.stream()
+                .filter(java.util.Objects::nonNull)
+                .map(String::valueOf)
+                .toList();
     }
 
     /**

@@ -89,6 +89,7 @@ public class LambdaService {
      * emulator workload.
      */
     private final ConcurrentHashMap<String, Object> concurrencyOpLocks = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Object> policyMutationLocks = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Object> versionCounterLocks = new ConcurrentHashMap<>();
 
     /**
@@ -1524,6 +1525,25 @@ public class LambdaService {
         return "snapshots/" + account + "/" + fn.getFunctionName();
     }
 
+    /** Stable, account-scoped S3 key for a published layer version's archive. */
+    public static String layerObjectKey(String accountId, String layerName, long version) {
+        var account = accountId != null ? accountId : "000000000000";
+        return "layers/" + account + "/" + layerName + "/" + version;
+    }
+
+    /** Percent-encodes each path segment of a bucket path or object key for use in a URL. */
+    public static String encodeObjectPath(String path) {
+        var encoded = new StringBuilder();
+        for (var segment : path.split("/", -1)) {
+            if (!encoded.isEmpty()) {
+                encoded.append('/');
+            }
+            encoded.append(java.net.URLEncoder.encode(segment, java.nio.charset.StandardCharsets.UTF_8)
+                    .replace("+", "%20"));
+        }
+        return encoded.toString();
+    }
+
     private void extractZipCode(LambdaFunction fn, String zipFileBase64, String region) {
         extractZipCodeBytes(fn, Base64.getDecoder().decode(zipFileBase64), region);
     }
@@ -1575,8 +1595,25 @@ public class LambdaService {
     }
 
     private void storeDeploymentPackage(LambdaFunction fn, byte[] zipBytes, String region) {
+        boolean stored = putTasksObjectQuietly(s3Service, region, codeObjectKey(fn), zipBytes,
+                "deployment package for " + fn.getFunctionName());
+        if (!stored && requiresStoredTasksObject(config)) {
+            throw new AwsException("ServiceException",
+                    "Could not store the deployment package for '" + fn.getFunctionName()
+                            + "' in Floci's S3, which the kubernetes Lambda executor needs to "
+                            + "launch pods. The function was not deployed.", 500);
+        }
+    }
+
+    /**
+     * Best-effort put into the per-region tasks bucket, shared by function-code and
+     * layer-archive storage. Returns whether the object was stored so a caller whose
+     * executor depends on it can fail loudly instead of silently succeeding.
+     */
+    static boolean putTasksObjectQuietly(S3Service s3Service, String region, String key,
+                                         byte[] zipBytes, String what) {
         if (s3Service == null) {
-            return;
+            return false;
         }
         String bucket = tasksBucketName(region);
         try {
@@ -1588,13 +1625,22 @@ public class LambdaService {
                     throw e;
                 }
             }
-            s3Service.putObject(bucket, codeObjectKey(fn), zipBytes,
-                    "application/zip", java.util.Map.of());
+            s3Service.putObject(bucket, key, zipBytes, "application/zip", java.util.Map.of());
+            return true;
         } catch (Exception e) {
-            // Never fail a deploy because the convenience copy failed.
-            LOG.warnv("Could not store deployment package for {0}: {1}",
-                    fn.getFunctionName(), e.getMessage());
+            LOG.warnv("Could not store {0}: {1}", what, e.getMessage());
+            return false;
         }
+    }
+
+    /**
+     * Whether the tasks-bucket copy is load-bearing for the active executor. The
+     * kubernetes executor's pods download code and layers from it, so a store failure
+     * must fail the deploy rather than surface later as broken cold starts.
+     */
+    static boolean requiresStoredTasksObject(EmulatorConfig config) {
+        return config != null
+                && "kubernetes".equalsIgnoreCase(config.services().lambda().executor().trim());
     }
 
     private void extractZipCodeFromS3(LambdaFunction fn, String s3Bucket, String s3Key, String region) {
@@ -1676,66 +1722,73 @@ public class LambdaService {
 
     public Map<String, Object> addPermission(String region, String functionName, String qualifier, Map<String, Object> request) {
         LambdaArnUtils.ResolvedFunctionRef ref = resolveWithRegion(region, functionName, qualifier);
-        LambdaFunction fn = getFunction(region, ref.name());
-        String resourceArn = policyResourceArn(fn, ref.qualifier());
-        String statementId = (String) request.get("StatementId");
-        if (statementId == null || statementId.isBlank()) {
-            throw new AwsException("InvalidParameterValueException", "StatementId is required", 400);
-        }
-        fn.getPolicies().stream()
-                .filter(s -> scopedTo(s, resourceArn))
-                .filter(s -> statementId.equals(s.get("Sid")))
-                .findFirst()
-                .ifPresent(s -> {
-                    throw new AwsException("ResourceConflictException",
-                            "The statement id (" + statementId + ") already exists. Please try again with a new Statement Id.", 409);
-                });
+        LambdaFunction observed = getFunction(region, ref.name());
+        synchronized (lockForPolicyMutation(observed.getFunctionArn())) {
+            LambdaFunction fn = getFunction(region, ref.name());
+            String resourceArn = policyResourceArn(fn, ref.qualifier());
+            String statementId = (String) request.get("StatementId");
+            if (statementId == null || statementId.isBlank()) {
+                throw new AwsException("InvalidParameterValueException", "StatementId is required", 400);
+            }
+            fn.getPolicies().stream()
+                    .filter(s -> scopedTo(s, resourceArn))
+                    .filter(s -> statementId.equals(s.get("Sid")))
+                    .findFirst()
+                    .ifPresent(s -> {
+                        throw new AwsException("ResourceConflictException",
+                                "The statement id (" + statementId + ") already exists. Please try again with a new Statement Id.", 409);
+                    });
 
-        String principal = (String) request.get("Principal");
-        String action = (String) request.get("Action");
-        String sourceArn = (String) request.get("SourceArn");
-        String sourceAccount = (String) request.get("SourceAccount");
+            String principal = (String) request.get("Principal");
+            String action = (String) request.get("Action");
+            String sourceArn = (String) request.get("SourceArn");
+            String sourceAccount = (String) request.get("SourceAccount");
 
-        Map<String, Object> statement = new java.util.LinkedHashMap<>();
-        statement.put("Sid", statementId);
-        statement.put("Effect", "Allow");
-        if (principal != null && principal.contains(".")) {
-            statement.put("Principal", Map.of("Service", principal));
-        } else if (principal != null && principal.startsWith("arn:")) {
-            statement.put("Principal", Map.of("AWS", principal));
-        } else {
-            statement.put("Principal", principal);
-        }
-        statement.put("Action", action);
-        statement.put("Resource", resourceArn);
-        if (sourceArn != null) {
-            statement.put("Condition", Map.of("ArnLike", Map.of("AWS:SourceArn", sourceArn)));
-        } else if (sourceAccount != null) {
-            statement.put("Condition", Map.of("StringEquals", Map.of("AWS:SourceAccount", sourceAccount)));
-        }
+            Map<String, Object> statement = new java.util.LinkedHashMap<>();
+            statement.put("Sid", statementId);
+            statement.put("Effect", "Allow");
+            if (principal != null && principal.contains(".")) {
+                statement.put("Principal", Map.of("Service", principal));
+            } else if (principal != null && principal.startsWith("arn:")) {
+                statement.put("Principal", Map.of("AWS", principal));
+            } else {
+                statement.put("Principal", principal);
+            }
+            statement.put("Action", action);
+            statement.put("Resource", resourceArn);
+            if (sourceArn != null) {
+                statement.put("Condition", Map.of("ArnLike", Map.of("AWS:SourceArn", sourceArn)));
+            } else if (sourceAccount != null) {
+                statement.put("Condition", Map.of("StringEquals", Map.of("AWS:SourceAccount", sourceAccount)));
+            }
 
-        fn.getPolicies().add(statement);
-        functionStore.save(region, fn);
-        LOG.infov("Added permission {0} to function {1}", statementId, functionName);
-        return statement;
+            fn.getPolicies().add(statement);
+            functionStore.save(region, fn);
+            LOG.infov("Added permission {0} to function {1}", statementId, functionName);
+            return statement;
+        }
     }
 
     public Map<String, Object> getPolicy(String region, String functionName, String qualifier) {
         LambdaArnUtils.ResolvedFunctionRef ref = resolveWithRegion(region, functionName, qualifier);
-        LambdaFunction fn = getFunction(region, ref.name());
-        String resourceArn = policyResourceArn(fn, ref.qualifier());
-        List<Map<String, Object>> statements = fn.getPolicies().stream()
-                .filter(s -> scopedTo(s, resourceArn))
-                .toList();
-        if (statements.isEmpty()) {
-            throw new AwsException("ResourceNotFoundException",
-                    "The resource you requested does not exist.", 404);
+        LambdaFunction observed = getFunction(region, ref.name());
+        synchronized (lockForPolicyMutation(observed.getFunctionArn())) {
+            LambdaFunction fn = getFunction(region, ref.name());
+            String resourceArn = policyResourceArn(fn, ref.qualifier());
+            List<Map<String, Object>> statements = fn.getPolicies().stream()
+                    .filter(statement -> scopedTo(statement, resourceArn))
+                    .<Map<String, Object>>map(java.util.LinkedHashMap::new)
+                    .toList();
+            if (statements.isEmpty()) {
+                throw new AwsException("ResourceNotFoundException",
+                        "The resource you requested does not exist.", 404);
+            }
+            Map<String, Object> policy = new java.util.LinkedHashMap<>();
+            policy.put("Version", "2012-10-17");
+            policy.put("Id", "default");
+            policy.put("Statement", statements);
+            return Map.of("policy", policy, "revisionId", fn.getRevisionId());
         }
-        Map<String, Object> policy = new java.util.LinkedHashMap<>();
-        policy.put("Version", "2012-10-17");
-        policy.put("Id", "default");
-        policy.put("Statement", statements);
-        return Map.of("policy", policy, "revisionId", fn.getRevisionId());
     }
 
     /**
@@ -1748,29 +1801,41 @@ public class LambdaService {
      * identically named statement on an alias or version and leave that one lost.
      */
     public void restorePermissionStatement(String region, String functionName, Map<String, Object> statement) {
-        LambdaFunction fn = getFunction(region, functionName);
-        String statementId = (String) statement.get("Sid");
-        String resourceArn = policyResourceArn(fn, null);
-        if (statementId != null) {
-            fn.getPolicies().removeIf(s -> statementId.equals(s.get("Sid")) && scopedTo(s, resourceArn));
+        LambdaFunction observed = getFunction(region, functionName);
+        synchronized (lockForPolicyMutation(observed.getFunctionArn())) {
+            LambdaFunction fn = getFunction(region, functionName);
+            String statementId = (String) statement.get("Sid");
+            String resourceArn = policyResourceArn(fn, null);
+            if (statementId != null) {
+                fn.getPolicies().removeIf(existing -> statementId.equals(existing.get("Sid"))
+                        && scopedTo(existing, resourceArn));
+            }
+            fn.getPolicies().add(statement);
+            functionStore.save(region, fn);
+            LOG.infov("Restored permission {0} on function {1}", statementId, functionName);
         }
-        fn.getPolicies().add(statement);
-        functionStore.save(region, fn);
-        LOG.infov("Restored permission {0} on function {1}", statementId, functionName);
     }
 
     public void removePermission(String region, String functionName, String qualifier, String statementId) {
         LambdaArnUtils.ResolvedFunctionRef ref = resolveWithRegion(region, functionName, qualifier);
-        LambdaFunction fn = getFunction(region, ref.name());
-        String resourceArn = policyResourceArn(fn, ref.qualifier());
-        boolean removed = fn.getPolicies()
-                .removeIf(s -> statementId.equals(s.get("Sid")) && scopedTo(s, resourceArn));
-        if (!removed) {
-            throw new AwsException("ResourceNotFoundException",
-                    "Statement " + statementId + " not found in function " + functionName, 404);
+        LambdaFunction observed = getFunction(region, ref.name());
+        synchronized (lockForPolicyMutation(observed.getFunctionArn())) {
+            LambdaFunction fn = getFunction(region, ref.name());
+            String resourceArn = policyResourceArn(fn, ref.qualifier());
+            boolean removed = fn.getPolicies()
+                    .removeIf(statement -> statementId.equals(statement.get("Sid"))
+                            && scopedTo(statement, resourceArn));
+            if (!removed) {
+                throw new AwsException("ResourceNotFoundException",
+                        "Statement " + statementId + " not found in function " + functionName, 404);
+            }
+            functionStore.save(region, fn);
+            LOG.infov("Removed permission {0} from function {1}", statementId, functionName);
         }
-        functionStore.save(region, fn);
-        LOG.infov("Removed permission {0} from function {1}", statementId, functionName);
+    }
+
+    private Object lockForPolicyMutation(String functionArn) {
+        return policyMutationLocks.computeIfAbsent(functionArn, key -> new Object());
     }
 
     // ──────────────────────────── Tags ────────────────────────────

@@ -121,9 +121,27 @@ public class DocDbService {
     }
 
     public DocDbCluster getDbCluster(String id) {
-        return clusters.get(id).orElseThrow(() ->
+        DocDbCluster cluster = clusters.get(id).orElseThrow(() ->
                 new AwsException("DBClusterNotFoundFault",
                         "DocDB cluster " + id + " not found.", 404));
+        if (cluster.getDbClusterArn() == null || cluster.getDbClusterArn().isBlank()) {
+            cluster.setDbClusterArn(legacyArn("cluster:" + id));
+            clusters.put(id, cluster);
+        }
+        return cluster;
+    }
+
+    /**
+     * The ARN a record written before ARNs were stored should have had.
+     *
+     * <p>The default region rather than the caller's: such a record was created when every ARN was
+     * built from the default, so that is the region it is in — and giving it the region of whoever
+     * happens to read it first would let a caller elsewhere claim it. Without an ARN a record
+     * cannot be told apart from another region's of the same identifier, and cannot be tagged
+     * through an ARN at all.
+     */
+    private String legacyArn(String resource) {
+        return regionResolver.buildArn("rds", regionResolver.getDefaultRegion(), resource);
     }
 
     public boolean hasCluster(String id) {
@@ -148,7 +166,9 @@ public class DocDbService {
     /** Refuses a record whose own ARN is not the one that was asked for. */
     private static void requireArnNamesRecord(String requested, String stored,
                                               String errorCode, String message) {
-        if (stored != null && !stored.equalsIgnoreCase(requested)) {
+        // No null allowance: a record read through getDbCluster or getDbInstance has been given
+        // its ARN if it lacked one, so anything reaching here can be compared.
+        if (!requested.equalsIgnoreCase(stored)) {
             throw new AwsException(errorCode, message, 404);
         }
     }
@@ -239,6 +259,7 @@ public class DocDbService {
             }
 
             clusters.delete(id);
+            writeLocks.remove("cluster:" + id);
             LOG.infov("DocDB cluster {0} deleted", id);
         }
     }
@@ -284,9 +305,14 @@ public class DocDbService {
     }
 
     public DocDbInstance getDbInstance(String id) {
-        return instances.get(id).orElseThrow(() ->
+        DocDbInstance instance = instances.get(id).orElseThrow(() ->
                 new AwsException("DBInstanceNotFound",
                         "DocDB instance " + id + " not found.", 404));
+        if (instance.getDbInstanceArn() == null || instance.getDbInstanceArn().isBlank()) {
+            instance.setDbInstanceArn(legacyArn("db:" + id));
+            instances.put(id, instance);
+        }
+        return instance;
     }
 
     public Collection<DocDbInstance> listDbInstances(String filterId) {
@@ -334,6 +360,7 @@ public class DocDbService {
             }
 
             instances.delete(id);
+            writeLocks.remove("instance:" + id);
             LOG.infov("DocDB instance {0} deleted", id);
         }
     }

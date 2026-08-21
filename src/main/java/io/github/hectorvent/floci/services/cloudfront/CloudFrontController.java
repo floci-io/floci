@@ -510,12 +510,12 @@ public class CloudFrontController {
     public Response getResponseHeadersPolicyConfig(@PathParam("Id") String id) {
         try {
             ResponseHeadersPolicy policy = service.getResponseHeadersPolicy(id);
-            String xml = new XmlBuilder()
+            XmlBuilder builder = new XmlBuilder()
                     .start("ResponseHeadersPolicyConfig", NS)
                     .elem("Name", policy.getName())
-                    .elem("Comment", policy.getComment() != null ? policy.getComment() : "")
-                    .end("ResponseHeadersPolicyConfig")
-                    .build();
+                    .elem("Comment", policy.getComment() != null ? policy.getComment() : "");
+            ResponseHeadersPolicyConfigCodec.serialize(builder, policy.getConfig());
+            String xml = builder.end("ResponseHeadersPolicyConfig").build();
             return Response.ok(xml, XML).header("ETag", policy.getEtag()).build();
         } catch (AwsException e) {
             return xmlErrorResponse(e);
@@ -563,23 +563,32 @@ public class CloudFrontController {
                                                 @QueryParam("MaxItems") @DefaultValue("100") int maxItems,
                                                 @QueryParam("Type") String type) {
         try {
+            if (maxItems < 1 || maxItems > 100) {
+                throw new AwsException("InvalidArgument",
+                        "MaxItems must be between 1 and 100.", 400);
+            }
             Page<ResponseHeadersPolicy> page = page(
-                    service.listResponseHeadersPolicies(marker, paginationFetchLimit(maxItems)),
+                    service.listResponseHeadersPolicies(
+                            marker, paginationFetchLimit(maxItems), type),
                     maxItems, ResponseHeadersPolicy::getId);
 
             XmlBuilder xml = new XmlBuilder()
                     .start("ResponseHeadersPolicyList", NS)
-                    .elem("NextMarker", page.nextMarker())
-                    .elem("MaxItems", maxItems)
-                    .elem("Quantity", page.items().size())
                     .start("Items");
             for (ResponseHeadersPolicy p : page.items()) {
                 xml.start("ResponseHeadersPolicySummary")
-                        .elem("Type", "custom")
+                        .elem("Type", CloudFrontService.isManagedResponseHeadersPolicy(p.getId())
+                                ? "managed" : "custom")
                         .raw(xmlResponseHeadersPolicyResponse(p))
                         .end("ResponseHeadersPolicySummary");
             }
-            xml.end("Items").end("ResponseHeadersPolicyList");
+            xml.end("Items")
+                    .elem("MaxItems", maxItems);
+            if (page.nextMarker() != null) {
+                xml.elem("NextMarker", page.nextMarker());
+            }
+            xml.elem("Quantity", page.items().size())
+                    .end("ResponseHeadersPolicyList");
             return Response.ok(xml.build(), XML).build();
         } catch (AwsException e) {
             return xmlErrorResponse(e);
@@ -1842,6 +1851,22 @@ public class CloudFrontController {
                     .end("CustomOriginConfig");
         }
 
+        List<Map<String, String>> customHeaders = o.getCustomHeaders();
+        int customHeaderCount = customHeaders == null ? 0 : customHeaders.size();
+        xml.start("CustomHeaders")
+                .elem("Quantity", customHeaderCount);
+        if (customHeaderCount > 0) {
+            xml.start("Items");
+            for (Map<String, String> header : customHeaders) {
+                xml.start("OriginCustomHeader")
+                        .elem("HeaderName", header.getOrDefault("HeaderName", ""))
+                        .elem("HeaderValue", header.getOrDefault("HeaderValue", ""))
+                        .end("OriginCustomHeader");
+            }
+            xml.end("Items");
+        }
+        xml.end("CustomHeaders");
+
         xml.end("Origin");
         return xml.build();
     }
@@ -1986,9 +2011,7 @@ public class CloudFrontController {
         List<Origin> origins = cfg != null ? cfg.getOrigins() : null;
         xml.raw(xmlQuantityItems("Origins", "Origin",
                 origins != null ? origins.size() : 0,
-                origins != null ? origins.stream().map(o ->
-                        "<Origin><Id>" + XmlBuilder.escape(o.getId()) + "</Id><DomainName>"
-                                + XmlBuilder.escape(o.getDomainName()) + "</DomainName></Origin>").toList()
+                origins != null ? origins.stream().map(this::xmlOrigin).toList()
                         : List.of()));
 
         List<String> aliases = cfg != null ? cfg.getAliases() : null;
@@ -2060,15 +2083,16 @@ public class CloudFrontController {
     }
 
     private String xmlResponseHeadersPolicyResponse(ResponseHeadersPolicy policy) {
-        return new XmlBuilder()
+        XmlBuilder xml = new XmlBuilder()
                 .start("ResponseHeadersPolicy")
                 .elem("Id", policy.getId())
                 .elem("LastModifiedTime",
                         policy.getLastModifiedTime() != null ? policy.getLastModifiedTime().toString() : "")
                 .start("ResponseHeadersPolicyConfig")
                 .elem("Name", policy.getName())
-                .elem("Comment", policy.getComment() != null ? policy.getComment() : "")
-                .end("ResponseHeadersPolicyConfig")
+                .elem("Comment", policy.getComment() != null ? policy.getComment() : "");
+        ResponseHeadersPolicyConfigCodec.serialize(xml, policy.getConfig());
+        return xml.end("ResponseHeadersPolicyConfig")
                 .end("ResponseHeadersPolicy")
                 .build();
     }
@@ -2368,11 +2392,37 @@ public class CloudFrontController {
             Origin current = null;
             Map<String, String> s3Config = null;
             Map<String, Object> customConfig = null;
+            boolean inCustomHeaders = false;
+            boolean inCustomHeaderItems = false;
+            boolean customHeaderItemsSeen = false;
+            List<Map<String, String>> customHeaders = null;
+            Map<String, String> currentHeader = null;
+            Integer customHeadersQuantity = null;
 
             while (r.hasNext()) {
                 int event = r.next();
                 if (event == XMLStreamConstants.START_ELEMENT) {
                     String local = r.getLocalName();
+                    if (inCustomHeaders) {
+                        boolean validElement = switch (local) {
+                            case "Quantity" -> !inCustomHeaderItems
+                                    && currentHeader == null
+                                    && customHeadersQuantity == null;
+                            case "Items" -> !inCustomHeaderItems
+                                    && currentHeader == null
+                                    && !customHeaderItemsSeen;
+                            case "OriginCustomHeader" ->
+                                    inCustomHeaderItems && currentHeader == null;
+                            case "HeaderName" -> currentHeader != null
+                                    && !currentHeader.containsKey("HeaderName");
+                            case "HeaderValue" -> currentHeader != null
+                                    && !currentHeader.containsKey("HeaderValue");
+                            default -> false;
+                        };
+                        if (!validElement) {
+                            throw invalidOriginCustomHeadersStructure();
+                        }
+                    }
                     switch (local) {
                         case "Origins" -> inOrigins = true;
                         case "Origin" -> {
@@ -2417,7 +2467,8 @@ public class CloudFrontController {
                             if (inOrigin && !inS3OriginConfig && !inCustomOriginConfig && current != null) {
                                 try {
                                     current.setConnectionAttempts(Integer.parseInt(r.getElementText()));
-                                } catch (NumberFormatException ignored) {
+                                } catch (NumberFormatException e) {
+                                    LOG.debugv("Ignoring malformed ConnectionAttempts during parse: {0}", e.getMessage());
                                 }
                             }
                         }
@@ -2425,7 +2476,8 @@ public class CloudFrontController {
                             if (inOrigin && !inS3OriginConfig && !inCustomOriginConfig && current != null) {
                                 try {
                                     current.setConnectionTimeout(Integer.parseInt(r.getElementText()));
-                                } catch (NumberFormatException ignored) {
+                                } catch (NumberFormatException e) {
+                                    LOG.debugv("Ignoring malformed ConnectionTimeout during parse: {0}", e.getMessage());
                                 }
                             }
                         }
@@ -2449,6 +2501,45 @@ public class CloudFrontController {
                                 customConfig.put("OriginProtocolPolicy", r.getElementText());
                             }
                         }
+                        case "CustomHeaders" -> {
+                            if (inOrigin) {
+                                inCustomHeaders = true;
+                                inCustomHeaderItems = false;
+                                customHeaderItemsSeen = false;
+                                customHeaders = new ArrayList<>();
+                                customHeadersQuantity = null;
+                            }
+                        }
+                        case "Quantity" -> {
+                            if (inCustomHeaders && currentHeader == null) {
+                                try {
+                                    customHeadersQuantity = Integer.parseInt(r.getElementText());
+                                } catch (NumberFormatException e) {
+                                    throw inconsistentQuantities();
+                                }
+                            }
+                        }
+                        case "Items" -> {
+                            if (inCustomHeaders) {
+                                inCustomHeaderItems = true;
+                                customHeaderItemsSeen = true;
+                            }
+                        }
+                        case "OriginCustomHeader" -> {
+                            if (inCustomHeaders) {
+                                currentHeader = new LinkedHashMap<>();
+                            }
+                        }
+                        case "HeaderName" -> {
+                            if (inCustomHeaders && currentHeader != null) {
+                                currentHeader.put("HeaderName", r.getElementText());
+                            }
+                        }
+                        case "HeaderValue" -> {
+                            if (inCustomHeaders && currentHeader != null) {
+                                currentHeader.put("HeaderValue", r.getElementText());
+                            }
+                        }
                         default -> {
                         }
                     }
@@ -2468,6 +2559,37 @@ public class CloudFrontController {
                             inCustomOriginConfig = false;
                             customConfig = null;
                         }
+                        case "OriginCustomHeader" -> {
+                            if (inCustomHeaders && currentHeader != null && customHeaders != null) {
+                                customHeaders.add(currentHeader);
+                            }
+                            currentHeader = null;
+                        }
+                        case "Items" -> {
+                            if (inCustomHeaders) {
+                                if (currentHeader != null) {
+                                    throw invalidOriginCustomHeadersStructure();
+                                }
+                                inCustomHeaderItems = false;
+                            }
+                        }
+                        case "CustomHeaders" -> {
+                            if (inCustomHeaders && current != null) {
+                                int itemCount = customHeaders == null ? 0 : customHeaders.size();
+                                if (customHeadersQuantity == null || customHeadersQuantity != itemCount) {
+                                    throw inconsistentQuantities();
+                                }
+                                if (itemCount > 0 && !customHeaderItemsSeen) {
+                                    throw invalidOriginCustomHeadersStructure();
+                                }
+                                current.setCustomHeaders(customHeaders);
+                            }
+                            inCustomHeaders = false;
+                            inCustomHeaderItems = false;
+                            customHeaderItemsSeen = false;
+                            customHeaders = null;
+                            customHeadersQuantity = null;
+                        }
                         case "Origin" -> {
                             if (inOrigin && current != null) {
                                 result.add(current);
@@ -2482,9 +2604,30 @@ public class CloudFrontController {
                 }
             }
             r.close();
-        } catch (Exception ignored) {
+            return result;
+        } catch (AwsException e) {
+            throw e;
+        } catch (Exception e) {
+            LOG.debugv("Rejecting malformed Origins during parse: {0}", e.getMessage());
+            throw new AwsException(
+                    "InvalidArgument",
+                    "The origin configuration is invalid.",
+                    400);
         }
-        return result;
+    }
+
+    private static AwsException inconsistentQuantities() {
+        return new AwsException(
+                "InconsistentQuantities",
+                "The value of Quantity and the size of Items do not match.",
+                400);
+    }
+
+    private static AwsException invalidOriginCustomHeadersStructure() {
+        return new AwsException(
+                "InvalidArgument",
+                "The origin custom headers structure is invalid.",
+                400);
     }
 
     private DefaultCacheBehavior parseDefaultCacheBehavior(String body) {
@@ -2883,6 +3026,7 @@ public class CloudFrontController {
         ResponseHeadersPolicy policy = new ResponseHeadersPolicy();
         policy.setName(XmlParser.extractFirst(body, "Name", null));
         policy.setComment(XmlParser.extractFirst(body, "Comment", null));
+        policy.setConfig(ResponseHeadersPolicyConfigCodec.parse(body));
         return policy;
     }
 

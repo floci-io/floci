@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.services.route53.model.HealthCheckConfig;
 import io.github.hectorvent.floci.services.route53.model.HostedZone;
 import io.github.hectorvent.floci.services.route53.model.ResourceRecord;
 import io.github.hectorvent.floci.services.route53.model.ResourceRecordSet;
+import io.github.hectorvent.floci.services.route53.model.VpcAssociation;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.DELETE;
 import jakarta.ws.rs.DefaultValue;
@@ -60,25 +61,26 @@ public class Route53Controller {
             String name = XmlParser.extractFirst(body, "Name", null);
             String callerRef = XmlParser.extractFirst(body, "CallerReference", null);
             String comment = XmlParser.extractFirst(body, "Comment", null);
-            boolean privateZone = "true".equalsIgnoreCase(
-                    XmlParser.extractFirst(body, "PrivateZone", "false"));
+            VpcAssociation vpcAssociation = parseVpcAssociation(body);
 
             if (name == null || callerRef == null) {
                 throw new AwsException("InvalidInput", "Name and CallerReference are required.", 400);
             }
 
-            CreateZoneResult result = service.createHostedZone(name, callerRef, comment, privateZone);
-            String xml = new XmlBuilder()
+            CreateZoneResult result = service.createHostedZone(name, callerRef, comment, vpcAssociation);
+            XmlBuilder xml = new XmlBuilder()
                     .start("CreateHostedZoneResponse", NS)
                     .raw(xmlHostedZone(result.zone()))
                     .raw(xmlChangeInfo(result.change()))
-                    .raw(xmlDelegationSet())
-                    .end("CreateHostedZoneResponse")
-                    .build();
+                    .raw(xmlDelegationSet());
+            if (!result.zone().getVpcAssociations().isEmpty()) {
+                xml.raw(xmlVpcAssociation(result.zone().getVpcAssociations().getFirst()));
+            }
+            xml.end("CreateHostedZoneResponse");
 
             return Response.created(URI.create("/2013-04-01/hostedzone/" + result.zone().getId()))
                     .type(XML)
-                    .entity(xml)
+                    .entity(xml.build())
                     .build();
         } catch (AwsException e) {
             return xmlErrorResponse(e);
@@ -94,6 +96,7 @@ public class Route53Controller {
                     .start("GetHostedZoneResponse", NS)
                     .raw(xmlHostedZone(zone))
                     .raw(xmlDelegationSet())
+                    .raw(xmlVpcAssociations(zone.getVpcAssociations()))
                     .end("GetHostedZoneResponse")
                     .build();
             return Response.ok(xml, XML).build();
@@ -541,6 +544,26 @@ public class Route53Controller {
         return xml.build();
     }
 
+    private String xmlVpcAssociation(VpcAssociation association) {
+        return new XmlBuilder()
+                .start("VPC")
+                .elem("VPCRegion", association.getVpcRegion())
+                .elem("VPCId", association.getVpcId())
+                .end("VPC")
+                .build();
+    }
+
+    private String xmlVpcAssociations(List<VpcAssociation> associations) {
+        if (associations == null || associations.isEmpty()) {
+            return "";
+        }
+        XmlBuilder xml = new XmlBuilder().start("VPCs");
+        for (VpcAssociation association : associations) {
+            xml.raw(xmlVpcAssociation(association));
+        }
+        return xml.end("VPCs").build();
+    }
+
     private String xmlResourceRecordSet(ResourceRecordSet rrs) {
         XmlBuilder xml = new XmlBuilder()
                 .start("ResourceRecordSet")
@@ -610,6 +633,23 @@ public class Route53Controller {
     }
 
     // ── Request parsers ───────────────────────────────────────────────────────
+
+    private VpcAssociation parseVpcAssociation(String body) {
+        List<Map<String, String>> vpcs = XmlParser.extractGroups(body, "VPC");
+        if (vpcs.isEmpty()) {
+            return null;
+        }
+        Map<String, String> vpc = vpcs.get(0);
+        String vpcId = vpc.get("VPCId");
+        String vpcRegion = vpc.get("VPCRegion");
+        // AWS requires VPCId and VPCRegion together whenever VPC is present; a
+        // half-populated element must not mark the zone private.
+        if (vpcId == null || vpcId.isEmpty() || vpcRegion == null || vpcRegion.isEmpty()) {
+            throw new AwsException(
+                    "InvalidInput", "VPCId and VPCRegion are both required when VPC is specified.", 400);
+        }
+        return new VpcAssociation(vpcId, vpcRegion);
+    }
 
     /**
      * Parses the ChangeBatch XML using StAX to correctly handle multiple Change elements,

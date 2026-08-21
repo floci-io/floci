@@ -6,6 +6,9 @@ quarkus:
       max-body-size: ${floci.max-request-size}M
   datasource:
     active: false
+  kubernetes-client:
+    devservices:
+      enabled: false
   # Groovy (a REST Assured dependency) starts DFA-cache-cleaner threads that never stop.
   # Loaded parent-first they live in the shared system classloader, so they cannot pin a
   # per-profile application classloader across the many app restarts of a test run.
@@ -69,6 +72,8 @@ floci:
       appsync:
         flush-interval-ms: 60000
       rum:
+        flush-interval-ms: 60000
+      fis:
         flush-interval-ms: 60000
       guardduty:
         flush-interval-ms: 60000
@@ -274,6 +279,8 @@ floci:
     backup:
       enabled: true
       job-completion-delay-seconds: 1
+    fis:
+      enabled: true
     route53:
       enabled: true
     textract:
@@ -291,6 +298,7 @@ floci:
     cloudtrail:
       enabled: true
     lightsail:
+      enabled: true
     cloudcontrol:
       enabled: true
     cloudfront:
@@ -314,6 +322,7 @@ floci:
     iotdata:
       enabled: true
     cloudhsmv2:
+      enabled: true
     efs:
       enabled: true
     rum:
@@ -321,4 +330,18 @@ floci:
     guardduty:
       enabled: true
     emrserverless:
+      enabled: true
+    tagging:
+      enabled: true
+    configservice:
+      enabled: true
+    transcribe:
+      enabled: true
+    docdb:
+      enabled: true
+      mock: false
+      default-image: "mongo:7.0"
+    bedrock-agent-core:
+      enabled: true
+    bedrock-agent-core-control:
       enabled: true

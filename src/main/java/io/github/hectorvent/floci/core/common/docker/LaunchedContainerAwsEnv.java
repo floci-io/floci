@@ -47,7 +47,15 @@ public class LaunchedContainerAwsEnv {
      *                           credentials from there. Empty = inject host or placeholder credentials.
      */
     public List<String> sdkBaselineEnv(String region, Optional<String> awsConfigMountDir) {
-        return sdkBaselineEnv(region, awsConfigMountDir, Optional.empty());
+        return sdkBaselineEnv(region, awsConfigMountDir, reachableEndpoint.baseUrl(), Optional.empty());
+    }
+
+    /**
+     * Variant for launchers whose workloads reach Floci at an address other than the
+     * Docker-reachable one (e.g. Kubernetes pods reaching Floci's pod IP).
+     */
+    public List<String> sdkBaselineEnv(String region, Optional<String> awsConfigMountDir, String flociEndpoint) {
+        return sdkBaselineEnv(region, awsConfigMountDir, flociEndpoint, Optional.empty());
     }
 
     /**
@@ -56,25 +64,34 @@ public class LaunchedContainerAwsEnv {
      */
     public List<String> sdkBaselineEnv(String region, Optional<String> awsConfigMountDir,
                                        Optional<SessionCreds> injectedCredentials) {
-        List<String> env = new ArrayList<>();
+        return sdkBaselineEnv(region, awsConfigMountDir, reachableEndpoint.baseUrl(), injectedCredentials);
+    }
+
+    /**
+     * Full variant taking both the Floci endpoint the workload should target and optional
+     * workload-specific session credentials.
+     */
+    public List<String> sdkBaselineEnv(String region, Optional<String> awsConfigMountDir,
+                                       String flociEndpoint, Optional<SessionCreds> injectedCredentials) {
+        var env = new ArrayList<String>();
         env.add("AWS_DEFAULT_REGION=" + region);
         env.add("AWS_REGION=" + region);
         if (awsConfigMountDir.isPresent() && !awsConfigMountDir.get().isBlank()) {
             // ~/.aws is mounted, so don't inject credentials. Let the SDK discover them.
             // Set explicit file paths so discovery works regardless of container HOME.
-            String dir = awsConfigMountDir.get();
+            var dir = awsConfigMountDir.get();
             env.add("AWS_SHARED_CREDENTIALS_FILE=" + dir + "/credentials");
             env.add("AWS_CONFIG_FILE=" + dir + "/config");
         } else if (injectedCredentials.isPresent()) {
-            SessionCreds credentials = injectedCredentials.get();
+            var credentials = injectedCredentials.get();
             env.add("AWS_ACCESS_KEY_ID=" + credentials.accessKeyId());
             env.add("AWS_SECRET_ACCESS_KEY=" + credentials.secretAccessKey());
             env.add("AWS_SESSION_TOKEN=" + credentials.sessionToken());
         } else {
             // Use Floci's own env vars, falling back to placeholder credentials.
-            String ak = System.getenv("AWS_ACCESS_KEY_ID");
-            String sk = System.getenv("AWS_SECRET_ACCESS_KEY");
-            String st = System.getenv("AWS_SESSION_TOKEN");
+            var ak = System.getenv("AWS_ACCESS_KEY_ID");
+            var sk = System.getenv("AWS_SECRET_ACCESS_KEY");
+            var st = System.getenv("AWS_SESSION_TOKEN");
             if ((ak != null || sk != null || st != null) && hostCredentialsWarned.compareAndSet(false, true)) {
                 // The container runs workload code, so surface that it is being handed the
                 // credentials Floci itself was started with (an exported key pair, aws-vault, a
@@ -89,7 +106,6 @@ public class LaunchedContainerAwsEnv {
             env.add("AWS_SECRET_ACCESS_KEY=" + (sk != null ? sk : "test"));
             env.add("AWS_SESSION_TOKEN=" + (st != null ? st : "test"));
         }
-        String flociEndpoint = reachableEndpoint.baseUrl();
         env.add("FLOCI_HOSTNAME=" + URI.create(flociEndpoint).getHost());
         env.add("FLOCI_ENDPOINT=" + flociEndpoint);
         env.add("AWS_ENDPOINT_URL=" + flociEndpoint);

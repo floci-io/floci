@@ -266,6 +266,7 @@ public interface EmulatorConfig {
         Ec2StorageConfig ec2();
         NeptuneStorageConfig neptune();
         BackupStorageConfig backup();
+        FisStorageConfig fis();
         CloudFrontStorageConfig cloudfront();
         AppSyncStorageConfig appsync();
         BatchStorageConfig batch();
@@ -399,6 +400,13 @@ public interface EmulatorConfig {
     }
 
     interface BackupStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+
+    interface FisStorageConfig {
         Optional<String> mode();
 
         @WithDefault("5000")
@@ -609,6 +617,7 @@ public interface EmulatorConfig {
         ApplicationAutoScalingServiceConfig applicationautoscaling();
         ElasticBeanstalkServiceConfig elasticbeanstalk();
         BackupServiceConfig backup();
+        FisServiceConfig fis();
         NeptuneServiceConfig neptune();
         DocDbServiceConfig docdb();
         Route53ServiceConfig route53();
@@ -715,6 +724,11 @@ public interface EmulatorConfig {
 
         @WithDefault("3")
         int jobCompletionDelaySeconds();
+    }
+
+    interface FisServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
     }
 
     interface Route53ServiceConfig {
@@ -1590,6 +1604,55 @@ public interface EmulatorConfig {
          * Env var: FLOCI_SERVICES_LAMBDA_AWS_CONFIG_PATH
          */
         Optional<String> awsConfigPath();
+
+        /**
+         * Execution backend for Lambda environments: {@code docker} (default) runs each
+         * environment as a Docker container, {@code kubernetes} runs it as a pod in the
+         * cluster Floci is configured against (in-cluster config or local kubeconfig).
+         *
+         * Env var: FLOCI_SERVICES_LAMBDA_EXECUTOR
+         */
+        @WithDefault("docker")
+        String executor();
+
+        KubernetesExecutor kubernetes();
+
+        interface KubernetesExecutor {
+            /**
+             * Namespace Lambda pods are created in. Multiple Floci instances must use
+             * separate namespaces — orphaned pods are swept by label on startup.
+             *
+             * Env var: FLOCI_SERVICES_LAMBDA_KUBERNETES_NAMESPACE
+             */
+            @WithDefault("default")
+            String namespace();
+
+            /**
+             * Extra labels applied to Lambda pods, as {@code key=value} entries.
+             *
+             * Env var: FLOCI_SERVICES_LAMBDA_KUBERNETES_LABELS (comma-separated)
+             */
+            Optional<List<String>> labels();
+
+            /**
+             * Host or IP that Lambda pods use to reach Floci (the Runtime API port range
+             * and the main port). When unset, Floci auto-detects its own pod address if
+             * running in-cluster; when running outside the cluster this must be set to an
+             * address the cluster's pods can reach.
+             *
+             * Env var: FLOCI_SERVICES_LAMBDA_KUBERNETES_FLOCI_ADDRESS
+             */
+            Optional<String> flociAddress();
+
+            /**
+             * Image for the init container that downloads and unpacks function code into
+             * the pod. Must provide sh, wget and unzip.
+             *
+             * Env var: FLOCI_SERVICES_LAMBDA_KUBERNETES_INIT_IMAGE
+             */
+            @WithDefault("busybox:1.36")
+            String initImage();
+        }
 
         HotReload hotReload();
 

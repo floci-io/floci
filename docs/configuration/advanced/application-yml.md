@@ -76,6 +76,8 @@ floci:
         flush-interval-ms: 5000
       opensearch:
         flush-interval-ms: 5000
+      fis:
+        flush-interval-ms: 5000
 
   dns:
     # Extra hostname suffixes resolved to Floci's container IP by the embedded DNS server.
@@ -242,6 +244,9 @@ floci:
       enabled: true
 
     appconfigdata:
+      enabled: true
+
+    fis:
       enabled: true
 
     ecr:

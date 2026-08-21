@@ -326,8 +326,14 @@ public class ElastiCacheService {
                 return port;
             }
         }
-        throw new AwsException("InsufficientReplicationGroupCapacity",
-                "No available proxy ports in range " + base + "-" + max, 503);
+        // Proxy-port exhaustion is a Floci-side limit, but on the wire it must look like the
+        // modeled capacity fault. botocore/smithy declare InsufficientCacheClusterCapacityFault
+        // for CreateReplicationGroup: awsQueryError code InsufficientCacheClusterCapacity,
+        // HTTP 400, Sender fault. The old InsufficientReplicationGroupCapacity/503 is invented —
+        // no such shape exists, so SDK clients cannot map it. Keep the real cause in the log.
+        LOG.warnv("ElastiCache proxy port range {0}-{1} exhausted; returning InsufficientCacheClusterCapacity", base, max);
+        throw new AwsException("InsufficientCacheClusterCapacity",
+                "The requested cache node type is not available in the specified Availability Zone.", 400);
     }
 
     private void releaseProxyPort(int port) {
