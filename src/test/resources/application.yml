@@ -332,6 +332,8 @@ floci:
       enabled: true
     emrserverless:
       enabled: true
+    route53resolver:
+      enabled: true
     tagging:
       enabled: true
     configservice:
