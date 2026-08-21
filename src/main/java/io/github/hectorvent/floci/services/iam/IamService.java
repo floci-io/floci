@@ -831,10 +831,12 @@ public class IamService implements SessionAccountLookup {
         summary.put("SigningCertificatesPerUserQuota", 2L);
         summary.put("ServerCertificates", 0L);
         summary.put("ServerCertificatesQuota", 20L);
-        summary.put("Providers", 0L);
+        summary.put("Providers", (long) oidcProviders.scan(k -> true).size());
         summary.put("MFADevices", 0L);
         summary.put("MFADevicesInUse", 0L);
         summary.put("AccountMFAEnabled", 0L);
+        // AWS reports whether the root account has access keys, not whether IAM users do.
+        // Floci does not model root access keys, so this remains false even when user keys exist.
         summary.put("AccountAccessKeysPresent", 0L);
         summary.put("AccountSigningCertificatesPresent", 0L);
         summary.put("AccountPasswordPresent", 0L);
