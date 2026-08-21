@@ -35,6 +35,7 @@
 | `EnableEnhancedMonitoring` | - |
 | `DisableEnhancedMonitoring` | - |
 | `UpdateStreamMode` | - |
+| `UpdateMaxRecordSize` | - |
 <!-- floci:actions:end -->
 
 ## Local Inspection Endpoints

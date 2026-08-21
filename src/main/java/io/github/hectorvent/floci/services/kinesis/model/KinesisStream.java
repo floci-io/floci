@@ -26,6 +26,8 @@ public class KinesisStream {
     private String keyId;
     private String streamMode = "PROVISIONED";
     private Set<String> enhancedMonitoringMetrics = new HashSet<>();
+    // AWS's default; streams persisted before this field existed read as the default too.
+    private int maxRecordSizeInKiB = 1024;
 
     public KinesisStream() {}
 
@@ -68,6 +70,9 @@ public class KinesisStream {
 
     public String getStreamMode() { return streamMode; }
     public void setStreamMode(String streamMode) { this.streamMode = streamMode; }
+
+    public int getMaxRecordSizeInKiB() { return maxRecordSizeInKiB; }
+    public void setMaxRecordSizeInKiB(int maxRecordSizeInKiB) { this.maxRecordSizeInKiB = maxRecordSizeInKiB; }
 
     public Set<String> getEnhancedMonitoringMetrics() { return enhancedMonitoringMetrics; }
     public void setEnhancedMonitoringMetrics(Set<String> enhancedMonitoringMetrics) { this.enhancedMonitoringMetrics = enhancedMonitoringMetrics; }
