@@ -402,6 +402,15 @@ public class EcsService implements ContainerTeardown {
         }
     }
 
+    /**
+     * Writes back a task definition mutated after {@link #registerTaskDefinition} returned it.
+     * A backend that serializes on {@code put} (persistent, hybrid, WAL) stored the value as it was
+     * at registration, so fields set on the returned instance need this to survive a restart.
+     */
+    public void persistTaskDefinition(TaskDefinition td) {
+        taskDefinitions.put(td.getFamily() + ":" + td.getRevision(), td);
+    }
+
     public TaskDefinition describeTaskDefinition(String taskDefinitionRef, String region) {
         return resolveTaskDefinitionOrThrow(taskDefinitionRef, region);
     }

@@ -30,6 +30,12 @@ ECS emulates clusters, task definitions, tasks, and services. In the default con
 | `DeregisterTaskDefinition` | Mark a revision INACTIVE |
 | `DeleteTaskDefinitions` | Delete one or more task definitions |
 
+`runtimePlatform` and a container's `logConfiguration` are stored and returned exactly as
+registered, so a client that reads back what it wrote (Terraform, or a deploy tool verifying its
+own `RegisterTaskDefinition`) sees no drift. Neither changes how a local task runs: Floci launches
+every task on the host's own architecture, and a task's output stays with its Docker container
+rather than being routed to the configured log driver.
+
 ### Tasks
 
 | Operation | Description |
