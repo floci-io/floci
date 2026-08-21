@@ -676,7 +676,7 @@ public class ApiGatewayController {
 
     @DELETE
     @Path("/restapis/{apiId}/authorizers/{authorizerId}")
-    public Response deleteAuthorizer(@PathParam("apiId") String apiId, @PathParam("authorizerId") String authorizerId, @Context HttpHeaders headers) {
+    public Response deleteAuthorizer(@Context HttpHeaders headers, @PathParam("apiId") String apiId, @PathParam("authorizerId") String authorizerId) {
         String region = regionResolver.resolveRegion(headers);
         service.deleteAuthorizer(region, apiId, authorizerId);
         return Response.accepted().build();
