@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.dynamodb.model.AttributeDefinition;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
@@ -332,5 +333,61 @@ class DynamoDbJsonHandlerTest {
 
         assertEquals("None", reasons.get(0).get("Code").asText());
         assertNull(reasons.get(0).get("Message"), "non failed item must not have a Message field");
+    }
+
+    // Reproduces lex00/floci#86: PutResourcePolicy/GetResourcePolicy/DeleteResourcePolicy
+    // were entirely unimplemented, so every call fell through to the default 400
+    // UnknownOperationException branch.
+    @Test
+    void putGetDeleteResourcePolicyRoundTrips() throws Exception {
+        TableDefinition table = createUsersTable("eu-west-1");
+        String tableArn = table.getTableArn();
+        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Sid\":\"AllowDummyRoleAccess\","
+                + "\"Effect\":\"Allow\",\"Principal\":{\"AWS\":\"arn:aws:iam::222222222222:role/DummyRole\"},"
+                + "\"Action\":\"dynamodb:GetItem\",\"Resource\":\"" + tableArn + "\"}]}";
+
+        ObjectNode putRequest = mapper.createObjectNode();
+        putRequest.put("ResourceArn", tableArn);
+        putRequest.put("Policy", policy);
+
+        Response putResponse = handler.handle("PutResourcePolicy", putRequest, "eu-west-1");
+        assertEquals(200, putResponse.getStatus());
+        JsonNode putBody = mapper.convertValue(putResponse.getEntity(), JsonNode.class);
+        assertTrue(putBody.has("RevisionId"), "PutResourcePolicy must return a RevisionId");
+        String revisionId = putBody.get("RevisionId").asText();
+        assertFalse(revisionId.isBlank());
+
+        ObjectNode getRequest = mapper.createObjectNode();
+        getRequest.put("ResourceArn", tableArn);
+
+        Response getResponse = handler.handle("GetResourcePolicy", getRequest, "eu-west-1");
+        assertEquals(200, getResponse.getStatus());
+        JsonNode getBody = mapper.convertValue(getResponse.getEntity(), JsonNode.class);
+        assertEquals(policy, getBody.get("Policy").asText());
+        assertEquals(revisionId, getBody.get("RevisionId").asText());
+
+        ObjectNode deleteRequest = mapper.createObjectNode();
+        deleteRequest.put("ResourceArn", tableArn);
+
+        Response deleteResponse = handler.handle("DeleteResourcePolicy", deleteRequest, "eu-west-1");
+        assertEquals(200, deleteResponse.getStatus());
+        JsonNode deleteBody = mapper.convertValue(deleteResponse.getEntity(), JsonNode.class);
+        assertEquals(revisionId, deleteBody.get("RevisionId").asText());
+
+        // Policy is gone: GetResourcePolicy must fail now
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("GetResourcePolicy", getRequest, "eu-west-1"));
+        assertEquals("PolicyNotFoundException", ex.getErrorCode());
+    }
+
+    @Test
+    void putResourcePolicyRejectsInvalidResourceArn() {
+        ObjectNode putRequest = mapper.createObjectNode();
+        putRequest.put("ResourceArn", "not-an-arn");
+        putRequest.put("Policy", "{}");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("PutResourcePolicy", putRequest, "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
     }
 }

@@ -66,6 +66,9 @@ public class DynamoDbJsonHandler {
             case "TagResource" -> handleTagResource(request, region);
             case "UntagResource" -> handleUntagResource(request, region);
             case "ListTagsOfResource" -> handleListTagsOfResource(request, region);
+            case "PutResourcePolicy" -> handlePutResourcePolicy(request, region);
+            case "GetResourcePolicy" -> handleGetResourcePolicy(request, region);
+            case "DeleteResourcePolicy" -> handleDeleteResourcePolicy(request, region);
             case "EnableKinesisStreamingDestination" -> handleEnableKinesisStreamingDestination(request, region);
             case "DisableKinesisStreamingDestination" -> handleDisableKinesisStreamingDestination(request, region);
             case "DescribeKinesisStreamingDestination" -> handleDescribeKinesisStreamingDestination(request, region);
@@ -1595,6 +1598,58 @@ public class DynamoDbJsonHandler {
             tagsArray.add(tagNode);
         }
         response.set("Tags", tagsArray);
+        return Response.ok(response).build();
+    }
+
+    private Response handlePutResourcePolicy(JsonNode request, String region) {
+        String resourceArn = request.path("ResourceArn").asText();
+        if (!isValidDynamoDbTableArn(resourceArn)) {
+            throw new AwsException("ValidationException",
+                    "Invalid ResourceArn: " + resourceArn, 400);
+        }
+        if (!request.hasNonNull("Policy")) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value null at 'policy' failed to satisfy constraint: "
+                    + "Member must not be null", 400);
+        }
+        String policy = request.path("Policy").asText();
+        String expectedRevisionId = request.has("ExpectedRevisionId")
+                ? request.get("ExpectedRevisionId").asText() : null;
+
+        String revisionId = dynamoDbService.putResourcePolicy(resourceArn, policy, expectedRevisionId, region);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("RevisionId", revisionId);
+        return Response.ok(response).build();
+    }
+
+    private Response handleGetResourcePolicy(JsonNode request, String region) {
+        String resourceArn = request.path("ResourceArn").asText();
+        if (!isValidDynamoDbTableArn(resourceArn)) {
+            throw new AwsException("ValidationException",
+                    "Invalid ResourceArn: " + resourceArn, 400);
+        }
+        DynamoDbService.ResourcePolicyResult result = dynamoDbService.getResourcePolicy(resourceArn, region);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("Policy", result.policy());
+        response.put("RevisionId", result.revisionId());
+        return Response.ok(response).build();
+    }
+
+    private Response handleDeleteResourcePolicy(JsonNode request, String region) {
+        String resourceArn = request.path("ResourceArn").asText();
+        if (!isValidDynamoDbTableArn(resourceArn)) {
+            throw new AwsException("ValidationException",
+                    "Invalid ResourceArn: " + resourceArn, 400);
+        }
+        String expectedRevisionId = request.has("ExpectedRevisionId")
+                ? request.get("ExpectedRevisionId").asText() : null;
+
+        String revisionId = dynamoDbService.deleteResourcePolicy(resourceArn, expectedRevisionId, region);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("RevisionId", revisionId);
         return Response.ok(response).build();
     }
 
