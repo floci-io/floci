@@ -72,12 +72,12 @@ class SigninServiceTest {
         verify(iam).registerSessionForAccount(eq(ACCOUNT_A), eq(tokens.accessToken().accessKeyId()),
                 eq(tokens.accessToken().secretAccessKey()),
                 eq("arn:aws:iam::" + ACCOUNT_A + ":root"), any(), isNull());
-        assertThrows(SigninService.SigninException.class, () -> exchangeCode(code, VERIFIER));
+        assertThrows(SigninException.class, () -> exchangeCode(code, VERIFIER));
     }
 
     @Test
     void requiresAwsSha256ChallengeMethod() throws Exception {
-        SigninService.SigninException error = assertThrows(SigninService.SigninException.class,
+        SigninException error = assertThrows(SigninException.class,
                 () -> service.authorize(CLIENT_ID, challenge(VERIFIER), "S256", REDIRECT_URI,
                         "code", "openid", "state", null));
 
@@ -151,7 +151,7 @@ class SigninServiceTest {
         String code = authorizeCode(VERIFIER);
         clock.advance(Duration.ofMinutes(5));
 
-        SigninService.SigninException error = assertThrows(SigninService.SigninException.class,
+        SigninException error = assertThrows(SigninException.class,
                 () -> exchangeCode(code, VERIFIER));
 
         assertEquals("invalid_grant", error.error());
@@ -161,7 +161,7 @@ class SigninServiceTest {
     void rejectsPkceMismatchWithoutRegisteringCredentials() throws Exception {
         String code = authorizeCode(VERIFIER);
 
-        SigninService.SigninException error = assertThrows(SigninService.SigninException.class,
+        SigninException error = assertThrows(SigninException.class,
                 () -> exchangeCode(code, VERIFIER + "wrong"));
 
         assertEquals("invalid_grant", error.error());
@@ -301,26 +301,26 @@ class SigninServiceTest {
     }
 
     private void assertInvalidAuthorization(String challenge, String clientId, String redirectUri, String state) {
-        SigninService.SigninException error = assertThrows(SigninService.SigninException.class,
+        SigninException error = assertThrows(SigninException.class,
                 () -> authorize(challenge, clientId, redirectUri, state));
         assertEquals("invalid_request", error.error());
     }
 
     private void assertInvalidVerifier(String verifier) throws Exception {
         String code = authorizeCode(verifier);
-        SigninService.SigninException error = assertThrows(SigninService.SigninException.class,
+        SigninException error = assertThrows(SigninException.class,
                 () -> exchangeCode(code, verifier));
         assertEquals("invalid_request", error.error());
     }
 
     private void assertInvalidRefresh(String refreshToken) {
-        SigninService.SigninException error = assertThrows(SigninService.SigninException.class,
+        SigninException error = assertThrows(SigninException.class,
                 () -> refresh(refreshToken));
         assertEquals("invalid_grant", error.error());
     }
 
     private void assertInvalidRequest(org.junit.jupiter.api.function.Executable request) {
-        SigninService.SigninException error = assertThrows(SigninService.SigninException.class, request);
+        SigninException error = assertThrows(SigninException.class, request);
         assertEquals("invalid_request", error.error());
     }
 

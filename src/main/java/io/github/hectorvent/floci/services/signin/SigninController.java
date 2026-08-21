@@ -46,78 +46,73 @@ public class SigninController {
                               @QueryParam("scope") String scope,
                               @QueryParam("state") String state,
                               @QueryParam("resource") String resource) {
-        try {
-            String location = signinService.authorize(clientId, codeChallenge, codeChallengeMethod,
-                    redirectUri, responseType, scope, state, resource);
-            return Response.status(Response.Status.FOUND)
-                    .header(HttpHeaders.LOCATION, location)
-                    .build();
-        } catch (SigninService.SigninException e) {
-            return error(e);
-        }
+        String location = signinService.authorize(clientId, codeChallenge, codeChallengeMethod,
+                redirectUri, responseType, scope, state, resource);
+        return Response.status(Response.Status.FOUND)
+                .header(HttpHeaders.LOCATION, location)
+                .build();
     }
 
     @POST
     @Path("/v1/token")
     @Consumes({MediaType.APPLICATION_JSON, MediaType.APPLICATION_FORM_URLENCODED})
     public Response token(String body, @Context HttpHeaders headers) {
-        try {
-            Map<String, String> values = parseBody(body, headers.getHeaderString(HttpHeaders.CONTENT_TYPE));
-            TokenResult result = signinService.exchange(
-                    value(values, "clientId", "client_id"),
-                    value(values, "grantType", "grant_type"),
-                    value(values, "code"),
-                    value(values, "redirectUri", "redirect_uri"),
-                    value(values, "codeVerifier", "code_verifier"),
-                    value(values, "refreshToken", "refresh_token"),
-                    value(values, "resource"));
-            Map<String, Object> response = new LinkedHashMap<>();
-            SessionCreds accessToken = result.accessToken();
-            response.put("accessToken", Map.of(
-                    "accessKeyId", accessToken.accessKeyId(),
-                    "secretAccessKey", accessToken.secretAccessKey(),
-                    "sessionToken", accessToken.sessionToken()));
-            response.put("tokenType", "aws_sigv4");
-            response.put("expiresIn", result.expiresIn());
-            response.put("refreshToken", result.refreshToken());
-            if (result.idToken() != null) {
-                response.put("idToken", result.idToken());
-            }
-            return Response.ok(response).type(MediaType.APPLICATION_JSON).build();
-        } catch (SigninService.SigninException e) {
-            return error(e);
-        } catch (IOException e) {
-            return error(new SigninService.SigninException("invalid_request", "Request body must be valid JSON"));
+        Map<String, String> values = parseBody(body, headers.getHeaderString(HttpHeaders.CONTENT_TYPE));
+        TokenResult result = signinService.exchange(
+                value(values, "clientId", "client_id"),
+                value(values, "grantType", "grant_type"),
+                value(values, "code"),
+                value(values, "redirectUri", "redirect_uri"),
+                value(values, "codeVerifier", "code_verifier"),
+                value(values, "refreshToken", "refresh_token"),
+                value(values, "resource"));
+        Map<String, Object> response = new LinkedHashMap<>();
+        SessionCreds accessToken = result.accessToken();
+        response.put("accessToken", Map.of(
+                "accessKeyId", accessToken.accessKeyId(),
+                "secretAccessKey", accessToken.secretAccessKey(),
+                "sessionToken", accessToken.sessionToken()));
+        response.put("tokenType", "aws_sigv4");
+        response.put("expiresIn", result.expiresIn());
+        response.put("refreshToken", result.refreshToken());
+        if (result.idToken() != null) {
+            response.put("idToken", result.idToken());
         }
+        return Response.ok(response).type(MediaType.APPLICATION_JSON).build();
     }
 
-    private Map<String, String> parseBody(String body, String contentType) throws IOException {
-        if (contentType != null && contentType.startsWith(MediaType.APPLICATION_FORM_URLENCODED)) {
-            Map<String, String> values = new LinkedHashMap<>();
-            if (body == null || body.isBlank()) {
+    private Map<String, String> parseBody(String body, String contentType) {
+        try {
+            if (contentType != null && contentType.startsWith(MediaType.APPLICATION_FORM_URLENCODED)) {
+                Map<String, String> values = new LinkedHashMap<>();
+                if (body == null || body.isBlank()) {
+                    return values;
+                }
+                for (String pair : body.split("&")) {
+                    String[] keyValue = pair.split("=", 2);
+                    String key = URLDecoder.decode(keyValue[0], StandardCharsets.UTF_8);
+                    String value = keyValue.length == 2
+                            ? URLDecoder.decode(keyValue[1], StandardCharsets.UTF_8) : "";
+                    values.put(key, value);
+                }
                 return values;
             }
-            for (String pair : body.split("&")) {
-                String[] keyValue = pair.split("=", 2);
-                String key = URLDecoder.decode(keyValue[0], StandardCharsets.UTF_8);
-                String value = keyValue.length == 2 ? URLDecoder.decode(keyValue[1], StandardCharsets.UTF_8) : "";
-                values.put(key, value);
+            JsonNode root = objectMapper.readTree(body == null ? "" : body);
+            if (root != null && root.has("tokenInput")) {
+                root = root.get("tokenInput");
+            }
+            Map<String, String> values = new LinkedHashMap<>();
+            if (root != null && root.isObject()) {
+                root.fields().forEachRemaining(entry -> {
+                    if (entry.getValue().isValueNode()) {
+                        values.put(entry.getKey(), entry.getValue().asText());
+                    }
+                });
             }
             return values;
+        } catch (IOException e) {
+            throw new SigninException("invalid_request", "Request body must be valid JSON");
         }
-        JsonNode root = objectMapper.readTree(body == null ? "" : body);
-        if (root != null && root.has("tokenInput")) {
-            root = root.get("tokenInput");
-        }
-        Map<String, String> values = new LinkedHashMap<>();
-        if (root != null && root.isObject()) {
-            root.fields().forEachRemaining(entry -> {
-                if (entry.getValue().isValueNode()) {
-                    values.put(entry.getKey(), entry.getValue().asText());
-                }
-            });
-        }
-        return values;
     }
 
     private static String value(Map<String, String> values, String... names) {
@@ -129,10 +124,4 @@ public class SigninController {
         return null;
     }
 
-    private static Response error(SigninService.SigninException exception) {
-        return Response.status(Response.Status.BAD_REQUEST)
-                .type(MediaType.APPLICATION_JSON)
-                .entity(Map.of("error", exception.error(), "message", exception.getMessage()))
-                .build();
-    }
 }

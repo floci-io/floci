@@ -14,6 +14,7 @@ import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.hasKey;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -67,7 +68,23 @@ class SigninIntegrationTest {
                 .get("/v1/authorize")
                 .then()
                 .statusCode(400)
-                .body("error", equalTo("invalid_request"));
+                .body("error", equalTo("invalid_request"))
+                .body("message", equalTo("code_challenge_method must be SHA-256"))
+                .body("$", not(hasKey("__type")));
+    }
+
+    @Test
+    void malformedTokenJsonUsesSigninErrorEnvelope() {
+        request()
+                .contentType("application/json")
+                .body("{")
+                .when()
+                .post("/v1/token")
+                .then()
+                .statusCode(400)
+                .body("error", equalTo("invalid_request"))
+                .body("message", equalTo("Request body must be valid JSON"))
+                .body("$", not(hasKey("__type")));
     }
 
     @Test
