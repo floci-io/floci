@@ -247,7 +247,7 @@ public class MemoryLakeFormationStorage implements LakeFormationStorage {
             if (r.getTableWithColumns().getColumnNames() != null && !r.getTableWithColumns().getColumnNames().isEmpty()) {
                 sb.append(":cols:").append(r.getTableWithColumns().getColumnNames().stream().map(c -> java.net.URLEncoder.encode(c, java.nio.charset.StandardCharsets.UTF_8)).sorted().collect(Collectors.joining(",")));
             } else if (r.getTableWithColumns().getColumnWildcard() != null) {
-                sb.append(":cols:*");
+                sb.append(":wildcard");
                 if (r.getTableWithColumns().getColumnWildcard().getExcludedColumnNames() != null && !r.getTableWithColumns().getColumnWildcard().getExcludedColumnNames().isEmpty()) {
                     sb.append(":excl:").append(r.getTableWithColumns().getColumnWildcard().getExcludedColumnNames().stream().map(c -> java.net.URLEncoder.encode(c, java.nio.charset.StandardCharsets.UTF_8)).sorted().collect(Collectors.joining(",")));
                 }
@@ -264,7 +264,7 @@ public class MemoryLakeFormationStorage implements LakeFormationStorage {
         }
         if (r.getLfTag() != null) {
             String cat = r.getLfTag().getCatalogId() != null ? "catalog:" + r.getLfTag().getCatalogId() + ":" : "";
-            StringBuilder sb = new StringBuilder(cat + "lfTag:" + r.getLfTag().getTagKey());
+            StringBuilder sb = new StringBuilder(cat + "lfTag:" + java.net.URLEncoder.encode(r.getLfTag().getTagKey(), java.nio.charset.StandardCharsets.UTF_8));
             if (r.getLfTag().getTagValues() != null) {
                 sb.append("=").append(r.getLfTag().getTagValues().stream().map(v -> java.net.URLEncoder.encode(v, java.nio.charset.StandardCharsets.UTF_8)).sorted().collect(Collectors.joining(",")));
             }
@@ -282,7 +282,7 @@ public class MemoryLakeFormationStorage implements LakeFormationStorage {
             }
             if (r.getLfTagPolicy().getExpression() != null) {
                 sb.append(":expr:").append(r.getLfTagPolicy().getExpression().stream()
-                        .map(e -> e.getTagKey() + "=" + e.getTagValues().stream().map(v -> java.net.URLEncoder.encode(v, java.nio.charset.StandardCharsets.UTF_8)).sorted().collect(Collectors.joining(",")))
+                        .map(e -> java.net.URLEncoder.encode(e.getTagKey(), java.nio.charset.StandardCharsets.UTF_8) + "=" + e.getTagValues().stream().map(v -> java.net.URLEncoder.encode(v, java.nio.charset.StandardCharsets.UTF_8)).sorted().collect(Collectors.joining(",")))
                         .sorted().collect(Collectors.joining(";")));
             }
             return sb.toString();
