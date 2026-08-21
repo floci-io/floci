@@ -495,4 +495,385 @@ class KinesisJsonHandlerTest {
                 () -> handler.handle("PutRecords", req, REGION));
         assertEquals("ResourceNotFoundException", ex.getErrorCode());
     }
+
+    private String streamArn(String name) {
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("StreamName", name);
+        return responseEntity(handler.handle("DescribeStreamSummary", req, REGION))
+                .get("StreamDescriptionSummary").get("StreamARN").asText();
+    }
+
+    private AwsException putRecord(String streamName, int dataBytes) {
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("StreamName", streamName);
+        req.put("Data", Base64.getEncoder().encodeToString(new byte[dataBytes]));
+        req.put("PartitionKey", "pk1");
+        return assertThrows(AwsException.class, () -> handler.handle("PutRecord", req, REGION));
+    }
+
+    /**
+     * Only PutRecord exposes the ordering: PutRecords resolves the stream in its own preflight, so
+     * a swap inside putRecordWithShardId stays invisible there.
+     */
+    @Test
+    void putRecordResolvesTheStreamBeforeValidatingRecordSize() {
+        assertEquals("ResourceNotFoundException", putRecord("missing-stream", 1_048_577).getErrorCode());
+    }
+
+    /** The partition key counts as UTF-8 bytes: 100 euro signs weigh 300, not 100. */
+    @Test
+    void putRecordMeasuresThePartitionKeyAsUtf8Bytes() {
+        createStream("test-stream");
+
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("StreamName", "test-stream");
+        req.put("Data", Base64.getEncoder().encodeToString(new byte[1_048_400]));
+        req.put("PartitionKey", "€".repeat(100));
+        AwsException ex = assertThrows(AwsException.class, () -> handler.handle("PutRecord", req, REGION));
+        assertEquals("InvalidArgumentException", ex.getErrorCode());
+    }
+
+    @Test
+    void putRecordsRejectsMoreThanFiveHundredRecords() {
+        createStream("test-stream");
+
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("StreamName", "test-stream");
+        ArrayNode records = req.putArray("Records");
+        for (int i = 0; i < 501; i++) {
+            records.addObject().put("Data", "dGVzdA==").put("PartitionKey", "pk1");
+        }
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("PutRecords", req, REGION));
+        assertEquals("InvalidArgumentException", ex.getErrorCode());
+    }
+
+    /** The count cap is inclusive: 500 is the largest batch AWS accepts, not the first rejected. */
+    @Test
+    void putRecordsAcceptsExactlyFiveHundredRecords() {
+        createStream("test-stream");
+
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("StreamName", "test-stream");
+        ArrayNode records = req.putArray("Records");
+        for (int i = 0; i < 500; i++) {
+            records.addObject().put("Data", "dGVzdA==").put("PartitionKey", "pk1");
+        }
+        Response resp = handler.handle("PutRecords", req, REGION);
+        assertThat(resp.getStatus(), is(200));
+        assertEquals(0, responseEntity(resp).get("FailedRecordCount").asInt());
+    }
+
+    /** Eleven records that each pass the per-record check still exceed the 10 MiB request cap. */
+    @Test
+    void putRecordsRejectsRequestOverTheTotalSizeLimit() {
+        createStream("test-stream");
+
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("StreamName", "test-stream");
+        ArrayNode records = req.putArray("Records");
+        String data = Base64.getEncoder().encodeToString(new byte[1_048_000]);
+        for (int i = 0; i < 11; i++) {
+            records.addObject().put("Data", data).put("PartitionKey", "pk1");
+        }
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("PutRecords", req, REGION));
+        assertEquals("InvalidArgumentException", ex.getErrorCode());
+    }
+
+    @Test
+    void describeStreamSummaryReportsTheDefaultMaxRecordSize() {
+        createStream("test-stream");
+
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("StreamName", "test-stream");
+        assertEquals(1024, responseEntity(handler.handle("DescribeStreamSummary", req, REGION))
+                .get("StreamDescriptionSummary").get("MaxRecordSizeInKiB").asInt());
+    }
+
+    /** An explicit JSON null means "not specified", not a type error — the default still applies. */
+    @Test
+    void createStreamTreatsANullMaxRecordSizeAsAbsent() {
+        ObjectNode create = MAPPER.createObjectNode();
+        create.put("StreamName", "null-size-stream");
+        create.put("ShardCount", 1);
+        create.putNull("MaxRecordSizeInKiB");
+        assertThat(handler.handle("CreateStream", create, REGION).getStatus(), is(200));
+
+        ObjectNode summary = MAPPER.createObjectNode();
+        summary.put("StreamName", "null-size-stream");
+        assertEquals(1024, responseEntity(handler.handle("DescribeStreamSummary", summary, REGION))
+                .get("StreamDescriptionSummary").get("MaxRecordSizeInKiB").asInt());
+    }
+
+    @Test
+    void createStreamHonorsMaxRecordSizeInKiB() {
+        ObjectNode create = MAPPER.createObjectNode();
+        create.put("StreamName", "big-stream");
+        create.put("ShardCount", 1);
+        create.put("MaxRecordSizeInKiB", 2048);
+        assertThat(handler.handle("CreateStream", create, REGION).getStatus(), is(200));
+
+        ObjectNode summary = MAPPER.createObjectNode();
+        summary.put("StreamName", "big-stream");
+        assertEquals(2048, responseEntity(handler.handle("DescribeStreamSummary", summary, REGION))
+                .get("StreamDescriptionSummary").get("MaxRecordSizeInKiB").asInt());
+
+        ObjectNode put = MAPPER.createObjectNode();
+        put.put("StreamName", "big-stream");
+        put.put("Data", Base64.getEncoder().encodeToString(new byte[1_500_000]));
+        put.put("PartitionKey", "pk1");
+        assertThat(handler.handle("PutRecord", put, REGION).getStatus(), is(200));
+    }
+
+    private AwsException createStreamWithMaxRecordSize(String name, int maxRecordSizeInKiB) {
+        ObjectNode create = MAPPER.createObjectNode();
+        create.put("StreamName", name);
+        create.put("ShardCount", 1);
+        create.put("MaxRecordSizeInKiB", maxRecordSizeInKiB);
+        return assertThrows(AwsException.class, () -> handler.handle("CreateStream", create, REGION));
+    }
+
+    /**
+     * Both bounds, and 0 — a real out-of-range value rather than "not specified". CreateStream
+     * reserves ValidationException for the on-demand case, so a range violation is InvalidArgument.
+     */
+    @Test
+    void createStreamRejectsMaxRecordSizeOutOfRange() {
+        assertEquals("InvalidArgumentException", createStreamWithMaxRecordSize("low-stream", 1023).getErrorCode());
+        assertEquals("InvalidArgumentException", createStreamWithMaxRecordSize("high-stream", 10241).getErrorCode());
+        assertEquals("InvalidArgumentException", createStreamWithMaxRecordSize("zero-stream", 0).getErrorCode());
+    }
+
+    /** A long or a float would otherwise truncate into range: 4294969344 narrows to 2048. */
+    @Test
+    void maxRecordSizeMustBeAnIntegerRatherThanTruncatedIntoRange() {
+        for (Object bad : new Object[] {4294969344L, 10240.9d, "2048"}) {
+            ObjectNode create = MAPPER.createObjectNode();
+            create.put("StreamName", "typed-stream");
+            create.put("ShardCount", 1);
+            if (bad instanceof Long l) {
+                create.put("MaxRecordSizeInKiB", l);
+            } else if (bad instanceof Double d) {
+                create.put("MaxRecordSizeInKiB", d);
+            } else {
+                create.put("MaxRecordSizeInKiB", (String) bad);
+            }
+            AwsException ex = assertThrows(AwsException.class,
+                    () -> handler.handle("CreateStream", create, REGION));
+            assertEquals("InvalidArgumentException", ex.getErrorCode(), "for " + bad);
+        }
+    }
+
+    @Test
+    void createStreamAcceptsBothEndsOfTheAllowedRange() {
+        for (int size : new int[] {1024, 10240}) {
+            ObjectNode create = MAPPER.createObjectNode();
+            create.put("StreamName", "edge-" + size);
+            create.put("ShardCount", 1);
+            create.put("MaxRecordSizeInKiB", size);
+            assertThat(handler.handle("CreateStream", create, REGION).getStatus(), is(200));
+
+            ObjectNode summary = MAPPER.createObjectNode();
+            summary.put("StreamName", "edge-" + size);
+            assertEquals(size, responseEntity(handler.handle("DescribeStreamSummary", summary, REGION))
+                    .get("StreamDescriptionSummary").get("MaxRecordSizeInKiB").asInt());
+        }
+    }
+
+    /** A Data that is not a base64 string cannot weigh nothing, or it smuggles the payload through. */
+    @Test
+    void putRecordsCountsNonStringDataTowardTheTotalSizeLimit() {
+        createStream("test-stream");
+
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("StreamName", "test-stream");
+        ArrayNode records = req.putArray("Records");
+        for (int i = 0; i < 500; i++) {
+            records.addObject().putObject("Data").put("pad", "X".repeat(21_000));
+        }
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("PutRecords", req, REGION));
+        assertEquals("InvalidArgumentException", ex.getErrorCode());
+    }
+
+    /** Multi-byte characters must be counted as UTF-8 bytes, not UTF-16 units. */
+    @Test
+    void putRecordsCountsUndecodableDataAsUtf8Bytes() {
+        createStream("test-stream");
+
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("StreamName", "test-stream");
+        req.putArray("Records").addObject()
+                .put("Data", "€".repeat(4_000_000))
+                .put("PartitionKey", "pk1");
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("PutRecords", req, REGION));
+        assertEquals("InvalidArgumentException", ex.getErrorCode());
+    }
+
+    private AwsException updateMaxRecordSize(String streamName, int maxRecordSizeInKiB) {
+        ObjectNode update = MAPPER.createObjectNode();
+        update.put("StreamARN", streamArn(streamName));
+        update.put("MaxRecordSizeInKiB", maxRecordSizeInKiB);
+        return assertThrows(AwsException.class,
+                () -> handler.handle("UpdateMaxRecordSize", update, REGION));
+    }
+
+    @Test
+    void updateMaxRecordSizeRejectsMissingStreamArn() {
+        ObjectNode update = MAPPER.createObjectNode();
+        update.put("MaxRecordSizeInKiB", 2048);
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateMaxRecordSize", update, REGION));
+        assertEquals("InvalidArgumentException", ex.getErrorCode());
+    }
+
+    @Test
+    void updateMaxRecordSizeRejectsAMissingSize() {
+        createStream("test-stream");
+
+        ObjectNode update = MAPPER.createObjectNode();
+        update.put("StreamARN", streamArn("test-stream"));
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateMaxRecordSize", update, REGION));
+        assertEquals("InvalidArgumentException", ex.getErrorCode());
+        assertEquals("MaxRecordSizeInKiB is required", ex.getMessage());
+    }
+
+    @Test
+    void putRecordsRejectsAnEmptyRecordArray() {
+        createStream("test-stream");
+
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("StreamName", "test-stream");
+        req.putArray("Records");
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("PutRecords", req, REGION));
+        assertEquals("InvalidArgumentException", ex.getErrorCode());
+    }
+
+    /** The preflight runs first, so an empty batch on an unknown stream is still a 404. */
+    @Test
+    void putRecordsResolvesTheStreamBeforeValidatingTheRecordCount() {
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("StreamName", "missing-stream");
+        req.putArray("Records");
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("PutRecords", req, REGION));
+        assertEquals("ResourceNotFoundException", ex.getErrorCode());
+    }
+
+    /** Pins the cap's value: ten near-limit records sit just under 10 MiB and must be accepted. */
+    @Test
+    void putRecordsAcceptsARequestJustUnderTheTotalSizeLimit() {
+        createStream("test-stream");
+
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("StreamName", "test-stream");
+        ArrayNode records = req.putArray("Records");
+        String data = Base64.getEncoder().encodeToString(new byte[1_048_000]);
+        for (int i = 0; i < 10; i++) {
+            records.addObject().put("Data", data).put("PartitionKey", "pk1");
+        }
+        assertThat(handler.handle("PutRecords", req, REGION).getStatus(), is(200));
+    }
+
+    /** And the cap itself is inclusive: ten records of 1_048_573 + "pk1" total exactly 10 MiB. */
+    @Test
+    void putRecordsAcceptsARequestExactlyAtTheTotalSizeLimit() {
+        createStream("test-stream");
+
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("StreamName", "test-stream");
+        ArrayNode records = req.putArray("Records");
+        String data = Base64.getEncoder().encodeToString(new byte[1_048_573]);
+        for (int i = 0; i < 10; i++) {
+            records.addObject().put("Data", data).put("PartitionKey", "pk1");
+        }
+        Response resp = handler.handle("PutRecords", req, REGION);
+        assertThat(resp.getStatus(), is(200));
+        assertEquals(0, responseEntity(resp).get("FailedRecordCount").asInt());
+    }
+
+    /** Data that fails to decode still occupies the request, so it cannot be free of the cap. */
+    @Test
+    void putRecordsCountsUndecodableDataTowardTheTotalSizeLimit() {
+        createStream("test-stream");
+
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("StreamName", "test-stream");
+        ArrayNode records = req.putArray("Records");
+        String malformed = "!".repeat(1_400_000);
+        for (int i = 0; i < 12; i++) {
+            records.addObject().put("Data", malformed).put("PartitionKey", "pk1");
+        }
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("PutRecords", req, REGION));
+        assertEquals("InvalidArgumentException", ex.getErrorCode());
+    }
+
+    @Test
+    void updateMaxRecordSizeRaisesTheStreamLimit() {
+        createStream("test-stream");
+        assertEquals("InvalidArgumentException", putRecord("test-stream", 1_500_000).getErrorCode());
+
+        ObjectNode update = MAPPER.createObjectNode();
+        update.put("StreamARN", streamArn("test-stream"));
+        update.put("MaxRecordSizeInKiB", 2048);
+        assertThat(handler.handle("UpdateMaxRecordSize", update, REGION).getStatus(), is(200));
+
+        ObjectNode put = MAPPER.createObjectNode();
+        put.put("StreamName", "test-stream");
+        put.put("Data", Base64.getEncoder().encodeToString(new byte[1_500_000]));
+        put.put("PartitionKey", "pk1");
+        assertThat(handler.handle("PutRecord", put, REGION).getStatus(), is(200));
+    }
+
+    @Test
+    void updateMaxRecordSizeRejectsOnDemandStreams() {
+        ObjectNode create = MAPPER.createObjectNode();
+        create.put("StreamName", "on-demand-stream");
+        create.put("ShardCount", 1);
+        create.putObject("StreamModeDetails").put("StreamMode", "ON_DEMAND");
+        assertThat(handler.handle("CreateStream", create, REGION).getStatus(), is(200));
+
+        ObjectNode update = MAPPER.createObjectNode();
+        update.put("StreamARN", streamArn("on-demand-stream"));
+        update.put("MaxRecordSizeInKiB", 2048);
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateMaxRecordSize", update, REGION));
+        assertEquals("ValidationException", ex.getErrorCode());
+    }
+
+    @Test
+    void updateMaxRecordSizeRejectsAStreamThatIsNotActive() {
+        createStream("test-stream");
+        service.describeStream("test-stream", REGION).setStreamStatus("UPDATING");
+
+        ObjectNode update = MAPPER.createObjectNode();
+        update.put("StreamARN", streamArn("test-stream"));
+        update.put("MaxRecordSizeInKiB", 2048);
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateMaxRecordSize", update, REGION));
+        assertEquals("ResourceInUseException", ex.getErrorCode());
+    }
+
+    @Test
+    void updateMaxRecordSizeRejectsSizeOutOfRange() {
+        createStream("test-stream");
+        assertEquals("ValidationException", updateMaxRecordSize("test-stream", 10241).getErrorCode());
+        assertEquals("ValidationException", updateMaxRecordSize("test-stream", 1023).getErrorCode());
+    }
+
+    /** Resolve before validate, the same ordering PutRecord follows. */
+    @Test
+    void updateMaxRecordSizeResolvesTheStreamBeforeValidatingTheSize() {
+        ObjectNode update = MAPPER.createObjectNode();
+        update.put("StreamARN", "arn:aws:kinesis:us-east-1:123456789012:stream/missing-stream");
+        update.put("MaxRecordSizeInKiB", 10241);
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateMaxRecordSize", update, REGION));
+        assertEquals("ResourceNotFoundException", ex.getErrorCode());
+    }
 }

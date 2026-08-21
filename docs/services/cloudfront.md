@@ -148,6 +148,11 @@ GET/HEAD/OPTIONS delivery from S3 or custom origins.
 - Viewer GET/HEAD requests, and OPTIONS requests allowed by the matched cache behavior, addressed to
   an enabled distribution's generated domain or alias are routed to the matching S3 or custom
   origin. Origin forwarding preserves the raw path; custom-origin redirects are not followed.
+- Origin custom headers are persisted through the CloudFront API and CloudFormation. They replace
+  same-named viewer headers on custom-origin GET/HEAD/OPTIONS requests. For in-process S3 origins, a
+  configured `Origin` header is used for S3 CORS evaluation. AWS-prohibited names, malformed
+  values, inconsistent quantities, duplicates, and quota violations are rejected with modeled
+  CloudFront errors when the distribution is created or updated.
 - Cache behaviors with enabled `TrustedKeyGroups` require a valid CloudFront signed URL or signed
   cookie before the origin is contacted. Signed URL parameters take precedence over signed cookies.
   Canned and custom policies support SHA-1 or SHA-256 signatures with RSA-2048 or ECDSA P-256 public

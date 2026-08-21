@@ -2032,6 +2032,10 @@ public class CloudFormationResourceProvisioner {
                 : (props != null ? props.get("S3DestinationConfiguration") : null);
         if (s3Node != null && !s3Node.isNull()) {
             s3 = new DeliveryStreamDescription.S3Destination();
+
+            s3.setCompressionFormat(
+                blankToNull(engine.resolve(s3Node.path("CompressionFormat")))
+            );
             s3.setBucketArn(blankToNull(engine.resolve(s3Node.path("BucketARN"))));
             s3.setPrefix(blankToNull(engine.resolve(s3Node.path("Prefix"))));
             if (s3Node.has("BufferingHints")) {
@@ -2195,9 +2199,37 @@ public class CloudFormationResourceProvisioner {
             }
             table = dynamoDbService.describeTable(tableName, region);
         }
+
+        // A template that declares StreamSpecification wants a stream. Unlike the DynamoDB API,
+        // the CloudFormation property carries no StreamEnabled flag — declaring the block IS the
+        // request — so its presence alone turns the stream on. Without this the table is created
+        // streamless and an event source mapping polls its ARN forever.
+        //
+        // Removing the block on an update is the inverse request: the stream is reconciled off,
+        // or a table updated out of streaming would keep emitting records to whatever still holds
+        // its ARN.
+        JsonNode streamSpec = props != null ? props.path("StreamSpecification") : null;
+        if (streamSpec != null && streamSpec.isObject()) {
+            String viewType = streamSpec.has("StreamViewType")
+                    ? engine.resolve(streamSpec.get("StreamViewType"))
+                    : null;
+            table = dynamoDbService.enableStream(tableName, viewType, region);
+        } else if (table.isStreamEnabled()) {
+            table = dynamoDbService.disableStream(tableName, region);
+        }
+
         r.setPhysicalId(tableName);
         r.getAttributes().put("Arn", table.getTableArn());
-        r.getAttributes().put("StreamArn", table.getTableArn() + "/stream/2024-01-01T00:00:00.000");
+        // Only a live stream has an ARN worth handing to Fn::GetAtt. Publishing one unconditionally
+        // resolved to nothing on a streamless table; publishing the retained ARN of a stream that
+        // has since been switched off would resolve to something no longer running. An update
+        // starts from the previous attributes, so the stale entry has to be removed rather than
+        // merely left unwritten.
+        if (table.isStreamEnabled() && table.getStreamArn() != null) {
+            r.getAttributes().put("StreamArn", table.getStreamArn());
+        } else {
+            r.getAttributes().remove("StreamArn");
+        }
     }
 
     // ── Lambda ────────────────────────────────────────────────────────────────
@@ -5273,6 +5305,9 @@ public class CloudFormationResourceProvisioner {
         req.put("routeKey", resolveOptional(props, "RouteKey", engine));
         req.put("authorizationType", resolveOrDefault(props, "AuthorizationType", engine, "NONE"));
         req.put("authorizerId", resolveOptional(props, "AuthorizerId", engine));
+        // Always present (empty when the property is absent) so an UpdateStack that removes
+        // AuthorizationScopes from the template clears the route's scopes instead of keeping them.
+        req.put("authorizationScopes", resolveStringListOrEmpty(props, "AuthorizationScopes", engine));
         req.put("target", resolveOptional(props, "Target", engine));
 
         Route route;
@@ -6422,6 +6457,17 @@ public class CloudFormationResourceProvisioner {
                         cfnText(node, "OriginAccessControlId", engine);
                 if (!originAccessControlId.isEmpty()) {
                     origin.setOriginAccessControlId(originAccessControlId);
+                }
+                JsonNode originCustomHeaders = node.path("OriginCustomHeaders");
+                if (originCustomHeaders.isArray()) {
+                    List<Map<String, String>> customHeaders = new ArrayList<>();
+                    for (JsonNode customHeader : originCustomHeaders) {
+                        Map<String, String> mapped = new LinkedHashMap<>();
+                        mapped.put("HeaderName", cfnText(customHeader, "HeaderName", engine));
+                        mapped.put("HeaderValue", cfnText(customHeader, "HeaderValue", engine));
+                        customHeaders.add(mapped);
+                    }
+                    origin.setCustomHeaders(customHeaders);
                 }
                 JsonNode s3 = node.path("S3OriginConfig");
                 JsonNode custom = node.path("CustomOriginConfig");

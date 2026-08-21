@@ -46,6 +46,7 @@ class SesConfigurationSetV1IntegrationTest {
             .post("/")
         .then()
             .statusCode(400)
+            .header("X-Amzn-Errortype", (String) null)
             .body(containsString("<Code>ConfigurationSetAlreadyExists</Code>"));
     }
 

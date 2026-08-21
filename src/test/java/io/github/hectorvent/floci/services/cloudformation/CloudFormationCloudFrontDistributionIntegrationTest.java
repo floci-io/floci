@@ -73,6 +73,9 @@ class CloudFormationCloudFrontDistributionIntegrationTest {
                               "Id": "s3-origin",
                               "DomainName": "%s.s3.us-east-1.amazonaws.com",
                               "OriginAccessControlId": "%s",
+                              "OriginCustomHeaders": [
+                                {"HeaderName": "X-Origin-Verify", "HeaderValue": "cfn-secret"}
+                              ],
                               "S3OriginConfig": { "OriginAccessIdentity": "" }
                             }
                           ],
@@ -128,6 +131,8 @@ class CloudFormationCloudFrontDistributionIntegrationTest {
         assertEquals(
                 oac.getId(),
                 provisioned.getConfig().getOrigins().getFirst().getOriginAccessControlId());
+        assertEquals(List.of(Map.of("HeaderName", "X-Origin-Verify", "HeaderValue", "cfn-secret")),
+                provisioned.getConfig().getOrigins().getFirst().getCustomHeaders());
         assertEquals("60669652-455b-4ae9-85a4-c4c02393f86c",
                 provisioned.getConfig().getDefaultCacheBehavior().getResponseHeadersPolicyId());
         assertEquals(List.of("67f7725c-6f97-4210-82d7-5512b31e9d03"),

@@ -258,6 +258,10 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>rum</artifactId>
         </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>fis</artifactId>
+        </dependency>
         <!-- GuardDuty client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>

@@ -596,6 +596,25 @@ class IamServiceTest {
     }
 
     @Test
+    void temporarySessionUsesExplicitAccountNamespace() {
+        String accountId = "222233334444";
+        String accessKeyId = "ASIASIGNINEXPLICIT";
+        AccountAwareStorageBackend<SessionCredential> sessions = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "000000000000");
+        IamService service = iamService(false, new InMemoryStorage<>(), sessions);
+
+        service.registerSessionForAccount(
+                accountId, accessKeyId, "signin-secret",
+                "arn:aws:iam::222233334444:root", Instant.now().plusSeconds(900), null);
+
+        SessionCredential stored = sessions.getForAccount(accountId, accessKeyId).orElseThrow();
+        assertEquals(accountId, stored.getOriginAccountId());
+        assertEquals("signin-secret", stored.getSecretAccessKey());
+        assertTrue(sessions.getForAccount("000000000000", accessKeyId).isEmpty());
+        assertEquals(accountId, service.resolveAccountId(accessKeyId).orElseThrow());
+    }
+
+    @Test
     void lambdaExecutionRoleSessionSweepPreservesStsSessions() {
         AccountAwareStorageBackend<SessionCredential> sessions = new AccountAwareStorageBackend<>(
                 new InMemoryStorage<>(), null, "000000000000");

@@ -16,6 +16,7 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 
 import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -66,6 +67,7 @@ public class KinesisJsonHandler {
             case "EnableEnhancedMonitoring" -> handleEnableEnhancedMonitoring(request, region);
             case "DisableEnhancedMonitoring" -> handleDisableEnhancedMonitoring(request, region);
             case "UpdateStreamMode" -> handleUpdateStreamMode(request, region);
+            case "UpdateMaxRecordSize" -> handleUpdateMaxRecordSize(request, region);
             default -> Response.status(400)
                     .entity(new AwsErrorResponse("UnsupportedOperation", "Operation " + action + " is not supported."))
                     .build();
@@ -112,7 +114,8 @@ public class KinesisJsonHandler {
                 streamMode = mode;
             }
         }
-        service.createStream(streamName, shardCount, streamMode, region);
+        service.createStream(streamName, shardCount, streamMode,
+                optionalMaxRecordSize(request), region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
@@ -132,6 +135,36 @@ public class KinesisJsonHandler {
         }
         String streamName = extractStreamNameFromArn(streamArn);
         service.updateStreamMode(streamName, streamMode, region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    /**
+     * MaxRecordSizeInKiB is modelled as an integer, so a float or a value outside int range is a
+     * type error rather than something to truncate into the range check.
+     */
+    private Integer optionalMaxRecordSize(JsonNode request) {
+        JsonNode size = request.path("MaxRecordSizeInKiB");
+        if (size.isMissingNode() || size.isNull()) {
+            return null;
+        }
+        if (!size.isIntegralNumber() || !size.canConvertToInt()) {
+            throw new AwsException("InvalidArgumentException",
+                    "MaxRecordSizeInKiB must be an integer", 400);
+        }
+        return size.intValue();
+    }
+
+    private Response handleUpdateMaxRecordSize(JsonNode request, String region) {
+        // UpdateMaxRecordSize identifies the stream by StreamARN only per the AWS API; StreamName is not valid.
+        String streamArn = request.path("StreamARN").asText(null);
+        if (streamArn == null || streamArn.isBlank()) {
+            throw new AwsException("InvalidArgumentException", "StreamARN is required", 400);
+        }
+        Integer size = optionalMaxRecordSize(request);
+        if (size == null) {
+            throw new AwsException("InvalidArgumentException", "MaxRecordSizeInKiB is required", 400);
+        }
+        service.updateMaxRecordSize(extractStreamNameFromArn(streamArn), size, region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
@@ -214,6 +247,7 @@ public class KinesisJsonHandler {
         summary.put("StreamCreationTimestamp", epochSeconds(stream.getStreamCreationTimestamp()));
         summary.put("OpenShardCount", (int) stream.getShards().stream().filter(s -> !s.isClosed()).count());
         summary.put("EncryptionType", stream.getEncryptionType());
+        summary.put("MaxRecordSizeInKiB", stream.getMaxRecordSizeInKiB());
         if (stream.getKeyId() != null) {
             summary.put("KeyId", stream.getKeyId());
         }
@@ -432,25 +466,43 @@ public class KinesisJsonHandler {
 
     private Response handlePutRecords(JsonNode request, String region) {
         String streamName = resolveStreamName(request);
-        service.describeStream(streamName, region);
+        KinesisStream stream = service.describeStream(streamName, region);
         JsonNode recordsNode = request.path("Records");
+        service.validateRecordCount(recordsNode.size());
 
         // An oversized record fails the whole request before anything is
         // written — per-record ErrorCode is reserved for throughput/internal
         // failures. Successful decodes are kept for the write loop; malformed
-        // Data is left null so it stays a per-record failure there.
+        // Data is left null so it stays a per-record failure there. The count
+        // cap is checked upfront and the byte cap as the loop goes, so neither
+        // an over-long batch nor an oversized one is fully decoded before it
+        // is rejected.
         record Entry(JsonNode node, byte[] data) {}
         List<Entry> entries = new ArrayList<>();
+        long totalBytes = 0;
         for (JsonNode node : recordsNode) {
-            byte[] data;
-            try {
-                data = Base64.getDecoder().decode(node.path("Data").asText());
-            } catch (IllegalArgumentException e) {
-                data = null;
+            JsonNode dataNode = node.path("Data");
+            byte[] data = null;
+            if (dataNode.isTextual()) {
+                try {
+                    data = Base64.getDecoder().decode(dataNode.textValue());
+                } catch (IllegalArgumentException e) {
+                    data = null;
+                }
             }
+            String partitionKey = node.path("PartitionKey").asText();
             if (data != null) {
-                service.validateRecordSize(data, node.path("PartitionKey").asText());
+                service.validateRecordSize(stream, data, partitionKey);
             }
+            // Data that did not decode still travelled in the request, so it counts toward the
+            // request cap at the bytes the caller sent rather than as nothing — otherwise a batch
+            // of undecodable records could carry any payload past the limit. A non-string Data is
+            // measured the same way, since it is not a blob AWS would have accepted either.
+            totalBytes += KinesisService.recordSize(
+                    data != null ? data.length
+                            : dataNode.toString().getBytes(StandardCharsets.UTF_8).length,
+                    partitionKey);
+            service.validateRequestSize(totalBytes);
             entries.add(new Entry(node, data));
         }
 
