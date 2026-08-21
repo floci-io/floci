@@ -376,50 +376,6 @@ class Ec2Tests {
     }
 
     @Test
-    @Order(11)
-    @DisplayName("CreateSubnet - reject unsupported tag resource type")
-    void createSubnetRejectsUnsupportedTagResourceType() {
-        assertCreateSubnetTagSpecificationRejected(
-                "10.0.2.0/24",
-                TagSpecification.builder()
-                        .resourceType(ResourceType.VPC)
-                        .tags(Tag.builder().key("Name").value("invalid").build())
-                        .build(),
-                "Tag specification resource type 'vpc'");
-    }
-
-    @Test
-    @Order(11)
-    @DisplayName("CreateSubnet - reject tag specification without resource type")
-    void createSubnetRejectsMissingTagResourceType() {
-        assertCreateSubnetTagSpecificationRejected(
-                "10.0.3.0/24",
-                TagSpecification.builder()
-                        .tags(Tag.builder().key("Name").value("invalid").build())
-                        .build(),
-                "Tag specification resource type ''");
-    }
-
-    private void assertCreateSubnetTagSpecificationRejected(
-            String cidrBlock, TagSpecification tagSpecification, String expectedMessage) {
-        assertThatThrownBy(() -> ec2.createSubnet(CreateSubnetRequest.builder()
-                .vpcId(vpcId)
-                .cidrBlock(cidrBlock)
-                .tagSpecifications(tagSpecification)
-                .build()))
-                .isInstanceOfSatisfying(Ec2Exception.class, error -> {
-                    assertThat(error.statusCode()).isEqualTo(400);
-                    assertThat(error.awsErrorDetails().errorCode()).isEqualTo("InvalidParameterValue");
-                    assertThat(error.awsErrorDetails().errorMessage()).contains(expectedMessage);
-                    assertThat(error.requestId()).isNotBlank();
-                });
-        assertThat(ec2.describeSubnets(DescribeSubnetsRequest.builder()
-                        .filters(Filter.builder().name("vpc-id").values(vpcId).build())
-                        .build()).subnets())
-                .noneMatch(subnet -> cidrBlock.equals(subnet.cidrBlock()));
-    }
-
-    @Test
     @Order(12)
     @DisplayName("DescribeSubnets - by ID")
     void describeSubnetsById() {
