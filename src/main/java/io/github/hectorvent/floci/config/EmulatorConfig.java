@@ -678,6 +678,10 @@ public interface EmulatorConfig {
     }
 
     interface EmrServerlessServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
     interface ServiceCatalogServiceConfig {
         @WithDefault("true")
         boolean enabled();
