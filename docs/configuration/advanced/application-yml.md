@@ -308,7 +308,7 @@ All keys in this table are declared on `EmulatorConfig` and accept environment v
 | `FLOCI_SERVICES_ECS_DOCKER_NETWORK`                | *(unset)*        | Docker network for ECS task containers                        |
 | `FLOCI_SERVICES_ECS_DEFAULT_MEMORY_MB`             | `512`            | Default memory (MB) when task definition omits it             |
 | `FLOCI_SERVICES_ECS_DEFAULT_CPU_UNITS`             | `256`            | Default CPU units when task definition omits it               |
-| `FLOCI_SERVICES_CODEBUILD_MAX_CONCURRENT_BUILDS`   | *(unbounded)*    | Max builds staging a workspace on disk at once; caps a parallel stage's fan-out on a constrained host |
+| `FLOCI_SERVICES_CODEBUILD_MAX_CONCURRENT_BUILDS`   | `4`    | Max builds staging a workspace on disk at once; caps a parallel stage's fan-out on a constrained host |
 | `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED`           | `false`          | Enforce IAM identity-based policies on every request when `true` |
 | `FLOCI_SERVICES_OPENSEARCH_MOCK`                   | `false`          | Skip Docker; domains appear active immediately (useful for CI)   |
 | `FLOCI_SERVICES_OPENSEARCH_KEEP_RUNNING_ON_SHUTDOWN` | `false`        | Leave OpenSearch containers running after Floci stops            |

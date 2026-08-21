@@ -116,8 +116,9 @@ on a well-resourced host.
 `StartBuild` honors the AWS override fields, so a CodePipeline CodeBuild action (or a manual caller) can
 retarget a build without editing the project: `sourceTypeOverride` / `sourceLocationOverride`,
 `secondarySourcesOverride`, `buildspecOverride`, `imageOverride`, and `environmentVariablesOverride`.
-This is how [CodePipeline](codepipeline.md) hands pipeline input artifacts to a CodeBuild action as
-its primary and secondary sources.
+[CodePipeline](codepipeline.md) uses these overrides to hand pipeline input artifacts to a
+CodeBuild action as its primary and secondary sources; that wiring ships with the CodePipeline
+work rather than here.
 
 ## Buildspec Support
 
