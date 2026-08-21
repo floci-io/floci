@@ -495,4 +495,119 @@ class KinesisJsonHandlerTest {
                 () -> handler.handle("PutRecords", req, REGION));
         assertEquals("ResourceNotFoundException", ex.getErrorCode());
     }
+
+    @Test
+    void getRecordsSerializesApproximateArrivalTimestampAsPlainDecimal() throws Exception {
+        createStream("test-stream");
+
+        ObjectNode putReq = MAPPER.createObjectNode();
+        putReq.put("StreamName", "test-stream");
+        putReq.put("Data", "dGVzdA==");
+        putReq.put("PartitionKey", "pk1");
+        handler.handle("PutRecord", putReq, REGION);
+
+        ObjectNode descReq = MAPPER.createObjectNode();
+        descReq.put("StreamName", "test-stream");
+        String shardId = responseEntity(handler.handle("DescribeStream", descReq, REGION))
+                .get("StreamDescription").get("Shards").get(0).get("ShardId").asText();
+
+        // A fixed, realistic (2020s-era) arrival timestamp - Instant.now() would also trigger
+        // the bug, but a fixed value makes the expected serialized decimal assertable exactly.
+        service.describeStream("test-stream", REGION).getShards().get(0).getRecords().get(0)
+                .setApproximateArrivalTimestamp(Instant.ofEpochMilli(1_786_959_659_083L));
+
+        ObjectNode iterReq = MAPPER.createObjectNode();
+        iterReq.put("StreamName", "test-stream");
+        iterReq.put("ShardId", shardId);
+        iterReq.put("ShardIteratorType", "TRIM_HORIZON");
+        String iterator = responseEntity(handler.handle("GetShardIterator", iterReq, REGION))
+                .get("ShardIterator").asText();
+
+        ObjectNode recReq = MAPPER.createObjectNode();
+        recReq.put("ShardIterator", iterator);
+        var timestampNode = responseEntity(handler.handle("GetRecords", recReq, REGION))
+                .get("Records").get(0).get("ApproximateArrivalTimestamp");
+
+        assertTrue(timestampNode.isNumber());
+        assertEquals(new BigDecimal("1786959659.083"), timestampNode.decimalValue());
+
+        String serialized = MAPPER.writeValueAsString(timestampNode);
+        assertEquals("1786959659.083", serialized);
+        assertFalse(serialized.contains("E"));
+        assertFalse(serialized.contains("e"));
+    }
+
+    @Test
+    void getRecordsWholeSecondArrivalTimestampRemainsNumeric() throws Exception {
+        createStream("test-stream");
+
+        ObjectNode putReq = MAPPER.createObjectNode();
+        putReq.put("StreamName", "test-stream");
+        putReq.put("Data", "dGVzdA==");
+        putReq.put("PartitionKey", "pk1");
+        handler.handle("PutRecord", putReq, REGION);
+
+        ObjectNode descReq = MAPPER.createObjectNode();
+        descReq.put("StreamName", "test-stream");
+        String shardId = responseEntity(handler.handle("DescribeStream", descReq, REGION))
+                .get("StreamDescription").get("Shards").get(0).get("ShardId").asText();
+
+        service.describeStream("test-stream", REGION).getShards().get(0).getRecords().get(0)
+                .setApproximateArrivalTimestamp(Instant.ofEpochMilli(1_786_959_659_000L));
+
+        ObjectNode iterReq = MAPPER.createObjectNode();
+        iterReq.put("StreamName", "test-stream");
+        iterReq.put("ShardId", shardId);
+        iterReq.put("ShardIteratorType", "TRIM_HORIZON");
+        String iterator = responseEntity(handler.handle("GetShardIterator", iterReq, REGION))
+                .get("ShardIterator").asText();
+
+        ObjectNode recReq = MAPPER.createObjectNode();
+        recReq.put("ShardIterator", iterator);
+        var timestampNode = responseEntity(handler.handle("GetRecords", recReq, REGION))
+                .get("Records").get(0).get("ApproximateArrivalTimestamp");
+
+        assertEquals(new BigDecimal("1786959659.000"), timestampNode.decimalValue());
+        assertEquals("1786959659.000", MAPPER.writeValueAsString(timestampNode));
+    }
+
+    @Test
+    void getRecordsOmitsArrivalTimestampRatherThanThrowingWhenNull() throws Exception {
+        // A record loaded back from hybrid/persistent JSON-backed storage (KinesisRecord is
+        // @RegisterForReflection with a no-arg constructor) can have a null
+        // approximateArrivalTimestamp if it was persisted by an older Floci version, or the
+        // field was otherwise dropped - GetRecords must not NPE serializing the whole response
+        // just because one record's timestamp is missing.
+        createStream("test-stream");
+
+        ObjectNode putReq = MAPPER.createObjectNode();
+        putReq.put("StreamName", "test-stream");
+        putReq.put("Data", "dGVzdA==");
+        putReq.put("PartitionKey", "pk1");
+        handler.handle("PutRecord", putReq, REGION);
+
+        ObjectNode descReq = MAPPER.createObjectNode();
+        descReq.put("StreamName", "test-stream");
+        String shardId = responseEntity(handler.handle("DescribeStream", descReq, REGION))
+                .get("StreamDescription").get("Shards").get(0).get("ShardId").asText();
+
+        service.describeStream("test-stream", REGION).getShards().get(0).getRecords().get(0)
+                .setApproximateArrivalTimestamp(null);
+
+        ObjectNode iterReq = MAPPER.createObjectNode();
+        iterReq.put("StreamName", "test-stream");
+        iterReq.put("ShardId", shardId);
+        iterReq.put("ShardIteratorType", "TRIM_HORIZON");
+        String iterator = responseEntity(handler.handle("GetShardIterator", iterReq, REGION))
+                .get("ShardIterator").asText();
+
+        ObjectNode recReq = MAPPER.createObjectNode();
+        recReq.put("ShardIterator", iterator);
+        Response resp = handler.handle("GetRecords", recReq, REGION);
+        assertThat(resp.getStatus(), is(200));
+
+        ObjectNode record = (ObjectNode) responseEntity(resp).get("Records").get(0);
+        assertFalse(record.has("ApproximateArrivalTimestamp"));
+        assertTrue(record.has("SequenceNumber"));
+    }
 }
