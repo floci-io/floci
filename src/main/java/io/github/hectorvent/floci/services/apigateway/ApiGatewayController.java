@@ -708,11 +708,15 @@ public class ApiGatewayController {
             throw new AwsException("BadRequestException", "mode=import and format=csv are required", 400);
         }
         String region = regionResolver.resolveRegion(headers);
-        List<String> ids = service.importApiKeys(region, body);
+        ApiGatewayService.ImportApiKeysResult result = service.importApiKeys(region, body);
+        if (failOnWarnings && !result.warnings().isEmpty()) {
+            throw new AwsException("BadRequestException", String.join("; ", result.warnings()), 400);
+        }
         ObjectNode root = objectMapper.createObjectNode();
         ArrayNode idArray = root.putArray("ids");
-        ids.forEach(idArray::add);
-        root.putArray("warnings");
+        result.ids().forEach(idArray::add);
+        ArrayNode warningArray = root.putArray("warnings");
+        result.warnings().forEach(warningArray::add);
         return Response.status(201).entity(root.toString()).type(MediaType.APPLICATION_JSON).build();
     }
 

@@ -2,10 +2,12 @@ package io.github.hectorvent.floci.services.apigateway;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 import io.github.hectorvent.floci.services.apigateway.model.EndpointConfiguration;
@@ -835,34 +837,70 @@ public class ApiGatewayService {
         return apiKey;
     }
 
-    public List<String> importApiKeys(String region, String csv) {
+    /** Result of ImportApiKeys: the generated key ids plus any non-fatal warnings raised for the CSV. */
+    public record ImportApiKeysResult(List<String> ids, List<String> warnings) {}
+
+    /**
+     * Imports API keys from the AWS CSV format. AWS ships a TitleCase header
+     * ({@code Name,Key,Description,Enabled,UsagePlanIds}); columns are addressed by name rather than
+     * position, and {@code value} is accepted as an alias for {@code Key}.
+     */
+    public ImportApiKeysResult importApiKeys(String region, String csv) {
         List<List<String>> rows = ApiKeyCsvParser.parse(csv);
         if (rows.isEmpty()) {
             throw new AwsException("BadRequestException", "CSV body is empty", 400);
         }
         List<String> header = rows.get(0);
-        if (header.size() < 3 || !"name".equals(header.get(0)) || !"value".equals(header.get(1)) || !"enabled".equals(header.get(2))) {
-            throw new AwsException("BadRequestException", "CSV header must contain name, value, enabled", 400);
+        Map<String, Integer> columns = new HashMap<>();
+        for (int i = 0; i < header.size(); i++) {
+            String column = header.get(i);
+            if (column == null) continue;
+            columns.putIfAbsent(column.trim().toLowerCase(java.util.Locale.ROOT), i);
         }
+        int nameIndex = columns.getOrDefault("name", -1);
+        int keyIndex = columns.containsKey("key") ? columns.get("key") : columns.getOrDefault("value", -1);
+        if (nameIndex < 0 || keyIndex < 0) {
+            throw new AwsException("BadRequestException",
+                    "CSV header must contain Name and Key columns", 400);
+        }
+        int descriptionIndex = columns.getOrDefault("description", -1);
+        int enabledIndex = columns.getOrDefault("enabled", -1);
+
         List<String> ids = new ArrayList<>();
+        List<String> warnings = new ArrayList<>();
+        Set<String> seenValues = new HashSet<>();
         for (int i = 1; i < rows.size(); i++) {
             List<String> row = rows.get(i);
-            if (row.size() < 3) {
+            String name = csvCell(row, nameIndex);
+            String value = csvCell(row, keyIndex);
+            if (name.isEmpty() || value.isEmpty()) {
                 throw new AwsException("BadRequestException", "Invalid CSV row", 400);
             }
-            String name = row.get(0);
-            String value = row.get(1);
-            if (name == null || name.isEmpty() || value == null || value.isEmpty()) {
-                throw new AwsException("BadRequestException", "Invalid CSV row", 400);
+            if (!seenValues.add(value)) {
+                warnings.add("Duplicate key value on row " + i + " for API key '" + name + "'");
             }
+            String enabled = csvCell(row, enabledIndex);
             Map<String, Object> request = new HashMap<>();
             request.put("name", name);
             request.put("value", value);
-            request.put("enabled", Boolean.parseBoolean(row.get(2)));
-            ApiKey apiKey = createApiKey(region, request);
-            ids.add(apiKey.getId());
+            // Absent or blank Enabled means enabled, matching the AWS default.
+            request.put("enabled", enabled.isEmpty() || Boolean.parseBoolean(enabled));
+            // The CSV Key column is the key VALUE; AWS generates a separate id for the key itself.
+            request.put("generateDistinctId", true);
+            String description = csvCell(row, descriptionIndex);
+            if (!description.isEmpty()) {
+                request.put("description", description);
+            }
+            ids.add(createApiKey(region, request).getId());
         }
-        return ids;
+        return new ImportApiKeysResult(ids, warnings);
+    }
+
+    /** Reads one CSV cell by column index, tolerating rows shorter than the header. */
+    private static String csvCell(List<String> row, int index) {
+        if (index < 0 || index >= row.size()) return "";
+        String value = row.get(index);
+        return value == null ? "" : value.trim();
     }
 
     public ApiKey getApiKey(String region, String apiKeyId) {
