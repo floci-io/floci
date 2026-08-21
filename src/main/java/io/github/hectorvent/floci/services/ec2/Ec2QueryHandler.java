@@ -1073,6 +1073,7 @@ public class Ec2QueryHandler {
         if (logDestination == null) {
             logDestination = p.getFirst("LogDestinationArn");
         }
+        String deliverLogsPermissionArn = p.getFirst("DeliverLogsPermissionArn");
         String logFormat = p.getFirst("LogFormat");
         int maxAgg = parseIntParam(p, "MaxAggregationInterval", 600);
 
@@ -1090,7 +1091,7 @@ public class Ec2QueryHandler {
                 .start("flowLogIdSet");
         for (String resourceId : resourceIds) {
             FlowLog fl = flowLogService.createFlowLog(region, resourceId, resourceType, trafficType,
-                    logDestinationType, logDestination, logFormat, maxAgg);
+                    logDestinationType, logDestination, deliverLogsPermissionArn, logFormat, maxAgg);
             // TagSpecification.N with ResourceType=vpc-flow-log, same shape every other
             // create handler in this file applies via applyResourceTags. FlowLog itself has no
             // model store registered in Ec2Service#tagTargets (it lives in FlowLogService), so
@@ -1122,6 +1123,7 @@ public class Ec2QueryHandler {
                     .elem("trafficType", fl.getTrafficType())
                     .elem("logDestinationType", fl.getLogDestinationType())
                     .elem("logDestination", fl.getLogDestination())
+                    .elem("deliverLogsPermissionArn", fl.getDeliverLogsPermissionArn())
                     .elem("flowLogStatus", fl.getFlowLogStatus())
                     .elem("deliverLogsStatus", fl.getDeliverLogsStatus())
                     .elem("maxAggregationInterval", String.valueOf(fl.getMaxAggregationInterval()))

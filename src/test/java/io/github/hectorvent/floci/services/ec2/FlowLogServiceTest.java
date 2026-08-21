@@ -33,7 +33,7 @@ class FlowLogServiceTest {
     @Test
     void deleteFlowLogsIsScopedToTheRequestRegion() {
         FlowLog fl = flowLogService.createFlowLog("us-east-1", "vpc-123", "VPC", "ALL",
-                "s3", "arn:aws:s3:::flow-bucket", null, 600);
+                "s3", "arn:aws:s3:::flow-bucket", null, null, 600);
 
         List<String> otherRegion = flowLogService.deleteFlowLogs("eu-west-1", List.of(fl.getFlowLogId()));
 

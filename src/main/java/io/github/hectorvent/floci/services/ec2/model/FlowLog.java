@@ -25,6 +25,7 @@ public class FlowLog {
     private String trafficType;      // ALL | ACCEPT | REJECT
     private String logDestinationType; // s3 | cloud-watch-logs
     private String logDestination;   // S3 bucket ARN, e.g. arn:aws:s3:::flow-logs-bucket
+    private String deliverLogsPermissionArn; // IAM role ARN, required when logDestinationType=cloud-watch-logs
     private String bucketName;       // resolved bucket name from the ARN
     private String logFormat;        // optional custom format string (default format used if null)
     private int maxAggregationInterval = 600; // seconds (60 or 600)
@@ -51,6 +52,9 @@ public class FlowLog {
 
     public String getLogDestination() { return logDestination; }
     public void setLogDestination(String logDestination) { this.logDestination = logDestination; }
+
+    public String getDeliverLogsPermissionArn() { return deliverLogsPermissionArn; }
+    public void setDeliverLogsPermissionArn(String deliverLogsPermissionArn) { this.deliverLogsPermissionArn = deliverLogsPermissionArn; }
 
     public String getBucketName() { return bucketName; }
     public void setBucketName(String bucketName) { this.bucketName = bucketName; }

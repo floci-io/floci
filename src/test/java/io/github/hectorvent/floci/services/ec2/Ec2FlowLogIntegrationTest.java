@@ -29,6 +29,7 @@ class Ec2FlowLogIntegrationTest {
 
     private static String vpcId;
     private static String flowLogId;
+    private static String cloudwatchFlowLogId;
 
     // =========================================================================
     // Fixture: a VPC to attach the flow log to
@@ -160,6 +161,65 @@ class Ec2FlowLogIntegrationTest {
         .then()
             .statusCode(200)
             .body("DescribeFlowLogsResponse.flowLogSet.item[0].flowLogId", equalTo(flowLogId));
+    }
+
+    // lex00/floci#87: CreateFlowLogs/DescribeFlowLogs never carried DeliverLogsPermissionArn
+    // (the IAM role ARN a CloudWatch-Logs-destination flow log delivers through), so
+    // aws_flow_log.iam_role_arn always read back empty and a real tofu plan proposed
+    // replacing the flow log forever, even right after a real apply that passed a real ARN.
+    // Same shape as #78 (a CreateFlowLogs-family field silently dropped), a different field.
+    @Test
+    @Order(14)
+    void createFlowLogsWithCloudWatchDestinationCarriesDeliverLogsPermissionArn() {
+        cloudwatchFlowLogId = given()
+            .formParam("Action", "CreateFlowLogs")
+            .formParam("ResourceType", "VPC")
+            .formParam("ResourceId.1", vpcId)
+            .formParam("TrafficType", "ALL")
+            .formParam("LogDestinationType", "cloud-watch-logs")
+            .formParam("LogDestination", "arn:aws:logs:us-east-1:000000000000:log-group:/aws/vpc/flow-logs")
+            .formParam("DeliverLogsPermissionArn", "arn:aws:iam::000000000000:role/flow-logs-role")
+            .formParam("MaxAggregationInterval", "600")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body("CreateFlowLogsResponse.flowLogIdSet.item[0]", startsWith("fl-"))
+            .extract().path("CreateFlowLogsResponse.flowLogIdSet.item[0]");
+    }
+
+    @Test
+    @Order(15)
+    void describeFlowLogsReturnsTheDeliverLogsPermissionArn() {
+        given()
+            .formParam("Action", "DescribeFlowLogs")
+            .formParam("FlowLogId.1", cloudwatchFlowLogId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body("DescribeFlowLogsResponse.flowLogSet.item[0].flowLogId", equalTo(cloudwatchFlowLogId))
+            .body("DescribeFlowLogsResponse.flowLogSet.item[0].logDestinationType", equalTo("cloud-watch-logs"))
+            .body("DescribeFlowLogsResponse.flowLogSet.item[0].deliverLogsPermissionArn",
+                    equalTo("arn:aws:iam::000000000000:role/flow-logs-role"));
+    }
+
+    @Test
+    @Order(16)
+    void deleteCloudwatchFlowLog() {
+        given()
+            .formParam("Action", "DeleteFlowLogs")
+            .formParam("FlowLogId.1", cloudwatchFlowLogId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml");
     }
 
     @Test
