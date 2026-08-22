@@ -897,4 +897,80 @@ class SamTransformProcessorTest {
         assertTrue(expanded.path("Transform").isMissingNode());
         assertTrue(expanded.path("Globals").isMissingNode());
     }
+    @Test
+    void expandSamTemplate_httpApiPreservesDefinitionBodyAsRoutes() throws Exception {
+        // Regression for #1956: a route-bearing HttpApi carries its routes in the inline
+        // OpenAPI DefinitionBody, which must survive as the ApiGatewayV2::Api Body — otherwise
+        // the API expands with no routes.
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Resources": {
+                "MyHttpApi": {
+                  "Type": "AWS::Serverless::HttpApi",
+                  "Properties": {
+                    "DefinitionBody": {
+                      "openapi": "3.0.1",
+                      "paths": {
+                        "/hello": { "get": { "x-amazon-apigateway-integration": { "type": "aws_proxy" } } }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            """);
+
+        JsonNode resources = processor.expandSamTemplate(template).path("Resources");
+
+        JsonNode api = resources.path("MyHttpApi");
+        assertEquals("AWS::ApiGatewayV2::Api", api.path("Type").asText());
+        JsonNode body = api.path("Properties").path("Body");
+        assertFalse(body.isMissingNode(), "DefinitionBody must be preserved as the API Body");
+        assertEquals("3.0.1", body.path("openapi").asText());
+        assertTrue(body.path("paths").has("/hello"), "route definitions must survive the transform");
+    }
+
+    @Test
+    void expandSamTemplate_httpApiMapsDefinitionUriToBodyS3Location() throws Exception {
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Resources": {
+                "MyHttpApi": {
+                  "Type": "AWS::Serverless::HttpApi",
+                  "Properties": { "DefinitionUri": "s3://api-specs/openapi.yaml" }
+                }
+              }
+            }
+            """);
+
+        JsonNode properties = processor.expandSamTemplate(template)
+                .path("Resources").path("MyHttpApi").path("Properties");
+
+        assertTrue(properties.path("Body").isMissingNode(), "DefinitionUri must not become an inline Body");
+        assertEquals("api-specs", properties.path("BodyS3Location").path("Bucket").asText());
+        assertEquals("openapi.yaml", properties.path("BodyS3Location").path("Key").asText());
+    }
+    @Test
+    void expandSamTemplate_httpApiPreservesIntrinsicDefinitionUriForProvisioning() throws Exception {
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Resources": {
+                "MyHttpApi": {
+                  "Type": "AWS::Serverless::HttpApi",
+                  "Properties": {
+                    "DefinitionUri": { "Fn::Sub": "s3://${SpecBucket}/openapi.yaml" }
+                  }
+                }
+              }
+            }
+            """);
+
+        JsonNode bodyS3Location = processor.expandSamTemplate(template)
+                .path("Resources").path("MyHttpApi").path("Properties").path("BodyS3Location");
+
+        assertEquals("s3://${SpecBucket}/openapi.yaml", bodyS3Location.path("Fn::Sub").asText());
+    }
 }

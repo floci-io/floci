@@ -735,12 +735,27 @@ public class CloudFormationService {
                             // Provisioners work on a copy of the stored resource metadata. Keep the
                             // last known-good identity and status when an update attempt fails so a
                             // later retry or stack deletion still manages the original resource.
-                            // The rollback walker must also know this resource is already restored;
-                            // otherwise an earlier UPDATE_COMPLETE status looks like an unhandled
-                            // mutation and incorrectly turns a safe rollback into ROLLBACK_FAILED.
-                            previousResource.getAttributes().put(
-                                    CloudFormationResourceProvisioner.UPDATE_ROLLBACK_RESTORED_ATTR,
-                                    "true");
+                            // Preserve any additional resources that the failed attempt could not
+                            // clean up, otherwise restoring this object would orphan them.
+                            provisioner.mergeFailedUpdateResourceTracking(previousResource, resource);
+                            String rollbackFailure = resource.getAttributes().get(
+                                    CloudFormationResourceProvisioner.UPDATE_ROLLBACK_FAILURE_ATTR);
+                            if (rollbackFailure == null) {
+                                // The rollback walker must know this resource is already restored;
+                                // otherwise an earlier UPDATE_COMPLETE status looks like an
+                                // unhandled mutation and incorrectly becomes ROLLBACK_FAILED.
+                                previousResource.getAttributes().put(
+                                        CloudFormationResourceProvisioner.UPDATE_ROLLBACK_RESTORED_ATTR,
+                                        "true");
+                            } else {
+                                // Restoration was attempted eagerly by the provisioner but did not
+                                // complete. Carry that failure onto the committed resource so the
+                                // rollback walker reports UPDATE_ROLLBACK_FAILED rather than claiming
+                                // the stale snapshot is live.
+                                previousResource.getAttributes().put(
+                                        CloudFormationResourceProvisioner.UPDATE_ROLLBACK_FAILURE_ATTR,
+                                        rollbackFailure);
+                            }
                             stack.getResources().put(logicalId, previousResource);
                         }
                         break;
@@ -1105,6 +1120,15 @@ public class CloudFormationService {
                             resource.getResourceType(), "DELETE_COMPLETE",
                             "Resource creation cancelled during update rollback");
                     removedResources.add(resource.getLogicalId());
+                } else if (resource.getAttributes().containsKey(
+                        CloudFormationResourceProvisioner.UPDATE_ROLLBACK_FAILURE_ATTR)) {
+                    String reason = resource.getAttributes().remove(
+                            CloudFormationResourceProvisioner.UPDATE_ROLLBACK_FAILURE_ATTR);
+                    failures.add(resource.getLogicalId());
+                    resource.setStatus("UPDATE_FAILED");
+                    resource.setStatusReason(reason);
+                    addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
+                            resource.getResourceType(), "UPDATE_FAILED", reason);
                 } else if ("true".equals(resource.getAttributes().remove(
                         CloudFormationResourceProvisioner.UPDATE_ROLLBACK_RESTORED_ATTR))
                         || provisioner.rollbackUpdate(resource)) {

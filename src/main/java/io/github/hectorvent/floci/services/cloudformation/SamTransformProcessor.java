@@ -210,6 +210,18 @@ class SamTransformProcessor {
         apiProps.set("Name", !name.isMissingNode() ? name.deepCopy() : objectMapper.getNodeFactory().textNode(logicalId));
         apiProps.put("ProtocolType", "HTTP");
         copyIfPresent(properties, "Description", apiProps);
+
+        // Preserve inline OpenAPI route definitions so the ApiGatewayV2 provisioner can
+        // materialize the routes and integrations declared by SAM DefinitionBody.
+        JsonNode definitionBody = properties.path("DefinitionBody");
+        if (!definitionBody.isMissingNode() && !definitionBody.isNull()) {
+            apiProps.set("Body", definitionBody.deepCopy());
+        } else {
+            ObjectNode bodyS3Location = buildHttpApiBodyS3Location(properties.path("DefinitionUri"));
+            if (bodyS3Location != null) {
+                apiProps.set("BodyS3Location", bodyS3Location);
+            }
+        }
         apiDef.set("Properties", apiProps);
         resources.set(logicalId, apiDef);
 
@@ -947,6 +959,41 @@ class SamTransformProcessor {
         stageDeps.add(deploymentLogicalId);
         stageDef.set("DependsOn", stageDeps);
         resources.set(stageLogicalId, stageDef);
+    }
+
+    /**
+     * {@code DefinitionUri} is SAM's S3-backed OpenAPI source. ApiGatewayV2 accepts the same
+     * source through {@code BodyS3Location}, with the S3 URI split into its bucket and key.
+     */
+    private ObjectNode buildHttpApiBodyS3Location(JsonNode definitionUri) {
+        if (definitionUri == null || definitionUri.isMissingNode() || definitionUri.isNull()) {
+            return null;
+        }
+        ObjectNode location = objectMapper.createObjectNode();
+        if (definitionUri.isTextual()) {
+            String uri = definitionUri.asText();
+            if (!uri.startsWith("s3://")) {
+                return null;
+            }
+            String withoutScheme = uri.substring("s3://".length());
+            int slash = withoutScheme.indexOf('/');
+            if (slash <= 0 || slash == withoutScheme.length() - 1) {
+                return null;
+            }
+            location.put("Bucket", withoutScheme.substring(0, slash));
+            location.put("Key", withoutScheme.substring(slash + 1));
+            return location;
+        }
+        if (definitionUri.isObject()) {
+            copyIfPresent(definitionUri, "Bucket", location);
+            copyIfPresent(definitionUri, "Key", location);
+            copyIfPresent(definitionUri, "Version", location);
+            // An intrinsic expression (for example Ref or Fn::Sub) cannot be split until the
+            // CloudFormation engine resolves it during provisioning. Preserve it as-is instead
+            // of silently dropping the HttpApi definition and its routes.
+            return location.has("Bucket") && location.has("Key") ? location : definitionUri.deepCopy();
+        }
+        return null;
     }
 
     private void copyIfPresent(JsonNode source, String field, ObjectNode target) {
