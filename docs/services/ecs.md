@@ -79,8 +79,13 @@ Known differences from AWS:
 - There is never a second `ACTIVE` deployment draining alongside the `PRIMARY` one;
   Floci swaps the task definition in place.
 - `deployments` is reported for every service. AWS omits it for services that use the
-  `CODE_DEPLOY` or `EXTERNAL` deployment controller, but Floci does not yet record
-  `deploymentController`, and `ECS` is the AWS default.
+  `CODE_DEPLOY` or `EXTERNAL` deployment controller; Floci records and echoes
+  `deploymentController` (along with `schedulingStrategy` and
+  `availabilityZoneRebalancing`; AWS defaults `ECS` / `REPLICA` / `ENABLED` on create) but
+  still synthesises the `deployments` list regardless of the controller type.
+- `DAEMON` scheduling runs exactly one task per `ACTIVE` container instance and derives
+  `desiredCount` from that count; it is rejected for the Fargate launch type and for the
+  `CODE_DEPLOY` / `EXTERNAL` controllers, as on AWS. Placement constraints are not evaluated.
 - `pendingCount` is always `0`, matching the top-level service field.
 - `forceNewDeployment` does not mint a new deployment `id`.
 - `updatedAt` equals `createdAt`. AWS advances it as a rollout progresses; Floci has no
