@@ -5,14 +5,25 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 import com.fasterxml.jackson.databind.annotation.JsonNaming;
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 
+import jakarta.ws.rs.QueryParam;
+
 @JsonNaming(PropertyNamingStrategies.UpperCamelCaseStrategy.class)
 @RegisterForReflection
 public class DescribeMountTargetsRequest {
 
+    @QueryParam("AccessPointId")
     private String accessPointId;
+    
+    @QueryParam("FileSystemId")
     private String fileSystemId;
+    
+    @QueryParam("Marker")
     private String marker;
+    
+    @QueryParam("MaxItems")
     private Integer maxItems;
+    
+    @QueryParam("MountTargetId")
     private String mountTargetId;
 
     public String getAccessPointId() {

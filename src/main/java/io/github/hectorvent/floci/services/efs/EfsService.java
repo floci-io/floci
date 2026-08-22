@@ -71,7 +71,9 @@ public class EfsService implements Resettable {
 
         synchronized (lockFor(region + "::create::" + token)) {
         for (FileSystem existing : fileSystemStore.scan(k -> k.startsWith(region + "::"))) {
-            if (token.equals(existing.getCreationToken())) {
+            if (token.equals(existing.getCreationToken())){
+                throw EfsException.fileSystemAlreadyExists(existing.getCreationToken());
+            }
                 boolean match = true;
                 
                 String reqPerfMode = request.getPerformanceMode() != null ? request.getPerformanceMode().name() : "generalPurpose";
@@ -107,7 +109,6 @@ public class EfsService implements Resettable {
                     throw EfsException.idempotentParameterMismatch();
                 }
                 return existing;
-            }
         }
 
         String fsId = "fs-" + UUID.randomUUID().toString().replace("-", "").substring(0, 17);
@@ -156,10 +157,14 @@ public class EfsService implements Resettable {
         }
     }
 
-    public List<FileSystem> describeFileSystems(String region) {
+    public List<FileSystem> describeFileSystems(String region, DescribeFileSystemsRequest request) {
         return fileSystemStore.scan(k -> k.startsWith(region + "::")).stream()
-                .filter(fs -> fs.getFileSystemArn().contains(":" + region + ":"))
-                .collect(Collectors.toList());
+            .filter(fs -> fs.getFileSystemArn().contains(":" + region + ":"))
+            .filter(fs -> request.getFileSystemId() == null
+                    || request.getFileSystemId().equals(fs.getFileSystemId()))
+            .filter(fs -> request.getCreationToken() == null
+                    || request.getCreationToken().equals(fs.getCreationToken()))
+            .collect(Collectors.toList());
     }
 
     public FileSystem getFileSystem(String region, String fileSystemId) {
@@ -191,7 +196,9 @@ public class EfsService implements Resettable {
                 throw EfsException.fileSystemNotFound(fileSystemId);
             }
 
-        List<MountTarget> mountTargets = describeMountTargets(region, fileSystemId);
+        DescribeMountTargetsRequest descReq = new DescribeMountTargetsRequest();
+        descReq.setFileSystemId(fileSystemId);
+        List<MountTarget> mountTargets = describeMountTargets(region, descReq);
         if (!mountTargets.isEmpty()) {
             throw EfsException.fileSystemInUse(fileSystemId);
         }
@@ -269,10 +276,27 @@ public class EfsService implements Resettable {
         }
     }
 
-    public List<MountTarget> describeMountTargets(String region, String fileSystemId) {
-        return mountTargetStore.scan(k -> k.startsWith(region + "::")).stream()
-                .filter(mt -> fileSystemId == null || mt.getFileSystemId().equals(fileSystemId))
+    public List<MountTarget> describeMountTargets(String region, DescribeMountTargetsRequest request) {
+        if (request.getFileSystemId() == null && request.getMountTargetId() == null && request.getAccessPointId() == null) {
+            throw EfsException.badRequest("One of FileSystemId, MountTargetId, or AccessPointId must be specified.");
+        }
+        
+        List<MountTarget> results = mountTargetStore.scan(k -> k.startsWith(region + "::")).stream()
+                .filter(mt -> request.getFileSystemId() == null || mt.getFileSystemId().equals(request.getFileSystemId()))
+                .filter(mt -> request.getMountTargetId() == null || mt.getMountTargetId().equals(request.getMountTargetId()))
                 .collect(Collectors.toList());
+                
+        // If accessPointId is specified, we would need to filter by access point file system ID, 
+        // but EFS AccessPoints resolve to a FileSystemId first.
+        if (request.getAccessPointId() != null) {
+            AccessPointDescription ap = accessPointStore.get(regionKey(region, request.getAccessPointId())).orElse(null);
+            if (ap == null) {
+                return new ArrayList<>();
+            }
+            results = results.stream().filter(mt -> mt.getFileSystemId().equals(ap.getFileSystemId())).collect(Collectors.toList());
+        }
+        
+        return results;
     }
 
     public void deleteMountTarget(String region, String mountTargetId) {

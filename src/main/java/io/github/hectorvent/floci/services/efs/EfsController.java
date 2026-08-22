@@ -42,10 +42,10 @@ public class EfsController {
 
     @GET
     @Path("/file-systems")
-    public Response describeFileSystems(@Context HttpHeaders headers) {
+    public Response describeFileSystems(@Context HttpHeaders headers, @jakarta.ws.rs.BeanParam DescribeFileSystemsRequest request) {
         String region = regionResolver.resolveRegion(headers);
         DescribeFileSystemsResponse response = new DescribeFileSystemsResponse();
-        response.setFileSystems(efsService.describeFileSystems(region));
+        response.setFileSystems(efsService.describeFileSystems(region, request));
         return Response.ok(response).build();
     }
 
@@ -105,10 +105,10 @@ public class EfsController {
 
     @GET
     @Path("/mount-targets")
-    public Response describeMountTargets(@Context HttpHeaders headers, @jakarta.ws.rs.QueryParam("FileSystemId") String fileSystemId) {
+    public Response describeMountTargets(@Context HttpHeaders headers, @jakarta.ws.rs.BeanParam DescribeMountTargetsRequest request) {
         String region = regionResolver.resolveRegion(headers);
         DescribeMountTargetsResponse response = new DescribeMountTargetsResponse();
-        response.setMountTargets(efsService.describeMountTargets(region, fileSystemId));
+        response.setMountTargets(efsService.describeMountTargets(region, request));
         return Response.ok(response).build();
     }
 
