@@ -6,6 +6,10 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
@@ -433,6 +437,96 @@ class Ec2VpcEndpointIntegrationTest {
 
     @Test
     @Order(11)
+    void subnetConfigurationIpv4PinsTheEndpointsEniAddressAcrossDescribes() {
+        // Mirrors the terraform-aws-modules/terraform-aws-vpc "ecs" endpoint (lex00/floci#99):
+        // three subnets, each with an explicit ipv4 pinned via SubnetConfiguration. Without this,
+        // floci synthesized its own address for the ENI and dropped the one the caller asked for,
+        // so a replan proposed replacing every ENI and subnet_configuration block.
+        String subnetA = createSubnet("10.40.10.0/24", "us-east-1a");
+        String subnetB = createSubnet("10.40.11.0/24", "us-east-1b");
+        String subnetC = createSubnet("10.40.12.0/24", "us-east-1c");
+
+        String pinnedEndpointId = given()
+            .formParam("Action", "CreateVpcEndpoint")
+            .formParam("VpcId", vpcId)
+            .formParam("ServiceName", "com.amazonaws.us-east-1.ecs")
+            .formParam("VpcEndpointType", "Interface")
+            .formParam("SubnetId.1", subnetA)
+            .formParam("SubnetId.2", subnetB)
+            .formParam("SubnetId.3", subnetC)
+            .formParam("SecurityGroupId.1", securityGroupId)
+            .formParam("SubnetConfiguration.1.SubnetId", subnetA)
+            .formParam("SubnetConfiguration.1.Ipv4", "10.40.10.10")
+            .formParam("SubnetConfiguration.2.SubnetId", subnetB)
+            .formParam("SubnetConfiguration.2.Ipv4", "10.40.11.10")
+            .formParam("SubnetConfiguration.3.SubnetId", subnetC)
+            .formParam("SubnetConfiguration.3.Ipv4", "10.40.12.10")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("CreateVpcEndpointResponse.vpcEndpoint.vpcEndpointId");
+
+        // Two describes, the way a Terraform apply followed by a plan reads the endpoint back:
+        // the pinned address must be identical both times, on both the resource itself and the
+        // network interfaces the provider follows it to.
+        for (int round = 0; round < 2; round++) {
+            List<String> eniIds = given()
+                .formParam("Action", "DescribeVpcEndpoints")
+                .formParam("VpcEndpointId.1", pinnedEndpointId)
+                .header("Authorization", AUTH_HEADER)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .extract().xmlPath()
+                .getList("DescribeVpcEndpointsResponse.vpcEndpointSet.item.networkInterfaceIdSet.item",
+                        String.class);
+            assertTrue(eniIds != null && eniIds.size() == 3, "round " + round + ": " + eniIds);
+
+            Map<String, String> privateIpBySubnet = new HashMap<>();
+            for (String eniId : eniIds) {
+                io.restassured.path.xml.XmlPath xml = given()
+                    .formParam("Action", "DescribeNetworkInterfaces")
+                    .formParam("NetworkInterfaceId.1", eniId)
+                    .header("Authorization", AUTH_HEADER)
+                .when()
+                    .post("/")
+                .then()
+                    .statusCode(200)
+                    .extract().xmlPath();
+                privateIpBySubnet.put(
+                        xml.getString("DescribeNetworkInterfacesResponse.networkInterfaceSet.item.subnetId"),
+                        xml.getString(
+                                "DescribeNetworkInterfacesResponse.networkInterfaceSet.item.privateIpAddress"));
+            }
+
+            assertTrue("10.40.10.10".equals(privateIpBySubnet.get(subnetA)),
+                    "round " + round + ": " + privateIpBySubnet);
+            assertTrue("10.40.11.10".equals(privateIpBySubnet.get(subnetB)),
+                    "round " + round + ": " + privateIpBySubnet);
+            assertTrue("10.40.12.10".equals(privateIpBySubnet.get(subnetC)),
+                    "round " + round + ": " + privateIpBySubnet);
+        }
+    }
+
+    private String createSubnet(String cidrBlock, String availabilityZone) {
+        return given()
+            .formParam("Action", "CreateSubnet")
+            .formParam("VpcId", vpcId)
+            .formParam("CidrBlock", cidrBlock)
+            .formParam("AvailabilityZone", availabilityZone)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("CreateSubnetResponse.subnet.subnetId");
+    }
+
+    @Test
+    @Order(12)
     void deleteEndpoints() {
         given()
             .formParam("Action", "DeleteVpcEndpoints")

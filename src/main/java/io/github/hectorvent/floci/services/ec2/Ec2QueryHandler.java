@@ -417,6 +417,25 @@ public class Ec2QueryHandler {
         return tags;
     }
 
+    /**
+     * Reads {@code CreateVpcEndpoint}'s {@code SubnetConfiguration.N} list: the per-subnet private
+     * IP(s) AWS assigns to the endpoint's network interfaces, fixed at creation time
+     * (API_SubnetConfiguration.html). Dropping this silently, as floci previously did, throws away
+     * an address the caller may have pinned in their own IaC config, so a later describe answers
+     * with a different address than the one that was asked for.
+     */
+    private List<VpcEndpointSubnetConfiguration> parseSubnetConfigurations(MultivaluedMap<String, String> p) {
+        List<VpcEndpointSubnetConfiguration> configs = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String prefix = "SubnetConfiguration." + i;
+            String subnetId = p.getFirst(prefix + ".SubnetId");
+            if (subnetId == null) break;
+            configs.add(new VpcEndpointSubnetConfiguration(
+                    subnetId, p.getFirst(prefix + ".Ipv4"), p.getFirst(prefix + ".Ipv6")));
+        }
+        return configs;
+    }
+
     private List<Tag> parseLaunchTemplateDataTagsForResource(MultivaluedMap<String, String> p, String resourceType) {
         List<Tag> tags = new ArrayList<>();
         for (int i = 1; ; i++) {
@@ -1161,7 +1180,8 @@ public class Ec2QueryHandler {
                 getList(p, "SecurityGroupId"),
                 p.getFirst("PrivateDnsEnabled") != null ? Boolean.valueOf(p.getFirst("PrivateDnsEnabled")) : null,
                 p.getFirst("PolicyDocument"),
-                parseTagsForResource(p, "vpc-endpoint"));
+                parseTagsForResource(p, "vpc-endpoint"),
+                parseSubnetConfigurations(p));
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateVpcEndpointResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())

@@ -33,6 +33,14 @@ public class VpcEndpoint {
     private String dnsRecordIpType = "ipv4";
     private String serviceRegion;
     private boolean requesterManaged;
+    /**
+     * The IPv4/IPv6 addresses the caller pinned per subnet via {@code CreateVpcEndpoint}'s
+     * {@code SubnetConfiguration} parameter. Per {@code API_SubnetConfiguration.html}, an address
+     * given at creation is assigned to the endpoint's network interface in that subnet and must be
+     * readable back unchanged on every subsequent describe; a subnet with no explicit configuration
+     * has no entry here and keeps floci's synthesized address.
+     */
+    private List<VpcEndpointSubnetConfiguration> subnetConfigurations = new ArrayList<>();
     private List<Tag> tags = new ArrayList<>();
 
     /** The full-access document AWS attaches to an endpoint created without an explicit policy. */
@@ -92,6 +100,11 @@ public class VpcEndpoint {
 
     public boolean isRequesterManaged() { return requesterManaged; }
     public void setRequesterManaged(boolean requesterManaged) { this.requesterManaged = requesterManaged; }
+
+    public List<VpcEndpointSubnetConfiguration> getSubnetConfigurations() { return subnetConfigurations; }
+    public void setSubnetConfigurations(List<VpcEndpointSubnetConfiguration> subnetConfigurations) {
+        this.subnetConfigurations = subnetConfigurations;
+    }
 
     public List<Tag> getTags() { return tags; }
     public void setTags(List<Tag> tags) { this.tags = tags; }

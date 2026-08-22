@@ -82,6 +82,7 @@ import io.github.hectorvent.floci.services.ec2.model.Vpc;
 import io.github.hectorvent.floci.services.ec2.model.VpcAttachment;
 import io.github.hectorvent.floci.services.ec2.model.VpcCidrBlockAssociation;
 import io.github.hectorvent.floci.services.ec2.model.VpcEndpoint;
+import io.github.hectorvent.floci.services.ec2.model.VpcEndpointSubnetConfiguration;
 import io.github.hectorvent.floci.services.ec2.model.VpnGateway;
 import jakarta.annotation.PostConstruct;
 import io.github.hectorvent.floci.services.ec2.model.LaunchSpecification;
@@ -1588,12 +1589,25 @@ public class Ec2Service implements ContainerTeardown {
                                          List<String> routeTableIds, List<String> subnetIds,
                                          List<String> securityGroupIds, Boolean privateDnsEnabled,
                                          String policyDocument, List<Tag> endpointTags) {
+        return createVpcEndpoint(region, vpcId, serviceName, endpointType, routeTableIds, subnetIds,
+                securityGroupIds, privateDnsEnabled, policyDocument, endpointTags, List.of());
+    }
+
+    public VpcEndpoint createVpcEndpoint(String region, String vpcId, String serviceName, String endpointType,
+                                         List<String> routeTableIds, List<String> subnetIds,
+                                         List<String> securityGroupIds, Boolean privateDnsEnabled,
+                                         String policyDocument, List<Tag> endpointTags,
+                                         List<VpcEndpointSubnetConfiguration> subnetConfigurations) {
         ensureDefaultResources(region);
         getRequiredVpc(region, vpcId);
         for (String routeTableId : routeTableIds) {
             getRequiredRouteTable(region, routeTableId);
         }
-        for (String subnetId : subnetIds) {
+        // A caller may name a subnet only through SubnetConfiguration and omit the flat SubnetId
+        // list entirely; AWS accepts either form.
+        List<String> effectiveSubnetIds = !subnetIds.isEmpty() ? subnetIds
+                : subnetConfigurations.stream().map(VpcEndpointSubnetConfiguration::getSubnetId).toList();
+        for (String subnetId : effectiveSubnetIds) {
             requireSubnet(region, subnetId);
         }
         for (String securityGroupId : securityGroupIds) {
@@ -1610,8 +1624,9 @@ public class Ec2Service implements ContainerTeardown {
         endpoint.setCreationTimestamp(Instant.now());
         endpoint.setRegion(region);
         endpoint.setRouteTableIds(new ArrayList<>(routeTableIds));
-        endpoint.setSubnetIds(new ArrayList<>(subnetIds));
+        endpoint.setSubnetIds(new ArrayList<>(effectiveSubnetIds));
         endpoint.setSecurityGroupIds(new ArrayList<>(securityGroupIds));
+        endpoint.setSubnetConfigurations(new ArrayList<>(subnetConfigurations));
         endpoint.setPolicyDocument(policyDocument != null && !policyDocument.isBlank()
                 ? policyDocument : VpcEndpoint.DEFAULT_POLICY_DOCUMENT);
         endpoint.setOwnerId(accountId);
@@ -1777,7 +1792,7 @@ public class Ec2Service implements ContainerTeardown {
                 ni.setAvailabilityZone(subnet.getAvailabilityZone());
                 ni.setDescription("VPC Endpoint Interface " + endpoint.getVpcEndpointId());
                 ni.setInterfaceType("vpc_endpoint");
-                ni.setPrivateIpAddress(endpointPrivateIp(subnet, endpoint.getVpcEndpointId()));
+                ni.setPrivateIpAddress(endpointPrivateIp(subnet, endpoint, subnetId));
                 ni.setStatus("in-use");
                 ni.setOwnerId(accountId);
                 ni.setGroups(endpoint.getSecurityGroupIds().stream()
@@ -1806,12 +1821,23 @@ public class Ec2Service implements ContainerTeardown {
         return "eni-" + hex.substring(0, 17);
     }
 
-    /** Stable host address near the top of the subnet range, clear of the instance counter (starts at 10). */
-    private static String endpointPrivateIp(Subnet subnet, String endpointId) {
+    /**
+     * The ENI's private IP for one of the endpoint's subnets: the address the caller pinned via
+     * {@code CreateVpcEndpoint}'s {@code SubnetConfiguration} for that subnet, if any, else a
+     * stable host address near the top of the subnet range, clear of the instance counter (starts
+     * at 10). A pinned address must win here and never fall back to the synthesized one, or a
+     * caller who set it explicitly sees it change out from under them on every describe.
+     */
+    private static String endpointPrivateIp(Subnet subnet, VpcEndpoint endpoint, String subnetId) {
+        for (VpcEndpointSubnetConfiguration config : endpoint.getSubnetConfigurations()) {
+            if (subnetId.equals(config.getSubnetId()) && config.getIpv4() != null && !config.getIpv4().isBlank()) {
+                return config.getIpv4();
+            }
+        }
         String cidr = subnet.getCidrBlock();
         String baseIp = cidr != null ? cidr.split("/")[0] : "172.31.0.0";
         String[] parts = baseIp.split("\\.");
-        int host = 200 + Math.floorMod(endpointId.hashCode(), 50);
+        int host = 200 + Math.floorMod(endpoint.getVpcEndpointId().hashCode(), 50);
         return parts[0] + "." + parts[1] + "." + parts[2] + "." + host;
     }
 
