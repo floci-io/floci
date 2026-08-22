@@ -147,6 +147,113 @@ class DynamoDbServiceTest {
     }
 
     @Test
+    void createTableRejectsGsiWithMoreThanFourSortKeyAttributes() {
+        GlobalSecondaryIndex gsi = new GlobalSecondaryIndex(
+                "GSI1",
+                List.of(
+                        new KeySchemaElement("PK", "HASH"),
+                        new KeySchemaElement("A", "RANGE"),
+                        new KeySchemaElement("B", "RANGE"),
+                        new KeySchemaElement("C", "RANGE"),
+                        new KeySchemaElement("D", "RANGE"),
+                        new KeySchemaElement("E", "RANGE")),
+                null, "ALL", null);
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.createTable("gsi-too-many-sort-keys",
+                List.of(new KeySchemaElement("PK", "HASH")),
+                List.of(
+                        new AttributeDefinition("PK", "S"),
+                        new AttributeDefinition("A", "S"),
+                        new AttributeDefinition("B", "S"),
+                        new AttributeDefinition("C", "S"),
+                        new AttributeDefinition("D", "S"),
+                        new AttributeDefinition("E", "S")),
+                5L, 5L, List.of(gsi), "eu-west-1"));
+
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void createTableRejectsGsiWithMoreThanFourPartitionKeyAttributes() {
+        GlobalSecondaryIndex gsi = new GlobalSecondaryIndex(
+                "GSI1",
+                List.of(
+                        new KeySchemaElement("A", "HASH"),
+                        new KeySchemaElement("B", "HASH"),
+                        new KeySchemaElement("C", "HASH"),
+                        new KeySchemaElement("D", "HASH"),
+                        new KeySchemaElement("E", "HASH")),
+                null, "ALL", null);
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.createTable("gsi-too-many-hash-keys",
+                List.of(new KeySchemaElement("PK", "HASH")),
+                List.of(
+                        new AttributeDefinition("PK", "S"),
+                        new AttributeDefinition("A", "S"),
+                        new AttributeDefinition("B", "S"),
+                        new AttributeDefinition("C", "S"),
+                        new AttributeDefinition("D", "S"),
+                        new AttributeDefinition("E", "S")),
+                5L, 5L, List.of(gsi), "eu-west-1"));
+
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void updateTableRejectsGsiCreateWithMoreThanFourSortKeyAttributes() {
+        createUsersTable("eu-west-1");
+        GlobalSecondaryIndex gsi = new GlobalSecondaryIndex(
+                "GSI1",
+                List.of(
+                        new KeySchemaElement("userId", "HASH"),
+                        new KeySchemaElement("A", "RANGE"),
+                        new KeySchemaElement("B", "RANGE"),
+                        new KeySchemaElement("C", "RANGE"),
+                        new KeySchemaElement("D", "RANGE"),
+                        new KeySchemaElement("E", "RANGE")),
+                null, "ALL", null);
+        List<AttributeDefinition> newAttrs = List.of(
+                new AttributeDefinition("A", "S"), new AttributeDefinition("B", "S"),
+                new AttributeDefinition("C", "S"), new AttributeDefinition("D", "S"),
+                new AttributeDefinition("E", "S"));
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.updateTable(
+                "Users", null, null, List.of(gsi), List.of(), newAttrs, "eu-west-1"));
+
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void updateTableRejectsGsiArityWithoutApplyingThroughputChange() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+        GlobalSecondaryIndex invalidGsi = new GlobalSecondaryIndex(
+                "GSI1",
+                List.of(
+                        new KeySchemaElement("A", "HASH"),
+                        new KeySchemaElement("B", "HASH"),
+                        new KeySchemaElement("C", "HASH"),
+                        new KeySchemaElement("D", "HASH"),
+                        new KeySchemaElement("E", "HASH")),
+                null, "ALL", null);
+        List<AttributeDefinition> newAttrs = List.of(
+                new AttributeDefinition("A", "S"), new AttributeDefinition("B", "S"),
+                new AttributeDefinition("C", "S"), new AttributeDefinition("D", "S"),
+                new AttributeDefinition("E", "S"));
+
+        assertThrows(AwsException.class, () -> service.updateTable(
+                "Users", 10L, 10L, List.of(invalidGsi), List.of(), newAttrs, region));
+
+        TableDefinition after = service.describeTable("Users", region);
+        assertEquals(5L, after.getProvisionedThroughput().getReadCapacityUnits());
+        assertEquals(5L, after.getProvisionedThroughput().getWriteCapacityUnits());
+        assertTrue(after.getGlobalSecondaryIndexes().isEmpty());
+    }
+
+    @Test
     void describeTable() {
         String region = "eu-west-1";
         createUsersTable(region);

@@ -88,6 +88,8 @@ public class DynamoDbService {
     private final ConcurrentHashMap<String, IdempotencyEntry> txIdempotency = new ConcurrentHashMap<>();
     private static final long TX_IDEMPOTENCY_TTL_NANOS = java.time.Duration.ofMinutes(10).toNanos();
 
+    private static final int MAX_MULTI_ATTRIBUTE_KEY_PART_SIZE = 4;
+
     private record IdempotencyEntry(String requestHash, long insertedAtNanos) {}
     private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
@@ -314,6 +316,7 @@ public class DynamoDbService {
 
         if (gsis != null && !gsis.isEmpty()) {
             for (GlobalSecondaryIndex gsi : gsis) {
+                validateGsiKeySchemaArity(gsi);
                 gsi.setIndexArn(table.getTableArn() + "/index/" + gsi.getIndexName());
             }
             table.setGlobalSecondaryIndexes(new ArrayList<>(gsis));
@@ -342,6 +345,23 @@ public class DynamoDbService {
         itemsByTable.put(scopedItemsKey(storageKey), new ConcurrentSkipListMap<>());
         LOG.infov("Created table: {0} in region {1}", tableName, region);
         return table;
+    }
+
+    private void validateGsiKeySchemaArity(GlobalSecondaryIndex gsi) {
+        long hashCount = gsi.getKeySchema().stream().filter(k -> "HASH".equals(k.getKeyType())).count();
+        long rangeCount = gsi.getKeySchema().stream().filter(k -> "RANGE".equals(k.getKeyType())).count();
+        if (hashCount > MAX_MULTI_ATTRIBUTE_KEY_PART_SIZE) {
+            throw new AwsException("ValidationException",
+                    "One or more parameter values were invalid: Global secondary index "
+                    + gsi.getIndexName() + " must not have more than "
+                    + MAX_MULTI_ATTRIBUTE_KEY_PART_SIZE + " partition key (HASH) attributes", 400);
+        }
+        if (rangeCount > MAX_MULTI_ATTRIBUTE_KEY_PART_SIZE) {
+            throw new AwsException("ValidationException",
+                    "One or more parameter values were invalid: Global secondary index "
+                    + gsi.getIndexName() + " must not have more than "
+                    + MAX_MULTI_ATTRIBUTE_KEY_PART_SIZE + " sort key (RANGE) attributes", 400);
+        }
     }
 
     public TableDefinition describeTable(String tableName, String region) {
@@ -1327,6 +1347,7 @@ public class DynamoDbService {
                             "Attribute: " + k.getAttributeName() + " is not defined in AttributeDefinitions", 400);
                 }
             }
+            validateGsiKeySchemaArity(newGsi);
         }
 
         for (String gsiName : gsiDeletes) {
