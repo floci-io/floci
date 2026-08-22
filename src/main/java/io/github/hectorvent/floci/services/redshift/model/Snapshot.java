@@ -9,6 +9,7 @@ public class Snapshot {
     private String status;
     private int port;
     private String masterUsername;
+    private String masterPassword;
     private String sqlDump;
 
     public Snapshot() {}
@@ -68,6 +69,14 @@ public class Snapshot {
 
     public void setMasterUsername(String masterUsername) {
         this.masterUsername = masterUsername;
+    }
+
+    public String getMasterPassword() {
+        return masterPassword;
+    }
+
+    public void setMasterPassword(String masterPassword) {
+        this.masterPassword = masterPassword;
     }
 
     public String getSqlDump() {

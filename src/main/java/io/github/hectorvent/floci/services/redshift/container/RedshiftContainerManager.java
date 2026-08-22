@@ -16,6 +16,7 @@ import io.github.hectorvent.floci.services.redshift.model.Cluster;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
+import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.jboss.logging.Logger;
 
@@ -23,7 +24,12 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -56,9 +62,9 @@ public class RedshiftContainerManager {
         this.config = config;
     }
 
-    public RedshiftContainerHandle start(String clusterIdentifier, String masterUsername, String masterPassword) {
+    public RedshiftContainerHandle start(String accountId, String clusterIdentifier, String masterUsername, String masterPassword) {
         String image = config.services().redshift().imageVersion();
-        String containerName = "floci-redshift-" + clusterIdentifier;
+        String containerName = containerName(accountId, clusterIdentifier);
 
         List<String> envVars = List.of(
                 "POSTGRES_USER=" + masterUsername,
@@ -92,29 +98,37 @@ public class RedshiftContainerManager {
         } catch (Exception e) {
             LOG.warnv("Failed to stream logs for {0}", containerName);
         }
-        
+
         try {
             Thread.sleep(3000);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
 
-        containers.put(clusterIdentifier, handle);
+        containers.put(containerKey(accountId, clusterIdentifier), handle);
         return handle;
     }
 
-    public void stop(String clusterIdentifier) {
-        containers.remove(clusterIdentifier);
-        String containerName = "floci-redshift-" + clusterIdentifier;
-        lifecycleManager.removeIfExists(containerName);
+    public void stop(String accountId, String clusterIdentifier) {
+        containers.remove(containerKey(accountId, clusterIdentifier));
+        lifecycleManager.removeIfExists(containerName(accountId, clusterIdentifier));
     }
 
-    public Optional<RedshiftContainerHandle> getContainer(String clusterIdentifier) {
-        return Optional.ofNullable(containers.get(clusterIdentifier));
+    public Optional<RedshiftContainerHandle> getContainer(String accountId, String clusterIdentifier) {
+        return Optional.ofNullable(containers.get(containerKey(accountId, clusterIdentifier)));
     }
 
-    public void takeSnapshot(String clusterIdentifier, String username, String dbname, java.nio.file.Path outputFile) {
-        RedshiftContainerHandle handle = containers.get(clusterIdentifier);
+    /** Distinguishes clusters that share an identifier across accounts, e.g. for the in-memory map key and Docker container name. */
+    private static String containerKey(String accountId, String clusterIdentifier) {
+        return accountId + "/" + clusterIdentifier;
+    }
+
+    private static String containerName(String accountId, String clusterIdentifier) {
+        return "floci-redshift-" + accountId + "-" + clusterIdentifier;
+    }
+
+    public void takeSnapshot(String accountId, String clusterIdentifier, String username, String dbname, Path outputFile) {
+        RedshiftContainerHandle handle = containers.get(containerKey(accountId, clusterIdentifier));
         if (handle == null) {
             throw new AwsException("ClusterNotFound", "Cluster container for " + clusterIdentifier + " not found", 404);
         }
@@ -129,11 +143,11 @@ public class RedshiftContainerManager {
                 LOG.warnv("pg_dump failed for cluster {0} (exit {1}): {2}", clusterIdentifier, result.exitCode(), result.stderr());
                 throw new AwsException("InternalFailure", "Failed to create snapshot for cluster " + clusterIdentifier + ": " + result.stderr(), 500);
             }
-            
-            try (java.io.InputStream in = lifecycleManager.getDockerClient().copyArchiveFromContainerCmd(handle.getContainerId(), "/tmp/dump.sql").exec();
-                 org.apache.commons.compress.archivers.tar.TarArchiveInputStream tar = new org.apache.commons.compress.archivers.tar.TarArchiveInputStream(in)) {
-                 tar.getNextTarEntry();
-                 java.nio.file.Files.copy(tar, outputFile, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+
+            try (InputStream in = lifecycleManager.getDockerClient().copyArchiveFromContainerCmd(handle.getContainerId(), "/tmp/dump.sql").exec();
+                TarArchiveInputStream tar = new TarArchiveInputStream(in)) {
+                tar.getNextTarEntry();
+                Files.copy(tar, outputFile, StandardCopyOption.REPLACE_EXISTING);
             }
         } catch (AwsException e) {
             throw e;
@@ -143,24 +157,24 @@ public class RedshiftContainerManager {
         }
     }
 
-    public void takeSnapshot(String clusterIdentifier, String username, java.nio.file.Path outputFile) {
-        takeSnapshot(clusterIdentifier, username, "dev", outputFile);
+    public void takeSnapshot(String accountId, String clusterIdentifier, String username, Path outputFile) {
+        takeSnapshot(accountId, clusterIdentifier, username, "dev", outputFile);
     }
 
-    public void createSnapshot(Cluster cluster, java.nio.file.Path outputFile) {
+    public void createSnapshot(String accountId, Cluster cluster, Path outputFile) {
         if (cluster == null) {
             throw new AwsException("InvalidParameterValue", "Cluster cannot be null", 400);
         }
-        takeSnapshot(cluster.getClusterIdentifier(), cluster.getMasterUsername(), "dev", outputFile);
+        takeSnapshot(accountId, cluster.getClusterIdentifier(), cluster.getMasterUsername(), "dev", outputFile);
     }
 
-    public void restoreSnapshot(String clusterIdentifier, String username, String dbname, java.nio.file.Path sqlDumpFile) {
-        RedshiftContainerHandle handle = containers.get(clusterIdentifier);
+    public void restoreSnapshot(String accountId, String clusterIdentifier, String username, String dbname, Path sqlDumpFile) {
+        RedshiftContainerHandle handle = containers.get(containerKey(accountId, clusterIdentifier));
         if (handle == null) {
             throw new AwsException("ClusterNotFound", "Cluster container for " + clusterIdentifier + " not found", 404);
         }
 
-        if (sqlDumpFile == null || !java.nio.file.Files.exists(sqlDumpFile)) {
+        if (sqlDumpFile == null || !Files.exists(sqlDumpFile)) {
             LOG.infov("Empty snapshot dump for cluster {0}, skipping restore", clusterIdentifier);
             return;
         }
@@ -189,15 +203,15 @@ public class RedshiftContainerManager {
         }
     }
 
-    public void restoreSnapshot(String clusterIdentifier, String username, java.nio.file.Path sqlDumpFile) {
-        restoreSnapshot(clusterIdentifier, username, "dev", sqlDumpFile);
+    public void restoreSnapshot(String accountId, String clusterIdentifier, String username, Path sqlDumpFile) {
+        restoreSnapshot(accountId, clusterIdentifier, username, "dev", sqlDumpFile);
     }
 
-    public void restoreSnapshot(Cluster cluster, java.nio.file.Path sqlDumpFile) {
+    public void restoreSnapshot(String accountId, Cluster cluster, Path sqlDumpFile) {
         if (cluster == null) {
             throw new AwsException("InvalidParameterValue", "Cluster cannot be null", 400);
         }
-        restoreSnapshot(cluster.getClusterIdentifier(), cluster.getMasterUsername(), "dev", sqlDumpFile);
+        restoreSnapshot(accountId, cluster.getClusterIdentifier(), cluster.getMasterUsername(), "dev", sqlDumpFile);
     }
 
     private ExecResult execInContainer(String containerId, String[] cmd, int timeoutSeconds) throws Exception {
@@ -206,7 +220,7 @@ public class RedshiftContainerManager {
         return new ExecResult(res.exitCode(), stdout.toString(StandardCharsets.UTF_8), res.stderr());
     }
 
-    private ExecResult execInContainer(String containerId, String[] cmd, int timeoutSeconds, java.io.OutputStream out) throws Exception {
+    private ExecResult execInContainer(String containerId, String[] cmd, int timeoutSeconds, OutputStream out) throws Exception {
         String execId = lifecycleManager.getDockerClient().execCreateCmd(containerId)
                 .withCmd(cmd)
                 .withAttachStdout(true)

@@ -71,10 +71,12 @@ class RedshiftContainerManagerTest {
         );
     }
 
+    private static final String ACCOUNT_ID = "111111111111";
+
     @Test
     void testTakeSnapshotContainerNotFound() {
         AwsException ex = assertThrows(AwsException.class, () ->
-                manager.takeSnapshot("non-existent-cluster", "admin", "dev", java.nio.file.Path.of("dummy.sql")));
+                manager.takeSnapshot(ACCOUNT_ID, "non-existent-cluster", "admin", "dev", java.nio.file.Path.of("dummy.sql")));
         assertEquals("ClusterNotFound", ex.getErrorCode());
         assertEquals(404, ex.getHttpStatus());
     }
@@ -82,7 +84,7 @@ class RedshiftContainerManagerTest {
     @Test
     void testRestoreSnapshotContainerNotFound() {
         AwsException ex = assertThrows(AwsException.class, () ->
-                manager.restoreSnapshot("non-existent-cluster", "admin", "dev", java.nio.file.Path.of("dummy.sql")));
+                manager.restoreSnapshot(ACCOUNT_ID, "non-existent-cluster", "admin", "dev", java.nio.file.Path.of("dummy.sql")));
         assertEquals("ClusterNotFound", ex.getErrorCode());
         assertEquals(404, ex.getHttpStatus());
     }
@@ -90,7 +92,7 @@ class RedshiftContainerManagerTest {
     @Test
     void testCreateSnapshotNullCluster() {
         AwsException ex = assertThrows(AwsException.class, () ->
-                manager.createSnapshot(null, java.nio.file.Path.of("dummy.sql")));
+                manager.createSnapshot(ACCOUNT_ID, null, java.nio.file.Path.of("dummy.sql")));
         assertEquals("InvalidParameterValue", ex.getErrorCode());
         assertEquals(400, ex.getHttpStatus());
     }
@@ -98,7 +100,7 @@ class RedshiftContainerManagerTest {
     @Test
     void testRestoreSnapshotNullCluster() {
         AwsException ex = assertThrows(AwsException.class, () ->
-                manager.restoreSnapshot((Cluster) null, java.nio.file.Path.of("dummy.sql")));
+                manager.restoreSnapshot(ACCOUNT_ID, (Cluster) null, java.nio.file.Path.of("dummy.sql")));
         assertEquals("InvalidParameterValue", ex.getErrorCode());
         assertEquals(400, ex.getHttpStatus());
     }
@@ -110,10 +112,10 @@ class RedshiftContainerManagerTest {
         ContainerInfo info = new ContainerInfo("cont-123", Map.of(5432, new EndpointInfo("localhost", 5432)));
         when(lifecycleManager.createAndStart(any())).thenReturn(info);
 
-        RedshiftContainerHandle handle = manager.start("test-cluster", "admin", "pass");
+        RedshiftContainerHandle handle = manager.start(ACCOUNT_ID, "test-cluster", "admin", "pass");
         assertNotNull(handle);
         assertEquals("cont-123", handle.getContainerId());
-        assertTrue(manager.getContainer("test-cluster").isPresent());
+        assertTrue(manager.getContainer(ACCOUNT_ID, "test-cluster").isPresent());
 
         // Mock docker exec for pg_dump
         ExecCreateCmd createCmd = mock(ExecCreateCmd.class, org.mockito.Mockito.RETURNS_SELF);
@@ -153,7 +155,7 @@ class RedshiftContainerManagerTest {
 
         java.nio.file.Path tempFile = java.nio.file.Files.createTempFile("test-take-snapshot", ".sql");
         try {
-            manager.takeSnapshot("test-cluster", "admin", "dev", tempFile);
+            manager.takeSnapshot(ACCOUNT_ID, "test-cluster", "admin", "dev",tempFile);
             String dump = java.nio.file.Files.readString(tempFile);
             assertTrue(dump.contains("PostgreSQL dump"));
             assertTrue(dump.contains("CREATE TABLE foo"));
@@ -169,7 +171,7 @@ class RedshiftContainerManagerTest {
         ContainerInfo info = new ContainerInfo("cont-123", Map.of(5432, new EndpointInfo("localhost", 5432)));
         when(lifecycleManager.createAndStart(any())).thenReturn(info);
 
-        manager.start("test-cluster", "admin", "pass");
+        manager.start(ACCOUNT_ID, "test-cluster", "admin", "pass");
 
         ExecCreateCmd createCmd = mock(ExecCreateCmd.class, org.mockito.Mockito.RETURNS_SELF);
         ExecCreateCmdResponse createResponse = mock(ExecCreateCmdResponse.class);
@@ -195,7 +197,7 @@ class RedshiftContainerManagerTest {
         when(dockerClient.inspectExecCmd("exec-fail")).thenReturn(inspectCmd);
 
         AwsException ex = assertThrows(AwsException.class, () ->
-                manager.takeSnapshot("test-cluster", "admin", "dev", java.nio.file.Path.of("dummy.sql")));
+                manager.takeSnapshot(ACCOUNT_ID, "test-cluster", "admin", "dev",java.nio.file.Path.of("dummy.sql")));
         assertEquals("InternalFailure", ex.getErrorCode());
         assertEquals(500, ex.getHttpStatus());
     }
@@ -207,11 +209,11 @@ class RedshiftContainerManagerTest {
         ContainerInfo info = new ContainerInfo("cont-123", Map.of(5432, new EndpointInfo("localhost", 5432)));
         when(lifecycleManager.createAndStart(any())).thenReturn(info);
 
-        manager.start("test-cluster", "admin", "pass");
+        manager.start(ACCOUNT_ID, "test-cluster", "admin", "pass");
 
         // Should return cleanly without touching dockerClient
-        manager.restoreSnapshot("test-cluster", "admin", "dev", java.nio.file.Path.of("non-existent-dump.sql"));
-        manager.restoreSnapshot("test-cluster", "admin", "dev", (java.nio.file.Path) null);
+        manager.restoreSnapshot(ACCOUNT_ID, "test-cluster", "admin", "dev",java.nio.file.Path.of("non-existent-dump.sql"));
+        manager.restoreSnapshot(ACCOUNT_ID, "test-cluster", "admin", "dev",(java.nio.file.Path) null);
     }
 
     @Test
@@ -221,7 +223,7 @@ class RedshiftContainerManagerTest {
         ContainerInfo info = new ContainerInfo("cont-123", Map.of(5432, new EndpointInfo("localhost", 5432)));
         when(lifecycleManager.createAndStart(any())).thenReturn(info);
 
-        manager.start("test-cluster", "admin", "pass");
+        manager.start(ACCOUNT_ID, "test-cluster", "admin", "pass");
 
         // Mock copyArchiveToContainerCmd
         CopyArchiveToContainerCmd copyCmd = mock(CopyArchiveToContainerCmd.class, org.mockito.Mockito.RETURNS_SELF);
@@ -251,7 +253,7 @@ class RedshiftContainerManagerTest {
 
         java.nio.file.Path tempFile = java.nio.file.Files.createTempFile("test-restore-snapshot", ".sql");
         try {
-            manager.restoreSnapshot("test-cluster", "admin", "dev", tempFile);
+            manager.restoreSnapshot(ACCOUNT_ID, "test-cluster", "admin", "dev",tempFile);
             verify(dockerClient).copyArchiveToContainerCmd("cont-123");
             verify(dockerClient).execCreateCmd("cont-123");
         } finally {
@@ -266,11 +268,30 @@ class RedshiftContainerManagerTest {
         ContainerInfo info = new ContainerInfo("cont-123", Map.of(5432, new EndpointInfo("localhost", 5432)));
         when(lifecycleManager.createAndStart(any())).thenReturn(info);
 
-        manager.start("test-cluster", "admin", "pass");
-        assertTrue(manager.getContainer("test-cluster").isPresent());
+        manager.start(ACCOUNT_ID, "test-cluster", "admin", "pass");
+        assertTrue(manager.getContainer(ACCOUNT_ID, "test-cluster").isPresent());
 
-        manager.stop("test-cluster");
-        assertTrue(manager.getContainer("test-cluster").isEmpty());
-        verify(lifecycleManager).removeIfExists("floci-redshift-test-cluster");
+        manager.stop(ACCOUNT_ID, "test-cluster");
+        assertTrue(manager.getContainer(ACCOUNT_ID, "test-cluster").isEmpty());
+        verify(lifecycleManager).removeIfExists("floci-redshift-" + ACCOUNT_ID + "-test-cluster");
+    }
+
+    @Test
+    void testSameClusterIdentifierAcrossAccountsDoesNotCollide() {
+        ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, org.mockito.Mockito.RETURNS_SELF);
+        when(containerBuilder.newContainer(anyString())).thenReturn(specBuilder);
+        ContainerInfo infoA = new ContainerInfo("cont-account-a", Map.of(5432, new EndpointInfo("localhost", 5432)));
+        ContainerInfo infoB = new ContainerInfo("cont-account-b", Map.of(5432, new EndpointInfo("localhost", 5433)));
+        when(lifecycleManager.createAndStart(any())).thenReturn(infoA, infoB);
+
+        String otherAccountId = "222222222222";
+        manager.start(ACCOUNT_ID, "shared-id", "admin", "pass");
+        manager.start(otherAccountId, "shared-id", "admin", "pass");
+
+        // Both accounts keep their own running container despite the shared cluster identifier
+        assertTrue(manager.getContainer(ACCOUNT_ID, "shared-id").isPresent());
+        assertTrue(manager.getContainer(otherAccountId, "shared-id").isPresent());
+        assertEquals("cont-account-a", manager.getContainer(ACCOUNT_ID, "shared-id").get().getContainerId());
+        assertEquals("cont-account-b", manager.getContainer(otherAccountId, "shared-id").get().getContainerId());
     }
 }

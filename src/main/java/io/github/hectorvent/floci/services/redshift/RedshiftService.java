@@ -48,14 +48,14 @@ public class RedshiftService {
                         .toList();
         for (AccountAwareStorageBackend.AccountEntry<Cluster> entry : availableClusters) {
             Cluster cluster = entry.value();
-            if (containerManager.getContainer(cluster.getClusterIdentifier()).isPresent()) {
+            if (containerManager.getContainer(entry.accountId(), cluster.getClusterIdentifier()).isPresent()) {
                 continue;
             }
             String password = cluster.getMasterPassword() != null ? cluster.getMasterPassword() : "admin";
             try {
                 LOG.infov("Recovering container for persisted cluster: {0}", cluster.getClusterIdentifier());
                 RedshiftContainerHandle handle = containerManager.start(
-                        cluster.getClusterIdentifier(), cluster.getMasterUsername(), password);
+                        entry.accountId(), cluster.getClusterIdentifier(), cluster.getMasterUsername(), password);
                 Endpoint endpoint = new Endpoint();
                 endpoint.setAddress(handle.getHost());
                 endpoint.setPort(handle.getPort());
@@ -87,7 +87,7 @@ public class RedshiftService {
 
         // Start container
         try {
-            RedshiftContainerHandle handle = containerManager.start(identifier, username, password);
+            RedshiftContainerHandle handle = containerManager.start(clusters.accountId(), identifier, username, password);
             Endpoint endpoint = new Endpoint();
             endpoint.setAddress(handle.getHost());
             endpoint.setPort(handle.getPort());
@@ -122,7 +122,7 @@ public class RedshiftService {
         }
         Cluster cluster = clusterOpt.get();
         
-        containerManager.stop(identifier);
+        containerManager.stop(clusters.accountId(), identifier);
         clusters.delete(identifier);
         clusters.flush();
         
@@ -147,6 +147,7 @@ public class RedshiftService {
         snapshot.setClusterIdentifier(clusterIdentifier);
         snapshot.setStatus("available");
         snapshot.setMasterUsername(cluster.getMasterUsername());
+        snapshot.setMasterPassword(cluster.getMasterPassword());
         if (cluster.getEndpoint() != null) {
             snapshot.setPort(cluster.getEndpoint().getPort());
         } else {
@@ -159,7 +160,7 @@ public class RedshiftService {
         try {
             java.nio.file.Files.createDirectories(dumpDir);
             java.nio.file.Path dumpFile = dumpDir.resolve(snapshotIdentifier + ".sql");
-            containerManager.takeSnapshot(clusterIdentifier, cluster.getMasterUsername(), dumpFile);
+            containerManager.takeSnapshot(clusters.accountId(), clusterIdentifier, cluster.getMasterUsername(), dumpFile);
             snapshot.setSqlDump(dumpFile.toAbsolutePath().toString());
         } catch (AwsException e) {
             throw e;
@@ -234,10 +235,10 @@ public class RedshiftService {
         Snapshot snapshot = snapshotOpt.get();
         String effectiveNodeType = (nodeType != null && !nodeType.isBlank()) ? nodeType : "dc2.large";
         String username = snapshot.getMasterUsername() != null ? snapshot.getMasterUsername() : "admin";
-        // Use the source cluster's password if it still exists, fallback to "admin" to avoid hardcoding
         String sourceCluster = snapshot.getClusterIdentifier();
-        String password = clusters.get(sourceCluster)
-                .map(Cluster::getMasterPassword)
+        String password = Optional.ofNullable(snapshot.getMasterPassword())
+                .filter(p -> !p.isBlank())
+                .or(() -> clusters.get(sourceCluster).map(Cluster::getMasterPassword))
                 .filter(p -> p != null && !p.isBlank())
                 .orElse("admin");
 
@@ -251,7 +252,7 @@ public class RedshiftService {
         clusters.flush();
 
         try {
-            RedshiftContainerHandle handle = containerManager.start(clusterIdentifier, username, password);
+            RedshiftContainerHandle handle = containerManager.start(clusters.accountId(), clusterIdentifier, username, password);
             Endpoint endpoint = new Endpoint();
             endpoint.setAddress(handle.getHost());
             endpoint.setPort(handle.getPort());
@@ -260,7 +261,7 @@ public class RedshiftService {
             if (snapshot.getSqlDump() != null && !snapshot.getSqlDump().isBlank()) {
                 // sqlDump is the absolute path that was stored when the snapshot was created
                 java.nio.file.Path dumpFile = java.nio.file.Paths.get(snapshot.getSqlDump());
-                containerManager.restoreSnapshot(clusterIdentifier, username, dumpFile);
+                containerManager.restoreSnapshot(clusters.accountId(), clusterIdentifier, username, dumpFile);
             }
 
             cluster.setClusterStatus("available");

@@ -72,17 +72,17 @@ class RedshiftServiceTest {
         when(clusterBackend.scanAllAccountEntries(any())).thenReturn(List.of(
                 new AccountAwareStorageBackend.AccountEntry<>("111111111111", "cluster-a", clusterA),
                 new AccountAwareStorageBackend.AccountEntry<>("222222222222", "cluster-b", clusterB)));
-        when(cm.getContainer(anyString())).thenReturn(Optional.empty());
-        when(cm.start(eq("cluster-a"), eq("admin"), eq("pw-a")))
+        when(cm.getContainer(anyString(), anyString())).thenReturn(Optional.empty());
+        when(cm.start(eq("111111111111"), eq("cluster-a"), eq("admin"), eq("pw-a")))
                 .thenReturn(new RedshiftContainerHandle("c-a", "cluster-a", "localhost", 5432));
-        when(cm.start(eq("cluster-b"), eq("admin"), eq("pw-b")))
+        when(cm.start(eq("222222222222"), eq("cluster-b"), eq("admin"), eq("pw-b")))
                 .thenReturn(new RedshiftContainerHandle("c-b", "cluster-b", "localhost", 5433));
 
         service.onStart(null);
 
         // Cluster owned by a second, non-default account must also be recovered
-        verify(cm).start("cluster-a", "admin", "pw-a");
-        verify(cm).start("cluster-b", "admin", "pw-b");
+        verify(cm).start("111111111111", "cluster-a", "admin", "pw-a");
+        verify(cm).start("222222222222", "cluster-b", "admin", "pw-b");
         verify(clusterBackend).putForAccount(eq("111111111111"), eq("cluster-a"), any(Cluster.class));
         verify(clusterBackend).putForAccount(eq("222222222222"), eq("cluster-b"), any(Cluster.class));
         verify(clusterBackend).flush();
@@ -95,12 +95,12 @@ class RedshiftServiceTest {
         cluster.setClusterStatus("available");
         when(clusterBackend.scanAllAccountEntries(any())).thenReturn(List.of(
                 new AccountAwareStorageBackend.AccountEntry<>("111111111111", "cluster-a", cluster)));
-        when(cm.getContainer("cluster-a"))
+        when(cm.getContainer("111111111111", "cluster-a"))
                 .thenReturn(Optional.of(new RedshiftContainerHandle("c-a", "cluster-a", "localhost", 5432)));
 
         service.onStart(null);
 
-        verify(cm, never()).start(any(), any(), any());
+        verify(cm, never()).start(any(), any(), any(), any());
         verify(clusterBackend, never()).putForAccount(any(), any(), any());
     }
 
@@ -113,8 +113,8 @@ class RedshiftServiceTest {
         cluster.setClusterStatus("available");
         when(clusterBackend.scanAllAccountEntries(any())).thenReturn(List.of(
                 new AccountAwareStorageBackend.AccountEntry<>("111111111111", "cluster-a", cluster)));
-        when(cm.getContainer("cluster-a")).thenReturn(Optional.empty());
-        when(cm.start(eq("cluster-a"), eq("admin"), eq("pw-a"))).thenThrow(new RuntimeException("docker down"));
+        when(cm.getContainer("111111111111", "cluster-a")).thenReturn(Optional.empty());
+        when(cm.start(eq("111111111111"), eq("cluster-a"), eq("admin"), eq("pw-a"))).thenThrow(new RuntimeException("docker down"));
 
         service.onStart(null);
 
@@ -126,7 +126,7 @@ class RedshiftServiceTest {
     @Test
     void testCreateCluster() {
         when(clusterBackend.get(anyString())).thenReturn(Optional.empty());
-        when(cm.start(any(), any(), any())).thenReturn(new RedshiftContainerHandle("c1", "my-cluster", "localhost", 5432));
+        when(cm.start(any(), any(), any(), any())).thenReturn(new RedshiftContainerHandle("c1", "my-cluster", "localhost", 5432));
 
         Cluster cluster = service.createCluster("my-cluster", "dc2.large", "admin", "password123");
         assertNotNull(cluster);
@@ -163,7 +163,7 @@ class RedshiftServiceTest {
 
         Cluster deleted = service.deleteCluster("test-c");
         assertEquals("deleting", deleted.getClusterStatus());
-        verify(cm).stop("test-c");
+        verify(cm).stop("111111111111", "test-c");
         verify(clusterBackend).delete("test-c");
     }
 
@@ -172,11 +172,12 @@ class RedshiftServiceTest {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("my-cluster");
         cluster.setMasterUsername("admin");
+        cluster.setMasterPassword("secret-pw");
         cluster.setEndpoint(new Endpoint("localhost", 5439));
 
         when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
         when(snapshotBackend.get("my-snapshot")).thenReturn(Optional.empty());
-        doNothing().when(cm).takeSnapshot(eq("my-cluster"), eq("admin"), any(java.nio.file.Path.class));
+        doNothing().when(cm).takeSnapshot(eq("111111111111"), eq("my-cluster"), eq("admin"), any(java.nio.file.Path.class));
 
         Snapshot snapshot = service.createSnapshot("my-snapshot", "my-cluster");
         assertNotNull(snapshot);
@@ -184,13 +185,15 @@ class RedshiftServiceTest {
         assertEquals("my-cluster", snapshot.getClusterIdentifier());
         assertEquals("available", snapshot.getStatus());
         assertEquals("admin", snapshot.getMasterUsername());
+        // Password captured at snapshot time so restore can recover it after the source cluster is gone
+        assertEquals("secret-pw", snapshot.getMasterPassword());
         assertEquals(5439, snapshot.getPort());
         // sqlDump is now an absolute path scoped by account to avoid collisions across accounts
         assertTrue(snapshot.getSqlDump().contains("111111111111"));
         assertTrue(snapshot.getSqlDump().endsWith("my-snapshot.sql"));
         verify(snapshotBackend).put(eq("my-snapshot"), any(Snapshot.class));
         verify(snapshotBackend).flush();
-        verify(cm).takeSnapshot(eq("my-cluster"), eq("admin"), any(java.nio.file.Path.class));
+        verify(cm).takeSnapshot(eq("111111111111"), eq("my-cluster"), eq("admin"), any(java.nio.file.Path.class));
     }
 
     @Test
@@ -260,9 +263,9 @@ class RedshiftServiceTest {
         when(clusterBackend.get("restored-cluster")).thenReturn(Optional.empty());
         when(clusterBackend.get("source-cluster")).thenReturn(Optional.of(sourceCluster));
         when(snapshotBackend.get("my-snapshot")).thenReturn(Optional.of(snapshot));
-        when(cm.start(eq("restored-cluster"), eq("admin"), eq("password123")))
+        when(cm.start(eq("111111111111"), eq("restored-cluster"), eq("admin"), eq("password123")))
                 .thenReturn(new RedshiftContainerHandle("c-new", "restored-cluster", "localhost", 5432));
-        doNothing().when(cm).restoreSnapshot(eq("restored-cluster"), eq("admin"), any(java.nio.file.Path.class));
+        doNothing().when(cm).restoreSnapshot(eq("111111111111"), eq("restored-cluster"), eq("admin"), any(java.nio.file.Path.class));
 
         Cluster cluster = service.restoreFromClusterSnapshot("restored-cluster", "my-snapshot", "dc2.large");
         assertNotNull(cluster);
@@ -274,10 +277,28 @@ class RedshiftServiceTest {
         assertEquals("localhost", cluster.getEndpoint().getAddress());
 
         // Restore must use the source cluster's actual password, not a hardcoded one
-        verify(cm).start("restored-cluster", "admin", "password123");
-        verify(cm).restoreSnapshot(eq("restored-cluster"), eq("admin"), any(java.nio.file.Path.class));
+        verify(cm).start("111111111111", "restored-cluster", "admin", "password123");
+        verify(cm).restoreSnapshot(eq("111111111111"), eq("restored-cluster"), eq("admin"), any(java.nio.file.Path.class));
         verify(clusterBackend, times(2)).put(eq("restored-cluster"), any(Cluster.class));
         verify(clusterBackend, times(2)).flush();
+    }
+
+    @Test
+    void testRestoreFromClusterSnapshotUsesStoredPasswordAfterSourceClusterDeleted() {
+        Snapshot snapshot = new Snapshot("my-snapshot", "deleted-source", "available", 5439, "admin");
+        snapshot.setMasterPassword("original-secret");
+        snapshot.setSqlDump("my-snapshot.sql");
+        when(clusterBackend.get("restored-cluster")).thenReturn(Optional.empty());
+        // Source cluster no longer exists, but the snapshot itself still carries the original password
+        when(clusterBackend.get("deleted-source")).thenReturn(Optional.empty());
+        when(snapshotBackend.get("my-snapshot")).thenReturn(Optional.of(snapshot));
+        when(cm.start(eq("111111111111"), eq("restored-cluster"), eq("admin"), eq("original-secret")))
+                .thenReturn(new RedshiftContainerHandle("c-new", "restored-cluster", "localhost", 5432));
+        doNothing().when(cm).restoreSnapshot(eq("111111111111"), eq("restored-cluster"), eq("admin"), any(java.nio.file.Path.class));
+
+        Cluster cluster = service.restoreFromClusterSnapshot("restored-cluster", "my-snapshot", "dc2.large");
+        assertEquals("original-secret", cluster.getMasterPassword());
+        verify(cm).start("111111111111", "restored-cluster", "admin", "original-secret");
     }
 
     @Test
@@ -287,13 +308,13 @@ class RedshiftServiceTest {
         when(clusterBackend.get("restored-cluster")).thenReturn(Optional.empty());
         when(clusterBackend.get("deleted-source")).thenReturn(Optional.empty());
         when(snapshotBackend.get("my-snapshot")).thenReturn(Optional.of(snapshot));
-        when(cm.start(eq("restored-cluster"), eq("admin"), eq("admin")))
+        when(cm.start(eq("111111111111"), eq("restored-cluster"), eq("admin"), eq("admin")))
                 .thenReturn(new RedshiftContainerHandle("c-new", "restored-cluster", "localhost", 5432));
-        doNothing().when(cm).restoreSnapshot(eq("restored-cluster"), eq("admin"), any(java.nio.file.Path.class));
+        doNothing().when(cm).restoreSnapshot(eq("111111111111"), eq("restored-cluster"), eq("admin"), any(java.nio.file.Path.class));
 
         Cluster cluster = service.restoreFromClusterSnapshot("restored-cluster", "my-snapshot", "dc2.large");
         assertEquals("admin", cluster.getMasterPassword());
-        verify(cm).start("restored-cluster", "admin", "admin");
+        verify(cm).start("111111111111", "restored-cluster", "admin", "admin");
     }
 
     @Test
@@ -319,7 +340,7 @@ class RedshiftServiceTest {
         when(clusterBackend.get("failed-cluster")).thenReturn(Optional.empty());
         when(snapshotBackend.get("my-snapshot")).thenReturn(Optional.of(snapshot));
         when(snapshotDumpBackend.get("my-snapshot")).thenReturn(Optional.of("CREATE TABLE t;"));
-        when(cm.start(any(), any(), any())).thenThrow(new RuntimeException("Docker error"));
+        when(cm.start(any(), any(), any(), any())).thenThrow(new RuntimeException("Docker error"));
 
         assertThrows(AwsException.class, () ->
                 service.restoreFromClusterSnapshot("failed-cluster", "my-snapshot"));
