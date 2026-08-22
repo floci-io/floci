@@ -6,7 +6,9 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.redshift.container.RedshiftContainerHandle;
 import io.github.hectorvent.floci.services.redshift.container.RedshiftContainerManager;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
+import io.github.hectorvent.floci.services.redshift.model.ClusterParameterGroup;
 import io.github.hectorvent.floci.services.redshift.model.Endpoint;
+import io.github.hectorvent.floci.services.redshift.model.Snapshot;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -18,11 +20,15 @@ import java.util.Optional;
 @ApplicationScoped
 public class RedshiftService {
     private final AccountAwareStorageBackend<Cluster> clusters;
+    private final AccountAwareStorageBackend<Snapshot> snapshots;
+    private final AccountAwareStorageBackend<ClusterParameterGroup> parameterGroups;
     private final RedshiftContainerManager containerManager;
 
     @Inject
     public RedshiftService(StorageFactory storageFactory, RedshiftContainerManager containerManager) {
         this.clusters = storageFactory.create("redshift", "redshift-clusters.json", new TypeReference<Map<String, Cluster>>() {});
+        this.snapshots = storageFactory.create("redshift", "redshift-snapshots.json", new TypeReference<Map<String, Snapshot>>() {});
+        this.parameterGroups = storageFactory.create("redshift", "redshift-parameter-groups.json", new TypeReference<Map<String, ClusterParameterGroup>>() {});
         this.containerManager = containerManager;
     }
 
@@ -82,5 +88,108 @@ public class RedshiftService {
         
         cluster.setClusterStatus("deleting");
         return cluster;
+    }
+
+    // ── Snapshot Operations ──────────────────────────────────────────────────
+
+    public Snapshot createSnapshot(String snapshotIdentifier, String clusterIdentifier) {
+        Optional<Cluster> clusterOpt = clusters.get(clusterIdentifier);
+        if (clusterOpt.isEmpty()) {
+            throw new AwsException("ClusterNotFound", "Cluster " + clusterIdentifier + " not found", 404);
+        }
+        if (snapshots.get(snapshotIdentifier).isPresent()) {
+            throw new AwsException("ClusterSnapshotAlreadyExists", "Snapshot " + snapshotIdentifier + " already exists", 400);
+        }
+
+        Cluster cluster = clusterOpt.get();
+        Snapshot snapshot = new Snapshot();
+        snapshot.setSnapshotIdentifier(snapshotIdentifier);
+        snapshot.setClusterIdentifier(clusterIdentifier);
+        snapshot.setStatus("available");
+        snapshot.setMasterUsername(cluster.getMasterUsername());
+        if (cluster.getEndpoint() != null) {
+            snapshot.setPort(cluster.getEndpoint().getPort());
+        } else {
+            snapshot.setPort(5439);
+        }
+
+        snapshots.put(snapshotIdentifier, snapshot);
+        snapshots.flush();
+        return snapshot;
+    }
+
+    public List<Snapshot> describeSnapshots(String snapshotIdentifier, String clusterIdentifier) {
+        if (snapshotIdentifier != null && !snapshotIdentifier.isBlank()) {
+            Optional<Snapshot> snapshot = snapshots.get(snapshotIdentifier);
+            if (snapshot.isEmpty()) {
+                throw new AwsException("ClusterSnapshotNotFound", "Snapshot " + snapshotIdentifier + " not found", 404);
+            }
+            return List.of(snapshot.get());
+        }
+        if (clusterIdentifier != null && !clusterIdentifier.isBlank()) {
+            return snapshots.scan(k -> true).stream()
+                    .filter(s -> clusterIdentifier.equals(s.getClusterIdentifier()))
+                    .toList();
+        }
+        return snapshots.scan(k -> true);
+    }
+
+    public List<Snapshot> describeSnapshots(String snapshotIdentifier) {
+        return describeSnapshots(snapshotIdentifier, null);
+    }
+
+    public Optional<Snapshot> getSnapshot(String snapshotIdentifier) {
+        return snapshots.get(snapshotIdentifier);
+    }
+
+    public Snapshot deleteSnapshot(String snapshotIdentifier) {
+        Optional<Snapshot> snapshotOpt = snapshots.get(snapshotIdentifier);
+        if (snapshotOpt.isEmpty()) {
+            throw new AwsException("ClusterSnapshotNotFound", "Snapshot " + snapshotIdentifier + " not found", 404);
+        }
+        Snapshot snapshot = snapshotOpt.get();
+        snapshots.delete(snapshotIdentifier);
+        snapshots.flush();
+        snapshot.setStatus("deleted");
+        return snapshot;
+    }
+
+    // ── Parameter Group Operations ───────────────────────────────────────────
+
+    public ClusterParameterGroup createClusterParameterGroup(String parameterGroupName, String parameterGroupFamily, String description) {
+        if (parameterGroups.get(parameterGroupName).isPresent()) {
+            throw new AwsException("ClusterParameterGroupAlreadyExists", "Cluster parameter group " + parameterGroupName + " already exists", 400);
+        }
+
+        ClusterParameterGroup group = new ClusterParameterGroup(parameterGroupName, parameterGroupFamily, description);
+        parameterGroups.put(parameterGroupName, group);
+        parameterGroups.flush();
+        return group;
+    }
+
+    public List<ClusterParameterGroup> describeClusterParameterGroups(String parameterGroupName) {
+        if (parameterGroupName != null && !parameterGroupName.isBlank()) {
+            Optional<ClusterParameterGroup> group = parameterGroups.get(parameterGroupName);
+            if (group.isEmpty()) {
+                throw new AwsException("ClusterParameterGroupNotFound", "Cluster parameter group " + parameterGroupName + " not found", 404);
+            }
+            return List.of(group.get());
+        }
+        return parameterGroups.scan(k -> true);
+    }
+
+    public Optional<ClusterParameterGroup> getClusterParameterGroup(String parameterGroupName) {
+        return parameterGroups.get(parameterGroupName);
+    }
+
+    public ClusterParameterGroup deleteClusterParameterGroup(String parameterGroupName) {
+        Optional<ClusterParameterGroup> groupOpt = parameterGroups.get(parameterGroupName);
+        if (groupOpt.isEmpty()) {
+            throw new AwsException("ClusterParameterGroupNotFound", "Cluster parameter group " + parameterGroupName + " not found", 404);
+        }
+        ClusterParameterGroup group = groupOpt.get();
+        parameterGroups.delete(parameterGroupName);
+        parameterGroups.flush();
+        return group;
     }
 }
