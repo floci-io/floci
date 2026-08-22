@@ -4949,10 +4949,24 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
 
     public List<Address> describeAddresses(String region, List<String> allocationIds, Map<String, List<String>> filters) {
         ensureDefaultResources(region);
-        return addresses.scan(k -> true).stream()
+        List<Address> matched = addresses.scan(k -> true).stream()
                 .filter(a -> a.getRegion().equals(region))
                 .filter(a -> allocationIds.isEmpty() || allocationIds.contains(a.getAllocationId()))
                 .collect(Collectors.toList());
+        // An EIP can be associated before its instance has a container, and Docker hands out a
+        // different bridge IP after a stop/start, either of which would leave the association
+        // reporting an address that no longer answers. Re-resolve on read: this is the call
+        // Terraform refreshes public_ip from, so it is the last chance to be right.
+        for (Address addr : matched) {
+            if (addr.getInstanceId() != null) {
+                String before = addr.getPublicIp();
+                pointAddressAtInstance(addr, region, addr.getInstanceId());
+                if (!Objects.equals(before, addr.getPublicIp())) {
+                    addresses.put(key(region, addr.getAllocationId()), addr);
+                }
+            }
+        }
+        return matched;
     }
 
     // ─── Availability Zones & Regions ─────────────────────────────────────────
