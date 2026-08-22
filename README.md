@@ -190,7 +190,7 @@ flowchart LR
         Router["HTTP Router\nJAX-RS / Vert.x"]
 
         subgraph Stateless ["Stateless Services"]
-            A["SSM · SQS · SNS\nIAM · STS · KMS\nSecrets Manager · SES\nCognito · Kinesis\nEventBridge · Scheduler · AppConfig\nCloudWatch · Step Functions\nCloudFormation · ACM · Config · CloudTrail\nAPI Gateway · AppSync · ELB v2 · Auto Scaling\nElastic Beanstalk · CodeDeploy · CodePipeline · Backup · Bedrock Runtime · Bedrock AgentCore · Route53 · Transfer"]
+            A["SSM · SQS · SNS\nIAM · STS · KMS\nSecrets Manager · SES\nCognito · Kinesis\nEventBridge · Scheduler · AppConfig\nCloudWatch · Step Functions\nCloudFormation · ACM · Config · CloudTrail\nAPI Gateway · AppSync · ELB v2 · Auto Scaling\nElastic Beanstalk · CodeDeploy · CodePipeline · Backup · FIS · Bedrock Runtime · Bedrock AgentCore · Route53 · Transfer"]
         end
 
         subgraph Stateful ["Stateful Services"]
