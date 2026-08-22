@@ -41,7 +41,8 @@ class DynamoDbAccessPathValidationTest {
                         attribute("createdAt"), attribute("alternate"))
                 .globalSecondaryIndexes(GlobalSecondaryIndex.builder()
                         .indexName("status-index")
-                        .keySchema(key("status", KeyType.HASH), key("createdAt", KeyType.RANGE))
+                        .keySchema(key("status", KeyType.HASH), key("createdAt", KeyType.RANGE),
+                                key("alternate", KeyType.RANGE))
                         .projection(Projection.builder()
                                 .projectionType(ProjectionType.INCLUDE)
                                 .nonKeyAttributes("summary")
@@ -182,6 +183,29 @@ class DynamoDbAccessPathValidationTest {
                 .keyConditionExpression("#status = :status")
                 .expressionAttributeNames(Map.of("#status", "status"))
                 .expressionAttributeValues(Map.of(":status", value("open")))));
+    }
+
+    @Test
+    void queryRejectsInvalidCompositeSortKeyConditions() {
+        assertValidationException(() -> ddb.query(request -> request
+                .tableName(TABLE)
+                .indexName("status-index")
+                .keyConditionExpression("#status = :status AND alternate = :alternate")
+                .expressionAttributeNames(Map.of("#status", "status"))
+                .expressionAttributeValues(Map.of(
+                        ":status", value("open"),
+                        ":alternate", value("a1")))));
+
+        assertValidationException(() -> ddb.query(request -> request
+                .tableName(TABLE)
+                .indexName("status-index")
+                .keyConditionExpression("#status = :status AND createdAt > :createdAt "
+                        + "AND alternate = :alternate")
+                .expressionAttributeNames(Map.of("#status", "status"))
+                .expressionAttributeValues(Map.of(
+                        ":status", value("open"),
+                        ":createdAt", value("2026-01-01"),
+                        ":alternate", value("a1")))));
     }
 
     private static void assertValidationException(org.assertj.core.api.ThrowableAssert.ThrowingCallable call) {
