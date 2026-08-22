@@ -184,6 +184,23 @@ class DynamoDbAccessPathValidationTest {
                 .expressionAttributeValues(Map.of(":status", value("open")))));
     }
 
+    @Test
+    void queryAndScanRejectWrongExclusiveStartKeyTypes() {
+        Map<String, AttributeValue> invalidStartKey = Map.of(
+                "pk", AttributeValue.builder().n("1").build(),
+                "sk", value("s1"));
+
+        assertValidationException(() -> ddb.query(request -> request
+                .tableName(TABLE)
+                .keyConditionExpression("pk = :pk")
+                .expressionAttributeValues(Map.of(":pk", value("p1")))
+                .exclusiveStartKey(invalidStartKey)));
+
+        assertValidationException(() -> ddb.scan(request -> request
+                .tableName(TABLE)
+                .exclusiveStartKey(invalidStartKey)));
+    }
+
     private static void assertValidationException(org.assertj.core.api.ThrowableAssert.ThrowingCallable call) {
         assertThatThrownBy(call)
                 .isInstanceOf(DynamoDbException.class)
