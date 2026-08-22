@@ -48,6 +48,7 @@ public class CloudFormationService {
     private static final Logger LOG = Logger.getLogger(CloudFormationService.class);
 
     private final ConcurrentHashMap<String, Stack> stacks = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Object> stackLocks = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, DeletedStackEntry> deletedStacks = new ConcurrentHashMap<>();
     // Global exports registry: region:exportName -> exportValue
     private final ConcurrentHashMap<String, String> exports = new ConcurrentHashMap<>();
@@ -60,6 +61,9 @@ public class CloudFormationService {
     private final RegionResolver regionResolver;
     private final SamTransformProcessor samTransformProcessor;
     private final Clock clock;
+    private Object getStackLock(String stackName, String region) {
+        return stackLocks.computeIfAbsent(key(stackName, region), k -> new Object());
+    }
 
     // Persisted state so stacks survive a restart (criteria #10, #11). The in-memory maps above are
     // the live working copy; these backends are write-through + loaded on startup. CloudFormation is
@@ -309,28 +313,36 @@ public class CloudFormationService {
      */
     public Future<?> executeChangeSet(String stackName, String changeSetName, String region, String accountId) {
         Stack stack = getStackOrThrow(stackName, region);
-        ChangeSet cs = stack.getChangeSets().get(resolveChangeSetName(changeSetName));
-        if (cs == null) {
-            throw new AwsException("ChangeSetNotFoundException",
-                    "ChangeSet [" + changeSetName + "] does not exist", 400);
+
+        synchronized (getStackLock(stackName, region)) {
+            ChangeSet cs = stack.getChangeSets().get(resolveChangeSetName(changeSetName));
+            if (cs == null) {
+                throw new AwsException("ChangeSetNotFoundException",
+                        "ChangeSet [" + changeSetName + "] does not exist", 400);
+            }
+
+            boolean isCreate = "CREATE".equalsIgnoreCase(cs.getChangeSetType()) ||
+                    "CREATE_IN_PROGRESS".equals(stack.getStatus());
+
+            stack.setStatus(isCreate ? "CREATE_IN_PROGRESS" : "UPDATE_IN_PROGRESS");
+            stack.setLastUpdatedTime(now());
+            addEvent(stack, stack.getStackName(), stack.getStackId(),
+                    "AWS::CloudFormation::Stack",
+                    isCreate ? "CREATE_IN_PROGRESS" : "UPDATE_IN_PROGRESS",
+                    null);
+            persistStack(stack);
+
+            String templateBody = cs.getTemplateBody();
+            Map<String, String> params =
+                    cs.getParameters() != null ? cs.getParameters() : Map.of();
+
+            return executor.submit(() -> runUnderAccount(accountId, () -> {
+                synchronized (getStackLock(stack.getStackName(), region)) {
+                    executeTemplate(stack, templateBody, params, isCreate, region, accountId);
+                }
+            }));
         }
-
-        boolean isCreate = "CREATE".equalsIgnoreCase(cs.getChangeSetType()) ||
-                "CREATE_IN_PROGRESS".equals(stack.getStatus());
-
-        stack.setStatus(isCreate ? "CREATE_IN_PROGRESS" : "UPDATE_IN_PROGRESS");
-        stack.setLastUpdatedTime(now());
-        addEvent(stack, stack.getStackName(), stack.getStackId(),
-                "AWS::CloudFormation::Stack", isCreate ? "CREATE_IN_PROGRESS" : "UPDATE_IN_PROGRESS", null);
-        persistStack(stack);
-
-        String templateBody = cs.getTemplateBody();
-        Map<String, String> params = cs.getParameters() != null ? cs.getParameters() : Map.of();
-
-        return executor.submit(() -> runUnderAccount(accountId,
-                () -> executeTemplate(stack, templateBody, params, isCreate, region, accountId)));
     }
-
     /**
      * Runs {@code body} under a synthetic CDI request scope whose account is {@code accountId}, so
      * that account-aware storage in the downstream services namespaces provisioned resources under
@@ -365,14 +377,21 @@ public class CloudFormationService {
 
     public void deleteChangeSet(String stackName, String changeSetName, String region) {
         Stack stack = getStackOrThrow(stackName, region);
-        String name = resolveChangeSetName(changeSetName);
-        ChangeSet cs = stack.getChangeSets().get(name);
-        if (cs == null) {
-            throw new AwsException("ChangeSetNotFoundException",
-                    "ChangeSet [" + changeSetName + "] does not exist", 400);
+
+        synchronized (getStackLock(stackName, region)) {
+            String name = resolveChangeSetName(changeSetName);
+            ChangeSet cs = stack.getChangeSets().get(name);
+
+            if (cs == null) {
+                throw new AwsException(
+                        "ChangeSetNotFoundException",
+                        "ChangeSet [" + changeSetName + "] does not exist",
+                        400);
+            }
+
+            stack.getChangeSets().remove(name);
+            persistStack(stack);
         }
-        stack.getChangeSets().remove(name);
-        persistStack(stack);
     }
 
     // ── DeleteStack ───────────────────────────────────────────────────────────
@@ -392,21 +411,39 @@ public class CloudFormationService {
      */
     public Future<?> deleteStack(String stackName, String region, String accountId) {
         purgeExpiredDeletedStacks();
+
         Stack stack = resolveStack(stackName, region);
         if (stack == null) {
-            return CompletableFuture.completedFuture(null); // Already gone — no-op
+            return CompletableFuture.completedFuture(null);
         }
-        if (stack.isEnableTerminationProtection()) {
-            // Real AWS rejects deletion of a protected stack and leaves it unchanged.
-            throw new AwsException("ValidationError",
-                    "Stack [" + stack.getStackId()
-                            + "] cannot be deleted while TerminationProtection is enabled", 400);
-        }
-        stack.setStatus("DELETE_IN_PROGRESS");
-        addEvent(stack, stack.getStackName(), stack.getStackId(),
-                "AWS::CloudFormation::Stack", "DELETE_IN_PROGRESS", null);
 
-        return executor.submit(() -> runUnderAccount(accountId, () -> deleteStackResources(stack, region)));
+        synchronized (getStackLock(stackName, region)) {
+            // Re-resolve after acquiring the lock in case another operation
+            // changed the stack between the initial lookup and lock acquisition.
+            stack = resolveStack(stackName, region);
+            if (stack == null) {
+                return CompletableFuture.completedFuture(null);
+            }
+
+            if (stack.isEnableTerminationProtection()) {
+                throw new AwsException("ValidationError",
+                        "Stack [" + stack.getStackId()
+                                + "] cannot be deleted while TerminationProtection is enabled", 400);
+            }
+
+            stack.setStatus("DELETE_IN_PROGRESS");
+            addEvent(stack, stack.getStackName(), stack.getStackId(),
+                    "AWS::CloudFormation::Stack", "DELETE_IN_PROGRESS", null);
+            persistStack(stack);
+
+            Stack stackToDelete = stack;
+
+            return executor.submit(() -> runUnderAccount(accountId, () -> {
+                synchronized (getStackLock(stackToDelete.getStackName(), region)) {
+                    deleteStackResources(stackToDelete, region);
+                }
+            }));
+        }
     }
 
     // ── GetTemplate ───────────────────────────────────────────────────────────
@@ -542,16 +579,22 @@ public class CloudFormationService {
             throw new AwsException("ValidationError",
                     "Stack with id " + stackName + " does not exist", 400);
         }
-        List<StackEvent> events = new ArrayList<>(stack.getEvents());
-        Collections.reverse(events);
-        return events;
+
+        synchronized (getStackLock(stack.getStackName(), stack.getRegion())) {
+            List<StackEvent> events = new ArrayList<>(stack.getEvents());
+            Collections.reverse(events);
+            return events;
+        }
     }
 
     // ── DescribeStackResources ────────────────────────────────────────────────
 
     public List<StackResource> describeStackResources(String stackName, String region) {
         Stack stack = getStackOrThrow(stackName, region);
-        return new ArrayList<>(stack.getResources().values());
+
+        synchronized (getStackLock(stack.getStackName(), stack.getRegion())) {
+            return new ArrayList<>(stack.getResources().values());
+        }
     }
 
     // ── ListStacks ────────────────────────────────────────────────────────────
