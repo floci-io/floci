@@ -3,6 +3,8 @@ package io.github.hectorvent.floci.services.redshift;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
+import io.github.hectorvent.floci.services.redshift.model.ClusterParameterGroup;
+import io.github.hectorvent.floci.services.redshift.model.Snapshot;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.MediaType;
@@ -72,6 +74,135 @@ public class RedshiftQueryHandler {
                     .end("DeleteClusterResponse")
                     .build();
             return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+        } else if ("CreateClusterSnapshot".equals(action)) {
+            String snapshotIdentifier = params.getFirst("SnapshotIdentifier");
+            String clusterIdentifier = params.getFirst("ClusterIdentifier");
+            Snapshot snapshot = service.createSnapshot(snapshotIdentifier, clusterIdentifier);
+            String xml = new XmlBuilder()
+                    .start("CreateClusterSnapshotResponse")
+                      .start("CreateClusterSnapshotResult")
+                        .raw(buildSnapshotXml(snapshot))
+                      .end("CreateClusterSnapshotResult")
+                      .start("ResponseMetadata")
+                        .elem("RequestId", "test-req-id")
+                      .end("ResponseMetadata")
+                    .end("CreateClusterSnapshotResponse")
+                    .build();
+            return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+        } else if ("DescribeClusterSnapshots".equals(action)) {
+            String snapshotIdentifier = params.getFirst("SnapshotIdentifier");
+            String clusterIdentifier = params.getFirst("ClusterIdentifier");
+            List<Snapshot> snapshots = service.describeSnapshots(snapshotIdentifier, clusterIdentifier);
+            XmlBuilder xmlBuilder = new XmlBuilder()
+                    .start("DescribeClusterSnapshotsResponse")
+                      .start("DescribeClusterSnapshotsResult")
+                        .start("Snapshots");
+            for (Snapshot snapshot : snapshots) {
+                xmlBuilder.raw(buildSnapshotXml(snapshot));
+            }
+            String xml = xmlBuilder
+                        .end("Snapshots")
+                      .end("DescribeClusterSnapshotsResult")
+                      .start("ResponseMetadata")
+                        .elem("RequestId", "test-req-id")
+                      .end("ResponseMetadata")
+                    .end("DescribeClusterSnapshotsResponse")
+                    .build();
+            return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+        } else if ("DeleteClusterSnapshot".equals(action)) {
+            String snapshotIdentifier = params.getFirst("SnapshotIdentifier");
+            Snapshot snapshot = service.deleteSnapshot(snapshotIdentifier);
+            String xml = new XmlBuilder()
+                    .start("DeleteClusterSnapshotResponse")
+                      .start("DeleteClusterSnapshotResult")
+                        .raw(buildSnapshotXml(snapshot))
+                      .end("DeleteClusterSnapshotResult")
+                      .start("ResponseMetadata")
+                        .elem("RequestId", "test-req-id")
+                      .end("ResponseMetadata")
+                    .end("DeleteClusterSnapshotResponse")
+                    .build();
+            return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+        } else if ("RestoreFromClusterSnapshot".equals(action)) {
+            String clusterIdentifier = params.getFirst("ClusterIdentifier");
+            String snapshotIdentifier = params.getFirst("SnapshotIdentifier");
+            String nodeType = params.getFirst("NodeType");
+            Cluster cluster = service.restoreFromClusterSnapshot(clusterIdentifier, snapshotIdentifier, nodeType);
+            String xml = new XmlBuilder()
+                    .start("RestoreFromClusterSnapshotResponse")
+                      .start("RestoreFromClusterSnapshotResult")
+                        .raw(buildClusterXml(cluster))
+                      .end("RestoreFromClusterSnapshotResult")
+                      .start("ResponseMetadata")
+                        .elem("RequestId", "test-req-id")
+                      .end("ResponseMetadata")
+                    .end("RestoreFromClusterSnapshotResponse")
+                    .build();
+            return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+        } else if ("CreateClusterParameterGroup".equals(action)) {
+            String parameterGroupName = params.getFirst("ParameterGroupName");
+            String parameterGroupFamily = params.getFirst("ParameterGroupFamily");
+            String description = params.getFirst("Description");
+            ClusterParameterGroup group = service.createClusterParameterGroup(parameterGroupName, parameterGroupFamily, description);
+            String xml = new XmlBuilder()
+                    .start("CreateClusterParameterGroupResponse")
+                      .start("CreateClusterParameterGroupResult")
+                        .raw(buildClusterParameterGroupXml(group))
+                      .end("CreateClusterParameterGroupResult")
+                      .start("ResponseMetadata")
+                        .elem("RequestId", "test-req-id")
+                      .end("ResponseMetadata")
+                    .end("CreateClusterParameterGroupResponse")
+                    .build();
+            return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+        } else if ("DescribeClusterParameterGroups".equals(action)) {
+            String parameterGroupName = params.getFirst("ParameterGroupName");
+            List<ClusterParameterGroup> groups = service.describeClusterParameterGroups(parameterGroupName);
+            XmlBuilder xmlBuilder = new XmlBuilder()
+                    .start("DescribeClusterParameterGroupsResponse")
+                      .start("DescribeClusterParameterGroupsResult")
+                        .start("ParameterGroups");
+            for (ClusterParameterGroup group : groups) {
+                xmlBuilder.raw(buildClusterParameterGroupXml(group));
+            }
+            String xml = xmlBuilder
+                        .end("ParameterGroups")
+                      .end("DescribeClusterParameterGroupsResult")
+                      .start("ResponseMetadata")
+                        .elem("RequestId", "test-req-id")
+                      .end("ResponseMetadata")
+                    .end("DescribeClusterParameterGroupsResponse")
+                    .build();
+            return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+        } else if ("DescribeClusterParameters".equals(action)) {
+            String parameterGroupName = params.getFirst("ParameterGroupName");
+            if (parameterGroupName == null || parameterGroupName.isBlank()) {
+                throw new AwsException("InvalidParameterValue", "ParameterGroupName is required", 400);
+            }
+            service.describeClusterParameterGroups(parameterGroupName);
+            String xml = new XmlBuilder()
+                    .start("DescribeClusterParametersResponse")
+                      .start("DescribeClusterParametersResult")
+                        .start("Parameters")
+                        .end("Parameters")
+                      .end("DescribeClusterParametersResult")
+                      .start("ResponseMetadata")
+                        .elem("RequestId", "test-req-id")
+                      .end("ResponseMetadata")
+                    .end("DescribeClusterParametersResponse")
+                    .build();
+            return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+        } else if ("DeleteClusterParameterGroup".equals(action)) {
+            String parameterGroupName = params.getFirst("ParameterGroupName");
+            service.deleteClusterParameterGroup(parameterGroupName);
+            String xml = new XmlBuilder()
+                    .start("DeleteClusterParameterGroupResponse")
+                      .start("ResponseMetadata")
+                        .elem("RequestId", "test-req-id")
+                      .end("ResponseMetadata")
+                    .end("DeleteClusterParameterGroupResponse")
+                    .build();
+            return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
         }
         
         throw new AwsException("InvalidAction", "Action " + action + " is not supported", 400);
@@ -93,5 +224,27 @@ public class RedshiftQueryHandler {
         }
         
         return builder.end("Cluster").build();
+    }
+
+    private String buildSnapshotXml(Snapshot snapshot) {
+        XmlBuilder builder = new XmlBuilder()
+            .start("Snapshot")
+            .elem("SnapshotIdentifier", snapshot.getSnapshotIdentifier())
+            .elem("ClusterIdentifier", snapshot.getClusterIdentifier())
+            .elem("Status", snapshot.getStatus())
+            .elem("Port", String.valueOf(snapshot.getPort()))
+            .elem("MasterUsername", snapshot.getMasterUsername());
+        
+        return builder.end("Snapshot").build();
+    }
+
+    private String buildClusterParameterGroupXml(ClusterParameterGroup group) {
+        XmlBuilder builder = new XmlBuilder()
+            .start("ClusterParameterGroup")
+            .elem("ParameterGroupName", group.getParameterGroupName())
+            .elem("ParameterGroupFamily", group.getParameterGroupFamily())
+            .elem("Description", group.getDescription());
+        
+        return builder.end("ClusterParameterGroup").build();
     }
 }
