@@ -26,6 +26,7 @@ import io.github.hectorvent.floci.services.ses.model.MessageTag;
 import io.github.hectorvent.floci.services.ses.model.SuppressedDestination;
 import io.github.hectorvent.floci.services.ses.model.SuppressionOptions;
 import io.github.hectorvent.floci.services.ses.model.Tag;
+import io.github.hectorvent.floci.services.ses.model.Tenant;
 import io.github.hectorvent.floci.services.ses.model.TrackingOptions;
 import io.github.hectorvent.floci.services.ses.model.VdmOptions;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -847,6 +848,134 @@ public class SesController {
         o.put("SuccessRedirectionURL", t.getSuccessRedirectionURL());
         o.put("FailureRedirectionURL", t.getFailureRedirectionURL());
         return o;
+    }
+
+    // ──────────────────────────── Tenants (multi-tenancy) ────────────────────────────
+    // The SES v2 tenant operations use RPC-style POST subpaths (/tenants, /tenants/get, /tenants/list,
+    // /tenants/delete). The service owns id/ARN generation and name validation; the controller only
+    // parses the request and renders the response.
+
+    @POST
+    @Path("/tenants")
+    public Response createTenant(@Context HttpHeaders headers, String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            JsonNode request = (body == null || body.isBlank())
+                    ? objectMapper.createObjectNode()
+                    : objectMapper.readTree(body);
+            requireJsonObject(request);
+            String tenantName = stringMemberOrAbsent(request, "TenantName");
+            List<Tag> tags = parseTagsArray(request.path("Tags"));
+            String accountId = regionResolver.getAccountId();
+            Tenant tenant = sesService.createTenant(tenantName, tags, accountId, region);
+            return Response.ok(tenantJson(tenant)).build();
+        } catch (AwsException e) {
+            throw remapV1Exception(e);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new AwsException("SerializationException", null, 400);
+        }
+    }
+
+    @POST
+    @Path("/tenants/get")
+    public Response getTenant(@Context HttpHeaders headers, String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            JsonNode request = (body == null || body.isBlank())
+                    ? objectMapper.createObjectNode()
+                    : objectMapper.readTree(body);
+            requireJsonObject(request);
+            String tenantName = stringMemberOrAbsent(request, "TenantName");
+            Tenant tenant = sesService.getTenant(tenantName, region);
+            ObjectNode result = objectMapper.createObjectNode();
+            result.set("Tenant", tenantJson(tenant));
+            return Response.ok(result).build();
+        } catch (AwsException e) {
+            throw remapV1Exception(e);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new AwsException("SerializationException", null, 400);
+        }
+    }
+
+    @POST
+    @Path("/tenants/list")
+    public Response listTenants(@Context HttpHeaders headers, String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            // Parse the body so a malformed request is rejected rather than silently accepted. Phase 1
+            // returns every tenant in one page; PageSize/NextToken pagination is a follow-up.
+            JsonNode request = (body == null || body.isBlank())
+                    ? objectMapper.createObjectNode()
+                    : objectMapper.readTree(body);
+            requireJsonObject(request);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new AwsException("SerializationException", null, 400);
+        }
+        ObjectNode result = objectMapper.createObjectNode();
+        ArrayNode tenants = result.putArray("Tenants");
+        for (Tenant t : sesService.listTenants(region)) {
+            // ListTenants returns the TenantInfo subset (no Tags / SendingStatus).
+            ObjectNode item = tenants.addObject();
+            item.put("TenantName", t.tenantName());
+            item.put("TenantId", t.tenantId());
+            item.put("TenantArn", t.tenantArn());
+            if (t.createdTimestamp() != null) {
+                item.put("CreatedTimestamp", t.createdTimestamp().toEpochMilli() / 1000.0);
+            }
+        }
+        return Response.ok(result).build();
+    }
+
+    @POST
+    @Path("/tenants/delete")
+    public Response deleteTenant(@Context HttpHeaders headers, String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            JsonNode request = (body == null || body.isBlank())
+                    ? objectMapper.createObjectNode()
+                    : objectMapper.readTree(body);
+            requireJsonObject(request);
+            String tenantName = stringMemberOrAbsent(request, "TenantName");
+            sesService.deleteTenant(tenantName, region);
+            return Response.ok(objectMapper.createObjectNode()).build();
+        } catch (AwsException e) {
+            throw remapV1Exception(e);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new AwsException("SerializationException", null, 400);
+        }
+    }
+
+    // Read a typed string member: absent/null returns null, but a present value of the wrong JSON type
+    // is rejected rather than coerced (asText would turn 123 into "123"), matching AWS.
+    private static String stringMemberOrAbsent(JsonNode parent, String field) {
+        JsonNode n = parent.path(field);
+        if (n.isMissingNode() || n.isNull()) {
+            return null;
+        }
+        if (!n.isTextual()) {
+            throw new AwsException("SerializationException", null, 400);
+        }
+        return n.textValue();
+    }
+
+    private ObjectNode tenantJson(Tenant tenant) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("TenantName", tenant.tenantName());
+        node.put("TenantId", tenant.tenantId());
+        node.put("TenantArn", tenant.tenantArn());
+        if (tenant.createdTimestamp() != null) {
+            node.put("CreatedTimestamp", tenant.createdTimestamp().toEpochMilli() / 1000.0);
+        }
+        if (tenant.tags() != null && !tenant.tags().isEmpty()) {
+            ArrayNode tags = node.putArray("Tags");
+            for (Tag t : tenant.tags()) {
+                ObjectNode tagNode = tags.addObject();
+                tagNode.put("Key", t.key());
+                tagNode.put("Value", t.value());
+            }
+        }
+        node.put("SendingStatus", tenant.sendingStatus());
+        return node;
     }
 
     @POST
