@@ -52,14 +52,15 @@ class EfsIntegrationTest {
 
     @Test
     @Order(2)
-    void describeFileSystems() {
-        given()
-            .contentType("application/json")
-        .when()
-            .get("/2015-02-01/file-systems")
-        .then()
-            .statusCode(200)
-            .body("FileSystems.FileSystemId", hasItem(fileSystemId));
+    void describeFileSystemsByFileSystemId() {
+    given()
+        .queryParam("FileSystemId", fileSystemId)
+    .when()
+        .get("/2015-02-01/file-systems")
+    .then()
+        .statusCode(200)
+        .body("FileSystems.size()", equalTo(1))
+        .body("FileSystems[0].FileSystemId", equalTo(fileSystemId));
     }
 
     @Test
@@ -75,7 +76,7 @@ class EfsIntegrationTest {
         .when()
             .put("/2015-02-01/file-systems/" + fileSystemId)
         .then()
-            .statusCode(200)
+            .statusCode(202)
             .body("ProvisionedThroughputInMibps", equalTo(50.0f));
     }
 

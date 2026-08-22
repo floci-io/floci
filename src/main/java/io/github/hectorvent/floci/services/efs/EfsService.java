@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.services.efs.model.*;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 
 import java.time.Instant;
 import java.util.ArrayList;
@@ -29,13 +30,15 @@ public class EfsService implements Resettable {
     private final StorageBackend<String, Boolean> originalBackupStore;
     private final StorageBackend<String, List<LifecyclePolicy>> lifecycleConfigurationStore;
     private final ConcurrentHashMap<String, Object> syncLocks = new ConcurrentHashMap<>();
+    private final RegionResolver regionResolver;
 
     private Object lockFor(String key) {
         return syncLocks.computeIfAbsent(key, k -> new Object());
     }
 
     @Inject
-    public EfsService(StorageFactory storageFactory) {
+    public EfsService(StorageFactory storageFactory, RegionResolver regionResolver) {
+        this.regionResolver = regionResolver;
         this.fileSystemStore = storageFactory.create("efs", "efs-filesystems.json",
                 new com.fasterxml.jackson.core.type.TypeReference<java.util.Map<String, FileSystem>>() {});
         this.mountTargetStore = storageFactory.create("efs", "efs-mounttargets.json",
@@ -71,44 +74,9 @@ public class EfsService implements Resettable {
 
         synchronized (lockFor(region + "::create::" + token)) {
         for (FileSystem existing : fileSystemStore.scan(k -> k.startsWith(region + "::"))) {
-            if (token.equals(existing.getCreationToken())){
-                throw EfsException.fileSystemAlreadyExists(existing.getCreationToken());
+            if (token.equals(existing.getCreationToken())) {
+                throw EfsException.fileSystemAlreadyExists(existing.getCreationToken(), existing.getFileSystemId());
             }
-                boolean match = true;
-                
-                String reqPerfMode = request.getPerformanceMode() != null ? request.getPerformanceMode().name() : "generalPurpose";
-                String extPerfMode = existing.getPerformanceMode();
-                if (!java.util.Objects.equals(reqPerfMode, extPerfMode)) match = false;
-                
-                String reqTpMode = request.getThroughputMode() != null ? request.getThroughputMode().name() : "bursting";
-                String extTpMode = existing.getThroughputMode();
-                if (!java.util.Objects.equals(reqTpMode, extTpMode)) match = false;
-
-                Boolean reqEnc = request.getEncrypted() != null ? request.getEncrypted() : Boolean.FALSE;
-                Boolean extEnc = existing.getEncrypted() != null ? existing.getEncrypted() : Boolean.FALSE;
-                if (!java.util.Objects.equals(reqEnc, extEnc)) match = false;
-                
-                if (!java.util.Objects.equals(request.getKmsKeyId(), existing.getKmsKeyId())) match = false;
-                if (!java.util.Objects.equals(request.getProvisionedThroughputInMibps(), existing.getProvisionedThroughputInMibps())) match = false;
-                
-                if (!java.util.Objects.equals(request.getAvailabilityZoneName(), existing.getAvailabilityZoneName())) match = false;
-                
-                Boolean reqBackup = request.getBackup() != null ? request.getBackup() : Boolean.TRUE;
-                Boolean extBackup = originalBackupStore.get(regionKey(region, existing.getFileSystemId())).orElse(null);
-                if (extBackup == null) {
-                    io.github.hectorvent.floci.services.efs.model.BackupPolicy extBackupPolicy = backupPolicyStore.get(regionKey(region, existing.getFileSystemId())).orElse(null);
-                    extBackup = extBackupPolicy != null && "ENABLED".equals(extBackupPolicy.getStatus());
-                }
-                if (!java.util.Objects.equals(reqBackup, extBackup)) match = false;
-                
-                java.util.List<io.github.hectorvent.floci.services.efs.model.Tag> reqTags = request.getTags() != null ? request.getTags() : java.util.Collections.emptyList();
-                java.util.List<io.github.hectorvent.floci.services.efs.model.Tag> extTags = existing.getTags() != null ? existing.getTags() : java.util.Collections.emptyList();
-                if (reqTags.size() != extTags.size() || !reqTags.containsAll(extTags)) match = false;
-                
-                if (!match) {
-                    throw EfsException.idempotentParameterMismatch();
-                }
-                return existing;
         }
 
         String fsId = "fs-" + UUID.randomUUID().toString().replace("-", "").substring(0, 17);
@@ -119,8 +87,8 @@ public class EfsService implements Resettable {
         fs.setCreationToken(token);
         fs.setCreationTime(Instant.now().getEpochSecond());
         fs.setLifeCycleState(LifeCycleState.available.name());
-        fs.setFileSystemArn("arn:aws:elasticfilesystem:" + region + ":000000000000:file-system/" + fsId);
-        fs.setOwnerId("000000000000");
+        fs.setFileSystemArn(regionResolver.buildArn("elasticfilesystem", region, "file-system/" + fsId));
+        fs.setOwnerId(regionResolver.getAccountId());
         fs.setNumberOfMountTargets(0);
         fs.setPerformanceMode(request.getPerformanceMode() != null ? request.getPerformanceMode().name() : "generalPurpose");
         fs.setThroughputMode(request.getThroughputMode() != null ? request.getThroughputMode().name() : "bursting");
@@ -159,11 +127,18 @@ public class EfsService implements Resettable {
 
     public List<FileSystem> describeFileSystems(String region, DescribeFileSystemsRequest request) {
         return fileSystemStore.scan(k -> k.startsWith(region + "::")).stream()
-            .filter(fs -> fs.getFileSystemArn().contains(":" + region + ":"))
             .filter(fs -> request.getFileSystemId() == null
                     || request.getFileSystemId().equals(fs.getFileSystemId()))
             .filter(fs -> request.getCreationToken() == null
                     || request.getCreationToken().equals(fs.getCreationToken()))
+            .map(fs -> {
+                if (fs.getTags() != null) {
+                    fs.getTags().stream().filter(t -> "Name".equals(t.getKey())).findFirst().ifPresent(tag -> {
+                        fs.setName(tag.getValue());
+                    });
+                }
+                return fs;
+            })
             .collect(Collectors.toList());
     }
 
@@ -225,13 +200,13 @@ public class EfsService implements Resettable {
         synchronized (lockFor(regionKey(region, fileSystemId))) {
             FileSystem fs = getFileSystem(region, fileSystemId);
             List<Tag> existing = fs.getTags();
-        if (request.getTags() != null) {
-            for (Tag newTag : request.getTags()) {
-                existing.removeIf(t -> t.getKey().equals(newTag.getKey()));
-                existing.add(newTag);
+            if (request.getTags() != null) {
+                for (Tag newTag : request.getTags()) {
+                    existing.removeIf(t -> t.getKey().equals(newTag.getKey()));
+                    existing.add(newTag);
+                }
             }
-        }
-        fileSystemStore.put(regionKey(region, fileSystemId), fs);
+            fileSystemStore.put(regionKey(region, fileSystemId), fs);
         }
     }
 
@@ -239,9 +214,70 @@ public class EfsService implements Resettable {
         synchronized (lockFor(regionKey(region, fileSystemId))) {
             FileSystem fs = getFileSystem(region, fileSystemId);
             if (request.getTagKeys() != null) {
-            fs.getTags().removeIf(t -> request.getTagKeys().contains(t.getKey()));
+                fs.getTags().removeIf(t -> request.getTagKeys().contains(t.getKey()));
+            }
+            fileSystemStore.put(regionKey(region, fileSystemId), fs);
         }
-        fileSystemStore.put(regionKey(region, fileSystemId), fs);
+    }
+    
+    public void tagResource(String region, TagResourceRequest request) {
+        synchronized (lockFor(regionKey(region, request.getResourceId()))) {
+            List<Tag> existing = getResourceTags(region, request.getResourceId());
+            if (request.getTags() != null) {
+                for (Tag newTag : request.getTags()) {
+                    existing.removeIf(t -> t.getKey().equals(newTag.getKey()));
+                    existing.add(newTag);
+                }
+            }
+            saveResourceTags(region, request.getResourceId(), existing);
+        }
+    }
+
+    public void untagResource(String region, String resourceId, List<String> tagKeys) {
+        synchronized (lockFor(regionKey(region, resourceId))) {
+            List<Tag> existing = getResourceTags(region, resourceId);
+            if (tagKeys != null) {
+                existing.removeIf(t -> tagKeys.contains(t.getKey()));
+            }
+            saveResourceTags(region, resourceId, existing);
+        }
+    }
+
+    public ListTagsForResourceResponse listTagsForResource(String region, String resourceId) {
+        List<Tag> tags = getResourceTags(region, resourceId);
+        ListTagsForResourceResponse res = new ListTagsForResourceResponse();
+        res.setTags(tags);
+        return res;
+    }
+
+    private List<Tag> getResourceTags(String region, String resourceId) {
+        if (resourceId.startsWith("fs-")) {
+            return getFileSystem(region, resourceId).getTags();
+        } else if (resourceId.startsWith("fsap-")) {
+            AccessPointDescription ap = accessPointStore.get(regionKey(region, resourceId)).orElse(null);
+            if (ap == null) throw EfsException.accessPointNotFound(resourceId);
+            if (ap.getTags() == null) ap.setTags(new ArrayList<>());
+            return ap.getTags();
+        } else if (resourceId.startsWith("fsmt-")) {
+            MountTarget mt = mountTargetStore.get(regionKey(region, resourceId)).orElse(null);
+            if (mt == null) throw EfsException.mountTargetNotFound(resourceId);
+            // Mount targets don't natively have tags in the emulator currently, so we'll just ignore for now or return empty.
+            return new ArrayList<>();
+        }
+        throw EfsException.badRequest("Invalid resource ID: " + resourceId);
+    }
+
+    private void saveResourceTags(String region, String resourceId, List<Tag> tags) {
+        if (resourceId.startsWith("fs-")) {
+            FileSystem fs = getFileSystem(region, resourceId);
+            fs.setTags(tags);
+            fileSystemStore.put(regionKey(region, resourceId), fs);
+        } else if (resourceId.startsWith("fsap-")) {
+            AccessPointDescription ap = accessPointStore.get(regionKey(region, resourceId)).orElse(null);
+            if (ap != null) {
+                ap.setTags(tags);
+                accessPointStore.put(regionKey(region, resourceId), ap);
+            }
         }
     }
 
@@ -250,17 +286,26 @@ public class EfsService implements Resettable {
     public MountTarget createMountTarget(CreateMountTargetRequest request, String region) {
         synchronized (lockFor(regionKey(region, request.getFileSystemId()))) {
             FileSystem fs = getFileSystem(region, request.getFileSystemId());
+            
+            for (MountTarget existing : mountTargetStore.scan(k -> k.startsWith(region + "::"))) {
+                if (existing.getFileSystemId().equals(request.getFileSystemId())) {
+                    if (existing.getSubnetId().equals(request.getSubnetId())) {
+                        throw EfsException.mountTargetConflict("Mount target already exists in this subnet");
+                    }
+                }
+            }
+            
             String mtId = "fsmt-" + UUID.randomUUID().toString().replace("-", "").substring(0, 17);
         
-        MountTarget mt = new MountTarget();
-        mt.setMountTargetId(mtId);
-        mt.setFileSystemId(request.getFileSystemId());
-        mt.setSubnetId(request.getSubnetId());
-        mt.setIpAddress(request.getIpAddress() != null ? request.getIpAddress() : "10.0.0.10");
-        mt.setLifeCycleState(LifeCycleState.available);
-        mt.setVpcId("vpc-12345678");
-        mt.setAvailabilityZoneId("use1-az1");
-        mt.setAvailabilityZoneName("us-east-1a");
+            MountTarget mt = new MountTarget();
+            mt.setMountTargetId(mtId);
+            mt.setFileSystemId(request.getFileSystemId());
+            mt.setSubnetId(request.getSubnetId());
+            mt.setIpAddress(request.getIpAddress() != null ? request.getIpAddress() : "10.0.0.10");
+            mt.setLifeCycleState(LifeCycleState.available);
+            mt.setVpcId("vpc-12345678");
+            mt.setAvailabilityZoneName(region + "a");
+            mt.setAvailabilityZoneId(region.replace("-", "") + "-az1");
         mt.setNetworkInterfaceId("eni-" + UUID.randomUUID().toString().replace("-", "").substring(0, 17));
         if (request.getSecurityGroups() != null) {
             mt.setSecurityGroups(new ArrayList<>(request.getSecurityGroups()));
@@ -358,50 +403,7 @@ public class EfsService implements Resettable {
 
                 for (AccessPointDescription existing : accessPointStore.scan(k -> k.startsWith(region + "::"))) {
                     if (token.equals(existing.getClientToken())) {
-                        boolean match = true;
-                        if (!request.getFileSystemId().equals(existing.getFileSystemId())) match = false;
-                        
-                        java.util.List<io.github.hectorvent.floci.services.efs.model.Tag> reqTags = request.getTags() != null ? request.getTags() : java.util.Collections.emptyList();
-                        java.util.List<io.github.hectorvent.floci.services.efs.model.Tag> extTags = existing.getTags() != null ? existing.getTags() : java.util.Collections.emptyList();
-                        if (reqTags.size() != extTags.size() || !reqTags.containsAll(extTags)) match = false;
-                        
-                        // Compare PosixUser
-                        if (request.getPosixUser() != null && existing.getPosixUser() == null) match = false;
-                        if (request.getPosixUser() == null && existing.getPosixUser() != null) match = false;
-                        if (request.getPosixUser() != null && existing.getPosixUser() != null) {
-                            if (!java.util.Objects.equals(request.getPosixUser().getUid(), existing.getPosixUser().getUid())) match = false;
-                            if (!java.util.Objects.equals(request.getPosixUser().getGid(), existing.getPosixUser().getGid())) match = false;
-                            
-                            java.util.List<Long> reqGids = request.getPosixUser().getSecondaryGids();
-                            java.util.List<Long> extGids = existing.getPosixUser().getSecondaryGids();
-                            if (reqGids != null && extGids == null) match = false;
-                            if (reqGids == null && extGids != null) match = false;
-                            if (reqGids != null && extGids != null) {
-                                if (reqGids.size() != extGids.size() || !reqGids.containsAll(extGids)) match = false;
-                            }
-                        }
-                        
-                        // Compare RootDirectory
-                        if (request.getRootDirectory() != null && existing.getRootDirectory() == null) match = false;
-                        if (request.getRootDirectory() == null && existing.getRootDirectory() != null) match = false;
-                        if (request.getRootDirectory() != null && existing.getRootDirectory() != null) {
-                            if (!java.util.Objects.equals(request.getRootDirectory().getPath(), existing.getRootDirectory().getPath())) match = false;
-                            
-                            io.github.hectorvent.floci.services.efs.model.CreationInfo reqCi = request.getRootDirectory().getCreationInfo();
-                            io.github.hectorvent.floci.services.efs.model.CreationInfo extCi = existing.getRootDirectory().getCreationInfo();
-                            if (reqCi != null && extCi == null) match = false;
-                            if (reqCi == null && extCi != null) match = false;
-                            if (reqCi != null && extCi != null) {
-                                if (!java.util.Objects.equals(reqCi.getOwnerUid(), extCi.getOwnerUid())) match = false;
-                                if (!java.util.Objects.equals(reqCi.getOwnerGid(), extCi.getOwnerGid())) match = false;
-                                if (!java.util.Objects.equals(reqCi.getPermissions(), extCi.getPermissions())) match = false;
-                            }
-                        }
-                        
-                        if (!match) {
-                            throw EfsException.idempotentParameterMismatch();
-                        }
-                        return existing;
+                        throw EfsException.accessPointAlreadyExists(existing.getClientToken(), existing.getAccessPointId());
                     }
                 }
 
@@ -409,7 +411,7 @@ public class EfsService implements Resettable {
         
         AccessPointDescription ap = new AccessPointDescription();
         ap.setAccessPointId(apId);
-        ap.setAccessPointArn("arn:aws:elasticfilesystem:" + region + ":000000000000:access-point/" + apId);
+        ap.setAccessPointArn(regionResolver.buildArn("elasticfilesystem", region, "access-point/" + apId));
         ap.setClientToken(token);
         ap.setFileSystemId(request.getFileSystemId());
         ap.setPosixUser(request.getPosixUser());
@@ -418,7 +420,7 @@ public class EfsService implements Resettable {
             ap.setTags(new ArrayList<>(request.getTags()));
         }
         ap.setLifeCycleState(LifeCycleState.available);
-        ap.setOwnerId("000000000000");
+        ap.setOwnerId(regionResolver.getAccountId());
         
         accessPointStore.put(regionKey(region, apId), ap);
         return ap;
