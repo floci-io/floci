@@ -49,11 +49,11 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Answers.RETURNS_SELF;
 import static org.mockito.Answers.RETURNS_DEEP_STUBS;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.withSettings;
@@ -394,6 +394,112 @@ class Ec2ContainerManagerTest {
     }
 
     @Test
+    void launchRetriesWithNextPortWhenDockerReportsHostPortCollision() throws Exception {
+        Ec2ContainerManager.containerBridgeIpAttempts = 1;
+        Ec2ContainerManager.containerBridgeIpPollMillis = 1;
+        LaunchHarness harness = launchHarness();
+        when(harness.portAllocator.allocate(anyInt(), anyInt())).thenReturn(2201, 2202);
+        when(harness.lifecycleManager.create(any(ContainerSpec.class)))
+                .thenReturn("container-conflict", TEST_CONTAINER_ID);
+        when(harness.lifecycleManager.startCreated(anyString(), any(ContainerSpec.class)))
+                .thenThrow(new RuntimeException("Bind for 0.0.0.0:2201 failed: port is already allocated"))
+                .thenReturn(null);
+
+        InspectContainerCmd inspect = mock(InspectContainerCmd.class);
+        InspectContainerResponse withIp = inspectResponse("172.18.0.12");
+        when(harness.dockerClient.inspectContainerCmd(TEST_CONTAINER_ID)).thenReturn(inspect);
+        when(inspect.exec()).thenReturn(withIp);
+        harness.stubSuccessfulExecs(new CountDownLatch(0), new CountDownLatch(0));
+
+        Instance instance = instance("i-port-collision");
+        harness.manager.launch(instance, "ubuntu:24.04", null, "us-west-2");
+
+        awaitUntil(() -> "running".equals(instance.getState().getName()), Duration.ofSeconds(2));
+        assertEquals(2202, instance.getSshHostPort());
+        verify(harness.lifecycleManager).removeIfExists("container-conflict");
+        verify(harness.portAllocator).markReserved(2201);
+        verify(harness.builder).withPortBinding(22, 2201);
+        verify(harness.builder).withPortBinding(22, 2202);
+    }
+
+    @Test
+    void launchReleasesPortAndCleansUpContainerAfterNonRetryableStartFailure() throws Exception {
+        LaunchHarness harness = launchHarness();
+        when(harness.lifecycleManager.startCreated(eq(TEST_CONTAINER_ID), any(ContainerSpec.class)))
+                .thenThrow(new RuntimeException("Docker daemon unavailable"));
+
+        Instance instance = instance("i-start-failure");
+        harness.manager.launch(instance, "ubuntu:24.04", null, "us-west-2");
+
+        awaitUntil(() -> "terminated".equals(instance.getState().getName()), Duration.ofSeconds(2));
+        verify(harness.lifecycleManager).removeIfExists(TEST_CONTAINER_ID);
+        verify(harness.portAllocator).release(2201);
+    }
+
+    @Test
+    void launchTerminatesBeforeCleanupFailure() throws Exception {
+        LaunchHarness harness = launchHarness();
+        when(harness.lifecycleManager.startCreated(eq(TEST_CONTAINER_ID), any(ContainerSpec.class)))
+                .thenThrow(new RuntimeException("Docker daemon unavailable"));
+        doThrow(new RuntimeException("port-forward cleanup failed"))
+                .when(harness.portForwardManager).unpublishAll(any(Instance.class));
+
+        Instance instance = instance("i-cleanup-failure");
+        harness.manager.launch(instance, "ubuntu:24.04", null, "us-west-2");
+
+        awaitUntil(() -> "terminated".equals(instance.getState().getName()), Duration.ofSeconds(2));
+        verify(harness.portForwardManager).unpublishAll(instance);
+    }
+
+    @Test
+    void cancelledLaunchRemovesContainerThatStartsAfterCancellation() throws Exception {
+        LaunchHarness harness = launchHarness();
+        CountDownLatch startEntered = new CountDownLatch(1);
+        CountDownLatch allowStart = new CountDownLatch(1);
+        when(harness.lifecycleManager.startCreated(eq(TEST_CONTAINER_ID), any(ContainerSpec.class))).thenAnswer(invocation -> {
+            startEntered.countDown();
+            assertTrue(allowStart.await(2, TimeUnit.SECONDS));
+            return null;
+        });
+
+        Instance instance = instance("i-cancelled-launch");
+        harness.manager.launch(instance, "ubuntu:24.04", null, "us-west-2");
+
+        assertTrue(startEntered.await(2, TimeUnit.SECONDS), "container startup should begin");
+        assertTrue(harness.manager.cancelLaunch(instance));
+        verify(harness.lifecycleManager).removeIfExists(TEST_CONTAINER_ID);
+        verify(harness.portAllocator).release(2201);
+
+        allowStart.countDown();
+        awaitUntil(() -> "terminated".equals(instance.getState().getName()), Duration.ofSeconds(2));
+    }
+
+    @Test
+    void cancelledLaunchRemovesContainerCreatedAfterCancellation() throws Exception {
+        LaunchHarness harness = launchHarness();
+        CountDownLatch createEntered = new CountDownLatch(1);
+        CountDownLatch allowCreate = new CountDownLatch(1);
+        when(harness.lifecycleManager.create(any(ContainerSpec.class))).thenAnswer(invocation -> {
+            createEntered.countDown();
+            assertTrue(allowCreate.await(2, TimeUnit.SECONDS));
+            return TEST_CONTAINER_ID;
+        });
+
+        Instance instance = instance("i-cancelled-during-create");
+        harness.manager.launch(instance, "ubuntu:24.04", null, "us-west-2");
+
+        assertTrue(createEntered.await(2, TimeUnit.SECONDS), "container creation should begin");
+        assertTrue(harness.manager.cancelLaunch(instance));
+        assertEquals("terminated", instance.getState().getName());
+
+        allowCreate.countDown();
+        verify(harness.lifecycleManager, timeout(2_000)).removeIfExists(TEST_CONTAINER_ID);
+        verify(harness.portAllocator, timeout(2_000)).release(2201);
+        verify(harness.lifecycleManager, never()).startCreated(eq(TEST_CONTAINER_ID), any(ContainerSpec.class));
+        assertEquals("terminated", instance.getState().getName());
+    }
+
+    @Test
     void launchMarksInstanceRunningBeforeUserDataCompletes() throws Exception {
         Ec2ContainerManager.containerBridgeIpAttempts = 2;
         Ec2ContainerManager.containerBridgeIpPollMillis = 1;
@@ -593,6 +699,7 @@ class Ec2ContainerManagerTest {
         DockerClient dockerClient = mock(DockerClient.class);
         Ec2MetadataServer metadataServer = mock(Ec2MetadataServer.class);
         ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
+        Ec2PortForwardManager portForwardManager = mock(Ec2PortForwardManager.class);
         Ec2ContainerManager manager = new Ec2ContainerManager(
                 containerBuilder,
                 lifecycleManager,
@@ -603,9 +710,9 @@ class Ec2ContainerManagerTest {
                 portAllocator,
                 config,
                 metadataServer,
-                mock(Ec2PortForwardManager.class));
-        return new LaunchHarness(manager, dockerClient, metadataServer, logStreamer, builder,
-                new CopyOnWriteArrayList<>());
+                portForwardManager);
+        return new LaunchHarness(manager, lifecycleManager, dockerClient, metadataServer, logStreamer, builder,
+                portAllocator, portForwardManager, new CopyOnWriteArrayList<>());
     }
 
     /**
@@ -649,10 +756,13 @@ class Ec2ContainerManagerTest {
     }
 
     private record LaunchHarness(Ec2ContainerManager manager,
+                                 ContainerLifecycleManager lifecycleManager,
                                  DockerClient dockerClient,
                                  Ec2MetadataServer metadataServer,
                                  ContainerLogStreamer logStreamer,
                                  ContainerBuilder.Builder builder,
+                                 PortAllocator portAllocator,
+                                 Ec2PortForwardManager portForwardManager,
                                  List<String[]> executedCommands) {
         void stubSuccessfulExecs(CountDownLatch userDataStarted, CountDownLatch finishUserData) throws Exception {
             AtomicReference<String[]> currentCommand = new AtomicReference<>();
