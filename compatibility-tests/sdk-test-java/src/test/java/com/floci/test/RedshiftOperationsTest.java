@@ -39,12 +39,16 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Properties;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 @DisplayName("Redshift Operations")
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class RedshiftOperationsTest {
+
+    private static final Logger LOG = Logger.getLogger(RedshiftOperationsTest.class.getName());
 
     private static final String USERNAME = "admin";
     private static final String PASSWORD = "password123";
@@ -68,7 +72,8 @@ class RedshiftOperationsTest {
                     client.deleteCluster(DeleteClusterRequest.builder()
                             .clusterIdentifier(clusterId)
                             .build());
-                } catch (Exception ignored) {
+                } catch (Exception e) {
+                    LOG.log(Level.WARNING, "Failed to clean up Redshift cluster " + clusterId, e);
                 }
             }
             for (String snapId : snapshotsToCleanup) {
@@ -76,7 +81,8 @@ class RedshiftOperationsTest {
                     client.deleteClusterSnapshot(DeleteClusterSnapshotRequest.builder()
                             .snapshotIdentifier(snapId)
                             .build());
-                } catch (Exception ignored) {
+                } catch (Exception e) {
+                    LOG.log(Level.WARNING, "Failed to clean up Redshift snapshot " + snapId, e);
                 }
             }
             for (String pgName : parameterGroupsToCleanup) {
@@ -84,7 +90,8 @@ class RedshiftOperationsTest {
                     client.deleteClusterParameterGroup(DeleteClusterParameterGroupRequest.builder()
                             .parameterGroupName(pgName)
                             .build());
-                } catch (Exception ignored) {
+                } catch (Exception e) {
+                    LOG.log(Level.WARNING, "Failed to clean up Redshift parameter group " + pgName, e);
                 }
             }
             client.close();
