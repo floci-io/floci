@@ -157,6 +157,26 @@ class DynamoDbAccessPathIntegrationTest {
             .body("__type", equalTo("ValidationException"))
             .body("message", equalTo("One or more parameter values were invalid: "
                     + "Condition parameter type does not match schema type"));
+
+        request("DynamoDB_20120810.Query", """
+                {
+                  "TableName":"%s",
+                  "KeyConditionExpression":"pk = :pk",
+                  "ExpressionAttributeValues":{":pk":{"S":null}}
+                }
+                """.formatted(TABLE))
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
+
+        request("DynamoDB_20120810.Query", """
+                {
+                  "TableName":"%s",
+                  "KeyConditionExpression":"pk = :pk",
+                  "ExpressionAttributeValues":{":pk":{"S":"p1","N":"1"}}
+                }
+                """.formatted(TABLE))
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
     }
 
     @Test

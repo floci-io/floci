@@ -180,7 +180,7 @@ final class DynamoDbAccessPathValidator {
                 throw validationException("Invalid KeyConditionExpression: An expression attribute value used "
                         + "in expression is not defined; attribute value: " + placeholder);
             }
-            if (!hasAttributeType(values.get(placeholder), expectedType)) {
+            if (!isValidKeyValue(values.get(placeholder), expectedType)) {
                 throw validationException(KEY_TYPE_MISMATCH);
             }
         }
@@ -227,7 +227,7 @@ final class DynamoDbAccessPathValidator {
             }
             String expectedType = attributeType(table, attribute);
             entry.getValue().path("AttributeValueList").forEach(value -> {
-                if (!hasAttributeType(value, expectedType)) {
+                if (!isValidKeyValue(value, expectedType)) {
                     throw validationException(KEY_TYPE_MISMATCH);
                 }
             });
@@ -246,8 +246,22 @@ final class DynamoDbAccessPathValidator {
                 .orElseThrow(() -> validationException(KEY_TYPE_MISMATCH));
     }
 
-    private static boolean hasAttributeType(JsonNode value, String expectedType) {
-        return value != null && value.has(expectedType);
+    private static boolean isValidKeyValue(JsonNode value, String expectedType) {
+        if (value == null || !value.isObject() || value.size() != 1 || !value.has(expectedType)) {
+            return false;
+        }
+        JsonNode payload = value.get(expectedType);
+        if (payload == null || !payload.isTextual() || payload.textValue().isEmpty()) {
+            return false;
+        }
+        if ("N".equals(expectedType)) {
+            DynamoDbNumberUtils.validateAndNormalize(payload.textValue());
+        }
+        if ("B".equals(expectedType)) {
+            return payload.textValue().matches(
+                    "(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?");
+        }
+        return true;
     }
 
     private static void validateFilterExpression(DynamoDbAccessPath accessPath,

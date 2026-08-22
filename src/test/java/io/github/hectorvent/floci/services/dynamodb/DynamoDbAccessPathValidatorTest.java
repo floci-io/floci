@@ -178,6 +178,24 @@ class DynamoDbAccessPathValidatorTest {
     }
 
     @Test
+    void rejectsMalformedKeyConditionValues() {
+        ObjectNode nullString = mapper.createObjectNode();
+        nullString.putNull("S");
+        ObjectNode values = expressionValues(":pk");
+        values.set(":pk", nullString);
+
+        assertThrows(AwsException.class, () -> DynamoDbAccessPathValidator.validateQuery(
+                table, tablePath, null, "pk = :pk", null, null, null, values));
+
+        ObjectNode multipleTypes = stringValue("p1");
+        multipleTypes.put("N", "1");
+        values.set(":pk", multipleTypes);
+
+        assertThrows(AwsException.class, () -> DynamoDbAccessPathValidator.validateQuery(
+                table, tablePath, null, "pk = :pk", null, null, null, values));
+    }
+
+    @Test
     void rejectsMissingKeyConditionExpressionValue() {
         ObjectNode values = expressionValues(":pk");
 
