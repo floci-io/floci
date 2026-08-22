@@ -1779,6 +1779,24 @@ public interface EmulatorConfig {
         @WithDefault("false")
         boolean awsFaithfulPrivateIp();
 
+        /**
+         * Whether an EC2 instance's Docker container IP is routable from the machines that
+         * consume Floci's API responses (Terraform, Terratest, your shell). When true,
+         * DescribeInstances / DescribeAddresses report the container IP, so the address they
+         * hand out accepts connections on the service's real port (22 for SSH, and every other
+         * port the guest listens on) with no port mapping involved. When false, Floci keeps
+         * reporting 127.0.0.1 and reachability depends on the published high host ports.
+         *
+         * Unset (the default) means auto-detect: Floci opens a throwaway TCP connection towards
+         * the container network and treats a refusal as proof of a route. Set it explicitly when
+         * the probe cannot speak for your clients — most notably when Floci itself runs as a
+         * container, where the probe measures container-to-container reachability rather than
+         * host-to-container.
+         *
+         * Env var: FLOCI_SERVICES_EC2_CONTAINER_IPS_ROUTABLE
+         */
+        Optional<Boolean> containerIpsRoutable();
+
         /** Port on the Floci host for the IMDS HTTP server (169.254.169.254 equivalent). */
         @WithDefault("9169")
         int imdsPort();

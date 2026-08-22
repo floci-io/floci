@@ -137,7 +137,8 @@ class Ec2ContainerManagerTest {
                 mock(EmulatorConfig.class, RETURNS_DEEP_STUBS),
                 metadataServer,
                 mock(Ec2PortForwardManager.class),
-                mock(RegionResolver.class));
+                mock(RegionResolver.class),
+                mock(ContainerNetworkReachability.class));
 
         Instance instance = new Instance();
         instance.setInstanceId("i-restored");
@@ -195,6 +196,115 @@ class Ec2ContainerManagerTest {
                         "#!/bin/bash\necho first\n",
                         "#!/bin/sh\necho second\n"),
                 Ec2ContainerManager.userDataShellScripts(userData));
+    }
+
+    private static String gzipBase64(String plain) throws Exception {
+        java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
+        try (java.util.zip.GZIPOutputStream gzip = new java.util.zip.GZIPOutputStream(bytes)) {
+            gzip.write(plain.getBytes(StandardCharsets.UTF_8));
+        }
+        return java.util.Base64.getEncoder().encodeToString(bytes.toByteArray());
+    }
+
+    private static final String CLOUDINIT_MULTIPART = """
+            Content-Type: multipart/mixed; boundary="MIMEBOUNDARY"
+            MIME-Version: 1.0
+
+            --MIMEBOUNDARY
+            Content-Disposition: attachment; filename="bastion-default-cloud-init"
+            Content-Transfer-Encoding: 7bit
+            Content-Type: text/x-shellscript
+            Mime-Version: 1.0
+
+            #!/bin/bash
+            apt-get install -y redis-tools
+
+            --MIMEBOUNDARY--
+            """;
+
+    @Test
+    void userDataShellScriptsDecodesBase64OfGzippedCloudInit() throws Exception {
+        // What data.cloudinit_config { gzip = true, base64_encode = true } renders, as it
+        // reaches the launch-configuration path that stores UserData still wire-encoded.
+        assertEquals(
+                List.of("#!/bin/bash\napt-get install -y redis-tools\n"),
+                Ec2ContainerManager.userDataShellScripts(gzipBase64(CLOUDINIT_MULTIPART)));
+    }
+
+    @Test
+    void userDataShellScriptsDecodesPlainBase64ShellScript() {
+        String script = "#!/bin/bash\necho ready\n";
+        String encoded = java.util.Base64.getEncoder().encodeToString(script.getBytes(StandardCharsets.UTF_8));
+
+        assertEquals(List.of(script), Ec2ContainerManager.userDataShellScripts(encoded));
+    }
+
+    @Test
+    void userDataShellScriptsLeavesAccidentallyBase64ShapedScriptAlone() {
+        // Valid base64 by shape, but decodes to nothing cloud-init would recognise, so it must
+        // be treated as the literal script it is rather than decoded into binary noise.
+        String script = "#!/bin/sh\necho deadbeefdeadbeef\n";
+
+        assertEquals(List.of(script), Ec2ContainerManager.userDataShellScripts(script));
+    }
+
+    @Test
+    void userDataShellScriptsIgnoresGarbage() {
+        assertTrue(Ec2ContainerManager.userDataShellScripts("not a script at all").isEmpty());
+    }
+
+    @Test
+    void reachablePublicAddressReportsContainerIpWhenRoutable() {
+        ContainerNetworkReachability reachability = mock(ContainerNetworkReachability.class);
+        when(reachability.isContainerIpRoutable("192.168.215.2")).thenReturn(true);
+        Ec2ContainerManager manager = managerWithReachability(reachability);
+
+        Instance instance = new Instance();
+        instance.setContainerBridgeIp("192.168.215.2");
+
+        assertEquals("192.168.215.2", manager.reachablePublicAddress(instance));
+        manager.exposeReachablePublicAddress(instance);
+        assertEquals("192.168.215.2", instance.getPublicIpAddress());
+        assertEquals("192.168.215.2", instance.getPublicDnsName());
+    }
+
+    @Test
+    void reachablePublicAddressFallsBackToLoopbackWhenContainerNetworkIsUnroutable() {
+        ContainerNetworkReachability reachability = mock(ContainerNetworkReachability.class);
+        when(reachability.isContainerIpRoutable("192.168.215.2")).thenReturn(false);
+        Ec2ContainerManager manager = managerWithReachability(reachability);
+
+        Instance instance = new Instance();
+        instance.setContainerBridgeIp("192.168.215.2");
+
+        assertEquals("127.0.0.1", manager.reachablePublicAddress(instance));
+        manager.exposeReachablePublicAddress(instance);
+        assertEquals("127.0.0.1", instance.getPublicIpAddress());
+        assertEquals("localhost", instance.getPublicDnsName());
+    }
+
+    @Test
+    void reachablePublicAddressIsNullBeforeAContainerExists() {
+        Ec2ContainerManager manager = managerWithReachability(mock(ContainerNetworkReachability.class));
+
+        assertEquals(null, manager.reachablePublicAddress(new Instance()));
+        assertEquals(null, manager.reachablePublicAddress(null));
+    }
+
+    private static Ec2ContainerManager managerWithReachability(ContainerNetworkReachability reachability) {
+        return new Ec2ContainerManager(
+                mock(ContainerBuilder.class),
+                mock(ContainerLifecycleManager.class),
+                mock(ContainerLogStreamer.class),
+                mock(ContainerDetector.class),
+                mock(DockerHostResolver.class),
+                mock(DockerClient.class),
+                mock(PortAllocator.class),
+                mock(EmulatorConfig.class, RETURNS_DEEP_STUBS),
+                mock(Ec2MetadataServer.class),
+                mock(Ec2PortForwardManager.class),
+                mock(RegionResolver.class),
+                reachability);
     }
 
     @Test
@@ -775,7 +885,8 @@ class Ec2ContainerManagerTest {
                 config,
                 metadataServer,
                 portForwardManager,
-                regionResolver);
+                regionResolver,
+                mock(ContainerNetworkReachability.class));
         return new LaunchHarness(manager, lifecycleManager, dockerClient, metadataServer, logStreamer, builder,
                 portAllocator, portForwardManager, new CopyOnWriteArrayList<>());
     }

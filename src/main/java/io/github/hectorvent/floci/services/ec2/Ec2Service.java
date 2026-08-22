@@ -4861,8 +4861,55 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
 
         addr.setInstanceId(instanceId);
         addr.setAssociationId("eipassoc-" + randomHex(17));
+        pointAddressAtInstance(addr, region, instanceId);
         addresses.put(key(region, allocationId), addr);
         return addr;
+    }
+
+    /**
+     * Re-points an associated EIP at an address that actually answers.
+     *
+     * <p>{@link #allocateAddress} can only invent a plausible {@code 54.x.x.x}, because at
+     * allocation time there is no instance to be reachable at. Real AWS then keeps that address
+     * fixed and makes the network route it; Floci cannot, so an EIP left at its allocated value
+     * routes nowhere — and it is precisely the value Terraform surfaces as
+     * {@code aws_eip.x.public_ip}, which is what test suites SSH into.
+     *
+     * <p>Rewriting on association is the more defensible of the two options. The alternative,
+     * keeping the fictional address and aliasing it to the real one, would need Floci to own
+     * routing or DNS on the client's machine, which it does not; and every client that reads
+     * the address out of the API and dials it directly — Terratest does exactly this — would
+     * still be handed something dead. Association is also the first moment the answer is
+     * knowable. The cost is a deliberate deviation from AWS: an EIP's public IP changes when it
+     * is associated. That is invisible to Terraform, for which {@code public_ip} is computed
+     * and refreshed from this same API, and the allocation stays coherent otherwise — the
+     * AllocationId, AssociationId and domain are untouched, and disassociation restores the
+     * allocated address.
+     */
+    private void pointAddressAtInstance(Address addr, String region, String instanceId) {
+        if (instanceId == null || instanceId.isBlank()) {
+            return;
+        }
+        Instance inst = instances.get(key(region, instanceId)).orElse(null);
+        if (inst == null) {
+            return;
+        }
+        if (addr.getAllocatedPublicIp() == null) {
+            addr.setAllocatedPublicIp(addr.getPublicIp());
+        }
+        String reachable = containerManager.reachablePublicAddress(inst);
+        if (reachable != null) {
+            addr.setPublicIp(reachable);
+            // An EIP association gives the instance a public address even in a subnet that does
+            // not map one on launch, exactly as on AWS.
+            inst.setPublicIpAddress(reachable);
+            inst.setPublicDnsName("127.0.0.1".equals(reachable) ? "localhost" : reachable);
+            instances.put(key(region, instanceId), inst);
+        }
+        addr.setPrivateIpAddress(inst.getPrivateIpAddress());
+        if (inst.getNetworkInterfaces() != null && !inst.getNetworkInterfaces().isEmpty()) {
+            addr.setNetworkInterfaceId(inst.getNetworkInterfaces().get(0).getNetworkInterfaceId());
+        }
     }
 
     private Address getRequiredAddress(String region, String allocationId) {
@@ -4879,6 +4926,13 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             if (addr.getRegion().equals(region) && associationId.equals(addr.getAssociationId())) {
                 addr.setInstanceId(null);
                 addr.setAssociationId(null);
+                addr.setNetworkInterfaceId(null);
+                addr.setPrivateIpAddress(null);
+                // Hand the allocation back its allocated address: with no instance behind it,
+                // there is nothing reachable left for it to stand for.
+                if (addr.getAllocatedPublicIp() != null) {
+                    addr.setPublicIp(addr.getAllocatedPublicIp());
+                }
                 addresses.put(key(region, addr.getAllocationId()), addr);
                 return;
             }
