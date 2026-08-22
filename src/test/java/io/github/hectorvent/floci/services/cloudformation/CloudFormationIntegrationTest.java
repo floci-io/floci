@@ -1797,6 +1797,106 @@ class CloudFormationIntegrationTest {
         throw new AssertionError("Stack did not reach DELETE_COMPLETE within timeout");
     }
 
+    // Regression: issue #1966. A resource removed outside CloudFormation must be treated as
+    // already deleted, even when its provisioner does not have a resource-specific safe delete.
+    @Test
+    void deleteStack_withAlreadyDeletedApiGatewayRestApi_reachesDeleteComplete() throws Exception {
+        String stackName = "cfn-1966-missing-rest-api";
+        String template = """
+            {
+              "Resources": {
+                "RestApi": {
+                  "Type": "AWS::ApiGateway::RestApi",
+                  "Properties": {
+                    "Name": "cfn-1966-missing-rest-api"
+                  }
+                }
+              }
+            }
+            """;
+
+        String createResponse = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackId>"))
+            .extract().asString();
+        String stackArn = createResponse.substring(
+                createResponse.indexOf("<StackId>") + "<StackId>".length(), createResponse.indexOf("</StackId>"));
+
+        boolean created = false;
+        long createDeadline = System.currentTimeMillis() + 10_000;
+        while (System.currentTimeMillis() < createDeadline) {
+            String statusXml = given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DescribeStacks")
+                .formParam("StackName", stackArn)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+            .extract().asString();
+            if (statusXml.contains("<StackStatus>CREATE_COMPLETE</StackStatus>")) {
+                created = true;
+                break;
+            }
+            Thread.sleep(200);
+        }
+        assertThat("Stack did not reach CREATE_COMPLETE within timeout", created, equalTo(true));
+
+        String resourcesXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackResources")
+            .formParam("StackName", stackArn)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+        String apiId = physicalIdByLogicalId(resourcesXml, "RestApi");
+
+        // Simulate state loss or an out-of-band delete. API Gateway reports NotFoundException (404)
+        // when CloudFormation later tries to delete the tracked physical ID.
+        given()
+        .when()
+            .delete("/restapis/" + apiId)
+        .then()
+            .statusCode(202);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteStack")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        long deleteDeadline = System.currentTimeMillis() + 10_000;
+        while (System.currentTimeMillis() < deleteDeadline) {
+            String statusXml = given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DescribeStacks")
+                .formParam("StackName", stackArn)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .extract().asString();
+            if (statusXml.contains("<StackStatus>DELETE_COMPLETE</StackStatus>")) {
+                return;
+            }
+            assertThat(statusXml, not(containsString("<StackStatus>DELETE_FAILED</StackStatus>")));
+            Thread.sleep(200);
+        }
+        throw new AssertionError("Stack did not reach DELETE_COMPLETE within timeout");
+    }
+
     @Test
     void describeDeletedStack_byArn_expiresAfterRetentionWindow() throws Exception {
         String template = """
