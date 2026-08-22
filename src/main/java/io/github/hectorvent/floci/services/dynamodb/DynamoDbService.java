@@ -755,7 +755,8 @@ public class DynamoDbService {
 
         DynamoDbAccessPath accessPath = DynamoDbAccessPath.resolve(table, indexName);
         String partitionKeyValuePlaceholder = DynamoDbAccessPathValidator.validateQuery(
-                accessPath, keyConditions, keyConditionExpression, filterExpression, null, exprAttrNames);
+                table, accessPath, keyConditions, keyConditionExpression, filterExpression,
+                null, exprAttrNames, expressionAttrValues);
         String pkName = accessPath.partitionKeyName();
         List<String> pkNames = accessPath.partitionKeyNames();
         String skName = accessPath.sortKeyName();
