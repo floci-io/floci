@@ -272,10 +272,62 @@ class DynamoDbAccessPathIntegrationTest {
             .body("__type", equalTo("ValidationException"))
             .body("message", equalTo("The provided starting key is invalid: "
                     + "The provided key element does not match the schema"));
+
+        request("DynamoDB_20120810.Query", """
+                {
+                  "TableName":"%s",
+                  "KeyConditionExpression":"pk = :pk",
+                  "ExpressionAttributeValues":{":pk":{"S":"p1"}},
+                  "ExclusiveStartKey":{"pk":{"S":null},"sk":{"S":"s1"}}
+                }
+                """.formatted(TABLE))
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("The provided starting key is invalid"));
+
+        request("DynamoDB_20120810.Scan", """
+                {
+                  "TableName":"%s",
+                  "ExclusiveStartKey":{"pk":{"S":123},"sk":{"S":"s1"}}
+                }
+                """.formatted(TABLE))
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
     }
 
     @Test
     @Order(10)
+    void queryRejectsMalformedNumericExclusiveStartKey() {
+        String numericTable = TABLE + "-numeric";
+        request("DynamoDB_20120810.CreateTable", """
+                {
+                  "TableName":"%s",
+                  "AttributeDefinitions":[{"AttributeName":"pk","AttributeType":"N"}],
+                  "KeySchema":[{"AttributeName":"pk","KeyType":"HASH"}],
+                  "BillingMode":"PAY_PER_REQUEST"
+                }
+                """.formatted(numericTable))
+            .statusCode(200);
+
+        request("DynamoDB_20120810.Query", """
+                {
+                  "TableName":"%s",
+                  "KeyConditionExpression":"pk = :pk",
+                  "ExpressionAttributeValues":{":pk":{"N":"1"}},
+                  "ExclusiveStartKey":{"pk":{"N":"not-a-number"}}
+                }
+                """.formatted(numericTable))
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
+
+        request("DynamoDB_20120810.DeleteTable", """
+                {"TableName":"%s"}
+                """.formatted(numericTable))
+            .statusCode(200);
+    }
+
+    @Test
+    @Order(11)
     void queryRejectsWrongIndexExclusiveStartKeyType() {
         request("DynamoDB_20120810.Query", """
                 {
