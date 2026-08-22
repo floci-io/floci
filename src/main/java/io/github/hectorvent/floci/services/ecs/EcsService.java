@@ -222,6 +222,11 @@ public class EcsService implements ContainerTeardown {
     }
 
     public EcsCluster createCluster(String clusterName, Map<String, String> tags, String region) {
+        return createCluster(clusterName, tags, null, region);
+    }
+
+    public EcsCluster createCluster(String clusterName, Map<String, String> tags,
+                                     List<ClusterSetting> settings, String region) {
         String name = (clusterName == null || clusterName.isBlank()) ? DEFAULT_CLUSTER : clusterName;
         String key = clusterKey(region, name);
         if (clusters.containsKey(key)) {
@@ -233,6 +238,9 @@ public class EcsService implements ContainerTeardown {
         cluster.setStatus("ACTIVE");
         if (tags != null && !tags.isEmpty()) {
             cluster.setTags(new LinkedHashMap<>(tags));
+        }
+        if (settings != null && !settings.isEmpty()) {
+            cluster.setSettings(settings);
         }
         clusters.put(key, cluster);
         LOG.infov("Created ECS cluster: {0} in {1}", name, region);
@@ -842,6 +850,22 @@ public class EcsService implements ContainerTeardown {
                                           List<EcsLoadBalancer> loadBalancers,
                                           NetworkConfiguration networkConfiguration,
                                           Map<String, String> tags, String region) {
+        return createService(clusterRef, serviceName, taskDefinition, desiredCount, launchType,
+                loadBalancers, networkConfiguration, tags, null, false, false, null, null, null, region);
+    }
+
+    public EcsServiceModel createService(String clusterRef, String serviceName, String taskDefinition,
+                                          int desiredCount, LaunchType launchType,
+                                          List<EcsLoadBalancer> loadBalancers,
+                                          NetworkConfiguration networkConfiguration,
+                                          Map<String, String> tags,
+                                          String schedulingStrategy,
+                                          boolean enableEcsManagedTags,
+                                          boolean enableExecuteCommand,
+                                          Integer healthCheckGracePeriodSeconds,
+                                          String deploymentController,
+                                          Map<String, Object> serviceConnectConfiguration,
+                                          String region) {
         EcsCluster cluster = resolveClusterOrDefault(clusterRef, region);
         resolveTaskDefinitionOrThrow(taskDefinition, region);
 
@@ -874,6 +898,12 @@ public class EcsService implements ContainerTeardown {
         if (tags != null && !tags.isEmpty()) {
             svc.setTags(new LinkedHashMap<>(tags));
         }
+        svc.setSchedulingStrategy(schedulingStrategy);
+        svc.setEnableEcsManagedTags(enableEcsManagedTags);
+        svc.setEnableExecuteCommand(enableExecuteCommand);
+        svc.setHealthCheckGracePeriodSeconds(healthCheckGracePeriodSeconds);
+        svc.setDeploymentController(deploymentController);
+        svc.setServiceConnectConfiguration(serviceConnectConfiguration);
 
         services.put(key, svc);
         cluster.setActiveServicesCount(cluster.getActiveServicesCount() + 1);

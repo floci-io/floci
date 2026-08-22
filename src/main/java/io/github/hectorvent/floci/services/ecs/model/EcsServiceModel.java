@@ -28,6 +28,15 @@ public class EcsServiceModel {
     private Map<String, String> tags = new HashMap<>();
     private List<EcsLoadBalancer> loadBalancers = new ArrayList<>();
     private NetworkConfiguration networkConfiguration;
+    private String schedulingStrategy = "REPLICA";
+    private boolean enableEcsManagedTags;
+    private boolean enableExecuteCommand;
+    private Integer healthCheckGracePeriodSeconds;
+    /** Raw passthrough of the request's {@code serviceConnectConfiguration} object, stored and
+     *  echoed back verbatim rather than modeled field-by-field: its nested shape (namespace,
+     *  per-container client aliases, discovery names, timeouts, tls) doesn't need to be
+     *  interpreted by this emulator to round-trip correctly. */
+    private Map<String, Object> serviceConnectConfiguration;
 
     public String getServiceArn() { return serviceArn; }
     public void setServiceArn(String serviceArn) { this.serviceArn = serviceArn; }
@@ -78,5 +87,26 @@ public class EcsServiceModel {
     public NetworkConfiguration getNetworkConfiguration() { return networkConfiguration; }
     public void setNetworkConfiguration(NetworkConfiguration networkConfiguration) {
         this.networkConfiguration = networkConfiguration;
+    }
+
+    public String getSchedulingStrategy() { return schedulingStrategy; }
+    public void setSchedulingStrategy(String schedulingStrategy) {
+        this.schedulingStrategy = schedulingStrategy != null ? schedulingStrategy : "REPLICA";
+    }
+
+    public boolean isEnableEcsManagedTags() { return enableEcsManagedTags; }
+    public void setEnableEcsManagedTags(boolean enableEcsManagedTags) { this.enableEcsManagedTags = enableEcsManagedTags; }
+
+    public boolean isEnableExecuteCommand() { return enableExecuteCommand; }
+    public void setEnableExecuteCommand(boolean enableExecuteCommand) { this.enableExecuteCommand = enableExecuteCommand; }
+
+    public Integer getHealthCheckGracePeriodSeconds() { return healthCheckGracePeriodSeconds; }
+    public void setHealthCheckGracePeriodSeconds(Integer healthCheckGracePeriodSeconds) {
+        this.healthCheckGracePeriodSeconds = healthCheckGracePeriodSeconds;
+    }
+
+    public Map<String, Object> getServiceConnectConfiguration() { return serviceConnectConfiguration; }
+    public void setServiceConnectConfiguration(Map<String, Object> serviceConnectConfiguration) {
+        this.serviceConnectConfiguration = serviceConnectConfiguration;
     }
 }

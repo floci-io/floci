@@ -155,7 +155,8 @@ public class EcsJsonHandler {
     private Response handleCreateCluster(JsonNode req, String region) {
         String name = req.path("clusterName").asText(null);
         Map<String, String> tags = parseTagMap(req.path("tags"));
-        EcsCluster cluster = service.createCluster(name, tags, region);
+        List<ClusterSetting> settings = parseClusterSettings(req.path("settings"));
+        EcsCluster cluster = service.createCluster(name, tags, settings, region);
         ObjectNode resp = objectMapper.createObjectNode();
         resp.set("cluster", clusterNode(cluster));
         return Response.ok(resp).build();
@@ -547,9 +548,21 @@ public class EcsJsonHandler {
         List<EcsLoadBalancer> loadBalancers = parseLoadBalancers(req.path("loadBalancers"));
         NetworkConfiguration networkConfiguration = parseNetworkConfiguration(req.path("networkConfiguration"));
         Map<String, String> tags = parseTagMap(req.path("tags"));
+        String schedulingStrategy = req.hasNonNull("schedulingStrategy")
+                ? req.path("schedulingStrategy").asText() : null;
+        boolean enableEcsManagedTags = req.path("enableECSManagedTags").asBoolean(false);
+        boolean enableExecuteCommand = req.path("enableExecuteCommand").asBoolean(false);
+        Integer healthCheckGracePeriodSeconds = req.hasNonNull("healthCheckGracePeriodSeconds")
+                ? req.path("healthCheckGracePeriodSeconds").asInt() : null;
+        String deploymentController = req.path("deploymentController").hasNonNull("type")
+                ? req.path("deploymentController").path("type").asText() : null;
+        Map<String, Object> serviceConnectConfiguration = req.hasNonNull("serviceConnectConfiguration")
+                ? parseRawObject(req.path("serviceConnectConfiguration")) : null;
 
         EcsServiceModel svc = service.createService(cluster, serviceName, taskDefinition,
-                desiredCount, launchType, loadBalancers, networkConfiguration, tags, region);
+                desiredCount, launchType, loadBalancers, networkConfiguration, tags,
+                schedulingStrategy, enableEcsManagedTags, enableExecuteCommand,
+                healthCheckGracePeriodSeconds, deploymentController, serviceConnectConfiguration, region);
 
         ObjectNode resp = objectMapper.createObjectNode();
         resp.set("service", serviceNode(svc));
@@ -594,6 +607,9 @@ public class EcsJsonHandler {
             m.setLoadBalancerName(loadBalancerName);
             m.setContainerName(containerName);
             m.setContainerPort(containerPort);
+            if (lb.hasNonNull("advancedConfiguration")) {
+                m.setAdvancedConfiguration(parseRawObject(lb.path("advancedConfiguration")));
+            }
             result.add(m);
         }
         return result;
@@ -1066,6 +1082,11 @@ public class EcsJsonHandler {
             c.getCapacityProviders().forEach(cp::add);
             n.set("capacityProviders", cp);
         }
+        if (c.getDefaultCapacityProviderStrategy() != null && !c.getDefaultCapacityProviderStrategy().isEmpty()) {
+            ArrayNode strategy = objectMapper.createArrayNode();
+            c.getDefaultCapacityProviderStrategy().forEach(s -> strategy.add(objectMapper.valueToTree(s)));
+            n.set("defaultCapacityProviderStrategy", strategy);
+        }
         if (c.getTags() != null && !c.getTags().isEmpty()) {
             n.set("tags", tagsNode(c.getTags()));
         }
@@ -1463,6 +1484,20 @@ public class EcsJsonHandler {
         if (s.getLaunchType() != null) { n.put("launchType", s.getLaunchType().name()); }
         if (s.getCreatedAt() != null) { n.put("createdAt", s.getCreatedAt().toEpochMilli() / 1000.0); }
         if (s.getNamespace() != null) { n.put("namespace", s.getNamespace()); }
+        n.put("schedulingStrategy", s.getSchedulingStrategy());
+        n.put("enableECSManagedTags", s.isEnableEcsManagedTags());
+        n.put("enableExecuteCommand", s.isEnableExecuteCommand());
+        if (s.getHealthCheckGracePeriodSeconds() != null) {
+            n.put("healthCheckGracePeriodSeconds", s.getHealthCheckGracePeriodSeconds());
+        }
+        if (s.getDeploymentController() != null) {
+            ObjectNode dc = objectMapper.createObjectNode();
+            dc.put("type", s.getDeploymentController());
+            n.set("deploymentController", dc);
+        }
+        if (s.getServiceConnectConfiguration() != null) {
+            n.set("serviceConnectConfiguration", objectMapper.valueToTree(s.getServiceConnectConfiguration()));
+        }
         if (s.getTags() != null && !s.getTags().isEmpty()) {
             n.set("tags", tagsNode(s.getTags()));
         }
@@ -1474,6 +1509,9 @@ public class EcsJsonHandler {
                 if (lb.getLoadBalancerName() != null) { ln.put("loadBalancerName", lb.getLoadBalancerName()); }
                 if (lb.getContainerName() != null) { ln.put("containerName", lb.getContainerName()); }
                 if (lb.getContainerPort() != null) { ln.put("containerPort", lb.getContainerPort()); }
+                if (lb.getAdvancedConfiguration() != null) {
+                    ln.set("advancedConfiguration", objectMapper.valueToTree(lb.getAdvancedConfiguration()));
+                }
                 lbs.add(ln);
             }
             n.set("loadBalancers", lbs);
