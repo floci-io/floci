@@ -73,16 +73,16 @@ class RedshiftServiceTest {
                 new AccountAwareStorageBackend.AccountEntry<>("111111111111", "cluster-a", clusterA),
                 new AccountAwareStorageBackend.AccountEntry<>("222222222222", "cluster-b", clusterB)));
         when(cm.getContainer(anyString(), anyString())).thenReturn(Optional.empty());
-        when(cm.start(eq("111111111111"), eq("cluster-a"), eq("admin"), eq("pw-a")))
+        when(cm.adoptOrStart(eq("111111111111"), eq("cluster-a"), eq("admin"), eq("pw-a")))
                 .thenReturn(new RedshiftContainerHandle("c-a", "cluster-a", "localhost", 5432));
-        when(cm.start(eq("222222222222"), eq("cluster-b"), eq("admin"), eq("pw-b")))
+        when(cm.adoptOrStart(eq("222222222222"), eq("cluster-b"), eq("admin"), eq("pw-b")))
                 .thenReturn(new RedshiftContainerHandle("c-b", "cluster-b", "localhost", 5433));
 
         service.onStart(null);
 
         // Cluster owned by a second, non-default account must also be recovered
-        verify(cm).start("111111111111", "cluster-a", "admin", "pw-a");
-        verify(cm).start("222222222222", "cluster-b", "admin", "pw-b");
+        verify(cm).adoptOrStart("111111111111", "cluster-a", "admin", "pw-a");
+        verify(cm).adoptOrStart("222222222222", "cluster-b", "admin", "pw-b");
         verify(clusterBackend).putForAccount(eq("111111111111"), eq("cluster-a"), any(Cluster.class));
         verify(clusterBackend).putForAccount(eq("222222222222"), eq("cluster-b"), any(Cluster.class));
         verify(clusterBackend).flush();
@@ -100,7 +100,7 @@ class RedshiftServiceTest {
 
         service.onStart(null);
 
-        verify(cm, never()).start(any(), any(), any(), any());
+        verify(cm, never()).adoptOrStart(any(), any(), any(), any());
         verify(clusterBackend, never()).putForAccount(any(), any(), any());
     }
 
@@ -114,7 +114,7 @@ class RedshiftServiceTest {
         when(clusterBackend.scanAllAccountEntries(any())).thenReturn(List.of(
                 new AccountAwareStorageBackend.AccountEntry<>("111111111111", "cluster-a", cluster)));
         when(cm.getContainer("111111111111", "cluster-a")).thenReturn(Optional.empty());
-        when(cm.start(eq("111111111111"), eq("cluster-a"), eq("admin"), eq("pw-a"))).thenThrow(new RuntimeException("docker down"));
+        when(cm.adoptOrStart(eq("111111111111"), eq("cluster-a"), eq("admin"), eq("pw-a"))).thenThrow(new RuntimeException("docker down"));
 
         service.onStart(null);
 

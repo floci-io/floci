@@ -54,7 +54,7 @@ public class RedshiftService {
             String password = cluster.getMasterPassword() != null ? cluster.getMasterPassword() : "admin";
             try {
                 LOG.infov("Recovering container for persisted cluster: {0}", cluster.getClusterIdentifier());
-                RedshiftContainerHandle handle = containerManager.start(
+                RedshiftContainerHandle handle = containerManager.adoptOrStart(
                         entry.accountId(), cluster.getClusterIdentifier(), cluster.getMasterUsername(), password);
                 Endpoint endpoint = new Endpoint();
                 endpoint.setAddress(handle.getHost());

@@ -109,6 +109,42 @@ public class RedshiftContainerManager {
         return handle;
     }
 
+    /**
+     * Starts a cluster's container the same way {@link #start}, except that a container
+     * already running under this cluster's name (e.g. Floci's own process restarted but
+     * Docker did not) is adopted instead of destroyed and recreated. The container has no
+     * persistent volume, so a blind recreate would silently discard the cluster's data;
+     * adopting preserves it whenever the physical container survived. If no such container
+     * exists (first start, or the container itself was removed), this falls back to
+     * {@link #start} — in that case the previous data is unrecoverable, matching this
+     * project's decision not to back Redshift containers with a Docker volume.
+     */
+    public RedshiftContainerHandle adoptOrStart(String accountId, String clusterIdentifier, String masterUsername, String masterPassword) {
+        String containerName = containerName(accountId, clusterIdentifier);
+        var existing = lifecycleManager.findByName(containerName);
+        if (existing.isEmpty()) {
+            return start(accountId, clusterIdentifier, masterUsername, masterPassword);
+        }
+
+        LOG.infov("Adopting existing container {0} for cluster {1} to avoid discarding its data",
+                containerName, clusterIdentifier);
+        int enginePort = 5432;
+        ContainerInfo info = lifecycleManager.adopt(existing.get().getId(), List.of(enginePort));
+        EndpointInfo endpoint = info.getEndpoint(enginePort);
+
+        RedshiftContainerHandle handle = new RedshiftContainerHandle(
+                info.containerId(), clusterIdentifier, endpoint.host(), endpoint.port());
+        try {
+            Closeable stream = logStreamer.attach(info.containerId(), "/floci/redshift", clusterIdentifier, "us-east-1", "redshift:" + clusterIdentifier);
+            handle.setLogStream(stream);
+        } catch (Exception e) {
+            LOG.warnv("Failed to stream logs for {0}", containerName);
+        }
+
+        containers.put(containerKey(accountId, clusterIdentifier), handle);
+        return handle;
+    }
+
     public void stop(String accountId, String clusterIdentifier) {
         containers.remove(containerKey(accountId, clusterIdentifier));
         lifecycleManager.removeIfExists(containerName(accountId, clusterIdentifier));

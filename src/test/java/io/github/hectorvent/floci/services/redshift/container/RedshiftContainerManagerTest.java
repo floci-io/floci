@@ -8,6 +8,7 @@ import com.github.dockerjava.api.command.ExecCreateCmdResponse;
 import com.github.dockerjava.api.command.ExecStartCmd;
 import com.github.dockerjava.api.command.InspectExecCmd;
 import com.github.dockerjava.api.command.InspectExecResponse;
+import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.api.model.StreamType;
 import io.github.hectorvent.floci.config.EmulatorConfig;
@@ -35,7 +36,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -293,5 +296,39 @@ class RedshiftContainerManagerTest {
         assertTrue(manager.getContainer(otherAccountId, "shared-id").isPresent());
         assertEquals("cont-account-a", manager.getContainer(ACCOUNT_ID, "shared-id").get().getContainerId());
         assertEquals("cont-account-b", manager.getContainer(otherAccountId, "shared-id").get().getContainerId());
+    }
+
+    @Test
+    void testAdoptOrStartAdoptsExistingContainerInsteadOfRecreatingIt() {
+        String containerName = "floci-redshift-" + ACCOUNT_ID + "-test-cluster";
+        Container existing = mock(Container.class);
+        when(existing.getId()).thenReturn("cont-existing");
+        when(lifecycleManager.findByName(containerName)).thenReturn(Optional.of(existing));
+        ContainerInfo adopted = new ContainerInfo("cont-existing", Map.of(5432, new EndpointInfo("localhost", 6000)));
+        when(lifecycleManager.adopt(eq("cont-existing"), any())).thenReturn(adopted);
+
+        RedshiftContainerHandle handle = manager.adoptOrStart(ACCOUNT_ID, "test-cluster", "admin", "pass");
+
+        assertEquals("cont-existing", handle.getContainerId());
+        assertEquals(6000, handle.getPort());
+        assertTrue(manager.getContainer(ACCOUNT_ID, "test-cluster").isPresent());
+        // Data lives only in the container's writable layer (no volume) — recreating it
+        // would silently discard it, so a container found by name must never be recreated.
+        verify(lifecycleManager, never()).createAndStart(any());
+    }
+
+    @Test
+    void testAdoptOrStartFallsBackToStartWhenNoExistingContainer() {
+        String containerName = "floci-redshift-" + ACCOUNT_ID + "-test-cluster";
+        when(lifecycleManager.findByName(containerName)).thenReturn(Optional.empty());
+        ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, org.mockito.Mockito.RETURNS_SELF);
+        when(containerBuilder.newContainer(anyString())).thenReturn(specBuilder);
+        ContainerInfo info = new ContainerInfo("cont-fresh", Map.of(5432, new EndpointInfo("localhost", 5432)));
+        when(lifecycleManager.createAndStart(any())).thenReturn(info);
+
+        RedshiftContainerHandle handle = manager.adoptOrStart(ACCOUNT_ID, "test-cluster", "admin", "pass");
+
+        assertEquals("cont-fresh", handle.getContainerId());
+        verify(lifecycleManager, never()).adopt(any(), any());
     }
 }
