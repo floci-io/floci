@@ -200,6 +200,7 @@ floci:
     stepfunctions:
       enabled: true
       allow-plaintext-http: true
+      mock-config-file: ${SFN_MOCK_CONFIG:src/test/resources/fixtures/sfn-mock-config.json}
     swf:
       enabled: true
       timeout-sweep-enabled: true

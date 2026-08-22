@@ -353,6 +353,7 @@ floci:
     stepfunctions:
       enabled: true
       allow-plaintext-http: false
+      mock-config-file: ${SFN_MOCK_CONFIG:}
     swf:
       enabled: true
       timeout-sweep-enabled: true
