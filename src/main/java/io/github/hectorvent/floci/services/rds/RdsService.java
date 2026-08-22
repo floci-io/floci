@@ -511,7 +511,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 dbName, dbInstanceClass, allocatedStorage, iamEnabled, paramGroupName,
                 dbSubnetGroupName, dbClusterIdentifier, availabilityZone, multiAz,
                 manageMasterUserPassword, masterUserSecretKmsKeyId, tags, vpcSecurityGroupIds,
-                optionGroupName, region, autoMinorVersionUpgrade, DbInstanceSettings.defaults());
+                optionGroupName, region, autoMinorVersionUpgrade, DbInstanceSettings.defaults(), null);
     }
 
     public DbInstance createDbInstance(String id, String engineParam, String engineVersion,
@@ -528,6 +528,28 @@ public class RdsService implements Resettable, ResourceProvider {
                                        String region,
                                        boolean autoMinorVersionUpgrade,
                                        DbInstanceSettings settings) {
+        return createDbInstance(id, engineParam, engineVersion, masterUsername, masterPassword,
+                dbName, dbInstanceClass, allocatedStorage, iamEnabled, paramGroupName,
+                dbSubnetGroupName, dbClusterIdentifier, availabilityZone, multiAz,
+                manageMasterUserPassword, masterUserSecretKmsKeyId, tags, vpcSecurityGroupIds,
+                optionGroupName, region, autoMinorVersionUpgrade, settings, null);
+    }
+
+    public DbInstance createDbInstance(String id, String engineParam, String engineVersion,
+                                       String masterUsername, String masterPassword,
+                                       String dbName, String dbInstanceClass,
+                                       int allocatedStorage, boolean iamEnabled,
+                                       String paramGroupName, String dbSubnetGroupName,
+                                       String dbClusterIdentifier, String availabilityZone,
+                                       boolean multiAz, boolean manageMasterUserPassword,
+                                       String masterUserSecretKmsKeyId,
+                                       Map<String, String> tags,
+                                       List<String> vpcSecurityGroupIds,
+                                       String optionGroupName,
+                                       String region,
+                                       boolean autoMinorVersionUpgrade,
+                                       DbInstanceSettings settings,
+                                       Boolean publiclyAccessible) {
         validateInstanceSettings(settings);
         String provisioningKey = "instance:" + currentAccountId() + ":"
                 + dbResourceKey(effectiveRegion(region), id);
@@ -541,7 +563,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     paramGroupName, dbSubnetGroupName, dbClusterIdentifier, availabilityZone,
                     multiAz, manageMasterUserPassword, masterUserSecretKmsKeyId, tags,
                     vpcSecurityGroupIds, optionGroupName, region, autoMinorVersionUpgrade,
-                    settings);
+                    settings, publiclyAccessible);
         } finally {
             provisioningIds.remove(provisioningKey);
         }
@@ -560,7 +582,8 @@ public class RdsService implements Resettable, ResourceProvider {
                                           String optionGroupName,
                                           String region,
                                           boolean autoMinorVersionUpgrade,
-                                          DbInstanceSettings settings) {
+                                          DbInstanceSettings settings,
+                                          Boolean publiclyAccessible) {
         String effectiveRegion = effectiveRegion(region);
         String dbiResourceId = "db-" + java.util.UUID.randomUUID().toString()
                 .replace("-", "").substring(0, 24).toUpperCase();
@@ -683,6 +706,9 @@ public class RdsService implements Resettable, ResourceProvider {
         instance.setAutoMinorVersionUpgrade(autoMinorVersionUpgrade);
         instance.setEngineIdentifier(engineIdentifier);
         resolvedSettings.applyTo(instance);
+        instance.setPubliclyAccessible(publiclyAccessible != null
+                ? publiclyAccessible
+                : defaultPubliclyAccessible(engineParam, dbSubnetGroupName));
 
         instance.setDbiResourceId(dbiResourceId);
         instance.setDbInstanceArn(dbInstanceArn);
@@ -1367,7 +1393,17 @@ public class RdsService implements Resettable, ResourceProvider {
             String optionGroupName, String region, Boolean autoMinorVersionUpgrade) {
         return modifyDbInstance(id, newPassword, iamEnabled, dbSubnetGroupName,
                 vpcSecurityGroupIds, optionGroupName, region, autoMinorVersionUpgrade,
-                DbInstanceSettings.unchanged());
+                DbInstanceSettings.unchanged(), null);
+    }
+
+    public DbInstance modifyDbInstance(
+            String id, String newPassword, Boolean iamEnabled,
+            String dbSubnetGroupName, List<String> vpcSecurityGroupIds,
+            String optionGroupName, String region, Boolean autoMinorVersionUpgrade,
+            DbInstanceSettings settings) {
+        return modifyDbInstance(id, newPassword, iamEnabled, dbSubnetGroupName,
+                vpcSecurityGroupIds, optionGroupName, region, autoMinorVersionUpgrade,
+                settings, null);
     }
 
     // synchronized like the tag and delete paths: an unguarded read-modify-write here could
@@ -1376,7 +1412,7 @@ public class RdsService implements Resettable, ResourceProvider {
             String id, String newPassword, Boolean iamEnabled,
             String dbSubnetGroupName, List<String> vpcSecurityGroupIds,
             String optionGroupName, String region, Boolean autoMinorVersionUpgrade,
-            DbInstanceSettings settings) {
+            DbInstanceSettings settings, Boolean publiclyAccessible) {
         validateInstanceSettings(settings);
         String effectiveRegion = effectiveRegion(region);
         DbInstance instance = getDbInstance(id, effectiveRegion);
@@ -1419,6 +1455,9 @@ public class RdsService implements Resettable, ResourceProvider {
             instance.setAutoMinorVersionUpgrade(autoMinorVersionUpgrade);
         }
         effective.applyTo(instance);
+        if (publiclyAccessible != null) {
+            instance.setPubliclyAccessible(publiclyAccessible);
+        }
         putInstanceForScope(currentAccountId(), effectiveRegion, id, instance);
 
         // The running auth proxy holds a password snapshot from start time, so swap it in place
@@ -1435,6 +1474,20 @@ public class RdsService implements Resettable, ResourceProvider {
 
     private static void validateInstanceSettings(DbInstanceSettings settings) {
         settings.validate();
+    }
+
+    /**
+     * AWS's conditional default for {@code PubliclyAccessible} when {@code CreateDBInstance}
+     * omits it: with no subnet group given, Aurora engines default to not-publicly-accessible and
+     * every other engine defaults to publicly accessible; with a subnet group given, the default
+     * is publicly accessible only when that group is literally named {@code default}, whatever
+     * the engine.
+     */
+    private static boolean defaultPubliclyAccessible(String engineParam, String dbSubnetGroupName) {
+        if (dbSubnetGroupName != null && !dbSubnetGroupName.isBlank()) {
+            return "default".equalsIgnoreCase(dbSubnetGroupName);
+        }
+        return !isAuroraEngine(engineParam);
     }
 
     /**

@@ -237,6 +237,68 @@ class RdsServiceTest {
     }
 
     @Test
+    void createAndModifyDbInstancePersistPubliclyAccessible() {
+        DbInstance instance = rdsService.createDbInstance("pubdb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false, false, null,
+                Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults(), true);
+
+        assertTrue(instance.isPubliclyAccessible());
+        assertTrue(rdsService.getDbInstance("pubdb").isPubliclyAccessible());
+
+        DbInstance modified = rdsService.modifyDbInstance("pubdb", null, null, null,
+                null, null, null, null, DbInstanceSettings.unchanged(), false);
+
+        assertFalse(modified.isPubliclyAccessible());
+        assertFalse(rdsService.getDbInstance("pubdb").isPubliclyAccessible());
+    }
+
+    @Test
+    void createDbInstanceOmittedPubliclyAccessibleDefaultsTrueForNonAuroraWithNoSubnetGroup() {
+        DbInstance instance = rdsService.createDbInstance("plain-db", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false, false, null,
+                Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults());
+
+        assertTrue(instance.isPubliclyAccessible());
+    }
+
+    @Test
+    void createDbInstanceOmittedPubliclyAccessibleDefaultsFalseForAuroraWithNoSubnetGroup() {
+        rdsService.createDbCluster("aurora-cluster", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", false, null);
+
+        DbInstance member = rdsService.createDbInstance("aurora-member", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", "db.r5.large",
+                20, false, null, null, "aurora-cluster", null, false, false, null,
+                Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults());
+
+        assertFalse(member.isPubliclyAccessible());
+    }
+
+    @Test
+    void createDbInstanceOmittedPubliclyAccessibleDefaultsFalseForNamedNonDefaultSubnetGroup() {
+        rdsService.createDbSubnetGroup("custom-subnets", "test", List.of("subnet-default-a", "subnet-default-b"));
+
+        DbInstance instance = rdsService.createDbInstance("custom-subnet-db", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, "custom-subnets", null, null, false, false, null,
+                Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults());
+
+        assertFalse(instance.isPubliclyAccessible());
+    }
+
+    @Test
+    void createDbInstanceOmittedPubliclyAccessibleDefaultsTrueForDefaultSubnetGroup() {
+        DbInstance instance = rdsService.createDbInstance("default-subnet-db", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, "default", null, null, false, false, null,
+                Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults());
+
+        assertTrue(instance.isPubliclyAccessible());
+    }
+
+    @Test
     void postgresImageUsesRequestedEngineVersionAndDefaultFlavor() {
         assertEquals("postgres:18.1-alpine",
                 RdsService.imageForRequestedVersion("postgres:16-alpine", "18.1"));
