@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.redshift.model.Endpoint;
 import io.github.hectorvent.floci.services.redshift.model.Snapshot;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 import java.util.List;
 import java.util.Optional;
@@ -18,6 +19,7 @@ import java.util.Optional;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.*;
 
 class RedshiftServiceTest {
@@ -48,8 +50,77 @@ class RedshiftServiceTest {
         when(sf.<Cluster>create(eq("redshift"), eq("redshift-clusters.json"), any())).thenReturn(clusterBackend);
         when(sf.<Snapshot>create(eq("redshift"), eq("redshift-snapshots.json"), any())).thenReturn(snapshotBackend);
         when(sf.<ClusterParameterGroup>create(eq("redshift"), eq("redshift-parameter-groups.json"), any())).thenReturn(parameterGroupBackend);
+        when(clusterBackend.accountId()).thenReturn("111111111111");
 
         service = new RedshiftService(sf, cm, config);
+    }
+
+    @Test
+    void testOnStartRecreatesContainersAcrossAccounts() {
+        Cluster clusterA = new Cluster();
+        clusterA.setClusterIdentifier("cluster-a");
+        clusterA.setMasterUsername("admin");
+        clusterA.setMasterPassword("pw-a");
+        clusterA.setClusterStatus("available");
+
+        Cluster clusterB = new Cluster();
+        clusterB.setClusterIdentifier("cluster-b");
+        clusterB.setMasterUsername("admin");
+        clusterB.setMasterPassword("pw-b");
+        clusterB.setClusterStatus("available");
+
+        when(clusterBackend.scanAllAccountEntries(any())).thenReturn(List.of(
+                new AccountAwareStorageBackend.AccountEntry<>("111111111111", "cluster-a", clusterA),
+                new AccountAwareStorageBackend.AccountEntry<>("222222222222", "cluster-b", clusterB)));
+        when(cm.getContainer(anyString())).thenReturn(Optional.empty());
+        when(cm.start(eq("cluster-a"), eq("admin"), eq("pw-a")))
+                .thenReturn(new RedshiftContainerHandle("c-a", "cluster-a", "localhost", 5432));
+        when(cm.start(eq("cluster-b"), eq("admin"), eq("pw-b")))
+                .thenReturn(new RedshiftContainerHandle("c-b", "cluster-b", "localhost", 5433));
+
+        service.onStart(null);
+
+        // Cluster owned by a second, non-default account must also be recovered
+        verify(cm).start("cluster-a", "admin", "pw-a");
+        verify(cm).start("cluster-b", "admin", "pw-b");
+        verify(clusterBackend).putForAccount(eq("111111111111"), eq("cluster-a"), any(Cluster.class));
+        verify(clusterBackend).putForAccount(eq("222222222222"), eq("cluster-b"), any(Cluster.class));
+        verify(clusterBackend).flush();
+    }
+
+    @Test
+    void testOnStartSkipsClusterWithRunningContainer() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("cluster-a");
+        cluster.setClusterStatus("available");
+        when(clusterBackend.scanAllAccountEntries(any())).thenReturn(List.of(
+                new AccountAwareStorageBackend.AccountEntry<>("111111111111", "cluster-a", cluster)));
+        when(cm.getContainer("cluster-a"))
+                .thenReturn(Optional.of(new RedshiftContainerHandle("c-a", "cluster-a", "localhost", 5432)));
+
+        service.onStart(null);
+
+        verify(cm, never()).start(any(), any(), any());
+        verify(clusterBackend, never()).putForAccount(any(), any(), any());
+    }
+
+    @Test
+    void testOnStartMarksClusterUnavailableOnStartFailure() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("cluster-a");
+        cluster.setMasterUsername("admin");
+        cluster.setMasterPassword("pw-a");
+        cluster.setClusterStatus("available");
+        when(clusterBackend.scanAllAccountEntries(any())).thenReturn(List.of(
+                new AccountAwareStorageBackend.AccountEntry<>("111111111111", "cluster-a", cluster)));
+        when(cm.getContainer("cluster-a")).thenReturn(Optional.empty());
+        when(cm.start(eq("cluster-a"), eq("admin"), eq("pw-a"))).thenThrow(new RuntimeException("docker down"));
+
+        service.onStart(null);
+
+        ArgumentCaptor<Cluster> captor = ArgumentCaptor.forClass(Cluster.class);
+        verify(clusterBackend).putForAccount(eq("111111111111"), eq("cluster-a"), captor.capture());
+        assertEquals("unavailable", captor.getValue().getClusterStatus());
     }
 
     @Test
@@ -114,7 +185,9 @@ class RedshiftServiceTest {
         assertEquals("available", snapshot.getStatus());
         assertEquals("admin", snapshot.getMasterUsername());
         assertEquals(5439, snapshot.getPort());
-        assertEquals("my-snapshot.sql", snapshot.getSqlDump());
+        // sqlDump is now an absolute path scoped by account to avoid collisions across accounts
+        assertTrue(snapshot.getSqlDump().contains("111111111111"));
+        assertTrue(snapshot.getSqlDump().endsWith("my-snapshot.sql"));
         verify(snapshotBackend).put(eq("my-snapshot"), any(Snapshot.class));
         verify(snapshotBackend).flush();
         verify(cm).takeSnapshot(eq("my-cluster"), eq("admin"), any(java.nio.file.Path.class));
@@ -178,9 +251,14 @@ class RedshiftServiceTest {
 
     @Test
     void testRestoreFromClusterSnapshot() {
+        Cluster sourceCluster = new Cluster();
+        sourceCluster.setClusterIdentifier("source-cluster");
+        sourceCluster.setMasterPassword("password123");
+
         Snapshot snapshot = new Snapshot("my-snapshot", "source-cluster", "available", 5439, "admin");
         snapshot.setSqlDump("my-snapshot.sql");
         when(clusterBackend.get("restored-cluster")).thenReturn(Optional.empty());
+        when(clusterBackend.get("source-cluster")).thenReturn(Optional.of(sourceCluster));
         when(snapshotBackend.get("my-snapshot")).thenReturn(Optional.of(snapshot));
         when(cm.start(eq("restored-cluster"), eq("admin"), eq("password123")))
                 .thenReturn(new RedshiftContainerHandle("c-new", "restored-cluster", "localhost", 5432));
@@ -191,13 +269,31 @@ class RedshiftServiceTest {
         assertEquals("restored-cluster", cluster.getClusterIdentifier());
         assertEquals("available", cluster.getClusterStatus());
         assertEquals("admin", cluster.getMasterUsername());
+        assertEquals("password123", cluster.getMasterPassword());
         assertEquals("dc2.large", cluster.getNodeType());
         assertEquals("localhost", cluster.getEndpoint().getAddress());
 
+        // Restore must use the source cluster's actual password, not a hardcoded one
         verify(cm).start("restored-cluster", "admin", "password123");
         verify(cm).restoreSnapshot(eq("restored-cluster"), eq("admin"), any(java.nio.file.Path.class));
         verify(clusterBackend, times(2)).put(eq("restored-cluster"), any(Cluster.class));
         verify(clusterBackend, times(2)).flush();
+    }
+
+    @Test
+    void testRestoreFromClusterSnapshotFallsBackToAdminWhenSourceClusterGone() {
+        Snapshot snapshot = new Snapshot("my-snapshot", "deleted-source", "available", 5439, "admin");
+        snapshot.setSqlDump("my-snapshot.sql");
+        when(clusterBackend.get("restored-cluster")).thenReturn(Optional.empty());
+        when(clusterBackend.get("deleted-source")).thenReturn(Optional.empty());
+        when(snapshotBackend.get("my-snapshot")).thenReturn(Optional.of(snapshot));
+        when(cm.start(eq("restored-cluster"), eq("admin"), eq("admin")))
+                .thenReturn(new RedshiftContainerHandle("c-new", "restored-cluster", "localhost", 5432));
+        doNothing().when(cm).restoreSnapshot(eq("restored-cluster"), eq("admin"), any(java.nio.file.Path.class));
+
+        Cluster cluster = service.restoreFromClusterSnapshot("restored-cluster", "my-snapshot", "dc2.large");
+        assertEquals("admin", cluster.getMasterPassword());
+        verify(cm).start("restored-cluster", "admin", "admin");
     }
 
     @Test
