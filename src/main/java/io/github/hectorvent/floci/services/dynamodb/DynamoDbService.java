@@ -327,6 +327,12 @@ public class DynamoDbService {
                     throw new AwsException("ValidationException",
                             "LocalSecondaryIndex partition key must match table partition key", 400);
                 }
+                if (lsi.getSortKeyNames().size() != 1) {
+                    throw new AwsException("ValidationException",
+                            "One or more parameter values were invalid: Local Secondary Index "
+                            + lsi.getIndexName() + " must have a sort key consisting of exactly "
+                            + "one scalar attribute", 400);
+                }
                 lsi.setIndexArn(table.getTableArn() + "/index/" + lsi.getIndexName());
             }
             table.setLocalSecondaryIndexes(new ArrayList<>(lsis));
@@ -1591,7 +1597,7 @@ public class DynamoDbService {
                                     JsonNode exprAttrNames, JsonNode exprAttrValues, String returnValuesOnConditionCheckFailure) {
         DynamoDbReservedWords.check(conditionExpression, "ConditionExpression");
         if (!matchesFilterExpression(existingItem, conditionExpression, exprAttrNames, exprAttrValues)) {
-            if ("ALL_OLD".equals(returnValuesOnConditionCheckFailure)){                
+            if ("ALL_OLD".equals(returnValuesOnConditionCheckFailure)){
                 throw new ConditionalCheckFailedException(existingItem);
             }
             else {
