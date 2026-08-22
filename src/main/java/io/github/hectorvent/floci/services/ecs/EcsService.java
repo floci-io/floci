@@ -693,7 +693,9 @@ public class EcsService implements ContainerTeardown {
                                           NetworkConfiguration networkConfiguration,
                                           Map<String, String> tags, String region) {
         EcsCluster cluster = resolveClusterOrDefault(clusterRef, region);
-        resolveTaskDefinitionOrThrow(taskDefinition, region);
+        // AWS resolves family / family:revision at create time and stores the ARN; the
+        // reconciler compares it with each task's taskDefinitionArn, so pin it here.
+        taskDefinition = resolveTaskDefinitionOrThrow(taskDefinition, region).getTaskDefinitionArn();
 
         String key = serviceKey(region, cluster.getClusterName(), serviceName);
         if (services.containsKey(key)) {
@@ -759,7 +761,7 @@ public class EcsService implements ContainerTeardown {
             svc.setNetworkConfiguration(networkConfiguration);
         }
         if (taskDefinition != null) {
-            resolveTaskDefinitionOrThrow(taskDefinition, region);
+            taskDefinition = resolveTaskDefinitionOrThrow(taskDefinition, region).getTaskDefinitionArn();
             svc.setTaskDefinition(taskDefinition);
             svc.setLastDeploymentAt(Instant.now());
             recordServiceDeployment(svc, taskDefinition, region);
@@ -1506,6 +1508,28 @@ public class EcsService implements ContainerTeardown {
         }
     }
 
+    /**
+     * The service's task definition as an ARN. Services created before the ARN was pinned at
+     * create/update time may still hold a raw {@code family} / {@code family:revision}
+     * reference; resolve it once and store the ARN so the comparison with
+     * {@link EcsTask#getTaskDefinitionArn()} is exact. A dangling reference is left as-is and
+     * simply matches nothing, which is the pre-existing behaviour for an unresolvable service.
+     */
+    private String pinnedTaskDefinitionArn(EcsServiceModel svc, String key, String region) {
+        String ref = svc.getTaskDefinition();
+        if (ref == null || ref.startsWith("arn:")) {
+            return ref;
+        }
+        try {
+            String arn = resolveTaskDefinitionOrThrow(ref, region).getTaskDefinitionArn();
+            svc.setTaskDefinition(arn);
+            services.put(key, svc);
+            return arn;
+        } catch (AwsException e) {
+            return ref;
+        }
+    }
+
     void reconcileServices() {
         for (Map.Entry<String, EcsServiceModel> entry : services.entrySet()) {
             try {
@@ -1524,17 +1548,28 @@ public class EcsService implements ContainerTeardown {
         String region = extractRegionFromServiceKey(key);
         String clusterName = extractClusterNameFromServiceKey(key);
 
-        long running = tasks.values().stream()
+        List<EcsTask> runningTasks = tasks.values().stream()
                 .filter(t -> t.getClusterArn().endsWith(":cluster/" + clusterName))
                 .filter(t -> svc.getServiceArn().equals(t.getGroup())
                         || svc.getServiceName().equals(t.getGroup()))
                 .filter(t -> TaskStatus.RUNNING.name().equals(t.getLastStatus()))
-                .count();
+                .toList();
+        long running = runningTasks.size();
+        // Tasks still on a previous task definition. AWS's ECS deployment controller rolls
+        // them: replacements on the service's current revision come up first, then the
+        // stale ones are drained, so UpdateService with a new taskDefinition actually
+        // changes what runs. Counting only current-revision tasks as "running" below is
+        // what makes the reconciler start the replacements.
+        String currentTaskDefinitionArn = pinnedTaskDefinitionArn(svc, key, region);
+        List<EcsTask> staleTasks = runningTasks.stream()
+                .filter(t -> !currentTaskDefinitionArn.equals(t.getTaskDefinitionArn()))
+                .toList();
+        long current = running - staleTasks.size();
 
         svc.setRunningCount((int) running);
 
-        if (running < svc.getDesiredCount()) {
-            int toStart = svc.getDesiredCount() - (int) running;
+        if (current < svc.getDesiredCount()) {
+            int toStart = svc.getDesiredCount() - (int) current;
             for (int i = 0; i < toStart; i++) {
                 try {
                     List<EcsTask> launched = runTask(clusterName, svc.getTaskDefinition(), 1,
@@ -1549,14 +1584,17 @@ public class EcsService implements ContainerTeardown {
             }
         } else if (running > svc.getDesiredCount()) {
             int toStop = (int) running - svc.getDesiredCount();
-            tasks.values().stream()
-                    .filter(t -> t.getClusterArn().endsWith(":cluster/" + clusterName))
-                    .filter(t -> svc.getServiceName().equals(t.getGroup()))
-                    .filter(t -> TaskStatus.RUNNING.name().equals(t.getLastStatus()))
+            // Drain stale tasks first: once their replacements are RUNNING this is the second
+            // half of the rolling deployment, not a scale-in.
+            Stream.concat(staleTasks.stream(),
+                            runningTasks.stream().filter(t -> !staleTasks.contains(t)))
                     .limit(toStop)
                     .forEach(t -> {
+                        boolean stale = staleTasks.contains(t);
                         try {
-                            stopTask(clusterName, t.getTaskArn(), "Service scale-in", region);
+                            stopTask(clusterName, t.getTaskArn(),
+                                    stale ? "Service deployment replaced task definition " + t.getTaskDefinitionArn()
+                                          : "Service scale-in", region);
                         } catch (Exception e) {
                             LOG.warnv("Service reconciler failed to stop task {0}: {1}",
                                     t.getTaskArn(), e.getMessage());

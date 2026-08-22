@@ -76,8 +76,10 @@ deployment, and moves with it thereafter.
 
 Known differences from AWS:
 
-- There is never a second `ACTIVE` deployment draining alongside the `PRIMARY` one;
-  Floci swaps the task definition in place.
+- There is never a second `ACTIVE` deployment draining alongside the `PRIMARY` one.
+  The running tasks *are* rolled onto a changed task definition (replacements on the new
+  revision start first, then the stale tasks are drained, one reconciler tick apart), but
+  the deployments list reports only the single `PRIMARY` throughout.
 - `deployments` is reported for every service. AWS omits it for services that use the
   `CODE_DEPLOY` or `EXTERNAL` deployment controller, but Floci does not yet record
   `deploymentController`, and `ECS` is the AWS default.
