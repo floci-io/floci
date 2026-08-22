@@ -85,40 +85,7 @@ public class EfsService implements Resettable {
         synchronized (lockFor(region + "::create::" + token)) {
         for (FileSystem existing : fileSystemStore.scan(k -> k.startsWith(region + "::"))) {
             if (token.equals(existing.getCreationToken())) {
-                boolean match = true;
-                
-                CreateFileSystemRequest original = originalFileSystemRequestStore.get(regionKey(region, existing.getFileSystemId())).orElse(request);
-                
-                String reqPerfMode = request.getPerformanceMode() != null ? request.getPerformanceMode().name() : "generalPurpose";
-                String extPerfMode = original.getPerformanceMode() != null ? original.getPerformanceMode().name() : "generalPurpose";
-                if (!Objects.equals(reqPerfMode, extPerfMode)) match = false;
-                
-                String reqTpMode = request.getThroughputMode() != null ? request.getThroughputMode().name() : "bursting";
-                String extTpMode = original.getThroughputMode() != null ? original.getThroughputMode().name() : "bursting";
-                if (!Objects.equals(reqTpMode, extTpMode)) match = false;
-
-                Boolean reqEnc = request.getEncrypted() != null ? request.getEncrypted() : Boolean.FALSE;
-                Boolean extEnc = original.getEncrypted() != null ? original.getEncrypted() : Boolean.FALSE;
-                if (!Objects.equals(reqEnc, extEnc)) match = false;
-                
-                if (!Objects.equals(request.getKmsKeyId(), original.getKmsKeyId())) match = false;
-                if (!Objects.equals(request.getProvisionedThroughputInMibps(), original.getProvisionedThroughputInMibps())) match = false;
-                
-                if (!Objects.equals(request.getAvailabilityZoneName(), original.getAvailabilityZoneName())) match = false;
-                
-                Boolean reqBackup = request.getBackup() != null ? request.getBackup() : Boolean.TRUE;
-                Boolean extBackup = original.getBackup() != null ? original.getBackup() : Boolean.TRUE;
-                if (!Objects.equals(reqBackup, extBackup)) match = false;
-                
-                List<Tag> reqTags = request.getTags() != null ? request.getTags() : Collections.emptyList();
-                List<Tag> extTags = original.getTags() != null ? original.getTags() : Collections.emptyList();
-                if (reqTags.size() != extTags.size() || !reqTags.containsAll(extTags)) match = false;
-                
-                if (match) {
-                    return existing;
-                } else {
-                    throw EfsException.idempotentParameterMismatch();
-                }
+                throw EfsException.fileSystemAlreadyExists(existing.getCreationToken(), existing.getFileSystemId());
             }
         }
 
@@ -445,54 +412,7 @@ public class EfsService implements Resettable {
 
                 for (AccessPointDescription existing : accessPointStore.scan(k -> k.startsWith(region + "::"))) {
                     if (token.equals(existing.getClientToken())) {
-                        boolean match = true;
-                        
-                        CreateAccessPointRequest original = originalAccessPointRequestStore.get(regionKey(region, existing.getAccessPointId())).orElse(request);
-                        
-                        if (!request.getFileSystemId().equals(original.getFileSystemId())) match = false;
-                        
-                        List<Tag> reqTags = request.getTags() != null ? request.getTags() : Collections.emptyList();
-                        List<Tag> extTags = original.getTags() != null ? original.getTags() : Collections.emptyList();
-                        if (reqTags.size() != extTags.size() || !reqTags.containsAll(extTags)) match = false;
-                        
-                        // Compare PosixUser
-                        if (request.getPosixUser() != null && original.getPosixUser() == null) match = false;
-                        if (request.getPosixUser() == null && original.getPosixUser() != null) match = false;
-                        if (request.getPosixUser() != null && original.getPosixUser() != null) {
-                            if (!Objects.equals(request.getPosixUser().getUid(), original.getPosixUser().getUid())) match = false;
-                            if (!Objects.equals(request.getPosixUser().getGid(), original.getPosixUser().getGid())) match = false;
-                            
-                            List<Long> reqGids = request.getPosixUser().getSecondaryGids();
-                            List<Long> extGids = original.getPosixUser().getSecondaryGids();
-                            if (reqGids != null && extGids == null) match = false;
-                            if (reqGids == null && extGids != null) match = false;
-                            if (reqGids != null && extGids != null) {
-                                if (reqGids.size() != extGids.size() || !reqGids.containsAll(extGids)) match = false;
-                            }
-                        }
-                        
-                        // Compare RootDirectory
-                        if (request.getRootDirectory() != null && original.getRootDirectory() == null) match = false;
-                        if (request.getRootDirectory() == null && original.getRootDirectory() != null) match = false;
-                        if (request.getRootDirectory() != null && original.getRootDirectory() != null) {
-                            if (!Objects.equals(request.getRootDirectory().getPath(), original.getRootDirectory().getPath())) match = false;
-                            
-                            CreationInfo reqCi = request.getRootDirectory().getCreationInfo();
-                            CreationInfo extCi = original.getRootDirectory().getCreationInfo();
-                            if (reqCi != null && extCi == null) match = false;
-                            if (reqCi == null && extCi != null) match = false;
-                            if (reqCi != null && extCi != null) {
-                                if (!Objects.equals(reqCi.getOwnerUid(), extCi.getOwnerUid())) match = false;
-                                if (!Objects.equals(reqCi.getOwnerGid(), extCi.getOwnerGid())) match = false;
-                                if (!Objects.equals(reqCi.getPermissions(), extCi.getPermissions())) match = false;
-                            }
-                        }
-                        
-                        if (match) {
-                            return existing;
-                        } else {
-                            throw EfsException.idempotentParameterMismatch();
-                        }
+                        throw EfsException.accessPointAlreadyExists(existing.getClientToken(), existing.getAccessPointId());
                     }
                 }
 
