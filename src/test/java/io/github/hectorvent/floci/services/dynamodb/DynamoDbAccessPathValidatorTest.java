@@ -93,13 +93,13 @@ class DynamoDbAccessPathValidatorTest {
         valid.set("tenantId", legacyCondition("EQ", attributeValues("acme")));
         valid.set("region", legacyCondition("EQ", attributeValues("us")));
         assertDoesNotThrow(() -> DynamoDbAccessPathValidator.validateQuery(
-                compositePkGsiPath, valid, null, null, null, null));
+                table, compositePkGsiPath, valid, null, null, null, null, null));
 
         ObjectNode missingRegion = mapper.createObjectNode();
         missingRegion.set("tenantId", legacyCondition("EQ", attributeValues("acme")));
         AwsException error = assertThrows(AwsException.class,
                 () -> DynamoDbAccessPathValidator.validateQuery(
-                        compositePkGsiPath, missingRegion, null, null, null, null));
+                        table, compositePkGsiPath, missingRegion, null, null, null, null, null));
         assertEquals("Query condition missed key schema element: region", error.getMessage());
     }
 
@@ -224,6 +224,24 @@ class DynamoDbAccessPathValidatorTest {
         legacy.set("sk", legacyCondition("EQ", mapper.createArrayNode().add(numberValue("1"))));
         assertThrows(AwsException.class, () -> DynamoDbAccessPathValidator.validateQuery(
                 table, tablePath, legacy, null, null, null, null, null));
+    }
+
+    @Test
+    void rejectsMalformedKeyConditionValues() {
+        ObjectNode nullString = mapper.createObjectNode();
+        nullString.putNull("S");
+        ObjectNode values = expressionValues(":pk");
+        values.set(":pk", nullString);
+
+        assertThrows(AwsException.class, () -> DynamoDbAccessPathValidator.validateQuery(
+                table, tablePath, null, "pk = :pk", null, null, null, values));
+
+        ObjectNode multipleTypes = stringValue("p1");
+        multipleTypes.put("N", "1");
+        values.set(":pk", multipleTypes);
+
+        assertThrows(AwsException.class, () -> DynamoDbAccessPathValidator.validateQuery(
+                table, tablePath, null, "pk = :pk", null, null, null, values));
     }
 
     @Test
