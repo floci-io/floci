@@ -146,10 +146,6 @@ floci:
         flush-interval-ms: 5000
       elasticbeanstalk:
         flush-interval-ms: 5000
-      redshift:
-        enabled: true
-        default-port: 5439
-        image-version: postgres:15-alpine
       rds:
         # Override storage mode for RDS (memory = no Docker volumes; hybrid/persistent = named volume per instance)
         # mode: memory
