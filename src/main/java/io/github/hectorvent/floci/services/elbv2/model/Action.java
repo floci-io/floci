@@ -4,7 +4,9 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 @RegisterForReflection
 @JsonIgnoreProperties(ignoreUnknown = true)
@@ -33,6 +35,32 @@ public class Action {
     private String fixedResponseStatusCode;
     private String fixedResponseContentType;
     private String fixedResponseMessageBody;
+
+    // authenticate-cognito
+    private String cognitoUserPoolArn;
+    private String cognitoUserPoolClientId;
+    private String cognitoUserPoolDomain;
+    private String cognitoSessionCookieName;
+    private Long cognitoSessionTimeout;
+    private String cognitoScope;
+    private String cognitoOnUnauthenticatedRequest;
+    private Map<String, String> cognitoAuthenticationRequestExtraParams = new LinkedHashMap<>();
+
+    // authenticate-oidc
+    private String oidcIssuer;
+    private String oidcAuthorizationEndpoint;
+    private String oidcTokenEndpoint;
+    private String oidcUserInfoEndpoint;
+    private String oidcClientId;
+    // Real AWS never returns the client secret from Describe* calls; we keep it
+    // only so a future ModifyListener/ModifyRule with UseExistingClientSecret has
+    // something to fall back on. It must never be serialized into a response.
+    private String oidcClientSecret;
+    private String oidcSessionCookieName;
+    private Long oidcSessionTimeout;
+    private String oidcScope;
+    private String oidcOnUnauthenticatedRequest;
+    private Map<String, String> oidcAuthenticationRequestExtraParams = new LinkedHashMap<>();
 
     public Action() {}
 
@@ -80,6 +108,63 @@ public class Action {
 
     public String getFixedResponseMessageBody() { return fixedResponseMessageBody; }
     public void setFixedResponseMessageBody(String fixedResponseMessageBody) { this.fixedResponseMessageBody = fixedResponseMessageBody; }
+
+    public String getCognitoUserPoolArn() { return cognitoUserPoolArn; }
+    public void setCognitoUserPoolArn(String cognitoUserPoolArn) { this.cognitoUserPoolArn = cognitoUserPoolArn; }
+
+    public String getCognitoUserPoolClientId() { return cognitoUserPoolClientId; }
+    public void setCognitoUserPoolClientId(String cognitoUserPoolClientId) { this.cognitoUserPoolClientId = cognitoUserPoolClientId; }
+
+    public String getCognitoUserPoolDomain() { return cognitoUserPoolDomain; }
+    public void setCognitoUserPoolDomain(String cognitoUserPoolDomain) { this.cognitoUserPoolDomain = cognitoUserPoolDomain; }
+
+    public String getCognitoSessionCookieName() { return cognitoSessionCookieName; }
+    public void setCognitoSessionCookieName(String cognitoSessionCookieName) { this.cognitoSessionCookieName = cognitoSessionCookieName; }
+
+    public Long getCognitoSessionTimeout() { return cognitoSessionTimeout; }
+    public void setCognitoSessionTimeout(Long cognitoSessionTimeout) { this.cognitoSessionTimeout = cognitoSessionTimeout; }
+
+    public String getCognitoScope() { return cognitoScope; }
+    public void setCognitoScope(String cognitoScope) { this.cognitoScope = cognitoScope; }
+
+    public String getCognitoOnUnauthenticatedRequest() { return cognitoOnUnauthenticatedRequest; }
+    public void setCognitoOnUnauthenticatedRequest(String cognitoOnUnauthenticatedRequest) { this.cognitoOnUnauthenticatedRequest = cognitoOnUnauthenticatedRequest; }
+
+    public Map<String, String> getCognitoAuthenticationRequestExtraParams() { return cognitoAuthenticationRequestExtraParams; }
+    public void setCognitoAuthenticationRequestExtraParams(Map<String, String> cognitoAuthenticationRequestExtraParams) { this.cognitoAuthenticationRequestExtraParams = cognitoAuthenticationRequestExtraParams; }
+
+    public String getOidcIssuer() { return oidcIssuer; }
+    public void setOidcIssuer(String oidcIssuer) { this.oidcIssuer = oidcIssuer; }
+
+    public String getOidcAuthorizationEndpoint() { return oidcAuthorizationEndpoint; }
+    public void setOidcAuthorizationEndpoint(String oidcAuthorizationEndpoint) { this.oidcAuthorizationEndpoint = oidcAuthorizationEndpoint; }
+
+    public String getOidcTokenEndpoint() { return oidcTokenEndpoint; }
+    public void setOidcTokenEndpoint(String oidcTokenEndpoint) { this.oidcTokenEndpoint = oidcTokenEndpoint; }
+
+    public String getOidcUserInfoEndpoint() { return oidcUserInfoEndpoint; }
+    public void setOidcUserInfoEndpoint(String oidcUserInfoEndpoint) { this.oidcUserInfoEndpoint = oidcUserInfoEndpoint; }
+
+    public String getOidcClientId() { return oidcClientId; }
+    public void setOidcClientId(String oidcClientId) { this.oidcClientId = oidcClientId; }
+
+    public String getOidcClientSecret() { return oidcClientSecret; }
+    public void setOidcClientSecret(String oidcClientSecret) { this.oidcClientSecret = oidcClientSecret; }
+
+    public String getOidcSessionCookieName() { return oidcSessionCookieName; }
+    public void setOidcSessionCookieName(String oidcSessionCookieName) { this.oidcSessionCookieName = oidcSessionCookieName; }
+
+    public Long getOidcSessionTimeout() { return oidcSessionTimeout; }
+    public void setOidcSessionTimeout(Long oidcSessionTimeout) { this.oidcSessionTimeout = oidcSessionTimeout; }
+
+    public String getOidcScope() { return oidcScope; }
+    public void setOidcScope(String oidcScope) { this.oidcScope = oidcScope; }
+
+    public String getOidcOnUnauthenticatedRequest() { return oidcOnUnauthenticatedRequest; }
+    public void setOidcOnUnauthenticatedRequest(String oidcOnUnauthenticatedRequest) { this.oidcOnUnauthenticatedRequest = oidcOnUnauthenticatedRequest; }
+
+    public Map<String, String> getOidcAuthenticationRequestExtraParams() { return oidcAuthenticationRequestExtraParams; }
+    public void setOidcAuthenticationRequestExtraParams(Map<String, String> oidcAuthenticationRequestExtraParams) { this.oidcAuthenticationRequestExtraParams = oidcAuthenticationRequestExtraParams; }
 
     @RegisterForReflection
     @JsonIgnoreProperties(ignoreUnknown = true)

@@ -958,7 +958,47 @@ public class ElbV2QueryHandler {
             if (a.getFixedResponseMessageBody() != null) xml.elem("MessageBody", a.getFixedResponseMessageBody());
             xml.end("FixedResponseConfig");
         }
+        if ("authenticate-cognito".equals(a.getType())) {
+            xml.start("AuthenticateCognitoConfig");
+            xml.elem("UserPoolArn", safe(a.getCognitoUserPoolArn()));
+            xml.elem("UserPoolClientId", safe(a.getCognitoUserPoolClientId()));
+            xml.elem("UserPoolDomain", safe(a.getCognitoUserPoolDomain()));
+            if (a.getCognitoSessionCookieName() != null) xml.elem("SessionCookieName", a.getCognitoSessionCookieName());
+            if (a.getCognitoSessionTimeout() != null) xml.elem("SessionTimeout", a.getCognitoSessionTimeout());
+            if (a.getCognitoScope() != null) xml.elem("Scope", a.getCognitoScope());
+            if (a.getCognitoOnUnauthenticatedRequest() != null) xml.elem("OnUnauthenticatedRequest", a.getCognitoOnUnauthenticatedRequest());
+            stringMapXml(xml, "AuthenticationRequestExtraParams", a.getCognitoAuthenticationRequestExtraParams());
+            xml.end("AuthenticateCognitoConfig");
+        }
+        if ("authenticate-oidc".equals(a.getType())) {
+            xml.start("AuthenticateOidcConfig");
+            xml.elem("Issuer", safe(a.getOidcIssuer()));
+            xml.elem("AuthorizationEndpoint", safe(a.getOidcAuthorizationEndpoint()));
+            xml.elem("TokenEndpoint", safe(a.getOidcTokenEndpoint()));
+            xml.elem("UserInfoEndpoint", safe(a.getOidcUserInfoEndpoint()));
+            xml.elem("ClientId", safe(a.getOidcClientId()));
+            // Real AWS never returns ClientSecret from DescribeListeners/DescribeRules,
+            // so it is intentionally omitted here too.
+            if (a.getOidcSessionCookieName() != null) xml.elem("SessionCookieName", a.getOidcSessionCookieName());
+            if (a.getOidcSessionTimeout() != null) xml.elem("SessionTimeout", a.getOidcSessionTimeout());
+            if (a.getOidcScope() != null) xml.elem("Scope", a.getOidcScope());
+            if (a.getOidcOnUnauthenticatedRequest() != null) xml.elem("OnUnauthenticatedRequest", a.getOidcOnUnauthenticatedRequest());
+            stringMapXml(xml, "AuthenticationRequestExtraParams", a.getOidcAuthenticationRequestExtraParams());
+            xml.end("AuthenticateOidcConfig");
+        }
         return xml.build();
+    }
+
+    private void stringMapXml(XmlBuilder xml, String elementName, Map<String, String> map) {
+        if (map == null || map.isEmpty()) return;
+        xml.start(elementName);
+        for (Map.Entry<String, String> e : map.entrySet()) {
+            xml.start("entry");
+            xml.elem("key", e.getKey());
+            xml.elem("value", e.getValue());
+            xml.end("entry");
+        }
+        xml.end(elementName);
     }
 
     private String conditionXml(RuleCondition c) {
@@ -1106,8 +1146,50 @@ public class ElbV2QueryHandler {
                     a.setFixedResponseContentType(p.getFirst(prefix + ".member." + i + ".FixedResponseConfig.ContentType"));
                     a.setFixedResponseMessageBody(p.getFirst(prefix + ".member." + i + ".FixedResponseConfig.MessageBody"));
                 }
+                case "authenticate-cognito" -> {
+                    String cognitoPrefix = prefix + ".member." + i + ".AuthenticateCognitoConfig";
+                    a.setCognitoUserPoolArn(p.getFirst(cognitoPrefix + ".UserPoolArn"));
+                    a.setCognitoUserPoolClientId(p.getFirst(cognitoPrefix + ".UserPoolClientId"));
+                    a.setCognitoUserPoolDomain(p.getFirst(cognitoPrefix + ".UserPoolDomain"));
+                    a.setCognitoSessionCookieName(p.getFirst(cognitoPrefix + ".SessionCookieName"));
+                    String sessionTimeout = p.getFirst(cognitoPrefix + ".SessionTimeout");
+                    if (sessionTimeout != null) a.setCognitoSessionTimeout(Long.parseLong(sessionTimeout));
+                    a.setCognitoScope(p.getFirst(cognitoPrefix + ".Scope"));
+                    a.setCognitoOnUnauthenticatedRequest(p.getFirst(cognitoPrefix + ".OnUnauthenticatedRequest"));
+                    a.setCognitoAuthenticationRequestExtraParams(
+                            parseStringMap(p, cognitoPrefix + ".AuthenticationRequestExtraParams"));
+                }
+                case "authenticate-oidc" -> {
+                    String oidcPrefix = prefix + ".member." + i + ".AuthenticateOidcConfig";
+                    a.setOidcIssuer(p.getFirst(oidcPrefix + ".Issuer"));
+                    a.setOidcAuthorizationEndpoint(p.getFirst(oidcPrefix + ".AuthorizationEndpoint"));
+                    a.setOidcTokenEndpoint(p.getFirst(oidcPrefix + ".TokenEndpoint"));
+                    a.setOidcUserInfoEndpoint(p.getFirst(oidcPrefix + ".UserInfoEndpoint"));
+                    a.setOidcClientId(p.getFirst(oidcPrefix + ".ClientId"));
+                    a.setOidcClientSecret(p.getFirst(oidcPrefix + ".ClientSecret"));
+                    a.setOidcSessionCookieName(p.getFirst(oidcPrefix + ".SessionCookieName"));
+                    String oidcSessionTimeout = p.getFirst(oidcPrefix + ".SessionTimeout");
+                    if (oidcSessionTimeout != null) a.setOidcSessionTimeout(Long.parseLong(oidcSessionTimeout));
+                    a.setOidcScope(p.getFirst(oidcPrefix + ".Scope"));
+                    a.setOidcOnUnauthenticatedRequest(p.getFirst(oidcPrefix + ".OnUnauthenticatedRequest"));
+                    a.setOidcAuthenticationRequestExtraParams(
+                            parseStringMap(p, oidcPrefix + ".AuthenticationRequestExtraParams"));
+                }
             }
             result.add(a);
+            i++;
+        }
+        return result;
+    }
+
+    private Map<String, String> parseStringMap(MultivaluedMap<String, String> p, String prefix) {
+        Map<String, String> result = new LinkedHashMap<>();
+        int i = 1;
+        while (true) {
+            String key = p.getFirst(prefix + ".entry." + i + ".key");
+            if (key == null) break;
+            String value = p.getFirst(prefix + ".entry." + i + ".value");
+            result.put(key, value);
             i++;
         }
         return result;
