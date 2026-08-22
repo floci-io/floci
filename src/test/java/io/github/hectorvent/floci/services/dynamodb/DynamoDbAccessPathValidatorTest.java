@@ -38,6 +38,7 @@ class DynamoDbAccessPathValidatorTest {
                 new AttributeDefinition("sk", "S"),
                 new AttributeDefinition("status", "S"),
                 new AttributeDefinition("createdAt", "S"),
+                new AttributeDefinition("sequence", "S"),
                 new AttributeDefinition("alternate", "S"),
                 new AttributeDefinition("tenantId", "S"),
                 new AttributeDefinition("region", "S")));
@@ -45,7 +46,8 @@ class DynamoDbAccessPathValidatorTest {
                 new GlobalSecondaryIndex(
                         "status-index",
                         List.of(new KeySchemaElement("status", "HASH"),
-                                new KeySchemaElement("createdAt", "RANGE")),
+                                new KeySchemaElement("createdAt", "RANGE"),
+                                new KeySchemaElement("sequence", "RANGE")),
                         null, "INCLUDE", List.of("summary")),
                 new GlobalSecondaryIndex(
                         "tenant-region-index",
@@ -128,6 +130,33 @@ class DynamoDbAccessPathValidatorTest {
         assertEquals(":status", DynamoDbAccessPathValidator.validateQuery(
                 table, gsiPath, null, "#status = :status AND createdAt BETWEEN :start AND :end",
                 null, null, names, expressionValues(":status", ":start", ":end")));
+    }
+
+    @Test
+    void acceptsCompositeSortKeyPrefixWithInequalityLast() {
+        assertDoesNotThrow(() -> validateExpression(gsiPath,
+                "status = :status AND createdAt = :createdAt AND sequence >= :sequence"));
+        assertDoesNotThrow(() -> validateExpression(gsiPath,
+                "status = :status AND createdAt BETWEEN :start AND :end"));
+    }
+
+    @Test
+    void rejectsSkippedCompositeSortKey() {
+        AwsException error = assertThrows(AwsException.class,
+                () -> validateExpression(gsiPath, "status = :status AND sequence = :sequence"));
+
+        assertEquals("RANGE key attributes createdAt must have equality conditions specified in the query "
+                + "because a condition is present on key attribute sequence", error.getMessage());
+    }
+
+    @Test
+    void rejectsCompositeSortKeyConditionAfterInequality() {
+        AwsException error = assertThrows(AwsException.class,
+                () -> validateExpression(gsiPath,
+                        "status = :status AND createdAt > :createdAt AND sequence = :sequence"));
+
+        assertEquals("RANGE key attributes createdAt must have equality conditions specified in the query "
+                + "because a condition is present on key attribute sequence", error.getMessage());
     }
 
     @Test
