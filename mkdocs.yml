@@ -93,6 +93,7 @@ nav:
     - Managed Service for Apache Flink: services/kinesisanalytics.md
     - Secrets Manager: services/secrets-manager.md
     - CloudFormation: services/cloudformation.md
+    - Cloud Control API: services/cloudcontrol.md
     - Step Functions: services/step-functions.md
     - SWF: services/swf.md
     - IAM: services/iam.md
@@ -147,6 +148,7 @@ nav:
     - AWS Config: services/config.md
     - CloudTrail: services/cloudtrail.md
     - EMR: services/emr.md
+    - EMR Serverless: services/emr-serverless.md
     - WAF v2: services/wafv2.md
     - Textract: services/textract.md
     - Transcribe: services/transcribe.md
