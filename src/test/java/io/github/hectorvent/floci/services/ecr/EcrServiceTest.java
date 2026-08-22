@@ -305,6 +305,99 @@ class EcrServiceTest {
     }
 
     @Test
+    void untaggedDigestOnlyRepositoryResolvesAndDescribes() throws Exception {
+        // A bare-name repo whose only manifest is untagged (digest-addressable):
+        // tags/list returns null tags, but the catalog still lists the repo, so
+        // resolution must not misroute it (Greptile P1: untagged images).
+        String repositoryName = "probe/untagged";
+        String digest = "sha256:4444444444444444444444444444444444444444444444444444444444444444";
+        String manifest = """
+                {
+                  "schemaVersion": 2,
+                  "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+                  "config": {"mediaType": "application/vnd.docker.container.image.v1+json", "size": 1, "digest": "sha256:c"},
+                  "layers": []
+                }
+                """;
+
+        try (UntaggedRegistryServer registry = new UntaggedRegistryServer(repositoryName, digest)) {
+            when(registryManager.httpClient())
+                    .thenReturn(new RegistryHttpClient("http://localhost:" + registry.port()));
+
+            service.createRepository(repositoryName, null, null, null, null, null, null, REGION);
+
+            // BatchGetImage by digest resolves the bare-name entry via catalog membership.
+            EcrService.BatchGetImageResult got = service.batchGetImage(
+                    repositoryName,
+                    List.of(new ImageIdentifier(null, digest)),
+                    null, null, REGION);
+            assertTrue(got.failures().isEmpty(), () -> "unexpected failures: " + got.failures());
+            assertEquals(1, got.images().size());
+        }
+    }
+
+    @Test
+    void bareEntryClaimedByOtherAccountIsNotResolvedForThisScope() throws Exception {
+        // Both accounts have metadata for the same repo name in the same region;
+        // only ONE bare registry entry exists. Account A's lookups must resolve
+        // to its own (namespaced, empty) entry, never to the shared bare entry
+        // holding account B's images (Greptile P1: scope isolation).
+        String repositoryName = "probe/shared-name";
+        String tag = "v1";
+        String digest = "sha256:6666666666666666666666666666666666666666666666666666666666666666";
+        String manifest = """
+                {
+                  "schemaVersion": 2,
+                  "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+                  "config": {"mediaType": "application/vnd.docker.container.image.v1+json", "size": 1, "digest": "sha256:c"},
+                  "layers": []
+                }
+                """;
+
+        try (FakeRegistryServer registry =
+                new FakeRegistryServer(repositoryName, tag, digest, manifest)) {
+            // The fake serves the BARE name in its catalog and tags — simulating
+            // a hostname-style push that bypassed the namespacing.
+            when(registryManager.httpClient())
+                    .thenReturn(new RegistryHttpClient("http://localhost:" + registry.port()));
+
+            // Account B created metadata for the same name.
+            service.createRepository(repositoryName, "111111111111", null, null, null, null, null, REGION);
+            // Account A creates its own repository; its namespaced entry does not
+            // exist in this registry, but a bare entry with that name DOES — the
+            // ambiguity guard must keep resolution on A's namespaced form.
+            service.createRepository(repositoryName, ACCOUNT, null, null, null, null, null, REGION);
+
+            List<ImageIdentifier> ids = service.listImages(repositoryName, ACCOUNT, REGION);
+            assertTrue(ids.isEmpty(),
+                    "bare entry owned by another account must not resolve for this scope");
+        }
+    }
+
+    @Test
+    void deleteRepositoryForceFailsWhenRegistryCleanupFails() throws Exception {
+        // Registry rejects the manifest DELETE: force-delete must surface an
+        // error and keep the metadata row instead of reporting success
+        // (Greptile P1: suppressed cleanup failures).
+        String repositoryName = "probe/failing-delete";
+        String tag = "v1";
+        String digest = "sha256:5555555555555555555555555555555555555555555555555555555555555555";
+        try (DeleteRejectingRegistryServer registry =
+                new DeleteRejectingRegistryServer(repositoryName, tag, digest)) {
+            when(registryManager.httpClient())
+                    .thenReturn(new RegistryHttpClient("http://localhost:" + registry.port()));
+
+            service.createRepository(repositoryName, null, null, null, null, null, null, REGION);
+            AwsException ex = assertThrows(AwsException.class,
+                    () -> service.deleteRepository(repositoryName, null, true, REGION));
+            assertEquals("InternalFailure", ex.getErrorCode());
+
+            // Metadata survives so the operator can retry after fixing the registry.
+            assertEquals(1, service.describeRepositories(List.of(repositoryName), null, REGION).size());
+        }
+    }
+
+    @Test
     void putImageTagMutability_roundTrips() {
         service.createRepository(REPO, null, null, null, null, null, null, REGION);
         Repository updated = service.putImageTagMutability(REPO, null, "IMMUTABLE", REGION);
@@ -448,6 +541,10 @@ class EcrServiceTest {
                 send(exchange, 200, "");
                 return;
             }
+            if ("/v2/_catalog".equals(path) && "GET".equals(method)) {
+                sendJson(exchange, 200, "{\"repositories\":[\"" + repository + "\"]}");
+                return;
+            }
             if (path.equals("/v2/" + repository + "/manifests/" + digest) && "DELETE".equals(method)) {
                 deletedDigests.add(digest);
                 exchange.sendResponseHeaders(202, -1);
@@ -471,6 +568,200 @@ class EcrServiceTest {
                 exchange.getResponseHeaders().add("Content-Type",
                         "application/vnd.docker.distribution.manifest.v2+json");
                 send(exchange, 200, manifest);
+                return;
+            }
+            exchange.sendResponseHeaders(404, -1);
+            exchange.close();
+        }
+
+        private static void sendJson(HttpExchange exchange, int status, String body) throws IOException {
+            exchange.getResponseHeaders().add("Content-Type", "application/json");
+            send(exchange, status, body);
+        }
+
+        private static void send(HttpExchange exchange, int status, String body) throws IOException {
+            byte[] bytes = body.getBytes();
+            exchange.sendResponseHeaders(status, bytes.length);
+            try (OutputStream out = exchange.getResponseBody()) {
+                out.write(bytes);
+            }
+        }
+
+        @Override
+        public void close() {
+            server.stop(0);
+        }
+    }
+
+    /** Registry serving a catalog entry whose repository has no tags (digest-only). */
+    private static final class UntaggedRegistryServer implements AutoCloseable {
+        private final HttpServer server;
+        private final String repository;
+        private final String digest;
+
+        private UntaggedRegistryServer(String repository, String digest) throws IOException {
+            this.repository = repository;
+            this.digest = digest;
+            this.server = HttpServer.create(new InetSocketAddress(0), 0);
+            this.server.createContext("/v2/", this::handle);
+            this.server.start();
+        }
+
+        private int port() {
+            return server.getAddress().getPort();
+        }
+
+        private void handle(HttpExchange exchange) throws IOException {
+            String path = exchange.getRequestURI().getPath();
+            String method = exchange.getRequestMethod();
+            if ("/v2/".equals(path) && "GET".equals(method)) {
+                send(exchange, 200, "");
+                return;
+            }
+            if ("/v2/_catalog".equals(path) && "GET".equals(method)) {
+                sendJson(exchange, 200, "{\"repositories\":[\"" + repository + "\"]}");
+                return;
+            }
+            if (path.equals("/v2/" + repository + "/tags/list") && "GET".equals(method)) {
+                // registry:2 returns tags: null when only untagged manifests exist.
+                sendJson(exchange, 200, "{\"name\":\"" + repository + "\",\"tags\":null}");
+                return;
+            }
+            if (path.equals("/v2/" + repository + "/manifests/" + digest)
+                    && ("GET".equals(method) || "HEAD".equals(method))) {
+                exchange.getResponseHeaders().add("Docker-Content-Digest", digest);
+                if ("HEAD".equals(method)) {
+                    exchange.sendResponseHeaders(200, -1);
+                    exchange.close();
+                    return;
+                }
+                exchange.getResponseHeaders().add("Content-Type",
+                        "application/vnd.docker.distribution.manifest.v2+json");
+                send(exchange, 200, "{\"schemaVersion\":2,\"config\":{\"size\":1},\"layers\":[]}");
+                return;
+            }
+            exchange.sendResponseHeaders(404, -1);
+            exchange.close();
+        }
+
+        private static void sendJson(HttpExchange exchange, int status, String body) throws IOException {
+            exchange.getResponseHeaders().add("Content-Type", "application/json");
+            send(exchange, status, body);
+        }
+
+        private static void send(HttpExchange exchange, int status, String body) throws IOException {
+            byte[] bytes = body.getBytes();
+            exchange.sendResponseHeaders(status, bytes.length);
+            try (OutputStream out = exchange.getResponseBody()) {
+                out.write(bytes);
+            }
+        }
+
+        @Override
+        public void close() {
+            server.stop(0);
+        }
+    }
+
+    /** Registry that reports a fixed catalog; nothing else resolves. */
+    private static final class CatalogOnlyRegistryServer implements AutoCloseable {
+        private final HttpServer server;
+        private final List<String> repositories;
+
+        private CatalogOnlyRegistryServer(List<String> repositories) throws IOException {
+            this.repositories = repositories;
+            this.server = HttpServer.create(new InetSocketAddress(0), 0);
+            this.server.createContext("/v2/", this::handle);
+            this.server.start();
+        }
+
+        private int port() {
+            return server.getAddress().getPort();
+        }
+
+        private void handle(HttpExchange exchange) throws IOException {
+            String path = exchange.getRequestURI().getPath();
+            String method = exchange.getRequestMethod();
+            if ("/v2/".equals(path) && "GET".equals(method)) {
+                send(exchange, 200, "");
+                return;
+            }
+            if ("/v2/_catalog".equals(path) && "GET".equals(method)) {
+                String joined = repositories.stream()
+                        .map(r -> "\"" + r + "\"")
+                        .reduce((a, b) -> a + "," + b)
+                        .orElse("");
+                sendJson(exchange, 200, "{\"repositories\":[" + joined + "]}");
+                return;
+            }
+            exchange.sendResponseHeaders(404, -1);
+            exchange.close();
+        }
+
+        private static void sendJson(HttpExchange exchange, int status, String body) throws IOException {
+            exchange.getResponseHeaders().add("Content-Type", "application/json");
+            send(exchange, status, body);
+        }
+
+        private static void send(HttpExchange exchange, int status, String body) throws IOException {
+            byte[] bytes = body.getBytes();
+            exchange.sendResponseHeaders(status, bytes.length);
+            try (OutputStream out = exchange.getResponseBody()) {
+                out.write(bytes);
+            }
+        }
+
+        @Override
+        public void close() {
+            server.stop(0);
+        }
+    }
+
+    /** Registry that accepts tag HEADs but rejects manifest DELETEs with 405. */
+    private static final class DeleteRejectingRegistryServer implements AutoCloseable {
+        private final HttpServer server;
+        private final String repository;
+        private final String tag;
+        private final String digest;
+
+        private DeleteRejectingRegistryServer(String repository, String tag, String digest) throws IOException {
+            this.repository = repository;
+            this.tag = tag;
+            this.digest = digest;
+            this.server = HttpServer.create(new InetSocketAddress(0), 0);
+            this.server.createContext("/v2/", this::handle);
+            this.server.start();
+        }
+
+        private int port() {
+            return server.getAddress().getPort();
+        }
+
+        private void handle(HttpExchange exchange) throws IOException {
+            String path = exchange.getRequestURI().getPath();
+            String method = exchange.getRequestMethod();
+            if ("/v2/".equals(path) && "GET".equals(method)) {
+                send(exchange, 200, "");
+                return;
+            }
+            if ("/v2/_catalog".equals(path) && "GET".equals(method)) {
+                sendJson(exchange, 200, "{\"repositories\":[\"" + repository + "\"]}");
+                return;
+            }
+            if (path.equals("/v2/" + repository + "/tags/list") && "GET".equals(method)) {
+                sendJson(exchange, 200, "{\"name\":\"" + repository + "\",\"tags\":[\"" + tag + "\"]}");
+                return;
+            }
+            if (path.equals("/v2/" + repository + "/manifests/" + tag) && "HEAD".equals(method)) {
+                exchange.getResponseHeaders().add("Docker-Content-Digest", digest);
+                exchange.sendResponseHeaders(200, -1);
+                exchange.close();
+                return;
+            }
+            if (path.equals("/v2/" + repository + "/manifests/" + digest) && "DELETE".equals(method)) {
+                // registry without DELETE enabled returns 405 METHOD_NOT_ALLOWED.
+                exchange.sendResponseHeaders(405, -1);
+                exchange.close();
                 return;
             }
             exchange.sendResponseHeaders(404, -1);

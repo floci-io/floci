@@ -199,18 +199,28 @@ public class EcrService {
         if (force && !tags.isEmpty()) {
             // Delete every manifest so blobs are unreferenced and tags stop
             // resolving; registry garbage-collect reclaims the bytes later.
+            // Any failure aborts the deletion (metadata stays) so the API
+            // never reports success while registry content remains pullable.
             RegistryHttpClient http = registryManager.httpClient();
             String internal = resolveRegistryRepoName(account, region, repositoryName);
             int deleted = 0;
-            for (String tag : tags) {
-                try {
+            try {
+                for (String tag : tags) {
                     String digest = http.headManifestDigest(internal, tag, null);
-                    if (digest != null && http.deleteManifest(internal, digest)) {
+                    if (digest != null) {
+                        if (!http.deleteManifest(internal, digest)) {
+                            throw new AwsException("InternalFailure",
+                                    "Failed to delete manifest " + digest + " from the backing registry", 500);
+                        }
                         deleted++;
                     }
-                } catch (Exception e) {
-                    LOG.warnv("Force-delete of {0}:{1} failed: {2}", repositoryName, tag, e.getMessage());
                 }
+            } catch (AwsException e) {
+                throw e;
+            } catch (Exception e) {
+                throw new AwsException("InternalFailure",
+                        "Failed to clean up the backing registry for repository '" + repositoryName + "': "
+                                + e.getMessage(), 500);
             }
             LOG.infov("Force-deleting ECR repository {0}: removed {1}/{2} manifest(s)",
                     repositoryName, deleted, tags.size());
@@ -535,19 +545,35 @@ public class EcrService {
      * Resolves the repository name as stored in the backing registry.
      * Hostname-style URIs ({@code <account>.dkr.ecr.<region>.localhost:<port>/<repo>})
      * reach the raw registry, so docker pushes land under the bare repo name,
-     * while path-style URIs land under {@code <account>/<region>/<repo>}. Prefer
-     * the namespaced form; fall back to the bare name when nothing is stored
-     * there (issue #2444).
+     * while path-style URIs land under {@code <account>/<region>/<repo>}.
+     * Resolution uses catalog membership (not tag listing) so untagged,
+     * digest-only repositories resolve correctly. The namespaced form wins
+     * when both exist.
+     *
+     * <p>Ambiguity guard: a bare-name entry can only be claimed when no
+     * <em>other</em> account/region has metadata for the same repository name.
+     * Otherwise the bare entry's owning scope is unknown and resolving to it
+     * would let one scope read or delete another scope's images, so the call
+     * falls back to the (empty) namespaced form.
      */
     private String resolveRegistryRepoName(String account, String region, String repoName) {
         String internal = registryManager.internalRepoName(account, region, repoName);
         try {
-            RegistryHttpClient http = registryManager.httpClient();
-            if (!http.listTags(internal).isEmpty()) {
+            List<String> catalog = registryManager.httpClient().catalog();
+            if (catalog.contains(internal)) {
                 return internal;
             }
-            if (!http.listTags(repoName).isEmpty()) {
-                return repoName;
+            if (catalog.contains(repoName)) {
+                String prefix = region + "::";
+                boolean otherScopeClaimsIt = repoStore.scan(k -> k.startsWith(prefix))
+                        .stream()
+                        .anyMatch(r -> !r.getRegistryId().equals(account)
+                                && r.getRepositoryName().equals(repoName));
+                if (!otherScopeClaimsIt) {
+                    return repoName;
+                }
+                LOG.warnv("Bare registry entry {0} claimed by another account/region; "
+                        + "resolving {1} to its namespaced form", repoName, internal);
             }
         } catch (Exception e) {
             LOG.debugv("Registry lookup failed while resolving {0}: {1}", repoName, e.getMessage());
