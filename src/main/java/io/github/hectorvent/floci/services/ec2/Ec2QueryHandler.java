@@ -294,8 +294,10 @@ public class Ec2QueryHandler {
             String volumeType = p.getFirst(prefix + ".Ebs.VolumeType");
             String deleteOnTermination = p.getFirst(prefix + ".Ebs.DeleteOnTermination");
             String encrypted = p.getFirst(prefix + ".Ebs.Encrypted");
+            String iops = p.getFirst(prefix + ".Ebs.Iops");
+            String throughput = p.getFirst(prefix + ".Ebs.Throughput");
             boolean hasEbs = snapshotId != null || volumeSize != null || volumeType != null
-                    || deleteOnTermination != null || encrypted != null;
+                    || deleteOnTermination != null || encrypted != null || iops != null || throughput != null;
             if (deviceName == null && !hasEbs) {
                 break;
             }
@@ -312,6 +314,8 @@ public class Ec2QueryHandler {
             ebs.setDeleteOnTermination(parseOptionalBoolean(deleteOnTermination,
                     prefix + ".Ebs.DeleteOnTermination"));
             ebs.setEncrypted(parseOptionalBoolean(encrypted, prefix + ".Ebs.Encrypted"));
+            ebs.setIops(parseOptionalInt(iops, prefix + ".Ebs.Iops"));
+            ebs.setThroughput(parseOptionalInt(throughput, prefix + ".Ebs.Throughput"));
             mapping.setEbs(ebs);
             mappings.add(mapping);
         }
@@ -520,6 +524,8 @@ public class Ec2QueryHandler {
             }
         }
 
+        List<BlockDeviceMapping> blockDeviceMappings = parseBlockDeviceMappings(p);
+
         LaunchTemplateData launchTemplateData = resolveRunInstancesLaunchTemplateData(p, region);
         if (launchTemplateData != null) {
             imageId = firstNonBlank(imageId, launchTemplateData.getImageId());
@@ -540,7 +546,7 @@ public class Ec2QueryHandler {
 
         Reservation res = service.runInstances(region, imageId, instanceType, minCount, maxCount,
                 keyName, sgIds, subnetId, clientToken, instanceTags, userData, iamInstanceProfileArn,
-                associatePublicIp);
+                associatePublicIp, blockDeviceMappings);
 
         XmlBuilder xml = new XmlBuilder()
                 .start("RunInstancesResponse", AwsNamespaces.EC2)
@@ -2760,7 +2766,7 @@ public class Ec2QueryHandler {
                     .start("ebs")
                     .elem("volumeId", inst.getRootVolumeId())
                     .elem("status", "attached")
-                    .elem("deleteOnTermination", "true")
+                    .elem("deleteOnTermination", String.valueOf(inst.isRootVolumeDeleteOnTermination()))
                     .elem("attachTime", inst.getLaunchTime() != null ? ISO_FMT.format(inst.getLaunchTime()) : "")
                     .end("ebs")
                     .end("item")

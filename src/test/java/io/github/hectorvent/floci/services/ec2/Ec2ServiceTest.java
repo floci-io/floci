@@ -774,6 +774,102 @@ class Ec2ServiceTest {
     }
 
     // =========================================================================
+    // RunInstances BlockDeviceMapping fidelity
+    // =========================================================================
+
+    @Test
+    void runInstancesDefaultsRootVolumeWhenNoBlockDeviceMappingGiven() {
+        // A/B baseline: with no mapping at all, the old hardcoded 8 GiB/gp3 default still
+        // applies. This must keep passing both before and after the fix below.
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+
+        Reservation reservation = service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), null, null, List.of(), null, null);
+        Instance inst = reservation.getInstances().getFirst();
+
+        Volume root = service.describeVolumes("us-east-1", List.of(inst.getRootVolumeId()), Map.of()).getFirst();
+        assertEquals(8, root.getSize());
+        assertEquals("gp3", root.getVolumeType());
+    }
+
+    @Test
+    void runInstancesHonoursRootBlockDeviceMappingVolumeSizeAndSiblingFields() {
+        // Regression test for the gap: RunInstances used to hardcode the root volume at
+        // 8 GiB/gp3 and silently ignore BlockDeviceMapping entirely, which made a Terraform
+        // replan on aws_instance.root_block_device.volume_size loop forever (8 -> requested,
+        // 8 -> requested, ...). Before the fix, this assertion fails with size=8; after, it
+        // reflects the requested 200 GiB along with the sibling Ebs fields.
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+
+        BlockDeviceMapping rootMapping = new BlockDeviceMapping();
+        rootMapping.setDeviceName("/dev/xvda"); // the default root device name for this test AMI
+        EbsBlockDevice rootEbs = new EbsBlockDevice();
+        rootEbs.setVolumeSize(200);
+        rootEbs.setVolumeType("gp3");
+        rootEbs.setEncrypted(true);
+        rootEbs.setIops(4000);
+        rootEbs.setThroughput(250);
+        rootEbs.setDeleteOnTermination(false);
+        rootMapping.setEbs(rootEbs);
+
+        Reservation reservation = service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), null, null, List.of(), null, null, null, List.of(rootMapping));
+        Instance inst = reservation.getInstances().getFirst();
+
+        Volume root = service.describeVolumes("us-east-1", List.of(inst.getRootVolumeId()), Map.of()).getFirst();
+        assertEquals(200, root.getSize());
+        assertEquals("gp3", root.getVolumeType());
+        assertTrue(root.isEncrypted());
+        assertEquals(4000, root.getIops());
+        assertEquals(250, root.getThroughput());
+        assertFalse(root.getAttachments().getFirst().isDeleteOnTermination());
+        assertFalse(inst.isRootVolumeDeleteOnTermination());
+    }
+
+    @Test
+    void runInstancesCreatesAdditionalVolumesForNonRootBlockDeviceMappings() {
+        // Regression test: RunInstances used to drop every BlockDeviceMapping entry, not just
+        // the root one. A non-root entry (Terraform's ebs_block_device) must produce its own
+        // attached volume, the same as a standalone CreateVolume + AttachVolume would.
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+
+        BlockDeviceMapping extraMapping = new BlockDeviceMapping();
+        extraMapping.setDeviceName("/dev/sdb");
+        EbsBlockDevice extraEbs = new EbsBlockDevice();
+        extraEbs.setVolumeSize(50);
+        extraEbs.setVolumeType("gp3");
+        extraMapping.setEbs(extraEbs);
+
+        Reservation reservation = service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), null, null, List.of(), null, null, null, List.of(extraMapping));
+        Instance inst = reservation.getInstances().getFirst();
+
+        List<Volume> allVolumes = service.describeVolumes("us-east-1", List.of(), Map.of());
+        Volume extra = allVolumes.stream()
+                .filter(v -> !v.getVolumeId().equals(inst.getRootVolumeId()))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("expected a second, non-root volume to have been created"));
+
+        assertEquals(50, extra.getSize());
+        assertEquals("gp3", extra.getVolumeType());
+        assertEquals("in-use", extra.getState());
+        VolumeAttachment attachment = extra.getAttachments().getFirst();
+        assertEquals(inst.getInstanceId(), attachment.getInstanceId());
+        assertEquals("/dev/sdb", attachment.getDevice());
+        assertTrue(attachment.isDeleteOnTermination());
+
+        // The root volume must still be untouched at its default size.
+        Volume root = service.describeVolumes("us-east-1", List.of(inst.getRootVolumeId()), Map.of()).getFirst();
+        assertEquals(8, root.getSize());
+    }
+
+        // =========================================================================
     // Managed prefix lists
     // =========================================================================
 

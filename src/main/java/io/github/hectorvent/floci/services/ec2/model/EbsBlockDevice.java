@@ -12,6 +12,8 @@ public class EbsBlockDevice {
     private String volumeType;
     private Boolean deleteOnTermination;
     private Boolean encrypted;
+    private Integer iops;
+    private Integer throughput;
 
     public EbsBlockDevice() {}
 
@@ -29,4 +31,10 @@ public class EbsBlockDevice {
 
     public Boolean getEncrypted() { return encrypted; }
     public void setEncrypted(Boolean encrypted) { this.encrypted = encrypted; }
+
+    public Integer getIops() { return iops; }
+    public void setIops(Integer iops) { this.iops = iops; }
+
+    public Integer getThroughput() { return throughput; }
+    public void setThroughput(Integer throughput) { this.throughput = throughput; }
 }
