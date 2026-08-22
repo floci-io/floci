@@ -104,7 +104,7 @@ final class DynamoDbAccessPathValidator {
         Set<String> conditionedPartitionKeys = new HashSet<>();
         String partitionKeyValuePlaceholder = null;
         Set<String> conditionedAttributes = new HashSet<>();
-        Map<String, Expr> sortKeyConditions = new HashMap<>();
+        Map<String, Boolean> sortKeyEqualities = new HashMap<>();
 
         for (Expr condition : conditions) {
             String attribute = conditionAttribute(condition, names);
@@ -124,7 +124,7 @@ final class DynamoDbAccessPathValidator {
                 if (!isSupportedSortKeyCondition(condition)) {
                     throw new AwsException("ValidationException", "Query key condition not supported", 400);
                 }
-                sortKeyConditions.put(attribute, condition);
+                sortKeyEqualities.put(attribute, isEqualityCondition(condition));
             } else {
                 throw new AwsException("ValidationException", "Query key condition not supported", 400);
             }
@@ -138,20 +138,20 @@ final class DynamoDbAccessPathValidator {
             throw new AwsException("ValidationException",
                     "Query condition missed key schema element: " + missing, 400);
         }
-        validateCompositeSortKeyConditions(sortKeys, sortKeyConditions);
+        validateCompositeSortKeyConditions(sortKeys, sortKeyEqualities);
         return partitionKeyValuePlaceholder;
     }
 
     private static void validateCompositeSortKeyConditions(List<String> sortKeys,
-                                                            Map<String, Expr> conditions) {
+                                                            Map<String, Boolean> equalities) {
         for (int laterIndex = 1; laterIndex < sortKeys.size(); laterIndex++) {
             String laterSortKey = sortKeys.get(laterIndex);
-            if (!conditions.containsKey(laterSortKey)) {
+            if (!equalities.containsKey(laterSortKey)) {
                 continue;
             }
             for (int priorIndex = 0; priorIndex < laterIndex; priorIndex++) {
                 String priorSortKey = sortKeys.get(priorIndex);
-                if (!isEqualityCondition(conditions.get(priorSortKey))) {
+                if (!Boolean.TRUE.equals(equalities.get(priorSortKey))) {
                     throw validationException("RANGE key attributes " + priorSortKey
                             + " must have equality conditions specified in the query because a condition is present "
                             + "on key attribute " + laterSortKey);
@@ -243,7 +243,8 @@ final class DynamoDbAccessPathValidator {
         }
 
         Set<String> partitionKeySet = Set.copyOf(partitionKeys);
-        Set<String> sortKeys = Set.copyOf(accessPath.sortKeyNames());
+        List<String> sortKeys = accessPath.sortKeyNames();
+        Map<String, Boolean> sortKeyEqualities = new HashMap<>();
         keyConditions.fields().forEachRemaining(entry -> {
             String attribute = entry.getKey();
             String operator = entry.getValue().path("ComparisonOperator").asText();
@@ -256,6 +257,8 @@ final class DynamoDbAccessPathValidator {
                     || !LEGACY_SORT_KEY_COMPARATORS.contains(operator)
                     || ("BETWEEN".equals(operator) ? values != 2 : values != 1)) {
                 throw new AwsException("ValidationException", "Query key condition not supported", 400);
+            } else {
+                sortKeyEqualities.put(attribute, "EQ".equals(operator));
             }
             String expectedType = attributeType(table, attribute);
             entry.getValue().path("AttributeValueList").forEach(value -> {
@@ -264,6 +267,7 @@ final class DynamoDbAccessPathValidator {
                 }
             });
         });
+        validateCompositeSortKeyConditions(sortKeys, sortKeyEqualities);
     }
 
     private static String attributeType(TableDefinition table, String attribute) {

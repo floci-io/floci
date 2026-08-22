@@ -224,6 +224,30 @@ class DynamoDbAccessPathValidatorTest {
     }
 
     @Test
+    void validatesLegacyCompositeSortKeyOrder() {
+        ObjectNode valid = mapper.createObjectNode();
+        valid.set("status", legacyCondition("EQ", attributeValues("open")));
+        valid.set("createdAt", legacyCondition("EQ", attributeValues("2026-01-01")));
+        valid.set("sequence", legacyCondition("GE", attributeValues("1")));
+        assertDoesNotThrow(() -> DynamoDbAccessPathValidator.validateQuery(
+                table, gsiPath, valid, null, null, null, null, null));
+
+        ObjectNode skipped = mapper.createObjectNode();
+        skipped.set("status", legacyCondition("EQ", attributeValues("open")));
+        skipped.set("sequence", legacyCondition("EQ", attributeValues("1")));
+        AwsException skippedError = assertThrows(AwsException.class,
+                () -> DynamoDbAccessPathValidator.validateQuery(
+                        table, gsiPath, skipped, null, null, null, null, null));
+        assertEquals("RANGE key attributes createdAt must have equality conditions specified in the query "
+                + "because a condition is present on key attribute sequence", skippedError.getMessage());
+
+        ObjectNode nonFinalInequality = valid.deepCopy();
+        nonFinalInequality.set("createdAt", legacyCondition("GT", attributeValues("2026-01-01")));
+        assertThrows(AwsException.class, () -> DynamoDbAccessPathValidator.validateQuery(
+                table, gsiPath, nonFinalInequality, null, null, null, null, null));
+    }
+
+    @Test
     void rejectsSelectedKeysInQueryFilters() {
         assertThrows(AwsException.class, () -> DynamoDbAccessPathValidator.validateQuery(
                 table, gsiPath, null, "status = :status", "createdAt > :cutoff", null, null,
