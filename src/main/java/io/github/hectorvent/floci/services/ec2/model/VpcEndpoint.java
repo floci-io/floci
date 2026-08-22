@@ -22,7 +22,23 @@ public class VpcEndpoint {
     private List<String> subnetIds = new ArrayList<>();
     private List<String> securityGroupIds = new ArrayList<>();
     private boolean privateDnsEnabled;
+    /**
+     * The endpoint's access policy. AWS attaches a full-access document when the caller supplies
+     * none and returns it on every describe, so an endpoint created without a policy still reads
+     * one back; {@code ModifyVpcEndpoint} with {@code ResetPolicy} restores it.
+     */
+    private String policyDocument;
+    private String ownerId;
+    private String ipAddressType = "ipv4";
+    private String dnsRecordIpType = "ipv4";
+    private String serviceRegion;
+    private boolean requesterManaged;
     private List<Tag> tags = new ArrayList<>();
+
+    /** The full-access document AWS attaches to an endpoint created without an explicit policy. */
+    public static final String DEFAULT_POLICY_DOCUMENT =
+            "{\"Version\":\"2008-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                    + "\"Principal\":\"*\",\"Action\":\"*\",\"Resource\":\"*\"}]}";
 
     public VpcEndpoint() {}
 
@@ -58,6 +74,24 @@ public class VpcEndpoint {
 
     public boolean isPrivateDnsEnabled() { return privateDnsEnabled; }
     public void setPrivateDnsEnabled(boolean privateDnsEnabled) { this.privateDnsEnabled = privateDnsEnabled; }
+
+    public String getPolicyDocument() { return policyDocument; }
+    public void setPolicyDocument(String policyDocument) { this.policyDocument = policyDocument; }
+
+    public String getOwnerId() { return ownerId; }
+    public void setOwnerId(String ownerId) { this.ownerId = ownerId; }
+
+    public String getIpAddressType() { return ipAddressType; }
+    public void setIpAddressType(String ipAddressType) { this.ipAddressType = ipAddressType; }
+
+    public String getDnsRecordIpType() { return dnsRecordIpType; }
+    public void setDnsRecordIpType(String dnsRecordIpType) { this.dnsRecordIpType = dnsRecordIpType; }
+
+    public String getServiceRegion() { return serviceRegion; }
+    public void setServiceRegion(String serviceRegion) { this.serviceRegion = serviceRegion; }
+
+    public boolean isRequesterManaged() { return requesterManaged; }
+    public void setRequesterManaged(boolean requesterManaged) { this.requesterManaged = requesterManaged; }
 
     public List<Tag> getTags() { return tags; }
     public void setTags(List<Tag> tags) { this.tags = tags; }

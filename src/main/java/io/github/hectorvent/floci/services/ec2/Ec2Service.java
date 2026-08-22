@@ -1586,7 +1586,8 @@ public class Ec2Service implements ContainerTeardown {
 
     public VpcEndpoint createVpcEndpoint(String region, String vpcId, String serviceName, String endpointType,
                                          List<String> routeTableIds, List<String> subnetIds,
-                                         List<String> securityGroupIds, Boolean privateDnsEnabled, List<Tag> endpointTags) {
+                                         List<String> securityGroupIds, Boolean privateDnsEnabled,
+                                         String policyDocument, List<Tag> endpointTags) {
         ensureDefaultResources(region);
         getRequiredVpc(region, vpcId);
         for (String routeTableId : routeTableIds) {
@@ -1611,6 +1612,12 @@ public class Ec2Service implements ContainerTeardown {
         endpoint.setRouteTableIds(new ArrayList<>(routeTableIds));
         endpoint.setSubnetIds(new ArrayList<>(subnetIds));
         endpoint.setSecurityGroupIds(new ArrayList<>(securityGroupIds));
+        endpoint.setPolicyDocument(policyDocument != null && !policyDocument.isBlank()
+                ? policyDocument : VpcEndpoint.DEFAULT_POLICY_DOCUMENT);
+        endpoint.setOwnerId(accountId);
+        endpoint.setServiceRegion(region);
+        // AWS reports service-defined DNS records on gateway endpoints and ipv4 on interface ones.
+        endpoint.setDnsRecordIpType(isInterface ? "ipv4" : "service-defined");
         if (endpointTags != null && !endpointTags.isEmpty()) {
             endpoint.setTags(new ArrayList<>(endpointTags));
             tags.put(endpoint.getVpcEndpointId(), new ArrayList<>(endpointTags));
@@ -1631,6 +1638,104 @@ public class Ec2Service implements ContainerTeardown {
                 .filter(endpoint -> endpoint.getRegion().equals(region))
                 .filter(endpoint -> endpointIds.isEmpty() || endpointIds.contains(endpoint.getVpcEndpointId()))
                 .filter(endpoint -> matchesFilters(endpoint, filters, region))
+                .collect(Collectors.toList());
+    }
+
+    /**
+     * Applies a {@code ModifyVpcEndpoint} request. Every list parameter is an add/remove delta
+     * against the stored endpoint, matching AWS: adds are idempotent (re-adding an attached route
+     * table is a no-op that still returns {@code true}) and every referenced id is validated, so a
+     * typo fails the call instead of silently changing nothing.
+     *
+     * <p>Route-table and subnet parameters are rejected against the wrong endpoint type with the
+     * same {@code InvalidParameter} messages AWS returns.
+     */
+    public VpcEndpoint modifyVpcEndpoint(String region, String endpointId, boolean resetPolicy,
+                                         String policyDocument,
+                                         List<String> addRouteTableIds, List<String> removeRouteTableIds,
+                                         List<String> addSubnetIds, List<String> removeSubnetIds,
+                                         List<String> addSecurityGroupIds, List<String> removeSecurityGroupIds,
+                                         Boolean privateDnsEnabled, String ipAddressType,
+                                         String dnsRecordIpType) {
+        ensureDefaultResources(region);
+        if (endpointId == null || endpointId.isBlank()) {
+            throw new AwsException("MissingParameter",
+                    "The request must contain the parameter VpcEndpointId.", 400);
+        }
+        synchronized (lockFor(key(region, endpointId))) {
+            VpcEndpoint endpoint = getRequiredVpcEndpoint(region, endpointId);
+            boolean isGateway = "Gateway".equalsIgnoreCase(endpoint.getVpcEndpointType());
+
+            if (!isGateway && !(addRouteTableIds.isEmpty() && removeRouteTableIds.isEmpty())) {
+                throw new AwsException("InvalidParameter",
+                        "Route table IDs are only supported for Gateway type VPC Endpoint.", 400);
+            }
+            if (isGateway && !(addSubnetIds.isEmpty() && removeSubnetIds.isEmpty())) {
+                throw new AwsException("InvalidParameter",
+                        "Subnet IDs are only supported for Interface and GatewayLoadBalancer type VPC Endpoints.",
+                        400);
+            }
+            for (String routeTableId : addRouteTableIds) {
+                getRequiredRouteTable(region, routeTableId);
+            }
+            for (String routeTableId : removeRouteTableIds) {
+                getRequiredRouteTable(region, routeTableId);
+            }
+            for (String subnetId : addSubnetIds) {
+                requireSubnet(region, subnetId);
+            }
+            for (String subnetId : removeSubnetIds) {
+                requireSubnet(region, subnetId);
+            }
+            for (String securityGroupId : addSecurityGroupIds) {
+                getRequiredSecurityGroup(region, securityGroupId);
+            }
+            for (String securityGroupId : removeSecurityGroupIds) {
+                getRequiredSecurityGroup(region, securityGroupId);
+            }
+
+            if (resetPolicy) {
+                endpoint.setPolicyDocument(VpcEndpoint.DEFAULT_POLICY_DOCUMENT);
+            } else if (policyDocument != null && !policyDocument.isBlank()) {
+                endpoint.setPolicyDocument(policyDocument);
+            }
+            endpoint.setRouteTableIds(applyIdDelta(endpoint.getRouteTableIds(), addRouteTableIds, removeRouteTableIds));
+            endpoint.setSubnetIds(applyIdDelta(endpoint.getSubnetIds(), addSubnetIds, removeSubnetIds));
+            endpoint.setSecurityGroupIds(
+                    applyIdDelta(endpoint.getSecurityGroupIds(), addSecurityGroupIds, removeSecurityGroupIds));
+            if (privateDnsEnabled != null) {
+                endpoint.setPrivateDnsEnabled(privateDnsEnabled);
+            }
+            if (ipAddressType != null && !ipAddressType.isBlank()) {
+                endpoint.setIpAddressType(ipAddressType);
+            }
+            if (dnsRecordIpType != null && !dnsRecordIpType.isBlank()) {
+                endpoint.setDnsRecordIpType(dnsRecordIpType);
+            }
+            vpcEndpoints.put(key(region, endpointId), endpoint);
+            return endpoint;
+        }
+    }
+
+    /** Removals first, then adds, keeping insertion order and never duplicating an existing id. */
+    private static List<String> applyIdDelta(List<String> current, List<String> add, List<String> remove) {
+        List<String> result = new ArrayList<>(current != null ? current : List.of());
+        result.removeAll(remove);
+        for (String id : add) {
+            if (!result.contains(id)) {
+                result.add(id);
+            }
+        }
+        return result;
+    }
+
+    /** The ENIs an interface endpoint owns, as reported by {@code DescribeVpcEndpoints}. */
+    public static List<String> endpointNetworkInterfaceIds(VpcEndpoint endpoint) {
+        if (!"Interface".equalsIgnoreCase(endpoint.getVpcEndpointType())) {
+            return List.of();
+        }
+        return endpoint.getSubnetIds().stream()
+                .map(subnetId -> endpointEniId(endpoint.getVpcEndpointId(), subnetId))
                 .collect(Collectors.toList());
     }
 
@@ -1673,6 +1778,21 @@ public class Ec2Service implements ContainerTeardown {
                 ni.setDescription("VPC Endpoint Interface " + endpoint.getVpcEndpointId());
                 ni.setInterfaceType("vpc_endpoint");
                 ni.setPrivateIpAddress(endpointPrivateIp(subnet, endpoint.getVpcEndpointId()));
+                ni.setStatus("in-use");
+                ni.setOwnerId(accountId);
+                ni.setGroups(endpoint.getSecurityGroupIds().stream()
+                        .map(groupId -> {
+                            GroupIdentifier group = new GroupIdentifier();
+                            group.setGroupId(groupId);
+                            SecurityGroup sg = securityGroups.get(key(region, groupId)).orElse(null);
+                            group.setGroupName(sg != null ? sg.getGroupName() : null);
+                            return group;
+                        })
+                        .collect(Collectors.toList()));
+                NetworkInterfacePrivateIpAddress primaryIp = new NetworkInterfacePrivateIpAddress();
+                primaryIp.setPrivateIpAddress(ni.getPrivateIpAddress());
+                primaryIp.setPrimary(true);
+                ni.getPrivateIpAddresses().add(primaryIp);
                 result.add(ni);
             }
         }
@@ -3233,8 +3353,11 @@ public class Ec2Service implements ContainerTeardown {
         VpnGateway gateway = new VpnGateway();
         gateway.setVpnGatewayId("vgw-" + randomHex(8));
         gateway.setType(type);
+        // AWS reports no availability zone unless the caller asked for one, and the Terraform
+        // provider treats availability_zone as ForceNew — inventing a zone here made every plan
+        // against an unchanged gateway propose destroy-and-recreate.
         gateway.setAvailabilityZone(availabilityZone != null && !availabilityZone.isBlank()
-                ? availabilityZone : region + "a");
+                ? availabilityZone : null);
         long asn;
         try {
             asn = (amazonSideAsn != null && !amazonSideAsn.isBlank())
@@ -3676,8 +3799,9 @@ public class Ec2Service implements ContainerTeardown {
                                        String connectivityType, List<Tag> natGatewayTags) {
         ensureDefaultResources(region);
         Subnet subnet = requireSubnet(region, subnetId);
+        Address address = null;
         if (allocationId != null && !allocationId.isBlank()) {
-            getRequiredAddress(region, allocationId);
+            address = getRequiredAddress(region, allocationId);
         }
 
         NatGateway natGateway = new NatGateway();
@@ -3686,6 +3810,16 @@ public class Ec2Service implements ContainerTeardown {
         natGateway.setVpcId(subnet.getVpcId());
         natGateway.setAllocationId(allocationId);
         natGateway.setConnectivityType(connectivityType != null && !connectivityType.isBlank() ? connectivityType : "public");
+        natGateway.setAvailabilityMode("zonal");
+        // AWS reports the gateway's ENI and addresses on every describe; the Terraform provider
+        // reads allocation_id, private_ip, public_ip and network_interface_id out of the address
+        // set rather than off the gateway itself.
+        natGateway.setNetworkInterfaceId("eni-" + randomHex(17));
+        natGateway.setPrivateIp(assignPrivateIp(region, subnetId));
+        if (address != null) {
+            natGateway.setPublicIp(address.getPublicIp());
+            natGateway.setAssociationId("eipassoc-" + randomHex(17));
+        }
         natGateway.setCreateTime(Instant.now());
         natGateway.setRegion(region);
         if (natGatewayTags != null && !natGatewayTags.isEmpty()) {
@@ -4473,6 +4607,20 @@ public class Ec2Service implements ContainerTeardown {
 
                 result.add(ni);
             }
+        }
+
+        // Interface VPC endpoints own ENIs too, and AWS answers for them here — the Terraform
+        // provider follows an endpoint's networkInterfaceIdSet straight into this call to build
+        // its subnet_configuration, and fails the whole read if an id it was handed is unknown.
+        for (NetworkInterface ni : endpointNetworkInterfaces(region)) {
+            if (!networkInterfaceIds.isEmpty() && !networkInterfaceIds.contains(ni.getNetworkInterfaceId())) {
+                continue;
+            }
+            foundIds.add(ni.getNetworkInterfaceId());
+            if (!matchesFilters(ni, filters, region)) {
+                continue;
+            }
+            result.add(ni);
         }
 
         // Phase 6: validate requested IDs exist

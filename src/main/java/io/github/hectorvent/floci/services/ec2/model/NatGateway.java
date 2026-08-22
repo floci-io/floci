@@ -17,8 +17,20 @@ public class NatGateway {
     private String allocationId;
     private String state = "available";
     private String connectivityType = "public";
+    /**
+     * {@code zonal} or {@code regional}. AWS always answers with one of the two, and the Terraform
+     * provider switches on it before it reads {@code subnetId} or the address set — an absent
+     * value leaves {@code subnet_id} and {@code allocation_id} unset in state, which reads as a
+     * forced replacement on the next plan.
+     */
+    private String availabilityMode = "zonal";
     private Instant createTime;
     private String region;
+    private String networkInterfaceId;
+    private String privateIp;
+    private String publicIp;
+    private String associationId;
+    private String addressStatus = "succeeded";
     private List<Tag> tags = new ArrayList<>();
 
     public NatGateway() {}
@@ -40,6 +52,24 @@ public class NatGateway {
 
     public String getConnectivityType() { return connectivityType; }
     public void setConnectivityType(String connectivityType) { this.connectivityType = connectivityType; }
+
+    public String getAvailabilityMode() { return availabilityMode; }
+    public void setAvailabilityMode(String availabilityMode) { this.availabilityMode = availabilityMode; }
+
+    public String getNetworkInterfaceId() { return networkInterfaceId; }
+    public void setNetworkInterfaceId(String networkInterfaceId) { this.networkInterfaceId = networkInterfaceId; }
+
+    public String getPrivateIp() { return privateIp; }
+    public void setPrivateIp(String privateIp) { this.privateIp = privateIp; }
+
+    public String getPublicIp() { return publicIp; }
+    public void setPublicIp(String publicIp) { this.publicIp = publicIp; }
+
+    public String getAssociationId() { return associationId; }
+    public void setAssociationId(String associationId) { this.associationId = associationId; }
+
+    public String getAddressStatus() { return addressStatus; }
+    public void setAddressStatus(String addressStatus) { this.addressStatus = addressStatus; }
 
     public Instant getCreateTime() { return createTime; }
     public void setCreateTime(Instant createTime) { this.createTime = createTime; }

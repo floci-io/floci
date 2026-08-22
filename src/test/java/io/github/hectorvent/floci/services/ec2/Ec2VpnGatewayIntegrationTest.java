@@ -10,6 +10,7 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.emptyOrNullString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -59,7 +60,7 @@ class Ec2VpnGatewayIntegrationTest {
     @Test
     @Order(2)
     void createWithoutAmazonSideAsnUsesTheAwsDefault() {
-        given()
+        String gatewayId = given()
             .formParam("Action", "CreateVpnGateway")
             .formParam("Type", "ipsec.1")
             .header("Authorization", AUTH_HEADER)
@@ -68,7 +69,21 @@ class Ec2VpnGatewayIntegrationTest {
         .then()
             .statusCode(200)
             .body("CreateVpnGatewayResponse.vpnGateway.amazonSideAsn", equalTo("64512"))
-            .body("CreateVpnGatewayResponse.vpnGateway.availabilityZone", equalTo("us-east-1a"));
+            // AWS answers with no availabilityZone element at all unless the caller asked for a
+            // zone. Inventing one made the Terraform provider see ForceNew drift on every plan
+            // against an unchanged gateway (lex00/floci#97).
+            .body(not(containsString("<availabilityZone>")))
+            .extract().path("CreateVpnGatewayResponse.vpnGateway.vpnGatewayId");
+
+        given()
+            .formParam("Action", "DescribeVpnGateways")
+            .formParam("VpnGatewayId.1", gatewayId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(not(containsString("<availabilityZone>")));
     }
 
     @Test

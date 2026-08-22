@@ -245,10 +245,10 @@ class Ec2ServiceTest {
                 Map.of("vpc-id", List.of("vpc-default"))).getFirst().getSubnetId();
         VpcEndpoint endpoint = service.createVpcEndpoint("us-east-1", "vpc-default",
                 "com.amazonaws.us-east-1.s3", "Interface",
-                List.of(), List.of(subnetId), List.of(), null, List.of());
+                List.of(), List.of(subnetId), List.of(), null, null, List.of());
         service.createVpcEndpoint("us-east-1", "vpc-default",
                 "com.amazonaws.us-east-1.dynamodb", "Gateway",
-                List.of(), List.of(), List.of(), null, List.of());
+                List.of(), List.of(), List.of(), null, null, List.of());
 
         List<NetworkInterface> enis = service.endpointNetworkInterfaces("us-east-1");
 

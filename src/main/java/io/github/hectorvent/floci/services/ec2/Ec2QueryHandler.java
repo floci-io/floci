@@ -75,6 +75,7 @@ public class Ec2QueryHandler {
                 case "DescribeVpcEndpointServices" -> handleDescribeVpcEndpointServices(params, region);
                 case "CreateVpcEndpoint" -> handleCreateVpcEndpoint(params, region);
                 case "DescribeVpcEndpoints" -> handleDescribeVpcEndpoints(params, region);
+                case "ModifyVpcEndpoint" -> handleModifyVpcEndpoint(params, region);
                 case "DeleteVpcEndpoints" -> handleDeleteVpcEndpoints(params, region);
                 // DHCP Options
                 case "CreateDhcpOptions" -> handleCreateDhcpOptions(params, region);
@@ -1159,6 +1160,7 @@ public class Ec2QueryHandler {
                 getList(p, "SubnetId"),
                 getList(p, "SecurityGroupId"),
                 p.getFirst("PrivateDnsEnabled") != null ? Boolean.valueOf(p.getFirst("PrivateDnsEnabled")) : null,
+                p.getFirst("PolicyDocument"),
                 parseTagsForResource(p, "vpc-endpoint"));
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateVpcEndpointResponse", AwsNamespaces.EC2)
@@ -1181,6 +1183,24 @@ public class Ec2QueryHandler {
         }
         xml.end("vpcEndpointSet").end("DescribeVpcEndpointsResponse");
         return xmlResponse(xml.build());
+    }
+
+    private Response handleModifyVpcEndpoint(MultivaluedMap<String, String> p, String region) {
+        service.modifyVpcEndpoint(
+                region,
+                p.getFirst("VpcEndpointId"),
+                Boolean.parseBoolean(p.getFirst("ResetPolicy")),
+                p.getFirst("PolicyDocument"),
+                getList(p, "AddRouteTableId"),
+                getList(p, "RemoveRouteTableId"),
+                getList(p, "AddSubnetId"),
+                getList(p, "RemoveSubnetId"),
+                getList(p, "AddSecurityGroupId"),
+                getList(p, "RemoveSecurityGroupId"),
+                p.getFirst("PrivateDnsEnabled") != null ? Boolean.valueOf(p.getFirst("PrivateDnsEnabled")) : null,
+                p.getFirst("IpAddressType"),
+                p.getFirst("DnsOptions.DnsRecordIpType"));
+        return booleanResponse("ModifyVpcEndpoint");
     }
 
     private Response handleDescribePrefixLists(MultivaluedMap<String, String> p, String region) {
@@ -2943,19 +2963,24 @@ public class Ec2QueryHandler {
                 .elem("subnetId", natGateway.getSubnetId())
                 .elem("vpcId", natGateway.getVpcId())
                 .elem("state", natGateway.getState())
-                .elem("connectivityType", natGateway.getConnectivityType());
+                .elem("connectivityType", natGateway.getConnectivityType())
+                .elem("availabilityMode", natGateway.getAvailabilityMode());
         if (natGateway.getCreateTime() != null) {
             xml.elem("createTime", ISO_FMT.format(natGateway.getCreateTime()));
         }
-        if (natGateway.getAllocationId() != null) {
-            xml.start("natGatewayAddressSet")
-                    .start("item")
-                    .elem("allocationId", natGateway.getAllocationId())
-                    .end("item")
-                    .end("natGatewayAddressSet");
-        } else {
-            xml.start("natGatewayAddressSet").end("natGatewayAddressSet");
-        }
+        // One primary address, the way AWS answers for a zonal gateway. isPrimary is what the
+        // Terraform provider keys on when it splits primary from secondary addresses.
+        xml.start("natGatewayAddressSet")
+                .start("item")
+                .elem("allocationId", natGateway.getAllocationId())
+                .elem("associationId", natGateway.getAssociationId())
+                .elem("networkInterfaceId", natGateway.getNetworkInterfaceId())
+                .elem("privateIp", natGateway.getPrivateIp())
+                .elem("publicIp", natGateway.getPublicIp())
+                .elem("isPrimary", "true")
+                .elem("status", natGateway.getAddressStatus())
+                .end("item")
+                .end("natGatewayAddressSet");
         xml.raw(tagSetXml(natGateway.getTags()));
         return xml.build();
     }
@@ -3065,11 +3090,26 @@ public class Ec2QueryHandler {
                 .elem("vpcId", endpoint.getVpcId())
                 .elem("serviceName", endpoint.getServiceName())
                 .elem("state", endpoint.getState())
-                .elem("privateDnsEnabled", String.valueOf(endpoint.isPrivateDnsEnabled()));
+                .elem("ownerId", endpoint.getOwnerId())
+                .elem("serviceRegion", endpoint.getServiceRegion())
+                .elem("ipAddressType", endpoint.getIpAddressType())
+                .elem("requesterManaged", String.valueOf(endpoint.isRequesterManaged()))
+                .elem("privateDnsEnabled", String.valueOf(endpoint.isPrivateDnsEnabled()))
+                .elem("policyDocument", endpoint.getPolicyDocument());
+        if (endpoint.getDnsRecordIpType() != null) {
+            xml.start("dnsOptions")
+                    .elem("dnsRecordIpType", endpoint.getDnsRecordIpType())
+                    .end("dnsOptions");
+        }
         if (endpoint.getCreationTimestamp() != null) {
             xml.elem("creationTimestamp", ISO_FMT.format(endpoint.getCreationTimestamp()));
         }
-        xml.start("routeTableIdSet");
+        xml.start("networkInterfaceIdSet");
+        for (String eniId : Ec2Service.endpointNetworkInterfaceIds(endpoint)) {
+            xml.elem("item", eniId);
+        }
+        xml.end("networkInterfaceIdSet")
+                .start("routeTableIdSet");
         for (String routeTableId : endpoint.getRouteTableIds()) {
             xml.elem("item", routeTableId);
         }
