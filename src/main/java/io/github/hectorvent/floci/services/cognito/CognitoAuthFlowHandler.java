@@ -1034,4 +1034,11 @@ final class CognitoAuthFlowHandler {
     private String regionForPool(UserPool pool) {
         return AwsArnUtils.regionOrDefault(pool.getArn(), regionResolver.getDefaultRegion());
     }
+
+    /** Drops all in-flight auth sessions. Invoked by {@link CognitoService#clear()}; this class
+     *  is not a CDI bean, so it cannot be a {@code Resettable} in its own right. */
+    void clearSessions() {
+        srpSessions.clear();
+        customAuthSessions.clear();
+    }
 }

@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackedMap;
@@ -41,7 +42,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
 @ApplicationScoped
-public class CodeDeployService {
+public class CodeDeployService implements Resettable {
 
     private static final Logger LOG = Logger.getLogger(CodeDeployService.class);
 
@@ -1810,5 +1811,19 @@ public class CodeDeployService {
             if (key != null) { tagMap.put(key, value != null ? value : ""); }
         }
         tags.put(arn, tagMap); // write back the in-place inner-map mutation
+    }
+
+    /**
+     * Deployment history is in-memory. In-flight lifecycle hooks are cancelled and their stop flags
+     * tripped first, so a reset does not leave a hook waiting on state that has been wiped.
+     */
+    @Override
+    public void clear() {
+        stopFlags.values().forEach(flag -> flag.set(true));
+        hookFutures.values().forEach(future -> future.cancel(true));
+        hookFutures.clear();
+        stopFlags.clear();
+        deployments.clear();
+        deploymentTargets.clear();
     }
 }

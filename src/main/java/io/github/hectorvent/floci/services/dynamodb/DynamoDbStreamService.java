@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.dynamodb;
 
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.dynamodb.model.DynamoDbStreamRecord;
@@ -28,7 +29,7 @@ import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.atomic.AtomicLong;
 
 @ApplicationScoped
-public class DynamoDbStreamService {
+public class DynamoDbStreamService implements Resettable {
 
     private static final Logger LOG = Logger.getLogger(DynamoDbStreamService.class);
 
@@ -301,5 +302,14 @@ public class DynamoDbStreamService {
 
     private String streamKey(String region, String tableName) {
         return region + "::" + tableName;
+    }
+
+    /**
+     * Stream descriptors and their record deques are plain maps; without this, GetRecords keeps serving events for tables that no longer exist.
+     */
+    @Override
+    public void clear() {
+        streams.clear();
+        records.clear();
     }
 }

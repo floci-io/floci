@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import io.github.hectorvent.floci.core.common.Resettable;
 import jakarta.enterprise.context.ApplicationScoped;
 import org.jboss.logging.Logger;
 
@@ -25,7 +26,7 @@ import java.util.concurrent.TimeoutException;
  * it — the timeout only guards a PUT that lands just after the container returns.
  */
 @ApplicationScoped
-public class CustomResourceResponseStore {
+public class CustomResourceResponseStore implements Resettable {
 
     private static final Logger LOG = Logger.getLogger(CustomResourceResponseStore.class);
 
@@ -67,5 +68,15 @@ public class CustomResourceResponseStore {
         } finally {
             pending.remove(token);
         }
+    }
+
+    /**
+     * Pending custom-resource responses are cancelled rather than dropped, so a provisioner still
+     * awaiting one fails fast instead of blocking to its timeout against a stack that is gone.
+     */
+    @Override
+    public void clear() {
+        pending.values().forEach(future -> future.cancel(true));
+        pending.clear();
     }
 }

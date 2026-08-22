@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
@@ -47,7 +48,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 @ApplicationScoped
-public class CodePipelineService {
+public class CodePipelineService implements Resettable {
     private static final Logger LOG = Logger.getLogger(CodePipelineService.class);
     private static final String DEFAULT_EXECUTION_MODE = "SUPERSEDED";
     private static final String DEFAULT_PIPELINE_TYPE = "V1";
@@ -1366,5 +1367,14 @@ public class CodePipelineService {
     }
 
     private record Page(int start, int end) {
+    }
+
+    /**
+     * Runtime artifacts are held in memory rather than in a StorageBackend.
+     */
+    @Override
+    public void clear() {
+        runtimeArtifacts.clear();
+        pipelineLocks.clear();
     }
 }

@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.iot;
 
+import io.github.hectorvent.floci.core.common.Resettable;
+
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.iot.model.IotRetainedMessage;
 import io.netty.handler.codec.mqtt.MqttQoS;
@@ -30,7 +32,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 @ApplicationScoped
-public class IotMqttBrokerService {
+public class IotMqttBrokerService implements Resettable {
 
     private static final Logger LOG = Logger.getLogger(IotMqttBrokerService.class);
 
@@ -321,5 +323,18 @@ public class IotMqttBrokerService {
     }
 
     record ConnectionInfo(String clientId, String address, int port) {
+    }
+
+    /**
+     * A reset must actively disconnect connected clients, not just forget them. Dropping the
+     * session map alone leaves every client still attached to the broker with no session behind
+     * it, so the next PUBLISH arrives for a client the broker no longer knows. Mirrors the close
+     * performed by {@code stop()} and {@link #disconnectClient}.
+     */
+    @Override
+    public void clear() {
+        sessionsByClient.values().forEach(session -> session.endpoint().close());
+        sessionsByClient.clear();
+        subscriptionsByClient.clear();
     }
 }

@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.ses;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -71,7 +72,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
-public class SesService {
+public class SesService implements Resettable {
 
     private static final Logger LOG = Logger.getLogger(SesService.class);
 
@@ -2846,5 +2847,13 @@ public class SesService {
         if (Character.isWhitespace(identity.charAt(0)) || Character.isWhitespace(identity.charAt(identity.length() - 1))) {
             throw new AwsException("InvalidParameterValue", fieldName + " must not contain leading or trailing whitespace.", 400);
         }
+    }
+
+    /**
+     * The DKIM lookup cache would keep answering for identities the reset removed.
+     */
+    @Override
+    public void clear() {
+        dkimLookupCache.clear();
     }
 }

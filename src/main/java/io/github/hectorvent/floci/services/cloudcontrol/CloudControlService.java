@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationResourceProvisioner;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
@@ -31,7 +32,7 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 @ApplicationScoped
-public class CloudControlService {
+public class CloudControlService implements Resettable {
 
     /** Cloud Control has no account context in the request; Floci's default test account. */
     private static final String ACCOUNT = "000000000000";
@@ -55,6 +56,16 @@ public class CloudControlService {
     /** RequestToken → ProgressEvent. Cloud Control is async; clients poll by token. */
     private final Map<String, ProgressEvent> requests = new ConcurrentHashMap<>();
     /** Token insertion order, so the map can be bounded without losing in-flight requests. */
+    /**
+     * Incremented by {@link #clear()}. CreateResource provisions on a background thread, so a
+     * reset that merely cleared the maps would let an operation started beforehand write its
+     * result back afterwards and resurrect a resource the reset removed. Work captures the epoch
+     * at submit time and drops its writes if it no longer matches. Interrupting is not an option
+     * here — provisioning can be long, and a reset must not block on it.
+     */
+    private final java.util.concurrent.atomic.AtomicLong resetEpoch =
+            new java.util.concurrent.atomic.AtomicLong();
+
     private final java.util.concurrent.ConcurrentLinkedQueue<String> requestOrder =
             new java.util.concurrent.ConcurrentLinkedQueue<>();
     /**
@@ -111,9 +122,13 @@ public class CloudControlService {
         String token = UUID.randomUUID().toString();
         ProgressEvent pending = new ProgressEvent(typeName, null, token, "CREATE", "IN_PROGRESS", null, null);
         record(pending);
+        long epoch = resetEpoch.get();
         executor.submit(() -> {
             try {
                 var resource = provisioner.provisionStandalone(typeName, props, region, ACCOUNT);
+                if (resetEpoch.get() != epoch) {
+                    return; // state was reset while this provision ran; drop the result
+                }
                 if (resource == null || resource.getPhysicalId() == null) {
                     record(pending.failed("CreateResource is not supported for " + typeName + "."));
                 } else {
@@ -129,6 +144,9 @@ public class CloudControlService {
                             token, "CREATE", "SUCCESS", null, model));
                 }
             } catch (Exception e) {
+                if (resetEpoch.get() != epoch) {
+                    return;
+                }
                 record(pending.failed(e.getMessage() == null ? e.toString() : e.getMessage()));
             }
         });
@@ -436,4 +454,15 @@ public class CloudControlService {
     }
 
     public record ResourceDescription(String identifier, String properties) {}
+
+    /**
+     * In-flight request progress and the created-resource index are plain maps, so a reset would otherwise leave GetResourceRequestStatus reporting resources that no longer exist.
+     */
+    @Override
+    public void clear() {
+        resetEpoch.incrementAndGet();
+        requests.clear();
+        requestOrder.clear();
+        created.clear();
+    }
 }

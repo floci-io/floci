@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.mwaa;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.TagHandler;
@@ -38,7 +39,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 @ApplicationScoped
-public class MwaaService implements TagHandler {
+public class MwaaService implements TagHandler, Resettable {
 
     private static final Logger LOG = Logger.getLogger(MwaaService.class);
 
@@ -538,5 +539,15 @@ public class MwaaService implements TagHandler {
         } else {
             storage.put(environment.getName(), environment);
         }
+    }
+
+    /**
+     * CLI tokens and DAG sync state are in-memory and would outlive their environments.
+     */
+    @Override
+    public void clear() {
+        cliTokensByEnvironment.clear();
+        dagSyncState.clear();
+        requirementsEtagByEnvironment.clear();
     }
 }

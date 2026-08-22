@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
@@ -29,7 +30,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 
 @ApplicationScoped
-public class CloudTrailService {
+public class CloudTrailService implements Resettable {
 
     private static final Logger LOG = Logger.getLogger(CloudTrailService.class);
 
@@ -558,5 +559,13 @@ public class CloudTrailService {
                         errorCode, errorMessage, eventTimeMillis);
             }
         }
+    }
+
+    /**
+     * Pending records would otherwise be flushed into a trail that the reset removed.
+     */
+    @Override
+    public void clear() {
+        pendingRecordsByTrail.clear();
     }
 }

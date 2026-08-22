@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.appsync.graphql;
 
+import io.github.hectorvent.floci.core.common.Resettable;
+
 import graphql.GraphQL;
 import graphql.execution.AsyncExecutionStrategy;
 import graphql.execution.AsyncSerialExecutionStrategy;
@@ -14,7 +16,7 @@ import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 
 @ApplicationScoped
-public class SchemaRegistry {
+public class SchemaRegistry implements Resettable {
     private final Map<String, GraphQLSchema> schemas = new ConcurrentHashMap<>();
     private final Map<String, GraphQL> engines = new ConcurrentHashMap<>();
     private final AppSyncSchemaParser appSyncSchemaParser;
@@ -58,5 +60,14 @@ public class SchemaRegistry {
                 .mutationExecutionStrategy(new AsyncSerialExecutionStrategy())
                 .subscriptionExecutionStrategy(new SubscriptionExecutionStrategy())
                 .build();
+    }
+
+    /**
+     * Compiled schemas and engines are keyed by API id and would be served for APIs the reset removed.
+     */
+    @Override
+    public void clear() {
+        schemas.clear();
+        engines.clear();
     }
 }

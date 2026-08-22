@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.dynamodb;
 
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
@@ -51,7 +52,7 @@ import java.util.function.Supplier;
 import java.util.zip.GZIPOutputStream;
 
 @ApplicationScoped
-public class DynamoDbService {
+public class DynamoDbService implements Resettable {
 
     private static final String LOCAL_REPLICA_UPDATE_ERROR =
             "Cannot add, delete, or update the local region through ReplicaUpdates. "
@@ -2979,5 +2980,18 @@ public class DynamoDbService {
                 .toList();
 
         return new ListExportsResult(summaries, newNextToken);
+    }
+
+    /**
+     * Items are served from an in-memory working copy loaded from the item store, so clearing the
+     * backend alone leaves the copy behind. It is not reachable through the API afterwards
+     * (every read validates the table, and CreateTable re-initialises the entry), but it is a
+     * leak, and the transaction idempotency index would outlive the tables it refers to.
+     */
+    @Override
+    public void clear() {
+        itemsByTable.clear();
+        itemLocks.clear();
+        txIdempotency.clear();
     }
 }

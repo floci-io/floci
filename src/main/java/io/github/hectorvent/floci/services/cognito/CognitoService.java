@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ReservedTags;
@@ -66,7 +67,7 @@ import java.util.UUID;
 import static io.github.hectorvent.floci.core.common.ReservedTags.rejectUnknownReservedTags;
 
 @ApplicationScoped
-public class CognitoService {
+public class CognitoService implements Resettable {
     private static final int DEFAULT_REFRESH_TOKEN_VALIDITY_DAYS = 30;
 
     private static final Logger LOG = Logger.getLogger(CognitoService.class);
@@ -2886,5 +2887,14 @@ public class CognitoService {
     }
 
     private record DeliveryTarget(String attributeName, String deliveryMedium, String destination) {
+    }
+
+    /**
+     * Auth sessions live in {@link CognitoAuthFlowHandler}, which is constructed directly rather
+     * than by CDI and so cannot be discovered as a {@code Resettable} itself.
+     */
+    @Override
+    public void clear() {
+        authFlowHandler.clearSessions();
     }
 }

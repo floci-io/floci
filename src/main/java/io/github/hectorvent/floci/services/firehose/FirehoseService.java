@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.firehose;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
@@ -30,7 +31,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 @ApplicationScoped
-public class FirehoseService {
+public class FirehoseService implements Resettable {
 
     private static final Logger LOG = Logger.getLogger(FirehoseService.class);
     private static final String DEFAULT_BUCKET = "floci-firehose-results";
@@ -415,5 +416,14 @@ public class FirehoseService {
         try {
             s3Service.createBucket(bucket, regionResolver.getDefaultRegion());
         } catch (Exception ignored) {}
+    }
+
+    /**
+     * Un-flushed delivery buffers survive a reset otherwise, and the next tick would deliver records belonging to a stream that has been wiped.
+     */
+    @Override
+    public void clear() {
+        buffers.clear();
+        bufferSince.clear();
     }
 }

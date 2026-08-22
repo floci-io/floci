@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.acm;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
@@ -35,7 +36,7 @@ import java.util.stream.Collectors;
  * @see <a href="https://docs.aws.amazon.com/acm/latest/APIReference/Welcome.html">AWS ACM API Reference</a>
  */
 @ApplicationScoped
-public class AcmService {
+public class AcmService implements Resettable {
 
     private static final Logger LOG = Logger.getLogger(AcmService.class);
     private static final int MAX_TAGS = 50;
@@ -654,5 +655,13 @@ public class AcmService {
             LOG.warn("Failed to load Amazon Root CA: " + e.getMessage());
             return "";
         }
+    }
+
+    /**
+     * The idempotency-token index would keep resolving tokens to certificates that are gone.
+     */
+    @Override
+    public void clear() {
+        idempotencyTokenIndex.clear();
     }
 }

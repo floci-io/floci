@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.codebuild;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.StorageBackedMap;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -29,7 +30,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 
 @ApplicationScoped
-public class CodeBuildService {
+public class CodeBuildService implements Resettable {
 
     // key: region -> name -> project
     private Map<String, Map<String, Project>> projects = new ConcurrentHashMap<>();
@@ -536,5 +537,15 @@ public class CodeBuildService {
         copy.setQueuedTimeoutInMinutes(source.getQueuedTimeoutInMinutes());
         copy.setEncryptionKey(source.getEncryptionKey());
         return copy;
+    }
+
+    /**
+     * Build history and counters are in-memory, so ListBuilds would keep returning builds for deleted projects and build numbers would not restart.
+     */
+    @Override
+    public void clear() {
+        builds.clear();
+        buildspecOverrides.clear();
+        buildCounters.clear();
     }
 }

@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.glue.schemaregistry;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -33,7 +34,7 @@ import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
-public class GlueSchemaRegistryService {
+public class GlueSchemaRegistryService implements Resettable {
 
     private static final Logger LOG = Logger.getLogger(GlueSchemaRegistryService.class);
 
@@ -1043,5 +1044,14 @@ public class GlueSchemaRegistryService {
             throw new AwsException("InvalidInputException",
                     "SchemaDefinition exceeds " + MAX_SCHEMA_DEFINITION_LENGTH + " characters", 400);
         }
+    }
+
+    /**
+     * Version indexes are derived in-memory views over schemas that the reset removes.
+     */
+    @Override
+    public void clear() {
+        versionByNumber.clear();
+        versionByDefinitionHash.clear();
     }
 }

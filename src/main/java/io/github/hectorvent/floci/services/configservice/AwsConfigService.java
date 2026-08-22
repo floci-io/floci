@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.configservice;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackedMap;
@@ -27,7 +28,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 @ApplicationScoped
-public class AwsConfigService {
+public class AwsConfigService implements Resettable {
 
     private final RegionResolver regionResolver;
     private final StorageFactory storageFactory;
@@ -374,5 +375,15 @@ public class AwsConfigService {
 
     private static String shortId() {
         return UUID.randomUUID().toString().replace("-", "").substring(0, 12);
+    }
+
+    /**
+     * Recorder run state is in-memory, so a reset would leave the recorder reported as running for a configuration that has been cleared.
+     */
+    @Override
+    public void clear() {
+        recorderRunning.clear();
+        recorderLastStartTime.clear();
+        recorderLastStopTime.clear();
     }
 }

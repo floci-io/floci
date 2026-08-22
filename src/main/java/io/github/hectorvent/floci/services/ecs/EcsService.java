@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.ContainerTeardown;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.storage.StorageBackedMap;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ecs.container.EcsContainerManager;
@@ -52,7 +53,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 
 @ApplicationScoped
-public class EcsService implements ContainerTeardown {
+public class EcsService implements ContainerTeardown, Resettable {
 
     private static final Logger LOG = Logger.getLogger(EcsService.class);
     private static final String DEFAULT_CLUSTER = "default";
@@ -63,6 +64,10 @@ public class EcsService implements ContainerTeardown {
     private final StorageFactory storageFactory;
     private final boolean dockerMode;
     private final String baseUrl;
+    /** Serialises {@link #reconcile()} against {@link #clear()} so a reset cannot interleave with
+     *  a reconciliation pass that is mid-way through reading the maps it is clearing. */
+    private final Object reconcileLock = new Object();
+
     private final ScheduledExecutorService reconciler = Executors.newSingleThreadScheduledExecutor(
             r -> { Thread t = new Thread(r, "ecs-reconciler"); t.setDaemon(true); return t; });
 
@@ -181,6 +186,15 @@ public class EcsService implements ContainerTeardown {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
+        stopTaskContainers();
+    }
+
+    /**
+     * Stops and forgets every running task container. Shared by shutdown and by {@link #clear()};
+     * unlike {@link #stopManagedContainers()} this leaves the reconciler running, because a state
+     * reset is not a shutdown and the emulator keeps serving afterwards.
+     */
+    private void stopTaskContainers() {
         for (String taskArn : new ArrayList<>(taskHandles.keySet())) {
             EcsTaskHandle claimed = taskHandles.remove(taskArn);
             if (claimed == null) {
@@ -189,8 +203,25 @@ public class EcsService implements ContainerTeardown {
             try {
                 containerManager.stopTask(claimed);
             } catch (Exception e) {
-                LOG.warnv("Failed to stop ECS task {0} on shutdown: {1}", taskArn, e.getMessage());
+                LOG.warnv("Failed to stop ECS task {0}: {1}", taskArn, e.getMessage());
             }
+        }
+    }
+
+    /**
+     * Clusters, services and task definitions are storage-backed and cleared by the storage
+     * factory, but tasks, container instances, task sets, deployments and revisions are plain
+     * maps. Without this a reset left orphan tasks pointing at clusters that no longer exist.
+     */
+    @Override
+    public void clear() {
+        synchronized (reconcileLock) {
+            stopTaskContainers();
+            tasks.clear();
+            containerInstances.clear();
+            taskSets.clear();
+            serviceDeployments.clear();
+            serviceRevisions.clear();
         }
     }
 
@@ -1408,8 +1439,10 @@ public class EcsService implements ContainerTeardown {
     // ── Service Reconciliation ────────────────────────────────────────────────
 
     void reconcile() {
-        reconcileTasks();
-        reconcileServices();
+        synchronized (reconcileLock) {
+            reconcileTasks();
+            reconcileServices();
+        }
     }
 
     private void reconcileTasks() {
