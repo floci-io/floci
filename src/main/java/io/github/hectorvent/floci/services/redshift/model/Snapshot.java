@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.redshift.model;
 
 import io.quarkus.runtime.annotations.RegisterForReflection;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 @RegisterForReflection
 public class Snapshot {
@@ -86,4 +88,9 @@ public class Snapshot {
     public void setSqlDump(String sqlDump) {
         this.sqlDump = sqlDump;
     }
+
+    private Map<String, String> tags = new LinkedHashMap<>();
+
+    public Map<String, String> getTags() { return tags; }
+    public void setTags(Map<String, String> tags) { this.tags = tags; }
 }

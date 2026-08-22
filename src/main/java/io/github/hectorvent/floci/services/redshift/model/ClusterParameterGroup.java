@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.redshift.model;
 
 import io.quarkus.runtime.annotations.RegisterForReflection;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 @RegisterForReflection
 public class ClusterParameterGroup {
@@ -39,4 +41,9 @@ public class ClusterParameterGroup {
     public void setDescription(String description) {
         this.description = description;
     }
+
+    private Map<String, String> tags = new LinkedHashMap<>();
+
+    public Map<String, String> getTags() { return tags; }
+    public void setTags(Map<String, String> tags) { this.tags = tags; }
 }

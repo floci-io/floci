@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.redshift.model;
 
 import io.quarkus.runtime.annotations.RegisterForReflection;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 @RegisterForReflection
 public class Cluster {
@@ -23,4 +25,9 @@ public class Cluster {
     public void setClusterStatus(String clusterStatus) { this.clusterStatus = clusterStatus; }
     public Endpoint getEndpoint() { return endpoint; }
     public void setEndpoint(Endpoint endpoint) { this.endpoint = endpoint; }
+
+    private Map<String, String> tags = new LinkedHashMap<>();
+
+    public Map<String, String> getTags() { return tags; }
+    public void setTags(Map<String, String> tags) { this.tags = tags; }
 }

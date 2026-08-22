@@ -14,6 +14,7 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -30,6 +31,7 @@ class RedshiftServiceTest {
     private AccountAwareStorageBackend<String> snapshotDumpBackend;
     private AccountAwareStorageBackend<ClusterParameterGroup> parameterGroupBackend;
     private RedshiftContainerManager cm;
+    private io.github.hectorvent.floci.core.common.RegionResolver regionResolver;
     private RedshiftService service;
 
     @BeforeEach
@@ -52,7 +54,9 @@ class RedshiftServiceTest {
         when(sf.<ClusterParameterGroup>create(eq("redshift"), eq("redshift-parameter-groups.json"), any())).thenReturn(parameterGroupBackend);
         when(clusterBackend.accountId()).thenReturn("111111111111");
 
-        service = new RedshiftService(sf, cm, config);
+        regionResolver = new io.github.hectorvent.floci.core.common.RegionResolver("us-east-1", "111111111111");
+
+        service = new RedshiftService(sf, cm, config, regionResolver);
     }
 
     @Test
@@ -403,5 +407,81 @@ class RedshiftServiceTest {
 
         assertThrows(AwsException.class, () ->
                 service.deleteClusterParameterGroup("missing-pg"));
+    }
+
+    @Test
+    void testCreateAndListTagsForCluster() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("my-cluster");
+        when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
+
+        service.createTags("arn:aws:redshift:us-east-1:111111111111:cluster:my-cluster",
+                java.util.Map.of("env", "test"));
+
+        assertEquals("test", cluster.getTags().get("env"));
+        verify(clusterBackend).put(eq("my-cluster"), any(Cluster.class));
+    }
+
+    @Test
+    void testDeleteTagsForCluster() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("my-cluster");
+        cluster.setTags(new java.util.LinkedHashMap<>(java.util.Map.of("env", "test", "team", "data")));
+        when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
+
+        service.deleteTags("arn:aws:redshift:us-east-1:111111111111:cluster:my-cluster", java.util.List.of("env"));
+
+        assertEquals(java.util.Map.of("team", "data"), cluster.getTags());
+    }
+
+    @Test
+    void testCreateTagsRejectsNonArnResourceName() {
+        assertThrows(AwsException.class, () ->
+                service.createTags("my-cluster", java.util.Map.of("env", "test")));
+    }
+
+    @Test
+    void testCreateTagsRejectsUnknownResourceType() {
+        assertThrows(AwsException.class, () ->
+                service.createTags("arn:aws:redshift:us-east-1:111111111111:reservednode:foo", java.util.Map.of("env", "test")));
+    }
+
+    @Test
+    void testDescribeTagsForSpecificResource() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("my-cluster");
+        cluster.setTags(new java.util.LinkedHashMap<>(java.util.Map.of("env", "test")));
+        when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
+
+        List<RedshiftService.TaggedResource> tagged =
+                service.describeTags("arn:aws:redshift:us-east-1:111111111111:cluster:my-cluster", null, null);
+
+        assertEquals(1, tagged.size());
+        assertEquals("cluster", tagged.get(0).resourceType());
+        assertEquals("env", tagged.get(0).tagKey());
+        assertEquals("test", tagged.get(0).tagValue());
+    }
+
+    @Test
+    void testDescribeTagsScansAllResourcesOfType() {
+        Cluster a = new Cluster();
+        a.setClusterIdentifier("cluster-a");
+        a.setTags(new java.util.LinkedHashMap<>(java.util.Map.of("env", "prod")));
+        Cluster b = new Cluster();
+        b.setClusterIdentifier("cluster-b");
+        b.setTags(new java.util.LinkedHashMap<>());
+        when(clusterBackend.scan(any())).thenReturn(java.util.List.of(a, b));
+        when(snapshotBackend.scan(any())).thenReturn(java.util.List.of());
+        when(parameterGroupBackend.scan(any())).thenReturn(java.util.List.of());
+
+        List<RedshiftService.TaggedResource> tagged = service.describeTags(null, "cluster", null);
+
+        assertEquals(1, tagged.size());
+        assertEquals("cluster-a", extractResourceId(tagged.get(0).resourceName()));
+    }
+
+    private static String extractResourceId(String arn) {
+        String resource = arn.substring(arn.lastIndexOf(':') + 1);
+        return resource.contains("/") ? resource.substring(resource.lastIndexOf('/') + 1) : resource;
     }
 }

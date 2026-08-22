@@ -1,7 +1,9 @@
 package io.github.hectorvent.floci.services.redshift;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.redshift.container.RedshiftContainerHandle;
@@ -30,14 +32,17 @@ public class RedshiftService {
     private final AccountAwareStorageBackend<ClusterParameterGroup> parameterGroups;
     private final RedshiftContainerManager containerManager;
     private final EmulatorConfig config;
+    private final RegionResolver regionResolver;
 
     @Inject
-    public RedshiftService(StorageFactory storageFactory, RedshiftContainerManager containerManager, EmulatorConfig config) {
+    public RedshiftService(StorageFactory storageFactory, RedshiftContainerManager containerManager,
+                            EmulatorConfig config, RegionResolver regionResolver) {
         this.clusters = storageFactory.create("redshift", "redshift-clusters.json", new TypeReference<Map<String, Cluster>>() {});
         this.snapshots = storageFactory.create("redshift", "redshift-snapshots.json", new TypeReference<Map<String, Snapshot>>() {});
         this.parameterGroups = storageFactory.create("redshift", "redshift-parameter-groups.json", new TypeReference<Map<String, ClusterParameterGroup>>() {});
         this.containerManager = containerManager;
         this.config = config;
+        this.regionResolver = regionResolver;
     }
 
     // Recreate Docker containers for persisted clusters on app restart (across every account, not just default)
@@ -317,5 +322,155 @@ public class RedshiftService {
         parameterGroups.delete(parameterGroupName);
         parameterGroups.flush();
         return group;
+    }
+
+    // ── Tagging Operations ───────────────────────────────────────────────────
+
+    /** A resolved tag target: its current tags plus a sink that persists an updated map. */
+    private record TagHandle(Map<String, String> tags, java.util.function.Consumer<Map<String, String>> save) {}
+
+    public record TaggedResource(String resourceName, String resourceType, String tagKey, String tagValue) {}
+
+    public Map<String, String> listTagsForResource(String resourceName) {
+        return Map.copyOf(resolveTagHandle(resourceName).tags());
+    }
+
+    public synchronized void createTags(String resourceName, Map<String, String> tags) {
+        TagHandle handle = resolveTagHandle(resourceName);
+        Map<String, String> updated = new java.util.LinkedHashMap<>(handle.tags());
+        updated.putAll(tags);
+        handle.save().accept(updated);
+    }
+
+    public synchronized void deleteTags(String resourceName, java.util.Collection<String> tagKeys) {
+        TagHandle handle = resolveTagHandle(resourceName);
+        Map<String, String> updated = new java.util.LinkedHashMap<>(handle.tags());
+        tagKeys.forEach(updated::remove);
+        handle.save().accept(updated);
+    }
+
+    public List<TaggedResource> describeTags(String resourceName, String resourceType, List<String> tagKeysFilter) {
+        List<TaggedResource> result = new java.util.ArrayList<>();
+        if (resourceName != null && !resourceName.isBlank()) {
+            TagHandle handle = resolveTagHandle(resourceName);
+            String type = arnResourceType(resourceName);
+            addTaggedResources(result, resourceName, type, handle.tags(), tagKeysFilter);
+            return result;
+        }
+        if (resourceType == null || "cluster".equalsIgnoreCase(resourceType)) {
+            for (Cluster c : clusters.scan(k -> true)) {
+                addTaggedResources(result, clusterArn(c.getClusterIdentifier()), "cluster", c.getTags(), tagKeysFilter);
+            }
+        }
+        if (resourceType == null || "snapshot".equalsIgnoreCase(resourceType)) {
+            for (Snapshot s : snapshots.scan(k -> true)) {
+                addTaggedResources(result, snapshotArn(s.getClusterIdentifier(), s.getSnapshotIdentifier()),
+                        "snapshot", s.getTags(), tagKeysFilter);
+            }
+        }
+        if (resourceType == null || "parametergroup".equalsIgnoreCase(resourceType)) {
+            for (ClusterParameterGroup g : parameterGroups.scan(k -> true)) {
+                addTaggedResources(result, parameterGroupArn(g.getParameterGroupName()),
+                        "parametergroup", g.getTags(), tagKeysFilter);
+            }
+        }
+        return result;
+    }
+
+    private void addTaggedResources(List<TaggedResource> out, String arn, String type,
+                                     Map<String, String> tags, List<String> tagKeysFilter) {
+        for (Map.Entry<String, String> e : tags.entrySet()) {
+            if (tagKeysFilter != null && !tagKeysFilter.isEmpty() && !tagKeysFilter.contains(e.getKey())) {
+                continue;
+            }
+            out.add(new TaggedResource(arn, type, e.getKey(), e.getValue()));
+        }
+    }
+
+    private String arnResourceType(String resourceName) {
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(resourceName);
+        String resource = arn.resource();
+        int sep = resource.indexOf(':');
+        return resource.substring(0, sep);
+    }
+
+    private String clusterArn(String clusterIdentifier) {
+        return regionResolver.buildArn("redshift", regionResolver.getRegion(), "cluster:" + clusterIdentifier);
+    }
+
+    private String snapshotArn(String clusterIdentifier, String snapshotIdentifier) {
+        return regionResolver.buildArn("redshift", regionResolver.getRegion(),
+                "snapshot:" + clusterIdentifier + "/" + snapshotIdentifier);
+    }
+
+    private String parameterGroupArn(String parameterGroupName) {
+        return regionResolver.buildArn("redshift", regionResolver.getRegion(), "parametergroup:" + parameterGroupName);
+    }
+
+    /**
+     * Resolves a tagging ResourceName to its backing resource.
+     *
+     * Redshift ARNs have the shape {@code arn:aws:redshift:<region>:<account>:<type>:<id>},
+     * where {@code <type>} is one of {@code cluster}, {@code snapshot} (id shape
+     * {@code <clusterId>/<snapshotId>}), or {@code parametergroup}. Unlike RDS's tag
+     * resolution, there is no bare-name fallback — Redshift tagging is new, so there is no
+     * existing caller to stay backward compatible with.
+     */
+    private TagHandle resolveTagHandle(String resourceName) {
+        if (resourceName == null || resourceName.isBlank()) {
+            throw new AwsException("InvalidParameterValue", "ResourceName is required.", 400);
+        }
+        if (!resourceName.startsWith("arn:")) {
+            throw new AwsException("InvalidParameterValue", "ResourceName must be a Redshift ARN: " + resourceName, 400);
+        }
+        AwsArnUtils.Arn arn;
+        try {
+            arn = AwsArnUtils.parse(resourceName);
+        } catch (IllegalArgumentException malformed) {
+            throw new AwsException("InvalidParameterValue", "Invalid resource name: " + resourceName, 400);
+        }
+        if (!"redshift".equals(arn.service())) {
+            throw new AwsException("InvalidParameterValue", "Invalid resource name: " + resourceName, 400);
+        }
+        String resource = arn.resource();
+        int sep = resource.indexOf(':');
+        if (sep < 0) {
+            throw new AwsException("InvalidParameterValue", "Invalid resource name: " + resourceName, 400);
+        }
+        String type = resource.substring(0, sep);
+        String id = resource.substring(sep + 1);
+
+        return switch (type) {
+            case "cluster" -> {
+                Cluster cluster = clusters.get(id)
+                        .orElseThrow(() -> new AwsException("ClusterNotFound", "Cluster " + id + " not found", 404));
+                yield new TagHandle(cluster.getTags(), updated -> {
+                    cluster.setTags(updated);
+                    clusters.put(id, cluster);
+                    clusters.flush();
+                });
+            }
+            case "snapshot" -> {
+                String snapshotId = id.contains("/") ? id.substring(id.lastIndexOf('/') + 1) : id;
+                Snapshot snapshot = snapshots.get(snapshotId)
+                        .orElseThrow(() -> new AwsException("ClusterSnapshotNotFound", "Snapshot " + snapshotId + " not found", 404));
+                yield new TagHandle(snapshot.getTags(), updated -> {
+                    snapshot.setTags(updated);
+                    snapshots.put(snapshotId, snapshot);
+                    snapshots.flush();
+                });
+            }
+            case "parametergroup" -> {
+                ClusterParameterGroup group = parameterGroups.get(id)
+                        .orElseThrow(() -> new AwsException("ClusterParameterGroupNotFound", "Cluster parameter group " + id + " not found", 404));
+                yield new TagHandle(group.getTags(), updated -> {
+                    group.setTags(updated);
+                    parameterGroups.put(id, group);
+                    parameterGroups.flush();
+                });
+            }
+            default -> throw new AwsException("InvalidParameterValue",
+                    "Tagging for resource type '" + type + "' is not supported: " + resourceName, 400);
+        };
     }
 }
