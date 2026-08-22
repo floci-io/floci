@@ -38,6 +38,10 @@ services:
     doc: docs/services/docdb.md
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/docdb/DocDbQueryHandler.java, mode: switch }
+  - service: efs
+    doc: docs/services/efs.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/efs/EfsController.java, mode: rest }
   - service: elasticache
     doc: docs/services/elasticache.md
     sources:
