@@ -397,9 +397,6 @@ public class EfsService implements Resettable {
             } catch (EfsException e) {
                 LOG.debug("File system " + mt.getFileSystemId() + " already deleted, skipping parent count update during mount target deletion");
                 mountTargetStore.delete(key);
-            } catch (Exception e) {
-                LOG.error("Failed to update parent file system " + mt.getFileSystemId() + " count during mount target deletion", e);
-                mountTargetStore.delete(key);
             }
         }
     }
