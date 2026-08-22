@@ -49,26 +49,47 @@ public class RegistryHttpClient {
         }
     }
 
-    /** Lists all repository names known to the backing registry. */
+    /**
+     * Lists all repository names known to the backing registry, following the
+     * {@code Link} header pagination that {@code GET /v2/_catalog} uses
+     * (registry:2 caps each page at 100 entries by default).
+     */
     public List<String> catalog() throws IOException, InterruptedException {
-        HttpResponse<String> resp = http.send(
-                HttpRequest.newBuilder(URI.create(baseUrl + "/v2/_catalog"))
-                        .timeout(Duration.ofSeconds(10))
-                        .GET()
-                        .build(),
-                HttpResponse.BodyHandlers.ofString());
-        if (resp.statusCode() != 200) {
-            LOG.warnv("Registry catalog returned {0}: {1}", resp.statusCode(), resp.body());
-            return Collections.emptyList();
-        }
-        JsonNode root = MAPPER.readTree(resp.body());
-        JsonNode repos = root.get("repositories");
-        if (repos == null || !repos.isArray()) {
-            return Collections.emptyList();
-        }
         List<String> out = new ArrayList<>();
-        repos.forEach(n -> out.add(n.asText()));
+        String url = baseUrl + "/v2/_catalog";
+        for (int page = 0; page < 10_000 && url != null; page++) {
+            HttpResponse<String> resp = http.send(
+                    HttpRequest.newBuilder(URI.create(url))
+                            .timeout(Duration.ofSeconds(10))
+                            .GET()
+                            .build(),
+                    HttpResponse.BodyHandlers.ofString());
+            if (resp.statusCode() != 200) {
+                LOG.warnv("Registry catalog returned {0}: {1}", resp.statusCode(), resp.body());
+                break;
+            }
+            JsonNode root = MAPPER.readTree(resp.body());
+            JsonNode repos = root.get("repositories");
+            if (repos != null && repos.isArray()) {
+                repos.forEach(n -> out.add(n.asText()));
+            }
+            url = nextCatalogPage(resp.headers().firstValue("Link").orElse(null));
+        }
         return out;
+    }
+
+    /** Extracts {@code </v2/_catalog?n=..&last=..>} from a registry Link header. */
+    private String nextCatalogPage(String link) {
+        if (link == null || link.isBlank()) {
+            return null;
+        }
+        int start = link.indexOf('<');
+        int end = link.indexOf('>');
+        if (start < 0 || end <= start) {
+            return null;
+        }
+        String target = link.substring(start + 1, end);
+        return target.startsWith("/") ? baseUrl + target : target;
     }
 
     /** Lists tags for a repository. Returns an empty list if the repo is not yet known to the registry. */
