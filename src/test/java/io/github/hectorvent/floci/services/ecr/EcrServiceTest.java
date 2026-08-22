@@ -235,6 +235,76 @@ class EcrServiceTest {
     // ------------------------------------------------------------
 
     @Test
+    void hostnameStylePushesUnderBareRepoNameAreVisibleViaListAndDescribeImages() throws Exception {
+        // A docker push to <account>.dkr.ecr.<region>.localhost:<port>/<repo>
+        // reaches the raw registry, so the image is stored under the bare repo
+        // name with no account/region prefix (issue #2444).
+        String repositoryName = "probe/roundtrip";
+        String tag = "v1";
+        String digest = "sha256:2222222222222222222222222222222222222222222222222222222222222222";
+        String manifest = """
+                {
+                  "schemaVersion": 2,
+                  "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+                  "config": {
+                    "mediaType": "application/vnd.docker.container.image.v1+json",
+                    "size": 100,
+                    "digest": "sha256:config"
+                  },
+                  "layers": []
+                }
+                """;
+
+        try (FakeRegistryServer registry = new FakeRegistryServer(repositoryName, tag, digest, manifest)) {
+            when(registryManager.getRepositoryUri(ACCOUNT, REGION, repositoryName))
+                    .thenReturn(ACCOUNT + ".dkr.ecr." + REGION + ".localhost:" + registry.port() + "/" + repositoryName);
+            when(registryManager.httpClient())
+                    .thenReturn(new RegistryHttpClient("http://localhost:" + registry.port()));
+
+            service.createRepository(repositoryName, null, null, null, null, null, null, REGION);
+
+            List<ImageIdentifier> imageIds = service.listImages(repositoryName, null, REGION);
+            assertEquals(1, imageIds.size());
+            assertEquals(tag, imageIds.get(0).getImageTag());
+            assertEquals(digest, imageIds.get(0).getImageDigest());
+
+            EcrService.DescribeImagesResult described = service.describeImages(repositoryName, null, null, REGION);
+            assertTrue(described.failures().isEmpty());
+            assertEquals(1, described.imageDetails().size());
+            assertEquals(digest, described.imageDetails().get(0).getImageDigest());
+        }
+    }
+
+    @Test
+    void deleteRepositoryForceRemovesManifestsFromRegistry() throws Exception {
+        String repositoryName = "probe/deleteme";
+        String tag = "v1";
+        String digest = "sha256:3333333333333333333333333333333333333333333333333333333333333333";
+        String manifest = """
+                {
+                  "schemaVersion": 2,
+                  "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+                  "config": {"mediaType": "application/vnd.docker.container.image.v1+json", "size": 1, "digest": "sha256:c"},
+                  "layers": []
+                }
+                """;
+
+        try (FakeRegistryServer registry = new FakeRegistryServer(repositoryName, tag, digest, manifest)) {
+            when(registryManager.getRepositoryUri(ACCOUNT, REGION, repositoryName))
+                    .thenReturn(ACCOUNT + ".dkr.ecr." + REGION + ".localhost:" + registry.port() + "/" + repositoryName);
+            when(registryManager.httpClient())
+                    .thenReturn(new RegistryHttpClient("http://localhost:" + registry.port()));
+
+            service.createRepository(repositoryName, null, null, null, null, null, null, REGION);
+            service.deleteRepository(repositoryName, null, true, REGION);
+
+            assertTrue(registry.sawDelete(), "expected a DELETE /v2/<name>/manifests/<digest> call");
+            assertEquals(digest, registry.lastDeletedDigest(),
+                    "delete-repository --force must DELETE the manifest from the registry");
+        }
+    }
+
+    @Test
     void putImageTagMutability_roundTrips() {
         service.createRepository(REPO, null, null, null, null, null, null, REGION);
         Repository updated = service.putImageTagMutability(REPO, null, "IMMUTABLE", REGION);
@@ -347,6 +417,7 @@ class EcrServiceTest {
         private final String tag;
         private final String digest;
         private final String manifest;
+        private final List<String> deletedDigests = new java.util.ArrayList<>();
 
         private FakeRegistryServer(String repository, String tag, String digest, String manifest) throws IOException {
             this.repository = repository;
@@ -362,11 +433,25 @@ class EcrServiceTest {
             return server.getAddress().getPort();
         }
 
+        private boolean sawDelete() {
+            return !deletedDigests.isEmpty();
+        }
+
+        private String lastDeletedDigest() {
+            return deletedDigests.isEmpty() ? null : deletedDigests.get(deletedDigests.size() - 1);
+        }
+
         private void handle(HttpExchange exchange) throws IOException {
             String path = exchange.getRequestURI().getPath();
             String method = exchange.getRequestMethod();
             if ("/v2/".equals(path) && "GET".equals(method)) {
                 send(exchange, 200, "");
+                return;
+            }
+            if (path.equals("/v2/" + repository + "/manifests/" + digest) && "DELETE".equals(method)) {
+                deletedDigests.add(digest);
+                exchange.sendResponseHeaders(202, -1);
+                exchange.close();
                 return;
             }
             if (("/v2/" + repository + "/tags/list").equals(path) && "GET".equals(method)) {
