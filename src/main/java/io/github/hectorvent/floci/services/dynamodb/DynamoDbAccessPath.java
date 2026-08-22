@@ -43,11 +43,14 @@ record DynamoDbAccessPath(String indexName, Kind kind, List<KeySchemaElement> ke
     }
 
     String partitionKeyName() {
+        return partitionKeyNames().getFirst();
+    }
+
+    List<String> partitionKeyNames() {
         return keySchema.stream()
                 .filter(key -> "HASH".equals(key.getKeyType()))
                 .map(KeySchemaElement::getAttributeName)
-                .findFirst()
-                .orElseThrow();
+                .toList();
     }
 
     List<String> sortKeyNames() {

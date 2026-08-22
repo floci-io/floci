@@ -24,6 +24,7 @@ class DynamoDbAccessPathValidatorTest {
     private DynamoDbAccessPath tablePath;
     private DynamoDbAccessPath gsiPath;
     private DynamoDbAccessPath lsiPath;
+    private DynamoDbAccessPath compositePkGsiPath;
 
     @BeforeEach
     void setUp() {
@@ -31,11 +32,18 @@ class DynamoDbAccessPathValidatorTest {
         table.setKeySchema(List.of(
                 new KeySchemaElement("pk", "HASH"),
                 new KeySchemaElement("sk", "RANGE")));
-        table.setGlobalSecondaryIndexes(List.of(new GlobalSecondaryIndex(
-                "status-index",
-                List.of(new KeySchemaElement("status", "HASH"),
-                        new KeySchemaElement("createdAt", "RANGE")),
-                null, "INCLUDE", List.of("summary"))));
+        table.setGlobalSecondaryIndexes(List.of(
+                new GlobalSecondaryIndex(
+                        "status-index",
+                        List.of(new KeySchemaElement("status", "HASH"),
+                                new KeySchemaElement("createdAt", "RANGE")),
+                        null, "INCLUDE", List.of("summary")),
+                new GlobalSecondaryIndex(
+                        "tenant-region-index",
+                        List.of(new KeySchemaElement("tenantId", "HASH"),
+                                new KeySchemaElement("region", "HASH"),
+                                new KeySchemaElement("createdAt", "RANGE")),
+                        null, "ALL", null)));
         table.setLocalSecondaryIndexes(List.of(new LocalSecondaryIndex(
                 "alternate-index",
                 List.of(new KeySchemaElement("pk", "HASH"),
@@ -45,6 +53,45 @@ class DynamoDbAccessPathValidatorTest {
         tablePath = DynamoDbAccessPath.resolve(table, null);
         gsiPath = DynamoDbAccessPath.resolve(table, "status-index");
         lsiPath = DynamoDbAccessPath.resolve(table, "alternate-index");
+        compositePkGsiPath = DynamoDbAccessPath.resolve(table, "tenant-region-index");
+    }
+
+    @Test
+    void acceptsCompositePartitionKeyQueryWhenEveryHashAttributeHasEquality() {
+        assertDoesNotThrow(() -> validateExpression(compositePkGsiPath,
+                "tenantId = :t AND region = :r"));
+        assertDoesNotThrow(() -> validateExpression(compositePkGsiPath,
+                "region = :r AND tenantId = :t"));
+    }
+
+    @Test
+    void rejectsCompositePartitionKeyQueryMissingOneHashAttribute() {
+        AwsException error = assertThrows(AwsException.class,
+                () -> validateExpression(compositePkGsiPath, "tenantId = :t"));
+
+        assertEquals("Query condition missed key schema element: region", error.getMessage());
+    }
+
+    @Test
+    void rejectsCompositePartitionKeyQueryWithNonEqualityCondition() {
+        assertThrows(AwsException.class, () -> validateExpression(compositePkGsiPath,
+                "tenantId = :t AND region > :r"));
+    }
+
+    @Test
+    void validatesLegacyCompositePartitionKeyConditions() {
+        ObjectNode valid = mapper.createObjectNode();
+        valid.set("tenantId", legacyCondition("EQ", attributeValues("acme")));
+        valid.set("region", legacyCondition("EQ", attributeValues("us")));
+        assertDoesNotThrow(() -> DynamoDbAccessPathValidator.validateQuery(
+                compositePkGsiPath, valid, null, null, null, null));
+
+        ObjectNode missingRegion = mapper.createObjectNode();
+        missingRegion.set("tenantId", legacyCondition("EQ", attributeValues("acme")));
+        AwsException error = assertThrows(AwsException.class,
+                () -> DynamoDbAccessPathValidator.validateQuery(
+                        compositePkGsiPath, missingRegion, null, null, null, null));
+        assertEquals("Query condition missed key schema element: region", error.getMessage());
     }
 
     @Test

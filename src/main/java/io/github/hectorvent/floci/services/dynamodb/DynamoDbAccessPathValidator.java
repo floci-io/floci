@@ -89,9 +89,10 @@ final class DynamoDbAccessPathValidator {
 
         List<Expr> conditions = root instanceof AndExpr and
                 ? and.operands() : List.of(root);
-        String partitionKey = accessPath.partitionKeyName();
+        List<String> partitionKeys = accessPath.partitionKeyNames();
+        Set<String> partitionKeySet = Set.copyOf(partitionKeys);
         Set<String> sortKeys = Set.copyOf(accessPath.sortKeyNames());
-        int partitionConditions = 0;
+        Set<String> conditionedPartitionKeys = new HashSet<>();
         String partitionKeyValuePlaceholder = null;
         Set<String> conditionedAttributes = new HashSet<>();
 
@@ -101,12 +102,14 @@ final class DynamoDbAccessPathValidator {
                 throw new AwsException("ValidationException",
                         "KeyConditionExpressions must only contain one condition per key", 400);
             }
-            if (partitionKey.equals(attribute)) {
-                partitionConditions++;
+            if (attribute != null && partitionKeySet.contains(attribute)) {
                 if (!isPartitionKeyEquality(condition)) {
                     throw new AwsException("ValidationException", "Query key condition not supported", 400);
                 }
-                partitionKeyValuePlaceholder = ((PlaceholderOperand) ((CompareExpr) condition).right()).name();
+                conditionedPartitionKeys.add(attribute);
+                if (attribute.equals(partitionKeys.getFirst())) {
+                    partitionKeyValuePlaceholder = ((PlaceholderOperand) ((CompareExpr) condition).right()).name();
+                }
             } else if (attribute != null && sortKeys.contains(attribute)) {
                 if (!isSupportedSortKeyCondition(condition)) {
                     throw new AwsException("ValidationException", "Query key condition not supported", 400);
@@ -116,13 +119,12 @@ final class DynamoDbAccessPathValidator {
             }
         }
 
-        if (partitionConditions == 0) {
+        if (!conditionedPartitionKeys.containsAll(partitionKeySet)) {
+            String missing = partitionKeys.stream()
+                    .filter(pk -> !conditionedPartitionKeys.contains(pk))
+                    .findFirst().orElseThrow();
             throw new AwsException("ValidationException",
-                    "Query condition missed key schema element: " + partitionKey, 400);
-        }
-        if (partitionConditions > 1) {
-            throw new AwsException("ValidationException",
-                    "KeyConditionExpressions must only contain one condition per key", 400);
+                    "Query condition missed key schema element: " + missing, 400);
         }
         return partitionKeyValuePlaceholder;
     }
@@ -165,18 +167,21 @@ final class DynamoDbAccessPathValidator {
     }
 
     private static void validateLegacyKeyConditions(DynamoDbAccessPath accessPath, JsonNode keyConditions) {
-        String partitionKey = accessPath.partitionKeyName();
-        if (keyConditions == null || !keyConditions.has(partitionKey)) {
-            throw new AwsException("ValidationException",
-                    "Query condition missed key schema element: " + partitionKey, 400);
+        List<String> partitionKeys = accessPath.partitionKeyNames();
+        for (String partitionKey : partitionKeys) {
+            if (keyConditions == null || !keyConditions.has(partitionKey)) {
+                throw new AwsException("ValidationException",
+                        "Query condition missed key schema element: " + partitionKey, 400);
+            }
         }
 
+        Set<String> partitionKeySet = Set.copyOf(partitionKeys);
         Set<String> sortKeys = Set.copyOf(accessPath.sortKeyNames());
         keyConditions.fields().forEachRemaining(entry -> {
             String attribute = entry.getKey();
             String operator = entry.getValue().path("ComparisonOperator").asText();
             int values = entry.getValue().path("AttributeValueList").size();
-            if (partitionKey.equals(attribute)) {
+            if (partitionKeySet.contains(attribute)) {
                 if (!"EQ".equals(operator) || values != 1) {
                     throw new AwsException("ValidationException", "Query key condition not supported", 400);
                 }

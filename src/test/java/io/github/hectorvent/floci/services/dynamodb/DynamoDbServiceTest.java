@@ -486,6 +486,86 @@ class DynamoDbServiceTest {
                 5L, 5L, List.of(gsi), region);
     }
 
+    private void createTableWithCompositePartitionKeyGsi(String region) {
+        GlobalSecondaryIndex gsi = new GlobalSecondaryIndex(
+                "tenantRegionIndex",
+                List.of(
+                        new KeySchemaElement("tenantId", "HASH"),
+                        new KeySchemaElement("region", "HASH"),
+                        new KeySchemaElement("createdAt", "RANGE")),
+                null, "ALL", null);
+        service.createTable("Accounts",
+                List.of(new KeySchemaElement("id", "HASH")),
+                List.of(
+                        new AttributeDefinition("id", "S"),
+                        new AttributeDefinition("tenantId", "S"),
+                        new AttributeDefinition("region", "S"),
+                        new AttributeDefinition("createdAt", "S")),
+                5L, 5L, List.of(gsi), region);
+        service.putItem("Accounts",
+                item("id", "1", "tenantId", "acme", "region", "us", "createdAt", "2026-01-01"), region);
+        service.putItem("Accounts",
+                item("id", "2", "tenantId", "acme", "region", "eu", "createdAt", "2026-01-02"), region);
+    }
+
+    @Test
+    void queryOnCompositePartitionKeyGsiRequiresEveryHashAttribute() {
+        String region = "eu-west-1";
+        createTableWithCompositePartitionKeyGsi(region);
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":t", attributeValue("S", "acme"));
+
+        AwsException error = assertThrows(AwsException.class, () -> service.query(
+                "Accounts", null, exprValues, "tenantId = :t",
+                null, null, null, "tenantRegionIndex", null, null, region));
+        assertEquals("ValidationException", error.getErrorCode());
+    }
+
+    @Test
+    void queryOnCompositePartitionKeyGsiFiltersByEveryHashAttribute() {
+        String region = "eu-west-1";
+        createTableWithCompositePartitionKeyGsi(region);
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":t", attributeValue("S", "acme"));
+        exprValues.set(":r", attributeValue("S", "us"));
+
+        DynamoDbService.QueryResult results = service.query(
+                "Accounts", null, exprValues, "tenantId = :t AND region = :r",
+                null, null, null, "tenantRegionIndex", null, null, region);
+
+        assertEquals(List.of("1"), results.items().stream()
+                .map(item -> item.get("id").get("S").asText())
+                .toList());
+    }
+
+    @Test
+    void legacyQueryOnCompositePartitionKeyGsiFiltersByEveryHashAttribute() {
+        String region = "eu-west-1";
+        createTableWithCompositePartitionKeyGsi(region);
+
+        ObjectNode keyConditions = mapper.createObjectNode();
+        keyConditions.set("tenantId", legacyEqCondition("acme"));
+        keyConditions.set("region", legacyEqCondition("us"));
+
+        DynamoDbService.QueryResult results = service.query("Accounts", keyConditions, null, null,
+                null, null, null, "tenantRegionIndex", null, null, region);
+
+        assertEquals(List.of("1"), results.items().stream()
+                .map(item -> item.get("id").get("S").asText())
+                .toList());
+    }
+
+    private ObjectNode legacyEqCondition(String value) {
+        ObjectNode condition = mapper.createObjectNode();
+        condition.put("ComparisonOperator", "EQ");
+        var attrList = mapper.createArrayNode();
+        attrList.add(attributeValue("S", value));
+        condition.set("AttributeValueList", attrList);
+        return condition;
+    }
+
     @Test
     void queryAppliesFilterExpressionAfterKeyCondition() {
         String region = "eu-west-1";
@@ -2289,7 +2369,7 @@ class DynamoDbServiceTest {
     @Test
     void updateItemConditionFailedReturnValuesNone() {
         createOrdersTable("us-east-1");
-    
+
         ObjectNode order = item("customerId", "1", "orderId", "sort1", "testAttr", "testVal");
         ObjectNode key = item("customerId", "1", "orderId", "sort1");
         service.putItem("Orders", order, "us-east-1");
@@ -2342,10 +2422,10 @@ class DynamoDbServiceTest {
     @Test
     void putItemNetNewConditionFailedReturnValuesNone() {
         createOrdersTable("us-east-1");
-    
+
         ObjectNode order = item("customerId", "1", "orderId", "sort1", "testAttr", "testVal");
         ObjectNode key = item("customerId", "1", "orderId", "sort1");
-        ConditionalCheckFailedException ex = assertThrows(ConditionalCheckFailedException.class, () -> 
+        ConditionalCheckFailedException ex = assertThrows(ConditionalCheckFailedException.class, () ->
             service.putItem("Orders", order, "attribute_exists(customerId)", null, null, "us-east-1", "NONE"));
 
         JsonNode stored = service.getItem("Orders", key, "us-east-1");
@@ -2357,10 +2437,10 @@ class DynamoDbServiceTest {
     @Test
     void putItemNetNewConditionFailedReturnValuesAllOld() {
         createOrdersTable("us-east-1");
-    
+
         ObjectNode order = item("customerId", "1", "orderId", "sort1", "testAttr", "testVal");
         ObjectNode key = item("customerId", "1", "orderId", "sort1");
-        ConditionalCheckFailedException ex = assertThrows(ConditionalCheckFailedException.class, () -> 
+        ConditionalCheckFailedException ex = assertThrows(ConditionalCheckFailedException.class, () ->
             service.putItem("Orders", order, "attribute_exists(customerId)", null, null, "us-east-1", "ALL_OLD"));
 
         JsonNode stored = service.getItem("Orders", key, "us-east-1");
@@ -2368,18 +2448,18 @@ class DynamoDbServiceTest {
 
         assertNull(ex.getItem());
     }
-    
+
     @Test
     void putItemExistingConditionFailedReturnValuesNone() {
         createOrdersTable("us-east-1");
-    
+
         ObjectNode order1 = item("customerId", "1", "orderId", "sort1", "testAttr", "testVal");
         ObjectNode order2 = item("customerId", "1", "orderId", "sort1", "testAttr", "testVal1");
         ObjectNode key = item("customerId", "1", "orderId", "sort1");
 
         service.putItem("Orders", order1, "us-east-1");
 
-        ConditionalCheckFailedException ex = assertThrows(ConditionalCheckFailedException.class, () -> 
+        ConditionalCheckFailedException ex = assertThrows(ConditionalCheckFailedException.class, () ->
             service.putItem("Orders", order2, "attribute_exists(someAttr)", null, null, "us-east-1", "NONE"));
 
         JsonNode stored = service.getItem("Orders", key, "us-east-1");
@@ -2400,7 +2480,7 @@ class DynamoDbServiceTest {
 
         service.putItem("Orders", order1, "us-east-1");
 
-        ConditionalCheckFailedException ex = assertThrows(ConditionalCheckFailedException.class, () -> 
+        ConditionalCheckFailedException ex = assertThrows(ConditionalCheckFailedException.class, () ->
             service.putItem("Orders", order2, "attribute_exists(someAttr)", null, null, "us-east-1", "ALL_OLD"));
 
         JsonNode stored = service.getItem("Orders", key, "us-east-1");
@@ -2414,18 +2494,18 @@ class DynamoDbServiceTest {
         assertEquals("testVal", returnedItem.get("testAttr").get("S").asText());
     }
 
-    
-    
+
+
     @Test
     void deleteItemConditionFailedReturnValuesNone() {
         createOrdersTable("us-east-1");
-    
+
         ObjectNode order = item("customerId", "1", "orderId", "sort1");
         ObjectNode key = item("customerId", "1", "orderId", "sort1");
 
         service.putItem("Orders", order, "us-east-1");
 
-        ConditionalCheckFailedException ex = assertThrows(ConditionalCheckFailedException.class, () -> 
+        ConditionalCheckFailedException ex = assertThrows(ConditionalCheckFailedException.class, () ->
             service.deleteItem("Orders", key, "attribute_exists(someAttr)", null, null, "us-east-1", "NONE"));
 
         JsonNode stored = service.getItem("Orders", key, "us-east-1");
@@ -2443,7 +2523,7 @@ class DynamoDbServiceTest {
 
         service.putItem("Orders", order, "us-east-1");
 
-        ConditionalCheckFailedException ex = assertThrows(ConditionalCheckFailedException.class, () -> 
+        ConditionalCheckFailedException ex = assertThrows(ConditionalCheckFailedException.class, () ->
             service.deleteItem("Orders", key, "attribute_exists(someAttr)", null, null, "us-east-1", "ALL_OLD"));
 
         JsonNode stored = service.getItem("Orders", key, "us-east-1");
