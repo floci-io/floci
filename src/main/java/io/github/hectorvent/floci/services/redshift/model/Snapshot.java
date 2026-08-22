@@ -9,6 +9,7 @@ public class Snapshot {
     private String status;
     private int port;
     private String masterUsername;
+    private String sqlDump;
 
     public Snapshot() {}
 
@@ -18,6 +19,15 @@ public class Snapshot {
         this.status = status;
         this.port = port;
         this.masterUsername = masterUsername;
+    }
+
+    public Snapshot(String snapshotIdentifier, String clusterIdentifier, String status, int port, String masterUsername, String sqlDump) {
+        this.snapshotIdentifier = snapshotIdentifier;
+        this.clusterIdentifier = clusterIdentifier;
+        this.status = status;
+        this.port = port;
+        this.masterUsername = masterUsername;
+        this.sqlDump = sqlDump;
     }
 
     public String getSnapshotIdentifier() {
@@ -58,5 +68,13 @@ public class Snapshot {
 
     public void setMasterUsername(String masterUsername) {
         this.masterUsername = masterUsername;
+    }
+
+    public String getSqlDump() {
+        return sqlDump;
+    }
+
+    public void setSqlDump(String sqlDump) {
+        this.sqlDump = sqlDump;
     }
 }

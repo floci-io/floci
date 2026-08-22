@@ -25,6 +25,7 @@ class RedshiftServiceTest {
     private StorageFactory sf;
     private AccountAwareStorageBackend<Cluster> clusterBackend;
     private AccountAwareStorageBackend<Snapshot> snapshotBackend;
+    private AccountAwareStorageBackend<String> snapshotDumpBackend;
     private AccountAwareStorageBackend<ClusterParameterGroup> parameterGroupBackend;
     private RedshiftContainerManager cm;
     private RedshiftService service;
@@ -35,11 +36,13 @@ class RedshiftServiceTest {
         sf = mock(StorageFactory.class);
         clusterBackend = mock(AccountAwareStorageBackend.class);
         snapshotBackend = mock(AccountAwareStorageBackend.class);
+        snapshotDumpBackend = mock(AccountAwareStorageBackend.class);
         parameterGroupBackend = mock(AccountAwareStorageBackend.class);
         cm = mock(RedshiftContainerManager.class);
 
         when(sf.<Cluster>create(eq("redshift"), eq("redshift-clusters.json"), any())).thenReturn(clusterBackend);
         when(sf.<Snapshot>create(eq("redshift"), eq("redshift-snapshots.json"), any())).thenReturn(snapshotBackend);
+        when(sf.<String>create(eq("redshift"), eq("redshift-snapshot-dumps.json"), any())).thenReturn(snapshotDumpBackend);
         when(sf.<ClusterParameterGroup>create(eq("redshift"), eq("redshift-parameter-groups.json"), any())).thenReturn(parameterGroupBackend);
 
         service = new RedshiftService(sf, cm);
@@ -98,6 +101,7 @@ class RedshiftServiceTest {
 
         when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
         when(snapshotBackend.get("my-snapshot")).thenReturn(Optional.empty());
+        when(cm.takeSnapshot("my-cluster", "admin", "dev")).thenReturn("-- dump sql");
 
         Snapshot snapshot = service.createSnapshot("my-snapshot", "my-cluster");
         assertNotNull(snapshot);
@@ -106,8 +110,12 @@ class RedshiftServiceTest {
         assertEquals("available", snapshot.getStatus());
         assertEquals("admin", snapshot.getMasterUsername());
         assertEquals(5439, snapshot.getPort());
+        assertEquals("-- dump sql", snapshot.getSqlDump());
         verify(snapshotBackend).put(eq("my-snapshot"), any(Snapshot.class));
         verify(snapshotBackend).flush();
+        verify(snapshotDumpBackend).put(eq("my-snapshot"), eq("-- dump sql"));
+        verify(snapshotDumpBackend).flush();
+        verify(cm).takeSnapshot("my-cluster", "admin", "dev");
     }
 
     @Test
@@ -156,6 +164,8 @@ class RedshiftServiceTest {
         assertEquals("deleted", deleted.getStatus());
         verify(snapshotBackend).delete("snap-1");
         verify(snapshotBackend).flush();
+        verify(snapshotDumpBackend).delete("snap-1");
+        verify(snapshotDumpBackend).flush();
     }
 
     @Test
@@ -163,6 +173,58 @@ class RedshiftServiceTest {
         when(snapshotBackend.get("missing-snap")).thenReturn(Optional.empty());
 
         assertThrows(AwsException.class, () -> service.deleteSnapshot("missing-snap"));
+    }
+
+    @Test
+    void testRestoreFromClusterSnapshot() {
+        Snapshot snapshot = new Snapshot("my-snapshot", "source-cluster", "available", 5439, "admin", "CREATE TABLE t;");
+        when(clusterBackend.get("restored-cluster")).thenReturn(Optional.empty());
+        when(snapshotBackend.get("my-snapshot")).thenReturn(Optional.of(snapshot));
+        when(snapshotDumpBackend.get("my-snapshot")).thenReturn(Optional.of("CREATE TABLE t;"));
+        when(cm.start(eq("restored-cluster"), eq("admin"), eq("password123")))
+                .thenReturn(new RedshiftContainerHandle("c-new", "restored-cluster", "localhost", 5432));
+
+        Cluster cluster = service.restoreFromClusterSnapshot("restored-cluster", "my-snapshot", "dc2.large");
+        assertNotNull(cluster);
+        assertEquals("restored-cluster", cluster.getClusterIdentifier());
+        assertEquals("available", cluster.getClusterStatus());
+        assertEquals("admin", cluster.getMasterUsername());
+        assertEquals("dc2.large", cluster.getNodeType());
+        assertEquals("localhost", cluster.getEndpoint().getAddress());
+
+        verify(cm).start("restored-cluster", "admin", "password123");
+        verify(cm).restoreSnapshot("restored-cluster", "admin", "dev", "CREATE TABLE t;");
+        verify(clusterBackend, times(2)).put(eq("restored-cluster"), any(Cluster.class));
+        verify(clusterBackend, times(2)).flush();
+    }
+
+    @Test
+    void testRestoreFromClusterSnapshotAlreadyExists() {
+        when(clusterBackend.get("existing-cluster")).thenReturn(Optional.of(new Cluster()));
+
+        assertThrows(AwsException.class, () ->
+                service.restoreFromClusterSnapshot("existing-cluster", "my-snapshot"));
+    }
+
+    @Test
+    void testRestoreFromClusterSnapshotNotFound() {
+        when(clusterBackend.get("new-cluster")).thenReturn(Optional.empty());
+        when(snapshotBackend.get("missing-snapshot")).thenReturn(Optional.empty());
+
+        assertThrows(AwsException.class, () ->
+                service.restoreFromClusterSnapshot("new-cluster", "missing-snapshot"));
+    }
+
+    @Test
+    void testRestoreFromClusterSnapshotFailure() {
+        Snapshot snapshot = new Snapshot("my-snapshot", "source-cluster", "available", 5439, "admin", "CREATE TABLE t;");
+        when(clusterBackend.get("failed-cluster")).thenReturn(Optional.empty());
+        when(snapshotBackend.get("my-snapshot")).thenReturn(Optional.of(snapshot));
+        when(snapshotDumpBackend.get("my-snapshot")).thenReturn(Optional.of("CREATE TABLE t;"));
+        when(cm.start(any(), any(), any())).thenThrow(new RuntimeException("Docker error"));
+
+        assertThrows(AwsException.class, () ->
+                service.restoreFromClusterSnapshot("failed-cluster", "my-snapshot"));
     }
 
     @Test
