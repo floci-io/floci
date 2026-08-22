@@ -254,6 +254,18 @@ class DynamoDbServiceTest {
     }
 
     @Test
+    void createTableRejectsMissingKeyAttributeDefinition() {
+        AwsException error = assertThrows(AwsException.class, () -> service.createTable(
+                "Users",
+                List.of(new KeySchemaElement("userId", "HASH")),
+                List.of(),
+                5L, 5L, "eu-west-1"));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("Invalid KeySchema: Some index key attribute have no definition", error.getMessage());
+    }
+
+    @Test
     void describeTable() {
         String region = "eu-west-1";
         createUsersTable(region);

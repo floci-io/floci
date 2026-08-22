@@ -227,6 +227,31 @@ class DynamoDbAccessPathValidatorTest {
     }
 
     @Test
+    void rejectsMissingKeyConditionExpressionValue() {
+        ObjectNode values = expressionValues(":pk");
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> DynamoDbAccessPathValidator.validateQuery(
+                        table, tablePath, null, "pk = :pk AND sk > :sk",
+                        null, null, null, values));
+
+        assertEquals("Invalid KeyConditionExpression: An expression attribute value used in expression "
+                + "is not defined; attribute value: :sk", error.getMessage());
+    }
+
+    @Test
+    void rejectsMissingAttributeDefinition() {
+        table.setAttributeDefinitions(null);
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> validateExpression(tablePath, "pk = :pk"));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("One or more parameter values were invalid: "
+                + "Condition parameter type does not match schema type", error.getMessage());
+    }
+
+    @Test
     void enforcesGsiProjectionButAllowsLsiTableFetches() {
         ObjectNode names = mapper.createObjectNode();
         names.put("#summary", "summary");
