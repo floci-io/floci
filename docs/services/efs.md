@@ -7,13 +7,35 @@ The EFS emulator provides a metadata control plane for file systems, mount targe
 
 ## Supported Operations
 
-| Category | Operations |
-|---|---|
-| **File Systems** | CreateFileSystem, DescribeFileSystems, UpdateFileSystem, DeleteFileSystem |
-| **Mount Targets** | CreateMountTarget, DescribeMountTargets, DeleteMountTarget, DescribeMountTargetSecurityGroups, ModifyMountTargetSecurityGroups |
-| **Access Points** | CreateAccessPoint, DescribeAccessPoints, DeleteAccessPoint |
-| **Policies & Configuration** | PutFileSystemPolicy, DescribeFileSystemPolicy, DeleteFileSystemPolicy, PutBackupPolicy, DescribeBackupPolicy, PutLifecycleConfiguration, DescribeLifecycleConfiguration |
-| **Tags** | TagResource, UntagResource, ListTagsForResource |
+<!-- floci:actions:start -->
+| Action | Description |
+| --- | --- |
+| `CreateFileSystem` | - |
+| `DescribeFileSystems` | - |
+| `UpdateFileSystem` | - |
+| `DeleteFileSystem` | - |
+| `CreateTags` | - |
+| `DescribeTags` | - |
+| `DeleteTags` | - |
+| `TagResource` | - |
+| `UntagResource` | - |
+| `ListTagsForResource` | - |
+| `CreateMountTarget` | - |
+| `DescribeMountTargets` | - |
+| `DeleteMountTarget` | - |
+| `DescribeMountTargetSecurityGroups` | - |
+| `ModifyMountTargetSecurityGroups` | - |
+| `CreateAccessPoint` | - |
+| `DescribeAccessPoints` | - |
+| `DeleteAccessPoint` | - |
+| `PutFileSystemPolicy` | - |
+| `DescribeFileSystemPolicy` | - |
+| `DeleteFileSystemPolicy` | - |
+| `PutBackupPolicy` | - |
+| `DescribeBackupPolicy` | - |
+| `PutLifecycleConfiguration` | - |
+| `DescribeLifecycleConfiguration` | - |
+<!-- floci:actions:end -->
 
 ## Limitations
 - **Metadata Only**: Floci provides an EFS API simulation (the control plane) so you can provision file systems for your ECS tasks and Lambda functions. It does not provide an actual NFSv4.1 data plane endpoint. Reading or writing files via standard file-system mounts will fail.
