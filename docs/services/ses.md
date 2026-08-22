@@ -271,6 +271,8 @@ Floci recognises the AWS [mailbox simulator addresses](https://docs.aws.amazon.c
 | `complaint@simulator.amazonses.com` | `Complaint` |
 | `suppressionlist@simulator.amazonses.com` | `Reject` |
 
+A `+label` subaddress is supported on any of these, so `bounce+order-123@simulator.amazonses.com` triggers a `Bounce` just like the bare address — the label lets senders distinguish test messages. Only `+` separates the label; `bounce-label@...` is not a simulator address.
+
 A successful send without a simulator-address recipient emits only the `Send` event.
 
 Account-level VDM (Virtual Deliverability Manager) attributes are stored per region. `PutAccountVdmAttributes` sets `VdmEnabled` (opt-in, defaults `DISABLED`) plus the optional `DashboardAttributes.EngagementMetrics` and `GuardianAttributes.OptimizedSharedDelivery`. `GetAccount` omits `VdmAttributes` until VDM has been configured for the region, then returns `VdmEnabled`, adding the `DashboardAttributes`/`GuardianAttributes` sub-objects only while `VdmEnabled` is `ENABLED`. Floci stores the settings but does not run VDM analytics.
