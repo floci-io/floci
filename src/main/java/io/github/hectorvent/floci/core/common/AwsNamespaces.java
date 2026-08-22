@@ -22,6 +22,7 @@ public final class AwsNamespaces {
     public static final String ELASTIC_BEANSTALK = "https://elasticbeanstalk.amazonaws.com/docs/2010-12-01/";
     public static final String ROUTE53     = "https://route53.amazonaws.com/doc/2013-04-01/";
     public static final String CLOUDFRONT  = "http://cloudfront.amazonaws.com/doc/2020-05-31/";
+    public static final String REDSHIFT    = "http://redshift.amazonaws.com/doc/2012-12-01/";
 
     private AwsNamespaces() {}
 }
