@@ -15,8 +15,8 @@
     <properties>
         <maven.compiler.release>25</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <quarkus.platform.version>3.37.4</quarkus.platform.version>
-        <jackson.version>2.22.1</jackson.version>
+        <quarkus.platform.version>3.38.2</quarkus.platform.version>
+        <jackson.version>2.22.2</jackson.version>
         <apicurio.version>2.6.13.Final</apicurio.version>
         <wire.version>6.4.5</wire.version>
     </properties>
@@ -50,7 +50,7 @@
             <dependency>
                 <groupId>com.google.api.grpc</groupId>
                 <artifactId>proto-google-common-protos</artifactId>
-                <version>2.49.0</version>
+                <version>2.74.0</version>
             </dependency>
             <dependency>
                 <groupId>com.h2database</groupId>
@@ -166,7 +166,7 @@
         <dependency>
             <groupId>org.apache.httpcomponents.client5</groupId>
             <artifactId>httpclient5</artifactId>
-            <version>5.5.1</version>
+            <version>5.6.4</version>
         </dependency>
         <!-- Explicit overrides for Quarkus BOM which pins these at 3.7.0;
              docker-java-core:3.7.1 requires 3.7.1 for ImageHistoryCmd and ExportContainerCmd -->
@@ -196,7 +196,7 @@
         <dependency>
             <groupId>org.bouncycastle</groupId>
             <artifactId>bcprov-jdk18on</artifactId>
-            <version>1.85</version>
+            <version>1.85.2</version>
         </dependency>
         <dependency>
             <groupId>org.bouncycastle</groupId>
@@ -236,7 +236,7 @@
         <dependency>
             <groupId>io.swagger.parser.v3</groupId>
             <artifactId>swagger-parser</artifactId>
-            <version>2.1.45</version>
+            <version>2.1.46</version>
         </dependency>
 
         <!-- Glue Schema Registry: Apicurio format utilities (parsing, canonicalization, compatibility) -->
@@ -295,7 +295,7 @@
         <dependency>
             <groupId>org.assertj</groupId>
             <artifactId>assertj-core</artifactId>
-            <version>3.25.3</version>
+            <version>3.27.7</version>
             <scope>test</scope>
         </dependency>
         <dependency>
@@ -332,7 +332,7 @@
         <dependency>
             <groupId>org.neo4j.driver</groupId>
             <artifactId>neo4j-java-driver</artifactId>
-            <version>6.2.0</version>
+            <version>6.2.1</version>
             <scope>test</scope>
         </dependency>
     </dependencies>
