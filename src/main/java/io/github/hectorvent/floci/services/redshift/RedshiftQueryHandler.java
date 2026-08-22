@@ -180,11 +180,22 @@ public class RedshiftQueryHandler {
                 throw new AwsException("InvalidParameterValue", "ParameterGroupName is required", 400);
             }
             service.describeClusterParameterGroups(parameterGroupName);
-            String xml = new XmlBuilder()
+            
+            List<io.github.hectorvent.floci.services.redshift.model.Parameter> parameters = List.of(
+                new io.github.hectorvent.floci.services.redshift.model.Parameter("max_cursor_result_set_size", "0", "Maximum cursor result set size", "integer"),
+                new io.github.hectorvent.floci.services.redshift.model.Parameter("wlm_json_configuration", "{}", "WLM configuration", "string")
+            );
+
+            XmlBuilder xmlBuilder = new XmlBuilder()
                     .start("DescribeClusterParametersResponse")
                       .start("DescribeClusterParametersResult")
-                        .start("Parameters")
-                        .end("Parameters")
+                        .start("Parameters");
+                        
+            for (io.github.hectorvent.floci.services.redshift.model.Parameter param : parameters) {
+                xmlBuilder.raw(buildParameterXml(param));
+            }
+            
+            String xml = xmlBuilder.end("Parameters")
                       .end("DescribeClusterParametersResult")
                       .start("ResponseMetadata")
                         .elem("RequestId", "test-req-id")
@@ -246,5 +257,20 @@ public class RedshiftQueryHandler {
             .elem("Description", group.getDescription());
         
         return builder.end("ClusterParameterGroup").build();
+    }
+
+    private String buildParameterXml(io.github.hectorvent.floci.services.redshift.model.Parameter param) {
+        XmlBuilder builder = new XmlBuilder()
+            .start("Parameter")
+            .elem("ParameterName", param.getParameterName())
+            .elem("ParameterValue", param.getParameterValue());
+            
+        if (param.getDescription() != null) {
+            builder.elem("Description", param.getDescription());
+        }
+        if (param.getDataType() != null) {
+            builder.elem("DataType", param.getDataType());
+        }
+        return builder.end("Parameter").build();
     }
 }

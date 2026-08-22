@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.redshift;
 
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -21,17 +22,17 @@ import java.util.Optional;
 public class RedshiftService {
     private final AccountAwareStorageBackend<Cluster> clusters;
     private final AccountAwareStorageBackend<Snapshot> snapshots;
-    private final AccountAwareStorageBackend<String> snapshotDumps;
     private final AccountAwareStorageBackend<ClusterParameterGroup> parameterGroups;
     private final RedshiftContainerManager containerManager;
+    private final EmulatorConfig config;
 
     @Inject
-    public RedshiftService(StorageFactory storageFactory, RedshiftContainerManager containerManager) {
+    public RedshiftService(StorageFactory storageFactory, RedshiftContainerManager containerManager, EmulatorConfig config) {
         this.clusters = storageFactory.create("redshift", "redshift-clusters.json", new TypeReference<Map<String, Cluster>>() {});
         this.snapshots = storageFactory.create("redshift", "redshift-snapshots.json", new TypeReference<Map<String, Snapshot>>() {});
-        this.snapshotDumps = storageFactory.create("redshift", "redshift-snapshot-dumps.json", new TypeReference<Map<String, String>>() {});
         this.parameterGroups = storageFactory.create("redshift", "redshift-parameter-groups.json", new TypeReference<Map<String, ClusterParameterGroup>>() {});
         this.containerManager = containerManager;
+        this.config = config;
     }
 
     public Cluster createCluster(String identifier, String nodeType, String username, String password) {
@@ -115,13 +116,12 @@ public class RedshiftService {
             snapshot.setPort(5439);
         }
 
+        java.nio.file.Path dumpDir = java.nio.file.Paths.get(config.storage().persistentPath()).resolve("redshift-dumps");
         try {
-            String sqlDump = containerManager.takeSnapshot(clusterIdentifier, cluster.getMasterUsername(), "dev");
-            snapshot.setSqlDump(sqlDump);
-            if (sqlDump != null) {
-                snapshotDumps.put(snapshotIdentifier, sqlDump);
-                snapshotDumps.flush();
-            }
+            java.nio.file.Files.createDirectories(dumpDir);
+            java.nio.file.Path dumpFile = dumpDir.resolve(snapshotIdentifier + ".sql");
+            containerManager.takeSnapshot(clusterIdentifier, cluster.getMasterUsername(), dumpFile);
+            snapshot.setSqlDump(dumpFile.getFileName().toString());
         } catch (AwsException e) {
             throw e;
         } catch (Exception e) {
@@ -165,8 +165,14 @@ public class RedshiftService {
         Snapshot snapshot = snapshotOpt.get();
         snapshots.delete(snapshotIdentifier);
         snapshots.flush();
-        snapshotDumps.delete(snapshotIdentifier);
-        snapshotDumps.flush();
+        if (snapshot.getSqlDump() != null) {
+            java.nio.file.Path dumpFile = java.nio.file.Paths.get(config.storage().persistentPath()).resolve("redshift-dumps").resolve(snapshot.getSqlDump());
+            try {
+                java.nio.file.Files.deleteIfExists(dumpFile);
+            } catch (java.io.IOException e) {
+                // ignore
+            }
+        }
         snapshot.setStatus("deleted");
         return snapshot;
     }
@@ -205,9 +211,9 @@ public class RedshiftService {
             endpoint.setPort(handle.getPort());
             cluster.setEndpoint(endpoint);
 
-            String sqlDump = snapshotDumps.get(snapshotIdentifier).orElse(snapshot.getSqlDump());
-            if (sqlDump != null && !sqlDump.isBlank()) {
-                containerManager.restoreSnapshot(clusterIdentifier, username, "dev", sqlDump);
+            if (snapshot.getSqlDump() != null && !snapshot.getSqlDump().isBlank()) {
+                java.nio.file.Path dumpFile = java.nio.file.Paths.get(config.storage().persistentPath()).resolve("redshift-dumps").resolve(snapshot.getSqlDump());
+                containerManager.restoreSnapshot(clusterIdentifier, username, dumpFile);
             }
 
             cluster.setClusterStatus("available");

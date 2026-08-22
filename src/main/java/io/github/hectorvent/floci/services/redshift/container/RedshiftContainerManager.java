@@ -113,7 +113,7 @@ public class RedshiftContainerManager {
         return Optional.ofNullable(containers.get(clusterIdentifier));
     }
 
-    public String takeSnapshot(String clusterIdentifier, String username, String dbname) {
+    public void takeSnapshot(String clusterIdentifier, String username, String dbname, java.nio.file.Path outputFile) {
         RedshiftContainerHandle handle = containers.get(clusterIdentifier);
         if (handle == null) {
             throw new AwsException("ClusterNotFound", "Cluster container for " + clusterIdentifier + " not found", 404);
@@ -122,14 +122,19 @@ public class RedshiftContainerManager {
         String effectiveUser = (username != null && !username.isBlank()) ? username : "postgres";
         String effectiveDb = (dbname != null && !dbname.isBlank()) ? dbname : "dev";
 
-        String[] cmd = new String[]{"pg_dump", "-U", effectiveUser, effectiveDb};
+        String[] cmd = new String[]{"pg_dump", "-U", effectiveUser, effectiveDb, "-f", "/tmp/dump.sql"};
         try {
             ExecResult result = execInContainer(handle.getContainerId(), cmd, 30);
             if (result.exitCode() != 0) {
                 LOG.warnv("pg_dump failed for cluster {0} (exit {1}): {2}", clusterIdentifier, result.exitCode(), result.stderr());
                 throw new AwsException("InternalFailure", "Failed to create snapshot for cluster " + clusterIdentifier + ": " + result.stderr(), 500);
             }
-            return result.stdout();
+            
+            try (java.io.InputStream in = lifecycleManager.getDockerClient().copyArchiveFromContainerCmd(handle.getContainerId(), "/tmp/dump.sql").exec();
+                 org.apache.commons.compress.archivers.tar.TarArchiveInputStream tar = new org.apache.commons.compress.archivers.tar.TarArchiveInputStream(in)) {
+                 tar.getNextTarEntry();
+                 java.nio.file.Files.copy(tar, outputFile, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            }
         } catch (AwsException e) {
             throw e;
         } catch (Exception e) {
@@ -138,39 +143,39 @@ public class RedshiftContainerManager {
         }
     }
 
-    public String takeSnapshot(String clusterIdentifier, String username) {
-        return takeSnapshot(clusterIdentifier, username, "dev");
+    public void takeSnapshot(String clusterIdentifier, String username, java.nio.file.Path outputFile) {
+        takeSnapshot(clusterIdentifier, username, "dev", outputFile);
     }
 
-    public String createSnapshot(Cluster cluster) {
+    public void createSnapshot(Cluster cluster, java.nio.file.Path outputFile) {
         if (cluster == null) {
             throw new AwsException("InvalidParameterValue", "Cluster cannot be null", 400);
         }
-        return takeSnapshot(cluster.getClusterIdentifier(), cluster.getMasterUsername(), "dev");
+        takeSnapshot(cluster.getClusterIdentifier(), cluster.getMasterUsername(), "dev", outputFile);
     }
 
-    public void restoreSnapshot(String clusterIdentifier, String username, String dbname, String sqlDump) {
+    public void restoreSnapshot(String clusterIdentifier, String username, String dbname, java.nio.file.Path sqlDumpFile) {
         RedshiftContainerHandle handle = containers.get(clusterIdentifier);
         if (handle == null) {
             throw new AwsException("ClusterNotFound", "Cluster container for " + clusterIdentifier + " not found", 404);
         }
 
-        if (sqlDump == null || sqlDump.isBlank()) {
+        if (sqlDumpFile == null || !java.nio.file.Files.exists(sqlDumpFile)) {
             LOG.infov("Empty snapshot dump for cluster {0}, skipping restore", clusterIdentifier);
             return;
         }
 
         String effectiveUser = (username != null && !username.isBlank()) ? username : "postgres";
         String effectiveDb = (dbname != null && !dbname.isBlank()) ? dbname : "dev";
+        String fileName = sqlDumpFile.getFileName().toString();
 
         try {
-            byte[] tar = buildSingleFileTar("restore.sql", sqlDump.getBytes(StandardCharsets.UTF_8), 0644);
             lifecycleManager.getDockerClient().copyArchiveToContainerCmd(handle.getContainerId())
+                    .withHostResource(sqlDumpFile.toString())
                     .withRemotePath("/tmp")
-                    .withTarInputStream(new ByteArrayInputStream(tar))
                     .exec();
 
-            String[] cmd = new String[]{"psql", "-U", effectiveUser, "-d", effectiveDb, "-f", "/tmp/restore.sql"};
+            String[] cmd = new String[]{"psql", "-U", effectiveUser, "-d", effectiveDb, "-f", "/tmp/" + fileName};
             ExecResult result = execInContainer(handle.getContainerId(), cmd, 60);
             if (result.exitCode() != 0) {
                 LOG.warnv("psql restore failed for cluster {0} (exit {1}): {2}", clusterIdentifier, result.exitCode(), result.stderr());
@@ -184,18 +189,24 @@ public class RedshiftContainerManager {
         }
     }
 
-    public void restoreSnapshot(String clusterIdentifier, String username, String sqlDump) {
-        restoreSnapshot(clusterIdentifier, username, "dev", sqlDump);
+    public void restoreSnapshot(String clusterIdentifier, String username, java.nio.file.Path sqlDumpFile) {
+        restoreSnapshot(clusterIdentifier, username, "dev", sqlDumpFile);
     }
 
-    public void restoreSnapshot(Cluster cluster, String sqlDump) {
+    public void restoreSnapshot(Cluster cluster, java.nio.file.Path sqlDumpFile) {
         if (cluster == null) {
             throw new AwsException("InvalidParameterValue", "Cluster cannot be null", 400);
         }
-        restoreSnapshot(cluster.getClusterIdentifier(), cluster.getMasterUsername(), "dev", sqlDump);
+        restoreSnapshot(cluster.getClusterIdentifier(), cluster.getMasterUsername(), "dev", sqlDumpFile);
     }
 
     private ExecResult execInContainer(String containerId, String[] cmd, int timeoutSeconds) throws Exception {
+        ByteArrayOutputStream stdout = new ByteArrayOutputStream();
+        ExecResult res = execInContainer(containerId, cmd, timeoutSeconds, stdout);
+        return new ExecResult(res.exitCode(), stdout.toString(StandardCharsets.UTF_8), res.stderr());
+    }
+
+    private ExecResult execInContainer(String containerId, String[] cmd, int timeoutSeconds, java.io.OutputStream out) throws Exception {
         String execId = lifecycleManager.getDockerClient().execCreateCmd(containerId)
                 .withCmd(cmd)
                 .withAttachStdout(true)
@@ -204,7 +215,6 @@ public class RedshiftContainerManager {
                 .getId();
 
         CountDownLatch latch = new CountDownLatch(1);
-        ByteArrayOutputStream stdout = new ByteArrayOutputStream();
         ByteArrayOutputStream stderr = new ByteArrayOutputStream();
 
         Closeable callback = lifecycleManager.getDockerClient().execStartCmd(execId).exec(new ResultCallback.Adapter<Frame>() {
@@ -214,9 +224,12 @@ public class RedshiftContainerManager {
                 if (payload == null) {
                     return;
                 }
-                ByteArrayOutputStream target = (frame.getStreamType() == StreamType.STDERR) ? stderr : stdout;
                 try {
-                    target.write(payload);
+                    if (frame.getStreamType() == StreamType.STDERR) {
+                        stderr.write(payload);
+                    } else {
+                        out.write(payload);
+                    }
                 } catch (IOException ignored) {
                 }
             }
@@ -236,12 +249,12 @@ public class RedshiftContainerManager {
         try {
             boolean completed = latch.await(timeoutSeconds, TimeUnit.SECONDS);
             if (!completed) {
-                return new ExecResult(-1, stdout.toString(StandardCharsets.UTF_8), "Timed out after " + timeoutSeconds + "s");
+                return new ExecResult(-1, "", "Timed out after " + timeoutSeconds + "s");
             }
             Long exitCode = lifecycleManager.getDockerClient().inspectExecCmd(execId).exec().getExitCodeLong();
             return new ExecResult(
                     exitCode != null ? exitCode : -1,
-                    stdout.toString(StandardCharsets.UTF_8),
+                    "",
                     stderr.toString(StandardCharsets.UTF_8));
         } finally {
             try {

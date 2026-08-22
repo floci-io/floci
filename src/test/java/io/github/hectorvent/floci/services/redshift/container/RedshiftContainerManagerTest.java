@@ -74,7 +74,7 @@ class RedshiftContainerManagerTest {
     @Test
     void testTakeSnapshotContainerNotFound() {
         AwsException ex = assertThrows(AwsException.class, () ->
-                manager.takeSnapshot("non-existent-cluster", "admin", "dev"));
+                manager.takeSnapshot("non-existent-cluster", "admin", "dev", java.nio.file.Path.of("dummy.sql")));
         assertEquals("ClusterNotFound", ex.getErrorCode());
         assertEquals(404, ex.getHttpStatus());
     }
@@ -82,7 +82,7 @@ class RedshiftContainerManagerTest {
     @Test
     void testRestoreSnapshotContainerNotFound() {
         AwsException ex = assertThrows(AwsException.class, () ->
-                manager.restoreSnapshot("non-existent-cluster", "admin", "dev", "CREATE TABLE test;"));
+                manager.restoreSnapshot("non-existent-cluster", "admin", "dev", java.nio.file.Path.of("dummy.sql")));
         assertEquals("ClusterNotFound", ex.getErrorCode());
         assertEquals(404, ex.getHttpStatus());
     }
@@ -90,7 +90,7 @@ class RedshiftContainerManagerTest {
     @Test
     void testCreateSnapshotNullCluster() {
         AwsException ex = assertThrows(AwsException.class, () ->
-                manager.createSnapshot(null));
+                manager.createSnapshot(null, java.nio.file.Path.of("dummy.sql")));
         assertEquals("InvalidParameterValue", ex.getErrorCode());
         assertEquals(400, ex.getHttpStatus());
     }
@@ -98,7 +98,7 @@ class RedshiftContainerManagerTest {
     @Test
     void testRestoreSnapshotNullCluster() {
         AwsException ex = assertThrows(AwsException.class, () ->
-                manager.restoreSnapshot((Cluster) null, "CREATE TABLE test;"));
+                manager.restoreSnapshot((Cluster) null, java.nio.file.Path.of("dummy.sql")));
         assertEquals("InvalidParameterValue", ex.getErrorCode());
         assertEquals(400, ex.getHttpStatus());
     }
@@ -126,8 +126,6 @@ class RedshiftContainerManagerTest {
         when(startCmd.exec(any())).thenAnswer(invocation -> {
             @SuppressWarnings("unchecked")
             ResultCallback.Adapter<Frame> adapter = invocation.getArgument(0);
-            byte[] output = "-- PostgreSQL dump\nCREATE TABLE foo (id int);\n".getBytes(StandardCharsets.UTF_8);
-            adapter.onNext(new Frame(StreamType.STDOUT, output));
             adapter.onComplete();
             return adapter;
         });
@@ -139,9 +137,29 @@ class RedshiftContainerManagerTest {
         when(inspectCmd.exec()).thenReturn(inspectResponse);
         when(dockerClient.inspectExecCmd("exec-1")).thenReturn(inspectCmd);
 
-        String dump = manager.takeSnapshot("test-cluster", "admin", "dev");
-        assertTrue(dump.contains("PostgreSQL dump"));
-        assertTrue(dump.contains("CREATE TABLE foo"));
+        // mock copyArchiveFromContainerCmd
+        com.github.dockerjava.api.command.CopyArchiveFromContainerCmd copyCmd = mock(com.github.dockerjava.api.command.CopyArchiveFromContainerCmd.class, org.mockito.Mockito.RETURNS_SELF);
+        byte[] tarBytes = "-- PostgreSQL dump\nCREATE TABLE foo (id int);\n".getBytes(StandardCharsets.UTF_8);
+        java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+        try (org.apache.commons.compress.archivers.tar.TarArchiveOutputStream tar = new org.apache.commons.compress.archivers.tar.TarArchiveOutputStream(bos)) {
+            org.apache.commons.compress.archivers.tar.TarArchiveEntry entry = new org.apache.commons.compress.archivers.tar.TarArchiveEntry("dump.sql");
+            entry.setSize(tarBytes.length);
+            tar.putArchiveEntry(entry);
+            tar.write(tarBytes);
+            tar.closeArchiveEntry();
+        }
+        when(copyCmd.exec()).thenReturn(new java.io.ByteArrayInputStream(bos.toByteArray()));
+        when(dockerClient.copyArchiveFromContainerCmd("cont-123", "/tmp/dump.sql")).thenReturn(copyCmd);
+
+        java.nio.file.Path tempFile = java.nio.file.Files.createTempFile("test-take-snapshot", ".sql");
+        try {
+            manager.takeSnapshot("test-cluster", "admin", "dev", tempFile);
+            String dump = java.nio.file.Files.readString(tempFile);
+            assertTrue(dump.contains("PostgreSQL dump"));
+            assertTrue(dump.contains("CREATE TABLE foo"));
+        } finally {
+            java.nio.file.Files.deleteIfExists(tempFile);
+        }
     }
 
     @Test
@@ -177,7 +195,7 @@ class RedshiftContainerManagerTest {
         when(dockerClient.inspectExecCmd("exec-fail")).thenReturn(inspectCmd);
 
         AwsException ex = assertThrows(AwsException.class, () ->
-                manager.takeSnapshot("test-cluster", "admin", "dev"));
+                manager.takeSnapshot("test-cluster", "admin", "dev", java.nio.file.Path.of("dummy.sql")));
         assertEquals("InternalFailure", ex.getErrorCode());
         assertEquals(500, ex.getHttpStatus());
     }
@@ -192,8 +210,8 @@ class RedshiftContainerManagerTest {
         manager.start("test-cluster", "admin", "pass");
 
         // Should return cleanly without touching dockerClient
-        manager.restoreSnapshot("test-cluster", "admin", "dev", "");
-        manager.restoreSnapshot("test-cluster", "admin", "dev", null);
+        manager.restoreSnapshot("test-cluster", "admin", "dev", java.nio.file.Path.of("non-existent-dump.sql"));
+        manager.restoreSnapshot("test-cluster", "admin", "dev", (java.nio.file.Path) null);
     }
 
     @Test
@@ -231,9 +249,14 @@ class RedshiftContainerManagerTest {
         when(inspectCmd.exec()).thenReturn(inspectResponse);
         when(dockerClient.inspectExecCmd("exec-restore")).thenReturn(inspectCmd);
 
-        manager.restoreSnapshot("test-cluster", "admin", "dev", "CREATE TABLE foo (id int);");
-        verify(dockerClient).copyArchiveToContainerCmd("cont-123");
-        verify(dockerClient).execCreateCmd("cont-123");
+        java.nio.file.Path tempFile = java.nio.file.Files.createTempFile("test-restore-snapshot", ".sql");
+        try {
+            manager.restoreSnapshot("test-cluster", "admin", "dev", tempFile);
+            verify(dockerClient).copyArchiveToContainerCmd("cont-123");
+            verify(dockerClient).execCreateCmd("cont-123");
+        } finally {
+            java.nio.file.Files.deleteIfExists(tempFile);
+        }
     }
 
     @Test

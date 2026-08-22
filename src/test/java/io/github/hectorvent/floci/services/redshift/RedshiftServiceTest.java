@@ -39,13 +39,17 @@ class RedshiftServiceTest {
         snapshotDumpBackend = mock(AccountAwareStorageBackend.class);
         parameterGroupBackend = mock(AccountAwareStorageBackend.class);
         cm = mock(RedshiftContainerManager.class);
+        
+        io.github.hectorvent.floci.config.EmulatorConfig config = mock(io.github.hectorvent.floci.config.EmulatorConfig.class);
+        io.github.hectorvent.floci.config.EmulatorConfig.StorageConfig storageConfig = mock(io.github.hectorvent.floci.config.EmulatorConfig.StorageConfig.class);
+        when(config.storage()).thenReturn(storageConfig);
+        when(storageConfig.persistentPath()).thenReturn("target/test-data");
 
         when(sf.<Cluster>create(eq("redshift"), eq("redshift-clusters.json"), any())).thenReturn(clusterBackend);
         when(sf.<Snapshot>create(eq("redshift"), eq("redshift-snapshots.json"), any())).thenReturn(snapshotBackend);
-        when(sf.<String>create(eq("redshift"), eq("redshift-snapshot-dumps.json"), any())).thenReturn(snapshotDumpBackend);
         when(sf.<ClusterParameterGroup>create(eq("redshift"), eq("redshift-parameter-groups.json"), any())).thenReturn(parameterGroupBackend);
 
-        service = new RedshiftService(sf, cm);
+        service = new RedshiftService(sf, cm, config);
     }
 
     @Test
@@ -101,7 +105,7 @@ class RedshiftServiceTest {
 
         when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
         when(snapshotBackend.get("my-snapshot")).thenReturn(Optional.empty());
-        when(cm.takeSnapshot("my-cluster", "admin", "dev")).thenReturn("-- dump sql");
+        doNothing().when(cm).takeSnapshot(eq("my-cluster"), eq("admin"), any(java.nio.file.Path.class));
 
         Snapshot snapshot = service.createSnapshot("my-snapshot", "my-cluster");
         assertNotNull(snapshot);
@@ -110,12 +114,10 @@ class RedshiftServiceTest {
         assertEquals("available", snapshot.getStatus());
         assertEquals("admin", snapshot.getMasterUsername());
         assertEquals(5439, snapshot.getPort());
-        assertEquals("-- dump sql", snapshot.getSqlDump());
+        assertEquals("my-snapshot.sql", snapshot.getSqlDump());
         verify(snapshotBackend).put(eq("my-snapshot"), any(Snapshot.class));
         verify(snapshotBackend).flush();
-        verify(snapshotDumpBackend).put(eq("my-snapshot"), eq("-- dump sql"));
-        verify(snapshotDumpBackend).flush();
-        verify(cm).takeSnapshot("my-cluster", "admin", "dev");
+        verify(cm).takeSnapshot(eq("my-cluster"), eq("admin"), any(java.nio.file.Path.class));
     }
 
     @Test
@@ -157,6 +159,7 @@ class RedshiftServiceTest {
     @Test
     void testDeleteSnapshot() {
         Snapshot s = new Snapshot("snap-1", "my-cluster", "available", 5439, "admin");
+        s.setSqlDump("snap-1.sql");
         when(snapshotBackend.get("snap-1")).thenReturn(Optional.of(s));
 
         Snapshot deleted = service.deleteSnapshot("snap-1");
@@ -164,8 +167,6 @@ class RedshiftServiceTest {
         assertEquals("deleted", deleted.getStatus());
         verify(snapshotBackend).delete("snap-1");
         verify(snapshotBackend).flush();
-        verify(snapshotDumpBackend).delete("snap-1");
-        verify(snapshotDumpBackend).flush();
     }
 
     @Test
@@ -177,12 +178,13 @@ class RedshiftServiceTest {
 
     @Test
     void testRestoreFromClusterSnapshot() {
-        Snapshot snapshot = new Snapshot("my-snapshot", "source-cluster", "available", 5439, "admin", "CREATE TABLE t;");
+        Snapshot snapshot = new Snapshot("my-snapshot", "source-cluster", "available", 5439, "admin");
+        snapshot.setSqlDump("my-snapshot.sql");
         when(clusterBackend.get("restored-cluster")).thenReturn(Optional.empty());
         when(snapshotBackend.get("my-snapshot")).thenReturn(Optional.of(snapshot));
-        when(snapshotDumpBackend.get("my-snapshot")).thenReturn(Optional.of("CREATE TABLE t;"));
         when(cm.start(eq("restored-cluster"), eq("admin"), eq("password123")))
                 .thenReturn(new RedshiftContainerHandle("c-new", "restored-cluster", "localhost", 5432));
+        doNothing().when(cm).restoreSnapshot(eq("restored-cluster"), eq("admin"), any(java.nio.file.Path.class));
 
         Cluster cluster = service.restoreFromClusterSnapshot("restored-cluster", "my-snapshot", "dc2.large");
         assertNotNull(cluster);
@@ -193,7 +195,7 @@ class RedshiftServiceTest {
         assertEquals("localhost", cluster.getEndpoint().getAddress());
 
         verify(cm).start("restored-cluster", "admin", "password123");
-        verify(cm).restoreSnapshot("restored-cluster", "admin", "dev", "CREATE TABLE t;");
+        verify(cm).restoreSnapshot(eq("restored-cluster"), eq("admin"), any(java.nio.file.Path.class));
         verify(clusterBackend, times(2)).put(eq("restored-cluster"), any(Cluster.class));
         verify(clusterBackend, times(2)).flush();
     }

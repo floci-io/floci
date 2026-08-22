@@ -89,8 +89,11 @@ public class RedshiftOperationsTest {
     void testClusterAndSnapshotLifecycle() {
         when(containerManager.start(eq("cluster-src"), any(), any()))
                 .thenReturn(new RedshiftContainerHandle("c1", "cluster-src", "localhost", 5439));
-        when(containerManager.takeSnapshot(eq("cluster-src"), eq("admin"), eq("dev")))
-                .thenReturn("-- dump sql table test_data;");
+        org.mockito.Mockito.doAnswer(invocation -> {
+            java.nio.file.Path p = invocation.getArgument(2);
+            java.nio.file.Files.writeString(p, "-- dump sql table test_data;");
+            return null;
+        }).when(containerManager).takeSnapshot(eq("cluster-src"), eq("admin"), any(java.nio.file.Path.class));
         when(containerManager.start(eq("cluster-restored"), any(), any()))
                 .thenReturn(new RedshiftContainerHandle("c2", "cluster-restored", "localhost", 5440));
 
