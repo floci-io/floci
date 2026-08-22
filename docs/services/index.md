@@ -1,6 +1,6 @@
 # Services Overview
 
-Floci emulates 72 AWS services on a single port (`4566`). All services use the real AWS wire protocol, your existing AWS CLI commands and SDK clients work without modification.
+Floci emulates 76 AWS services on a single port (`4566`). All services use the real AWS wire protocol, your existing AWS CLI commands and SDK clients work without modification.
 
 This page is the canonical reference for supported service and operation counts. Some services expose separate control-plane and data-plane rows below. Other docs (and the README) should link here rather than duplicating the table.
 
@@ -32,7 +32,9 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [Managed Service for Apache Flink](kinesisanalytics.md) | `POST /` + `X-Amz-Target: KinesisAnalytics_20180523.*` | JSON 1.1 | 7 |
 | [Secrets Manager](secrets-manager.md) | `POST /` + `X-Amz-Target: secretsmanager.*` | JSON 1.1 | 16 |
 | [Step Functions](step-functions.md) | `POST /` + `X-Amz-Target: AmazonStatesService.*` | JSON 1.1 | 19 |
+| [SWF](swf.md) | `POST /` + `X-Amz-Target: SimpleWorkflowService.*` | JSON 1.0 | 39 |
 | [CloudFormation](cloudformation.md) | `POST /` with `Action=` param | Query | 19 |
+| [Cloud Control API](cloudcontrol.md) | `POST /` + `X-Amz-Target: CloudApiService.*` | JSON 1.1 | 5 |
 | [EventBridge](eventbridge.md) | `POST /` + `X-Amz-Target: AmazonEventBridge.*` | JSON 1.1 | 16 |
 | [EventBridge Scheduler](scheduler.md) | `/schedules/*`, `/schedule-groups/*`, `/tags/*` | REST JSON | 12 |
 | [EventBridge Pipes](pipes.md) | `/v1/pipes/*` | REST JSON | 7 |
@@ -51,6 +53,7 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [Neptune](neptune.md) | `POST /` with `Action=` param + Gremlin TCP proxy | Query + WebSocket | 8 |
 | [DocumentDB](docdb.md) | `POST /` with `Action=` param + MongoDB container | Query + MongoDB wire | 8 |
 | [EMR](emr.md) | `POST /` + `X-Amz-Target: ElasticMapReduce.*` | JSON 1.1 | 24 |
+| [EMR Serverless](emr-serverless.md) | `/applications/*` | REST JSON | 7 |
 | [Data Firehose](firehose.md) | `POST /` + `X-Amz-Target: Firehose_20150804.*` | JSON 1.1 | 6 |
 | [ECS](ecs.md) | `POST /` + `X-Amz-Target: AmazonEC2ContainerServiceV20141113.*` | JSON 1.1 | 58 |
 | [EC2](ec2.md) | `POST /` with `Action=` param | EC2 Query | 78 |
@@ -66,6 +69,7 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [AppSync](appsync.md) | `/v1/apis/...` | REST JSON | 33 |
 | [Bedrock Runtime](bedrock-runtime.md) | `/model/{modelId}/converse`, `/model/{modelId}/invoke` | REST JSON | 2 (stub; streaming returns 501) |
 | [EKS](eks.md) | `/clusters`, `/clusters/{name}`, `/tags/{resourceArn}` | REST JSON | 7 |
+| [MWAA](mwaa.md) | `/environments/{name}`, `/webtoken/{name}`, `/clitoken/{name}` | REST JSON | 10 |
 | [ELB v2](elb.md) | `POST /` with `Action=` param | Query | 34 |
 | [WAF v2](wafv2.md) | `POST /` + `X-Amz-Target: AWSWAF_20190729.*` | JSON 1.1 | 35 |
 | [Auto Scaling](autoscaling.md) | `POST /` with `Action=` param | Query | 33 |
