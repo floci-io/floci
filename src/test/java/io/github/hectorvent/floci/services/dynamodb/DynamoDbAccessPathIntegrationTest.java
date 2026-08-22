@@ -248,6 +248,56 @@ class DynamoDbAccessPathIntegrationTest {
     }
 
     @Test
+    @Order(9)
+    void queryAndScanRejectWrongExclusiveStartKeyTypes() {
+        request("DynamoDB_20120810.Query", """
+                {
+                  "TableName":"%s",
+                  "KeyConditionExpression":"pk = :pk",
+                  "ExpressionAttributeValues":{":pk":{"S":"p1"}},
+                  "ExclusiveStartKey":{"pk":{"N":"1"},"sk":{"S":"s1"}}
+                }
+                """.formatted(TABLE))
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("The provided starting key is invalid"));
+
+        request("DynamoDB_20120810.Scan", """
+                {
+                  "TableName":"%s",
+                  "ExclusiveStartKey":{"pk":{"S":"p1"},"sk":{"BOOL":true}}
+                }
+                """.formatted(TABLE))
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("The provided starting key is invalid: "
+                    + "The provided key element does not match the schema"));
+    }
+
+    @Test
+    @Order(10)
+    void queryRejectsWrongIndexExclusiveStartKeyType() {
+        request("DynamoDB_20120810.Query", """
+                {
+                  "TableName":"%s",
+                  "IndexName":"status-index",
+                  "KeyConditionExpression":"#status = :status",
+                  "ExpressionAttributeNames":{"#status":"status"},
+                  "ExpressionAttributeValues":{":status":{"S":"open"}},
+                  "ExclusiveStartKey":{
+                    "pk":{"S":"p1"},
+                    "sk":{"S":"s1"},
+                    "status":{"S":"open"},
+                    "createdAt":{"N":"1"}
+                  }
+                }
+                """.formatted(TABLE))
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("The provided starting key is invalid"));
+    }
+
+    @Test
     @Order(99)
     void deleteTable() {
         given()
