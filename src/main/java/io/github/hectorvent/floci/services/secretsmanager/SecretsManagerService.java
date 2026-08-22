@@ -516,6 +516,17 @@ public class SecretsManagerService {
         return secret;
     }
 
+    /**
+     * True for secret names that follow AWS's reserved "ServiceID!SecretName" naming convention
+     * for secrets managed by another AWS service (see
+     * https://docs.aws.amazon.com/secretsmanager/latest/userguide/service-linked-secrets.html),
+     * restricted here to the services that offer managed rotation of master-user credentials:
+     * Amazon RDS/Aurora ("rds!"), Amazon Redshift ("redshift!"), and Amazon DocumentDB ("docdb!").
+     */
+    private static boolean isAwsManagedSecretName(String name) {
+        return name != null && (name.startsWith("rds!") || name.startsWith("redshift!") || name.startsWith("docdb!"));
+    }
+
     public Secret rotateSecret(String secretId, String clientRequestToken, String rotationLambdaArn, Secret.RotationRules rotationRules,
                                boolean rotateImmediately, String region) {
         Secret secret = resolveSecret(secretId, region);
@@ -535,13 +546,20 @@ public class SecretsManagerService {
         }
 
         String finalLambdaArn = rotationLambdaArn != null ? rotationLambdaArn : secret.getRotationLambdaArn();
-        if (finalLambdaArn == null) {
+        // Secrets owned by another AWS service (identified by the "ServiceID!..." naming
+        // convention documented at
+        // https://docs.aws.amazon.com/secretsmanager/latest/userguide/service-linked-secrets.html)
+        // use AWS-managed rotation for RDS/Redshift/DocumentDB master-user credentials: AWS itself
+        // rotates the secret, so no customer Lambda function is ever configured for it.
+        // See https://docs.aws.amazon.com/secretsmanager/latest/userguide/rotate-secrets_managed.html
+        boolean managedRotation = finalLambdaArn == null && isAwsManagedSecretName(secret.getName());
+        if (finalLambdaArn == null && !managedRotation) {
             throw new AwsException("InvalidRequestException",
                     "You tried to enable rotation on a secret that doesn't already have a Lambda function ARN configured and you didn't include such an ARN as a parameter in this call.", 400);
         }
 
         // Validate Lambda exists synchronously
-        if (lambdaService != null) {
+        if (finalLambdaArn != null && lambdaService != null) {
             try {
                 lambdaService.getFunction(region, finalLambdaArn);
             } catch (AwsException e) {
@@ -577,8 +595,23 @@ public class SecretsManagerService {
 
         String arn = secret.getArn();
         String finalToken = clientRequestToken != null && !clientRequestToken.isEmpty() ? clientRequestToken : UUID.randomUUID().toString();
+
+        if (managedRotation) {
+            // There's no customer Lambda to drive the createSecret/setSecret/testSecret/finishSecret
+            // lifecycle, and real managed rotation "typically completes within one minute" without any
+            // customer-visible steps. Floci doesn't simulate generating new RDS/Redshift/DocumentDB
+            // credentials, so just record that rotation ran rather than leaving a background job that
+            // would try (and fail) to invoke a null Lambda ARN.
+            synchronized (lockFor(arn)) {
+                secret.setLastRotatedDate(Instant.now());
+                store.put(regionKey(region, secret.getName()), secret);
+            }
+            LOG.infov("Completed AWS-managed rotation for secret: {0}", secret.getName());
+            return secret;
+        }
+
         boolean isExistingVersion = secret.getVersions() != null && secret.getVersions().containsKey(finalToken);
-        
+
         rotationExecutor.submit(() -> {
             try {
                 executeRotationLifecycle(arn, finalToken, finalLambdaArn, rotateImmediately, isExistingVersion, region);

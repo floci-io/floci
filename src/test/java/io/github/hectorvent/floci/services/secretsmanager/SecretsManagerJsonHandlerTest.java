@@ -525,4 +525,45 @@ class SecretsManagerJsonHandlerTest {
         assertThat(body.get("RotationRules").get("AutomaticallyAfterDays").asInt(), is(45));
         assertThat(body.get("RotationRules").get("Duration").asText(), is("2h"));
     }
+
+    @Test
+    void rotateSecretSucceedsForRdsManagedSecretWithoutLambdaArn() {
+        // https://github.com/lex00/floci/issues/52: RDS-managed master-user secrets (identified
+        // by the "rds!" name prefix) use AWS-managed rotation and never have a Lambda ARN.
+        ObjectNode createReq = MAPPER.createObjectNode();
+        createReq.put("Name", "rds!db-managed-secret");
+        handler.handle("CreateSecret", createReq, REGION);
+
+        ObjectNode rotateReq = MAPPER.createObjectNode();
+        rotateReq.put("SecretId", "rds!db-managed-secret");
+        ObjectNode rules = MAPPER.createObjectNode();
+        rules.put("ScheduleExpression", "cron(0 16 ? * 2 *)");
+        rotateReq.set("RotationRules", rules);
+
+        Response response = handler.handle("RotateSecret", rotateReq, REGION);
+        assertThat(response.getStatus(), is(200));
+
+        ObjectNode describeReq = MAPPER.createObjectNode();
+        describeReq.put("SecretId", "rds!db-managed-secret");
+        Response describeResponse = handler.handle("DescribeSecret", describeReq, REGION);
+        ObjectNode body = (ObjectNode) describeResponse.getEntity();
+        assertThat(body.get("RotationEnabled").asBoolean(), is(true));
+        assertThat(body.has("RotationLambdaARN"), is(false));
+    }
+
+    @Test
+    void rotateSecretFailsWithoutLambdaArnForOrdinarySecret() {
+        ObjectNode createReq = MAPPER.createObjectNode();
+        createReq.put("Name", "ordinary-secret-no-lambda");
+        handler.handle("CreateSecret", createReq, REGION);
+
+        ObjectNode rotateReq = MAPPER.createObjectNode();
+        rotateReq.put("SecretId", "ordinary-secret-no-lambda");
+
+        io.github.hectorvent.floci.core.common.AwsException ex = org.junit.jupiter.api.Assertions.assertThrows(
+                io.github.hectorvent.floci.core.common.AwsException.class,
+                () -> handler.handle("RotateSecret", rotateReq, REGION)
+        );
+        assertThat(ex.getErrorCode(), is("InvalidRequestException"));
+    }
 }

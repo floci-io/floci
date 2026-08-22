@@ -327,6 +327,36 @@ class SecretsManagerServiceTest {
     }
 
     @Test
+    void rotateSecretManagedRotationWithoutLambdaArnSucceeds() {
+        // RDS-managed (and Redshift/DocumentDB-managed) master-user secrets use AWS's own
+        // "managed rotation": Secrets Manager rotates them internally and no customer Lambda
+        // function is ever configured, so RotateSecret must accept a request that supplies
+        // only RotationRules and omits RotationLambdaARN for these secrets.
+        // See https://github.com/lex00/floci/issues/52
+        service.createSecret("rds!db-1234abcd-managed", "value", null, null, null, null, REGION);
+
+        Secret.RotationRules rules = new Secret.RotationRules(null, null, "cron(0 16 1,15 * ? *)");
+
+        Secret rotated = service.rotateSecret("rds!db-1234abcd-managed",
+                "a1b2c3d4-e5f6-7890-abcd-ef1234567890", null, rules, true, REGION);
+
+        assertTrue(rotated.isRotationEnabled());
+        assertNull(rotated.getRotationLambdaArn());
+        assertNotNull(rotated.getLastRotatedDate());
+    }
+
+    @Test
+    void rotateSecretWithoutLambdaArnOrManagedSecretThrows() {
+        service.createSecret("my-secret", "value", null, null, null, null, REGION);
+
+        AwsException thrown = assertThrows(AwsException.class, () ->
+                service.rotateSecret("my-secret", "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+                        null, null, true, REGION));
+
+        assertEquals("InvalidRequestException", thrown.getErrorCode());
+    }
+
+    @Test
     void tagAndUntagResource() {
         service.createSecret("my-secret", "value", null, null, null,
                 List.of(new Secret.Tag("env", "prod")), REGION);
