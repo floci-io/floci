@@ -12,6 +12,7 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 
 import java.util.List;
+import java.util.Map;
 
 @ApplicationScoped
 public class RedshiftQueryHandler {
@@ -214,8 +215,59 @@ public class RedshiftQueryHandler {
                     .end("DeleteClusterParameterGroupResponse")
                     .build();
             return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+        } else if ("CreateTags".equals(action)) {
+            String resourceName = params.getFirst("ResourceName");
+            service.createTags(resourceName, parseTags(params));
+            String xml = new XmlBuilder()
+                    .start("CreateTagsResponse")
+                      .start("ResponseMetadata")
+                        .elem("RequestId", "test-req-id")
+                      .end("ResponseMetadata")
+                    .end("CreateTagsResponse")
+                    .build();
+            return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+        } else if ("DeleteTags".equals(action)) {
+            String resourceName = params.getFirst("ResourceName");
+            List<String> tagKeys = memberList(params, "TagKeys");
+            service.deleteTags(resourceName, tagKeys);
+            String xml = new XmlBuilder()
+                    .start("DeleteTagsResponse")
+                      .start("ResponseMetadata")
+                        .elem("RequestId", "test-req-id")
+                      .end("ResponseMetadata")
+                    .end("DeleteTagsResponse")
+                    .build();
+            return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+        } else if ("DescribeTags".equals(action)) {
+            String resourceName = params.getFirst("ResourceName");
+            String resourceType = params.getFirst("ResourceType");
+            List<String> tagKeys = memberList(params, "TagKeys");
+            List<RedshiftService.TaggedResource> tagged = service.describeTags(resourceName, resourceType, tagKeys);
+            XmlBuilder xmlBuilder = new XmlBuilder()
+                    .start("DescribeTagsResponse")
+                      .start("DescribeTagsResult")
+                        .start("TaggedResources");
+            for (RedshiftService.TaggedResource t : tagged) {
+                xmlBuilder.start("TaggedResource")
+                        .elem("ResourceName", t.resourceName())
+                        .elem("ResourceType", t.resourceType())
+                        .start("Tag")
+                          .elem("Key", t.tagKey())
+                          .elem("Value", t.tagValue())
+                        .end("Tag")
+                      .end("TaggedResource");
+            }
+            String xml = xmlBuilder
+                        .end("TaggedResources")
+                      .end("DescribeTagsResult")
+                      .start("ResponseMetadata")
+                        .elem("RequestId", "test-req-id")
+                      .end("ResponseMetadata")
+                    .end("DescribeTagsResponse")
+                    .build();
+            return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
         }
-        
+
         throw new AwsException("InvalidAction", "Action " + action + " is not supported", 400);
     }
 
@@ -264,7 +316,7 @@ public class RedshiftQueryHandler {
             .start("Parameter")
             .elem("ParameterName", param.getParameterName())
             .elem("ParameterValue", param.getParameterValue());
-            
+
         if (param.getDescription() != null) {
             builder.elem("Description", param.getDescription());
         }
@@ -272,5 +324,32 @@ public class RedshiftQueryHandler {
             builder.elem("DataType", param.getDataType());
         }
         return builder.end("Parameter").build();
+    }
+
+    private static List<String> memberList(MultivaluedMap<String, String> params, String baseName) {
+        return params.keySet().stream()
+                .filter(key -> key.matches(java.util.regex.Pattern.quote(baseName) + "(\\.member)?\\.\\d+"))
+                .sorted(java.util.Comparator.comparingInt(RedshiftQueryHandler::numericSuffix))
+                .map(params::getFirst)
+                .filter(value -> value != null && !value.isBlank())
+                .toList();
+    }
+
+    private static int numericSuffix(String key) {
+        int lastDot = key.lastIndexOf('.');
+        return Integer.parseInt(key.substring(lastDot + 1));
+    }
+
+    private static Map<String, String> parseTags(MultivaluedMap<String, String> params) {
+        Map<String, String> tags = new java.util.LinkedHashMap<>();
+        for (int i = 1; ; i++) {
+            String key = params.getFirst("Tags.member." + i + ".Key");
+            if (key == null) {
+                break;
+            }
+            String value = params.getFirst("Tags.member." + i + ".Value");
+            tags.put(key, value == null ? "" : value);
+        }
+        return tags;
     }
 }

@@ -200,4 +200,72 @@ public class RedshiftOperationsTest {
             .contentType("application/xml")
             .body(containsString("<ClusterIdentifier>cluster-restored</ClusterIdentifier>"));
     }
+
+    @Test
+    @Order(3)
+    void testTagLifecycle() {
+        when(containerManager.start(any(), eq("cluster-tags"), any(), any()))
+                .thenReturn(new RedshiftContainerHandle("c3", "cluster-tags", "localhost", 5441));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "CreateCluster")
+            .formParam("ClusterIdentifier", "cluster-tags")
+            .formParam("NodeType", "dc2.large")
+            .formParam("MasterUsername", "admin")
+            .formParam("MasterUserPassword", "password123")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String clusterArn = "arn:aws:redshift:us-east-1:000000000000:cluster:cluster-tags";
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "CreateTags")
+            .formParam("ResourceName", clusterArn)
+            .formParam("Tags.member.1.Key", "env")
+            .formParam("Tags.member.1.Value", "test")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml");
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "DescribeTags")
+            .formParam("ResourceName", clusterArn)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<Key>env</Key>"))
+            .body(containsString("<Value>test</Value>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "DeleteTags")
+            .formParam("ResourceName", clusterArn)
+            .formParam("TagKeys.member.1", "env")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "DeleteCluster")
+            .formParam("ClusterIdentifier", "cluster-tags")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
 }
