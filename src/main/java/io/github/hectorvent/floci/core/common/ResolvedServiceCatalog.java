@@ -486,7 +486,13 @@ public class ResolvedServiceCatalog {
                         storageMode(config.storage().services().guardduty().mode(), config.storage().mode()),
                         config.storage().services().guardduty().flushIntervalMs(), null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
-                        Set.of(), Set.of("guardduty"), Set.of(), Set.of(GuardDutyController.class))
+                        Set.of(), Set.of("guardduty"), Set.of(), Set.of(GuardDutyController.class)),
+                descriptor("lakeformation", "lakeformation", config.services().lakeformation().enabled(), true,
+                        "lakeformation",
+                        storageMode(config.storage().services().lakeformation().mode(), config.storage().mode()),
+                        config.storage().services().lakeformation().flushIntervalMs(), null, ServiceProtocol.JSON,
+                        protocols(ServiceProtocol.JSON),
+                        Set.of("AWSLakeFormation."), Set.of("lakeformation"), Set.of(), Set.of())
         ));
     }
 
