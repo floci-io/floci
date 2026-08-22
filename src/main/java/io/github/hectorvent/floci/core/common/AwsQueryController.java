@@ -498,7 +498,8 @@ public class AwsQueryController {
     private static final Set<String> CLOUDWATCH_ACTIONS = Set.of(
             "PutMetricData", "ListMetrics", "GetMetricStatistics", "GetMetricData",
             "PutMetricAlarm", "DescribeAlarms", "DeleteAlarms", "SetAlarmState",
-            "ListTagsForResource", "TagResource", "UntagResource"
+            "ListTagsForResource", "TagResource", "UntagResource",
+            "PutDashboard", "GetDashboard", "ListDashboards", "DeleteDashboards"
     );
 
     private static final Set<String> ELASTIC_BEANSTALK_ACTIONS = Set.of(
