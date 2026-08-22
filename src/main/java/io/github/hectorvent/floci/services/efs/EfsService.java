@@ -11,6 +11,8 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Collections;
+import java.util.Objects;
 import java.util.UUID;
 import java.util.stream.Collectors;
 import java.util.concurrent.ConcurrentHashMap;
@@ -28,6 +30,8 @@ public class EfsService implements Resettable {
     private final StorageBackend<String, String> fileSystemPolicyStore;
     private final StorageBackend<String, BackupPolicy> backupPolicyStore;
     private final StorageBackend<String, Boolean> originalBackupStore;
+    private final StorageBackend<String, CreateFileSystemRequest> originalFileSystemRequestStore;
+    private final StorageBackend<String, CreateAccessPointRequest> originalAccessPointRequestStore;
     private final StorageBackend<String, List<LifecyclePolicy>> lifecycleConfigurationStore;
     private final ConcurrentHashMap<String, Object> syncLocks = new ConcurrentHashMap<>();
     private final RegionResolver regionResolver;
@@ -51,6 +55,10 @@ public class EfsService implements Resettable {
                 new com.fasterxml.jackson.core.type.TypeReference<java.util.Map<String, BackupPolicy>>() {});
         this.originalBackupStore = storageFactory.create("efs", "efs-original-backups.json",
                 new com.fasterxml.jackson.core.type.TypeReference<java.util.Map<String, Boolean>>() {});
+        this.originalFileSystemRequestStore = storageFactory.create("efs", "efs-original-fs-requests.json",
+                new com.fasterxml.jackson.core.type.TypeReference<java.util.Map<String, CreateFileSystemRequest>>() {});
+        this.originalAccessPointRequestStore = storageFactory.create("efs", "efs-original-ap-requests.json",
+                new com.fasterxml.jackson.core.type.TypeReference<java.util.Map<String, CreateAccessPointRequest>>() {});
         this.lifecycleConfigurationStore = storageFactory.create("efs", "efs-lifecycle.json",
                 new com.fasterxml.jackson.core.type.TypeReference<java.util.Map<String, List<LifecyclePolicy>>>() {});
     }
@@ -63,6 +71,8 @@ public class EfsService implements Resettable {
         fileSystemPolicyStore.clear();
         backupPolicyStore.clear();
         originalBackupStore.clear();
+        originalFileSystemRequestStore.clear();
+        originalAccessPointRequestStore.clear();
         lifecycleConfigurationStore.clear();
         syncLocks.clear();
     }
@@ -77,33 +87,31 @@ public class EfsService implements Resettable {
             if (token.equals(existing.getCreationToken())) {
                 boolean match = true;
                 
+                CreateFileSystemRequest original = originalFileSystemRequestStore.get(regionKey(region, existing.getFileSystemId())).orElse(request);
+                
                 String reqPerfMode = request.getPerformanceMode() != null ? request.getPerformanceMode().name() : "generalPurpose";
-                String extPerfMode = existing.getPerformanceMode();
-                if (!java.util.Objects.equals(reqPerfMode, extPerfMode)) match = false;
+                String extPerfMode = original.getPerformanceMode() != null ? original.getPerformanceMode().name() : "generalPurpose";
+                if (!Objects.equals(reqPerfMode, extPerfMode)) match = false;
                 
                 String reqTpMode = request.getThroughputMode() != null ? request.getThroughputMode().name() : "bursting";
-                String extTpMode = existing.getThroughputMode();
-                if (!java.util.Objects.equals(reqTpMode, extTpMode)) match = false;
+                String extTpMode = original.getThroughputMode() != null ? original.getThroughputMode().name() : "bursting";
+                if (!Objects.equals(reqTpMode, extTpMode)) match = false;
 
                 Boolean reqEnc = request.getEncrypted() != null ? request.getEncrypted() : Boolean.FALSE;
-                Boolean extEnc = existing.getEncrypted() != null ? existing.getEncrypted() : Boolean.FALSE;
-                if (!java.util.Objects.equals(reqEnc, extEnc)) match = false;
+                Boolean extEnc = original.getEncrypted() != null ? original.getEncrypted() : Boolean.FALSE;
+                if (!Objects.equals(reqEnc, extEnc)) match = false;
                 
-                if (!java.util.Objects.equals(request.getKmsKeyId(), existing.getKmsKeyId())) match = false;
-                if (!java.util.Objects.equals(request.getProvisionedThroughputInMibps(), existing.getProvisionedThroughputInMibps())) match = false;
+                if (!Objects.equals(request.getKmsKeyId(), original.getKmsKeyId())) match = false;
+                if (!Objects.equals(request.getProvisionedThroughputInMibps(), original.getProvisionedThroughputInMibps())) match = false;
                 
-                if (!java.util.Objects.equals(request.getAvailabilityZoneName(), existing.getAvailabilityZoneName())) match = false;
+                if (!Objects.equals(request.getAvailabilityZoneName(), original.getAvailabilityZoneName())) match = false;
                 
                 Boolean reqBackup = request.getBackup() != null ? request.getBackup() : Boolean.TRUE;
-                Boolean extBackup = originalBackupStore.get(regionKey(region, existing.getFileSystemId())).orElse(null);
-                if (extBackup == null) {
-                    io.github.hectorvent.floci.services.efs.model.BackupPolicy extBackupPolicy = backupPolicyStore.get(regionKey(region, existing.getFileSystemId())).orElse(null);
-                    extBackup = extBackupPolicy != null && "ENABLED".equals(extBackupPolicy.getStatus());
-                }
-                if (!java.util.Objects.equals(reqBackup, extBackup)) match = false;
+                Boolean extBackup = original.getBackup() != null ? original.getBackup() : Boolean.TRUE;
+                if (!Objects.equals(reqBackup, extBackup)) match = false;
                 
-                java.util.List<io.github.hectorvent.floci.services.efs.model.Tag> reqTags = request.getTags() != null ? request.getTags() : java.util.Collections.emptyList();
-                java.util.List<io.github.hectorvent.floci.services.efs.model.Tag> extTags = existing.getTags() != null ? existing.getTags() : java.util.Collections.emptyList();
+                List<Tag> reqTags = request.getTags() != null ? request.getTags() : Collections.emptyList();
+                List<Tag> extTags = original.getTags() != null ? original.getTags() : Collections.emptyList();
                 if (reqTags.size() != extTags.size() || !reqTags.containsAll(extTags)) match = false;
                 
                 if (match) {
@@ -137,6 +145,7 @@ public class EfsService implements Resettable {
             fs.setAvailabilityZoneId(request.getAvailabilityZoneName() + "-id");
         }
         originalBackupStore.put(regionKey, request.getBackup() != null ? request.getBackup() : Boolean.TRUE);
+        originalFileSystemRequestStore.put(regionKey, request);
         
         if (request.getTags() != null) {
             fs.setTags(new ArrayList<>(request.getTags()));
@@ -152,7 +161,7 @@ public class EfsService implements Resettable {
 
         fileSystemStore.put(regionKey, fs);
         
-        io.github.hectorvent.floci.services.efs.model.BackupPolicy bp = new io.github.hectorvent.floci.services.efs.model.BackupPolicy();
+        BackupPolicy bp = new BackupPolicy();
         bp.setStatus(request.getBackup() != null && !request.getBackup() ? "DISABLED" : "ENABLED");
         backupPolicyStore.put(regionKey, bp);
         
@@ -223,6 +232,7 @@ public class EfsService implements Resettable {
         fileSystemPolicyStore.delete(key);
         backupPolicyStore.delete(key);
         originalBackupStore.delete(key);
+        originalFileSystemRequestStore.delete(key);
         lifecycleConfigurationStore.delete(key);
 
         fileSystemStore.delete(key);
@@ -437,21 +447,23 @@ public class EfsService implements Resettable {
                     if (token.equals(existing.getClientToken())) {
                         boolean match = true;
                         
-                        if (!request.getFileSystemId().equals(existing.getFileSystemId())) match = false;
+                        CreateAccessPointRequest original = originalAccessPointRequestStore.get(regionKey(region, existing.getAccessPointId())).orElse(request);
                         
-                        java.util.List<io.github.hectorvent.floci.services.efs.model.Tag> reqTags = request.getTags() != null ? request.getTags() : java.util.Collections.emptyList();
-                        java.util.List<io.github.hectorvent.floci.services.efs.model.Tag> extTags = existing.getTags() != null ? existing.getTags() : java.util.Collections.emptyList();
+                        if (!request.getFileSystemId().equals(original.getFileSystemId())) match = false;
+                        
+                        List<Tag> reqTags = request.getTags() != null ? request.getTags() : Collections.emptyList();
+                        List<Tag> extTags = original.getTags() != null ? original.getTags() : Collections.emptyList();
                         if (reqTags.size() != extTags.size() || !reqTags.containsAll(extTags)) match = false;
                         
                         // Compare PosixUser
-                        if (request.getPosixUser() != null && existing.getPosixUser() == null) match = false;
-                        if (request.getPosixUser() == null && existing.getPosixUser() != null) match = false;
-                        if (request.getPosixUser() != null && existing.getPosixUser() != null) {
-                            if (!java.util.Objects.equals(request.getPosixUser().getUid(), existing.getPosixUser().getUid())) match = false;
-                            if (!java.util.Objects.equals(request.getPosixUser().getGid(), existing.getPosixUser().getGid())) match = false;
+                        if (request.getPosixUser() != null && original.getPosixUser() == null) match = false;
+                        if (request.getPosixUser() == null && original.getPosixUser() != null) match = false;
+                        if (request.getPosixUser() != null && original.getPosixUser() != null) {
+                            if (!Objects.equals(request.getPosixUser().getUid(), original.getPosixUser().getUid())) match = false;
+                            if (!Objects.equals(request.getPosixUser().getGid(), original.getPosixUser().getGid())) match = false;
                             
-                            java.util.List<Long> reqGids = request.getPosixUser().getSecondaryGids();
-                            java.util.List<Long> extGids = existing.getPosixUser().getSecondaryGids();
+                            List<Long> reqGids = request.getPosixUser().getSecondaryGids();
+                            List<Long> extGids = original.getPosixUser().getSecondaryGids();
                             if (reqGids != null && extGids == null) match = false;
                             if (reqGids == null && extGids != null) match = false;
                             if (reqGids != null && extGids != null) {
@@ -460,19 +472,19 @@ public class EfsService implements Resettable {
                         }
                         
                         // Compare RootDirectory
-                        if (request.getRootDirectory() != null && existing.getRootDirectory() == null) match = false;
-                        if (request.getRootDirectory() == null && existing.getRootDirectory() != null) match = false;
-                        if (request.getRootDirectory() != null && existing.getRootDirectory() != null) {
-                            if (!java.util.Objects.equals(request.getRootDirectory().getPath(), existing.getRootDirectory().getPath())) match = false;
+                        if (request.getRootDirectory() != null && original.getRootDirectory() == null) match = false;
+                        if (request.getRootDirectory() == null && original.getRootDirectory() != null) match = false;
+                        if (request.getRootDirectory() != null && original.getRootDirectory() != null) {
+                            if (!Objects.equals(request.getRootDirectory().getPath(), original.getRootDirectory().getPath())) match = false;
                             
-                            io.github.hectorvent.floci.services.efs.model.CreationInfo reqCi = request.getRootDirectory().getCreationInfo();
-                            io.github.hectorvent.floci.services.efs.model.CreationInfo extCi = existing.getRootDirectory().getCreationInfo();
+                            CreationInfo reqCi = request.getRootDirectory().getCreationInfo();
+                            CreationInfo extCi = original.getRootDirectory().getCreationInfo();
                             if (reqCi != null && extCi == null) match = false;
                             if (reqCi == null && extCi != null) match = false;
                             if (reqCi != null && extCi != null) {
-                                if (!java.util.Objects.equals(reqCi.getOwnerUid(), extCi.getOwnerUid())) match = false;
-                                if (!java.util.Objects.equals(reqCi.getOwnerGid(), extCi.getOwnerGid())) match = false;
-                                if (!java.util.Objects.equals(reqCi.getPermissions(), extCi.getPermissions())) match = false;
+                                if (!Objects.equals(reqCi.getOwnerUid(), extCi.getOwnerUid())) match = false;
+                                if (!Objects.equals(reqCi.getOwnerGid(), extCi.getOwnerGid())) match = false;
+                                if (!Objects.equals(reqCi.getPermissions(), extCi.getPermissions())) match = false;
                             }
                         }
                         
@@ -500,6 +512,7 @@ public class EfsService implements Resettable {
         ap.setOwnerId(regionResolver.getAccountId());
         
         accessPointStore.put(regionKey(region, apId), ap);
+        originalAccessPointRequestStore.put(regionKey(region, apId), request);
         return ap;
             }
         }
@@ -514,10 +527,12 @@ public class EfsService implements Resettable {
 
     public void deleteAccessPoint(String region, String accessPointId) {
         String key = regionKey(region, accessPointId);
-        if (accessPointStore.get(key).isEmpty()) {
+        AccessPointDescription ap = accessPointStore.get(key).orElse(null);
+        if (ap == null) {
             throw EfsException.accessPointNotFound(accessPointId);
         }
         accessPointStore.delete(key);
+        originalAccessPointRequestStore.delete(key);
     }
 
     // --- Policies ---
