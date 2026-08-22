@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.ses;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.services.ses.model.AccountDetails;
 import io.github.hectorvent.floci.services.ses.model.AccountSuppressionAttributes;
 import io.github.hectorvent.floci.services.ses.model.AccountVdmAttributes;
 import io.github.hectorvent.floci.services.ses.model.ConfigurationSet;
@@ -33,6 +34,7 @@ final class SesServiceTestBuilder {
     private final InMemoryStorage<String, SentEmail> emailStore = new InMemoryStorage<>();
     private final InMemoryStorage<String, Boolean> accountSettingsStore = new InMemoryStorage<>();
     private final InMemoryStorage<String, AccountVdmAttributes> accountVdmStore = new InMemoryStorage<>();
+    private final InMemoryStorage<String, AccountDetails> accountDetailsStore = new InMemoryStorage<>();
     private final InMemoryStorage<String, EmailTemplate> templateStore = new InMemoryStorage<>();
     private final InMemoryStorage<String, ConfigurationSet> configSetStore = new InMemoryStorage<>();
     private final InMemoryStorage<String, SuppressedDestination> suppressionStore = new InMemoryStorage<>();
@@ -110,7 +112,7 @@ final class SesServiceTestBuilder {
         return new SesService(
                 identityStore,
                 new SesSentEmailService(emailStore),
-                new SesAccountService(accountSettingsStore, accountVdmStore),
+                new SesAccountService(accountSettingsStore, accountVdmStore, accountDetailsStore),
                 new SesTemplateService(templateStore),
                 configSetStore,
                 new SesSuppressionService(suppressionStore, accountSuppressionStore),

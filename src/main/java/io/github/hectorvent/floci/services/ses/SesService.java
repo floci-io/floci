@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.services.route53.model.HostedZone;
 import io.github.hectorvent.floci.services.route53.model.ResourceRecord;
 import io.github.hectorvent.floci.services.route53.model.ResourceRecordSet;
 import io.github.hectorvent.floci.services.ses.model.AccountSuppressionAttributes;
+import io.github.hectorvent.floci.services.ses.model.AccountDetails;
 import io.github.hectorvent.floci.services.ses.model.AccountVdmAttributes;
 import io.github.hectorvent.floci.services.ses.model.ArchivingOptions;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntry;
@@ -1122,6 +1123,17 @@ public class SesService {
 
     public void setAccountSendingEnabled(String region, boolean enabled) {
         accountService.setAccountSendingEnabled(region, enabled);
+    }
+
+    public Optional<AccountDetails> findAccountDetails(String region) {
+        return accountService.findAccountDetails(region);
+    }
+
+    public AccountDetails putAccountDetails(String region, String mailType, String websiteUrl,
+                                            String contactLanguage, String useCaseDescription,
+                                            List<String> additionalContacts, boolean productionAccessEnabled) {
+        return accountService.putAccountDetails(region, mailType, websiteUrl, contactLanguage,
+                useCaseDescription, additionalContacts, productionAccessEnabled);
     }
 
     public Optional<AccountVdmAttributes> findAccountVdmAttributes(String region) {

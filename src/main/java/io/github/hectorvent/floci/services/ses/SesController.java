@@ -1870,6 +1870,27 @@ public class SesController {
             }
         });
 
+        // Like VdmAttributes, AWS omits Details until PutAccountDetails has run for the region.
+        sesService.findAccountDetails(region).ifPresent(details -> {
+            ObjectNode d = result.putObject("Details");
+            d.put("MailType", details.mailType());
+            d.put("WebsiteURL", details.websiteUrl());
+            if (details.contactLanguage() != null) {
+                d.put("ContactLanguage", details.contactLanguage());
+            }
+            if (details.useCaseDescription() != null) {
+                d.put("UseCaseDescription", details.useCaseDescription());
+            }
+            if (details.additionalContactEmailAddresses() != null
+                    && !details.additionalContactEmailAddresses().isEmpty()) {
+                ArrayNode addrs = d.putArray("AdditionalContactEmailAddresses");
+                details.additionalContactEmailAddresses().forEach(addrs::add);
+            }
+            ObjectNode review = d.putObject("ReviewDetails");
+            review.put("Status", details.reviewStatus());
+            review.put("CaseId", details.caseId());
+        });
+
         return Response.ok(result).build();
     }
 
@@ -1908,6 +1929,75 @@ public class SesController {
         } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
             throw new AwsException("BadRequestException", e.getMessage(), 400);
         }
+    }
+
+    @POST
+    @Path("/account/details")
+    public Response putAccountDetails(@Context HttpHeaders headers, String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            JsonNode request = (body == null || body.isBlank())
+                    ? objectMapper.createObjectNode()
+                    : objectMapper.readTree(body);
+            requireJsonObject(request);
+
+            // Parse every member first (rejecting wrong JSON types as a serialization error, the way
+            // AWS does before validation), then validate the parsed values together so all constraint
+            // violations are aggregated into one response.
+            String mailType = requireStringOrAbsent(request, "MailType");
+            String websiteUrl = requireStringOrAbsent(request, "WebsiteURL");
+            String contactLanguage = requireStringOrAbsent(request, "ContactLanguage");
+            String useCaseDescription = requireStringOrAbsent(request, "UseCaseDescription");
+
+            List<String> additionalContacts = null;
+            JsonNode contacts = request.path("AdditionalContactEmailAddresses");
+            if (!contacts.isMissingNode() && !contacts.isNull()) {
+                // A typed list member: reject a non-array, and reject non-string elements, rather than
+                // coercing (asText would turn 123 into "123"), matching how AWS rejects type mismatches.
+                if (!contacts.isArray()) {
+                    throw new AwsException("SerializationException", null, 400);
+                }
+                additionalContacts = new ArrayList<>();
+                for (JsonNode node : contacts) {
+                    if (!node.isTextual()) {
+                        throw new AwsException("SerializationException", null, 400);
+                    }
+                    additionalContacts.add(node.textValue());
+                }
+            }
+            JsonNode productionAccess = request.path("ProductionAccessEnabled");
+            if (!productionAccess.isMissingNode() && !productionAccess.isNull() && !productionAccess.isBoolean()) {
+                throw new AwsException("SerializationException", null, 400);
+            }
+            boolean productionAccessEnabled = productionAccess.asBoolean(false);
+
+            // The service owns validation and the synthetic review/case so they can't be bypassed; the
+            // controller only parses the REST JSON and rejects wrong JSON types.
+            sesService.putAccountDetails(region, mailType, websiteUrl, contactLanguage,
+                    useCaseDescription, additionalContacts, productionAccessEnabled);
+            LOG.infov("SES V2 PutAccountDetails: region={0}, mailType={1}", region, mailType);
+            return Response.ok(objectMapper.createObjectNode()).build();
+        } catch (AwsException e) {
+            throw remapV1Exception(e);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            // AWS reports a malformed JSON body as a SerializationException, the same error type used
+            // for wrong-typed members above.
+            throw new AwsException("SerializationException", null, 400);
+        }
+    }
+
+    // Read a typed string member: absent/null returns null, but a present value of the wrong JSON type
+    // is rejected rather than coerced (asText would turn 123 into "123"), the same as the identity and
+    // configuration-set string members elsewhere in this controller.
+    private static String requireStringOrAbsent(JsonNode parent, String field) {
+        JsonNode n = parent.path(field);
+        if (n.isMissingNode() || n.isNull()) {
+            return null;
+        }
+        if (!n.isTextual()) {
+            throw new AwsException("SerializationException", null, 400);
+        }
+        return n.textValue();
     }
 
     // Parse an AWS FeatureStatus (ENABLED/DISABLED) field. A required member that is absent, or any

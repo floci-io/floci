@@ -1,11 +1,18 @@
 package io.github.hectorvent.floci.services.ses;
 
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.services.ses.model.AccountDetails;
 import io.github.hectorvent.floci.services.ses.model.AccountVdmAttributes;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -20,7 +27,7 @@ class SesAccountServiceTest {
 
     @BeforeEach
     void setUp() {
-        service = new SesAccountService(new InMemoryStorage<>(), new InMemoryStorage<>());
+        service = new SesAccountService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
     }
 
     @Test
@@ -53,5 +60,31 @@ class SesAccountServiceTest {
         assertTrue(vdm.vdmEnabled());
         assertTrue(vdm.engagementMetrics());
         assertFalse(vdm.optimizedSharedDelivery());
+    }
+
+    @Test
+    void accountDetails_absentUntilConfigured_thenRoundTrip() {
+        // Opt-in like VDM: a never-configured region has no Details at all.
+        assertTrue(service.findAccountDetails(REGION).isEmpty());
+
+        AccountDetails stored = service.putAccountDetails(REGION, "TRANSACTIONAL",
+                "https://example.com", "EN", "use case", List.of("ops@example.com"), true);
+        assertEquals("GRANTED", stored.reviewStatus());
+        assertNotNull(stored.caseId());
+
+        AccountDetails d = service.findAccountDetails(REGION).orElseThrow();
+        assertEquals("TRANSACTIONAL", d.mailType());
+        assertEquals("https://example.com", d.websiteUrl());
+        assertEquals("GRANTED", d.reviewStatus());
+        assertTrue(service.findAccountDetails("eu-west-1").isEmpty());
+    }
+
+    @Test
+    void accountDetails_invalidInput_isRejectedByService() {
+        // Domain validation lives in the service, so it can't be bypassed by another caller.
+        assertThrows(AwsException.class, () -> service.putAccountDetails(REGION, "SPAM",
+                "https://example.com", null, null, null, false));
+        assertThrows(AwsException.class, () -> service.putAccountDetails(REGION, null,
+                null, null, null, null, false));
     }
 }

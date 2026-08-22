@@ -209,6 +209,7 @@ Alongside the classic Query API, Floci implements a subset of the SES v2 REST JS
 | `PUT` | `/v2/email/account/sending` | `PutAccountSendingAttributes` |
 | `PUT` | `/v2/email/account/suppression` | `PutAccountSuppressionAttributes` |
 | `PUT` | `/v2/email/account/vdm` | `PutAccountVdmAttributes` |
+| `POST` | `/v2/email/account/details` | `PutAccountDetails` |
 | `POST` | `/v2/email/templates` | `CreateEmailTemplate` |
 | `GET` | `/v2/email/templates` | `ListEmailTemplates` |
 | `GET` | `/v2/email/templates/{templateName}` | `GetEmailTemplate` |
@@ -276,6 +277,8 @@ A `+label` subaddress is supported on any of these, so `bounce+order-123@simulat
 A successful send without a simulator-address recipient emits only the `Send` event.
 
 Account-level VDM (Virtual Deliverability Manager) attributes are stored per region. `PutAccountVdmAttributes` sets `VdmEnabled` (opt-in, defaults `DISABLED`) plus the optional `DashboardAttributes.EngagementMetrics` and `GuardianAttributes.OptimizedSharedDelivery`. `GetAccount` omits `VdmAttributes` until VDM has been configured for the region, then returns `VdmEnabled`, adding the `DashboardAttributes`/`GuardianAttributes` sub-objects only while `VdmEnabled` is `ENABLED`. Floci stores the settings but does not run VDM analytics.
+
+Account provisioning details are stored per region. `PutAccountDetails` sets `MailType` (required, ∈ {`MARKETING`, `TRANSACTIONAL`}) and `WebsiteURL` (required, 1–1000 chars) plus the optional `ContactLanguage` (∈ {`EN`, `JA`}), `UseCaseDescription` (≤5000 chars), `AdditionalContactEmailAddresses` (1–4 entries, each 6–254 chars matching `^(.+)@(.+)$`), and `ProductionAccessEnabled`. Floci stores `ProductionAccessEnabled` as given but stays production-enabled regardless (it has no sandbox), so the flag has no functional effect. Like `VdmAttributes`, `GetAccount` omits `Details` until it has been configured for the region, then echoes the stored fields under `Details` with a `ReviewDetails` block. Matching AWS, all modeled-constraint violations (null / enum / length / list) are aggregated into a single `BadRequestException` reporting every failure; a malformed (but in-range) `WebsiteURL` is reported separately as `Url contains invalid format`. Floci has no sandbox and does not run a production-access review, so `ReviewDetails.Status` is always `GRANTED`.
 
 Suppression list entries are stored per region with `Reason` ∈ {`BOUNCE`, `COMPLAINT`}. At send time, a recipient is suppressed when it appears on the suppression list AND its stored `Reason` is contained in the **effective** `SuppressedReasons` for the send. The effective list is the configuration set's `SuppressionOptions.SuppressedReasons` (set via `PutConfigurationSetSuppressionOptions`) when present — an **empty list is preserved as an explicit "no suppression filtering for this configuration set"** — otherwise it falls back to the account-level `AccountSuppressionAttributes.SuppressedReasons` (set via `PutAccountSuppressionAttributes`, default `[BOUNCE, COMPLAINT]`). Following the AWS V2 contract, there is no dedicated `GetConfigurationSetSuppressionOptions` action; once set, the block is read back through `GetConfigurationSet`'s response (the field is omitted when the configuration set has no override).
 

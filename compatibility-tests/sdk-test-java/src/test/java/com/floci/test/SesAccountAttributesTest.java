@@ -17,18 +17,24 @@ import software.amazon.awssdk.services.ses.model.GetAccountSendingEnabledRespons
 import software.amazon.awssdk.services.ses.model.UpdateAccountSendingEnabledRequest;
 
 import software.amazon.awssdk.services.sesv2.SesV2Client;
+import software.amazon.awssdk.services.sesv2.model.AccountDetails;
+import software.amazon.awssdk.services.sesv2.model.ContactLanguage;
 import software.amazon.awssdk.services.sesv2.model.DashboardAttributes;
 import software.amazon.awssdk.services.sesv2.model.FeatureStatus;
 import software.amazon.awssdk.services.sesv2.model.GetAccountRequest;
 import software.amazon.awssdk.services.sesv2.model.GetAccountResponse;
 import software.amazon.awssdk.services.sesv2.model.GuardianAttributes;
+import software.amazon.awssdk.services.sesv2.model.MailType;
+import software.amazon.awssdk.services.sesv2.model.PutAccountDetailsRequest;
 import software.amazon.awssdk.services.sesv2.model.PutAccountSendingAttributesRequest;
 import software.amazon.awssdk.services.sesv2.model.PutAccountSuppressionAttributesRequest;
 import software.amazon.awssdk.services.sesv2.model.PutAccountVdmAttributesRequest;
+import software.amazon.awssdk.services.sesv2.model.SesV2Exception;
 import software.amazon.awssdk.services.sesv2.model.SuppressionListReason;
 import software.amazon.awssdk.services.sesv2.model.VdmAttributes;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 @DisplayName("SES account attributes: sending, suppression, VDM (v1 + v2)")
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -197,5 +203,51 @@ class SesAccountAttributesTest {
 
         GetAccountSendingEnabledResponse afterV2Enable = sesV1.getAccountSendingEnabled();
         assertThat(afterV2Enable.enabled()).isTrue();
+    }
+
+    @Test
+    @Order(6)
+    void putAndGet_accountDetailsRoundTrip() {
+        // PutAccountDetails is POST (unlike the sibling PUT account operations); the SDK exercises the
+        // real verb, so a mis-wired route would surface here. Status is set by AWS's review and is not
+        // controllable, so assert only that ReviewDetails is present with a status and case id.
+        //
+        // PutAccountDetails has no delete/reset API and AWS owns the resulting ReviewDetails/case, so
+        // this mutation cannot be undone — re-submitting captured fields cannot restore the prior
+        // review status or case id. Skip it entirely on real AWS rather than risk changing a real
+        // caller's account; against Floci the in-memory store makes the round-trip safe and it still
+        // catches a mis-wired route there.
+        org.junit.jupiter.api.Assumptions.assumeFalse(TestFixtures.isRealAws(),
+                "skipping on real AWS: PutAccountDetails cannot be reset and AWS owns ReviewDetails");
+        sesV2.putAccountDetails(PutAccountDetailsRequest.builder()
+                .mailType(MailType.TRANSACTIONAL)
+                .websiteURL("https://example.com")
+                .contactLanguage(ContactLanguage.EN)
+                .useCaseDescription("compatibility test")
+                .additionalContactEmailAddresses("ops@example.com")
+                .build());
+
+        GetAccountResponse account = sesV2.getAccount(GetAccountRequest.builder().build());
+        AccountDetails details = account.details();
+        assertThat(details).isNotNull();
+        assertThat(details.mailType()).isEqualTo(MailType.TRANSACTIONAL);
+        assertThat(details.websiteURL()).isEqualTo("https://example.com");
+        assertThat(details.contactLanguage()).isEqualTo(ContactLanguage.EN);
+        assertThat(details.additionalContactEmailAddresses()).contains("ops@example.com");
+        assertThat(details.reviewDetails()).isNotNull();
+        assertThat(details.reviewDetails().statusAsString()).isNotBlank();
+        assertThat(details.reviewDetails().caseId()).isNotBlank();
+    }
+
+    @Test
+    @Order(7)
+    void putAccountDetails_invalidMailType_throwsBadRequest() {
+        // Server-side enum validation (the string bypasses the SDK's typed enum), rejected without
+        // mutating account state.
+        assertThatThrownBy(() -> sesV2.putAccountDetails(PutAccountDetailsRequest.builder()
+                        .mailType("SPAM")
+                        .websiteURL("https://example.com")
+                        .build()))
+                .isInstanceOf(SesV2Exception.class);
     }
 }
