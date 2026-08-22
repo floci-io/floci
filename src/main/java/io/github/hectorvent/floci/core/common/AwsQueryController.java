@@ -517,7 +517,9 @@ public class AwsQueryController {
     );
 
     private static final Set<String> REDSHIFT_ACTIONS = Set.of(
-            "CreateCluster"
+            "CreateCluster", "DescribeClusters", "DeleteCluster",
+            "CreateClusterSnapshot", "DescribeClusterSnapshots", "DeleteClusterSnapshot", "RestoreFromClusterSnapshot",
+            "CreateClusterParameterGroup", "DescribeClusterParameterGroups", "DescribeClusterParameters", "DeleteClusterParameterGroup"
     );
 
     private String resolveService(String authorization, String action) {
