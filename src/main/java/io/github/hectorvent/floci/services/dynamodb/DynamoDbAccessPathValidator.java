@@ -174,11 +174,12 @@ final class DynamoDbAccessPathValidator {
 
     private static void validateConditionValueTypes(TableDefinition table, String attribute,
                                                     Expr condition, JsonNode values) {
-        if (values == null) {
-            return;
-        }
         String expectedType = attributeType(table, attribute);
         for (String placeholder : conditionValuePlaceholders(condition)) {
+            if (values == null || !values.has(placeholder)) {
+                throw validationException("Invalid KeyConditionExpression: An expression attribute value used "
+                        + "in expression is not defined; attribute value: " + placeholder);
+            }
             if (!hasAttributeType(values.get(placeholder), expectedType)) {
                 throw validationException(KEY_TYPE_MISMATCH);
             }
@@ -234,15 +235,19 @@ final class DynamoDbAccessPathValidator {
     }
 
     private static String attributeType(TableDefinition table, String attribute) {
-        return table.getAttributeDefinitions().stream()
+        List<AttributeDefinition> definitions = table.getAttributeDefinitions();
+        if (definitions == null) {
+            throw validationException(KEY_TYPE_MISMATCH);
+        }
+        return definitions.stream()
                 .filter(definition -> attribute.equals(definition.getAttributeName()))
                 .map(AttributeDefinition::getAttributeType)
                 .findFirst()
-                .orElse(null);
+                .orElseThrow(() -> validationException(KEY_TYPE_MISMATCH));
     }
 
     private static boolean hasAttributeType(JsonNode value, String expectedType) {
-        return expectedType == null || value != null && value.has(expectedType);
+        return value != null && value.has(expectedType);
     }
 
     private static void validateFilterExpression(DynamoDbAccessPath accessPath,
