@@ -732,20 +732,45 @@ public class DynamoDbJsonHandler {
         }
         Set<String> actual = new HashSet<>();
         exclusiveStartKey.fieldNames().forEachRemaining(actual::add);
-        if (!actual.equals(expected) || hasInvalidKeyType(exclusiveStartKey, table, expected)) {
+        if (!actual.equals(expected) || hasInvalidKeyValue(exclusiveStartKey, table, expected)) {
             throw invalidStartingKey(isScan);
         }
     }
 
-    private boolean hasInvalidKeyType(JsonNode exclusiveStartKey, TableDefinition table,
-                                      Set<String> expected) {
-        return table.getAttributeDefinitions().stream()
-                .filter(definition -> expected.contains(definition.getAttributeName()))
-                .anyMatch(definition -> {
-                    JsonNode value = exclusiveStartKey.get(definition.getAttributeName());
-                    return value == null || !value.isObject() || value.size() != 1
-                            || !value.has(definition.getAttributeType());
-                });
+    private boolean hasInvalidKeyValue(JsonNode exclusiveStartKey, TableDefinition table,
+                                       Set<String> expected) {
+        if (table.getAttributeDefinitions() == null) {
+            return true;
+        }
+        for (String attribute : expected) {
+            String expectedType = table.getAttributeDefinitions().stream()
+                    .filter(definition -> attribute.equals(definition.getAttributeName()))
+                    .map(AttributeDefinition::getAttributeType)
+                    .findFirst()
+                    .orElse(null);
+            if (expectedType == null || hasInvalidScalarValue(exclusiveStartKey.get(attribute), expectedType)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean hasInvalidScalarValue(JsonNode value, String expectedType) {
+        if (value == null || !value.isObject() || value.size() != 1 || !value.has(expectedType)) {
+            return true;
+        }
+        JsonNode payload = value.get(expectedType);
+        if (payload == null || !payload.isTextual() || payload.textValue().isEmpty()) {
+            return true;
+        }
+        if ("N".equals(expectedType)) {
+            DynamoDbNumberUtils.validateAndNormalize(payload.textValue());
+        }
+        if ("B".equals(expectedType)) {
+            return !payload.textValue().matches(
+                    "(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?");
+        }
+        return false;
     }
 
     private AwsException invalidStartingKey(boolean isScan) {
