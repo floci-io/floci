@@ -305,6 +305,37 @@ class EcrServiceTest {
     }
 
     @Test
+    void bareEntryOnSecondCatalogPageStillResolves() throws Exception {
+        // registry:2 caps _catalog pages at 100 entries; a bare entry beyond the
+        // first page must still be found (Greptile P1: catalog pagination).
+        String repositoryName = "probe/paged";
+        String tag = "v1";
+        String digest = "sha256:7777777777777777777777777777777777777777777777777777777777777777";
+        String manifest = """
+                {
+                  "schemaVersion": 2,
+                  "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+                  "config": {"mediaType": "application/vnd.docker.container.image.v1+json", "size": 1, "digest": "sha256:c"},
+                  "layers": []
+                }
+                """;
+
+        try (PaginatedCatalogRegistryServer registry =
+                new PaginatedCatalogRegistryServer(repositoryName, 150)) {
+            when(registryManager.httpClient())
+                    .thenReturn(new RegistryHttpClient("http://localhost:" + registry.port()));
+
+            service.createRepository(repositoryName, null, null, null, null, null, null, REGION);
+            List<ImageIdentifier> ids = service.listImages(repositoryName, null, REGION);
+            assertEquals(1, ids.size());
+            assertEquals(tag, ids.get(0).getImageTag());
+            assertEquals(digest, ids.get(0).getImageDigest());
+            org.junit.jupiter.api.Assertions.assertTrue(registry.sawSecondPageRequest(),
+                    "resolver must follow the Link header to page 2");
+        }
+    }
+
+    @Test
     void untaggedDigestOnlyRepositoryResolvesAndDescribes() throws Exception {
         // A bare-name repo whose only manifest is untagged (digest-addressable):
         // tags/list returns null tags, but the catalog still lists the repo, so
@@ -568,6 +599,94 @@ class EcrServiceTest {
                 exchange.getResponseHeaders().add("Content-Type",
                         "application/vnd.docker.distribution.manifest.v2+json");
                 send(exchange, 200, manifest);
+                return;
+            }
+            exchange.sendResponseHeaders(404, -1);
+            exchange.close();
+        }
+
+        private static void sendJson(HttpExchange exchange, int status, String body) throws IOException {
+            exchange.getResponseHeaders().add("Content-Type", "application/json");
+            send(exchange, status, body);
+        }
+
+        private static void send(HttpExchange exchange, int status, String body) throws IOException {
+            byte[] bytes = body.getBytes();
+            exchange.sendResponseHeaders(status, bytes.length);
+            try (OutputStream out = exchange.getResponseBody()) {
+                out.write(bytes);
+            }
+        }
+
+        @Override
+        public void close() {
+            server.stop(0);
+        }
+    }
+
+    /** Registry whose _catalog spans two pages (Link header); repo lives on page 2. */
+    private static final class PaginatedCatalogRegistryServer implements AutoCloseable {
+        private final HttpServer server;
+        private final String repository;
+        private final String tag;
+        private final String digest;
+        private final List<String> filler;
+        private volatile boolean secondPageRequested;
+
+        private PaginatedCatalogRegistryServer(String repository, int fillerCount) throws IOException {
+            this.repository = repository;
+            this.tag = "v1";
+            this.digest = "sha256:7777777777777777777777777777777777777777777777777777777777777777";
+            List<String> f = new java.util.ArrayList<>();
+            for (int i = 0; i < fillerCount; i++) {
+                f.add(String.format("filler/%03d", i));
+            }
+            this.filler = f;
+            this.server = HttpServer.create(new InetSocketAddress(0), 0);
+            this.server.createContext("/v2/", this::handle);
+            this.server.start();
+        }
+
+        private int port() {
+            return server.getAddress().getPort();
+        }
+
+        private boolean sawSecondPageRequest() {
+            return secondPageRequested;
+        }
+
+        private void handle(HttpExchange exchange) throws IOException {
+            String path = exchange.getRequestURI().getPath();
+            String query = exchange.getRequestURI().getQuery();
+            String method = exchange.getRequestMethod();
+            if ("/v2/".equals(path) && "GET".equals(method)) {
+                send(exchange, 200, "");
+                return;
+            }
+            if ("/v2/_catalog".equals(path) && "GET".equals(method)) {
+                boolean pageTwo = query != null && query.contains("last=");
+                if (pageTwo) {
+                    secondPageRequested = true;
+                    sendJson(exchange, 200, "{\"repositories\":[\"" + repository + "\"]}");
+                } else {
+                    String joined = filler.stream()
+                            .map(r -> "\"" + r + "\"")
+                            .reduce((a, b) -> a + "," + b)
+                            .orElse("");
+                    exchange.getResponseHeaders().add("Link",
+                            "</v2/_catalog?n=100&last=" + filler.get(filler.size() - 1).replace("/", "%2F") + ">; rel=\"next\"");
+                    sendJson(exchange, 200, "{\"repositories\":[" + joined + "]}");
+                }
+                return;
+            }
+            if (path.equals("/v2/" + repository + "/tags/list") && "GET".equals(method)) {
+                sendJson(exchange, 200, "{\"name\":\"" + repository + "\",\"tags\":[\"" + tag + "\"]}");
+                return;
+            }
+            if (path.equals("/v2/" + repository + "/manifests/" + tag) && "HEAD".equals(method)) {
+                exchange.getResponseHeaders().add("Docker-Content-Digest", digest);
+                exchange.sendResponseHeaders(200, -1);
+                exchange.close();
                 return;
             }
             exchange.sendResponseHeaders(404, -1);
