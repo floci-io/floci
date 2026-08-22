@@ -186,6 +186,7 @@ class DynamoDbAccessPathValidationTest {
     }
 
     @Test
+    @SuppressWarnings("deprecation")
     void queryRejectsInvalidCompositeSortKeyConditions() {
         assertValidationException(() -> ddb.query(request -> request
                 .tableName(TABLE)
@@ -206,6 +207,21 @@ class DynamoDbAccessPathValidationTest {
                         ":status", value("open"),
                         ":createdAt", value("2026-01-01"),
                         ":alternate", value("a1")))));
+
+        assertValidationException(() -> ddb.query(request -> request
+                .tableName(TABLE)
+                .indexName("status-index")
+                .keyConditions(Map.of(
+                        "status", condition(ComparisonOperator.EQ, "open"),
+                        "alternate", condition(ComparisonOperator.EQ, "a1")))));
+
+        assertValidationException(() -> ddb.query(request -> request
+                .tableName(TABLE)
+                .indexName("status-index")
+                .keyConditions(Map.of(
+                        "status", condition(ComparisonOperator.EQ, "open"),
+                        "createdAt", condition(ComparisonOperator.GT, "2026-01-01"),
+                        "alternate", condition(ComparisonOperator.EQ, "a1")))));
     }
 
     private static void assertValidationException(org.assertj.core.api.ThrowableAssert.ThrowingCallable call) {
