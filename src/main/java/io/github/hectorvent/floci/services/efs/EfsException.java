@@ -9,6 +9,14 @@ public class EfsException extends AwsException {
         super(errorCode, message, status.getStatusCode());
     }
 
+    public EfsException(Status status, String errorCode, String message, java.util.Map<String, Object> extendedData) {
+        super(errorCode, message, status.getStatusCode(), extendedData);
+    }
+
+    public static EfsException fileSystemAlreadyExists(String token, String fileSystemId) {
+        return new EfsException(Status.CONFLICT, "FileSystemAlreadyExists", "File system with creation token " + token + " already exists.", java.util.Map.of("FileSystemId", fileSystemId));
+    }
+
     public static EfsException fileSystemNotFound(String fileSystemId) {
         return new EfsException(Status.NOT_FOUND, "FileSystemNotFound", "File system " + fileSystemId + " does not exist.");
     }
@@ -20,7 +28,15 @@ public class EfsException extends AwsException {
     public static EfsException mountTargetNotFound(String mountTargetId) {
         return new EfsException(Status.NOT_FOUND, "MountTargetNotFound", "Mount target " + mountTargetId + " does not exist.");
     }
+    
+    public static EfsException mountTargetConflict(String message) {
+        return new EfsException(Status.CONFLICT, "MountTargetConflict", message);
+    }
 
+    public static EfsException accessPointAlreadyExists(String token, String accessPointId) {
+        return new EfsException(Status.CONFLICT, "AccessPointAlreadyExists", "Access point with client token " + token + " already exists.", java.util.Map.of("AccessPointId", accessPointId));
+    }
+    
     public static EfsException accessPointNotFound(String accessPointId) {
         return new EfsException(Status.NOT_FOUND, "AccessPointNotFound", "Access point " + accessPointId + " does not exist.");
     }

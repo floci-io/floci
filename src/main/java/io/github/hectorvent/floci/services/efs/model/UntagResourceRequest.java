@@ -12,6 +12,8 @@ import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 public class UntagResourceRequest {
 
     private String resourceId;
+    
+    @jakarta.ws.rs.QueryParam("tagKeys")
     private List<String> tagKeys;
 
     public String getResourceId() {

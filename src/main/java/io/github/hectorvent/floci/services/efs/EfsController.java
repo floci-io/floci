@@ -54,7 +54,7 @@ public class EfsController {
     public Response updateFileSystem(@Context HttpHeaders headers, @PathParam("FileSystemId") String fileSystemId, UpdateFileSystemRequest request) {
         String region = regionResolver.resolveRegion(headers);
         FileSystem fs = efsService.updateFileSystem(region, fileSystemId, request);
-        return Response.ok(fs).build();
+        return Response.status(202).entity(fs).build();
     }
 
     @DELETE
@@ -91,6 +91,30 @@ public class EfsController {
         String region = regionResolver.resolveRegion(headers);
         efsService.deleteTags(region, fileSystemId, request);
         return Response.noContent().build();
+    }
+
+    @POST
+    @Path("/resource-tags/{ResourceId}")
+    public Response tagResource(@Context HttpHeaders headers, @PathParam("ResourceId") String resourceId, TagResourceRequest request) {
+        String region = regionResolver.resolveRegion(headers);
+        request.setResourceId(resourceId);
+        efsService.tagResource(region, request);
+        return Response.ok().build();
+    }
+
+    @DELETE
+    @Path("/resource-tags/{ResourceId}")
+    public Response untagResource(@Context HttpHeaders headers, @PathParam("ResourceId") String resourceId, @jakarta.ws.rs.BeanParam UntagResourceRequest request) {
+        String region = regionResolver.resolveRegion(headers);
+        efsService.untagResource(region, resourceId, request.getTagKeys());
+        return Response.ok().build();
+    }
+
+    @GET
+    @Path("/resource-tags/{ResourceId}")
+    public Response listTagsForResource(@Context HttpHeaders headers, @PathParam("ResourceId") String resourceId) {
+        String region = regionResolver.resolveRegion(headers);
+        return Response.ok(efsService.listTagsForResource(region, resourceId)).build();
     }
 
     // --- Mount Targets ---
