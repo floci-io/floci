@@ -165,7 +165,7 @@ public class EfsController {
     // --- Policies ---
 
     @PUT
-    @Path("/file-systems/{FileSystemId}/policies")
+    @Path("/file-systems/{FileSystemId}/policy")
     public Response putFileSystemPolicy(@Context HttpHeaders headers, @PathParam("FileSystemId") String fileSystemId, PutFileSystemPolicyRequest request) {
         String region = regionResolver.resolveRegion(headers);
         efsService.putFileSystemPolicy(region, fileSystemId, request.getPolicy());
@@ -176,7 +176,7 @@ public class EfsController {
     }
 
     @GET
-    @Path("/file-systems/{FileSystemId}/policies")
+    @Path("/file-systems/{FileSystemId}/policy")
     public Response describeFileSystemPolicy(@Context HttpHeaders headers, @PathParam("FileSystemId") String fileSystemId) {
         String region = regionResolver.resolveRegion(headers);
         String policy = efsService.getFileSystemPolicy(region, fileSystemId);
@@ -187,7 +187,7 @@ public class EfsController {
     }
 
     @DELETE
-    @Path("/file-systems/{FileSystemId}/policies")
+    @Path("/file-systems/{FileSystemId}/policy")
     public Response deleteFileSystemPolicy(@Context HttpHeaders headers, @PathParam("FileSystemId") String fileSystemId) {
         String region = regionResolver.resolveRegion(headers);
         efsService.deleteFileSystemPolicy(region, fileSystemId);

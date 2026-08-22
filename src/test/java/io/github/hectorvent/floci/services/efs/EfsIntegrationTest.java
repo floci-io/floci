@@ -182,7 +182,7 @@ class EfsIntegrationTest {
                 }
                 """)
         .when()
-            .put("/2015-02-01/file-systems/" + fileSystemId + "/policies")
+            .put("/2015-02-01/file-systems/" + fileSystemId + "/policy")
         .then()
             .statusCode(200)
             .body("Policy", equalTo("{\"Statement\": []}"));
@@ -190,7 +190,7 @@ class EfsIntegrationTest {
         given()
             .contentType("application/json")
         .when()
-            .get("/2015-02-01/file-systems/" + fileSystemId + "/policies")
+            .get("/2015-02-01/file-systems/" + fileSystemId + "/policy")
         .then()
             .statusCode(200)
             .body("Policy", equalTo("{\"Statement\": []}"));
