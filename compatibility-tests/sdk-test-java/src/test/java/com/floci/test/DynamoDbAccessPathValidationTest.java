@@ -85,6 +85,16 @@ class DynamoDbAccessPathValidationTest {
     }
 
     @Test
+    void queryRejectsKeyConditionValuesWithWrongSchemaTypes() {
+        assertValidationException(() -> ddb.query(request -> request
+                .tableName(TABLE)
+                .keyConditionExpression("pk = :pk AND sk > :sk")
+                .expressionAttributeValues(Map.of(
+                        ":pk", value("p1"),
+                        ":sk", numberValue("1")))));
+    }
+
+    @Test
     void acceptsTableKeyConditionsInEitherOrder() {
         var response = ddb.query(request -> request
                 .tableName(TABLE)
@@ -204,6 +214,10 @@ class DynamoDbAccessPathValidationTest {
 
     private static AttributeValue value(String value) {
         return AttributeValue.builder().s(value).build();
+    }
+
+    private static AttributeValue numberValue(String value) {
+        return AttributeValue.builder().n(value).build();
     }
 
     private static Condition condition(ComparisonOperator operator, String attributeValue) {

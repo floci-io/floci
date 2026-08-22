@@ -830,8 +830,8 @@ public class DynamoDbJsonHandler {
 
         TableDefinition queryTable = dynamoDbService.describeTable(tableName, region);
         DynamoDbAccessPath queryAccessPath = DynamoDbAccessPath.resolve(queryTable, indexName);
-        DynamoDbAccessPathValidator.validateQuery(queryAccessPath, keyConditions, keyConditionExpr,
-                filterExpr, queryFilter, exprAttrNames);
+        DynamoDbAccessPathValidator.validateQuery(queryTable, queryAccessPath, keyConditions,
+                keyConditionExpr, filterExpr, queryFilter, exprAttrNames, exprAttrValues);
         DynamoDbAccessPathValidator.validateSelection(queryTable, queryAccessPath, select,
                 projectionExpression, attributesToGet, exprAttrNames);
 
