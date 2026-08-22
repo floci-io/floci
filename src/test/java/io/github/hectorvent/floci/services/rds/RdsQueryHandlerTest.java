@@ -70,6 +70,88 @@ class RdsQueryHandlerTest {
     }
 
     @Test
+    void describeDbInstances_includesStorageEncryptedAndSiblingCreateTimeFields() {
+        // Regression test: AWS always returns these from DescribeDBInstances. Their prior
+        // absence made a Terraform replan see storage_encrypted flip from unset to the
+        // configured value and propose a forced replacement.
+        DbInstance instance = makeInstance("mydb");
+        instance.setStorageEncrypted(true);
+        instance.setDeletionProtection(true);
+        instance.setAutoMinorVersionUpgrade(false);
+        instance.setCopyTagsToSnapshot(true);
+        instance.setBackupRetentionPeriod(7);
+        instance.setPerformanceInsightsEnabled(true);
+        when(service.listDbInstances(null)).thenReturn(List.of(instance));
+
+        Response response = handler.handle("DescribeDBInstances", params());
+
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<StorageEncrypted>true</StorageEncrypted>"), body);
+        assertTrue(body.contains("<DeletionProtection>true</DeletionProtection>"), body);
+        assertTrue(body.contains("<AutoMinorVersionUpgrade>false</AutoMinorVersionUpgrade>"), body);
+        assertTrue(body.contains("<CopyTagsToSnapshot>true</CopyTagsToSnapshot>"), body);
+        assertTrue(body.contains("<BackupRetentionPeriod>7</BackupRetentionPeriod>"), body);
+        assertTrue(body.contains("<PerformanceInsightsEnabled>true</PerformanceInsightsEnabled>"), body);
+    }
+
+    @Test
+    void describeDbInstances_defaultsStorageEncryptedToFalseWhenUnset() {
+        DbInstance instance = makeInstance("mydb");
+        when(service.listDbInstances(null)).thenReturn(List.of(instance));
+
+        Response response = handler.handle("DescribeDBInstances", params());
+
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<StorageEncrypted>false</StorageEncrypted>"), body);
+    }
+
+    @Test
+    void createDbInstance_parsesAndPersistsStorageEncryptedAndSiblingFields() {
+        DbInstance instance = makeInstance("mydb");
+        when(service.createDbInstance(eq("mydb"), eq("postgres"), eq("16.3"),
+                eq(null), eq(null), eq(null), eq("db.t3.micro"),
+                eq(20), eq(false), eq(null), eq(null), eq(null), eq(null), eq(false), eq(false), eq(null),
+                eq(java.util.Map.of()), eq(List.of()), isNull()))
+                .thenReturn(instance);
+        when(service.setCreateTimeInstanceAttributes("mydb", true, true, false, true, 7, true))
+                .thenReturn(instance);
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBInstanceIdentifier", "mydb");
+        p.add("Engine", "postgres");
+        p.add("StorageEncrypted", "true");
+        p.add("DeletionProtection", "true");
+        p.add("AutoMinorVersionUpgrade", "false");
+        p.add("CopyTagsToSnapshot", "true");
+        p.add("BackupRetentionPeriod", "7");
+        p.add("EnablePerformanceInsights", "true");
+        handler.handle("CreateDBInstance", p);
+
+        verify(service).setCreateTimeInstanceAttributes("mydb", true, true, false, true, 7, true);
+    }
+
+    @Test
+    void createDbInstance_defaultsAutoMinorVersionUpgradeAndBackupRetentionWhenOmitted() {
+        // AWS defaults AutoMinorVersionUpgrade to true and BackupRetentionPeriod to 1 when the
+        // request omits them; the other create-time booleans default to false.
+        DbInstance instance = makeInstance("mydb");
+        when(service.createDbInstance(eq("mydb"), eq("postgres"), eq("16.3"),
+                eq(null), eq(null), eq(null), eq("db.t3.micro"),
+                eq(20), eq(false), eq(null), eq(null), eq(null), eq(null), eq(false), eq(false), eq(null),
+                eq(java.util.Map.of()), eq(List.of()), isNull()))
+                .thenReturn(instance);
+        when(service.setCreateTimeInstanceAttributes("mydb", false, false, true, false, 1, false))
+                .thenReturn(instance);
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBInstanceIdentifier", "mydb");
+        p.add("Engine", "postgres");
+        handler.handle("CreateDBInstance", p);
+
+        verify(service).setCreateTimeInstanceAttributes("mydb", false, false, true, false, 1, false);
+    }
+
+    @Test
     void describeDbInstances_reportsDefaultDbParameterGroupWhenUnattached() {
         DbInstance instance = makeInstance("mydb");
         instance.setEngineVersion("16.3");
@@ -278,6 +360,9 @@ class RdsQueryHandlerTest {
                 anyInt(), anyBoolean(), any(), any(), eq("cluster1"), any(), anyBoolean(), anyBoolean(), any(),
                 any(), any(), isNull()))
                 .thenReturn(instance);
+        when(service.setCreateTimeInstanceAttributes(eq("member1"), anyBoolean(), anyBoolean(), anyBoolean(),
+                anyBoolean(), anyInt(), anyBoolean()))
+                .thenReturn(instance);
 
         MultivaluedMap<String, String> p = params();
         p.add("DBInstanceIdentifier", "member1");
@@ -298,6 +383,9 @@ class RdsQueryHandlerTest {
                 eq(null), eq(null), eq(null), eq("db.t3.micro"),
                 eq(20), eq(false), eq(null), eq(null), eq(null), eq(null), eq(false), eq(false), eq(null),
                 eq(java.util.Map.of()), eq(List.of("sg-123", "sg-456")), isNull()))
+                .thenReturn(instance);
+        when(service.setCreateTimeInstanceAttributes(eq("mydb"), anyBoolean(), anyBoolean(), anyBoolean(),
+                anyBoolean(), anyInt(), anyBoolean()))
                 .thenReturn(instance);
 
         MultivaluedMap<String, String> p = params();
@@ -400,6 +488,41 @@ class RdsQueryHandlerTest {
     // ──────────────────────────── DBParameterGroups XML tag ──────────────────────
 
     @Test
+    void createDbParameterGroup_passesTagsAndEchoesArn() {
+        DbParameterGroup group = new DbParameterGroup("pg1", "postgres16", "test group");
+        group.setDbParameterGroupArn("arn:aws:rds:us-east-1:000000000000:pg:pg1");
+        when(service.createDbParameterGroup(eq("pg1"), eq("postgres16"), eq("test group"),
+                eq(java.util.Map.of("Name", "pg1")), isNull()))
+                .thenReturn(group);
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBParameterGroupName", "pg1");
+        p.add("DBParameterGroupFamily", "postgres16");
+        p.add("Description", "test group");
+        p.add("Tags.member.1.Key", "Name");
+        p.add("Tags.member.1.Value", "pg1");
+        Response response = handler.handle("CreateDBParameterGroup", p);
+
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<DBParameterGroupArn>arn:aws:rds:us-east-1:000000000000:pg:pg1</DBParameterGroupArn>"),
+                "Expected DBParameterGroupArn in CreateDBParameterGroup response: " + body);
+        verify(service).createDbParameterGroup("pg1", "postgres16", "test group",
+                java.util.Map.of("Name", "pg1"), null);
+    }
+
+    @Test
+    void describeDbParameterGroups_includesArn() {
+        DbParameterGroup group = new DbParameterGroup("pg1", "postgres15", "test group");
+        group.setDbParameterGroupArn("arn:aws:rds:us-east-1:000000000000:pg:pg1");
+        when(service.listDbParameterGroups(null)).thenReturn(List.of(group));
+
+        Response response = handler.handle("DescribeDBParameterGroups", params());
+
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<DBParameterGroupArn>arn:aws:rds:us-east-1:000000000000:pg:pg1</DBParameterGroupArn>"));
+    }
+
+    @Test
     void describeDbParameterGroups_usesDBParameterGroupTag() {
         DbParameterGroup group = new DbParameterGroup("pg1", "postgres15", "test group");
         when(service.listDbParameterGroups(null)).thenReturn(List.of(group));
@@ -445,6 +568,9 @@ class RdsQueryHandlerTest {
                 eq(20), eq(false), eq(null), eq(null), eq(null), eq(null), eq(false), eq(true),
                 eq("kms-key-1"), eq(java.util.Map.of()), eq(List.of()), isNull()))
                 .thenReturn(instance);
+        when(service.setCreateTimeInstanceAttributes(eq("mydb"), anyBoolean(), anyBoolean(), anyBoolean(),
+                anyBoolean(), anyInt(), anyBoolean()))
+                .thenReturn(instance);
 
         MultivaluedMap<String, String> p = params();
         p.add("DBInstanceIdentifier", "mydb");
@@ -476,6 +602,9 @@ class RdsQueryHandlerTest {
                 eq("admin"), eq("secret"), eq("dbname"), eq("db.t3.micro"),
                 eq(20), eq(false), eq(null), eq("default"), eq(null), eq("ap-northeast-1a"), eq(true),
                 eq(false), eq(null), eq(java.util.Map.of()), eq(List.of()), isNull()))
+                .thenReturn(instance);
+        when(service.setCreateTimeInstanceAttributes(eq("mydb"), anyBoolean(), anyBoolean(), anyBoolean(),
+                anyBoolean(), anyInt(), anyBoolean()))
                 .thenReturn(instance);
 
         MultivaluedMap<String, String> p = params();
