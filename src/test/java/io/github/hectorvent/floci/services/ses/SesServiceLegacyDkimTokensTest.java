@@ -1,23 +1,10 @@
 package io.github.hectorvent.floci.services.ses;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
-import io.github.hectorvent.floci.services.ses.model.AccountSuppressionAttributes;
-import io.github.hectorvent.floci.services.ses.model.AccountVdmAttributes;
-import io.github.hectorvent.floci.services.ses.model.ConfigurationSet;
-import io.github.hectorvent.floci.services.ses.model.ContactList;
-import io.github.hectorvent.floci.services.ses.model.Contact;
-import io.github.hectorvent.floci.services.ses.model.ReceiptRuleSet;
-import io.github.hectorvent.floci.services.ses.model.CustomVerificationEmailTemplate;
-import io.github.hectorvent.floci.services.ses.model.DedicatedIpPool;
-import io.github.hectorvent.floci.services.ses.model.EmailTemplate;
 import io.github.hectorvent.floci.services.ses.model.Identity;
-import io.github.hectorvent.floci.services.ses.model.SentEmail;
-import io.github.hectorvent.floci.services.ses.model.SuppressedDestination;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.time.Clock;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -26,7 +13,6 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.Mockito.mock;
 
 class SesServiceLegacyDkimTokensTest {
 
@@ -37,22 +23,9 @@ class SesServiceLegacyDkimTokensTest {
 
     @BeforeEach
     void setUp() {
-        identityStore = new InMemoryStorage<>();
-        service = new SesService(
-                identityStore,
-                new SesSentEmailService(new InMemoryStorage<String, SentEmail>()),
-                new SesAccountService(new InMemoryStorage<String, Boolean>(), new InMemoryStorage<String, AccountVdmAttributes>()),
-                new SesTemplateService(new InMemoryStorage<String, EmailTemplate>()),
-                new InMemoryStorage<String, ConfigurationSet>(),
-                new SesSuppressionService(new InMemoryStorage<String, SuppressedDestination>(), new InMemoryStorage<String, AccountSuppressionAttributes>()),
-                new SesDedicatedIpService(new InMemoryStorage<String, DedicatedIpPool>()),
-                new SesContactService(new InMemoryStorage<String, ContactList>(), new InMemoryStorage<String, Contact>(), Clock.systemUTC()),
-                new SesPolicyService(new InMemoryStorage<String, String>(), new ObjectMapper()),
-                new SesReceiptRuleService(new InMemoryStorage<String, ReceiptRuleSet>(), Clock.systemUTC()),
-                new SesCvetService(new InMemoryStorage<String, CustomVerificationEmailTemplate>()),
-                mock(SmtpRelay.class),
-                new ObjectMapper(),
-                Clock.systemUTC());
+        SesServiceTestBuilder builder = SesServiceTestBuilder.create();
+        identityStore = builder.identityStore();
+        service = builder.build();
     }
 
     @Test
