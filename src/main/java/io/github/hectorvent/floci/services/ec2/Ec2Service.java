@@ -896,6 +896,18 @@ public class Ec2Service implements ContainerTeardown {
                                     String clientToken, List<Tag> instanceTags,
                                     String userData, String iamInstanceProfileArn,
                                     Boolean associatePublicIp) {
+        return runInstances(region, imageId, instanceType, minCount, maxCount, keyName,
+                securityGroupIds, subnetId, clientToken, instanceTags, userData,
+                iamInstanceProfileArn, associatePublicIp, List.of());
+    }
+
+    public Reservation runInstances(String region, String imageId, String instanceType,
+                                    int minCount, int maxCount, String keyName,
+                                    List<String> securityGroupIds, String subnetId,
+                                    String clientToken, List<Tag> instanceTags,
+                                    String userData, String iamInstanceProfileArn,
+                                    Boolean associatePublicIp,
+                                    List<BlockDeviceMapping> blockDeviceMappings) {
         if (imageId == null || imageId.isBlank()) {
             throw new AwsException("MissingParameter", "The request must contain the parameter ImageId", 400);
         }
@@ -941,6 +953,16 @@ public class Ec2Service implements ContainerTeardown {
         validateArchitectureCompatibility(imageId, effectiveInstanceType);
         int count = Math.min(maxCount, Math.max(minCount, 1));
         String architecture = architectureFor(imageId, effectiveInstanceType);
+        List<BlockDeviceMapping> effectiveBlockDeviceMappings =
+                blockDeviceMappings != null ? blockDeviceMappings : List.of();
+        Image sourceImage = findImageForCapture(region, imageId);
+        String effectiveRootDeviceName = sourceImage != null && sourceImage.getRootDeviceName() != null
+                ? sourceImage.getRootDeviceName() : "/dev/xvda";
+        BlockDeviceMapping rootMapping = effectiveBlockDeviceMappings.stream()
+                .filter(m -> m.getDeviceName() != null && m.getDeviceName().equalsIgnoreCase(effectiveRootDeviceName))
+                .findFirst()
+                .orElse(null);
+        EbsBlockDevice rootEbs = rootMapping != null ? rootMapping.getEbs() : null;
         for (int i = 0; i < count; i++) {
             String instanceId = "i-" + randomHex(17);
             String privateIp = assignPrivateIp(region, finalSubnetId);
@@ -948,6 +970,7 @@ public class Ec2Service implements ContainerTeardown {
             Instance inst = new Instance();
             inst.setInstanceId(instanceId);
             inst.setImageId(imageId);
+            inst.setRootDeviceName(effectiveRootDeviceName);
             inst.setState(InstanceState.pending());
             inst.setInstanceType(effectiveInstanceType);
             inst.setPlacement(new Placement(az));
@@ -991,26 +1014,76 @@ public class Ec2Service implements ContainerTeardown {
             }
             inst.getNetworkInterfaces().add(eni);
 
-            // Root EBS volume
+            // Root EBS volume. BlockDeviceMapping.Ebs fields for the AMI's actual root
+            // device name (resolved above, not assumed to be /dev/xvda) override the
+            // defaults below, matching AWS's own CreateVolume-time behavior.
             String rootVolId = "vol-" + randomHex(17);
             inst.setRootVolumeId(rootVolId);
             Volume rootVol = new Volume();
             rootVol.setVolumeId(rootVolId);
             rootVol.setAvailabilityZone(az);
-            rootVol.setVolumeType(DEFAULT_ROOT_VOLUME_TYPE);
-            rootVol.setSize(DEFAULT_ROOT_VOLUME_SIZE_GIB);
+            String rootVolumeType = rootEbs != null && rootEbs.getVolumeType() != null
+                    ? rootEbs.getVolumeType() : DEFAULT_ROOT_VOLUME_TYPE;
+            rootVol.setVolumeType(rootVolumeType);
+            rootVol.setSize(rootEbs != null && rootEbs.getVolumeSize() != null
+                    ? rootEbs.getVolumeSize() : DEFAULT_ROOT_VOLUME_SIZE_GIB);
+            rootVol.setEncrypted(rootEbs != null && Boolean.TRUE.equals(rootEbs.getEncrypted()));
+            if (rootEbs != null && rootEbs.getIops() != null) {
+                rootVol.setIops(rootEbs.getIops());
+            }
+            // Throughput is a gp3-only attribute; AWS reports 125 MiB/s by default for gp3.
+            if ("gp3".equals(rootVolumeType)) {
+                rootVol.setThroughput(rootEbs != null && rootEbs.getThroughput() != null
+                        ? rootEbs.getThroughput() : 125);
+            } else if (rootEbs != null) {
+                rootVol.setThroughput(rootEbs.getThroughput());
+            }
+            if (rootEbs != null) {
+                rootVol.setSnapshotId(rootEbs.getSnapshotId());
+            }
             rootVol.setState("in-use");
             rootVol.setRegion(region);
             rootVol.setCreateTime(Instant.now());
+            boolean rootDeleteOnTermination = rootEbs == null || rootEbs.getDeleteOnTermination() == null
+                    || rootEbs.getDeleteOnTermination();
+            inst.setRootVolumeDeleteOnTermination(rootDeleteOnTermination);
             VolumeAttachment att = new VolumeAttachment();
             att.setVolumeId(rootVolId);
             att.setInstanceId(instanceId);
             att.setDevice(inst.getRootDeviceName());
             att.setState("attached");
-            att.setDeleteOnTermination(true);
+            att.setDeleteOnTermination(rootDeleteOnTermination);
             att.setAttachTime(Instant.now());
             rootVol.getAttachments().add(att);
             volumes.put(key(region, rootVolId), rootVol);
+
+            // Additional (non-root) EBS block device mappings each get their own volume,
+            // created and attached the same way a standalone CreateVolume + AttachVolume
+            // would. Previously RunInstances dropped every BlockDeviceMapping entry other
+            // than the (hardcoded) root volume, so these never existed at all.
+            for (BlockDeviceMapping mapping : effectiveBlockDeviceMappings) {
+                if (mapping == rootMapping || mapping.getEbs() == null) {
+                    continue;
+                }
+                EbsBlockDevice extraEbs = mapping.getEbs();
+                String extraType = extraEbs.getVolumeType() != null ? extraEbs.getVolumeType() : "gp2";
+                int extraSize = extraEbs.getVolumeSize() != null ? extraEbs.getVolumeSize() : 8;
+                Volume extraVol = createVolume(region, az, extraType, extraSize,
+                        Boolean.TRUE.equals(extraEbs.getEncrypted()),
+                        extraEbs.getIops() != null ? extraEbs.getIops() : 0,
+                        extraEbs.getThroughput(), extraEbs.getSnapshotId(), List.of());
+                VolumeAttachment extraAtt = new VolumeAttachment();
+                extraAtt.setVolumeId(extraVol.getVolumeId());
+                extraAtt.setInstanceId(instanceId);
+                extraAtt.setDevice(mapping.getDeviceName());
+                extraAtt.setState("attached");
+                extraAtt.setDeleteOnTermination(extraEbs.getDeleteOnTermination() == null
+                        || extraEbs.getDeleteOnTermination());
+                extraAtt.setAttachTime(Instant.now());
+                extraVol.getAttachments().add(extraAtt);
+                extraVol.setState("in-use");
+                volumes.put(key(region, extraVol.getVolumeId()), extraVol);
+            }
 
             instances.put(key(region, instanceId), inst);
             reservation.getInstances().add(inst);

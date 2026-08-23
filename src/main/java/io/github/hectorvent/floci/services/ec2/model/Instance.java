@@ -50,6 +50,7 @@ public class Instance {
     private List<Tag> tags = new ArrayList<>();
 
     private String rootVolumeId;
+    private boolean rootVolumeDeleteOnTermination = true;
 
     // NOTE: disableApiStop and disableApiTermination are stored but ModifyInstanceAttribute
     // does not yet wire them through. Terraform reads these via DescribeInstanceAttribute;
@@ -193,6 +194,9 @@ public class Instance {
 
     public String getRootVolumeId() { return rootVolumeId; }
     public void setRootVolumeId(String rootVolumeId) { this.rootVolumeId = rootVolumeId; }
+
+    public boolean isRootVolumeDeleteOnTermination() { return rootVolumeDeleteOnTermination; }
+    public void setRootVolumeDeleteOnTermination(boolean rootVolumeDeleteOnTermination) { this.rootVolumeDeleteOnTermination = rootVolumeDeleteOnTermination; }
 
     public boolean isDisableApiStop() { return disableApiStop; }
     public void setDisableApiStop(boolean disableApiStop) { this.disableApiStop = disableApiStop; }
