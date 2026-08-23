@@ -131,6 +131,35 @@ public class RedshiftOperationsTest {
             .body(containsString("<ClusterIdentifier>cluster-src</ClusterIdentifier>"))
             .body(containsString("<ClusterStatus>available</ClusterStatus>"));
 
+        // 1b. RebootCluster — must preserve data (no Docker volume backs this container)
+        when(containerManager.getContainer(any(), eq("cluster-src")))
+                .thenReturn(java.util.Optional.of(new RedshiftContainerHandle("c1", "cluster-src", "localhost", 5439)));
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "RebootCluster")
+            .formParam("ClusterIdentifier", "cluster-src")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body(containsString("<ClusterIdentifier>cluster-src</ClusterIdentifier>"))
+            .body(containsString("<ClusterStatus>available</ClusterStatus>"));
+
+        // 1c. ModifyCluster
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "ModifyCluster")
+            .formParam("ClusterIdentifier", "cluster-src")
+            .formParam("NodeType", "ra3.xlplus")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<NodeType>ra3.xlplus</NodeType>"));
+
         // 2. CreateClusterSnapshot
         given()
             .contentType("application/x-www-form-urlencoded")

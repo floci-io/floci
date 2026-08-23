@@ -519,6 +519,7 @@ public class AwsQueryController {
     private static final Set<String> REDSHIFT_ACTIONS = Set.of(
             "CreateCluster", "DescribeClusters", "DeleteCluster",
             "CreateClusterSnapshot", "DescribeClusterSnapshots", "DeleteClusterSnapshot", "RestoreFromClusterSnapshot",
+            "ModifyCluster", "RebootCluster",
             "CreateClusterParameterGroup", "DescribeClusterParameterGroups", "DescribeClusterParameters", "DeleteClusterParameterGroup",
             "ModifyClusterParameterGroup",
             "CreateClusterSubnetGroup", "DescribeClusterSubnetGroups", "ModifyClusterSubnetGroup", "DeleteClusterSubnetGroup",

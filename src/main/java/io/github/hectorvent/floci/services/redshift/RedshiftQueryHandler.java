@@ -342,6 +342,41 @@ public class RedshiftQueryHandler {
                     .end("DeleteClusterSubnetGroupResponse")
                     .build();
             return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+        } else if ("ModifyCluster".equals(action)) {
+            String clusterIdentifier = params.getFirst("ClusterIdentifier");
+            String nodeType = params.getFirst("NodeType");
+            Integer numberOfNodes = params.getFirst("NumberOfNodes") != null
+                    ? Integer.valueOf(params.getFirst("NumberOfNodes")) : null;
+            String masterUserPassword = params.getFirst("MasterUserPassword");
+            String clusterParameterGroupName = params.getFirst("ClusterParameterGroupName");
+            List<String> vpcSecurityGroupIds = memberList(params, "VpcSecurityGroupIds");
+            Cluster cluster = service.modifyCluster(clusterIdentifier, nodeType, numberOfNodes,
+                    masterUserPassword, clusterParameterGroupName, vpcSecurityGroupIds);
+            String xml = new XmlBuilder()
+                    .start("ModifyClusterResponse")
+                      .start("ModifyClusterResult")
+                        .raw(buildClusterXml(cluster))
+                      .end("ModifyClusterResult")
+                      .start("ResponseMetadata")
+                        .elem("RequestId", "test-req-id")
+                      .end("ResponseMetadata")
+                    .end("ModifyClusterResponse")
+                    .build();
+            return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+        } else if ("RebootCluster".equals(action)) {
+            String clusterIdentifier = params.getFirst("ClusterIdentifier");
+            Cluster cluster = service.rebootCluster(clusterIdentifier);
+            String xml = new XmlBuilder()
+                    .start("RebootClusterResponse")
+                      .start("RebootClusterResult")
+                        .raw(buildClusterXml(cluster))
+                      .end("RebootClusterResult")
+                      .start("ResponseMetadata")
+                        .elem("RequestId", "test-req-id")
+                      .end("ResponseMetadata")
+                    .end("RebootClusterResponse")
+                    .build();
+            return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
         }
 
         throw new AwsException("InvalidAction", "Action " + action + " is not supported", 400);
