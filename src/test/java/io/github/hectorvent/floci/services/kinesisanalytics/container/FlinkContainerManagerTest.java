@@ -20,6 +20,7 @@ import io.github.hectorvent.floci.services.s3.model.S3Object;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.Mockito;
 
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -156,7 +157,8 @@ class FlinkContainerManagerTest {
 
         FlinkContainerManager manager = new FlinkContainerManager(containerBuilder, lifecycleManager,
                 Mockito.mock(ContainerLogStreamer.class), Mockito.mock(ContainerDetector.class), config,
-                regionResolver, Mockito.mock(S3Service.class), Mockito.mock(FlinkRestClient.class), MAPPER);
+                regionResolver, Mockito.mock(LaunchedContainerAwsEnv.class), Mockito.mock(S3Service.class),
+                Mockito.mock(FlinkRestClient.class), MAPPER);
 
         FlinkApplication app = new FlinkApplication();
         app.setApplicationName("my-app");
