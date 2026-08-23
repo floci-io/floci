@@ -26,6 +26,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class DocDbContainerManagerTest {
@@ -96,6 +97,55 @@ class DocDbContainerManagerTest {
             assertEquals("container-id", handle.getContainerId());
             assertEquals(serverSocket.getLocalPort(), handle.getPort());
             acceptor.join(5000);
+        }
+    }
+
+    @Test
+    void startLabelsContainerWithResourceIdentity() throws IOException {
+        try (ServerSocket serverSocket = new ServerSocket(0)) {
+            Thread acceptor = new Thread(() -> {
+                try (Socket socket = serverSocket.accept()) {
+                    socket.getInputStream().read(new byte[1]);
+                } catch (IOException e) {
+                    LOG.debugv(e, "Acceptor socket closed during test teardown");
+                }
+            });
+            acceptor.setDaemon(true);
+            acceptor.start();
+
+            ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+            when(lifecycleManager.createAndStart(any())).thenReturn(new ContainerLifecycleManager.ContainerInfo(
+                    "container-id", Map.of(27017,
+                            new ContainerLifecycleManager.EndpointInfo(
+                                    "127.0.0.1", serverSocket.getLocalPort()))));
+
+            ContainerBuilder containerBuilder = mock(ContainerBuilder.class);
+            ContainerBuilder.Builder builder = mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
+            when(containerBuilder.newContainer(anyString())).thenReturn(builder);
+            when(builder.build()).thenReturn(mock(ContainerSpec.class));
+
+            ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
+            lenient().when(logStreamer.generateLogStreamName(any())).thenReturn("log-stream");
+
+            EmulatorConfig config = mock(EmulatorConfig.class);
+            EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
+            EmulatorConfig.DocDbServiceConfig docdb = mock(EmulatorConfig.DocDbServiceConfig.class);
+            when(config.services()).thenReturn(services);
+            when(services.docdb()).thenReturn(docdb);
+            when(docdb.dockerNetwork()).thenReturn(Optional.empty());
+
+            DocDbContainerManager manager = new DocDbContainerManager(containerBuilder, lifecycleManager,
+                    logStreamer, mock(ContainerDetector.class), config,
+                    new RegionResolver("us-east-1", "000000000000"));
+
+            manager.start("cluster1", "mongo:7.0", "admin", "secret");
+
+            verify(builder).withLabels(Map.of(
+                    "io.floci", "aws",
+                    "io.floci.service", "docdb",
+                    "io.floci.resource-id", "cluster1",
+                    "io.floci.account", "000000000000",
+                    "io.floci.region", "us-east-1"));
         }
     }
 
