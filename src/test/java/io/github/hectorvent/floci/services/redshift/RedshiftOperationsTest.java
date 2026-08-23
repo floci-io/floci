@@ -219,6 +219,60 @@ public class RedshiftOperationsTest {
     }
 
     @Test
+    @Order(4)
+    void testClusterSubnetGroupLifecycle() {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "CreateClusterSubnetGroup")
+            .formParam("ClusterSubnetGroupName", "subnet-group-1")
+            .formParam("Description", "Test subnet group")
+            .formParam("SubnetIds.member.1", "subnet-aaa")
+            .formParam("SubnetIds.member.2", "subnet-bbb")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body(containsString("<ClusterSubnetGroupName>subnet-group-1</ClusterSubnetGroupName>"))
+            .body(containsString("<SubnetIdentifier>subnet-aaa</SubnetIdentifier>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "DescribeClusterSubnetGroups")
+            .formParam("ClusterSubnetGroupName", "subnet-group-1")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<ClusterSubnetGroupName>subnet-group-1</ClusterSubnetGroupName>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "ModifyClusterSubnetGroup")
+            .formParam("ClusterSubnetGroupName", "subnet-group-1")
+            .formParam("Description", "Updated")
+            .formParam("SubnetIds.member.1", "subnet-ccc")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<SubnetIdentifier>subnet-ccc</SubnetIdentifier>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "DeleteClusterSubnetGroup")
+            .formParam("ClusterSubnetGroupName", "subnet-group-1")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
     @Order(3)
     void testTagLifecycle() {
         when(containerManager.start(any(), eq("cluster-tags"), any(), any()))

@@ -521,6 +521,7 @@ public class AwsQueryController {
             "CreateClusterSnapshot", "DescribeClusterSnapshots", "DeleteClusterSnapshot", "RestoreFromClusterSnapshot",
             "CreateClusterParameterGroup", "DescribeClusterParameterGroups", "DescribeClusterParameters", "DeleteClusterParameterGroup",
             "ModifyClusterParameterGroup",
+            "CreateClusterSubnetGroup", "DescribeClusterSubnetGroups", "ModifyClusterSubnetGroup", "DeleteClusterSubnetGroup",
             "CreateTags", "DeleteTags", "DescribeTags"
     );
 

@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
 import io.github.hectorvent.floci.services.redshift.model.ClusterParameterGroup;
+import io.github.hectorvent.floci.services.redshift.model.ClusterSubnetGroup;
 import io.github.hectorvent.floci.services.redshift.model.Parameter;
 import io.github.hectorvent.floci.services.redshift.model.Snapshot;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -276,6 +277,68 @@ public class RedshiftQueryHandler {
                     .end("DescribeTagsResponse")
                     .build();
             return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+        } else if ("CreateClusterSubnetGroup".equals(action)) {
+            String name = params.getFirst("ClusterSubnetGroupName");
+            String description = params.getFirst("Description");
+            List<String> subnetIds = memberList(params, "SubnetIds");
+            ClusterSubnetGroup group = service.createClusterSubnetGroup(name, description, null, subnetIds);
+            String xml = new XmlBuilder()
+                    .start("CreateClusterSubnetGroupResponse")
+                      .start("CreateClusterSubnetGroupResult")
+                        .raw(buildClusterSubnetGroupXml(group))
+                      .end("CreateClusterSubnetGroupResult")
+                      .start("ResponseMetadata")
+                        .elem("RequestId", "test-req-id")
+                      .end("ResponseMetadata")
+                    .end("CreateClusterSubnetGroupResponse")
+                    .build();
+            return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+        } else if ("DescribeClusterSubnetGroups".equals(action)) {
+            String name = params.getFirst("ClusterSubnetGroupName");
+            List<ClusterSubnetGroup> groups = service.describeClusterSubnetGroups(name);
+            XmlBuilder xmlBuilder = new XmlBuilder()
+                    .start("DescribeClusterSubnetGroupsResponse")
+                      .start("DescribeClusterSubnetGroupsResult")
+                        .start("ClusterSubnetGroups");
+            for (ClusterSubnetGroup group : groups) {
+                xmlBuilder.raw(buildClusterSubnetGroupXml(group));
+            }
+            String xml = xmlBuilder
+                        .end("ClusterSubnetGroups")
+                      .end("DescribeClusterSubnetGroupsResult")
+                      .start("ResponseMetadata")
+                        .elem("RequestId", "test-req-id")
+                      .end("ResponseMetadata")
+                    .end("DescribeClusterSubnetGroupsResponse")
+                    .build();
+            return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+        } else if ("ModifyClusterSubnetGroup".equals(action)) {
+            String name = params.getFirst("ClusterSubnetGroupName");
+            String description = params.getFirst("Description");
+            List<String> subnetIds = memberList(params, "SubnetIds");
+            ClusterSubnetGroup group = service.modifyClusterSubnetGroup(name, description, subnetIds);
+            String xml = new XmlBuilder()
+                    .start("ModifyClusterSubnetGroupResponse")
+                      .start("ModifyClusterSubnetGroupResult")
+                        .raw(buildClusterSubnetGroupXml(group))
+                      .end("ModifyClusterSubnetGroupResult")
+                      .start("ResponseMetadata")
+                        .elem("RequestId", "test-req-id")
+                      .end("ResponseMetadata")
+                    .end("ModifyClusterSubnetGroupResponse")
+                    .build();
+            return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+        } else if ("DeleteClusterSubnetGroup".equals(action)) {
+            String name = params.getFirst("ClusterSubnetGroupName");
+            service.deleteClusterSubnetGroup(name);
+            String xml = new XmlBuilder()
+                    .start("DeleteClusterSubnetGroupResponse")
+                      .start("ResponseMetadata")
+                        .elem("RequestId", "test-req-id")
+                      .end("ResponseMetadata")
+                    .end("DeleteClusterSubnetGroupResponse")
+                    .build();
+            return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
         }
 
         throw new AwsException("InvalidAction", "Action " + action + " is not supported", 400);
@@ -319,6 +382,19 @@ public class RedshiftQueryHandler {
             .elem("Description", group.getDescription());
         
         return builder.end("ClusterParameterGroup").build();
+    }
+
+    private String buildClusterSubnetGroupXml(ClusterSubnetGroup group) {
+        XmlBuilder builder = new XmlBuilder()
+            .start("ClusterSubnetGroup")
+            .elem("ClusterSubnetGroupName", group.getClusterSubnetGroupName())
+            .elem("Description", group.getDescription())
+            .elem("VpcId", group.getVpcId())
+            .start("Subnets");
+        for (String subnetId : group.getSubnetIds()) {
+            builder.start("Subnet").elem("SubnetIdentifier", subnetId).end("Subnet");
+        }
+        return builder.end("Subnets").end("ClusterSubnetGroup").build();
     }
 
     private String buildParameterXml(Parameter param) {
