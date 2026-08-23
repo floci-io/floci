@@ -129,6 +129,47 @@ class RdsServiceTest {
     }
 
     @Test
+    void createDbInstanceDefaultsMatchAwsCreateDbInstanceDefaults() {
+        // AWS always returns these from DescribeDBInstances even when CreateDBInstance omitted
+        // them; the defaults below must match what AWS itself defaults to.
+        DbInstance instance = rdsService.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+
+        assertFalse(instance.isStorageEncrypted());
+        assertFalse(instance.isDeletionProtection());
+        assertTrue(instance.isAutoMinorVersionUpgrade());
+        assertFalse(instance.isCopyTagsToSnapshot());
+        assertEquals(1, instance.getBackupRetentionPeriod());
+        assertFalse(instance.isPerformanceInsightsEnabled());
+    }
+
+    @Test
+    void setCreateTimeInstanceAttributesPersistsRequestedValues() {
+        // Regression test: DescribeDBInstances used to omit StorageEncrypted (and its sibling
+        // create-time-only fields) entirely, which made a Terraform replan see it flip from
+        // unset to the configured value and propose a forced replacement.
+        DbInstance instance = rdsService.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+
+        DbInstance updated = rdsService.setCreateTimeInstanceAttributes("mydb",
+                true, true, false, true, 7, true);
+
+        assertTrue(updated.isStorageEncrypted());
+        assertTrue(updated.isDeletionProtection());
+        assertFalse(updated.isAutoMinorVersionUpgrade());
+        assertTrue(updated.isCopyTagsToSnapshot());
+        assertEquals(7, updated.getBackupRetentionPeriod());
+        assertTrue(updated.isPerformanceInsightsEnabled());
+
+        // And it must actually be persisted, not just returned transiently.
+        DbInstance reread = rdsService.getDbInstance("mydb");
+        assertTrue(reread.isStorageEncrypted());
+        assertEquals(7, reread.getBackupRetentionPeriod());
+    }
+
+    @Test
     void createAndModifyDbInstancePersistVpcSecurityGroups() {
         DbInstance instance = rdsService.createDbInstance("mydb", "postgres", "13",
                 "admin", "password", "dbname", "db.t3.micro",
@@ -516,6 +557,43 @@ class RdsServiceTest {
         rdsService.addTagsToResource(cluster.getDbClusterArn(), java.util.Map.of("env", "test"));
         assertEquals(java.util.Map.of("env", "test"),
                 rdsService.listTagsForResource(cluster.getDbClusterArn()));
+    }
+
+    @Test
+    void createDbParameterGroupReturnsArn() {
+        // AWS's DBParameterGroup always has an ARN (used by DescribeDBParameterGroups,
+        // and needed to address the group with AddTagsToResource/ListTagsForResource).
+        DbParameterGroup group = rdsService.createDbParameterGroup("repro-pg1", "postgres16", "test group");
+
+        assertEquals("arn:aws:rds:us-east-1:123456789012:pg:repro-pg1", group.getDbParameterGroupArn());
+    }
+
+    @Test
+    void createDbParameterGroupWithGeneratedNamePrefixStyleNameStillGetsAnArn() {
+        // Mirrors Terraform's aws_db_parameter_group name_prefix path: the caller supplies an
+        // already-generated (suffixed) name, not a fixed constant. The ARN must key off whatever
+        // name was actually given, not assume a caller-supplied literal.
+        String generatedName = "corpus-rds-complete-postgres20260822175959123400000001";
+        DbParameterGroup group = rdsService.createDbParameterGroup(generatedName, "postgres16", "generated name");
+
+        assertEquals("arn:aws:rds:us-east-1:123456789012:pg:" + generatedName, group.getDbParameterGroupArn());
+    }
+
+    @Test
+    void dbParameterGroupTagsRoundTripByArn() {
+        DbParameterGroup group = rdsService.createDbParameterGroup("pg-tags", "postgres16", "test group",
+                java.util.Map.of("Name", "pg-tags"), "us-east-1");
+
+        assertEquals(java.util.Map.of("Name", "pg-tags"),
+                rdsService.listTagsForResource(group.getDbParameterGroupArn()));
+
+        rdsService.addTagsToResource(group.getDbParameterGroupArn(), java.util.Map.of("env", "test"));
+        assertEquals(java.util.Map.of("Name", "pg-tags", "env", "test"),
+                rdsService.listTagsForResource(group.getDbParameterGroupArn()));
+
+        rdsService.removeTagsFromResource(group.getDbParameterGroupArn(), java.util.List.of("Name"));
+        assertEquals(java.util.Map.of("env", "test"),
+                rdsService.listTagsForResource(group.getDbParameterGroupArn()));
     }
 
     @Test
@@ -1053,6 +1131,20 @@ class RdsServiceTest {
                 List.of("subnet-default-a", "subnet-default-b"));
 
         assertEquals("arn:aws:rds:us-east-1:123456789012:subgrp:my-subnet-group", group.getDbSubnetGroupArn());
+    }
+
+    @Test
+    void createDbSubnetGroupPersistsTagsFromCreateRequest() {
+        // AWS always echoes back the Tags a CreateDBSubnetGroup request set (same as every
+        // other RDS resource) - see lex00/floci#105. Tags written later via AddTagsToResource
+        // on the subgrp: ARN already worked; only the create-time Tags member was dropped.
+        DbSubnetGroup group = rdsService.createDbSubnetGroup("my-subnet-group", "desc",
+                List.of("subnet-default-a", "subnet-default-b"),
+                Map.of("Name", "my-subnet-group"), "us-east-1");
+
+        assertEquals(Map.of("Name", "my-subnet-group"), group.getTags());
+        assertEquals(Map.of("Name", "my-subnet-group"),
+                rdsService.listTagsForResource(group.getDbSubnetGroupArn()));
     }
 
     @Test

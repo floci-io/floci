@@ -75,6 +75,7 @@ import io.github.hectorvent.floci.services.ec2.model.SecurityGroupRule;
 import io.github.hectorvent.floci.services.ec2.model.Snapshot;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
+import io.github.hectorvent.floci.services.ec2.model.PrefixListIdReference;
 import io.github.hectorvent.floci.services.ec2.model.UserIdGroupPair;
 import io.github.hectorvent.floci.services.ec2.model.Volume;
 import io.github.hectorvent.floci.services.ec2.model.VolumeAttachment;
@@ -82,6 +83,7 @@ import io.github.hectorvent.floci.services.ec2.model.Vpc;
 import io.github.hectorvent.floci.services.ec2.model.VpcAttachment;
 import io.github.hectorvent.floci.services.ec2.model.VpcCidrBlockAssociation;
 import io.github.hectorvent.floci.services.ec2.model.VpcEndpoint;
+import io.github.hectorvent.floci.services.ec2.model.VpcEndpointSubnetConfiguration;
 import io.github.hectorvent.floci.services.ec2.model.VpnGateway;
 import jakarta.annotation.PostConstruct;
 import io.github.hectorvent.floci.services.ec2.model.LaunchSpecification;
@@ -408,12 +410,18 @@ public class Ec2Service implements ContainerTeardown {
     }
 
     private NetworkAclEntry naclEntry(int ruleNumber, String protocol, String action, boolean egress, String cidr) {
+        return naclEntry(ruleNumber, protocol, action, egress, cidr, null);
+    }
+
+    private NetworkAclEntry naclEntry(int ruleNumber, String protocol, String action, boolean egress, String cidr,
+                                       String ipv6Cidr) {
         NetworkAclEntry entry = new NetworkAclEntry();
         entry.setRuleNumber(ruleNumber);
         entry.setProtocol(protocol);
         entry.setRuleAction(action);
         entry.setEgress(egress);
         entry.setCidrBlock(cidr);
+        entry.setIpv6CidrBlock(ipv6Cidr);
         return entry;
     }
 
@@ -493,8 +501,8 @@ public class Ec2Service implements ContainerTeardown {
     }
 
     public void createNetworkAclEntry(String region, String networkAclId, int ruleNumber, String protocol,
-                                      String ruleAction, boolean egress, String cidrBlock, Integer from, Integer to,
-                                      boolean replace) {
+                                      String ruleAction, boolean egress, String cidrBlock, String ipv6CidrBlock,
+                                      Integer from, Integer to, boolean replace) {
         synchronized (lockFor(key(region, networkAclId))) {
             NetworkAcl acl = getRequiredNetworkAcl(region, networkAclId);
             boolean exists = acl.getEntries().stream()
@@ -505,7 +513,7 @@ public class Ec2Service implements ContainerTeardown {
             }
             List<NetworkAclEntry> next = new ArrayList<>(acl.getEntries());
             next.removeIf(e -> e.getRuleNumber() == ruleNumber && e.isEgress() == egress);
-            NetworkAclEntry entry = naclEntry(ruleNumber, protocol, ruleAction, egress, cidrBlock);
+            NetworkAclEntry entry = naclEntry(ruleNumber, protocol, ruleAction, egress, cidrBlock, ipv6CidrBlock);
             entry.setPortRangeFrom(from);
             entry.setPortRangeTo(to);
             next.add(entry);
@@ -895,6 +903,18 @@ public class Ec2Service implements ContainerTeardown {
                                     String clientToken, List<Tag> instanceTags,
                                     String userData, String iamInstanceProfileArn,
                                     Boolean associatePublicIp) {
+        return runInstances(region, imageId, instanceType, minCount, maxCount, keyName,
+                securityGroupIds, subnetId, clientToken, instanceTags, userData,
+                iamInstanceProfileArn, associatePublicIp, List.of());
+    }
+
+    public Reservation runInstances(String region, String imageId, String instanceType,
+                                    int minCount, int maxCount, String keyName,
+                                    List<String> securityGroupIds, String subnetId,
+                                    String clientToken, List<Tag> instanceTags,
+                                    String userData, String iamInstanceProfileArn,
+                                    Boolean associatePublicIp,
+                                    List<BlockDeviceMapping> blockDeviceMappings) {
         if (imageId == null || imageId.isBlank()) {
             throw new AwsException("MissingParameter", "The request must contain the parameter ImageId", 400);
         }
@@ -940,6 +960,16 @@ public class Ec2Service implements ContainerTeardown {
         validateArchitectureCompatibility(imageId, effectiveInstanceType);
         int count = Math.min(maxCount, Math.max(minCount, 1));
         String architecture = architectureFor(imageId, effectiveInstanceType);
+        List<BlockDeviceMapping> effectiveBlockDeviceMappings =
+                blockDeviceMappings != null ? blockDeviceMappings : List.of();
+        Image sourceImage = findImageForCapture(region, imageId);
+        String effectiveRootDeviceName = sourceImage != null && sourceImage.getRootDeviceName() != null
+                ? sourceImage.getRootDeviceName() : "/dev/xvda";
+        BlockDeviceMapping rootMapping = effectiveBlockDeviceMappings.stream()
+                .filter(m -> m.getDeviceName() != null && m.getDeviceName().equalsIgnoreCase(effectiveRootDeviceName))
+                .findFirst()
+                .orElse(null);
+        EbsBlockDevice rootEbs = rootMapping != null ? rootMapping.getEbs() : null;
         for (int i = 0; i < count; i++) {
             String instanceId = "i-" + randomHex(17);
             String privateIp = assignPrivateIp(region, finalSubnetId);
@@ -947,6 +977,7 @@ public class Ec2Service implements ContainerTeardown {
             Instance inst = new Instance();
             inst.setInstanceId(instanceId);
             inst.setImageId(imageId);
+            inst.setRootDeviceName(effectiveRootDeviceName);
             inst.setState(InstanceState.pending());
             inst.setInstanceType(effectiveInstanceType);
             inst.setPlacement(new Placement(az));
@@ -990,26 +1021,76 @@ public class Ec2Service implements ContainerTeardown {
             }
             inst.getNetworkInterfaces().add(eni);
 
-            // Root EBS volume
+            // Root EBS volume. BlockDeviceMapping.Ebs fields for the AMI's actual root
+            // device name (resolved above, not assumed to be /dev/xvda) override the
+            // defaults below, matching AWS's own CreateVolume-time behavior.
             String rootVolId = "vol-" + randomHex(17);
             inst.setRootVolumeId(rootVolId);
             Volume rootVol = new Volume();
             rootVol.setVolumeId(rootVolId);
             rootVol.setAvailabilityZone(az);
-            rootVol.setVolumeType(DEFAULT_ROOT_VOLUME_TYPE);
-            rootVol.setSize(DEFAULT_ROOT_VOLUME_SIZE_GIB);
+            String rootVolumeType = rootEbs != null && rootEbs.getVolumeType() != null
+                    ? rootEbs.getVolumeType() : DEFAULT_ROOT_VOLUME_TYPE;
+            rootVol.setVolumeType(rootVolumeType);
+            rootVol.setSize(rootEbs != null && rootEbs.getVolumeSize() != null
+                    ? rootEbs.getVolumeSize() : DEFAULT_ROOT_VOLUME_SIZE_GIB);
+            rootVol.setEncrypted(rootEbs != null && Boolean.TRUE.equals(rootEbs.getEncrypted()));
+            if (rootEbs != null && rootEbs.getIops() != null) {
+                rootVol.setIops(rootEbs.getIops());
+            }
+            // Throughput is a gp3-only attribute; AWS reports 125 MiB/s by default for gp3.
+            if ("gp3".equals(rootVolumeType)) {
+                rootVol.setThroughput(rootEbs != null && rootEbs.getThroughput() != null
+                        ? rootEbs.getThroughput() : 125);
+            } else if (rootEbs != null) {
+                rootVol.setThroughput(rootEbs.getThroughput());
+            }
+            if (rootEbs != null) {
+                rootVol.setSnapshotId(rootEbs.getSnapshotId());
+            }
             rootVol.setState("in-use");
             rootVol.setRegion(region);
             rootVol.setCreateTime(Instant.now());
+            boolean rootDeleteOnTermination = rootEbs == null || rootEbs.getDeleteOnTermination() == null
+                    || rootEbs.getDeleteOnTermination();
+            inst.setRootVolumeDeleteOnTermination(rootDeleteOnTermination);
             VolumeAttachment att = new VolumeAttachment();
             att.setVolumeId(rootVolId);
             att.setInstanceId(instanceId);
             att.setDevice(inst.getRootDeviceName());
             att.setState("attached");
-            att.setDeleteOnTermination(true);
+            att.setDeleteOnTermination(rootDeleteOnTermination);
             att.setAttachTime(Instant.now());
             rootVol.getAttachments().add(att);
             volumes.put(key(region, rootVolId), rootVol);
+
+            // Additional (non-root) EBS block device mappings each get their own volume,
+            // created and attached the same way a standalone CreateVolume + AttachVolume
+            // would. Previously RunInstances dropped every BlockDeviceMapping entry other
+            // than the (hardcoded) root volume, so these never existed at all.
+            for (BlockDeviceMapping mapping : effectiveBlockDeviceMappings) {
+                if (mapping == rootMapping || mapping.getEbs() == null) {
+                    continue;
+                }
+                EbsBlockDevice extraEbs = mapping.getEbs();
+                String extraType = extraEbs.getVolumeType() != null ? extraEbs.getVolumeType() : "gp2";
+                int extraSize = extraEbs.getVolumeSize() != null ? extraEbs.getVolumeSize() : 8;
+                Volume extraVol = createVolume(region, az, extraType, extraSize,
+                        Boolean.TRUE.equals(extraEbs.getEncrypted()),
+                        extraEbs.getIops() != null ? extraEbs.getIops() : 0,
+                        extraEbs.getThroughput(), extraEbs.getSnapshotId(), List.of());
+                VolumeAttachment extraAtt = new VolumeAttachment();
+                extraAtt.setVolumeId(extraVol.getVolumeId());
+                extraAtt.setInstanceId(instanceId);
+                extraAtt.setDevice(mapping.getDeviceName());
+                extraAtt.setState("attached");
+                extraAtt.setDeleteOnTermination(extraEbs.getDeleteOnTermination() == null
+                        || extraEbs.getDeleteOnTermination());
+                extraAtt.setAttachTime(Instant.now());
+                extraVol.getAttachments().add(extraAtt);
+                extraVol.setState("in-use");
+                volumes.put(key(region, extraVol.getVolumeId()), extraVol);
+            }
 
             instances.put(key(region, instanceId), inst);
             reservation.getInstances().add(inst);
@@ -1588,12 +1669,25 @@ public class Ec2Service implements ContainerTeardown {
                                          List<String> routeTableIds, List<String> subnetIds,
                                          List<String> securityGroupIds, Boolean privateDnsEnabled,
                                          String policyDocument, List<Tag> endpointTags) {
+        return createVpcEndpoint(region, vpcId, serviceName, endpointType, routeTableIds, subnetIds,
+                securityGroupIds, privateDnsEnabled, policyDocument, endpointTags, List.of());
+    }
+
+    public VpcEndpoint createVpcEndpoint(String region, String vpcId, String serviceName, String endpointType,
+                                         List<String> routeTableIds, List<String> subnetIds,
+                                         List<String> securityGroupIds, Boolean privateDnsEnabled,
+                                         String policyDocument, List<Tag> endpointTags,
+                                         List<VpcEndpointSubnetConfiguration> subnetConfigurations) {
         ensureDefaultResources(region);
         getRequiredVpc(region, vpcId);
         for (String routeTableId : routeTableIds) {
             getRequiredRouteTable(region, routeTableId);
         }
-        for (String subnetId : subnetIds) {
+        // A caller may name a subnet only through SubnetConfiguration and omit the flat SubnetId
+        // list entirely; AWS accepts either form.
+        List<String> effectiveSubnetIds = !subnetIds.isEmpty() ? subnetIds
+                : subnetConfigurations.stream().map(VpcEndpointSubnetConfiguration::getSubnetId).toList();
+        for (String subnetId : effectiveSubnetIds) {
             requireSubnet(region, subnetId);
         }
         for (String securityGroupId : securityGroupIds) {
@@ -1610,8 +1704,9 @@ public class Ec2Service implements ContainerTeardown {
         endpoint.setCreationTimestamp(Instant.now());
         endpoint.setRegion(region);
         endpoint.setRouteTableIds(new ArrayList<>(routeTableIds));
-        endpoint.setSubnetIds(new ArrayList<>(subnetIds));
+        endpoint.setSubnetIds(new ArrayList<>(effectiveSubnetIds));
         endpoint.setSecurityGroupIds(new ArrayList<>(securityGroupIds));
+        endpoint.setSubnetConfigurations(new ArrayList<>(subnetConfigurations));
         endpoint.setPolicyDocument(policyDocument != null && !policyDocument.isBlank()
                 ? policyDocument : VpcEndpoint.DEFAULT_POLICY_DOCUMENT);
         endpoint.setOwnerId(accountId);
@@ -1777,7 +1872,7 @@ public class Ec2Service implements ContainerTeardown {
                 ni.setAvailabilityZone(subnet.getAvailabilityZone());
                 ni.setDescription("VPC Endpoint Interface " + endpoint.getVpcEndpointId());
                 ni.setInterfaceType("vpc_endpoint");
-                ni.setPrivateIpAddress(endpointPrivateIp(subnet, endpoint.getVpcEndpointId()));
+                ni.setPrivateIpAddress(endpointPrivateIp(subnet, endpoint, subnetId));
                 ni.setStatus("in-use");
                 ni.setOwnerId(accountId);
                 ni.setGroups(endpoint.getSecurityGroupIds().stream()
@@ -1806,12 +1901,23 @@ public class Ec2Service implements ContainerTeardown {
         return "eni-" + hex.substring(0, 17);
     }
 
-    /** Stable host address near the top of the subnet range, clear of the instance counter (starts at 10). */
-    private static String endpointPrivateIp(Subnet subnet, String endpointId) {
+    /**
+     * The ENI's private IP for one of the endpoint's subnets: the address the caller pinned via
+     * {@code CreateVpcEndpoint}'s {@code SubnetConfiguration} for that subnet, if any, else a
+     * stable host address near the top of the subnet range, clear of the instance counter (starts
+     * at 10). A pinned address must win here and never fall back to the synthesized one, or a
+     * caller who set it explicitly sees it change out from under them on every describe.
+     */
+    private static String endpointPrivateIp(Subnet subnet, VpcEndpoint endpoint, String subnetId) {
+        for (VpcEndpointSubnetConfiguration config : endpoint.getSubnetConfigurations()) {
+            if (subnetId.equals(config.getSubnetId()) && config.getIpv4() != null && !config.getIpv4().isBlank()) {
+                return config.getIpv4();
+            }
+        }
         String cidr = subnet.getCidrBlock();
         String baseIp = cidr != null ? cidr.split("/")[0] : "172.31.0.0";
         String[] parts = baseIp.split("\\.");
-        int host = 200 + Math.floorMod(endpointId.hashCode(), 50);
+        int host = 200 + Math.floorMod(endpoint.getVpcEndpointId().hashCode(), 50);
         return parts[0] + "." + parts[1] + "." + parts[2] + "." + host;
     }
 
@@ -2039,6 +2145,13 @@ public class Ec2Service implements ContainerTeardown {
                     atoms.add(atom);
                 }
             }
+            if (perm.getPrefixListIds() != null) {
+                for (PrefixListIdReference ref : perm.getPrefixListIds()) {
+                    IpPermission atom = copyPorts(perm);
+                    atom.getPrefixListIds().add(ref);
+                    atoms.add(atom);
+                }
+            }
             if (atoms.size() == before) {
                 atoms.add(copyPorts(perm));
             }
@@ -2057,6 +2170,7 @@ public class Ec2Service implements ContainerTeardown {
             group.getIpRanges().addAll(atom.getIpRanges());
             group.getIpv6Ranges().addAll(atom.getIpv6Ranges());
             group.getUserIdGroupPairs().addAll(atom.getUserIdGroupPairs());
+            group.getPrefixListIds().addAll(atom.getPrefixListIds());
         }
         return new ArrayList<>(byPorts.values());
     }
@@ -2135,6 +2249,9 @@ public class Ec2Service implements ContainerTeardown {
             UserIdGroupPair pair = atom.getUserIdGroupPairs().get(0);
             return "sg:" + pair.getUserId() + "/" + (pair.getGroupId() != null ? pair.getGroupId() : pair.getGroupName());
         }
+        if (!atom.getPrefixListIds().isEmpty()) {
+            return "pl:" + atom.getPrefixListIds().get(0).getPrefixListId();
+        }
         return "none";
     }
 
@@ -2146,6 +2263,8 @@ public class Ec2Service implements ContainerTeardown {
             source = "cidr6:" + rule.getCidrIpv6();
         } else if (rule.getReferencedGroupInfo() != null) {
             source = "sg:" + rule.getReferencedGroupInfo().getUserId() + "/" + rule.getReferencedGroupInfo().getGroupId();
+        } else if (rule.getPrefixListId() != null) {
+            source = "pl:" + rule.getPrefixListId();
         } else {
             source = "none";
         }
@@ -2199,6 +2318,14 @@ public class Ec2Service implements ContainerTeardown {
                 ref.setUserId(pair.getUserId());
                 rule.setReferencedGroupInfo(ref);
                 rule.setDescription(pair.getDescription());
+                rules.add(rule);
+            }
+        }
+        if (perm.getPrefixListIds() != null) {
+            for (PrefixListIdReference ref : perm.getPrefixListIds()) {
+                SecurityGroupRule rule = newRule(groupId, perm, egress);
+                rule.setPrefixListId(ref.getPrefixListId());
+                rule.setDescription(ref.getDescription());
                 rules.add(rule);
             }
         }
@@ -4269,12 +4396,27 @@ public class Ec2Service implements ContainerTeardown {
             };
         }
         if (resource instanceof Volume vol) {
+            // #103 follow-up: attachment.* was previously unhandled and fell through to the
+            // `default -> true` catch-all below, so DescribeVolumes --filters
+            // attachment.instance-id/attachment.device matched every volume in the region
+            // instead of the one actually attached. Volumes[0] in the CLI output then depended
+            // on Map iteration order across every volume ever created, not on the filter --
+            // this reads as "nondeterministic" (sometimes the right volume, sometimes some
+            // other instance's default-sized one) but is a plain missing-filter bug, not a race.
             return switch (filterName) {
                 case "volume-id" -> matchesValue(values, vol.getVolumeId());
                 case "status" -> matchesValue(values, vol.getState());
                 case "volume-type" -> matchesValue(values, vol.getVolumeType());
                 case "availability-zone" -> matchesValue(values, vol.getAvailabilityZone());
                 case "encrypted" -> matchesValue(values, String.valueOf(vol.isEncrypted()));
+                case "attachment.instance-id" -> vol.getAttachments().stream()
+                        .anyMatch(a -> matchesValue(values, a.getInstanceId()));
+                case "attachment.device" -> vol.getAttachments().stream()
+                        .anyMatch(a -> matchesValue(values, a.getDevice()));
+                case "attachment.status" -> vol.getAttachments().stream()
+                        .anyMatch(a -> matchesValue(values, a.getState()));
+                case "attachment.delete-on-termination" -> vol.getAttachments().stream()
+                        .anyMatch(a -> matchesValue(values, String.valueOf(a.isDeleteOnTermination())));
                 default -> true;
             };
         }

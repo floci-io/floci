@@ -12,6 +12,7 @@ public class NetworkAclEntry {
     private String ruleAction;
     private boolean egress;
     private String cidrBlock;
+    private String ipv6CidrBlock;
     private Integer portRangeFrom;
     private Integer portRangeTo;
 
@@ -31,6 +32,9 @@ public class NetworkAclEntry {
 
     public String getCidrBlock() { return cidrBlock; }
     public void setCidrBlock(String cidrBlock) { this.cidrBlock = cidrBlock; }
+
+    public String getIpv6CidrBlock() { return ipv6CidrBlock; }
+    public void setIpv6CidrBlock(String ipv6CidrBlock) { this.ipv6CidrBlock = ipv6CidrBlock; }
 
     public Integer getPortRangeFrom() { return portRangeFrom; }
     public void setPortRangeFrom(Integer portRangeFrom) { this.portRangeFrom = portRangeFrom; }

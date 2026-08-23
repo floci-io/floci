@@ -63,7 +63,7 @@ public class RdsQueryHandler {
                 case "DescribeDBClusters" -> handleDescribeDbClusters(params);
                 case "DeleteDBCluster" -> handleDeleteDbCluster(params);
                 case "ModifyDBCluster" -> handleModifyDbCluster(params);
-                case "CreateDBParameterGroup" -> handleCreateDbParameterGroup(params);
+                case "CreateDBParameterGroup" -> handleCreateDbParameterGroup(params, region);
                 case "DescribeDBParameterGroups" -> handleDescribeDbParameterGroups(params);
                 case "DeleteDBParameterGroup" -> handleDeleteDbParameterGroup(params);
                 case "ModifyDBParameterGroup" -> handleModifyDbParameterGroup(params);
@@ -116,6 +116,18 @@ public class RdsQueryHandler {
         Map<String, String> tags = parseTags(params);
         String availabilityZone = params.getFirst("AvailabilityZone");
         boolean multiAz = "true".equalsIgnoreCase(params.getFirst("MultiAZ"));
+        // AWS always returns these from DescribeDBInstances; defaults below match AWS's own
+        // CreateDBInstance defaults when the request omits them.
+        boolean storageEncrypted = "true".equalsIgnoreCase(params.getFirst("StorageEncrypted"));
+        boolean deletionProtection = "true".equalsIgnoreCase(params.getFirst("DeletionProtection"));
+        String autoMinorVersionUpgradeStr = params.getFirst("AutoMinorVersionUpgrade");
+        boolean autoMinorVersionUpgrade = autoMinorVersionUpgradeStr != null
+                ? Boolean.parseBoolean(autoMinorVersionUpgradeStr) : true;
+        boolean copyTagsToSnapshot = "true".equalsIgnoreCase(params.getFirst("CopyTagsToSnapshot"));
+        String backupRetentionPeriodStr = params.getFirst("BackupRetentionPeriod");
+        int backupRetentionPeriod = backupRetentionPeriodStr != null
+                ? parseIntSafe(backupRetentionPeriodStr, 1) : 1;
+        boolean performanceInsightsEnabled = "true".equalsIgnoreCase(params.getFirst("EnablePerformanceInsights"));
 
         if (dbInstanceClass == null) {
             dbInstanceClass = "db.t3.micro";
@@ -130,6 +142,9 @@ public class RdsQueryHandler {
                     masterPassword, dbName, dbInstanceClass, allocatedStorage, iamEnabled,
                     paramGroupName, dbSubnetGroupName, dbClusterIdentifier, availabilityZone, multiAz,
                     manageMasterUserPassword, masterUserSecretKmsKeyId, tags, vpcSecurityGroupIds, region);
+            instance = service.setCreateTimeInstanceAttributes(id, storageEncrypted, deletionProtection,
+                    autoMinorVersionUpgrade, copyTagsToSnapshot, backupRetentionPeriod,
+                    performanceInsightsEnabled);
             String result = dbInstanceXml(instance);
             return Response.ok(AwsQueryResponse.envelope("CreateDBInstance", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {
@@ -270,8 +285,9 @@ public class RdsQueryHandler {
         }
         String description = params.getFirst("DBSubnetGroupDescription");
         List<String> subnetIds = memberList(params, "SubnetIds");
+        Map<String, String> tags = parseTags(params);
         try {
-            DbSubnetGroup group = service.createDbSubnetGroup(name, description, subnetIds, region);
+            DbSubnetGroup group = service.createDbSubnetGroup(name, description, subnetIds, tags, region);
             return Response.ok(AwsQueryResponse.envelope("CreateDBSubnetGroup",
                     AwsNamespaces.RDS, dbSubnetGroupXml(group))).build();
         } catch (AwsException e) {
@@ -432,7 +448,7 @@ public class RdsQueryHandler {
 
     // ── Parameter Groups ──────────────────────────────────────────────────────
 
-    private Response handleCreateDbParameterGroup(MultivaluedMap<String, String> params) {
+    private Response handleCreateDbParameterGroup(MultivaluedMap<String, String> params, String region) {
         String name = params.getFirst("DBParameterGroupName");
         String family = params.getFirst("DBParameterGroupFamily");
         String description = params.getFirst("Description");
@@ -440,7 +456,8 @@ public class RdsQueryHandler {
             return AwsQueryResponse.error("InvalidParameterValue", "DBParameterGroupName is required.", AwsNamespaces.RDS, 400);
         }
         try {
-            DbParameterGroup group = service.createDbParameterGroup(name, family, description);
+            Map<String, String> tags = parseTags(params);
+            DbParameterGroup group = service.createDbParameterGroup(name, family, description, tags, region);
             String result = paramGroupXml(group);
             return Response.ok(AwsQueryResponse.envelope("CreateDBParameterGroup", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {
@@ -483,11 +500,11 @@ public class RdsQueryHandler {
         }
         Map<String, String> parameters = new HashMap<>();
         for (int n = 1; ; n++) {
-            String paramName = params.getFirst("Parameters.member." + n + ".ParameterName");
+            String paramName = params.getFirst("Parameters.Parameter." + n + ".ParameterName");
             if (paramName == null) {
                 break;
             }
-            String paramValue = params.getFirst("Parameters.member." + n + ".ParameterValue");
+            String paramValue = params.getFirst("Parameters.Parameter." + n + ".ParameterValue");
             if (paramValue != null) {
                 parameters.put(paramName, paramValue);
             }
@@ -512,11 +529,11 @@ public class RdsQueryHandler {
             DbParameterGroup group = service.getDbParameterGroup(name);
             XmlBuilder xml = new XmlBuilder().start("Parameters");
             for (Map.Entry<String, String> entry : group.getParameters().entrySet()) {
-                xml.start("member")
+                xml.start("Parameter")
                    .elem("ParameterName", entry.getKey())
                    .elem("ParameterValue", entry.getValue())
                    .elem("IsModifiable", true)
-                   .end("member");
+                   .end("Parameter");
             }
             xml.end("Parameters").start("Marker").end("Marker");
             return Response.ok(AwsQueryResponse.envelope("DescribeDBParameters", AwsNamespaces.RDS, xml.build())).build();
@@ -578,11 +595,11 @@ public class RdsQueryHandler {
         }
         Map<String, String> parameters = new HashMap<>();
         for (int n = 1; ; n++) {
-            String paramName = params.getFirst("Parameters.member." + n + ".ParameterName");
+            String paramName = params.getFirst("Parameters.Parameter." + n + ".ParameterName");
             if (paramName == null) {
                 break;
             }
-            String paramValue = params.getFirst("Parameters.member." + n + ".ParameterValue");
+            String paramValue = params.getFirst("Parameters.Parameter." + n + ".ParameterValue");
             if (paramValue != null) {
                 parameters.put(paramName, paramValue);
             }
@@ -607,11 +624,11 @@ public class RdsQueryHandler {
             DbClusterParameterGroup group = service.getDbClusterParameterGroup(name);
             XmlBuilder xml = new XmlBuilder().start("Parameters");
             for (Map.Entry<String, String> entry : group.getParameters().entrySet()) {
-                xml.start("member")
+                xml.start("Parameter")
                    .elem("ParameterName", entry.getKey())
                    .elem("ParameterValue", entry.getValue())
                    .elem("IsModifiable", true)
-                   .end("member");
+                   .end("Parameter");
             }
             xml.end("Parameters").start("Marker").end("Marker");
             return Response.ok(AwsQueryResponse.envelope("DescribeDBClusterParameters", AwsNamespaces.RDS, xml.build())).build();
@@ -679,10 +696,16 @@ public class RdsQueryHandler {
         xml.elem("IAMDatabaseAuthenticationEnabled", i.isIamDatabaseAuthenticationEnabled())
            .elem("MultiAZ", i.isMultiAz())
            .elem("StorageType", "gp2")
+           .elem("StorageEncrypted", i.isStorageEncrypted())
            .elem("PubliclyAccessible", false)
            .elem("AvailabilityZone", i.getAvailabilityZone() != null ? i.getAvailabilityZone() : config.defaultAvailabilityZone())
            .elem("PreferredMaintenanceWindow", "mon:00:00-mon:03:00")
            .elem("PreferredBackupWindow", "04:00-06:00")
+           .elem("BackupRetentionPeriod", i.getBackupRetentionPeriod())
+           .elem("AutoMinorVersionUpgrade", i.isAutoMinorVersionUpgrade())
+           .elem("DeletionProtection", i.isDeletionProtection())
+           .elem("CopyTagsToSnapshot", i.isCopyTagsToSnapshot())
+           .elem("PerformanceInsightsEnabled", i.isPerformanceInsightsEnabled())
            .raw(vpcSecurityGroupsXml(i))
            .raw(dbParameterGroupsXml(i))
            .raw(dbSubnetGroupXml(dbSubnetGroupForInstance(i)))
@@ -906,6 +929,7 @@ public class RdsQueryHandler {
                 .elem("DBParameterGroupName", g.getDbParameterGroupName())
                 .elem("DBParameterGroupFamily", g.getDbParameterGroupFamily())
                 .elem("Description", g.getDescription())
+                .elem("DBParameterGroupArn", g.getDbParameterGroupArn())
                 .build();
     }
 

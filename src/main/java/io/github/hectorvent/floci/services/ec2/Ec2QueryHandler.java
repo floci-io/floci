@@ -294,8 +294,10 @@ public class Ec2QueryHandler {
             String volumeType = p.getFirst(prefix + ".Ebs.VolumeType");
             String deleteOnTermination = p.getFirst(prefix + ".Ebs.DeleteOnTermination");
             String encrypted = p.getFirst(prefix + ".Ebs.Encrypted");
+            String iops = p.getFirst(prefix + ".Ebs.Iops");
+            String throughput = p.getFirst(prefix + ".Ebs.Throughput");
             boolean hasEbs = snapshotId != null || volumeSize != null || volumeType != null
-                    || deleteOnTermination != null || encrypted != null;
+                    || deleteOnTermination != null || encrypted != null || iops != null || throughput != null;
             if (deviceName == null && !hasEbs) {
                 break;
             }
@@ -312,6 +314,8 @@ public class Ec2QueryHandler {
             ebs.setDeleteOnTermination(parseOptionalBoolean(deleteOnTermination,
                     prefix + ".Ebs.DeleteOnTermination"));
             ebs.setEncrypted(parseOptionalBoolean(encrypted, prefix + ".Ebs.Encrypted"));
+            ebs.setIops(parseOptionalInt(iops, prefix + ".Ebs.Iops"));
+            ebs.setThroughput(parseOptionalInt(throughput, prefix + ".Ebs.Throughput"));
             mapping.setEbs(ebs);
             mappings.add(mapping);
         }
@@ -395,6 +399,13 @@ public class Ec2QueryHandler {
                 pair.setDescription(desc);
                 perm.getUserIdGroupPairs().add(pair);
             }
+            for (int j = 1; ; j++) {
+                String base = prefix + "." + i + ".PrefixListIds." + j;
+                String prefixListId = p.getFirst(base + ".PrefixListId");
+                if (prefixListId == null) break;
+                String desc = p.getFirst(base + ".Description");
+                perm.getPrefixListIds().add(new PrefixListIdReference(prefixListId, desc));
+            }
             perms.add(perm);
         }
         return perms;
@@ -415,6 +426,25 @@ public class Ec2QueryHandler {
             }
         }
         return tags;
+    }
+
+    /**
+     * Reads {@code CreateVpcEndpoint}'s {@code SubnetConfiguration.N} list: the per-subnet private
+     * IP(s) AWS assigns to the endpoint's network interfaces, fixed at creation time
+     * (API_SubnetConfiguration.html). Dropping this silently, as floci previously did, throws away
+     * an address the caller may have pinned in their own IaC config, so a later describe answers
+     * with a different address than the one that was asked for.
+     */
+    private List<VpcEndpointSubnetConfiguration> parseSubnetConfigurations(MultivaluedMap<String, String> p) {
+        List<VpcEndpointSubnetConfiguration> configs = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String prefix = "SubnetConfiguration." + i;
+            String subnetId = p.getFirst(prefix + ".SubnetId");
+            if (subnetId == null) break;
+            configs.add(new VpcEndpointSubnetConfiguration(
+                    subnetId, p.getFirst(prefix + ".Ipv4"), p.getFirst(prefix + ".Ipv6")));
+        }
+        return configs;
     }
 
     private List<Tag> parseLaunchTemplateDataTagsForResource(MultivaluedMap<String, String> p, String resourceType) {
@@ -520,6 +550,8 @@ public class Ec2QueryHandler {
             }
         }
 
+        List<BlockDeviceMapping> blockDeviceMappings = parseBlockDeviceMappings(p);
+
         LaunchTemplateData launchTemplateData = resolveRunInstancesLaunchTemplateData(p, region);
         if (launchTemplateData != null) {
             imageId = firstNonBlank(imageId, launchTemplateData.getImageId());
@@ -540,7 +572,7 @@ public class Ec2QueryHandler {
 
         Reservation res = service.runInstances(region, imageId, instanceType, minCount, maxCount,
                 keyName, sgIds, subnetId, clientToken, instanceTags, userData, iamInstanceProfileArn,
-                associatePublicIp);
+                associatePublicIp, blockDeviceMappings);
 
         XmlBuilder xml = new XmlBuilder()
                 .start("RunInstancesResponse", AwsNamespaces.EC2)
@@ -1161,7 +1193,8 @@ public class Ec2QueryHandler {
                 getList(p, "SecurityGroupId"),
                 p.getFirst("PrivateDnsEnabled") != null ? Boolean.valueOf(p.getFirst("PrivateDnsEnabled")) : null,
                 p.getFirst("PolicyDocument"),
-                parseTagsForResource(p, "vpc-endpoint"));
+                parseTagsForResource(p, "vpc-endpoint"),
+                parseSubnetConfigurations(p));
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateVpcEndpointResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -2192,6 +2225,7 @@ public class Ec2QueryHandler {
                 p.getFirst("RuleAction"),
                 Boolean.parseBoolean(p.getFirst("Egress")),
                 p.getFirst("CidrBlock"),
+                p.getFirst("Ipv6CidrBlock"),
                 fromStr != null ? Integer.valueOf(fromStr) : null,
                 toStr != null ? Integer.valueOf(toStr) : null,
                 "ReplaceNetworkAclEntry".equals(action));
@@ -2760,7 +2794,7 @@ public class Ec2QueryHandler {
                     .start("ebs")
                     .elem("volumeId", inst.getRootVolumeId())
                     .elem("status", "attached")
-                    .elem("deleteOnTermination", "true")
+                    .elem("deleteOnTermination", String.valueOf(inst.isRootVolumeDeleteOnTermination()))
                     .elem("attachTime", inst.getLaunchTime() != null ? ISO_FMT.format(inst.getLaunchTime()) : "")
                     .end("ebs")
                     .end("item")
@@ -2871,6 +2905,7 @@ public class Ec2QueryHandler {
                     .elem("vpcPeeringConnectionId", ref.getVpcPeeringConnectionId())
                     .end("referencedGroupInfo");
         }
+        xml.elem("prefixListId", rule.getPrefixListId());
         xml.elem("description", rule.getDescription())
                 .raw(tagSetXml(rule.getTags()));
         return xml.build();
@@ -2935,7 +2970,8 @@ public class Ec2QueryHandler {
                     .elem("protocol", e.getProtocol())
                     .elem("ruleAction", e.getRuleAction())
                     .elem("egress", String.valueOf(e.isEgress()))
-                    .elem("cidrBlock", e.getCidrBlock());
+                    .elem("cidrBlock", e.getCidrBlock())
+                    .elem("ipv6CidrBlock", e.getIpv6CidrBlock());
             if (e.getPortRangeFrom() != null || e.getPortRangeTo() != null) {
                 xml.start("portRange")
                         .elem("from", String.valueOf(e.getPortRangeFrom()))
@@ -3380,7 +3416,15 @@ public class Ec2QueryHandler {
                         .elem("description", g.getDescription())
                         .end("item");
             }
-            xml.end("groups").end("item");
+            xml.end("groups")
+                    .start("prefixListIds");
+            for (PrefixListIdReference ref : perm.getPrefixListIds()) {
+                xml.start("item")
+                        .elem("prefixListId", ref.getPrefixListId())
+                        .elem("description", ref.getDescription())
+                        .end("item");
+            }
+            xml.end("prefixListIds").end("item");
         }
         xml.end(wrapperTag);
         return xml.build();

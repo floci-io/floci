@@ -44,6 +44,15 @@ public class DbInstance {
     private Instant createdAt;
     private int proxyPort;
 
+    // AWS always returns these in DescribeDBInstances, defaulted to match AWS's own
+    // CreateDBInstance defaults when the request omits them.
+    private boolean storageEncrypted;
+    private boolean deletionProtection;
+    private boolean autoMinorVersionUpgrade = true;
+    private boolean copyTagsToSnapshot;
+    private int backupRetentionPeriod = 1;
+    private boolean performanceInsightsEnabled;
+
     private String dockerVolumeName;
     private String volumeId;
 
@@ -182,4 +191,22 @@ public class DbInstance {
 
     public int getContainerPort() { return containerPort; }
     public void setContainerPort(int containerPort) { this.containerPort = containerPort; }
+
+    public boolean isStorageEncrypted() { return storageEncrypted; }
+    public void setStorageEncrypted(boolean storageEncrypted) { this.storageEncrypted = storageEncrypted; }
+
+    public boolean isDeletionProtection() { return deletionProtection; }
+    public void setDeletionProtection(boolean deletionProtection) { this.deletionProtection = deletionProtection; }
+
+    public boolean isAutoMinorVersionUpgrade() { return autoMinorVersionUpgrade; }
+    public void setAutoMinorVersionUpgrade(boolean autoMinorVersionUpgrade) { this.autoMinorVersionUpgrade = autoMinorVersionUpgrade; }
+
+    public boolean isCopyTagsToSnapshot() { return copyTagsToSnapshot; }
+    public void setCopyTagsToSnapshot(boolean copyTagsToSnapshot) { this.copyTagsToSnapshot = copyTagsToSnapshot; }
+
+    public int getBackupRetentionPeriod() { return backupRetentionPeriod; }
+    public void setBackupRetentionPeriod(int backupRetentionPeriod) { this.backupRetentionPeriod = backupRetentionPeriod; }
+
+    public boolean isPerformanceInsightsEnabled() { return performanceInsightsEnabled; }
+    public void setPerformanceInsightsEnabled(boolean performanceInsightsEnabled) { this.performanceInsightsEnabled = performanceInsightsEnabled; }
 }

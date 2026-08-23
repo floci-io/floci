@@ -412,6 +412,31 @@ public class RdsService implements Resettable {
         return instance;
     }
 
+    /**
+     * Records the CreateDBInstance-time attributes that AWS always echoes back from
+     * DescribeDBInstances but that Floci does not otherwise model: StorageEncrypted (immutable
+     * after creation on real AWS), DeletionProtection, AutoMinorVersionUpgrade,
+     * CopyTagsToSnapshot, BackupRetentionPeriod and PerformanceInsightsEnabled. Without this,
+     * a replan sees these fields go from unset to their configured value and proposes a change
+     * (a forced replacement for StorageEncrypted specifically, since it is a ForceNew attribute).
+     */
+    public DbInstance setCreateTimeInstanceAttributes(String id, boolean storageEncrypted,
+                                                       boolean deletionProtection,
+                                                       boolean autoMinorVersionUpgrade,
+                                                       boolean copyTagsToSnapshot,
+                                                       int backupRetentionPeriod,
+                                                       boolean performanceInsightsEnabled) {
+        DbInstance instance = getDbInstance(id);
+        instance.setStorageEncrypted(storageEncrypted);
+        instance.setDeletionProtection(deletionProtection);
+        instance.setAutoMinorVersionUpgrade(autoMinorVersionUpgrade);
+        instance.setCopyTagsToSnapshot(copyTagsToSnapshot);
+        instance.setBackupRetentionPeriod(backupRetentionPeriod);
+        instance.setPerformanceInsightsEnabled(performanceInsightsEnabled);
+        instances.put(id, instance);
+        return instance;
+    }
+
     public Map<String, String> listTagsForResource(String resourceName) {
         return Map.copyOf(resolveTagHandle(resourceName).tags());
     }
@@ -491,8 +516,15 @@ public class RdsService implements Resettable {
                     subnetGroups.put(resourceId, group);
                 });
             }
-            // Valid RDS resource types Floci does not model yet (og, pg, snapshot, ...) — taggable
-            // on real AWS, so the message states the Floci limitation rather than AWS semantics.
+            case "pg" -> {
+                DbParameterGroup group = getDbParameterGroup(resourceId);
+                yield new TagHandle(group.getTags(), updated -> {
+                    group.setTags(updated);
+                    parameterGroups.put(resourceId, group);
+                });
+            }
+            // Valid RDS resource types Floci does not model yet (og, cluster-pg, snapshot, ...) —
+            // taggable on real AWS, so the message states the Floci limitation rather than AWS semantics.
             default -> throw new AwsException("InvalidParameterValue",
                     "Tagging for resource type '" + type + "' is not yet implemented by Floci: " + resourceName, 400);
         };
@@ -971,6 +1003,11 @@ public class RdsService implements Resettable {
     }
 
     public DbSubnetGroup createDbSubnetGroup(String name, String description, List<String> subnetIds, String region) {
+        return createDbSubnetGroup(name, description, subnetIds, Map.of(), region);
+    }
+
+    public DbSubnetGroup createDbSubnetGroup(String name, String description, List<String> subnetIds,
+                                              Map<String, String> tags, String region) {
         if (name == null || name.isBlank()) {
             throw new AwsException("MissingParameter", "The request must contain the parameter DBSubnetGroupName.", 400);
         }
@@ -983,6 +1020,9 @@ public class RdsService implements Resettable {
         }
 
         DbSubnetGroup group = buildSubnetGroup(name, description, subnetIds, effectiveRegion(region));
+        // AWS always echoes back the Tags a CreateDBSubnetGroup request set, the same as every
+        // other RDS resource - see lex00/floci#105.
+        group.setTags(tags != null ? new LinkedHashMap<>(tags) : new LinkedHashMap<>());
         subnetGroups.put(name, group);
         return group;
     }
@@ -1024,11 +1064,18 @@ public class RdsService implements Resettable {
     // ── Parameter Groups ──────────────────────────────────────────────────────
 
     public DbParameterGroup createDbParameterGroup(String name, String family, String description) {
+        return createDbParameterGroup(name, family, description, Map.of(), regionResolver.getDefaultRegion());
+    }
+
+    public DbParameterGroup createDbParameterGroup(String name, String family, String description,
+                                                     Map<String, String> tags, String region) {
         if (parameterGroups.get(name).isPresent()) {
             throw new AwsException("DBParameterGroupAlreadyExists",
                     "DB parameter group " + name + " already exists.", 400);
         }
         DbParameterGroup group = new DbParameterGroup(name, family, description);
+        group.setDbParameterGroupArn(regionResolver.buildArn("rds", effectiveRegion(region), "pg:" + name));
+        group.setTags(tags);
         parameterGroups.put(name, group);
         return group;
     }
