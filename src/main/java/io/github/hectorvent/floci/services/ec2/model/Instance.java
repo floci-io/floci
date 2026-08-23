@@ -58,6 +58,15 @@ public class Instance {
     private boolean disableApiStop = false;
     private boolean disableApiTermination = false;
 
+    // AWS's own documented defaults for a launch that specifies no
+    // MetadataOptions at all (RunInstances honours an explicit request;
+    // ModifyInstanceMetadataOptions updates these after launch).
+    private String metadataHttpTokens = "optional";
+    private int metadataHttpPutResponseHopLimit = 1;
+    private String metadataHttpEndpoint = "enabled";
+    private String metadataHttpProtocolIpv6 = "disabled";
+    private String metadataInstanceMetadataTags = "disabled";
+
     // Docker backing fields (not serialised to AWS wire format)
     private String dockerContainerId;
     private String containerBridgeIp;
@@ -203,4 +212,19 @@ public class Instance {
 
     public boolean isDisableApiTermination() { return disableApiTermination; }
     public void setDisableApiTermination(boolean disableApiTermination) { this.disableApiTermination = disableApiTermination; }
+
+    public String getMetadataHttpTokens() { return metadataHttpTokens; }
+    public void setMetadataHttpTokens(String metadataHttpTokens) { this.metadataHttpTokens = metadataHttpTokens; }
+
+    public int getMetadataHttpPutResponseHopLimit() { return metadataHttpPutResponseHopLimit; }
+    public void setMetadataHttpPutResponseHopLimit(int metadataHttpPutResponseHopLimit) { this.metadataHttpPutResponseHopLimit = metadataHttpPutResponseHopLimit; }
+
+    public String getMetadataHttpEndpoint() { return metadataHttpEndpoint; }
+    public void setMetadataHttpEndpoint(String metadataHttpEndpoint) { this.metadataHttpEndpoint = metadataHttpEndpoint; }
+
+    public String getMetadataHttpProtocolIpv6() { return metadataHttpProtocolIpv6; }
+    public void setMetadataHttpProtocolIpv6(String metadataHttpProtocolIpv6) { this.metadataHttpProtocolIpv6 = metadataHttpProtocolIpv6; }
+
+    public String getMetadataInstanceMetadataTags() { return metadataInstanceMetadataTags; }
+    public void setMetadataInstanceMetadataTags(String metadataInstanceMetadataTags) { this.metadataInstanceMetadataTags = metadataInstanceMetadataTags; }
 }

@@ -63,10 +63,18 @@ public class Ec2ImageCatalog {
         return result;
     }
 
+    public Optional<CatalogImage> findByPublicParameterName(String parameterName) {
+        if (parameterName == null || parameterName.isBlank()) {
+            return Optional.empty();
+        }
+        return Optional.ofNullable(loaded().imagesByPublicParameterName.get(parameterName));
+    }
+
     private static final class Loaded {
         private final String defaultDockerImage;
         private final List<CatalogImage> images;
         private final Map<String, CatalogImage> imagesByIdOrAlias;
+        private final Map<String, CatalogImage> imagesByPublicParameterName;
 
         Loaded(Catalog catalog) {
             this.defaultDockerImage = require(catalog.defaultDockerImage, "defaultDockerImage");
@@ -75,6 +83,7 @@ public class Ec2ImageCatalog {
                 throw new IllegalStateException("EC2 image catalog has no images: " + CATALOG_RESOURCE_NAME);
             }
             this.imagesByIdOrAlias = indexImages(this.images);
+            this.imagesByPublicParameterName = indexPublicParameterNames(this.images);
         }
     }
 
@@ -107,6 +116,20 @@ public class Ec2ImageCatalog {
         return Map.copyOf(index);
     }
 
+    private static Map<String, CatalogImage> indexPublicParameterNames(List<CatalogImage> images) {
+        Map<String, CatalogImage> index = new LinkedHashMap<>();
+        for (CatalogImage image : images) {
+            for (String parameterName : image.publicParameterAliases()) {
+                CatalogImage previous = index.putIfAbsent(parameterName, image);
+                if (previous != null) {
+                    throw new IllegalStateException(
+                            "Duplicate EC2 image catalog public parameter alias: " + parameterName);
+                }
+            }
+        }
+        return Map.copyOf(index);
+    }
+
     private static void addIndexEntry(Map<String, CatalogImage> index, String imageIdOrAlias, CatalogImage image) {
         CatalogImage previous = index.putIfAbsent(imageIdOrAlias, image);
         if (previous != null) {
@@ -133,6 +156,7 @@ public class Ec2ImageCatalog {
     public static final class CatalogImage {
         public String imageId;
         public List<String> aliases = List.of();
+        public List<String> publicParameterAliases = List.of();
         public String dockerImage;
         public String name;
         public String description;
@@ -158,6 +182,20 @@ public class Ec2ImageCatalog {
 
         public List<String> aliases() {
             return aliases == null ? List.of() : List.copyOf(aliases);
+        }
+
+        /**
+         * Full SSM parameter names (e.g.
+         * "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64")
+         * under which this image is published as one of AWS's own documented
+         * public AMI parameters:
+         * https://docs.aws.amazon.com/systems-manager/latest/userguide/parameter-store-public-parameters-ami.html
+         * Real AWS seeds these in every account with no setup; SsmService
+         * resolves a miss under "/aws/service/" against this index instead of
+         * requiring every consumer to seed them by hand.
+         */
+        public List<String> publicParameterAliases() {
+            return publicParameterAliases == null ? List.of() : List.copyOf(publicParameterAliases);
         }
 
         public List<String> idsAndAliases() {

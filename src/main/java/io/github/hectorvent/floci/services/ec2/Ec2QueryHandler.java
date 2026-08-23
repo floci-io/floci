@@ -65,6 +65,7 @@ public class Ec2QueryHandler {
                 case "DescribeInstanceAttribute" -> handleDescribeInstanceAttribute(params, region);
                 case "ModifyInstanceAttribute" -> handleModifyInstanceAttribute(params, region);
                 case "ModifyInstanceMetadataDefaults" -> handleModifyInstanceMetadataDefaults(params, region);
+                case "ModifyInstanceMetadataOptions" -> handleModifyInstanceMetadataOptions(params, region);
                 case "GetInstanceMetadataDefaults" -> handleGetInstanceMetadataDefaults(params, region);
                 // VPCs
                 case "CreateVpc" -> handleCreateVpc(params, region);
@@ -570,9 +571,11 @@ public class Ec2QueryHandler {
             }
         }
 
+        InstanceMetadataRequest metadataOptions = parseInstanceMetadataRequest(p, "MetadataOptions.");
+
         Reservation res = service.runInstances(region, imageId, instanceType, minCount, maxCount,
                 keyName, sgIds, subnetId, clientToken, instanceTags, userData, iamInstanceProfileArn,
-                associatePublicIp, blockDeviceMappings);
+                associatePublicIp, blockDeviceMappings, metadataOptions);
 
         XmlBuilder xml = new XmlBuilder()
                 .start("RunInstancesResponse", AwsNamespaces.EC2)
@@ -871,6 +874,39 @@ public class Ec2QueryHandler {
                 p.containsKey("HttpPutResponseHopLimit") ? parseIntParam(p, "HttpPutResponseHopLimit", -1) : null,
                 p.getFirst("HttpEndpoint"), p.getFirst("InstanceMetadataTags"));
         return booleanResponse("ModifyInstanceMetadataDefaults");
+    }
+
+    // lex00/floci#114 remainder: a launch (or ModifyInstanceMetadataOptions call) that names
+    // MetadataOptions.HttpTokens explicitly must be honoured per-instance rather than answered
+    // with a hardcoded "optional" regardless of what was requested - real AWS's own documented
+    // default only applies when the caller specifies nothing at all.
+    private InstanceMetadataRequest parseInstanceMetadataRequest(MultivaluedMap<String, String> p, String prefix) {
+        String httpTokens = p.getFirst(prefix + "HttpTokens");
+        Integer hopLimit = p.containsKey(prefix + "HttpPutResponseHopLimit")
+                ? parseIntParam(p, prefix + "HttpPutResponseHopLimit", 1) : null;
+        String httpEndpoint = p.getFirst(prefix + "HttpEndpoint");
+        String httpProtocolIpv6 = p.getFirst(prefix + "HttpProtocolIpv6");
+        String instanceMetadataTags = p.getFirst(prefix + "InstanceMetadataTags");
+        return new InstanceMetadataRequest(httpTokens, hopLimit, httpEndpoint, httpProtocolIpv6, instanceMetadataTags);
+    }
+
+    private Response handleModifyInstanceMetadataOptions(MultivaluedMap<String, String> p, String region) {
+        String instanceId = p.getFirst("InstanceId");
+        Instance inst = service.modifyInstanceMetadataOptions(region, instanceId, parseInstanceMetadataRequest(p, ""));
+        XmlBuilder xml = new XmlBuilder()
+                .start("ModifyInstanceMetadataOptionsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .elem("instanceId", instanceId)
+                .start("metadataOptions")
+                .elem("state", "applied")
+                .elem("httpTokens", inst.getMetadataHttpTokens())
+                .elem("httpPutResponseHopLimit", String.valueOf(inst.getMetadataHttpPutResponseHopLimit()))
+                .elem("httpEndpoint", inst.getMetadataHttpEndpoint())
+                .elem("httpProtocolIpv6", inst.getMetadataHttpProtocolIpv6())
+                .elem("instanceMetadataTags", inst.getMetadataInstanceMetadataTags())
+                .end("metadataOptions")
+                .end("ModifyInstanceMetadataOptionsResponse");
+        return xmlResponse(xml.build());
     }
 
     private Response handleGetInstanceMetadataDefaults(MultivaluedMap<String, String> p, String region) {
@@ -2764,11 +2800,11 @@ public class Ec2QueryHandler {
                 .end("cpuOptions")
                 .start("metadataOptions")
                 .elem("state", "applied")
-                .elem("httpTokens", "optional")
-                .elem("httpPutResponseHopLimit", "1")
-                .elem("httpEndpoint", "enabled")
-                .elem("httpProtocolIpv6", "disabled")
-                .elem("instanceMetadataTags", "disabled")
+                .elem("httpTokens", inst.getMetadataHttpTokens())
+                .elem("httpPutResponseHopLimit", String.valueOf(inst.getMetadataHttpPutResponseHopLimit()))
+                .elem("httpEndpoint", inst.getMetadataHttpEndpoint())
+                .elem("httpProtocolIpv6", inst.getMetadataHttpProtocolIpv6())
+                .elem("instanceMetadataTags", inst.getMetadataInstanceMetadataTags())
                 .end("metadataOptions")
                 .start("maintenanceOptions")
                 .elem("autoRecovery", "default")
