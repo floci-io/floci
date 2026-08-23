@@ -117,6 +117,15 @@ nav:
     - MediaLive: services/medialive.md
     - SageMaker: services/sagemaker.md
     - App Runner: services/apprunner.md
+    - Bedrock: services/bedrock.md
+    - Global Accelerator: services/globalaccelerator.md
+    - Cognito Identity: services/cognitoidentity.md
+    - CodeArtifact: services/codeartifact.md
+    - Connect: services/connect.md
+    - AppIntegrations: services/appintegrations.md
+    - DataSync: services/datasync.md
+    - CodeGuru Reviewer: services/codegurureviewer.md
+    - Audit Manager: services/auditmanager.md
     - ACM: services/acm.md
     - ECS: services/ecs.md
     - ECR: services/ecr.md

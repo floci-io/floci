@@ -800,7 +800,7 @@ public class CloudFormationResourceProvisioner {
             }
         }
         var lt = ec2Service.createLaunchTemplate(region, name, imageId, instanceType, keyName,
-                securityGroupIds, null, encodedUserData, iamInstanceProfileArn, null, null);
+                securityGroupIds, null, encodedUserData, iamInstanceProfileArn, null, null, null, null);
         r.setPhysicalId(lt.getLaunchTemplateId());
         r.getAttributes().put("LaunchTemplateId", lt.getLaunchTemplateId());
         r.getAttributes().put("LatestVersionNumber", lt.getLatestVersionNumber());

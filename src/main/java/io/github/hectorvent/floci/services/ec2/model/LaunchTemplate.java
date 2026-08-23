@@ -29,6 +29,8 @@ public class LaunchTemplate {
     private List<String> securityGroupIds = new ArrayList<>();
     private List<Tag> tags = new ArrayList<>();
     private List<Tag> instanceTags = new ArrayList<>();
+    private LaunchTemplateData.MetadataOptions metadataOptions;
+    private Boolean monitoringEnabled;
     private Map<String, LaunchTemplateData> versions = new LinkedHashMap<>();
 
     public LaunchTemplate() {}
@@ -82,6 +84,12 @@ public class LaunchTemplate {
     public void setInstanceTags(List<Tag> instanceTags) {
         this.instanceTags = instanceTags != null ? new ArrayList<>(instanceTags) : new ArrayList<>();
     }
+
+    public LaunchTemplateData.MetadataOptions getMetadataOptions() { return metadataOptions; }
+    public void setMetadataOptions(LaunchTemplateData.MetadataOptions metadataOptions) { this.metadataOptions = metadataOptions; }
+
+    public Boolean getMonitoringEnabled() { return monitoringEnabled; }
+    public void setMonitoringEnabled(Boolean monitoringEnabled) { this.monitoringEnabled = monitoringEnabled; }
 
     public Map<String, LaunchTemplateData> getVersions() { return versions; }
     public void setVersions(Map<String, LaunchTemplateData> versions) {

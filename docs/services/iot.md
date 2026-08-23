@@ -48,6 +48,46 @@ Current MVP 2 limitations:
 - Jobs reserved MQTT topics remain follow-up scope; Jobs Data HTTP APIs are implemented first.
 - Dynamic thing groups, fleet indexing, job rollouts, cancellations, documents from S3, and advanced job scheduling are not yet modeled.
 
+## Custom Authorizers
+
+Status: control plane implemented; the authorizer Lambda is never invoked.
+
+Supported operations:
+
+- `CreateAuthorizer`, `DescribeAuthorizer`, `UpdateAuthorizer`, `DeleteAuthorizer`, and `ListAuthorizers`
+  (with the `status` query filter) on the modelled `/authorizer/{authorizerName}` and `/authorizers/` paths.
+- `SetDefaultAuthorizer` and `DescribeDefaultAuthorizer` on `/default-authorizer`.
+- `tags` passed to `CreateAuthorizer` are stored and readable through the shared `/tags` path, alongside
+  `TagResource` and `UntagResource` for an authorizer ARN.
+
+Behavior notes:
+
+- An authorizer reports the status it was created with — `ACTIVE` unless the request asked for
+  `INACTIVE` — from the first read. There is no transition to wait on.
+- `DeleteAuthorizer` requires the authorizer to be `INACTIVE`, matching AWS, and returns
+  `DeleteConflictException` otherwise. Deleting the default authorizer clears the default.
+- `SetDefaultAuthorizer` rejects an `INACTIVE` authorizer, and `DescribeDefaultAuthorizer`
+  returns `ResourceNotFoundException` until a default is set.
+- `authorizerFunctionArn` and `tokenSigningPublicKeys` are recorded but never used: Floci does not
+  invoke the authorizer Lambda and does not verify token signatures, so custom authorization is not
+  enforced at the MQTT or HTTP data plane.
+
+## Domain Configurations
+
+Status: control plane implemented; no alternate endpoint is served.
+
+Supported operations: `CreateDomainConfiguration`, `DescribeDomainConfiguration`,
+`UpdateDomainConfiguration`, `DeleteDomainConfiguration`, and `ListDomainConfigurations` (with the
+`serviceType` query filter), plus `tags` on create through the shared `/tags` path.
+
+Behavior notes:
+
+- A configuration is `ENABLED` from the first read. Omitting `domainName` yields an AWS-managed
+  endpoint domain and `domainType` `AWS_MANAGED`; supplying one yields `CUSTOMER_MANAGED`.
+- `DeleteDomainConfiguration` requires the configuration to be `DISABLED` first, matching AWS.
+- Server certificates are recorded and reported as `VALID` without being fetched or validated, and
+  Floci does not actually serve the configured domain, so connecting to it is not possible.
+
 ## MQTT Broker
 
 Status: complete.

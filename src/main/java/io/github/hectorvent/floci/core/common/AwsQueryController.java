@@ -154,6 +154,8 @@ public class AwsQueryController {
             "UpdateSecurityGroupRuleDescriptionsIngress", "UpdateSecurityGroupRuleDescriptionsEgress",
             "CreateKeyPair", "DescribeKeyPairs", "DeleteKeyPair", "ImportKeyPair",
             "DescribeImages", "RegisterImage", "DescribeSnapshots",
+            "EnableSnapshotBlockPublicAccess", "DisableSnapshotBlockPublicAccess",
+            "GetSnapshotBlockPublicAccessState",
             "CreateTags", "DeleteTags", "DescribeTags",
             "CreateInternetGateway", "DescribeInternetGateways", "DeleteInternetGateway",
             "AttachInternetGateway", "DetachInternetGateway",

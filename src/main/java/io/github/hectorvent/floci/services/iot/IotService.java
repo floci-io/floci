@@ -10,7 +10,9 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.iot.model.IotAuthorizer;
 import io.github.hectorvent.floci.services.iot.model.IotCertificate;
+import io.github.hectorvent.floci.services.iot.model.IotDomainConfiguration;
 import io.github.hectorvent.floci.services.iot.model.IotJob;
 import io.github.hectorvent.floci.services.iot.model.IotJobExecution;
 import io.github.hectorvent.floci.services.iot.model.IotPolicy;
@@ -51,6 +53,8 @@ public class IotService {
     static final String DEFAULT_ENDPOINT_TYPE = "iot:Data-ATS";
 
     private static final Pattern THING_NAME_PATTERN = Pattern.compile("[a-zA-Z0-9:_-]{1,128}");
+    private static final Pattern AUTHORIZER_NAME_PATTERN = Pattern.compile("[\\w=,@-]{1,128}");
+    private static final Pattern DOMAIN_CONFIGURATION_NAME_PATTERN = Pattern.compile("[\\w.-]{1,128}");
 
     private final StorageBackend<String, Thing> thingStore;
     private final StorageBackend<String, IotCertificate> certificateStore;
@@ -65,6 +69,9 @@ public class IotService {
     private final StorageBackend<String, IotThingType> thingTypeStore;
     private final StorageBackend<String, IotThingGroup> thingGroupStore;
     private final StorageBackend<String, Set<String>> thingGroupMembershipStore;
+    private final StorageBackend<String, IotAuthorizer> authorizerStore;
+    private final StorageBackend<String, String> defaultAuthorizerStore;
+    private final StorageBackend<String, IotDomainConfiguration> domainConfigurationStore;
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
@@ -103,6 +110,9 @@ public class IotService {
                 storageFactory.create("iot", "iot-thing-types.json", new TypeReference<Map<String, IotThingType>>() {}),
                 storageFactory.create("iot", "iot-thing-groups.json", new TypeReference<Map<String, IotThingGroup>>() {}),
                 storageFactory.create("iot", "iot-thing-group-memberships.json", new TypeReference<Map<String, Set<String>>>() {}),
+                storageFactory.create("iot", "iot-authorizers.json", new TypeReference<Map<String, IotAuthorizer>>() {}),
+                storageFactory.create("iot", "iot-default-authorizers.json", new TypeReference<Map<String, String>>() {}),
+                storageFactory.create("iot", "iot-domain-configurations.json", new TypeReference<Map<String, IotDomainConfiguration>>() {}),
                 config, regionResolver, objectMapper, publishEventRecorder, mqttBrokerService, sqsService, snsService,
                 s3Service, kinesisService, dynamoDbService, lambdaService);
     }
@@ -120,6 +130,9 @@ public class IotService {
                   StorageBackend<String, IotThingType> thingTypeStore,
                   StorageBackend<String, IotThingGroup> thingGroupStore,
                   StorageBackend<String, Set<String>> thingGroupMembershipStore,
+                  StorageBackend<String, IotAuthorizer> authorizerStore,
+                  StorageBackend<String, String> defaultAuthorizerStore,
+                  StorageBackend<String, IotDomainConfiguration> domainConfigurationStore,
                   EmulatorConfig config,
                  RegionResolver regionResolver,
                  ObjectMapper objectMapper,
@@ -144,6 +157,9 @@ public class IotService {
         this.thingTypeStore = thingTypeStore;
         this.thingGroupStore = thingGroupStore;
         this.thingGroupMembershipStore = thingGroupMembershipStore;
+        this.authorizerStore = authorizerStore;
+        this.defaultAuthorizerStore = defaultAuthorizerStore;
+        this.domainConfigurationStore = domainConfigurationStore;
         this.config = config;
         this.regionResolver = regionResolver;
         this.objectMapper = objectMapper;
@@ -259,6 +275,267 @@ public class IotService {
         Map<String, String> updatedTags = new TreeMap<>(resource.tags());
         tagKeys.forEach(updatedTags::remove);
         resource.updateTags().accept(updatedTags);
+    }
+
+    /**
+     * Creates a custom authorizer. Floci records the definition only — {@code authorizerFunctionArn}
+     * is never invoked — so the authorizer reports the status it was created with (defaulting to
+     * {@code ACTIVE}) from the first read.
+     */
+    public IotAuthorizer createAuthorizer(String authorizerName, JsonNode request, String region) {
+        validateAuthorizerName(authorizerName);
+        if (authorizerStore.get(authorizerKey(region, authorizerName)).isPresent()) {
+            throw new AwsException("ResourceAlreadyExistsException",
+                    "Authorizer already exists: " + authorizerName, 409);
+        }
+        String functionArn = request.path("authorizerFunctionArn").asText(null);
+        if (functionArn == null || functionArn.isBlank()) {
+            throw new AwsException("InvalidRequestException", "authorizerFunctionArn is required", 400);
+        }
+        Instant now = Instant.now();
+        IotAuthorizer authorizer = new IotAuthorizer();
+        authorizer.setAuthorizerName(authorizerName);
+        authorizer.setAuthorizerArn(regionResolver.buildArn("iot", region, "authorizer/" + authorizerName));
+        authorizer.setAuthorizerFunctionArn(functionArn);
+        authorizer.setTokenKeyName(blankToNull(request.path("tokenKeyName").asText(null)));
+        authorizer.setTokenSigningPublicKeys(parseStringMap(request.path("tokenSigningPublicKeys")));
+        authorizer.setStatus(validAuthorizerStatus(request.path("status").asText(null), IotAuthorizer.STATUS_ACTIVE));
+        authorizer.setSigningDisabled(request.path("signingDisabled").asBoolean(false));
+        authorizer.setEnableCachingForHttp(request.path("enableCachingForHttp").asBoolean(false));
+        authorizer.setTags(parseTagList(request.path("tags")));
+        authorizer.setCreationDate(now);
+        authorizer.setLastModifiedDate(now);
+        authorizerStore.put(authorizerKey(region, authorizerName), authorizer);
+        return authorizer;
+    }
+
+    public IotAuthorizer describeAuthorizer(String authorizerName, String region) {
+        validateAuthorizerName(authorizerName);
+        return authorizerStore.get(authorizerKey(region, authorizerName))
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "Authorizer not found: " + authorizerName, 404));
+    }
+
+    public IotAuthorizer updateAuthorizer(String authorizerName, JsonNode request, String region) {
+        IotAuthorizer authorizer = describeAuthorizer(authorizerName, region);
+        if (request.hasNonNull("authorizerFunctionArn")) {
+            authorizer.setAuthorizerFunctionArn(request.path("authorizerFunctionArn").asText());
+        }
+        if (request.hasNonNull("tokenKeyName")) {
+            authorizer.setTokenKeyName(blankToNull(request.path("tokenKeyName").asText()));
+        }
+        if (request.hasNonNull("tokenSigningPublicKeys")) {
+            authorizer.setTokenSigningPublicKeys(parseStringMap(request.path("tokenSigningPublicKeys")));
+        }
+        if (request.hasNonNull("status")) {
+            authorizer.setStatus(validAuthorizerStatus(request.path("status").asText(), IotAuthorizer.STATUS_ACTIVE));
+        }
+        if (request.hasNonNull("enableCachingForHttp")) {
+            authorizer.setEnableCachingForHttp(request.path("enableCachingForHttp").asBoolean());
+        }
+        authorizer.setLastModifiedDate(Instant.now());
+        authorizerStore.put(authorizerKey(region, authorizerName), authorizer);
+        return authorizer;
+    }
+
+    /** Deletes an authorizer. AWS requires it to be {@code INACTIVE} first, and so does Floci. */
+    public void deleteAuthorizer(String authorizerName, String region) {
+        IotAuthorizer authorizer = describeAuthorizer(authorizerName, region);
+        if (IotAuthorizer.STATUS_ACTIVE.equals(authorizer.getStatus())) {
+            throw new AwsException("DeleteConflictException",
+                    "Cannot delete an ACTIVE authorizer: " + authorizerName, 409);
+        }
+        authorizerStore.delete(authorizerKey(region, authorizerName));
+        defaultAuthorizerStore.get(defaultAuthorizerKey(region))
+                .filter(authorizerName::equals)
+                .ifPresent(name -> defaultAuthorizerStore.delete(defaultAuthorizerKey(region)));
+    }
+
+    public List<IotAuthorizer> listAuthorizers(String region, String status) {
+        String prefix = "authorizer:" + region + ":";
+        return authorizerStore.scan(key -> key.startsWith(prefix)).stream()
+                .filter(authorizer -> status == null || status.isBlank() || status.equals(authorizer.getStatus()))
+                .sorted(Comparator.comparing(IotAuthorizer::getAuthorizerName))
+                .toList();
+    }
+
+    public IotAuthorizer setDefaultAuthorizer(String authorizerName, String region) {
+        IotAuthorizer authorizer = describeAuthorizer(authorizerName, region);
+        if (!IotAuthorizer.STATUS_ACTIVE.equals(authorizer.getStatus())) {
+            throw new AwsException("InvalidRequestException",
+                    "Cannot set an INACTIVE authorizer as the default: " + authorizerName, 400);
+        }
+        defaultAuthorizerStore.put(defaultAuthorizerKey(region), authorizerName);
+        return authorizer;
+    }
+
+    public IotAuthorizer describeDefaultAuthorizer(String region) {
+        String authorizerName = defaultAuthorizerStore.get(defaultAuthorizerKey(region))
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "No default authorizer is set", 404));
+        return describeAuthorizer(authorizerName, region);
+    }
+
+    private void validateAuthorizerName(String authorizerName) {
+        if (authorizerName == null || !AUTHORIZER_NAME_PATTERN.matcher(authorizerName).matches()) {
+            throw new AwsException("InvalidRequestException", "Invalid authorizer name: " + authorizerName, 400);
+        }
+    }
+
+    private String validAuthorizerStatus(String status, String defaultStatus) {
+        if (status == null || status.isBlank()) {
+            return defaultStatus;
+        }
+        if (!Set.of(IotAuthorizer.STATUS_ACTIVE, IotAuthorizer.STATUS_INACTIVE).contains(status)) {
+            throw new AwsException("InvalidRequestException", "Unsupported authorizer status: " + status, 400);
+        }
+        return status;
+    }
+
+    /**
+     * Creates a domain configuration. Floci never serves an alternate endpoint for the domain and
+     * never validates the server certificates, so the configuration is {@code ENABLED} from the
+     * first read. Omitting {@code domainName} produces an AWS-managed endpoint domain, matching
+     * the {@code AWS_MANAGED} / {@code CUSTOMER_MANAGED} split AWS reports on describe.
+     */
+    public IotDomainConfiguration createDomainConfiguration(String name, JsonNode request, String region) {
+        validateDomainConfigurationName(name);
+        if (domainConfigurationStore.get(domainConfigurationKey(region, name)).isPresent()) {
+            throw new AwsException("ResourceAlreadyExistsException",
+                    "Domain configuration already exists: " + name, 409);
+        }
+        IotDomainConfiguration configuration = new IotDomainConfiguration();
+        configuration.setName(name);
+        String domainName = blankToNull(request.path("domainName").asText(null));
+        configuration.setDomainType(domainName == null
+                ? IotDomainConfiguration.DOMAIN_TYPE_AWS_MANAGED
+                : IotDomainConfiguration.DOMAIN_TYPE_CUSTOMER_MANAGED);
+        String configurationId = UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+        configuration.setDomainName(domainName != null ? domainName
+                : configurationId + ".iot." + region + "." + URI.create(config.effectiveBaseUrl()).getHost());
+        configuration.setArn(regionResolver.buildArn("iot", region,
+                "domainconfiguration/" + name + "/" + configurationId));
+        configuration.setServerCertificateArns(stringList(request.path("serverCertificateArns")));
+        configuration.setValidationCertificateArn(blankToNull(request.path("validationCertificateArn").asText(null)));
+        configuration.setServiceType(validDomainConfigurationServiceType(request.path("serviceType").asText(null)));
+        configuration.setAuthenticationType(blankToNull(request.path("authenticationType").asText(null)));
+        configuration.setApplicationProtocol(blankToNull(request.path("applicationProtocol").asText(null)));
+        applyDomainConfigurationBlocks(configuration, request);
+        configuration.setTags(parseTagList(request.path("tags")));
+        configuration.setLastStatusChangeDate(Instant.now());
+        domainConfigurationStore.put(domainConfigurationKey(region, name), configuration);
+        return configuration;
+    }
+
+    public IotDomainConfiguration describeDomainConfiguration(String name, String region) {
+        return domainConfigurationStore.get(domainConfigurationKey(region, name))
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "Domain configuration not found: " + name, 404));
+    }
+
+    public IotDomainConfiguration updateDomainConfiguration(String name, JsonNode request, String region) {
+        IotDomainConfiguration configuration = describeDomainConfiguration(name, region);
+        if (request.hasNonNull("domainConfigurationStatus")) {
+            configuration.setStatus(validDomainConfigurationStatus(request.path("domainConfigurationStatus").asText()));
+        }
+        if (request.path("removeAuthorizerConfig").asBoolean(false)) {
+            configuration.setDefaultAuthorizerName(null);
+            configuration.setAllowAuthorizerOverride(null);
+        }
+        if (request.hasNonNull("authenticationType")) {
+            configuration.setAuthenticationType(blankToNull(request.path("authenticationType").asText()));
+        }
+        if (request.hasNonNull("applicationProtocol")) {
+            configuration.setApplicationProtocol(blankToNull(request.path("applicationProtocol").asText()));
+        }
+        applyDomainConfigurationBlocks(configuration, request);
+        configuration.setLastStatusChangeDate(Instant.now());
+        domainConfigurationStore.put(domainConfigurationKey(region, name), configuration);
+        return configuration;
+    }
+
+    /** Deletes a domain configuration. AWS requires it to be {@code DISABLED} first, and so does Floci. */
+    public void deleteDomainConfiguration(String name, String region) {
+        IotDomainConfiguration configuration = describeDomainConfiguration(name, region);
+        if (IotDomainConfiguration.STATUS_ENABLED.equals(configuration.getStatus())) {
+            throw new AwsException("InvalidRequestException",
+                    "Cannot delete an ENABLED domain configuration: " + name, 400);
+        }
+        domainConfigurationStore.delete(domainConfigurationKey(region, name));
+    }
+
+    public List<IotDomainConfiguration> listDomainConfigurations(String region, String serviceType) {
+        String prefix = "domain-configuration:" + region + ":";
+        return domainConfigurationStore.scan(key -> key.startsWith(prefix)).stream()
+                .filter(c -> serviceType == null || serviceType.isBlank() || serviceType.equals(c.getServiceType()))
+                .sorted(Comparator.comparing(IotDomainConfiguration::getName))
+                .toList();
+    }
+
+    private void applyDomainConfigurationBlocks(IotDomainConfiguration configuration, JsonNode request) {
+        JsonNode authorizerConfig = request.path("authorizerConfig");
+        if (authorizerConfig.isObject()) {
+            configuration.setDefaultAuthorizerName(blankToNull(authorizerConfig.path("defaultAuthorizerName").asText(null)));
+            if (authorizerConfig.hasNonNull("allowAuthorizerOverride")) {
+                configuration.setAllowAuthorizerOverride(authorizerConfig.path("allowAuthorizerOverride").asBoolean());
+            }
+        }
+        JsonNode tlsConfig = request.path("tlsConfig");
+        if (tlsConfig.isObject()) {
+            configuration.setSecurityPolicy(blankToNull(tlsConfig.path("securityPolicy").asText(null)));
+        }
+        JsonNode serverCertificateConfig = request.path("serverCertificateConfig");
+        if (serverCertificateConfig.isObject()) {
+            configuration.setEnableOcspCheck(serverCertificateConfig.path("enableOCSPCheck").asBoolean(false));
+            configuration.setOcspLambdaArn(blankToNull(serverCertificateConfig.path("ocspLambdaArn").asText(null)));
+            configuration.setOcspAuthorizedResponderArn(
+                    blankToNull(serverCertificateConfig.path("ocspAuthorizedResponderArn").asText(null)));
+        }
+        JsonNode clientCertificateConfig = request.path("clientCertificateConfig");
+        if (clientCertificateConfig.isObject()) {
+            configuration.setClientCertificateCallbackArn(
+                    blankToNull(clientCertificateConfig.path("clientCertificateCallbackArn").asText(null)));
+        }
+    }
+
+    private void validateDomainConfigurationName(String name) {
+        if (name == null || !DOMAIN_CONFIGURATION_NAME_PATTERN.matcher(name).matches()) {
+            throw new AwsException("InvalidRequestException", "Invalid domain configuration name: " + name, 400);
+        }
+    }
+
+    private String validDomainConfigurationServiceType(String serviceType) {
+        if (serviceType == null || serviceType.isBlank()) {
+            return "DATA";
+        }
+        if (!Set.of("DATA", "CREDENTIAL_PROVIDER", "JOBS").contains(serviceType)) {
+            throw new AwsException("InvalidRequestException", "Unsupported service type: " + serviceType, 400);
+        }
+        return serviceType;
+    }
+
+    private String validDomainConfigurationStatus(String status) {
+        if (!Set.of(IotDomainConfiguration.STATUS_ENABLED, IotDomainConfiguration.STATUS_DISABLED).contains(status)) {
+            throw new AwsException("InvalidRequestException",
+                    "Unsupported domain configuration status: " + status, 400);
+        }
+        return status;
+    }
+
+    private Map<String, String> parseStringMap(JsonNode node) {
+        Map<String, String> values = new TreeMap<>();
+        if (node != null && node.isObject()) {
+            node.fields().forEachRemaining(entry -> values.put(entry.getKey(), entry.getValue().asText()));
+        }
+        return values;
+    }
+
+    private Map<String, String> parseTagList(JsonNode node) {
+        Map<String, String> tags = new TreeMap<>();
+        if (node != null && node.isArray()) {
+            node.forEach(tag -> tags.put(tag.path("Key").asText(), tag.path("Value").asText("")));
+        }
+        return tags;
     }
 
     public IotCertificate createKeysAndCertificate(boolean setAsActive, String region) {
@@ -990,6 +1267,9 @@ public class IotService {
     private String thingTypeKey(String region, String thingTypeName) { return "thing-type:" + region + ":" + thingTypeName; }
     private String thingGroupKey(String region, String thingGroupName) { return "thing-group:" + region + ":" + thingGroupName; }
     private String thingGroupMembershipKey(String region, String thingGroupName) { return "thing-group-membership:" + region + ":" + thingGroupName; }
+    private String authorizerKey(String region, String authorizerName) { return "authorizer:" + region + ":" + authorizerName; }
+    private String defaultAuthorizerKey(String region) { return "default-authorizer:" + region; }
+    private String domainConfigurationKey(String region, String name) { return "domain-configuration:" + region + ":" + name; }
 
     private JsonNode readJson(String json) {
         try {
@@ -1283,6 +1563,22 @@ public class IotService {
             return new TaggableResource(rule.getTags(), tags -> {
                 rule.setTags(tags);
                 topicRuleStore.put(topicRuleKey(region, ruleName), rule);
+            });
+        }
+        if (resource.startsWith("domainconfiguration/")) {
+            String domainConfigurationName = resource.substring("domainconfiguration/".length()).split("/", 2)[0];
+            IotDomainConfiguration configuration = describeDomainConfiguration(domainConfigurationName, region);
+            return new TaggableResource(configuration.getTags(), tags -> {
+                configuration.setTags(tags);
+                domainConfigurationStore.put(domainConfigurationKey(region, domainConfigurationName), configuration);
+            });
+        }
+        if (resource.startsWith("authorizer/")) {
+            String authorizerName = resource.substring("authorizer/".length());
+            IotAuthorizer authorizer = describeAuthorizer(authorizerName, region);
+            return new TaggableResource(authorizer.getTags(), tags -> {
+                authorizer.setTags(tags);
+                authorizerStore.put(authorizerKey(region, authorizerName), authorizer);
             });
         }
         throw new AwsException("InvalidRequestException", "Invalid resource ARN: " + resourceArn, 400);

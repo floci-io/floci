@@ -182,10 +182,10 @@ class Ec2ServiceTest {
                 "ami-source", "t3.micro", "app-key", List.of("sg-source"),
                 "source-user-data", "c291cmNlLXVzZXItZGF0YQ==",
                 "arn:aws:iam::000000000000:instance-profile/app-profile",
-                List.of(), List.of(new Tag("Role", "source")));
+                List.of(), List.of(new Tag("Role", "source")), null, null);
 
         service.createLaunchTemplateVersion("us-east-1", template.getLaunchTemplateId(), null,
-                "1", null, "t3.small", null, List.of(), null, null, null, List.of());
+                "1", null, "t3.small", null, List.of(), null, null, null, List.of(), null, null);
 
         LaunchTemplate version = service.describeLaunchTemplateVersions(
                 "us-east-1", template.getLaunchTemplateId(), null, List.of("2")).getFirst();

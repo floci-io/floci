@@ -125,6 +125,9 @@ public class Ec2QueryHandler {
                 case "CreateImage" -> handleCreateImage(params, region);
                 case "RegisterImage" -> handleRegisterImage(params, region);
                 case "DescribeSnapshots" -> handleDescribeSnapshots(params, region);
+                case "EnableSnapshotBlockPublicAccess" -> handleEnableSnapshotBlockPublicAccess(params, region);
+                case "DisableSnapshotBlockPublicAccess" -> handleDisableSnapshotBlockPublicAccess(region);
+                case "GetSnapshotBlockPublicAccessState" -> handleGetSnapshotBlockPublicAccessState(region);
                 // Tags
                 case "CreateTags" -> handleCreateTags(params, region);
                 case "DeleteTags" -> handleDeleteTags(params, region);
@@ -1809,6 +1812,34 @@ public class Ec2QueryHandler {
         return xmlResponse(xml.build());
     }
 
+    // ─── Snapshot block-public-access handlers ────────────────────────────────
+
+    private Response handleEnableSnapshotBlockPublicAccess(MultivaluedMap<String, String> p, String region) {
+        String state = service.enableSnapshotBlockPublicAccess(region, p.getFirst("State"));
+        return snapshotBlockPublicAccessResponse("EnableSnapshotBlockPublicAccess", state, null);
+    }
+
+    private Response handleDisableSnapshotBlockPublicAccess(String region) {
+        String state = service.disableSnapshotBlockPublicAccess(region);
+        return snapshotBlockPublicAccessResponse("DisableSnapshotBlockPublicAccess", state, null);
+    }
+
+    private Response handleGetSnapshotBlockPublicAccessState(String region) {
+        String state = service.getSnapshotBlockPublicAccessState(region);
+        // The emulator has no declarative-policy layer, so the account always owns the state.
+        return snapshotBlockPublicAccessResponse("GetSnapshotBlockPublicAccessState", state, "account");
+    }
+
+    private Response snapshotBlockPublicAccessResponse(String action, String state, String managedBy) {
+        XmlBuilder xml = new XmlBuilder()
+                .start(action + "Response", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .elem("state", state)
+                .elem("managedBy", managedBy)
+                .end(action + "Response");
+        return xmlResponse(xml.build());
+    }
+
     // ─── Tag handlers ─────────────────────────────────────────────────────────
 
     private Response handleCreateTags(MultivaluedMap<String, String> p, String region) {
@@ -2527,7 +2558,9 @@ public class Ec2QueryHandler {
                 encodedUserData,
                 resolveIamInstanceProfileArn(p, "LaunchTemplateData.IamInstanceProfile"),
                 parseTagsForResource(p, "launch-template"),
-                parseLaunchTemplateDataTagsForResource(p, "instance"));
+                parseLaunchTemplateDataTagsForResource(p, "instance"),
+                parseLaunchTemplateMetadataOptions(p),
+                parseLaunchTemplateMonitoring(p));
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateLaunchTemplateResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -2550,7 +2583,9 @@ public class Ec2QueryHandler {
                 decodeUserData(encodedUserData),
                 encodedUserData,
                 resolveIamInstanceProfileArn(p, "LaunchTemplateData.IamInstanceProfile"),
-                parseLaunchTemplateDataTagsForResource(p, "instance"));
+                parseLaunchTemplateDataTagsForResource(p, "instance"),
+                parseLaunchTemplateMetadataOptions(p),
+                parseLaunchTemplateMonitoring(p));
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateLaunchTemplateVersionResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -3109,8 +3144,55 @@ public class Ec2QueryHandler {
                     .end("item")
                     .end("tagSpecificationSet");
         }
+        LaunchTemplateData.MetadataOptions metadataOptions = launchTemplate.getMetadataOptions();
+        if (metadataOptions != null && !metadataOptions.isEmpty()) {
+            xml.start("metadataOptions");
+            if (metadataOptions.getHttpEndpoint() != null) {
+                xml.elem("httpEndpoint", metadataOptions.getHttpEndpoint());
+            }
+            if (metadataOptions.getHttpProtocolIpv6() != null) {
+                xml.elem("httpProtocolIpv6", metadataOptions.getHttpProtocolIpv6());
+            }
+            if (metadataOptions.getHttpPutResponseHopLimit() != null) {
+                xml.elem("httpPutResponseHopLimit", String.valueOf(metadataOptions.getHttpPutResponseHopLimit()));
+            }
+            if (metadataOptions.getHttpTokens() != null) {
+                xml.elem("httpTokens", metadataOptions.getHttpTokens());
+            }
+            if (metadataOptions.getInstanceMetadataTags() != null) {
+                xml.elem("instanceMetadataTags", metadataOptions.getInstanceMetadataTags());
+            }
+            xml.end("metadataOptions");
+        }
+        if (launchTemplate.getMonitoringEnabled() != null) {
+            xml.start("monitoring")
+                    .elem("enabled", String.valueOf(launchTemplate.getMonitoringEnabled()))
+                    .end("monitoring");
+        }
         xml.end("launchTemplateData");
         return xml.build();
+    }
+
+    // parseLaunchTemplateMetadataOptions and parseLaunchTemplateMonitoring:
+    // aws_launch_template's metadata_options and monitoring blocks - see
+    // LaunchTemplateData.MetadataOptions's own doc comment for why these
+    // exist and what surfaced the gap (corpus-autoscaling-complete).
+    private LaunchTemplateData.MetadataOptions parseLaunchTemplateMetadataOptions(MultivaluedMap<String, String> p) {
+        LaunchTemplateData.MetadataOptions opts = new LaunchTemplateData.MetadataOptions();
+        opts.setHttpEndpoint(p.getFirst("LaunchTemplateData.MetadataOptions.HttpEndpoint"));
+        opts.setHttpProtocolIpv6(p.getFirst("LaunchTemplateData.MetadataOptions.HttpProtocolIpv6"));
+        String hopLimit = p.getFirst("LaunchTemplateData.MetadataOptions.HttpPutResponseHopLimit");
+        if (hopLimit != null && !hopLimit.isBlank()) {
+            opts.setHttpPutResponseHopLimit(Integer.parseInt(hopLimit));
+        }
+        opts.setHttpTokens(p.getFirst("LaunchTemplateData.MetadataOptions.HttpTokens"));
+        opts.setInstanceMetadataTags(p.getFirst("LaunchTemplateData.MetadataOptions.InstanceMetadataTags"));
+        return opts.isEmpty() ? null : opts;
+    }
+
+    private Boolean parseLaunchTemplateMonitoring(MultivaluedMap<String, String> p) {
+        String enabled = p.getFirst("LaunchTemplateData.Monitoring.Enabled");
+        return enabled == null || enabled.isBlank() ? null : Boolean.parseBoolean(enabled);
     }
 
     private List<String> parseLaunchTemplateSecurityGroupIds(MultivaluedMap<String, String> p) {

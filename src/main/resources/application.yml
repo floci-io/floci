@@ -65,6 +65,7 @@ quarkus:
       - --initialize-at-run-time=io.github.hectorvent.floci.services.elasticbeanstalk.ElasticBeanstalkService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.apprunner.AppRunnerService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.redshift.RedshiftService
+      - --initialize-at-run-time=io.github.hectorvent.floci.services.datasync.DataSyncService
       - --initialize-at-run-time=graphql.util.IdGenerator
 
 
@@ -513,4 +514,22 @@ floci:
     apprunner:
       enabled: true
     redshift:
+      enabled: true
+    bedrock:
+      enabled: true
+    globalaccelerator:
+      enabled: true
+    cognitoidentity:
+      enabled: true
+    codeartifact:
+      enabled: true
+    connect:
+      enabled: true
+    appintegrations:
+      enabled: true
+    datasync:
+      enabled: true
+    codegurureviewer:
+      enabled: true
+    auditmanager:
       enabled: true

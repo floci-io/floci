@@ -428,7 +428,7 @@ public class ResolvedServiceCatalog {
                         // iot-jobs-data: the IoT Jobs Data Plane (GetPendingJobExecutions,
                         // DescribeJobExecution, StartNextPendingJobExecution, UpdateJobExecution)
                         // signs under its own name while IotController serves its /things/*/jobs routes
-                        Set.of(), Set.of("iot", "execute-api", "iot-jobs-data"), Set.of(),
+                        Set.of(), Set.of("iot", "iot-jobs-data"), Set.of(),
                         Set.of(IotController.class)),
                 descriptor("iotdata", "iotdata", config.services().iotdata().enabled(), true,
                         "iot", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
@@ -474,6 +474,16 @@ public class ResolvedServiceCatalog {
                         "sagemaker", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
                         Set.of("SageMaker."), Set.of("sagemaker"), Set.of(), Set.of()),
+                descriptor("bedrock", "bedrock", config.services().bedrock().enabled(), true,
+                        "bedrock", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON),
+                        // The control plane and bedrock-runtime share the signing name
+                        // "bedrock", and credential-scope registration is last-write-wins.
+                        // bedrock-runtime already claims it; claiming it again here would
+                        // silently move its enablement resolution. Requests that match this
+                        // controller resolve through resourceClasses, which is checked first.
+                        Set.of(), Set.of(), Set.of(),
+                        Set.of(io.github.hectorvent.floci.services.bedrock.BedrockController.class)),
                 descriptor("apprunner", "apprunner", config.services().apprunner().enabled(), true,
                         "apprunner", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
@@ -482,7 +492,49 @@ public class ResolvedServiceCatalog {
                         "accessanalyzer", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
                         Set.of(), Set.of("access-analyzer"), Set.of(),
-                        Set.of(io.github.hectorvent.floci.services.accessanalyzer.AccessAnalyzerController.class))
+                        Set.of(io.github.hectorvent.floci.services.accessanalyzer.AccessAnalyzerController.class)),
+                descriptor("globalaccelerator", "globalaccelerator",
+                        config.services().globalaccelerator().enabled(), true,
+                        "globalaccelerator", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
+                        protocols(ServiceProtocol.JSON),
+                        Set.of("GlobalAccelerator_V20180706."), Set.of("globalaccelerator"), Set.of(), Set.of()),
+                descriptor("cognito-identity", "cognitoidentity",
+                        config.services().cognitoidentity().enabled(), true,
+                        "cognitoidentity", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
+                        protocols(ServiceProtocol.JSON),
+                        Set.of("AWSCognitoIdentityService."), Set.of("cognito-identity"), Set.of(), Set.of()),
+                descriptor("codeartifact", "codeartifact", config.services().codeartifact().enabled(), true,
+                        "codeartifact", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON),
+                        Set.of(), Set.of("codeartifact"), Set.of(),
+                        Set.of(io.github.hectorvent.floci.services.codeartifact.CodeArtifactController.class)),
+                descriptor("connect", "connect", config.services().connect().enabled(), true,
+                        "connect", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON),
+                        Set.of(), Set.of("connect"), Set.of(),
+                        Set.of(io.github.hectorvent.floci.services.connect.ConnectController.class)),
+                descriptor("app-integrations", "appintegrations",
+                        config.services().appintegrations().enabled(), true,
+                        "appintegrations", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON),
+                        Set.of(), Set.of("app-integrations"), Set.of(),
+                        Set.of(io.github.hectorvent.floci.services.appintegrations.AppIntegrationsController.class)),
+                descriptor("datasync", "datasync", config.services().datasync().enabled(), true,
+                        "datasync", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
+                        protocols(ServiceProtocol.JSON),
+                        // DataSync's Smithy service shape is FmrsService
+                        Set.of("FmrsService."), Set.of("datasync"), Set.of(), Set.of()),
+                descriptor("codeguru-reviewer", "codegurureviewer",
+                        config.services().codegurureviewer().enabled(), true,
+                        "codegurureviewer", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON),
+                        Set.of(), Set.of("codeguru-reviewer"), Set.of(),
+                        Set.of(io.github.hectorvent.floci.services.codegurureviewer.CodeGuruReviewerController.class)),
+                descriptor("auditmanager", "auditmanager", config.services().auditmanager().enabled(), true,
+                        "auditmanager", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON),
+                        Set.of(), Set.of("auditmanager"), Set.of(),
+                        Set.of(io.github.hectorvent.floci.services.auditmanager.AuditManagerController.class))
         ));
     }
 

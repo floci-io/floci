@@ -284,4 +284,158 @@ class AutoScalingQueryHandlerTest {
         assertTrue(xml.contains("<OnDemandPercentageAboveBaseCapacity>25</OnDemandPercentageAboveBaseCapacity>"));
         assertTrue(xml.contains("<SpotAllocationStrategy>capacity-optimized</SpotAllocationStrategy>"));
     }
+
+    // The four tests below are corpus-autoscaling-complete's own regression:
+    // aws_autoscaling_policy's Enabled, StepAdjustments and
+    // PredictiveScalingConfiguration had no field on the model at all (PUT
+    // accepted and silently dropped every one of them), and Cooldown
+    // defaulted to 300 for every policy type rather than only SimpleScaling
+    // - real AWS documents Cooldown as "only used if PolicyType is
+    // SimpleScaling, otherwise ignored". Field/element names are taken from
+    // aws-sdk-go-v2's service/autoscaling/types (StepAdjustment,
+    // PredictiveScalingConfiguration, PredictiveScalingMetricSpecification),
+    // not guessed.
+
+    private AutoScalingQueryHandler newHandlerWithGroup(String asgName) {
+        AutoScalingService service = new AutoScalingService();
+        service.regionResolver = new RegionResolver(REGION, "000000000000");
+        AutoScalingQueryHandler handler = new AutoScalingQueryHandler(service);
+
+        MultivaluedHashMap<String, String> createParams = new MultivaluedHashMap<>();
+        createParams.add("AutoScalingGroupName", asgName);
+        createParams.add("LaunchTemplate.LaunchTemplateId", "lt-policy-test");
+        createParams.add("MinSize", "0");
+        createParams.add("MaxSize", "1");
+        createParams.add("AvailabilityZones.member.1", "us-east-1a");
+        assertEquals(200, handler.handle("CreateAutoScalingGroup", createParams, REGION).getStatus());
+        return handler;
+    }
+
+    @Test
+    void stepScalingPolicyRoundTripsEnabledAndStepAdjustmentsWithNoCooldownAtAll() {
+        AutoScalingQueryHandler handler = newHandlerWithGroup("step-policy-asg");
+
+        MultivaluedHashMap<String, String> putParams = new MultivaluedHashMap<>();
+        putParams.add("AutoScalingGroupName", "step-policy-asg");
+        putParams.add("PolicyName", "scale-out");
+        putParams.add("PolicyType", "StepScaling");
+        putParams.add("AdjustmentType", "ExactCapacity");
+        putParams.add("StepAdjustments.member.1.ScalingAdjustment", "1");
+        putParams.add("StepAdjustments.member.1.MetricIntervalLowerBound", "0");
+        putParams.add("StepAdjustments.member.1.MetricIntervalUpperBound", "10");
+        putParams.add("StepAdjustments.member.2.ScalingAdjustment", "2");
+        putParams.add("StepAdjustments.member.2.MetricIntervalLowerBound", "10");
+        assertEquals(200, handler.handle("PutScalingPolicy", putParams, REGION).getStatus());
+
+        MultivaluedHashMap<String, String> describeParams = new MultivaluedHashMap<>();
+        describeParams.add("AutoScalingGroupName", "step-policy-asg");
+        Response describeResponse = handler.handle("DescribePolicies", describeParams, REGION);
+        assertEquals(200, describeResponse.getStatus());
+        String xml = (String) describeResponse.getEntity();
+
+        // Enabled defaults true - never sent, never modeled before this fix.
+        assertTrue(xml.contains("<Enabled>true</Enabled>"), xml);
+        // StepScaling: Cooldown was never sent, and must not be invented.
+        assertTrue(!xml.contains("<Cooldown>"), xml);
+        assertTrue(xml.contains("<StepAdjustments>"), xml);
+        assertTrue(xml.contains("<ScalingAdjustment>1</ScalingAdjustment>"), xml);
+        assertTrue(xml.contains("<MetricIntervalLowerBound>0.0</MetricIntervalLowerBound>"), xml);
+        assertTrue(xml.contains("<MetricIntervalUpperBound>10.0</MetricIntervalUpperBound>"), xml);
+        assertTrue(xml.contains("<ScalingAdjustment>2</ScalingAdjustment>"), xml);
+        assertTrue(xml.contains("<MetricIntervalLowerBound>10.0</MetricIntervalLowerBound>"), xml);
+    }
+
+    @Test
+    void simpleScalingPolicyDefaultsCooldownTo300OnlyWhenNoneIsSent() {
+        AutoScalingQueryHandler handler = newHandlerWithGroup("simple-policy-asg");
+
+        MultivaluedHashMap<String, String> putParams = new MultivaluedHashMap<>();
+        putParams.add("AutoScalingGroupName", "simple-policy-asg");
+        putParams.add("PolicyName", "simple");
+        putParams.add("PolicyType", "SimpleScaling");
+        putParams.add("AdjustmentType", "ChangeInCapacity");
+        putParams.add("ScalingAdjustment", "1");
+        assertEquals(200, handler.handle("PutScalingPolicy", putParams, REGION).getStatus());
+
+        MultivaluedHashMap<String, String> describeParams = new MultivaluedHashMap<>();
+        describeParams.add("AutoScalingGroupName", "simple-policy-asg");
+        String xml = (String) handler.handle("DescribePolicies", describeParams, REGION).getEntity();
+        assertTrue(xml.contains("<Cooldown>300</Cooldown>"), xml);
+
+        MultivaluedHashMap<String, String> putExplicit = new MultivaluedHashMap<>();
+        putExplicit.add("AutoScalingGroupName", "simple-policy-asg");
+        putExplicit.add("PolicyName", "simple-explicit");
+        putExplicit.add("PolicyType", "SimpleScaling");
+        putExplicit.add("AdjustmentType", "ChangeInCapacity");
+        putExplicit.add("ScalingAdjustment", "1");
+        putExplicit.add("Cooldown", "60");
+        assertEquals(200, handler.handle("PutScalingPolicy", putExplicit, REGION).getStatus());
+        String xml2 = (String) handler.handle("DescribePolicies", describeParams, REGION).getEntity();
+        assertTrue(xml2.contains("<Cooldown>60</Cooldown>"), xml2);
+    }
+
+    @Test
+    void predictiveScalingPolicyRoundTripsItsWholeConfiguration() {
+        AutoScalingQueryHandler handler = newHandlerWithGroup("predictive-policy-asg");
+
+        MultivaluedHashMap<String, String> putParams = new MultivaluedHashMap<>();
+        putParams.add("AutoScalingGroupName", "predictive-policy-asg");
+        putParams.add("PolicyName", "predictive-scaling");
+        putParams.add("PolicyType", "PredictiveScaling");
+        putParams.add("PredictiveScalingConfiguration.Mode", "ForecastAndScale");
+        putParams.add("PredictiveScalingConfiguration.SchedulingBufferTime", "10");
+        putParams.add("PredictiveScalingConfiguration.MaxCapacityBreachBehavior", "IncreaseMaxCapacity");
+        putParams.add("PredictiveScalingConfiguration.MaxCapacityBuffer", "10");
+        putParams.add("PredictiveScalingConfiguration.MetricSpecifications.member.1.TargetValue", "32");
+        putParams.add("PredictiveScalingConfiguration.MetricSpecifications.member.1."
+                + "PredefinedScalingMetricSpecification.PredefinedMetricType", "ASGAverageCPUUtilization");
+        putParams.add("PredictiveScalingConfiguration.MetricSpecifications.member.1."
+                + "PredefinedScalingMetricSpecification.ResourceLabel", "testLabel");
+        putParams.add("PredictiveScalingConfiguration.MetricSpecifications.member.1."
+                + "PredefinedLoadMetricSpecification.PredefinedMetricType", "ASGTotalCPUUtilization");
+        putParams.add("PredictiveScalingConfiguration.MetricSpecifications.member.1."
+                + "PredefinedLoadMetricSpecification.ResourceLabel", "testLabel");
+        assertEquals(200, handler.handle("PutScalingPolicy", putParams, REGION).getStatus());
+
+        MultivaluedHashMap<String, String> describeParams = new MultivaluedHashMap<>();
+        describeParams.add("AutoScalingGroupName", "predictive-policy-asg");
+        String xml = (String) handler.handle("DescribePolicies", describeParams, REGION).getEntity();
+
+        assertTrue(xml.contains("<PredictiveScalingConfiguration>"), xml);
+        assertTrue(xml.contains("<Mode>ForecastAndScale</Mode>"), xml);
+        assertTrue(xml.contains("<SchedulingBufferTime>10</SchedulingBufferTime>"), xml);
+        assertTrue(xml.contains("<MaxCapacityBreachBehavior>IncreaseMaxCapacity</MaxCapacityBreachBehavior>"), xml);
+        assertTrue(xml.contains("<MaxCapacityBuffer>10</MaxCapacityBuffer>"), xml);
+        assertTrue(xml.contains("<TargetValue>32.0</TargetValue>"), xml);
+        assertTrue(xml.contains("<PredefinedScalingMetricSpecification>"), xml);
+        assertTrue(xml.contains("<PredefinedMetricType>ASGAverageCPUUtilization</PredefinedMetricType>"), xml);
+        assertTrue(xml.contains("<PredefinedLoadMetricSpecification>"), xml);
+        assertTrue(xml.contains("<PredefinedMetricType>ASGTotalCPUUtilization</PredefinedMetricType>"), xml);
+        // Both predefined specs share ResourceLabel "testLabel" - two occurrences.
+        assertEquals(2, xml.split("<ResourceLabel>testLabel</ResourceLabel>", -1).length - 1);
+    }
+
+    @Test
+    void targetTrackingPolicyRoundTripsResourceLabelOnThePredefinedMetric() {
+        AutoScalingQueryHandler handler = newHandlerWithGroup("tt-policy-asg");
+
+        MultivaluedHashMap<String, String> putParams = new MultivaluedHashMap<>();
+        putParams.add("AutoScalingGroupName", "tt-policy-asg");
+        putParams.add("PolicyName", "request-count-per-target");
+        putParams.add("PolicyType", "TargetTrackingScaling");
+        putParams.add("TargetTrackingConfiguration.PredefinedMetricSpecification.PredefinedMetricType",
+                "ALBRequestCountPerTarget");
+        putParams.add("TargetTrackingConfiguration.PredefinedMetricSpecification.ResourceLabel",
+                "app/complete/hash/targetgroup/tf-abc/def");
+        putParams.add("TargetTrackingConfiguration.TargetValue", "800");
+        assertEquals(200, handler.handle("PutScalingPolicy", putParams, REGION).getStatus());
+
+        MultivaluedHashMap<String, String> describeParams = new MultivaluedHashMap<>();
+        describeParams.add("AutoScalingGroupName", "tt-policy-asg");
+        String xml = (String) handler.handle("DescribePolicies", describeParams, REGION).getEntity();
+
+        assertTrue(xml.contains("<ResourceLabel>app/complete/hash/targetgroup/tf-abc/def</ResourceLabel>"), xml);
+        assertTrue(xml.contains("<PredefinedMetricType>ALBRequestCountPerTarget</PredefinedMetricType>"), xml);
+        assertTrue(xml.contains("<TargetValue>800.0</TargetValue>"), xml);
+    }
 }

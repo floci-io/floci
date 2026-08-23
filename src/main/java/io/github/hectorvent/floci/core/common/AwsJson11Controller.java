@@ -7,6 +7,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.ObjectReader;
 import io.github.hectorvent.floci.services.acm.AcmJsonHandler;
 import io.github.hectorvent.floci.services.athena.AthenaJsonHandler;
+import io.github.hectorvent.floci.services.cognitoidentity.CognitoIdentityJsonHandler;
+import io.github.hectorvent.floci.services.datasync.DataSyncJsonHandler;
+import io.github.hectorvent.floci.services.globalaccelerator.GlobalAcceleratorJsonHandler;
 import io.github.hectorvent.floci.services.codebuild.CodeBuildJsonHandler;
 import io.github.hectorvent.floci.services.codedeploy.CodeDeployJsonHandler;
 import io.github.hectorvent.floci.services.codepipeline.CodePipelineJsonHandler;
@@ -105,6 +108,9 @@ public class AwsJson11Controller {
     private final CloudControlJsonHandler cloudControlJsonHandler;
     private final ApplicationAutoScalingJsonHandler applicationAutoScalingJsonHandler;
     private final SageMakerJsonHandler sageMakerJsonHandler;
+    private final CognitoIdentityJsonHandler cognitoIdentityJsonHandler;
+    private final DataSyncJsonHandler dataSyncJsonHandler;
+    private final GlobalAcceleratorJsonHandler globalAcceleratorJsonHandler;
 
     @Inject
     public AwsJson11Controller(ObjectMapper objectMapper, ResolvedServiceCatalog catalog,
@@ -141,7 +147,10 @@ public class AwsJson11Controller {
                                LightsailJsonHandler lightsailJsonHandler,
                                CloudControlJsonHandler cloudControlJsonHandler,
                                ApplicationAutoScalingJsonHandler applicationAutoScalingJsonHandler,
-                               SageMakerJsonHandler sageMakerJsonHandler) {
+                               SageMakerJsonHandler sageMakerJsonHandler,
+                               CognitoIdentityJsonHandler cognitoIdentityJsonHandler,
+                               DataSyncJsonHandler dataSyncJsonHandler,
+                               GlobalAcceleratorJsonHandler globalAcceleratorJsonHandler) {
         this.objectMapper = objectMapper;
         this.strictBodyReader = objectMapper.reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
         this.catalog = catalog;
@@ -183,6 +192,9 @@ public class AwsJson11Controller {
         this.cloudControlJsonHandler = cloudControlJsonHandler;
         this.applicationAutoScalingJsonHandler = applicationAutoScalingJsonHandler;
         this.sageMakerJsonHandler = sageMakerJsonHandler;
+        this.cognitoIdentityJsonHandler = cognitoIdentityJsonHandler;
+        this.dataSyncJsonHandler = dataSyncJsonHandler;
+        this.globalAcceleratorJsonHandler = globalAcceleratorJsonHandler;
     }
 
     @POST
@@ -255,6 +267,9 @@ public class AwsJson11Controller {
                 case "lightsail" -> lightsailJsonHandler.handle(action, request, region);
                 case "cloudcontrol" -> cloudControlJsonHandler.handle(action, request, region);
                 case "sagemaker" -> sageMakerJsonHandler.handle(action, request, region);
+                case "cognito-identity" -> cognitoIdentityJsonHandler.handle(action, request, region);
+                case "datasync" -> dataSyncJsonHandler.handle(action, request, region);
+                case "globalaccelerator" -> globalAcceleratorJsonHandler.handle(action, request, region);
                 default -> null;
             };
             // catalog.matchTarget is protocol-agnostic: a JSON 1.0 target

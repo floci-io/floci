@@ -43,14 +43,14 @@ class S3FallthroughGuardIntegrationTest {
 
     @Test
     void iotScopedUnimplementedRouteGetsUnknownOperation() {
-        // IoT CreateAuthorizer: POST /authorizer/{authorizerName} is not an IotController
-        // route, so JAX-RS matches S3's wildcard instead.
+        // IoT CreateSecurityProfile: POST /security-profiles/{securityProfileName} is not an
+        // IotController route, so JAX-RS matches S3's wildcard instead.
         given()
             .header("Authorization", authorization("iot"))
             .contentType("application/json")
             .body("{}")
         .when()
-            .post("/authorizer/guard-test-authorizer")
+            .post("/security-profiles/guard-test-security-profile")
         .then()
             .statusCode(404)
             .body("__type", equalTo("UnknownOperationException"));
