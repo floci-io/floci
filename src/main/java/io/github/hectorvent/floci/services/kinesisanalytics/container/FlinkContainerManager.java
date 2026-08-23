@@ -153,7 +153,10 @@ public class FlinkContainerManager {
                 .withDockerNetwork(config.services().dockerNetwork())
                 .withHostDockerInternalOnLinux()
                 .withEmbeddedDns()
-                .withLogRotation();
+                .withLogRotation()
+                .withLabels(ContainerStorageHelper.resourceIdentityLabels(
+                        "kinesisanalytics", app.getApplicationName(), regionResolver.getAccountId(),
+                        regionResolver.getDefaultRegion()));
         // Named volume (not the container's ephemeral filesystem) so snapshots survive a
         // Stop/StartApplication cycle — stopCluster() removes the JobManager container, but this
         // volume is only removed on DeleteApplication (removeSavepointsVolume), mirroring how other
@@ -194,6 +197,9 @@ public class FlinkContainerManager {
                     .withEnv("FLINK_PROPERTIES", tmProps)
                     .withNetworkMode("container:" + jm.containerId())
                     .withLogRotation()
+                    .withLabels(ContainerStorageHelper.resourceIdentityLabels(
+                            "kinesisanalytics", app.getApplicationName(), regionResolver.getAccountId(),
+                            regionResolver.getDefaultRegion()))
                     .build();
             try {
                 ContainerInfo tm = lifecycleManager.createAndStart(tmSpec);

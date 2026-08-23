@@ -31,6 +31,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
@@ -119,6 +120,55 @@ class FlinkContainerManagerTest {
         return new FlinkApplication(name,
                 "arn:aws:kinesisanalytics:us-west-2:000000000000:application/" + name,
                 "FLINK-1_18", "arn:aws:iam::000000000000:role/x", "STREAMING");
+    }
+
+    @Test
+    void startClusterLabelsJobManagerContainerWithResourceIdentity() {
+        EmulatorConfig config = Mockito.mock(EmulatorConfig.class);
+        EmulatorConfig.ServicesConfig services = Mockito.mock(EmulatorConfig.ServicesConfig.class);
+        EmulatorConfig.KinesisAnalyticsServiceConfig kinesisAnalytics =
+                Mockito.mock(EmulatorConfig.KinesisAnalyticsServiceConfig.class);
+        when(config.services()).thenReturn(services);
+        when(services.kinesisAnalytics()).thenReturn(kinesisAnalytics);
+        when(services.dockerNetwork()).thenReturn(Optional.empty());
+        when(kinesisAnalytics.defaultImage()).thenReturn(Optional.empty());
+        EmulatorConfig.DockerConfig docker = Mockito.mock(EmulatorConfig.DockerConfig.class);
+        when(config.docker()).thenReturn(docker);
+        when(docker.logMaxSize()).thenReturn("10m");
+        when(docker.logMaxFile()).thenReturn("3");
+        EmulatorConfig.StorageConfig storage = Mockito.mock(EmulatorConfig.StorageConfig.class);
+        when(config.storage()).thenReturn(storage);
+        when(storage.hostPersistentPath()).thenReturn("floci-data");
+
+        ContainerLifecycleManager lifecycleManager = Mockito.mock(ContainerLifecycleManager.class);
+        when(lifecycleManager.createAndStart(any())).thenReturn(
+                new ContainerLifecycleManager.ContainerInfo("jm-container-id", Map.of(8081,
+                        new ContainerLifecycleManager.EndpointInfo("localhost", 8081))));
+
+        ContainerBuilder containerBuilder = Mockito.mock(ContainerBuilder.class);
+        ContainerBuilder.Builder builder = Mockito.mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
+        when(containerBuilder.newContainer(anyString())).thenReturn(builder);
+        when(builder.build()).thenReturn(Mockito.mock(ContainerSpec.class));
+
+        RegionResolver regionResolver = Mockito.mock(RegionResolver.class);
+        when(regionResolver.getAccountId()).thenReturn("000000000000");
+        when(regionResolver.getDefaultRegion()).thenReturn("us-east-1");
+
+        FlinkContainerManager manager = new FlinkContainerManager(containerBuilder, lifecycleManager,
+                Mockito.mock(ContainerLogStreamer.class), Mockito.mock(ContainerDetector.class), config,
+                regionResolver, Mockito.mock(S3Service.class), Mockito.mock(FlinkRestClient.class), MAPPER);
+
+        FlinkApplication app = new FlinkApplication();
+        app.setApplicationName("my-app");
+
+        manager.startCluster(app);
+
+        verify(builder).withLabels(Map.of(
+                "io.floci", "aws",
+                "io.floci.service", "kinesisanalytics",
+                "io.floci.resource-id", "my-app",
+                "io.floci.account", "000000000000",
+                "io.floci.region", "us-east-1"));
     }
 
     @Test
