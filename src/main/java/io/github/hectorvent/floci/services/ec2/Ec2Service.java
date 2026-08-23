@@ -895,6 +895,22 @@ public class Ec2Service implements ContainerTeardown {
                                     String clientToken, List<Tag> instanceTags,
                                     String userData, String iamInstanceProfileArn,
                                     Boolean associatePublicIp) {
+        return runInstances(region, imageId, instanceType, minCount, maxCount, keyName,
+                securityGroupIds, subnetId, clientToken, instanceTags, userData,
+                iamInstanceProfileArn, associatePublicIp, null);
+    }
+
+    /**
+     * MetadataOptions.* arguments are null when the launch request did not
+     * specify them, meaning "use AWS's documented per-field default" (see
+     * Instance's metadataHttp* field defaults) rather than "unset".
+     */
+    public Reservation runInstances(String region, String imageId, String instanceType,
+                                    int minCount, int maxCount, String keyName,
+                                    List<String> securityGroupIds, String subnetId,
+                                    String clientToken, List<Tag> instanceTags,
+                                    String userData, String iamInstanceProfileArn,
+                                    Boolean associatePublicIp, InstanceMetadataRequest metadataOptions) {
         if (imageId == null || imageId.isBlank()) {
             throw new AwsException("MissingParameter", "The request must contain the parameter ImageId", 400);
         }
@@ -969,6 +985,7 @@ public class Ec2Service implements ContainerTeardown {
             inst.setRegion(region);
             inst.setUserData(userData);
             inst.setIamInstanceProfileArn(iamInstanceProfileArn);
+            applyInstanceMetadataRequest(inst, metadataOptions);
             if (instanceTags != null && !instanceTags.isEmpty()) {
                 inst.setTags(new ArrayList<>(instanceTags));
                 tags.put(instanceId, new ArrayList<>(instanceTags));
@@ -3534,6 +3551,71 @@ public class Ec2Service implements ContainerTeardown {
      */
     public InstanceMetadataDefaults getInstanceMetadataDefaults(String region) {
         return instanceMetadataDefaults.getOrDefault(region, new InstanceMetadataDefaults());
+    }
+
+    /**
+     * Seeds a newly launched instance's metadata options: an explicit
+     * RunInstances MetadataOptions.* field wins, then the region's own
+     * ModifyInstanceMetadataDefaults preference (if one was ever set), then
+     * AWS's hardcoded ultimate default - the same three-level precedence
+     * real AWS documents for GetInstanceMetadataDefaults/RunInstances.
+     */
+    private void applyInstanceMetadataRequest(Instance inst, InstanceMetadataRequest request) {
+        InstanceMetadataDefaults regionDefaults = getInstanceMetadataDefaults(inst.getRegion());
+        String tokens = firstNonBlank(request == null ? null : request.httpTokens(),
+                blankIfNoPreference(regionDefaults.getHttpTokens()));
+        inst.setMetadataHttpTokens(tokens != null ? tokens : "optional");
+
+        Integer hopLimit = request == null ? null : request.httpPutResponseHopLimit();
+        if (hopLimit == null && regionDefaults.getHttpPutResponseHopLimit() >= 0) {
+            hopLimit = regionDefaults.getHttpPutResponseHopLimit();
+        }
+        inst.setMetadataHttpPutResponseHopLimit(hopLimit != null ? hopLimit : 1);
+
+        String endpoint = firstNonBlank(request == null ? null : request.httpEndpoint(),
+                blankIfNoPreference(regionDefaults.getHttpEndpoint()));
+        inst.setMetadataHttpEndpoint(endpoint != null ? endpoint : "enabled");
+
+        if (request != null && request.httpProtocolIpv6() != null) {
+            inst.setMetadataHttpProtocolIpv6(request.httpProtocolIpv6());
+        }
+
+        String metadataTags = firstNonBlank(request == null ? null : request.instanceMetadataTags(),
+                blankIfNoPreference(regionDefaults.getInstanceMetadataTags()));
+        inst.setMetadataInstanceMetadataTags(metadataTags != null ? metadataTags : "disabled");
+    }
+
+    private static String blankIfNoPreference(String value) {
+        return "no-preference".equals(value) ? null : value;
+    }
+
+    private static String firstNonBlank(String first, String fallback) {
+        return (first == null || first.isBlank()) ? fallback : first;
+    }
+
+    /**
+     * ModifyInstanceMetadataOptions: only the fields the caller supplies
+     * change, matching real AWS - a call that touches just HttpTokens must
+     * not reset HttpEndpoint back to a default.
+     */
+    public Instance modifyInstanceMetadataOptions(String region, String instanceId, InstanceMetadataRequest request) {
+        Instance inst = getRequiredInstance(region, instanceId);
+        if (request.httpTokens() != null) {
+            inst.setMetadataHttpTokens(request.httpTokens());
+        }
+        if (request.httpPutResponseHopLimit() != null) {
+            inst.setMetadataHttpPutResponseHopLimit(request.httpPutResponseHopLimit());
+        }
+        if (request.httpEndpoint() != null) {
+            inst.setMetadataHttpEndpoint(request.httpEndpoint());
+        }
+        if (request.httpProtocolIpv6() != null) {
+            inst.setMetadataHttpProtocolIpv6(request.httpProtocolIpv6());
+        }
+        if (request.instanceMetadataTags() != null) {
+            inst.setMetadataInstanceMetadataTags(request.instanceMetadataTags());
+        }
+        return inst;
     }
 
     // ─── Capacity Reservations ────────────────────────────────────────────────
