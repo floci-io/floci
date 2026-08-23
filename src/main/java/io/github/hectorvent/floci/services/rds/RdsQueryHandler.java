@@ -285,8 +285,9 @@ public class RdsQueryHandler {
         }
         String description = params.getFirst("DBSubnetGroupDescription");
         List<String> subnetIds = memberList(params, "SubnetIds");
+        Map<String, String> tags = parseTags(params);
         try {
-            DbSubnetGroup group = service.createDbSubnetGroup(name, description, subnetIds, region);
+            DbSubnetGroup group = service.createDbSubnetGroup(name, description, subnetIds, tags, region);
             return Response.ok(AwsQueryResponse.envelope("CreateDBSubnetGroup",
                     AwsNamespaces.RDS, dbSubnetGroupXml(group))).build();
         } catch (AwsException e) {
@@ -499,11 +500,11 @@ public class RdsQueryHandler {
         }
         Map<String, String> parameters = new HashMap<>();
         for (int n = 1; ; n++) {
-            String paramName = params.getFirst("Parameters.member." + n + ".ParameterName");
+            String paramName = params.getFirst("Parameters.Parameter." + n + ".ParameterName");
             if (paramName == null) {
                 break;
             }
-            String paramValue = params.getFirst("Parameters.member." + n + ".ParameterValue");
+            String paramValue = params.getFirst("Parameters.Parameter." + n + ".ParameterValue");
             if (paramValue != null) {
                 parameters.put(paramName, paramValue);
             }
@@ -528,11 +529,11 @@ public class RdsQueryHandler {
             DbParameterGroup group = service.getDbParameterGroup(name);
             XmlBuilder xml = new XmlBuilder().start("Parameters");
             for (Map.Entry<String, String> entry : group.getParameters().entrySet()) {
-                xml.start("member")
+                xml.start("Parameter")
                    .elem("ParameterName", entry.getKey())
                    .elem("ParameterValue", entry.getValue())
                    .elem("IsModifiable", true)
-                   .end("member");
+                   .end("Parameter");
             }
             xml.end("Parameters").start("Marker").end("Marker");
             return Response.ok(AwsQueryResponse.envelope("DescribeDBParameters", AwsNamespaces.RDS, xml.build())).build();
@@ -594,11 +595,11 @@ public class RdsQueryHandler {
         }
         Map<String, String> parameters = new HashMap<>();
         for (int n = 1; ; n++) {
-            String paramName = params.getFirst("Parameters.member." + n + ".ParameterName");
+            String paramName = params.getFirst("Parameters.Parameter." + n + ".ParameterName");
             if (paramName == null) {
                 break;
             }
-            String paramValue = params.getFirst("Parameters.member." + n + ".ParameterValue");
+            String paramValue = params.getFirst("Parameters.Parameter." + n + ".ParameterValue");
             if (paramValue != null) {
                 parameters.put(paramName, paramValue);
             }
@@ -623,11 +624,11 @@ public class RdsQueryHandler {
             DbClusterParameterGroup group = service.getDbClusterParameterGroup(name);
             XmlBuilder xml = new XmlBuilder().start("Parameters");
             for (Map.Entry<String, String> entry : group.getParameters().entrySet()) {
-                xml.start("member")
+                xml.start("Parameter")
                    .elem("ParameterName", entry.getKey())
                    .elem("ParameterValue", entry.getValue())
                    .elem("IsModifiable", true)
-                   .end("member");
+                   .end("Parameter");
             }
             xml.end("Parameters").start("Marker").end("Marker");
             return Response.ok(AwsQueryResponse.envelope("DescribeDBClusterParameters", AwsNamespaces.RDS, xml.build())).build();

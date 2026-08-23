@@ -1003,6 +1003,11 @@ public class RdsService implements Resettable {
     }
 
     public DbSubnetGroup createDbSubnetGroup(String name, String description, List<String> subnetIds, String region) {
+        return createDbSubnetGroup(name, description, subnetIds, Map.of(), region);
+    }
+
+    public DbSubnetGroup createDbSubnetGroup(String name, String description, List<String> subnetIds,
+                                              Map<String, String> tags, String region) {
         if (name == null || name.isBlank()) {
             throw new AwsException("MissingParameter", "The request must contain the parameter DBSubnetGroupName.", 400);
         }
@@ -1015,6 +1020,9 @@ public class RdsService implements Resettable {
         }
 
         DbSubnetGroup group = buildSubnetGroup(name, description, subnetIds, effectiveRegion(region));
+        // AWS always echoes back the Tags a CreateDBSubnetGroup request set, the same as every
+        // other RDS resource - see lex00/floci#105.
+        group.setTags(tags != null ? new LinkedHashMap<>(tags) : new LinkedHashMap<>());
         subnetGroups.put(name, group);
         return group;
     }
