@@ -59,7 +59,7 @@ public class Ec2VpcEndpointCfnProvisioner implements CfnResourceProvisioner {
                 resolveIdList(props, "SubnetIds", ctx),
                 resolveIdList(props, "SecurityGroupIds", ctx),
                 privateDnsEnabled,
-                null,
+                policyDocument(props),
                 List.of());
         r.setPhysicalId(endpoint.getVpcEndpointId());
         r.getAttributes().put("Id", endpoint.getVpcEndpointId());
@@ -76,6 +76,20 @@ public class Ec2VpcEndpointCfnProvisioner implements CfnResourceProvisioner {
     @Override
     public void delete(String resourceType, String physicalId, String region) {
         ec2Service.deleteVpcEndpoints(region, List.of(physicalId));
+    }
+
+    /**
+     * {@code PolicyDocument} is declared as JSON in the template, so it arrives as an object
+     * node rather than a string. Serialising the node matches how {@code IamRoleCfnProvisioner}
+     * handles {@code AssumeRolePolicyDocument}, and without it a CloudFormation-declared
+     * endpoint policy is dropped exactly as it used to be on the EC2 API path.
+     */
+    private String policyDocument(JsonNode props) {
+        if (props == null || !props.has("PolicyDocument") || props.get("PolicyDocument").isNull()) {
+            return null;
+        }
+        JsonNode document = props.get("PolicyDocument");
+        return document.isTextual() ? document.textValue() : document.toString();
     }
 
     /** Resolve an array property of Ref/GetAtt entries into plain id strings. */

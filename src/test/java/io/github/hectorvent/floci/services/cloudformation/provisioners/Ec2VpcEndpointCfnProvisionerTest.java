@@ -105,6 +105,50 @@ class Ec2VpcEndpointCfnProvisionerTest {
     }
 
     @Test
+    void policyDocumentIsSerialisedAndPassedThrough() {
+        // The template declares PolicyDocument as JSON, so it arrives as an object node.
+        // Passing null here would drop a CloudFormation-declared policy exactly as the
+        // EC2 API path used to.
+        when(ec2.createVpcEndpoint(anyString(), anyString(), anyString(), anyString(),
+                anyList(), anyList(), anyList(), any(), any(), anyList()))
+                .thenReturn(endpoint("vpce-policy"));
+        StackResource r = resource();
+        ObjectNode props = mapper.createObjectNode()
+                .put("VpcId", "vpc-1")
+                .put("ServiceName", "com.amazonaws.us-east-1.s3");
+        ObjectNode statement = mapper.createObjectNode()
+                .put("Effect", "Allow")
+                .put("Principal", "*")
+                .put("Action", "s3:GetObject")
+                .put("Resource", "*");
+        ObjectNode policy = mapper.createObjectNode().put("Version", "2012-10-17");
+        policy.putArray("Statement").add(statement);
+        props.set("PolicyDocument", policy);
+
+        provisioner.provision(r, props, ctx());
+
+        verify(ec2).createVpcEndpoint(eq("us-east-1"), eq("vpc-1"), eq("com.amazonaws.us-east-1.s3"),
+                anyString(), anyList(), anyList(), anyList(), any(),
+                eq(policy.toString()), anyList());
+    }
+
+    @Test
+    void anAbsentPolicyDocumentStaysNull() {
+        when(ec2.createVpcEndpoint(anyString(), anyString(), anyString(), anyString(),
+                anyList(), anyList(), anyList(), any(), isNull(), anyList()))
+                .thenReturn(endpoint("vpce-nopolicy"));
+        StackResource r = resource();
+        ObjectNode props = mapper.createObjectNode()
+                .put("VpcId", "vpc-1")
+                .put("ServiceName", "com.amazonaws.us-east-1.s3");
+
+        provisioner.provision(r, props, ctx());
+
+        verify(ec2).createVpcEndpoint(anyString(), anyString(), anyString(), anyString(),
+                anyList(), anyList(), anyList(), any(), isNull(), anyList());
+    }
+
+    @Test
     void updateReplacesAndDeletesPreviousEndpoint() {
         when(ec2.createVpcEndpoint(anyString(), anyString(), anyString(), anyString(),
                 anyList(), anyList(), anyList(), any(), any(), anyList()))

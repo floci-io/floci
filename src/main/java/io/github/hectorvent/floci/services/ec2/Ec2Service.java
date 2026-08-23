@@ -2760,9 +2760,7 @@ public class Ec2Service implements ContainerTeardown {
         endpoint.setRouteTableIds(new ArrayList<>(routeTableIds));
         endpoint.setSubnetIds(new ArrayList<>(subnetIds));
         endpoint.setSecurityGroupIds(new ArrayList<>(securityGroupIds));
-        if (policyDocument != null && !policyDocument.isBlank()) {
-            endpoint.setPolicyDocument(policyDocument);
-        }
+        endpoint.setPolicyDocument(policyDocument);
         if (endpointTags != null && !endpointTags.isEmpty()) {
             endpoint.setTags(new ArrayList<>(endpointTags));
             tags.put(endpoint.getVpcEndpointId(), new ArrayList<>(endpointTags));
@@ -2785,6 +2783,13 @@ public class Ec2Service implements ContainerTeardown {
                                          List<String> addSubnetIds, List<String> removeSubnetIds,
                                          List<String> addSecurityGroupIds, List<String> removeSecurityGroupIds,
                                          String policyDocument, Boolean resetPolicy, Boolean privateDnsEnabled) {
+        // VpcEndpointId is the one required member of ModifyVpcEndpointRequest. The model
+        // requires it to be present, not to be non-empty, so only an absent value is a
+        // MissingParameter; a present-but-unknown id is an InvalidVpcEndpointId.NotFound.
+        if (endpointId == null) {
+            throw new AwsException("MissingParameter",
+                    "The request must contain the parameter VpcEndpointId", 400);
+        }
         ensureDefaultResources(region);
         // Terraform declares each aws_vpc_endpoint_route_table_association as its own
         // resource and applies them in parallel, so several ModifyVpcEndpoint calls land
@@ -2826,7 +2831,7 @@ public class Ec2Service implements ContainerTeardown {
 
         if (Boolean.TRUE.equals(resetPolicy)) {
             endpoint.setPolicyDocument(null);
-        } else if (policyDocument != null && !policyDocument.isBlank()) {
+        } else if (policyDocument != null) {
             endpoint.setPolicyDocument(policyDocument);
         }
         if (privateDnsEnabled != null) {

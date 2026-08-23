@@ -3441,7 +3441,7 @@ public class Ec2QueryHandler {
             xml.start("item").elem("groupId", securityGroupId).end("item");
         }
         xml.end("groupSet");
-        if (endpoint.getPolicyDocument() != null && !endpoint.getPolicyDocument().isBlank()) {
+        if (endpoint.getPolicyDocument() != null) {
             xml.elem("policyDocument", endpoint.getPolicyDocument());
         }
         xml.raw(tagSetXml(endpoint.getTags()));

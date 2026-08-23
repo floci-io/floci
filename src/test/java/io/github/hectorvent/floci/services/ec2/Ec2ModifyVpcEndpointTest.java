@@ -226,7 +226,38 @@ class Ec2ModifyVpcEndpointTest {
         .when()
             .post("/")
         .then()
-            .statusCode(400);
+            .statusCode(400)
+            // Assert the code, not just the status: UnsupportedOperation is also a 400, so a
+            // status-only assertion passes even when the action is not implemented at all.
+            .body(hasXPath("//*[local-name()='Code']", equalTo("InvalidVpcEndpointId.NotFound")));
+    }
+
+    @Test
+    void omittingVpcEndpointIdIsRejectedAsMissingParameter() {
+        // VpcEndpointId is the sole required member of ModifyVpcEndpointRequest. An absent
+        // required Query parameter is MissingParameter, not a lookup failure for the id "null".
+        given()
+            .formParam("Action", "ModifyVpcEndpoint")
+            .formParam("ResetPolicy", "true")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body(hasXPath("//*[local-name()='Code']", equalTo("MissingParameter")));
+    }
+
+    @Test
+    void aPresentEmptyPolicyDocumentIsStoredRatherThanDropped() {
+        // The model gives PolicyDocument no `min`, so "present" is the only test the request
+        // supports; treating an empty string as absent would silently discard a supplied value.
+        Fixture f = fixture("10.98.0.0/16");
+        ec2("ModifyVpcEndpoint", "VpcEndpointId", f.endpointId(), "PolicyDocument", POLICY);
+        ec2("ModifyVpcEndpoint", "VpcEndpointId", f.endpointId(), "PolicyDocument", "");
+
+        assertEquals("", service
+                .describeVpcEndpoints("us-east-1", List.of(f.endpointId()), Map.of())
+                .getFirst().getPolicyDocument());
     }
 
     @Test
@@ -243,7 +274,8 @@ class Ec2ModifyVpcEndpointTest {
         .when()
             .post("/")
         .then()
-            .statusCode(400);
+            .statusCode(400)
+            .body(hasXPath("//*[local-name()='Code']", equalTo("InvalidRouteTableID.NotFound")));
 
         // The valid removal in the same request must not have been applied.
         given()
