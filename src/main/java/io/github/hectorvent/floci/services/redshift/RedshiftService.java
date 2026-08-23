@@ -147,6 +147,34 @@ public class RedshiftService {
         return cluster;
     }
 
+    public synchronized Cluster modifyCluster(String clusterIdentifier, String nodeType, Integer numberOfNodes,
+                                               String masterUserPassword, String clusterParameterGroupName,
+                                               List<String> vpcSecurityGroupIds) {
+        Cluster cluster = clusters.get(clusterIdentifier)
+                .orElseThrow(() -> new AwsException("ClusterNotFound", "Cluster " + clusterIdentifier + " not found", 404));
+
+        // NodeType/NumberOfNodes only update metadata — they do not resize the underlying
+        // Postgres container, which has no notion of Redshift node count.
+        if (nodeType != null && !nodeType.isBlank()) {
+            cluster.setNodeType(nodeType);
+        }
+        if (clusterParameterGroupName != null && !clusterParameterGroupName.isBlank()) {
+            cluster.setClusterParameterGroupName(clusterParameterGroupName);
+        }
+        if (vpcSecurityGroupIds != null && !vpcSecurityGroupIds.isEmpty()) {
+            cluster.setVpcSecurityGroupIds(vpcSecurityGroupIds);
+        }
+        if (masterUserPassword != null && !masterUserPassword.isBlank()) {
+            containerManager.alterUserPassword(clusters.accountId(), clusterIdentifier,
+                    cluster.getMasterUsername(), masterUserPassword);
+            cluster.setMasterPassword(masterUserPassword);
+        }
+
+        clusters.put(clusterIdentifier, cluster);
+        clusters.flush();
+        return cluster;
+    }
+
     // ── Snapshot Operations ──────────────────────────────────────────────────
 
     public Snapshot createSnapshot(String snapshotIdentifier, String clusterIdentifier) {

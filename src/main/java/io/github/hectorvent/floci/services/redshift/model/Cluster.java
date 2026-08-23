@@ -15,6 +15,7 @@ public class Cluster {
     private String clusterStatus;
     private Endpoint endpoint;
     private String clusterSubnetGroupName;
+    private String clusterParameterGroupName;
     private List<String> vpcSecurityGroupIds = new ArrayList<>();
 
     public String getClusterIdentifier() { return clusterIdentifier; }
@@ -31,6 +32,8 @@ public class Cluster {
     public void setEndpoint(Endpoint endpoint) { this.endpoint = endpoint; }
     public String getClusterSubnetGroupName() { return clusterSubnetGroupName; }
     public void setClusterSubnetGroupName(String clusterSubnetGroupName) { this.clusterSubnetGroupName = clusterSubnetGroupName; }
+    public String getClusterParameterGroupName() { return clusterParameterGroupName; }
+    public void setClusterParameterGroupName(String clusterParameterGroupName) { this.clusterParameterGroupName = clusterParameterGroupName; }
     public List<String> getVpcSecurityGroupIds() { return vpcSecurityGroupIds; }
     public void setVpcSecurityGroupIds(List<String> vpcSecurityGroupIds) { this.vpcSecurityGroupIds = vpcSecurityGroupIds; }
 

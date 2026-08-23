@@ -237,6 +237,46 @@ class RedshiftServiceTest {
     }
 
     @Test
+    void testModifyClusterUpdatesMetadataAndPassword() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("my-cluster");
+        cluster.setNodeType("dc2.large");
+        cluster.setMasterUsername("admin");
+        cluster.setMasterPassword("old-pw");
+        when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
+
+        Cluster updated = service.modifyCluster("my-cluster", "ra3.xlplus", null, "new-pw", null, null);
+
+        assertEquals("ra3.xlplus", updated.getNodeType());
+        assertEquals("new-pw", updated.getMasterPassword());
+        verify(cm).alterUserPassword("111111111111", "my-cluster", "admin", "new-pw");
+        verify(clusterBackend).put(eq("my-cluster"), any(Cluster.class));
+        verify(clusterBackend).flush();
+    }
+
+    @Test
+    void testModifyClusterUpdatesVpcSecurityGroups() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("my-cluster");
+        cluster.setMasterUsername("admin");
+        when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
+
+        Cluster updated = service.modifyCluster("my-cluster", null, null, null, "custom-pg", List.of("sg-9"));
+
+        assertEquals("custom-pg", updated.getClusterParameterGroupName());
+        assertEquals(List.of("sg-9"), updated.getVpcSecurityGroupIds());
+        verify(cm, never()).alterUserPassword(any(), any(), any(), any());
+    }
+
+    @Test
+    void testModifyClusterNotFound() {
+        when(clusterBackend.get("missing")).thenReturn(Optional.empty());
+
+        assertThrows(AwsException.class, () ->
+                service.modifyCluster("missing", "ra3.xlplus", null, null, null, null));
+    }
+
+    @Test
     void testDescribeSnapshots() {
         Snapshot s = new Snapshot("snap-1", "my-cluster", "available", 5439, "admin");
         when(snapshotBackend.get("snap-1")).thenReturn(Optional.of(s));
