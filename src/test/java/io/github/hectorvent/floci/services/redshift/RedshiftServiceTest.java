@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.services.redshift.container.RedshiftContainerH
 import io.github.hectorvent.floci.services.redshift.container.RedshiftContainerManager;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
 import io.github.hectorvent.floci.services.redshift.model.ClusterParameterGroup;
+import io.github.hectorvent.floci.services.redshift.model.ClusterSubnetGroup;
 import io.github.hectorvent.floci.services.redshift.model.Endpoint;
 import io.github.hectorvent.floci.services.redshift.model.Parameter;
 import io.github.hectorvent.floci.services.redshift.model.Snapshot;
@@ -31,6 +32,7 @@ class RedshiftServiceTest {
     private AccountAwareStorageBackend<Snapshot> snapshotBackend;
     private AccountAwareStorageBackend<String> snapshotDumpBackend;
     private AccountAwareStorageBackend<ClusterParameterGroup> parameterGroupBackend;
+    private AccountAwareStorageBackend<ClusterSubnetGroup> subnetGroupBackend;
     private RedshiftContainerManager cm;
     private io.github.hectorvent.floci.core.common.RegionResolver regionResolver;
     private RedshiftService service;
@@ -43,6 +45,7 @@ class RedshiftServiceTest {
         snapshotBackend = mock(AccountAwareStorageBackend.class);
         snapshotDumpBackend = mock(AccountAwareStorageBackend.class);
         parameterGroupBackend = mock(AccountAwareStorageBackend.class);
+        subnetGroupBackend = mock(AccountAwareStorageBackend.class);
         cm = mock(RedshiftContainerManager.class);
         
         io.github.hectorvent.floci.config.EmulatorConfig config = mock(io.github.hectorvent.floci.config.EmulatorConfig.class);
@@ -53,6 +56,7 @@ class RedshiftServiceTest {
         when(sf.<Cluster>create(eq("redshift"), eq("redshift-clusters.json"), any())).thenReturn(clusterBackend);
         when(sf.<Snapshot>create(eq("redshift"), eq("redshift-snapshots.json"), any())).thenReturn(snapshotBackend);
         when(sf.<ClusterParameterGroup>create(eq("redshift"), eq("redshift-parameter-groups.json"), any())).thenReturn(parameterGroupBackend);
+        when(sf.<ClusterSubnetGroup>create(eq("redshift"), eq("redshift-subnet-groups.json"), any())).thenReturn(subnetGroupBackend);
         when(clusterBackend.accountId()).thenReturn("111111111111");
 
         regionResolver = new io.github.hectorvent.floci.core.common.RegionResolver("us-east-1", "111111111111");
@@ -539,11 +543,74 @@ class RedshiftServiceTest {
         when(clusterBackend.scan(any())).thenReturn(java.util.List.of(a, b));
         when(snapshotBackend.scan(any())).thenReturn(java.util.List.of());
         when(parameterGroupBackend.scan(any())).thenReturn(java.util.List.of());
+        when(subnetGroupBackend.scan(any())).thenReturn(java.util.List.of());
 
         List<RedshiftService.TaggedResource> tagged = service.describeTags(null, "cluster", null);
 
         assertEquals(1, tagged.size());
         assertEquals("cluster-a", extractResourceId(tagged.get(0).resourceName()));
+    }
+
+    @Test
+    void testCreateClusterSubnetGroup() {
+        when(subnetGroupBackend.get("my-subnet-group")).thenReturn(Optional.empty());
+
+        ClusterSubnetGroup group = service.createClusterSubnetGroup(
+                "my-subnet-group", "test group", "vpc-123", List.of("subnet-1", "subnet-2"));
+
+        assertEquals("my-subnet-group", group.getClusterSubnetGroupName());
+        assertEquals(List.of("subnet-1", "subnet-2"), group.getSubnetIds());
+        verify(subnetGroupBackend).put(eq("my-subnet-group"), any(ClusterSubnetGroup.class));
+        verify(subnetGroupBackend).flush();
+    }
+
+    @Test
+    void testCreateClusterSubnetGroupAlreadyExists() {
+        when(subnetGroupBackend.get("existing")).thenReturn(Optional.of(new ClusterSubnetGroup()));
+
+        assertThrows(AwsException.class, () ->
+                service.createClusterSubnetGroup("existing", "d", "vpc-1", List.of("subnet-1")));
+    }
+
+    @Test
+    void testDescribeClusterSubnetGroups() {
+        ClusterSubnetGroup group = new ClusterSubnetGroup("my-group", "d", "vpc-1", List.of("subnet-1"));
+        when(subnetGroupBackend.get("my-group")).thenReturn(Optional.of(group));
+
+        List<ClusterSubnetGroup> list = service.describeClusterSubnetGroups("my-group");
+
+        assertEquals(1, list.size());
+        assertEquals("my-group", list.get(0).getClusterSubnetGroupName());
+    }
+
+    @Test
+    void testModifyClusterSubnetGroup() {
+        ClusterSubnetGroup group = new ClusterSubnetGroup("my-group", "old", "vpc-1", List.of("subnet-1"));
+        when(subnetGroupBackend.get("my-group")).thenReturn(Optional.of(group));
+
+        ClusterSubnetGroup updated = service.modifyClusterSubnetGroup("my-group", "new", List.of("subnet-2", "subnet-3"));
+
+        assertEquals("new", updated.getDescription());
+        assertEquals(List.of("subnet-2", "subnet-3"), updated.getSubnetIds());
+    }
+
+    @Test
+    void testDeleteClusterSubnetGroup() {
+        ClusterSubnetGroup group = new ClusterSubnetGroup("my-group", "d", "vpc-1", List.of("subnet-1"));
+        when(subnetGroupBackend.get("my-group")).thenReturn(Optional.of(group));
+
+        ClusterSubnetGroup deleted = service.deleteClusterSubnetGroup("my-group");
+
+        assertEquals("my-group", deleted.getClusterSubnetGroupName());
+        verify(subnetGroupBackend).delete("my-group");
+        verify(subnetGroupBackend).flush();
+    }
+
+    @Test
+    void testDeleteClusterSubnetGroupNotFound() {
+        when(subnetGroupBackend.get("missing")).thenReturn(Optional.empty());
+
+        assertThrows(AwsException.class, () -> service.deleteClusterSubnetGroup("missing"));
     }
 
     private static String extractResourceId(String arn) {

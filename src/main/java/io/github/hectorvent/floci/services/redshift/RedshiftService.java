@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.services.redshift.container.RedshiftContainerH
 import io.github.hectorvent.floci.services.redshift.container.RedshiftContainerManager;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
 import io.github.hectorvent.floci.services.redshift.model.ClusterParameterGroup;
+import io.github.hectorvent.floci.services.redshift.model.ClusterSubnetGroup;
 import io.github.hectorvent.floci.services.redshift.model.Endpoint;
 import io.github.hectorvent.floci.services.redshift.model.Parameter;
 import io.github.hectorvent.floci.services.redshift.model.Snapshot;
@@ -32,6 +33,7 @@ public class RedshiftService {
     private final AccountAwareStorageBackend<Cluster> clusters;
     private final AccountAwareStorageBackend<Snapshot> snapshots;
     private final AccountAwareStorageBackend<ClusterParameterGroup> parameterGroups;
+    private final AccountAwareStorageBackend<ClusterSubnetGroup> subnetGroups;
     private final RedshiftContainerManager containerManager;
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
@@ -42,6 +44,7 @@ public class RedshiftService {
         this.clusters = storageFactory.create("redshift", "redshift-clusters.json", new TypeReference<Map<String, Cluster>>() {});
         this.snapshots = storageFactory.create("redshift", "redshift-snapshots.json", new TypeReference<Map<String, Snapshot>>() {});
         this.parameterGroups = storageFactory.create("redshift", "redshift-parameter-groups.json", new TypeReference<Map<String, ClusterParameterGroup>>() {});
+        this.subnetGroups = storageFactory.create("redshift", "redshift-subnet-groups.json", new TypeReference<Map<String, ClusterSubnetGroup>>() {});
         this.containerManager = containerManager;
         this.config = config;
         this.regionResolver = regionResolver;
@@ -367,6 +370,49 @@ public class RedshiftService {
         return group;
     }
 
+    // ── Cluster Subnet Group Operations ──────────────────────────────────────
+
+    public ClusterSubnetGroup createClusterSubnetGroup(String name, String description, String vpcId, List<String> subnetIds) {
+        if (subnetGroups.get(name).isPresent()) {
+            throw new AwsException("ClusterSubnetGroupAlreadyExists", "Cluster subnet group " + name + " already exists", 400);
+        }
+        ClusterSubnetGroup group = new ClusterSubnetGroup(name, description, vpcId, subnetIds);
+        subnetGroups.put(name, group);
+        subnetGroups.flush();
+        return group;
+    }
+
+    public List<ClusterSubnetGroup> describeClusterSubnetGroups(String name) {
+        if (name != null && !name.isBlank()) {
+            ClusterSubnetGroup group = subnetGroups.get(name)
+                    .orElseThrow(() -> new AwsException("ClusterSubnetGroupNotFoundFault", "Cluster subnet group " + name + " not found", 404));
+            return List.of(group);
+        }
+        return subnetGroups.scan(k -> true);
+    }
+
+    public synchronized ClusterSubnetGroup modifyClusterSubnetGroup(String name, String description, List<String> subnetIds) {
+        ClusterSubnetGroup group = subnetGroups.get(name)
+                .orElseThrow(() -> new AwsException("ClusterSubnetGroupNotFoundFault", "Cluster subnet group " + name + " not found", 404));
+        if (description != null) {
+            group.setDescription(description);
+        }
+        if (subnetIds != null && !subnetIds.isEmpty()) {
+            group.setSubnetIds(subnetIds);
+        }
+        subnetGroups.put(name, group);
+        subnetGroups.flush();
+        return group;
+    }
+
+    public ClusterSubnetGroup deleteClusterSubnetGroup(String name) {
+        ClusterSubnetGroup group = subnetGroups.get(name)
+                .orElseThrow(() -> new AwsException("ClusterSubnetGroupNotFoundFault", "Cluster subnet group " + name + " not found", 404));
+        subnetGroups.delete(name);
+        subnetGroups.flush();
+        return group;
+    }
+
     // ── Tagging Operations ───────────────────────────────────────────────────
 
     /** A resolved tag target: its current tags plus a sink that persists an updated map. */
@@ -417,6 +463,12 @@ public class RedshiftService {
                         "parametergroup", g.getTags(), tagKeysFilter);
             }
         }
+        if (resourceType == null || "subnetgroup".equalsIgnoreCase(resourceType)) {
+            for (ClusterSubnetGroup g : subnetGroups.scan(k -> true)) {
+                addTaggedResources(result, subnetGroupArn(g.getClusterSubnetGroupName()),
+                        "subnetgroup", g.getTags(), tagKeysFilter);
+            }
+        }
         return result;
     }
 
@@ -448,6 +500,10 @@ public class RedshiftService {
 
     private String parameterGroupArn(String parameterGroupName) {
         return regionResolver.buildArn("redshift", regionResolver.getRegion(), "parametergroup:" + parameterGroupName);
+    }
+
+    private String subnetGroupArn(String name) {
+        return regionResolver.buildArn("redshift", regionResolver.getRegion(), "subnetgroup:" + name);
     }
 
     /**
@@ -510,6 +566,15 @@ public class RedshiftService {
                     group.setTags(updated);
                     parameterGroups.put(id, group);
                     parameterGroups.flush();
+                });
+            }
+            case "subnetgroup" -> {
+                ClusterSubnetGroup group = subnetGroups.get(id)
+                        .orElseThrow(() -> new AwsException("ClusterSubnetGroupNotFoundFault", "Cluster subnet group " + id + " not found", 404));
+                yield new TagHandle(group.getTags(), updated -> {
+                    group.setTags(updated);
+                    subnetGroups.put(id, group);
+                    subnetGroups.flush();
                 });
             }
             default -> throw new AwsException("InvalidParameterValue",
