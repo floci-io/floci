@@ -203,6 +203,12 @@ public class RedshiftContainerManager {
             throw new AwsException("ClusterNotFound", "Cluster container for " + clusterIdentifier + " not found", 404);
         }
         String effectiveUser = (username != null && !username.isBlank()) ? username : "postgres";
+        // Validate effectiveUser against safe SQL identifier pattern to prevent SQL injection.
+        // psql -c sends the query string to Postgres, which allows multiple ;-separated statements,
+        // so even argv-escaping doesn't protect against a username like "postgres; DROP TABLE ..."
+        if (!effectiveUser.matches("^[A-Za-z_][A-Za-z0-9_]*$")) {
+            throw new AwsException("InvalidParameterValue", "Username must be a valid SQL identifier", 400);
+        }
         // The password is embedded in a SQL literal executed via psql -c, not shell-interpolated —
         // ' inside the password would break the SQL literal, so reject it rather than risk injection.
         if (newPassword != null && newPassword.contains("'")) {

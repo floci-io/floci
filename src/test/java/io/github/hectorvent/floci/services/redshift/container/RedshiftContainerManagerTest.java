@@ -373,4 +373,77 @@ class RedshiftContainerManagerTest {
         assertEquals("ClusterNotFound", ex.getErrorCode());
         assertEquals(404, ex.getHttpStatus());
     }
+
+    @Test
+    void testAlterUserPasswordInvalidUsername() throws Exception {
+        ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, org.mockito.Mockito.RETURNS_SELF);
+        when(containerBuilder.newContainer(anyString())).thenReturn(specBuilder);
+        ContainerInfo info = new ContainerInfo("cont-123", Map.of(5432, new EndpointInfo("localhost", 5432)));
+        when(lifecycleManager.createAndStart(any())).thenReturn(info);
+        manager.start(ACCOUNT_ID, "test-cluster", "admin", "pass");
+
+        // Test SQL injection attempt with semicolon
+        AwsException ex = assertThrows(AwsException.class, () ->
+                manager.alterUserPassword(ACCOUNT_ID, "test-cluster", "postgres; DROP TABLE some_table; --", "new-secret"));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+
+        // Test SQL injection attempt with space
+        ex = assertThrows(AwsException.class, () ->
+                manager.alterUserPassword(ACCOUNT_ID, "test-cluster", "admin user", "new-secret"));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void testAlterUserPasswordInvalidPassword() throws Exception {
+        ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, org.mockito.Mockito.RETURNS_SELF);
+        when(containerBuilder.newContainer(anyString())).thenReturn(specBuilder);
+        ContainerInfo info = new ContainerInfo("cont-123", Map.of(5432, new EndpointInfo("localhost", 5432)));
+        when(lifecycleManager.createAndStart(any())).thenReturn(info);
+        manager.start(ACCOUNT_ID, "test-cluster", "admin", "pass");
+
+        // Test password with single quote
+        AwsException ex = assertThrows(AwsException.class, () ->
+                manager.alterUserPassword(ACCOUNT_ID, "test-cluster", "admin", "pass'word"));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void testAlterUserPasswordExecFailure() throws Exception {
+        ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, org.mockito.Mockito.RETURNS_SELF);
+        when(containerBuilder.newContainer(anyString())).thenReturn(specBuilder);
+        ContainerInfo info = new ContainerInfo("cont-123", Map.of(5432, new EndpointInfo("localhost", 5432)));
+        when(lifecycleManager.createAndStart(any())).thenReturn(info);
+        manager.start(ACCOUNT_ID, "test-cluster", "admin", "pass");
+
+        ExecCreateCmd createCmd = mock(ExecCreateCmd.class, org.mockito.Mockito.RETURNS_SELF);
+        ExecCreateCmdResponse createResponse = mock(ExecCreateCmdResponse.class);
+        when(createResponse.getId()).thenReturn("exec-fail");
+        when(createCmd.exec()).thenReturn(createResponse);
+        when(dockerClient.execCreateCmd("cont-123")).thenReturn(createCmd);
+
+        ExecStartCmd startCmd = mock(ExecStartCmd.class);
+        when(startCmd.exec(any())).thenAnswer(invocation -> {
+            @SuppressWarnings("unchecked")
+            ResultCallback.Adapter<Frame> adapter = invocation.getArgument(0);
+            byte[] err = "ERROR: role \"admin\" does not exist".getBytes(StandardCharsets.UTF_8);
+            adapter.onNext(new Frame(StreamType.STDERR, err));
+            adapter.onComplete();
+            return adapter;
+        });
+        when(dockerClient.execStartCmd("exec-fail")).thenReturn(startCmd);
+
+        InspectExecCmd inspectCmd = mock(InspectExecCmd.class);
+        InspectExecResponse inspectResponse = mock(InspectExecResponse.class);
+        when(inspectResponse.getExitCodeLong()).thenReturn(1L);
+        when(inspectCmd.exec()).thenReturn(inspectResponse);
+        when(dockerClient.inspectExecCmd("exec-fail")).thenReturn(inspectCmd);
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                manager.alterUserPassword(ACCOUNT_ID, "test-cluster", "admin", "new-secret"));
+        assertEquals("InternalFailure", ex.getErrorCode());
+        assertEquals(500, ex.getHttpStatus());
+    }
 }
