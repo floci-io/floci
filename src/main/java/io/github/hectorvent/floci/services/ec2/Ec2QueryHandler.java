@@ -395,6 +395,13 @@ public class Ec2QueryHandler {
                 pair.setDescription(desc);
                 perm.getUserIdGroupPairs().add(pair);
             }
+            for (int j = 1; ; j++) {
+                String base = prefix + "." + i + ".PrefixListIds." + j;
+                String prefixListId = p.getFirst(base + ".PrefixListId");
+                if (prefixListId == null) break;
+                String desc = p.getFirst(base + ".Description");
+                perm.getPrefixListIds().add(new PrefixListIdReference(prefixListId, desc));
+            }
             perms.add(perm);
         }
         return perms;
@@ -2871,6 +2878,7 @@ public class Ec2QueryHandler {
                     .elem("vpcPeeringConnectionId", ref.getVpcPeeringConnectionId())
                     .end("referencedGroupInfo");
         }
+        xml.elem("prefixListId", rule.getPrefixListId());
         xml.elem("description", rule.getDescription())
                 .raw(tagSetXml(rule.getTags()));
         return xml.build();
@@ -3380,7 +3388,15 @@ public class Ec2QueryHandler {
                         .elem("description", g.getDescription())
                         .end("item");
             }
-            xml.end("groups").end("item");
+            xml.end("groups")
+                    .start("prefixListIds");
+            for (PrefixListIdReference ref : perm.getPrefixListIds()) {
+                xml.start("item")
+                        .elem("prefixListId", ref.getPrefixListId())
+                        .elem("description", ref.getDescription())
+                        .end("item");
+            }
+            xml.end("prefixListIds").end("item");
         }
         xml.end(wrapperTag);
         return xml.build();

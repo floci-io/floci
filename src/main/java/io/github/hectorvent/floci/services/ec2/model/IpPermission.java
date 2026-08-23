@@ -16,6 +16,7 @@ public class IpPermission {
     private List<IpRange> ipRanges = new ArrayList<>();
     private List<Ipv6Range> ipv6Ranges = new ArrayList<>();
     private List<UserIdGroupPair> userIdGroupPairs = new ArrayList<>();
+    private List<PrefixListIdReference> prefixListIds = new ArrayList<>();
 
     public IpPermission() {}
 
@@ -36,4 +37,7 @@ public class IpPermission {
 
     public List<UserIdGroupPair> getUserIdGroupPairs() { return userIdGroupPairs; }
     public void setUserIdGroupPairs(List<UserIdGroupPair> userIdGroupPairs) { this.userIdGroupPairs = userIdGroupPairs; }
+
+    public List<PrefixListIdReference> getPrefixListIds() { return prefixListIds; }
+    public void setPrefixListIds(List<PrefixListIdReference> prefixListIds) { this.prefixListIds = prefixListIds; }
 }

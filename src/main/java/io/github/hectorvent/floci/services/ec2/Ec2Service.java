@@ -75,6 +75,7 @@ import io.github.hectorvent.floci.services.ec2.model.SecurityGroupRule;
 import io.github.hectorvent.floci.services.ec2.model.Snapshot;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
+import io.github.hectorvent.floci.services.ec2.model.PrefixListIdReference;
 import io.github.hectorvent.floci.services.ec2.model.UserIdGroupPair;
 import io.github.hectorvent.floci.services.ec2.model.Volume;
 import io.github.hectorvent.floci.services.ec2.model.VolumeAttachment;
@@ -2039,6 +2040,13 @@ public class Ec2Service implements ContainerTeardown {
                     atoms.add(atom);
                 }
             }
+            if (perm.getPrefixListIds() != null) {
+                for (PrefixListIdReference ref : perm.getPrefixListIds()) {
+                    IpPermission atom = copyPorts(perm);
+                    atom.getPrefixListIds().add(ref);
+                    atoms.add(atom);
+                }
+            }
             if (atoms.size() == before) {
                 atoms.add(copyPorts(perm));
             }
@@ -2057,6 +2065,7 @@ public class Ec2Service implements ContainerTeardown {
             group.getIpRanges().addAll(atom.getIpRanges());
             group.getIpv6Ranges().addAll(atom.getIpv6Ranges());
             group.getUserIdGroupPairs().addAll(atom.getUserIdGroupPairs());
+            group.getPrefixListIds().addAll(atom.getPrefixListIds());
         }
         return new ArrayList<>(byPorts.values());
     }
@@ -2135,6 +2144,9 @@ public class Ec2Service implements ContainerTeardown {
             UserIdGroupPair pair = atom.getUserIdGroupPairs().get(0);
             return "sg:" + pair.getUserId() + "/" + (pair.getGroupId() != null ? pair.getGroupId() : pair.getGroupName());
         }
+        if (!atom.getPrefixListIds().isEmpty()) {
+            return "pl:" + atom.getPrefixListIds().get(0).getPrefixListId();
+        }
         return "none";
     }
 
@@ -2146,6 +2158,8 @@ public class Ec2Service implements ContainerTeardown {
             source = "cidr6:" + rule.getCidrIpv6();
         } else if (rule.getReferencedGroupInfo() != null) {
             source = "sg:" + rule.getReferencedGroupInfo().getUserId() + "/" + rule.getReferencedGroupInfo().getGroupId();
+        } else if (rule.getPrefixListId() != null) {
+            source = "pl:" + rule.getPrefixListId();
         } else {
             source = "none";
         }
@@ -2199,6 +2213,14 @@ public class Ec2Service implements ContainerTeardown {
                 ref.setUserId(pair.getUserId());
                 rule.setReferencedGroupInfo(ref);
                 rule.setDescription(pair.getDescription());
+                rules.add(rule);
+            }
+        }
+        if (perm.getPrefixListIds() != null) {
+            for (PrefixListIdReference ref : perm.getPrefixListIds()) {
+                SecurityGroupRule rule = newRule(groupId, perm, egress);
+                rule.setPrefixListId(ref.getPrefixListId());
+                rule.setDescription(ref.getDescription());
                 rules.add(rule);
             }
         }
