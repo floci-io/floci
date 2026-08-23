@@ -18,6 +18,7 @@ import io.github.hectorvent.floci.services.ec2.model.Image;
 import io.github.hectorvent.floci.services.ec2.model.NetworkAcl;
 import io.github.hectorvent.floci.services.ec2.model.KeyPair;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
+import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
 import io.github.hectorvent.floci.services.ec2.model.NatGateway;
 import io.github.hectorvent.floci.services.ec2.model.RouteTable;
 import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
@@ -242,6 +243,84 @@ class Ec2ServicePersistenceTest {
         RouteTable afterDelete =
                 restarted.describeRouteTables(REGION, List.of(routeTableId), Map.of()).getFirst();
         assertEquals(0, afterDelete.getRoutes().size(), "delete must actually remove the legacy route");
+    }
+
+    /**
+     * Regression test for the pre-unified-data schema migration in LaunchTemplate /
+     * LaunchTemplateData: a launch template persisted before that PR stored the IAM instance
+     * profile as a bare {@code iamInstanceProfileArn} string and instance tags as a flat
+     * {@code instanceTags} list, both directly on LaunchTemplate and, separately, on each entry
+     * of its {@code versions} map. Without the legacy {@code @JsonSetter}s those two keys are
+     * unrecognized by the current model and ignoreUnknown drops them, so a template that used to
+     * carry an IAM profile and instance tags would come back from a restart with neither.
+     *
+     * <p>This writes a hand-built ec2-launch-templates.json in the pre-migration shape directly
+     * (rather than producing it by running old code), then loads a fresh Ec2Service over it and
+     * asserts the profile ARN and instance tag survive - covering both the versions-map entry
+     * (the path DescribeLaunchTemplateVersions and AutoScaling actually read) and the top-level
+     * fields (the path ensureLaunchTemplateVersions falls back to for a template with no
+     * versions map at all, i.e. one only ever read via {@code getData()} pre-migration).
+     */
+    @Test
+    void legacyIamProfileAndInstanceTagsSurviveRestart(@TempDir Path dir) throws java.io.IOException {
+        String legacyJson = """
+                {
+                  "us-east-1::lt-legacy-versioned": {
+                    "launchTemplateId": "lt-legacy-versioned",
+                    "launchTemplateName": "legacy-versioned",
+                    "defaultVersionNumber": "1",
+                    "latestVersionNumber": "1",
+                    "region": "us-east-1",
+                    "iamInstanceProfileArn": "arn:aws:iam::000000000000:instance-profile/legacy-profile",
+                    "instanceTags": [ { "key": "Name", "value": "legacy-versioned" } ],
+                    "versions": {
+                      "1": {
+                        "imageId": "ami-legacy",
+                        "instanceType": "t3.micro",
+                        "iamInstanceProfileArn": "arn:aws:iam::000000000000:instance-profile/legacy-profile",
+                        "instanceTags": [ { "key": "Name", "value": "legacy-versioned" } ]
+                      }
+                    }
+                  },
+                  "us-east-1::lt-legacy-no-versions": {
+                    "launchTemplateId": "lt-legacy-no-versions",
+                    "launchTemplateName": "legacy-no-versions",
+                    "defaultVersionNumber": "1",
+                    "latestVersionNumber": "1",
+                    "region": "us-east-1",
+                    "imageId": "ami-legacy",
+                    "instanceType": "t3.micro",
+                    "iamInstanceProfileArn": "arn:aws:iam::000000000000:instance-profile/legacy-profile",
+                    "instanceTags": [ { "key": "Name", "value": "legacy-no-versions" } ],
+                    "versions": {}
+                  }
+                }
+                """;
+        Files.writeString(dir.resolve("ec2-launch-templates.json"), legacyJson);
+
+        Ec2Service restarted = newService(dir);
+
+        LaunchTemplateData versioned = restarted
+                .describeLaunchTemplateVersions(REGION, "lt-legacy-versioned", null, List.of())
+                .getFirst()
+                .getData();
+        assertEquals("arn:aws:iam::000000000000:instance-profile/legacy-profile",
+                restarted.iamInstanceProfileArn(versioned),
+                "IAM instance profile on a legacy versions-map entry must survive restart");
+        assertEquals(List.of("legacy-versioned"),
+                versioned.getInstanceTags().stream().map(Tag::getValue).toList(),
+                "instance tags on a legacy versions-map entry must survive restart");
+
+        LaunchTemplateData noVersions = restarted
+                .describeLaunchTemplateVersions(REGION, "lt-legacy-no-versions", null, List.of())
+                .getFirst()
+                .getData();
+        assertEquals("arn:aws:iam::000000000000:instance-profile/legacy-profile",
+                restarted.iamInstanceProfileArn(noVersions),
+                "IAM instance profile on a legacy template with no versions map must survive restart");
+        assertEquals(List.of("legacy-no-versions"),
+                noVersions.getInstanceTags().stream().map(Tag::getValue).toList(),
+                "instance tags on a legacy template with no versions map must survive restart");
     }
 
     private BlockDeviceMapping blockDeviceMapping(String snapshotId, int volumeSize) {

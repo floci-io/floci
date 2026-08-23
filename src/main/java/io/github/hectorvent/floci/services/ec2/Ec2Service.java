@@ -3830,12 +3830,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
 
     // ─── Launch Templates ─────────────────────────────────────────────────────
 
-    public LaunchTemplate createLaunchTemplate(String region, String name, String imageId,
-                                               String instanceType, String keyName,
-                                               List<String> securityGroupIds, String userData,
-                                               String encodedUserData,
-                                               String iamInstanceProfileArn,
-                                               List<Tag> launchTemplateTags, List<Tag> instanceTags) {
+    public LaunchTemplate createLaunchTemplate(String region, String name, LaunchTemplateData data,
+                                               List<Tag> launchTemplateTags) {
         ensureDefaultResources(region);
         if (name == null || name.isBlank()) {
             throw new AwsException("MissingParameter", "The request must contain the parameter LaunchTemplateName", 400);
@@ -3853,65 +3849,28 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         launchTemplate.setCreateTime(Instant.now());
         launchTemplate.setCreatedBy(AwsArnUtils.Arn.of("iam", "", accountId, "root").toString());
         launchTemplate.setRegion(region);
-        launchTemplate.setImageId(imageId);
-        launchTemplate.setInstanceType(instanceType);
-        launchTemplate.setKeyName(keyName);
-        launchTemplate.setUserData(userData);
-        launchTemplate.setEncodedUserData(encodedUserData);
-        launchTemplate.setIamInstanceProfileArn(iamInstanceProfileArn);
-        if (securityGroupIds != null) {
-            launchTemplate.setSecurityGroupIds(new ArrayList<>(securityGroupIds));
-        }
+        launchTemplate.setData(new LaunchTemplateData(data != null ? data : new LaunchTemplateData()));
         if (launchTemplateTags != null && !launchTemplateTags.isEmpty()) {
             launchTemplate.setTags(new ArrayList<>(launchTemplateTags));
             tags.put(launchTemplate.getLaunchTemplateId(), new ArrayList<>(launchTemplateTags));
         }
-        if (instanceTags != null && !instanceTags.isEmpty()) {
-            launchTemplate.setInstanceTags(new ArrayList<>(instanceTags));
-        }
-        launchTemplate.getVersions().put("1", dataFrom(launchTemplate));
+        launchTemplate.getVersions().put("1", new LaunchTemplateData(launchTemplate.getData()));
         launchTemplates.put(key(region, launchTemplate.getLaunchTemplateId()), launchTemplate);
         return launchTemplate;
     }
 
     public LaunchTemplate createLaunchTemplateVersion(String region, String id, String name,
-                                                      String sourceVersion,
-                                                      String imageId, String instanceType, String keyName,
-                                                      List<String> securityGroupIds, String userData,
-                                                      String encodedUserData,
-                                                      String iamInstanceProfileArn,
-                                                      List<Tag> instanceTags) {
+                                                      String sourceVersion, LaunchTemplateData data) {
         ensureDefaultResources(region);
         LaunchTemplate launchTemplate = findLaunchTemplate(region, id, name);
         ensureLaunchTemplateVersions(launchTemplate);
         int latestVersion = parseLaunchTemplateVersion(launchTemplate.getLatestVersionNumber()) + 1;
-        LaunchTemplateData data = new LaunchTemplateData(versionData(launchTemplate,
-                resolveLaunchTemplateVersion(launchTemplate, sourceVersion, launchTemplate.getLatestVersionNumber())));
+        LaunchTemplateData source = versionData(launchTemplate,
+                resolveLaunchTemplateVersion(launchTemplate, sourceVersion, launchTemplate.getLatestVersionNumber()));
+        LaunchTemplateData merged = source.mergedWith(data != null ? data : new LaunchTemplateData());
         launchTemplate.setLatestVersionNumber(String.valueOf(latestVersion));
-        if (imageId != null && !imageId.isBlank()) {
-            data.setImageId(imageId);
-        }
-        if (instanceType != null && !instanceType.isBlank()) {
-            data.setInstanceType(instanceType);
-        }
-        if (keyName != null && !keyName.isBlank()) {
-            data.setKeyName(keyName);
-        }
-        if (userData != null && !userData.isBlank()) {
-            data.setUserData(userData);
-            data.setEncodedUserData(encodedUserData);
-        }
-        if (iamInstanceProfileArn != null && !iamInstanceProfileArn.isBlank()) {
-            data.setIamInstanceProfileArn(iamInstanceProfileArn);
-        }
-        if (securityGroupIds != null && !securityGroupIds.isEmpty()) {
-            data.setSecurityGroupIds(securityGroupIds);
-        }
-        if (instanceTags != null && !instanceTags.isEmpty()) {
-            data.setInstanceTags(instanceTags);
-        }
-        launchTemplate.getVersions().put(String.valueOf(latestVersion), data);
-        applyData(launchTemplate, data);
+        launchTemplate.getVersions().put(String.valueOf(latestVersion), merged);
+        launchTemplate.setData(new LaunchTemplateData(merged));
         launchTemplates.put(key(region, launchTemplate.getLaunchTemplateId()), launchTemplate);
         return launchTemplate;
     }
@@ -3971,6 +3930,25 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 .collect(Collectors.toList());
     }
 
+    /**
+     * The instance-profile ARN a launch from {@code data} should use. A template given only a
+     * {@code Name} keeps that form as stored; the ARN is derived here, at launch time, instead of
+     * being written back into the template.
+     */
+    public String iamInstanceProfileArn(LaunchTemplateData data) {
+        if (data == null || data.getIamInstanceProfile() == null) {
+            return null;
+        }
+        LaunchTemplateData.IamInstanceProfile profile = data.getIamInstanceProfile();
+        if (profile.getArn() != null && !profile.getArn().isBlank()) {
+            return profile.getArn();
+        }
+        if (profile.getName() == null || profile.getName().isBlank()) {
+            return null;
+        }
+        return AwsArnUtils.Arn.of("iam", "", accountId, "instance-profile/" + profile.getName()).toString();
+    }
+
     public LaunchTemplateData resolveLaunchTemplateData(String region, String id, String name, String version) {
         ensureDefaultResources(region);
         LaunchTemplate launchTemplate = findLaunchTemplate(region, id, name);
@@ -4019,7 +3997,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         if (!launchTemplate.getVersions().isEmpty()) {
             return;
         }
-        launchTemplate.getVersions().put(launchTemplate.getLatestVersionNumber(), dataFrom(launchTemplate));
+        launchTemplate.getVersions().put(launchTemplate.getLatestVersionNumber(),
+                new LaunchTemplateData(launchTemplate.getData()));
         launchTemplates.put(key(launchTemplate.getRegion(), launchTemplate.getLaunchTemplateId()), launchTemplate);
     }
 
@@ -4045,30 +4024,6 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         return launchTemplate.getVersions().get(version);
     }
 
-    private LaunchTemplateData dataFrom(LaunchTemplate launchTemplate) {
-        LaunchTemplateData data = new LaunchTemplateData();
-        data.setImageId(launchTemplate.getImageId());
-        data.setInstanceType(launchTemplate.getInstanceType());
-        data.setKeyName(launchTemplate.getKeyName());
-        data.setUserData(launchTemplate.getUserData());
-        data.setEncodedUserData(launchTemplate.getEncodedUserData());
-        data.setIamInstanceProfileArn(launchTemplate.getIamInstanceProfileArn());
-        data.setSecurityGroupIds(launchTemplate.getSecurityGroupIds());
-        data.setInstanceTags(launchTemplate.getInstanceTags());
-        return data;
-    }
-
-    private void applyData(LaunchTemplate launchTemplate, LaunchTemplateData data) {
-        launchTemplate.setImageId(data.getImageId());
-        launchTemplate.setInstanceType(data.getInstanceType());
-        launchTemplate.setKeyName(data.getKeyName());
-        launchTemplate.setUserData(data.getUserData());
-        launchTemplate.setEncodedUserData(data.getEncodedUserData());
-        launchTemplate.setIamInstanceProfileArn(data.getIamInstanceProfileArn());
-        launchTemplate.setSecurityGroupIds(new ArrayList<>(data.getSecurityGroupIds()));
-        launchTemplate.setInstanceTags(data.getInstanceTags());
-    }
-
     private LaunchTemplate copyForVersion(LaunchTemplate source, String versionNumber) {
         LaunchTemplate copy = new LaunchTemplate();
         copy.setLaunchTemplateId(source.getLaunchTemplateId());
@@ -4079,7 +4034,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         copy.setCreatedBy(source.getCreatedBy());
         copy.setRegion(source.getRegion());
         copy.setTags(source.getTags());
-        applyData(copy, versionData(source, versionNumber));
+        copy.setData(new LaunchTemplateData(versionData(source, versionNumber)));
         return copy;
     }
 

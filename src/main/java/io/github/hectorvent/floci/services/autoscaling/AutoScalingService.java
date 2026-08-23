@@ -825,7 +825,7 @@ public class AutoScalingService {
         if (launchTemplateVersions.isEmpty()) {
             throw invalidLaunchTemplate();
         }
-        if (isBlank(launchTemplateVersions.getFirst().getImageId())) {
+        if (isBlank(launchTemplateVersions.getFirst().getData().getImageId())) {
             throw missingLaunchTemplateImageId();
         }
     }

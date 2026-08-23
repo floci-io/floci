@@ -472,6 +472,34 @@ Route table ids follow the live API's own inconsistency: an id that does not exi
 
 Launch templates store versioned launch data. New template versions can be created from an existing source version, and `ModifyLaunchTemplate` updates the default version used by later launches.
 
+#### Launch template data members
+
+These members of `RequestLaunchTemplateData` are stored and read back unchanged by
+`DescribeLaunchTemplateVersions`:
+
+`ImageId`, `InstanceType`, `KeyName`, `UserData`, `KernelId`, `RamDiskId`, `SecurityGroupIds`,
+`IamInstanceProfile`, `BlockDeviceMappings`, `NetworkInterfaces`, `TagSpecifications`,
+`MetadataOptions`, `Monitoring`, `Placement`, `CpuOptions`, `CreditSpecification`,
+`EnclaveOptions`, `HibernationOptions`, `MaintenanceOptions`, `PrivateDnsNameOptions`,
+`CapacityReservationSpecification`, `EbsOptimized`, `DisableApiTermination`, `DisableApiStop`,
+`InstanceInitiatedShutdownBehavior`.
+
+Two behaviours worth calling out, because they are what Terraform reads back:
+
+- **`IamInstanceProfile` keeps the form it was given.** A profile submitted as `Name` reads back as
+  `Name`, not rewritten to `Arn`. The instance-profile ARN is derived at launch time instead, so
+  `aws_launch_template.iam_instance_profile.name` converges.
+- **`NetworkInterfaces` stays a `NetworkInterfaces` block.** Its `Groups` are not hoisted into
+  top-level `SecurityGroupIds`; on AWS the two are mutually exclusive. A launch from the template
+  resolves its security groups from whichever of the two is populated.
+
+Members the service model declares that are accepted and ignored rather than stored:
+`InstanceMarketOptions`, `InstanceRequirements`, `LicenseSpecifications`, `ElasticGpuSpecifications`,
+`ElasticInferenceAccelerators`, `NetworkPerformanceOptions`, `Operator`, `SecondaryInterfaces` and
+`SecurityGroups` (security groups by name). Within `NetworkInterfaces`, the IPv4/IPv6 address and
+prefix lists, `EnaSrdSpecification`, `ConnectionTrackingSpecification`, `PrimaryIpv6` and
+`EnaQueueCount` are likewise ignored.
+
 ### IAM Instance Profiles
 
 | Action | Description |

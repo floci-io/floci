@@ -17,6 +17,7 @@ import io.github.hectorvent.floci.services.ec2.model.SecurityGroupRule;
 import io.github.hectorvent.floci.services.ec2.model.UserIdGroupPair;
 import io.github.hectorvent.floci.services.ec2.model.InstanceState;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
+import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
 import io.github.hectorvent.floci.services.ec2.model.ManagedPrefixList;
 import io.github.hectorvent.floci.services.ec2.model.SecurityGroupRule;
 import io.github.hectorvent.floci.services.ec2.model.PrefixListId;
@@ -221,28 +222,38 @@ class Ec2ServiceTest {
                 mock(Ec2PortForwardManager.class),
                 mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
                 new InMemoryStorageFactory());
-        LaunchTemplate template = service.createLaunchTemplate("us-east-1", "app-template",
-                "ami-source", "t3.micro", "app-key", List.of("sg-source"),
-                "source-user-data", "c291cmNlLXVzZXItZGF0YQ==",
-                "arn:aws:iam::000000000000:instance-profile/app-profile",
-                List.of(), List.of(new Tag("Role", "source")));
+        LaunchTemplateData source = new LaunchTemplateData();
+        source.setImageId("ami-source");
+        source.setInstanceType("t3.micro");
+        source.setKeyName("app-key");
+        source.setSecurityGroupIds(List.of("sg-source"));
+        source.setUserData("source-user-data");
+        source.setEncodedUserData("c291cmNlLXVzZXItZGF0YQ==");
+        source.setIamInstanceProfile(new LaunchTemplateData.IamInstanceProfile(
+                "arn:aws:iam::000000000000:instance-profile/app-profile", null));
+        source.setTagSpecifications(List.of(
+                new LaunchTemplateData.TagSpecification("instance", List.of(new Tag("Role", "source")))));
+        LaunchTemplate template = service.createLaunchTemplate("us-east-1", "app-template", source, List.of());
 
-        service.createLaunchTemplateVersion("us-east-1", template.getLaunchTemplateId(), null,
-                "1", null, "t3.small", null, List.of(), null, null, null, List.of());
+        LaunchTemplateData override = new LaunchTemplateData();
+        override.setInstanceType("t3.small");
+        service.createLaunchTemplateVersion("us-east-1", template.getLaunchTemplateId(), null, "1", override);
 
         LaunchTemplate version = service.describeLaunchTemplateVersions(
                 "us-east-1", template.getLaunchTemplateId(), null, List.of("2")).getFirst();
-        assertEquals("ami-source", version.getImageId());
-        assertEquals("t3.small", version.getInstanceType());
-        assertEquals("app-key", version.getKeyName());
-        assertEquals(List.of("sg-source"), version.getSecurityGroupIds());
-        assertEquals("source-user-data", version.getUserData());
-        assertEquals("c291cmNlLXVzZXItZGF0YQ==", version.getEncodedUserData());
-        assertEquals("arn:aws:iam::000000000000:instance-profile/app-profile", version.getIamInstanceProfileArn());
+        LaunchTemplateData data = version.getData();
+        assertEquals("ami-source", data.getImageId());
+        assertEquals("t3.small", data.getInstanceType());
+        assertEquals("app-key", data.getKeyName());
+        assertEquals(List.of("sg-source"), data.getSecurityGroupIds());
+        assertEquals("source-user-data", data.getUserData());
+        assertEquals("c291cmNlLXVzZXItZGF0YQ==", data.getEncodedUserData());
+        assertEquals("arn:aws:iam::000000000000:instance-profile/app-profile",
+                data.getIamInstanceProfile().getArn());
         assertEquals("2", version.getLatestVersionNumber());
-        assertEquals(1, version.getInstanceTags().size());
-        assertEquals("Role", version.getInstanceTags().getFirst().getKey());
-        assertEquals("source", version.getInstanceTags().getFirst().getValue());
+        assertEquals(1, data.getInstanceTags().size());
+        assertEquals("Role", data.getInstanceTags().getFirst().getKey());
+        assertEquals("source", data.getInstanceTags().getFirst().getValue());
     }
 
     @Test

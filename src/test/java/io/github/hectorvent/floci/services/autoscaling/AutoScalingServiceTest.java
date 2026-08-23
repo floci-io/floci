@@ -98,7 +98,7 @@ class AutoScalingServiceTest {
         Ec2Service ec2Service = mock(Ec2Service.class);
         service.ec2Service = ec2Service;
         LaunchTemplate version = new LaunchTemplate();
-        version.setImageId(null);
+        version.getData().setImageId(null);
         when(ec2Service.describeLaunchTemplateVersions(REGION, "lt-no-image", null, List.of("1")))
                 .thenReturn(List.of(version));
 
@@ -242,7 +242,7 @@ class AutoScalingServiceTest {
         Ec2Service ec2Service = mock(Ec2Service.class);
         service.ec2Service = ec2Service;
         LaunchTemplate version = new LaunchTemplate();
-        version.setImageId("");
+        version.getData().setImageId("");
         when(ec2Service.describeLaunchTemplateVersions(REGION, "lt-no-image", null, List.of("2")))
                 .thenReturn(List.of(version));
 
