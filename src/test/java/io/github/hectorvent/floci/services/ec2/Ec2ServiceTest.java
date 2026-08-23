@@ -869,6 +869,58 @@ class Ec2ServiceTest {
         assertEquals(8, root.getSize());
     }
 
+    @Test
+    void describeVolumesAttachmentFiltersMatchOnlyTheirOwnInstance() {
+        // Root cause of the "nondeterministic" lex00/floci#103 report: this looked like a
+        // startup race (sometimes 200, sometimes the old hardcoded 8) but is a plain,
+        // deterministic missing-filter bug. matchesFilters() for Volume had no case for
+        // "attachment.instance-id" or "attachment.device", so both fell through to its
+        // `default -> true`, and DescribeVolumes --filters attachment.instance-id=<id>
+        // attachment.device=/dev/xvda matched *every* volume in the region, not just the one
+        // actually attached to <id>. `Volumes[0]` in the CLI output then depended on Map
+        // iteration order across every volume ever created rather than on the filter, which
+        // reads as "sometimes right, sometimes wrong" for the exact same request even though
+        // no thread, lock, or timing is involved anywhere in the create or describe path.
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+
+        // Instance A: default root volume (size 8) -- the same shape as any other instance in a
+        // real estate that never overrides root_block_device.
+        Instance instanceA = service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), null, null, List.of(), null, null).getInstances().getFirst();
+
+        // Instance B: the one under test, requesting a 200 GiB root volume.
+        BlockDeviceMapping rootMapping = new BlockDeviceMapping();
+        rootMapping.setDeviceName("/dev/xvda");
+        EbsBlockDevice rootEbs = new EbsBlockDevice();
+        rootEbs.setVolumeSize(200);
+        rootMapping.setEbs(rootEbs);
+        Instance instanceB = service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), null, null, List.of(), null, null, null, List.of(rootMapping))
+                .getInstances().getFirst();
+
+        Map<String, List<String>> filters = Map.of(
+                "attachment.instance-id", List.of(instanceB.getInstanceId()),
+                "attachment.device", List.of("/dev/xvda"));
+        List<Volume> matched = service.describeVolumes("us-east-1", List.of(), filters);
+
+        assertEquals(1, matched.size(),
+                "the attachment filters must isolate exactly instance B's volume, not every volume "
+                        + "in the region: " + matched);
+        assertEquals(instanceB.getRootVolumeId(), matched.getFirst().getVolumeId());
+        assertEquals(200, matched.getFirst().getSize());
+
+        // Sanity: the same filters scoped to instance A return only its (differently sized) volume.
+        Map<String, List<String>> filtersA = Map.of(
+                "attachment.instance-id", List.of(instanceA.getInstanceId()),
+                "attachment.device", List.of("/dev/xvda"));
+        List<Volume> matchedA = service.describeVolumes("us-east-1", List.of(), filtersA);
+        assertEquals(1, matchedA.size());
+        assertEquals(instanceA.getRootVolumeId(), matchedA.getFirst().getVolumeId());
+        assertEquals(8, matchedA.getFirst().getSize());
+    }
+
         // =========================================================================
     // Managed prefix lists
     // =========================================================================
