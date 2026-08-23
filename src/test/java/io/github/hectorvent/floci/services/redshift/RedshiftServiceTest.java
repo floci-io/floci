@@ -189,6 +189,38 @@ class RedshiftServiceTest {
     }
 
     @Test
+    void testRebootClusterDumpsAndRestoresData() throws Exception {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("my-cluster");
+        cluster.setMasterUsername("admin");
+        cluster.setMasterPassword("pw");
+        cluster.setClusterStatus("available");
+        when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
+        when(cm.start(eq("111111111111"), eq("my-cluster"), eq("admin"), eq("pw")))
+                .thenReturn(new RedshiftContainerHandle("c-rebooted", "my-cluster", "localhost", 5555));
+        doAnswer(invocation -> {
+            java.nio.file.Path dumpFile = invocation.getArgument(3);
+            java.nio.file.Files.writeString(dumpFile, "-- dump");
+            return null;
+        }).when(cm).takeSnapshot(eq("111111111111"), eq("my-cluster"), eq("admin"), any(java.nio.file.Path.class));
+
+        Cluster rebooted = service.rebootCluster("my-cluster");
+
+        assertEquals("available", rebooted.getClusterStatus());
+        assertEquals(5555, rebooted.getEndpoint().getPort());
+        verify(cm).stop("111111111111", "my-cluster");
+        verify(cm).start("111111111111", "my-cluster", "admin", "pw");
+        verify(cm).restoreSnapshot(eq("111111111111"), eq("my-cluster"), eq("admin"), any(java.nio.file.Path.class));
+    }
+
+    @Test
+    void testRebootClusterNotFound() {
+        when(clusterBackend.get("missing")).thenReturn(Optional.empty());
+
+        assertThrows(AwsException.class, () -> service.rebootCluster("missing"));
+    }
+
+    @Test
     void testCreateSnapshot() {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("my-cluster");

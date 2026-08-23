@@ -175,6 +175,57 @@ public class RedshiftService {
         return cluster;
     }
 
+    public synchronized Cluster rebootCluster(String clusterIdentifier) {
+        Cluster cluster = clusters.get(clusterIdentifier)
+                .orElseThrow(() -> new AwsException("ClusterNotFound", "Cluster " + clusterIdentifier + " not found", 404));
+
+        // The container backing a cluster has no persistent volume (see RedshiftContainerManager),
+        // so a plain stop+recreate would silently drop the cluster's data. Dump before stopping and
+        // restore immediately after starting, using a throwaway temp file — no Snapshot resource is
+        // created or exposed to the caller.
+        java.nio.file.Path tempDump;
+        try {
+            tempDump = java.nio.file.Files.createTempFile("redshift-reboot-" + clusterIdentifier, ".sql");
+        } catch (java.io.IOException e) {
+            throw new AwsException("InternalFailure", "Failed to prepare reboot dump file: " + e.getMessage(), 500);
+        }
+
+        try {
+            containerManager.takeSnapshot(clusters.accountId(), clusterIdentifier, cluster.getMasterUsername(), tempDump);
+            containerManager.stop(clusters.accountId(), clusterIdentifier);
+
+            String password = cluster.getMasterPassword() != null ? cluster.getMasterPassword() : "admin";
+            RedshiftContainerHandle handle = containerManager.start(
+                    clusters.accountId(), clusterIdentifier, cluster.getMasterUsername(), password);
+            Endpoint endpoint = new Endpoint();
+            endpoint.setAddress(handle.getHost());
+            endpoint.setPort(handle.getPort());
+            cluster.setEndpoint(endpoint);
+
+            containerManager.restoreSnapshot(clusters.accountId(), clusterIdentifier, cluster.getMasterUsername(), tempDump);
+
+            cluster.setClusterStatus("available");
+        } catch (AwsException e) {
+            cluster.setClusterStatus("failed");
+            clusters.flush();
+            throw e;
+        } catch (Exception e) {
+            cluster.setClusterStatus("failed");
+            clusters.flush();
+            throw new AwsException("InternalFailure", "Failed to reboot cluster " + clusterIdentifier + ": " + e.getMessage(), 500);
+        } finally {
+            try {
+                java.nio.file.Files.deleteIfExists(tempDump);
+            } catch (java.io.IOException ignored) {
+                // best-effort cleanup of a temp file
+            }
+        }
+
+        clusters.put(clusterIdentifier, cluster);
+        clusters.flush();
+        return cluster;
+    }
+
     // ── Snapshot Operations ──────────────────────────────────────────────────
 
     public Snapshot createSnapshot(String snapshotIdentifier, String clusterIdentifier) {
