@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.mwaa;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
@@ -65,18 +66,21 @@ public class MwaaEnvironmentManager {
     private final ContainerDetector containerDetector;
     private final EmulatorConfig config;
     private final LaunchedContainerAwsEnv awsEnv;
+    private final RegionResolver regionResolver;
 
     @Inject
     public MwaaEnvironmentManager(ContainerBuilder containerBuilder,
                                   ContainerLifecycleManager lifecycleManager,
                                   ContainerDetector containerDetector,
                                   EmulatorConfig config,
-                                  LaunchedContainerAwsEnv awsEnv) {
+                                  LaunchedContainerAwsEnv awsEnv,
+                                  RegionResolver regionResolver) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.containerDetector = containerDetector;
         this.config = config;
         this.awsEnv = awsEnv;
+        this.regionResolver = regionResolver;
     }
 
     /**
@@ -109,6 +113,8 @@ public class MwaaEnvironmentManager {
                 .withDockerNetwork(config.services().mwaa().dockerNetwork())
                 .withExposedPort(POSTGRES_PORT)
                 .withLogRotation()
+                .withLabels(ContainerStorageHelper.resourceIdentityLabels(
+                        "mwaa", name, regionResolver.getAccountId(), regionResolver.getDefaultRegion()))
                 .build();
 
         String dbContainerId = lifecycleManager.create(dbSpec);
@@ -169,7 +175,9 @@ public class MwaaEnvironmentManager {
                 .withNamedVolume(dagsVolume, DAGS_MOUNT)
                 .withNamedVolume(logsVolume, LOGS_MOUNT)
                 .withDockerNetwork(config.services().mwaa().dockerNetwork())
-                .withLogRotation();
+                .withLogRotation()
+                .withLabels(ContainerStorageHelper.resourceIdentityLabels(
+                        "mwaa", name, regionResolver.getAccountId(), regionResolver.getDefaultRegion()));
 
         if (!containerDetector.isRunningInContainer()) {
             specBuilder.withDynamicPort(AIRFLOW_WEBSERVER_PORT);
