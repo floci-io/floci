@@ -28,9 +28,13 @@ import jakarta.ws.rs.core.UriBuilder;
 import jakarta.ws.rs.core.UriInfo;
 import org.jboss.logging.Logger;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 
@@ -660,8 +664,109 @@ public class LambdaController {
             fn.getEnvironment().forEach(vars::put);
         }
 
+        putVpcConfig(node, fn);
+        putSnapStart(node, fn);
+        putLoggingConfig(node, fn);
+        putRuntimeVersionConfig(node, fn);
+
         @SuppressWarnings("unchecked")
         Map<String, Object> result = objectMapper.convertValue(node, Map.class);
         return result;
+    }
+
+    /**
+     * VpcConfigResponse, not VpcConfig: the response shape adds VpcId, which the request shape
+     * has no member for. Emitted only while the function is actually attached to a VPC — AWS
+     * omits the block entirely once the last subnet and security group are removed.
+     */
+    private void putVpcConfig(ObjectNode node, LambdaFunction fn) {
+        Map<String, Object> vpcConfig = fn.getVpcConfig();
+        List<String> subnetIds = stringList(vpcConfig, "SubnetIds");
+        List<String> securityGroupIds = stringList(vpcConfig, "SecurityGroupIds");
+        if (subnetIds.isEmpty() && securityGroupIds.isEmpty()) {
+            return;
+        }
+        ObjectNode vpcNode = node.putObject("VpcConfig");
+        ArrayNode subnetNode = vpcNode.putArray("SubnetIds");
+        subnetIds.forEach(subnetNode::add);
+        ArrayNode securityGroupNode = vpcNode.putArray("SecurityGroupIds");
+        securityGroupIds.forEach(securityGroupNode::add);
+        if (fn.getVpcId() != null) {
+            vpcNode.put("VpcId", fn.getVpcId());
+        }
+        vpcNode.put("Ipv6AllowedForDualStack",
+                Boolean.TRUE.equals(vpcConfig.get("Ipv6AllowedForDualStack")));
+    }
+
+    /**
+     * SnapStartResponse, not SnapStart: the response adds OptimizationStatus, which the request
+     * shape has no member for. AWS only reports {@code On} for a published version whose snapshot
+     * has been optimized; {@code $LATEST} is always {@code Off} even with ApplyOn set.
+     */
+    private void putSnapStart(ObjectNode node, LambdaFunction fn) {
+        String applyOn = fn.getSnapStartApplyOn() != null ? fn.getSnapStartApplyOn() : "None";
+        boolean optimized = "PublishedVersions".equals(applyOn) && !"$LATEST".equals(fn.getVersion());
+        node.putObject("SnapStart")
+                .put("ApplyOn", applyOn)
+                .put("OptimizationStatus", optimized ? "On" : "Off");
+    }
+
+    /**
+     * Always present, as on AWS: an unset LoggingConfig still reads back as Text plus the default
+     * {@code /aws/lambda/<name>} log group. The two log levels are JSON-format-only.
+     */
+    private void putLoggingConfig(ObjectNode node, LambdaFunction fn) {
+        String logFormat = fn.getLogFormat() != null ? fn.getLogFormat() : "Text";
+        ObjectNode logging = node.putObject("LoggingConfig");
+        logging.put("LogFormat", logFormat);
+        if ("JSON".equals(logFormat)) {
+            logging.put("ApplicationLogLevel",
+                    fn.getApplicationLogLevel() != null ? fn.getApplicationLogLevel() : "INFO");
+            logging.put("SystemLogLevel",
+                    fn.getSystemLogLevel() != null ? fn.getSystemLogLevel() : "INFO");
+        }
+        logging.put("LogGroup", fn.getLogGroup() != null && !fn.getLogGroup().isBlank()
+                ? fn.getLogGroup()
+                : "/aws/lambda/" + fn.getFunctionName());
+    }
+
+    /** Managed-runtime only: AWS omits it for container images, which pin their own runtime. */
+    private void putRuntimeVersionConfig(ObjectNode node, LambdaFunction fn) {
+        if ("Image".equals(fn.getPackageType()) || fn.getRuntime() == null || fn.getRuntime().isBlank()) {
+            return;
+        }
+        node.putObject("RuntimeVersionConfig")
+                .put("RuntimeVersionArn", runtimeVersionArn(fn));
+    }
+
+    private static String runtimeVersionArn(LambdaFunction fn) {
+        String region = "us-east-1";
+        String[] arnParts = fn.getFunctionArn() != null ? fn.getFunctionArn().split(":") : new String[0];
+        if (arnParts.length > 3 && !arnParts[3].isBlank()) {
+            region = arnParts[3];
+        }
+        return "arn:aws:lambda:" + region + "::runtime:" + runtimeVersionId(fn.getRuntime());
+    }
+
+    /**
+     * AWS identifies a runtime version by a 64-hex digest. Derived from the runtime name so the
+     * same runtime keeps the same id across restarts — a value that churned would show up as a
+     * perpetual diff in anything that records it.
+     */
+    private static String runtimeVersionId(String runtime) {
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256")
+                    .digest(runtime.getBytes(StandardCharsets.UTF_8));
+            return HexFormat.of().formatHex(digest);
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 unavailable", e);
+        }
+    }
+
+    private static List<String> stringList(Map<String, Object> config, String key) {
+        if (config == null || !(config.get(key) instanceof List<?> values)) {
+            return List.of();
+        }
+        return values.stream().filter(java.util.Objects::nonNull).map(Object::toString).toList();
     }
 }

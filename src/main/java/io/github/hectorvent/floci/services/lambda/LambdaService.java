@@ -10,6 +10,8 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
 import io.github.hectorvent.floci.core.resource.SupportedResourceType;
+import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import io.github.hectorvent.floci.services.lambda.model.EventSourceMapping;
 import io.github.hectorvent.floci.services.lambda.model.FunctionEventInvokeConfig;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
@@ -77,6 +79,7 @@ public class LambdaService implements ResourceProvider {
     private final DynamoDbStreamsEventSourcePoller dynamodbStreamsPoller;
     private final StorageFactory storageFactory;
     private final LambdaLayerService layerService;
+    private final Ec2Service ec2Service;
     private Map<String, Integer> versionCounters = new ConcurrentHashMap<>();
     private Map<String, FunctionEventInvokeConfig> eventInvokeConfigs = new ConcurrentHashMap<>();
     /**
@@ -146,6 +149,7 @@ public class LambdaService implements ResourceProvider {
         this.dynamodbStreamsPoller = null;
         this.storageFactory = storageFactory;
         this.layerService = null;
+        this.ec2Service = null;
     }
 
     @Inject
@@ -165,7 +169,8 @@ public class LambdaService implements ResourceProvider {
                           KinesisEventSourcePoller kinesisPoller,
                           DynamoDbStreamsEventSourcePoller dynamodbStreamsPoller,
                           StorageFactory storageFactory,
-                          LambdaLayerService layerService) {
+                          LambdaLayerService layerService,
+                          Ec2Service ec2Service) {
         this.functionStore = functionStore;
         this.executorService = executorService;
         this.concurrencyLimiter = concurrencyLimiter;
@@ -183,6 +188,7 @@ public class LambdaService implements ResourceProvider {
         this.dynamodbStreamsPoller = dynamodbStreamsPoller;
         this.storageFactory = storageFactory;
         this.layerService = layerService;
+        this.ec2Service = ec2Service;
     }
 
     // Real AWS validates a function's Layers eagerly at CreateFunction/UpdateFunctionConfiguration
@@ -384,7 +390,11 @@ public class LambdaService implements ResourceProvider {
             @SuppressWarnings("unchecked")
             Map<String, Object> vpc = (Map<String, Object>) request.get("VpcConfig");
             fn.setVpcConfig(vpc);
+            fn.setVpcId(resolveVpcId(region, vpc));
         }
+
+        applySnapStart(fn, request.get("SnapStart"));
+        applyLoggingConfig(fn, request.get("LoggingConfig"));
 
         List<LambdaFileSystemConfig> fileSystemConfigs =
                 parseFileSystemConfigs(request.get("FileSystemConfigs"));
@@ -526,6 +536,12 @@ public class LambdaService implements ResourceProvider {
         if (request.containsKey("Layers")) {
             validateLayersResolvable(layerList);
         }
+        if (request.containsKey("SnapStart")) {
+            validateSnapStart(request.get("SnapStart"));
+        }
+        if (request.containsKey("LoggingConfig")) {
+            validateLoggingConfig(request.get("LoggingConfig"));
+        }
 
         Map<String, Object> requestedVpcConfig = fn.getVpcConfig();
         if (request.get("VpcConfig") instanceof Map<?, ?>) {
@@ -619,7 +635,16 @@ public class LambdaService implements ResourceProvider {
         if (request.containsKey("VpcConfig")) {
             if (request.get("VpcConfig") instanceof Map<?, ?>) {
                 fn.setVpcConfig(requestedVpcConfig);
+                fn.setVpcId(resolveVpcId(region, requestedVpcConfig));
             }
+        }
+
+        if (request.containsKey("SnapStart")) {
+            applySnapStart(fn, request.get("SnapStart"));
+        }
+
+        if (request.containsKey("LoggingConfig")) {
+            applyLoggingConfig(fn, request.get("LoggingConfig"));
         }
 
         if (request.containsKey("FileSystemConfigs")) {
@@ -1137,6 +1162,12 @@ public class LambdaService implements ResourceProvider {
         snapshot.setVpcConfig(fn.getVpcConfig() == null
                 ? null
                 : new java.util.HashMap<>(fn.getVpcConfig()));
+        snapshot.setVpcId(fn.getVpcId());
+        snapshot.setSnapStartApplyOn(fn.getSnapStartApplyOn());
+        snapshot.setLogFormat(fn.getLogFormat());
+        snapshot.setApplicationLogLevel(fn.getApplicationLogLevel());
+        snapshot.setSystemLogLevel(fn.getSystemLogLevel());
+        snapshot.setLogGroup(fn.getLogGroup());
         snapshot.setFileSystemConfigs(new ArrayList<>(fn.getFileSystemConfigs()));
         snapshot.setLastModified(System.currentTimeMillis());
         snapshot.setRevisionId(UUID.randomUUID().toString());
@@ -1217,6 +1248,94 @@ public class LambdaService implements ResourceProvider {
             throw new AwsException("InvalidParameterValueException",
                     "EFS file system access requires VpcConfig with subnets and security groups", 400);
         }
+    }
+
+    /**
+     * The VpcConfig request shape carries no VpcId; VpcConfigResponse does. AWS derives it from
+     * the subnets the function is attached to, so resolve it once at attach time and store it.
+     * A subnet EC2 has never heard of resolves to null rather than failing the call - Floci's
+     * Lambda accepts unmanaged subnet ids, and CreateFunction must not start rejecting them.
+     */
+    private String resolveVpcId(String region, Map<String, Object> vpcConfig) {
+        if (ec2Service == null || !hasValues(vpcConfig, "SubnetIds")) {
+            return null;
+        }
+        for (Object subnetId : (List<?>) vpcConfig.get("SubnetIds")) {
+            if (subnetId == null) {
+                continue;
+            }
+            try {
+                List<Subnet> found = ec2Service.describeSubnets(region, List.of(subnetId.toString()), Map.of());
+                if (!found.isEmpty() && found.get(0).getVpcId() != null) {
+                    return found.get(0).getVpcId();
+                }
+            } catch (RuntimeException e) {
+                LOG.debugv(e, "Could not resolve VpcId for subnet {0} in {1}", subnetId, region);
+            }
+        }
+        return null;
+    }
+
+    private static void validateSnapStart(Object value) {
+        if (!(value instanceof Map<?, ?> snapStart)) {
+            return;
+        }
+        Object applyOn = snapStart.get("ApplyOn");
+        if (applyOn != null && !"None".equals(applyOn) && !"PublishedVersions".equals(applyOn)) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value '" + applyOn + "' at 'snapStart.applyOn' failed to "
+                            + "satisfy constraint: Member must satisfy enum value set: "
+                            + "[PublishedVersions, None]", 400);
+        }
+    }
+
+    private static void applySnapStart(LambdaFunction fn, Object value) {
+        if (!(value instanceof Map<?, ?> snapStart)) {
+            return;
+        }
+        validateSnapStart(value);
+        Object applyOn = snapStart.get("ApplyOn");
+        fn.setSnapStartApplyOn(applyOn instanceof String s && !s.isBlank() ? s : "None");
+    }
+
+    private static void validateLoggingConfig(Object value) {
+        if (!(value instanceof Map<?, ?> logging)) {
+            return;
+        }
+        validateEnum(logging.get("LogFormat"), "loggingConfig.logFormat", List.of("JSON", "Text"));
+        validateEnum(logging.get("ApplicationLogLevel"), "loggingConfig.applicationLogLevel",
+                List.of("TRACE", "DEBUG", "INFO", "WARN", "ERROR", "FATAL"));
+        validateEnum(logging.get("SystemLogLevel"), "loggingConfig.systemLogLevel",
+                List.of("DEBUG", "INFO", "WARN"));
+    }
+
+    private static void validateEnum(Object value, String field, List<String> allowed) {
+        if (value == null || allowed.contains(value)) {
+            return;
+        }
+        throw new AwsException("ValidationException",
+                "1 validation error detected: Value '" + value + "' at '" + field + "' failed to satisfy "
+                        + "constraint: Member must satisfy enum value set: ["
+                        + String.join(", ", allowed) + "]", 400);
+    }
+
+    /**
+     * LoggingConfig is replaced wholesale, not merged: AWS resets any member the request omits
+     * back to its default, so an update that names only LogFormat drops a previously set LogGroup.
+     */
+    private static void applyLoggingConfig(LambdaFunction fn, Object value) {
+        if (!(value instanceof Map<?, ?> logging)) {
+            return;
+        }
+        validateLoggingConfig(value);
+        fn.setLogFormat(logging.get("LogFormat") instanceof String format && !format.isBlank()
+                ? format : "Text");
+        fn.setApplicationLogLevel(logging.get("ApplicationLogLevel") instanceof String level && !level.isBlank()
+                ? level : null);
+        fn.setSystemLogLevel(logging.get("SystemLogLevel") instanceof String level && !level.isBlank()
+                ? level : null);
+        fn.setLogGroup(logging.get("LogGroup") instanceof String group && !group.isBlank()
+                ? group : null);
     }
 
     private static boolean hasValues(Map<String, Object> config, String key) {

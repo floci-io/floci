@@ -446,6 +446,38 @@ No extra configuration or `cap_add` is needed because Docker containers have
 `CAP_NET_BIND_SERVICE` in their default capability set, so Floci (running as a
 non-root user) can bind UDP/53 without any changes to your Compose file.
 
+### VpcConfig, SnapStart and LoggingConfig
+
+All three round-trip through `CreateFunction`, `UpdateFunctionConfiguration`,
+`GetFunctionConfiguration`, `GetFunction`, `ListFunctions` and `PublishVersion`.
+
+The response shapes are **not** the request shapes, and Floci follows the AWS model
+rather than echoing the request back:
+
+| Field | Request shape | Response shape | Extra members Floci fills in |
+|---|---|---|---|
+| `VpcConfig` | `VpcConfig` | `VpcConfigResponse` | `VpcId`, resolved from the first subnet via EC2 |
+| `SnapStart` | `SnapStart` | `SnapStartResponse` | `OptimizationStatus` — `On` only for a published version with `ApplyOn=PublishedVersions`, `Off` for `$LATEST` |
+| `LoggingConfig` | `LoggingConfig` | `LoggingConfig` | — |
+
+`SnapStart` and `LoggingConfig` are always present in a response, as on AWS: an
+unset function reads back `SnapStart={ApplyOn: None, OptimizationStatus: Off}` and
+`LoggingConfig={LogFormat: Text, LogGroup: /aws/lambda/<name>}`. With
+`LogFormat=JSON`, `ApplicationLogLevel` and `SystemLogLevel` are also returned,
+defaulting to `INFO`. Terraform treats these as `Computed` blocks, so a missing one
+is a permanent diff rather than a cosmetic omission.
+
+`LoggingConfig` is replaced wholesale on update, not merged — an update naming only
+`LogFormat` resets `LogGroup` to the default.
+
+`VpcConfig` is omitted entirely while the function is not attached to a VPC.
+Subnets that EC2 does not know about are still accepted and returned; only `VpcId`
+is left off in that case.
+
+`RuntimeVersionConfig.RuntimeVersionArn` is returned for managed (non-image)
+runtimes. Its value is derived from the runtime name, so it is stable across
+restarts.
+
 ### File system configs
 
 `FileSystemConfigs` accepts one EFS access point and mounts it under the
