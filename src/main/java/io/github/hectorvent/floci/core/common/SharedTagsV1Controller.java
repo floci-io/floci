@@ -24,8 +24,18 @@ import jakarta.ws.rs.core.UriInfo;
  * AWS Batch's came back {@code 404 NotFoundException: GraphQL API not found}
  * (lex00/floci#72). Registering a {@link TagHandler} whose {@link TagHandler#tagPathPrefix()}
  * is {@code /v1/tags} is now all a service needs to be served here.
+ *
+ * <p>The class root is {@code /}, not {@code /v1/tags}: CodeArtifact's own real REST shape
+ * (lex00/floci#50) puts {@code TagResource}/{@code UntagResource}/{@code ListTagsForResource}
+ * at the bare paths {@code /v1/tag}, {@code /v1/untag} and {@code /v1/tags} with the ARN as a
+ * query parameter, not a path segment. This controller never serves the bare path (every
+ * method here requires a non-empty {@code {arn}} segment) but a Jakarta REST root resource
+ * still "owns" its literal class-level {@code @Path} even where none of its own methods
+ * match, which 404'd {@code CodeArtifactController}'s bare {@code /v1/tags} before it was
+ * ever reached. Folding the prefix into each method's own {@code @Path} instead leaves the
+ * bare literal path unclaimed for {@code CodeArtifactController} to serve.
  */
-@Path("/v1/tags")
+@Path("/")
 @Produces(MediaType.APPLICATION_JSON)
 public class SharedTagsV1Controller {
 
@@ -40,13 +50,13 @@ public class SharedTagsV1Controller {
     }
 
     @GET
-    @Path("/{arn: .+}")
+    @Path(PREFIX + "/{arn: .+}")
     public Response listTags(@Context HttpHeaders headers, @PathParam("arn") String arn) {
         return dispatcher.listTags(PREFIX, headers, arn);
     }
 
     @POST
-    @Path("/{arn: .+}")
+    @Path(PREFIX + "/{arn: .+}")
     @Consumes(MediaType.WILDCARD)
     public Response tagResource(@Context HttpHeaders headers,
                                 @PathParam("arn") String arn,
@@ -55,7 +65,7 @@ public class SharedTagsV1Controller {
     }
 
     @DELETE
-    @Path("/{arn: .+}")
+    @Path(PREFIX + "/{arn: .+}")
     public Response untagResource(@Context HttpHeaders headers,
                                   @Context UriInfo uriInfo,
                                   @PathParam("arn") String arn) {
