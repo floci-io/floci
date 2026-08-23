@@ -331,4 +331,46 @@ class RedshiftContainerManagerTest {
         assertEquals("cont-fresh", handle.getContainerId());
         verify(lifecycleManager, never()).adopt(any(), any());
     }
+
+    @Test
+    void testAlterUserPasswordSuccess() throws Exception {
+        ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, org.mockito.Mockito.RETURNS_SELF);
+        when(containerBuilder.newContainer(anyString())).thenReturn(specBuilder);
+        ContainerInfo info = new ContainerInfo("cont-123", Map.of(5432, new EndpointInfo("localhost", 5432)));
+        when(lifecycleManager.createAndStart(any())).thenReturn(info);
+        manager.start(ACCOUNT_ID, "test-cluster", "admin", "pass");
+
+        ExecCreateCmd createCmd = mock(ExecCreateCmd.class, org.mockito.Mockito.RETURNS_SELF);
+        ExecCreateCmdResponse createResponse = mock(ExecCreateCmdResponse.class);
+        when(createResponse.getId()).thenReturn("exec-alter");
+        when(createCmd.exec()).thenReturn(createResponse);
+        when(dockerClient.execCreateCmd("cont-123")).thenReturn(createCmd);
+
+        ExecStartCmd startCmd = mock(ExecStartCmd.class);
+        when(startCmd.exec(any())).thenAnswer(invocation -> {
+            @SuppressWarnings("unchecked")
+            ResultCallback.Adapter<Frame> adapter = invocation.getArgument(0);
+            adapter.onComplete();
+            return adapter;
+        });
+        when(dockerClient.execStartCmd("exec-alter")).thenReturn(startCmd);
+
+        InspectExecCmd inspectCmd = mock(InspectExecCmd.class);
+        InspectExecResponse inspectResponse = mock(InspectExecResponse.class);
+        when(inspectResponse.getExitCodeLong()).thenReturn(0L);
+        when(inspectCmd.exec()).thenReturn(inspectResponse);
+        when(dockerClient.inspectExecCmd("exec-alter")).thenReturn(inspectCmd);
+
+        manager.alterUserPassword(ACCOUNT_ID, "test-cluster", "admin", "new-secret");
+
+        verify(dockerClient).execCreateCmd("cont-123");
+    }
+
+    @Test
+    void testAlterUserPasswordContainerNotFound() {
+        AwsException ex = assertThrows(AwsException.class, () ->
+                manager.alterUserPassword(ACCOUNT_ID, "non-existent-cluster", "admin", "new-secret"));
+        assertEquals("ClusterNotFound", ex.getErrorCode());
+        assertEquals(404, ex.getHttpStatus());
+    }
 }

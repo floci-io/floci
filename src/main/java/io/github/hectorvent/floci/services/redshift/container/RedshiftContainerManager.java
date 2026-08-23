@@ -197,6 +197,33 @@ public class RedshiftContainerManager {
         takeSnapshot(accountId, clusterIdentifier, username, "dev", outputFile);
     }
 
+    public void alterUserPassword(String accountId, String clusterIdentifier, String username, String newPassword) {
+        RedshiftContainerHandle handle = containers.get(containerKey(accountId, clusterIdentifier));
+        if (handle == null) {
+            throw new AwsException("ClusterNotFound", "Cluster container for " + clusterIdentifier + " not found", 404);
+        }
+        String effectiveUser = (username != null && !username.isBlank()) ? username : "postgres";
+        // The password is embedded in a SQL literal executed via psql -c, not shell-interpolated —
+        // ' inside the password would break the SQL literal, so reject it rather than risk injection.
+        if (newPassword != null && newPassword.contains("'")) {
+            throw new AwsException("InvalidParameterValue", "MasterUserPassword must not contain a single quote", 400);
+        }
+        String sql = "ALTER USER " + effectiveUser + " PASSWORD '" + newPassword + "'";
+        String[] cmd = new String[]{"psql", "-U", effectiveUser, "-d", "dev", "-c", sql};
+        try {
+            ExecResult result = execInContainer(handle.getContainerId(), cmd, 15);
+            if (result.exitCode() != 0) {
+                LOG.warnv("ALTER USER failed for cluster {0} (exit {1}): {2}", clusterIdentifier, result.exitCode(), result.stderr());
+                throw new AwsException("InternalFailure", "Failed to change master password for cluster " + clusterIdentifier + ": " + result.stderr(), 500);
+            }
+        } catch (AwsException e) {
+            throw e;
+        } catch (Exception e) {
+            LOG.errorv(e, "Error changing master password for cluster {0}", clusterIdentifier);
+            throw new AwsException("InternalFailure", "Failed to change master password for cluster " + clusterIdentifier + ": " + e.getMessage(), 500);
+        }
+    }
+
     public void createSnapshot(String accountId, Cluster cluster, Path outputFile) {
         if (cluster == null) {
             throw new AwsException("InvalidParameterValue", "Cluster cannot be null", 400);
