@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.services.batch.model.BatchJob;
+import com.github.dockerjava.api.DockerClient;
 import org.junit.jupiter.api.Test;
 
 import java.util.Map;
@@ -16,6 +17,8 @@ import java.util.Optional;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
+import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -63,14 +66,14 @@ class BatchDockerRunnerTest {
         ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
         when(lifecycleManager.createAndStart(any())).thenReturn(
                 new ContainerLifecycleManager.ContainerInfo("container-id", Map.of()));
-        com.github.dockerjava.api.DockerClient dockerClient =
-                mock(com.github.dockerjava.api.DockerClient.class, org.mockito.Mockito.RETURNS_DEEP_STUBS);
+        DockerClient dockerClient =
+                mock(DockerClient.class, RETURNS_DEEP_STUBS);
         when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
         when(dockerClient.inspectContainerCmd("container-id").exec().getState().getRunning()).thenReturn(false);
         when(dockerClient.inspectContainerCmd("container-id").exec().getState().getExitCodeLong()).thenReturn(0L);
 
         ContainerBuilder containerBuilder = mock(ContainerBuilder.class);
-        ContainerBuilder.Builder builder = mock(ContainerBuilder.Builder.class, org.mockito.Mockito.RETURNS_SELF);
+        ContainerBuilder.Builder builder = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
         when(containerBuilder.newContainer(anyString())).thenReturn(builder);
         when(builder.build()).thenReturn(mock(ContainerSpec.class));
 

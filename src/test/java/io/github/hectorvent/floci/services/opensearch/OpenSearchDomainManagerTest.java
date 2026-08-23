@@ -16,6 +16,8 @@ import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -51,8 +53,8 @@ class OpenSearchDomainManagerTest {
                 new ContainerLifecycleManager.ContainerInfo("container-id", Map.of()));
 
         ContainerBuilder containerBuilder = mock(ContainerBuilder.class);
-        ContainerBuilder.Builder builder = mock(ContainerBuilder.Builder.class, org.mockito.Mockito.RETURNS_SELF);
-        when(containerBuilder.newContainer(org.mockito.ArgumentMatchers.anyString())).thenReturn(builder);
+        ContainerBuilder.Builder builder = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(containerBuilder.newContainer(anyString())).thenReturn(builder);
         when(builder.build()).thenReturn(mock(ContainerSpec.class));
 
         RegionResolver regionResolver = mock(RegionResolver.class);

@@ -22,6 +22,8 @@ import org.mockito.Mockito;
 
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -168,7 +170,7 @@ class EksClusterManagerTest {
         when(eks.defaultImage()).thenReturn("rancher/k3s:v1.30.0-k3s1");
         when(eks.apiServerBasePort()).thenReturn(6440);
         when(eks.apiServerMaxPort()).thenReturn(6499);
-        when(eks.dockerNetwork()).thenReturn(java.util.Optional.empty());
+        when(eks.dockerNetwork()).thenReturn(Optional.empty());
         when(eks.disableCni()).thenReturn(false);
         when(eks.iamAuthWebhook()).thenReturn(false);
         when(eks.ecrRegistryMirror()).thenReturn(false);
@@ -176,7 +178,7 @@ class EksClusterManagerTest {
         ContainerLifecycleManager lifecycleManager = Mockito.mock(ContainerLifecycleManager.class);
         when(lifecycleManager.create(any())).thenReturn("container-id");
         when(lifecycleManager.startCreated(any(), any())).thenReturn(
-                new ContainerInfo("container-id", java.util.Map.of()));
+                new ContainerInfo("container-id", Map.of()));
 
         ContainerBuilder containerBuilder = Mockito.mock(ContainerBuilder.class);
         ContainerBuilder.Builder builder = Mockito.mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
@@ -197,7 +199,7 @@ class EksClusterManagerTest {
 
         manager.startCluster(cluster);
 
-        verify(builder).withLabels(java.util.Map.of(
+        verify(builder).withLabels(Map.of(
                 "io.floci", "aws",
                 "io.floci.service", "eks",
                 "io.floci.resource-id", "my-cluster",
