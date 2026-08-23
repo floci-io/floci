@@ -152,7 +152,7 @@ A container backing an emulated AWS resource also carries labels tying it back t
 | `io.floci.account` | the resolved account id | The AWS account the resource belongs to |
 | `io.floci.region` | the resolved region | The AWS region the resource belongs to |
 
-This makes `docker ps --filter label=io.floci.resource-id=orders-db-primary` resolve a specific emulated resource to its backing container directly, without inferring it from names or creation order. Applied to RDS, DocDB, ElastiCache (Redis/Valkey and Memcached), MemoryDB, Neptune, MSK, OpenSearch, ECS, EKS, AmazonMQ, MWAA, Kinesis Data Analytics (Flink), Batch, CodeBuild, Lambda, and EC2. ECR's backing registry container carries `io.floci`/`io.floci.service` only, since it is a shared singleton with no single resource identifier.
+This makes `docker ps --filter label=io.floci.resource-id=orders-db-primary` resolve a specific emulated resource to its backing container directly, without inferring it from names or creation order. Applied to RDS, DocDB, ElastiCache (Redis/Valkey and Memcached), MemoryDB, Neptune, MSK, OpenSearch, ECS, EKS, AmazonMQ, MWAA, Kinesis Data Analytics (Flink), Batch, CodeBuild, Lambda, and EC2. ECR's backing registry container carries every label except `io.floci.resource-id`, since it is a shared singleton with no single resource identifier.
 
 ## Docker Network
 
