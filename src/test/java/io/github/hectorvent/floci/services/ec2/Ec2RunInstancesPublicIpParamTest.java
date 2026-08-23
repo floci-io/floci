@@ -57,7 +57,8 @@ class Ec2RunInstancesPublicIpParamTest {
         when(service.runInstances(anyString(), nullable(String.class), nullable(String.class),
                 anyInt(), anyInt(), nullable(String.class), anyList(), nullable(String.class),
                 nullable(String.class), anyList(), nullable(String.class), nullable(String.class),
-                nullable(Boolean.class), anyList())).thenReturn(new Reservation());
+                nullable(Boolean.class), anyList(),
+                nullable(InstanceMetadataRequest.class))).thenReturn(new Reservation());
 
         Ec2QueryHandler handler = new Ec2QueryHandler(service, mock(EmulatorConfig.class),
                 mock(FlowLogService.class));
@@ -67,7 +68,8 @@ class Ec2RunInstancesPublicIpParamTest {
         verify(service).runInstances(anyString(), nullable(String.class), nullable(String.class),
                 anyInt(), anyInt(), nullable(String.class), anyList(), nullable(String.class),
                 nullable(String.class), anyList(), nullable(String.class), nullable(String.class),
-                associatePublicIp.capture(), anyList());
+                associatePublicIp.capture(), anyList(),
+                nullable(InstanceMetadataRequest.class));
         if (expected == null) {
             assertNull(associatePublicIp.getValue(),
                     "an absent override must stay null so the subnet default decides");

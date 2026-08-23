@@ -817,7 +817,7 @@ class Ec2ServiceTest {
         rootMapping.setEbs(rootEbs);
 
         Reservation reservation = service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro",
-                1, 1, null, List.of(), null, null, List.of(), null, null, null, List.of(rootMapping));
+                1, 1, null, List.of(), null, null, List.of(), null, null, null, List.of(rootMapping), null);
         Instance inst = reservation.getInstances().getFirst();
 
         Volume root = service.describeVolumes("us-east-1", List.of(inst.getRootVolumeId()), Map.of()).getFirst();
@@ -847,7 +847,7 @@ class Ec2ServiceTest {
         extraMapping.setEbs(extraEbs);
 
         Reservation reservation = service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro",
-                1, 1, null, List.of(), null, null, List.of(), null, null, null, List.of(extraMapping));
+                1, 1, null, List.of(), null, null, List.of(), null, null, null, List.of(extraMapping), null);
         Instance inst = reservation.getInstances().getFirst();
 
         List<Volume> allVolumes = service.describeVolumes("us-east-1", List.of(), Map.of());
@@ -897,7 +897,7 @@ class Ec2ServiceTest {
         rootEbs.setVolumeSize(200);
         rootMapping.setEbs(rootEbs);
         Instance instanceB = service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro",
-                1, 1, null, List.of(), null, null, List.of(), null, null, null, List.of(rootMapping))
+                1, 1, null, List.of(), null, null, List.of(), null, null, null, List.of(rootMapping), null)
                 .getInstances().getFirst();
 
         Map<String, List<String>> filters = Map.of(
