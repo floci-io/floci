@@ -652,7 +652,8 @@ class RdsQueryHandlerTest {
 
     @Test
     void createDbSubnetGroup_passesSubnetMembersToService() {
-        when(service.createDbSubnetGroup("sample-db-subnets", "test", List.of("subnet-aaa", "subnet-bbb"), null))
+        when(service.createDbSubnetGroup("sample-db-subnets", "test", List.of("subnet-aaa", "subnet-bbb"),
+                Map.of(), null))
                 .thenReturn(new DbSubnetGroup(
                         "sample-db-subnets", "test", "vpc-123", List.of("subnet-aaa", "subnet-bbb"),
                         Map.of("subnet-aaa", "us-east-1a", "subnet-bbb", "us-east-1b")));
@@ -664,7 +665,8 @@ class RdsQueryHandlerTest {
         p.add("SubnetIds.SubnetIdentifier.2", "subnet-bbb");
         Response response = handler.handle("CreateDBSubnetGroup", p);
 
-        verify(service).createDbSubnetGroup("sample-db-subnets", "test", List.of("subnet-aaa", "subnet-bbb"), null);
+        verify(service).createDbSubnetGroup("sample-db-subnets", "test", List.of("subnet-aaa", "subnet-bbb"),
+                Map.of(), null);
         String body = (String) response.getEntity();
         assertEquals(200, response.getStatus());
         assertTrue(body.contains("<DBSubnetGroupName>sample-db-subnets</DBSubnetGroupName>"));
@@ -676,7 +678,8 @@ class RdsQueryHandlerTest {
 
     @Test
     void createDbSubnetGroupPassesRequestRegionToService() {
-        when(service.createDbSubnetGroup("sample-db-subnets", "test", List.of("subnet-aaa", "subnet-bbb"), "us-west-2"))
+        when(service.createDbSubnetGroup("sample-db-subnets", "test", List.of("subnet-aaa", "subnet-bbb"),
+                Map.of(), "us-west-2"))
                 .thenReturn(new DbSubnetGroup(
                         "sample-db-subnets", "test", "vpc-123", List.of("subnet-aaa", "subnet-bbb"),
                         Map.of("subnet-aaa", "us-west-2a", "subnet-bbb", "us-west-2b")));
@@ -690,7 +693,30 @@ class RdsQueryHandlerTest {
         Response response = handler.handle("CreateDBSubnetGroup", p, "us-west-2");
 
         assertEquals(200, response.getStatus());
-        verify(service).createDbSubnetGroup("sample-db-subnets", "test", List.of("subnet-aaa", "subnet-bbb"), "us-west-2");
+        verify(service).createDbSubnetGroup("sample-db-subnets", "test", List.of("subnet-aaa", "subnet-bbb"),
+                Map.of(), "us-west-2");
+    }
+
+    @Test
+    void createDbSubnetGroup_passesTagsToService() {
+        // lex00/floci#105: CreateDBSubnetGroup's Tags member was silently dropped.
+        when(service.createDbSubnetGroup("sample-db-subnets", "test", List.of("subnet-aaa"),
+                Map.of("Name", "sample-db-subnets"), null))
+                .thenReturn(new DbSubnetGroup(
+                        "sample-db-subnets", "test", "vpc-123", List.of("subnet-aaa"),
+                        Map.of("subnet-aaa", "us-east-1a")));
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBSubnetGroupName", "sample-db-subnets");
+        p.add("DBSubnetGroupDescription", "test");
+        p.add("SubnetIds.SubnetIdentifier.1", "subnet-aaa");
+        p.add("Tags.member.1.Key", "Name");
+        p.add("Tags.member.1.Value", "sample-db-subnets");
+
+        handler.handle("CreateDBSubnetGroup", p);
+
+        verify(service).createDbSubnetGroup("sample-db-subnets", "test", List.of("subnet-aaa"),
+                Map.of("Name", "sample-db-subnets"), null);
     }
 
     @Test
@@ -745,12 +771,41 @@ class RdsQueryHandlerTest {
 
         MultivaluedMap<String, String> p = params();
         p.add("DBParameterGroupName", "pg1");
-        p.add("Parameters.member.1.ParameterName", "max_connections");
-        p.add("Parameters.member.1.ParameterValue", "200");
-        p.add("Parameters.member.2.ParameterName", "ignored_without_value");
+        // The real RDS API model names this list member "Parameter", not the Query-protocol
+        // default "member" (confirmed against botocore's rds/2014-10-31 service-2.json:
+        // ModifyDBParameterGroupMessage.Parameters -> ParametersList, member locationName
+        // "Parameter"). A prior version of this test used "Parameters.member.N...", which
+        // matched RdsQueryHandler's own (wrong) parsing key instead of the real wire format,
+        // so it passed while every real AWS CLI request silently lost its parameters.
+        p.add("Parameters.Parameter.1.ParameterName", "max_connections");
+        p.add("Parameters.Parameter.1.ParameterValue", "200");
+        p.add("Parameters.Parameter.2.ParameterName", "ignored_without_value");
         handler.handle("ModifyDBParameterGroup", p);
 
         verify(service).modifyDbParameterGroup("pg1", java.util.Map.of("max_connections", "200"));
+    }
+
+    @Test
+    void describeDbParameters_usesParameterTagNotMember() {
+        // botocore parses DescribeDBParametersResult.Parameters by its list member's
+        // locationName, "Parameter" (rds/2014-10-31 service-2.json), same shape ("Parameter"
+        // element) both request and response use. Emitting <member> here means every DB
+        // parameter set through ModifyDBParameterGroup silently vanishes on the next read,
+        // regardless of whether the request-side key is fixed.
+        DbParameterGroup group = new DbParameterGroup("pg1", "postgres15", "test group");
+        group.getParameters().put("autovacuum", "1");
+        when(service.getDbParameterGroup("pg1")).thenReturn(group);
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBParameterGroupName", "pg1");
+        Response response = handler.handle("DescribeDBParameters", p);
+
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<Parameter><ParameterName>autovacuum</ParameterName>")
+                        || body.contains("<Parameter>\n") || body.contains("<Parameter>"),
+                "Expected <Parameter> element wrapping each parameter: " + body);
+        assertFalse(body.contains("<member><ParameterName>"),
+                "Did not expect <member> wrapping ParameterName: " + body);
     }
 
     @Test
@@ -825,12 +880,31 @@ class RdsQueryHandlerTest {
 
         MultivaluedMap<String, String> p = params();
         p.add("DBClusterParameterGroupName", "cpg1");
-        p.add("Parameters.member.1.ParameterName", "log_statement");
-        p.add("Parameters.member.1.ParameterValue", "all");
-        p.add("Parameters.member.2.ParameterName", "ignored_without_value");
+        // Same real wire key as ModifyDBParameterGroup - see the comment there.
+        p.add("Parameters.Parameter.1.ParameterName", "log_statement");
+        p.add("Parameters.Parameter.1.ParameterValue", "all");
+        p.add("Parameters.Parameter.2.ParameterName", "ignored_without_value");
         handler.handle("ModifyDBClusterParameterGroup", p);
 
         verify(service).modifyDbClusterParameterGroup("cpg1", java.util.Map.of("log_statement", "all"));
+    }
+
+    @Test
+    void describeDbClusterParameters_usesParameterTagNotMember() {
+        // Same real wire shape as DescribeDBParameters - see the comment there.
+        DbClusterParameterGroup group = new DbClusterParameterGroup("cpg1", "aurora-postgresql16", "test group");
+        group.getParameters().put("log_statement", "all");
+        when(service.getDbClusterParameterGroup("cpg1")).thenReturn(group);
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBClusterParameterGroupName", "cpg1");
+        Response response = handler.handle("DescribeDBClusterParameters", p);
+
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<Parameter>"),
+                "Expected <Parameter> element wrapping each parameter: " + body);
+        assertFalse(body.contains("<member><ParameterName>"),
+                "Did not expect <member> wrapping ParameterName: " + body);
     }
 
     @Test
@@ -875,7 +949,8 @@ class RdsQueryHandlerTest {
         group.setVpcId("vpc-12345678");
         group.setSubnetIds(List.of("subnet-a", "subnet-b"));
         group.setSubnetAvailabilityZones(Map.of("subnet-a", "us-east-1a", "subnet-b", "us-east-1b"));
-        when(service.createDbSubnetGroup("my-subnet-group", "test subnet group", List.of("subnet-a", "subnet-b"), null))
+        when(service.createDbSubnetGroup("my-subnet-group", "test subnet group", List.of("subnet-a", "subnet-b"),
+                Map.of(), null))
                 .thenReturn(group);
 
         MultivaluedMap<String, String> p = params();

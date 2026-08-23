@@ -1134,6 +1134,20 @@ class RdsServiceTest {
     }
 
     @Test
+    void createDbSubnetGroupPersistsTagsFromCreateRequest() {
+        // AWS always echoes back the Tags a CreateDBSubnetGroup request set (same as every
+        // other RDS resource) - see lex00/floci#105. Tags written later via AddTagsToResource
+        // on the subgrp: ARN already worked; only the create-time Tags member was dropped.
+        DbSubnetGroup group = rdsService.createDbSubnetGroup("my-subnet-group", "desc",
+                List.of("subnet-default-a", "subnet-default-b"),
+                Map.of("Name", "my-subnet-group"), "us-east-1");
+
+        assertEquals(Map.of("Name", "my-subnet-group"), group.getTags());
+        assertEquals(Map.of("Name", "my-subnet-group"),
+                rdsService.listTagsForResource(group.getDbSubnetGroupArn()));
+    }
+
+    @Test
     void createDbSubnetGroupUsesSuppliedRegionForSubnetLookup() {
         List<String> subnetIds = List.of("subnet-west-a", "subnet-west-b");
         when(ec2Service.describeSubnets(eq("us-west-2"), eq(subnetIds), eq(Map.of())))
