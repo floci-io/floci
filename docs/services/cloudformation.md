@@ -60,6 +60,7 @@ cross-resource references.
 | DynamoDB | `Table`, `GlobalTable` |
 | Lambda | `Function` (Zip via S3/inline `ZipFile`, and Image), `LayerVersion`, `EventSourceMapping` (SQS, Kinesis, DynamoDB Streams), `Version`, `Alias` (also what SAM's `AutoPublishAlias` expands into) |
 | IAM | `Role`, `User`, `AccessKey`, `Policy`, `ManagedPolicy`, `InstanceProfile` |
+| Organizations | `Organization`, `OrganizationalUnit`, `Account`, `Policy`, `ResourcePolicy` |
 | SSM | `Parameter` |
 | KMS | `Key`, `Alias` |
 | Secrets Manager | `Secret`, `SecretTargetAttachment` |
@@ -121,6 +122,26 @@ Redshift clusters, Redshift Serverless namespaces, and DocumentDB Elastic cluste
 because their backing services are not implemented. A `SecretId` change is applied in place rather
 than reproducing CloudFormation's replacement event sequence; failed changes restore affected secret
 data and attachment ownership.
+
+## Organizations
+
+`AWS::Organizations::Organization` uses the stack's calling account as the management account, so
+the rest of the stack's Organizations resources are provisioned into that account's organization.
+`Fn::GetAtt Org.RootId` is the usual way to root the OU tree in the same template.
+
+- `OrganizationalUnit` — `ParentId` is create-only per the registry schema, so an update only
+  renames the OU in place; the physical id survives, keeping every `Ref` to it valid.
+- `Account` — `ParentIds` accepts a single entry and the account is moved there after creation
+  (accounts are always created under the root). Because Floci resolves a 12-digit access key id
+  straight to an account, `Ref`/`Fn::GetAtt AccountId` yields an id you can immediately use as a
+  caller identity against other services.
+- `Policy` — `TargetIds` is reconciled on update: targets the template adds are attached and ones
+  it drops are detached. Deleting the resource detaches its remaining targets first, since
+  `DeletePolicy` refuses while a policy is still attached.
+- `ResourcePolicy` — backed by `PutResourcePolicy`, which is already create-or-update.
+
+Deleting the stack removes the resources in dependency order and finally the organization itself.
+Deleting a resource that is already gone is tolerated.
 
 ## Auto Scaling Launch Template Resolution
 

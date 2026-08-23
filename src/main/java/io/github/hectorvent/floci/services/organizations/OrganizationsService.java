@@ -1111,6 +1111,50 @@ public class OrganizationsService {
         return organization;
     }
 
+    /**
+     * The management account that owns the given organization, root, OU, account, policy or
+     * resource-policy id, or empty when nothing matches.
+     *
+     * <p>CloudFormation's delete path carries no caller identity — {@code CfnResourceProvisioner}
+     * hands over a physical id and a region only — so the owner has to be recovered from the
+     * resource itself before a management-account-scoped operation can run against it.
+     */
+    public Optional<String> findManagementAccountForResource(String resourceId) {
+        if (resourceId == null || resourceId.isEmpty()) {
+            return Optional.empty();
+        }
+        for (Organization organization : organizations.scanAllAccounts()) {
+            boolean owns = resourceId.equals(organization.getId())
+                    || resourceId.equals(organization.getRoot().getId())
+                    || resourceId.equals(organization.getResourcePolicyId());
+            if (owns) {
+                return Optional.of(organization.getMasterAccountId());
+            }
+        }
+        if (ACCOUNT_ID_PATTERN.matcher(resourceId).matches()) {
+            return accounts.scanAllAccounts().stream()
+                    .filter(account -> resourceId.equals(account.getId()))
+                    .findFirst()
+                    .flatMap(account -> organizationById(account.getOrganizationId()))
+                    .map(Organization::getMasterAccountId);
+        }
+        if (OU_ID_PATTERN.matcher(resourceId).matches()) {
+            return organizationalUnits.scanAllAccounts().stream()
+                    .filter(unit -> resourceId.equals(unit.getId()))
+                    .findFirst()
+                    .flatMap(unit -> organizationById(unit.getOrganizationId()))
+                    .map(Organization::getMasterAccountId);
+        }
+        if (POLICY_ID_PATTERN.matcher(resourceId).matches()) {
+            return policies.scanAllAccounts().stream()
+                    .filter(policy -> resourceId.equals(policy.getId()))
+                    .findFirst()
+                    .flatMap(policy -> organizationById(policy.getOrganizationId()))
+                    .map(Organization::getMasterAccountId);
+        }
+        return Optional.empty();
+    }
+
     private Optional<Organization> findOrganizationForAccount(String accountId) {
         for (Organization organization : organizations.scanAllAccounts()) {
             if (accountId.equals(organization.getMasterAccountId())) {
