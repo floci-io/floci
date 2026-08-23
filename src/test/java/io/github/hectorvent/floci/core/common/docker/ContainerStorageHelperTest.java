@@ -115,6 +115,26 @@ class ContainerStorageHelperTest {
                 ContainerStorageHelper.defaultLabels(config));
     }
 
+    @Test
+    void resourceIdentityLabelsCarryTheFullEmulatedResourceIdentity() {
+        assertEquals(
+                Map.of("io.floci", "aws",
+                        "io.floci.service", "rds",
+                        "io.floci.resource-id", "orders-db-primary",
+                        "io.floci.account", "000000000000",
+                        "io.floci.region", "us-east-1"),
+                ContainerStorageHelper.resourceIdentityLabels(
+                        "rds", "orders-db-primary", "000000000000", "us-east-1"));
+    }
+
+    @Test
+    void resourceIdentityLabelsOmitBlankOrMissingValues() {
+        // ECR's sibling registry is a shared singleton with no per-resource identifier.
+        assertEquals(
+                Map.of("io.floci", "aws", "io.floci.service", "ecr"),
+                ContainerStorageHelper.resourceIdentityLabels("ecr", null, "", "   "));
+    }
+
     private static EmulatorConfig.DockerConfig.LabelEntry label(String key, String value) {
         return new EmulatorConfig.DockerConfig.LabelEntry() {
             @Override
