@@ -16,18 +16,27 @@ import software.amazon.awssdk.services.redshift.model.CreateClusterRequest;
 import software.amazon.awssdk.services.redshift.model.CreateClusterResponse;
 import software.amazon.awssdk.services.redshift.model.CreateClusterSnapshotRequest;
 import software.amazon.awssdk.services.redshift.model.CreateClusterSnapshotResponse;
+import software.amazon.awssdk.services.redshift.model.CreateClusterSubnetGroupRequest;
+import software.amazon.awssdk.services.redshift.model.CreateTagsRequest;
 import software.amazon.awssdk.services.redshift.model.DeleteClusterParameterGroupRequest;
 import software.amazon.awssdk.services.redshift.model.DeleteClusterRequest;
 import software.amazon.awssdk.services.redshift.model.DeleteClusterSnapshotRequest;
+import software.amazon.awssdk.services.redshift.model.DeleteClusterSubnetGroupRequest;
+import software.amazon.awssdk.services.redshift.model.DeleteTagsRequest;
 import software.amazon.awssdk.services.redshift.model.DescribeClusterParameterGroupsRequest;
 import software.amazon.awssdk.services.redshift.model.DescribeClusterParameterGroupsResponse;
 import software.amazon.awssdk.services.redshift.model.DescribeClusterSnapshotsRequest;
 import software.amazon.awssdk.services.redshift.model.DescribeClusterSnapshotsResponse;
+import software.amazon.awssdk.services.redshift.model.DescribeClusterSubnetGroupsRequest;
 import software.amazon.awssdk.services.redshift.model.DescribeClustersRequest;
 import software.amazon.awssdk.services.redshift.model.DescribeClustersResponse;
+import software.amazon.awssdk.services.redshift.model.DescribeTagsRequest;
+import software.amazon.awssdk.services.redshift.model.ModifyClusterRequest;
+import software.amazon.awssdk.services.redshift.model.RebootClusterRequest;
 import software.amazon.awssdk.services.redshift.model.RestoreFromClusterSnapshotRequest;
 import software.amazon.awssdk.services.redshift.model.RestoreFromClusterSnapshotResponse;
 import software.amazon.awssdk.services.redshift.model.Snapshot;
+import software.amazon.awssdk.services.redshift.model.Tag;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -58,7 +67,7 @@ class RedshiftOperationsTest {
     private static final List<String> clustersToCleanup = new ArrayList<>();
     private static final List<String> snapshotsToCleanup = new ArrayList<>();
     private static final List<String> parameterGroupsToCleanup = new ArrayList<>();
-    private static final java.util.List<String> subnetGroupsToCleanup = new java.util.ArrayList<>();
+    private static final List<String> subnetGroupsToCleanup = new ArrayList<>();
 
     @BeforeAll
     static void setup() {
@@ -97,7 +106,7 @@ class RedshiftOperationsTest {
             }
             for (String subnetGroupName : subnetGroupsToCleanup) {
                 try {
-                    client.deleteClusterSubnetGroup(software.amazon.awssdk.services.redshift.model.DeleteClusterSubnetGroupRequest.builder()
+                    client.deleteClusterSubnetGroup(DeleteClusterSubnetGroupRequest.builder()
                             .clusterSubnetGroupName(subnetGroupName)
                             .build());
                 } catch (Exception e) {
@@ -253,8 +262,8 @@ class RedshiftOperationsTest {
     @Order(3)
     void testTaggingAndSubnetGroupAndModify() {
         // Cluster subnet group
-        String subnetGroupName = "sdk-test-subnet-group";
-        client.createClusterSubnetGroup(software.amazon.awssdk.services.redshift.model.CreateClusterSubnetGroupRequest.builder()
+        String subnetGroupName = TestFixtures.uniqueName("rs-subnet-group");
+        client.createClusterSubnetGroup(CreateClusterSubnetGroupRequest.builder()
                 .clusterSubnetGroupName(subnetGroupName)
                 .description("SDK test subnet group")
                 .subnetIds("subnet-aaa", "subnet-bbb")
@@ -262,14 +271,14 @@ class RedshiftOperationsTest {
         subnetGroupsToCleanup.add(subnetGroupName);
 
         var describedGroups = client.describeClusterSubnetGroups(
-                software.amazon.awssdk.services.redshift.model.DescribeClusterSubnetGroupsRequest.builder()
+                DescribeClusterSubnetGroupsRequest.builder()
                         .clusterSubnetGroupName(subnetGroupName)
                         .build());
         assertThat(describedGroups.clusterSubnetGroups()).hasSize(1);
         assertThat(describedGroups.clusterSubnetGroups().get(0).subnets()).hasSize(2);
 
         // Cluster + tagging + modify + reboot
-        String clusterId = "sdk-test-tag-cluster";
+        String clusterId = TestFixtures.uniqueName("rs-tag-cluster");
         CreateClusterResponse created = client.createCluster(CreateClusterRequest.builder()
                 .clusterIdentifier(clusterId)
                 .nodeType("dc2.large")
@@ -279,28 +288,28 @@ class RedshiftOperationsTest {
         clustersToCleanup.add(clusterId);
         String arn = "arn:aws:redshift:us-east-1:000000000000:cluster:" + clusterId;
 
-        client.createTags(software.amazon.awssdk.services.redshift.model.CreateTagsRequest.builder()
+        client.createTags(CreateTagsRequest.builder()
                 .resourceName(arn)
-                .tags(software.amazon.awssdk.services.redshift.model.Tag.builder().key("env").value("test").build())
+                .tags(Tag.builder().key("env").value("test").build())
                 .build());
 
-        var described = client.describeTags(software.amazon.awssdk.services.redshift.model.DescribeTagsRequest.builder()
+        var described = client.describeTags(DescribeTagsRequest.builder()
                 .resourceName(arn)
                 .build());
         assertThat(described.taggedResources()).anyMatch(t -> "env".equals(t.tag().key()) && "test".equals(t.tag().value()));
 
-        client.deleteTags(software.amazon.awssdk.services.redshift.model.DeleteTagsRequest.builder()
+        client.deleteTags(DeleteTagsRequest.builder()
                 .resourceName(arn)
                 .tagKeys("env")
                 .build());
 
-        var modified = client.modifyCluster(software.amazon.awssdk.services.redshift.model.ModifyClusterRequest.builder()
+        var modified = client.modifyCluster(ModifyClusterRequest.builder()
                 .clusterIdentifier(clusterId)
                 .nodeType("ra3.xlplus")
                 .build());
         assertThat(modified.cluster().nodeType()).isEqualTo("ra3.xlplus");
 
-        var rebooted = client.rebootCluster(software.amazon.awssdk.services.redshift.model.RebootClusterRequest.builder()
+        var rebooted = client.rebootCluster(RebootClusterRequest.builder()
                 .clusterIdentifier(clusterId)
                 .build());
         assertThat(rebooted.cluster().clusterStatus()).isEqualTo("available");
