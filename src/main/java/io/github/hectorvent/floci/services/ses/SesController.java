@@ -123,6 +123,9 @@ public class SesController {
             // without leaving a half-created identity behind, matching AWS and the ConfigurationSetName
             // pre-check below.
             List<Tag> parsedTags = parseTagsArray(request.path("Tags"));
+            // Validate tags before creating the identity so an invalid set fails atomically
+            // instead of leaving the identity behind.
+            SesTags.validate(parsedTags);
 
             // Verified against AWS: a non-existent ConfigurationSetName fails the whole call
             // (NotFoundException) without creating the identity, so validate it before creating.

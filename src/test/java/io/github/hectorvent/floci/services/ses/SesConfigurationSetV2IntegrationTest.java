@@ -275,7 +275,7 @@ class SesConfigurationSetV2IntegrationTest {
 
     @Test
     @Order(12)
-    void createConfigurationSet_tagWithMissingValue_roundTripsAsAbsent() {
+    void createConfigurationSet_tagWithMissingValue_returns400() {
         given()
             .contentType("application/json")
             .header("Authorization", AUTH_HEADER)
@@ -288,15 +288,10 @@ class SesConfigurationSetV2IntegrationTest {
         .when()
             .post("/v2/email/configuration-sets")
         .then()
-            .statusCode(200);
-
-        given()
-            .header("Authorization", AUTH_HEADER)
-        .when()
-            .get("/v2/email/configuration-sets/v2-cs-tag-no-value")
-        .then()
-            .statusCode(200)
-            .body("Tags[0].Key", equalTo("env"));
+            .statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", equalTo("Tags can only contain letters, numbers, spaces, and the "
+                + "following special characters: _ . : / = + - @"));
     }
 
     @Test
