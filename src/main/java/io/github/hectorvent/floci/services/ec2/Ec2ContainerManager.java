@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ec2;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
@@ -74,6 +75,7 @@ public class Ec2ContainerManager {
     private final EmulatorConfig config;
     private final Ec2MetadataServer metadataServer;
     private final Ec2PortForwardManager portForwardManager;
+    private final RegionResolver regionResolver;
 
     private final ExecutorService executor = Executors.newCachedThreadPool(r -> {
         Thread t = new Thread(r, "ec2-container-launcher");
@@ -91,7 +93,8 @@ public class Ec2ContainerManager {
                                PortAllocator portAllocator,
                                EmulatorConfig config,
                                Ec2MetadataServer metadataServer,
-                               Ec2PortForwardManager portForwardManager) {
+                               Ec2PortForwardManager portForwardManager,
+                               RegionResolver regionResolver) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.logStreamer = logStreamer;
@@ -100,6 +103,7 @@ public class Ec2ContainerManager {
         this.dockerClient = dockerClient;
         this.portAllocator = portAllocator;
         this.config = config;
+        this.regionResolver = regionResolver;
         this.metadataServer = metadataServer;
         this.portForwardManager = portForwardManager;
     }
@@ -309,6 +313,8 @@ public class Ec2ContainerManager {
                 .withPortBinding(22, sshHostPort)
                 .withHostDockerInternalOnLinux()
                 .withLogRotation()
+                .withLabels(ContainerStorageHelper.resourceIdentityLabels(
+                        "ec2", instanceId, regionResolver.getAccountId(), region))
                 // EC2 instances expose IMDS on 169.254.169.254. Floci needs network administration
                 // privileges in the local container to attach that link-local address.
                 .withPrivileged(true)

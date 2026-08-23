@@ -17,6 +17,7 @@ import java.nio.charset.StandardCharsets;
 import com.github.dockerjava.api.model.NetworkSettings;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
@@ -135,7 +136,8 @@ class Ec2ContainerManagerTest {
                 mock(PortAllocator.class),
                 mock(EmulatorConfig.class, RETURNS_DEEP_STUBS),
                 metadataServer,
-                mock(Ec2PortForwardManager.class));
+                mock(Ec2PortForwardManager.class),
+                mock(RegionResolver.class));
 
         Instance instance = new Instance();
         instance.setInstanceId("i-restored");
@@ -235,6 +237,27 @@ class Ec2ContainerManagerTest {
         verify(harness.logStreamer, timeout(2000)).streamToCloudWatchLogs(
             any(String.class), any(String.class), eq("us-west-2"), eq(TEST_USER_DATA_OUTPUT)
         );
+    }
+
+    @Test
+    void launchLabelsContainerWithResourceIdentity() throws Exception {
+        LaunchHarness harness = launchHarness();
+        harness.stubSuccessfulExecs(new CountDownLatch(0), new CountDownLatch(0));
+
+        InspectContainerCmd inspect = mock(InspectContainerCmd.class);
+        InspectContainerResponse response = inspectResponse("192.168.215.42");
+        when(harness.dockerClient.inspectContainerCmd(TEST_CONTAINER_ID)).thenReturn(inspect);
+        when(inspect.exec()).thenReturn(response);
+
+        Instance instance = instance("i-labeltest");
+        harness.manager.launch(instance, "ubuntu:24.04", null, "us-west-2");
+
+        verify(harness.builder, timeout(2000)).withLabels(Map.of(
+                "io.floci", "aws",
+                "io.floci.service", "ec2",
+                "io.floci.resource-id", "i-labeltest",
+                "io.floci.account", "000000000000",
+                "io.floci.region", "us-west-2"));
     }
 
     @Test
@@ -739,6 +762,8 @@ class Ec2ContainerManagerTest {
         Ec2MetadataServer metadataServer = mock(Ec2MetadataServer.class);
         ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
         Ec2PortForwardManager portForwardManager = mock(Ec2PortForwardManager.class);
+        RegionResolver regionResolver = mock(RegionResolver.class);
+        when(regionResolver.getAccountId()).thenReturn("000000000000");
         Ec2ContainerManager manager = new Ec2ContainerManager(
                 containerBuilder,
                 lifecycleManager,
@@ -749,7 +774,8 @@ class Ec2ContainerManagerTest {
                 portAllocator,
                 config,
                 metadataServer,
-                portForwardManager);
+                portForwardManager,
+                regionResolver);
         return new LaunchHarness(manager, lifecycleManager, dockerClient, metadataServer, logStreamer, builder,
                 portAllocator, portForwardManager, new CopyOnWriteArrayList<>());
     }
