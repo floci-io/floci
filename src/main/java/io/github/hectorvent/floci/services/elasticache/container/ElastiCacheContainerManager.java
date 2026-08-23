@@ -84,7 +84,9 @@ public class ElastiCacheContainerManager {
                 .withName(containerName)
                 .withEnv("VALKEY_EXTRA_FLAGS", "--loglevel verbose")
                 .withDockerNetwork(config.services().elasticache().dockerNetwork())
-                .withLogRotation();
+                .withLogRotation()
+                .withLabels(ContainerStorageHelper.resourceIdentityLabels(
+                        "elasticache", groupId, regionResolver.getAccountId(), regionResolver.getDefaultRegion()));
 
         if (!containerDetector.isRunningInContainer()) {
             specBuilder.withDynamicPort(BACKEND_PORT);
