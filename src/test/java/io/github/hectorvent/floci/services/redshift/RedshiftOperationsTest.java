@@ -57,6 +57,21 @@ public class RedshiftOperationsTest {
             .contentType("application/xml")
             .body(containsString("<ParameterGroupName>pg-test-1</ParameterGroupName>"));
 
+        // 2b. ModifyClusterParameterGroup
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "ModifyClusterParameterGroup")
+            .formParam("ParameterGroupName", "pg-test-1")
+            .formParam("Parameters.member.1.ParameterName", "statement_timeout")
+            .formParam("Parameters.member.1.ParameterValue", "5000")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body(containsString("<ParameterGroupName>pg-test-1</ParameterGroupName>"));
+
         // 3. DescribeClusterParameters
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -68,7 +83,9 @@ public class RedshiftOperationsTest {
         .then()
             .statusCode(200)
             .contentType("application/xml")
-            .body(containsString("<DescribeClusterParametersResponse>"));
+            .body(containsString("<DescribeClusterParametersResponse>"))
+            .body(containsString("<ParameterName>statement_timeout</ParameterName>"))
+            .body(containsString("<ParameterValue>5000</ParameterValue>"));
 
         // 4. DeleteClusterParameterGroup
         given()

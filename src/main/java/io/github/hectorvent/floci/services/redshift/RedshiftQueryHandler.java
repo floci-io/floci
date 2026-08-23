@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
 import io.github.hectorvent.floci.services.redshift.model.ClusterParameterGroup;
+import io.github.hectorvent.floci.services.redshift.model.Parameter;
 import io.github.hectorvent.floci.services.redshift.model.Snapshot;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -180,28 +181,37 @@ public class RedshiftQueryHandler {
             if (parameterGroupName == null || parameterGroupName.isBlank()) {
                 throw new AwsException("InvalidParameterValue", "ParameterGroupName is required", 400);
             }
-            service.describeClusterParameterGroups(parameterGroupName);
-            
-            List<io.github.hectorvent.floci.services.redshift.model.Parameter> parameters = List.of(
-                new io.github.hectorvent.floci.services.redshift.model.Parameter("max_cursor_result_set_size", "0", "Maximum cursor result set size", "integer"),
-                new io.github.hectorvent.floci.services.redshift.model.Parameter("wlm_json_configuration", "{}", "WLM configuration", "string")
-            );
+            List<Parameter> parameters = service.describeClusterParameters(parameterGroupName);
 
             XmlBuilder xmlBuilder = new XmlBuilder()
                     .start("DescribeClusterParametersResponse")
                       .start("DescribeClusterParametersResult")
                         .start("Parameters");
-                        
-            for (io.github.hectorvent.floci.services.redshift.model.Parameter param : parameters) {
+            for (Parameter param : parameters) {
                 xmlBuilder.raw(buildParameterXml(param));
             }
-            
             String xml = xmlBuilder.end("Parameters")
                       .end("DescribeClusterParametersResult")
                       .start("ResponseMetadata")
                         .elem("RequestId", "test-req-id")
                       .end("ResponseMetadata")
                     .end("DescribeClusterParametersResponse")
+                    .build();
+            return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+        } else if ("ModifyClusterParameterGroup".equals(action)) {
+            String parameterGroupName = params.getFirst("ParameterGroupName");
+            List<Parameter> updates = parseParameters(params);
+            service.modifyClusterParameterGroup(parameterGroupName, updates);
+            String xml = new XmlBuilder()
+                    .start("ModifyClusterParameterGroupResponse")
+                      .start("ModifyClusterParameterGroupResult")
+                        .elem("ParameterGroupName", parameterGroupName)
+                        .elem("ParameterGroupStatus", "pending-reboot")
+                      .end("ModifyClusterParameterGroupResult")
+                      .start("ResponseMetadata")
+                        .elem("RequestId", "test-req-id")
+                      .end("ResponseMetadata")
+                    .end("ModifyClusterParameterGroupResponse")
                     .build();
             return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
         } else if ("DeleteClusterParameterGroup".equals(action)) {
@@ -311,7 +321,7 @@ public class RedshiftQueryHandler {
         return builder.end("ClusterParameterGroup").build();
     }
 
-    private String buildParameterXml(io.github.hectorvent.floci.services.redshift.model.Parameter param) {
+    private String buildParameterXml(Parameter param) {
         XmlBuilder builder = new XmlBuilder()
             .start("Parameter")
             .elem("ParameterName", param.getParameterName())
@@ -338,6 +348,19 @@ public class RedshiftQueryHandler {
     private static int numericSuffix(String key) {
         int lastDot = key.lastIndexOf('.');
         return Integer.parseInt(key.substring(lastDot + 1));
+    }
+
+    private static List<Parameter> parseParameters(MultivaluedMap<String, String> params) {
+        List<Parameter> parsed = new java.util.ArrayList<>();
+        for (int i = 1; ; i++) {
+            String name = params.getFirst("Parameters.member." + i + ".ParameterName");
+            if (name == null) {
+                break;
+            }
+            String value = params.getFirst("Parameters.member." + i + ".ParameterValue");
+            parsed.add(new Parameter(name, value));
+        }
+        return parsed;
     }
 
     private static Map<String, String> parseTags(MultivaluedMap<String, String> params) {
