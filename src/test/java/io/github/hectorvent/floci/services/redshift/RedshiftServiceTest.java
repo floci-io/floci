@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.services.redshift.container.RedshiftContainerM
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
 import io.github.hectorvent.floci.services.redshift.model.ClusterParameterGroup;
 import io.github.hectorvent.floci.services.redshift.model.Endpoint;
+import io.github.hectorvent.floci.services.redshift.model.Parameter;
 import io.github.hectorvent.floci.services.redshift.model.Snapshot;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -407,6 +408,54 @@ class RedshiftServiceTest {
 
         assertThrows(AwsException.class, () ->
                 service.deleteClusterParameterGroup("missing-pg"));
+    }
+
+    @Test
+    void testModifyClusterParameterGroup() {
+        ClusterParameterGroup group = new ClusterParameterGroup("my-pg", "redshift-1.0", "custom pg");
+        when(parameterGroupBackend.get("my-pg")).thenReturn(Optional.of(group));
+
+        ClusterParameterGroup updated = service.modifyClusterParameterGroup("my-pg",
+                List.of(new Parameter("max_cursor_result_set_size", "1000")));
+
+        assertEquals("1000", updated.getParameters().stream()
+                .filter(p -> "max_cursor_result_set_size".equals(p.getParameterName()))
+                .findFirst().orElseThrow().getParameterValue());
+        verify(parameterGroupBackend).put(eq("my-pg"), any(ClusterParameterGroup.class));
+        verify(parameterGroupBackend).flush();
+    }
+
+    @Test
+    void testModifyClusterParameterGroupAppendsUnknownParameter() {
+        ClusterParameterGroup group = new ClusterParameterGroup("my-pg", "redshift-1.0", "custom pg");
+        when(parameterGroupBackend.get("my-pg")).thenReturn(Optional.of(group));
+
+        ClusterParameterGroup updated = service.modifyClusterParameterGroup("my-pg",
+                List.of(new Parameter("statement_timeout", "5000")));
+
+        assertTrue(updated.getParameters().stream()
+                .anyMatch(p -> "statement_timeout".equals(p.getParameterName()) && "5000".equals(p.getParameterValue())));
+    }
+
+    @Test
+    void testModifyClusterParameterGroupNotFound() {
+        when(parameterGroupBackend.get("missing")).thenReturn(Optional.empty());
+
+        assertThrows(AwsException.class, () ->
+                service.modifyClusterParameterGroup("missing", List.of(new Parameter("x", "y"))));
+    }
+
+    @Test
+    void testDescribeClusterParametersReturnsStoredValues() {
+        ClusterParameterGroup group = new ClusterParameterGroup("my-pg", "redshift-1.0", "custom pg");
+        group.setParameters(new java.util.ArrayList<>(List.of(new Parameter("statement_timeout", "5000"))));
+        when(parameterGroupBackend.get("my-pg")).thenReturn(Optional.of(group));
+
+        List<Parameter> params = service.describeClusterParameters("my-pg");
+
+        assertEquals(1, params.size());
+        assertEquals("statement_timeout", params.get(0).getParameterName());
+        assertEquals("5000", params.get(0).getParameterValue());
     }
 
     @Test

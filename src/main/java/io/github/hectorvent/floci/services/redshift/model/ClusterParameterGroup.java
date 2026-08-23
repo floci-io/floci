@@ -1,7 +1,9 @@
 package io.github.hectorvent.floci.services.redshift.model;
 
 import io.quarkus.runtime.annotations.RegisterForReflection;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 @RegisterForReflection
@@ -46,4 +48,12 @@ public class ClusterParameterGroup {
 
     public Map<String, String> getTags() { return tags; }
     public void setTags(Map<String, String> tags) { this.tags = tags; }
+
+    private List<Parameter> parameters = new ArrayList<>(List.of(
+            new Parameter("max_cursor_result_set_size", "0", "Maximum cursor result set size", "integer"),
+            new Parameter("wlm_json_configuration", "{}", "WLM configuration", "string")
+    ));
+
+    public List<Parameter> getParameters() { return parameters; }
+    public void setParameters(List<Parameter> parameters) { this.parameters = parameters; }
 }

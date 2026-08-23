@@ -313,6 +313,40 @@ public class RedshiftService {
         return parameterGroups.get(parameterGroupName);
     }
 
+    public List<io.github.hectorvent.floci.services.redshift.model.Parameter> describeClusterParameters(String parameterGroupName) {
+        ClusterParameterGroup group = parameterGroups.get(parameterGroupName)
+                .orElseThrow(() -> new AwsException("ClusterParameterGroupNotFound",
+                        "Cluster parameter group " + parameterGroupName + " not found", 404));
+        return group.getParameters();
+    }
+
+    public synchronized ClusterParameterGroup modifyClusterParameterGroup(
+            String parameterGroupName, List<io.github.hectorvent.floci.services.redshift.model.Parameter> updates) {
+        ClusterParameterGroup group = parameterGroups.get(parameterGroupName)
+                .orElseThrow(() -> new AwsException("ClusterParameterGroupNotFound",
+                        "Cluster parameter group " + parameterGroupName + " not found", 404));
+
+        List<io.github.hectorvent.floci.services.redshift.model.Parameter> current =
+                new java.util.ArrayList<>(group.getParameters());
+        for (io.github.hectorvent.floci.services.redshift.model.Parameter update : updates) {
+            boolean matched = false;
+            for (int i = 0; i < current.size(); i++) {
+                if (current.get(i).getParameterName().equals(update.getParameterName())) {
+                    current.set(i, update);
+                    matched = true;
+                    break;
+                }
+            }
+            if (!matched) {
+                current.add(update);
+            }
+        }
+        group.setParameters(current);
+        parameterGroups.put(parameterGroupName, group);
+        parameterGroups.flush();
+        return group;
+    }
+
     public ClusterParameterGroup deleteClusterParameterGroup(String parameterGroupName) {
         Optional<ClusterParameterGroup> groupOpt = parameterGroups.get(parameterGroupName);
         if (groupOpt.isEmpty()) {
