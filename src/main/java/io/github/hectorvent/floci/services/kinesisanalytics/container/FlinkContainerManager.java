@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.E
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
+import io.github.hectorvent.floci.core.common.docker.LaunchedContainerAwsEnv;
 import io.github.hectorvent.floci.services.kinesisanalytics.KinesisAnalyticsRuntimes;
 import io.github.hectorvent.floci.services.kinesisanalytics.model.FlinkApplication;
 import io.github.hectorvent.floci.services.kinesisanalytics.model.Snapshot;
@@ -35,7 +36,9 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
@@ -68,6 +71,7 @@ public class FlinkContainerManager {
     private final ContainerDetector containerDetector;
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
+    private final LaunchedContainerAwsEnv awsEnv;
     private final S3Service s3Service;
     private final FlinkRestClient flinkRest;
     private final ObjectMapper objectMapper;
@@ -87,6 +91,7 @@ public class FlinkContainerManager {
                                  ContainerDetector containerDetector,
                                  EmulatorConfig config,
                                  RegionResolver regionResolver,
+                                 LaunchedContainerAwsEnv awsEnv,
                                  S3Service s3Service,
                                  FlinkRestClient flinkRest,
                                  ObjectMapper objectMapper) {
@@ -96,6 +101,7 @@ public class FlinkContainerManager {
         this.containerDetector = containerDetector;
         this.config = config;
         this.regionResolver = regionResolver;
+        this.awsEnv = awsEnv;
         this.objectMapper = objectMapper;
         this.s3Service = s3Service;
         this.flinkRest = flinkRest;
@@ -129,6 +135,7 @@ public class FlinkContainerManager {
         // Read the JAR before starting anything so a missing/empty artifact fails fast, before any
         // container is created. (S3 read runs on the request thread → account context is available.)
         byte[] jarBytes = app.hasCode() ? readJar(app) : null;
+        List<String> awsBaselineEnv = awsEnv.sdkBaselineEnv(config.defaultRegion(), Optional.empty());
 
         LOG.infov("Starting Flink cluster for application {0} using image {1}{2}",
                 app.getApplicationName(), image, app.hasCode() ? " (with TaskManager)" : "");
@@ -141,8 +148,11 @@ public class FlinkContainerManager {
         ContainerBuilder.Builder jmSpec = containerBuilder.newContainer(image)
                 .withName(jmName)
                 .withCmd("jobmanager")
+                .withEnv(awsBaselineEnv)
                 .withEnv("FLINK_PROPERTIES", jmProps)
                 .withDockerNetwork(config.services().dockerNetwork())
+                .withHostDockerInternalOnLinux()
+                .withEmbeddedDns()
                 .withLogRotation();
         // Named volume (not the container's ephemeral filesystem) so snapshots survive a
         // Stop/StartApplication cycle — stopCluster() removes the JobManager container, but this
@@ -180,6 +190,7 @@ public class FlinkContainerManager {
             ContainerSpec tmSpec = containerBuilder.newContainer(image)
                     .withName(tmName)
                     .withCmd("taskmanager")
+                    .withEnv(awsBaselineEnv)
                     .withEnv("FLINK_PROPERTIES", tmProps)
                     .withNetworkMode("container:" + jm.containerId())
                     .withLogRotation()
