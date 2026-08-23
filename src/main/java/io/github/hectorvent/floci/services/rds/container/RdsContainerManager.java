@@ -130,6 +130,8 @@ public class RdsContainerManager {
             // Build environment variables
             List<String> envVars = buildEnvVars(engine, masterUsername, masterPassword, dbName);
 
+            RuntimeIdentity runtimeIdentity = resolveRuntimeIdentity(effectiveRuntimeId);
+
         // Build container spec with bind mounts for persistence. Publish the
         // engine port to the host only in native mode; in Docker mode the auth
         // proxy reaches the DB via the container network.
@@ -137,7 +139,9 @@ public class RdsContainerManager {
                     .withName(containerName)
                     .withEnv(envVars)
                     .withDockerNetwork(config.services().rds().dockerNetwork())
-                    .withLogRotation();
+                    .withLogRotation()
+                    .withLabels(ContainerStorageHelper.resourceIdentityLabels(
+                            "rds", instanceId, runtimeIdentity.accountId(), runtimeIdentity.region()));
 
             if (!containerDetector.isRunningInContainer()) {
                 specBuilder.withDynamicPort(enginePort);
@@ -179,29 +183,13 @@ public class RdsContainerManager {
                     : info.containerId();
             String logGroup = "/aws/rds/instance/" + instanceId + "/error";
             String logStream = logStreamer.generateLogStreamName(shortId);
-            String region = regionResolver.getDefaultRegion();
-            String accountId = null;
-            try {
-                AwsArnUtils.Arn runtimeArn = AwsArnUtils.parse(effectiveRuntimeId);
-                if ("rds".equals(runtimeArn.service())) {
-                    if (!runtimeArn.region().isBlank()) {
-                        region = runtimeArn.region();
-                    }
-                    if (!runtimeArn.accountId().isBlank()) {
-                        accountId = runtimeArn.accountId();
-                    }
-                }
-            } catch (IllegalArgumentException ignored) {
-                LOG.debugv("Using legacy RDS runtime identity for log routing: {0}",
-                        effectiveRuntimeId);
-            }
 
-            Closeable logHandle = accountId != null
+            Closeable logHandle = runtimeIdentity.arnAccountId() != null
                     ? logStreamer.attachForAccount(
-                            accountId, info.containerId(), logGroup, logStream, region,
-                            "rds:" + effectiveRuntimeId)
+                            runtimeIdentity.arnAccountId(), info.containerId(), logGroup,
+                            logStream, runtimeIdentity.region(), "rds:" + effectiveRuntimeId)
                     : logStreamer.attach(
-                            info.containerId(), logGroup, logStream, region,
+                            info.containerId(), logGroup, logStream, runtimeIdentity.region(),
                             "rds:" + effectiveRuntimeId);
             handle.setLogStream(logHandle);
             activeContainers.put(effectiveRuntimeId, handle);
@@ -236,6 +224,34 @@ public class RdsContainerManager {
             throw e;
         }
     }
+
+    /**
+     * Resolves the region and account id backing an RDS runtime identity. {@code accountId} is
+     * never blank (falls back to {@link RegionResolver#getAccountId}); {@code arnAccountId} keeps
+     * the pre-existing null-when-absent semantics that log-stream routing depends on to pick
+     * between {@code attach} and {@code attachForAccount}.
+     */
+    private RuntimeIdentity resolveRuntimeIdentity(String runtimeId) {
+        String region = regionResolver.getDefaultRegion();
+        String arnAccountId = null;
+        try {
+            AwsArnUtils.Arn runtimeArn = AwsArnUtils.parse(runtimeId);
+            if ("rds".equals(runtimeArn.service())) {
+                if (!runtimeArn.region().isBlank()) {
+                    region = runtimeArn.region();
+                }
+                if (!runtimeArn.accountId().isBlank()) {
+                    arnAccountId = runtimeArn.accountId();
+                }
+            }
+        } catch (IllegalArgumentException ignored) {
+            LOG.debugv("Using legacy RDS runtime identity for log routing: {0}", runtimeId);
+        }
+        String accountId = arnAccountId != null ? arnAccountId : regionResolver.getAccountId();
+        return new RuntimeIdentity(region, accountId, arnAccountId);
+    }
+
+    private record RuntimeIdentity(String region, String accountId, String arnAccountId) {}
 
     public void stop(RdsContainerHandle handle) {
         if (handle == null) {
