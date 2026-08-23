@@ -18,7 +18,6 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
-import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -26,6 +25,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ThreadLocalRandom;
 
 /**
  * AWS Global Accelerator management plane.
@@ -44,7 +44,6 @@ import java.util.UUID;
 public class GlobalAcceleratorService {
 
     private static final Logger LOG = Logger.getLogger(GlobalAcceleratorService.class);
-    private static final SecureRandom RANDOM = new SecureRandom();
     private static final String ID_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789";
     private static final String HEX = "0123456789abcdef";
 
@@ -500,7 +499,7 @@ public class GlobalAcceleratorService {
         String[] pools = {"75.2", "99.83"};
         int poolIndex = 0;
         while (addresses.size() < 2) {
-            addresses.add(pools[poolIndex++] + "." + RANDOM.nextInt(256) + "." + RANDOM.nextInt(256));
+            addresses.add(pools[poolIndex++] + "." + ThreadLocalRandom.current().nextInt(256) + "." + ThreadLocalRandom.current().nextInt(256));
         }
         return addresses;
     }
@@ -528,7 +527,7 @@ public class GlobalAcceleratorService {
     private static String randomId(int length) {
         StringBuilder id = new StringBuilder(length);
         for (int i = 0; i < length; i++) {
-            id.append(ID_ALPHABET.charAt(RANDOM.nextInt(ID_ALPHABET.length())));
+            id.append(ID_ALPHABET.charAt(ThreadLocalRandom.current().nextInt(ID_ALPHABET.length())));
         }
         return id.toString();
     }
@@ -536,7 +535,7 @@ public class GlobalAcceleratorService {
     private static String randomHex(int length) {
         StringBuilder hex = new StringBuilder(length);
         for (int i = 0; i < length; i++) {
-            hex.append(HEX.charAt(RANDOM.nextInt(HEX.length())));
+            hex.append(HEX.charAt(ThreadLocalRandom.current().nextInt(HEX.length())));
         }
         return hex.toString().toLowerCase(Locale.ROOT);
     }
