@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
+import org.jboss.logging.Logger;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
@@ -25,6 +26,8 @@ import static org.mockito.Mockito.when;
 
 class ElastiCacheMemcachedContainerManagerTest {
 
+    private static final Logger LOG = Logger.getLogger(ElastiCacheMemcachedContainerManagerTest.class);
+
     @Test
     void startLabelsContainerWithResourceIdentity() throws IOException {
         try (ServerSocket serverSocket = new ServerSocket(0)) {
@@ -33,7 +36,8 @@ class ElastiCacheMemcachedContainerManagerTest {
                     socket.getInputStream().read(new byte[1024]);
                     socket.getOutputStream().write("VERSION 1.6.0\r\n".getBytes(StandardCharsets.UTF_8));
                     socket.getOutputStream().flush();
-                } catch (IOException ignored) {
+                } catch (IOException e) {
+                    LOG.debugv(e, "Acceptor socket closed during test teardown");
                 }
             });
             acceptor.setDaemon(true);
