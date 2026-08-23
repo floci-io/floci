@@ -1162,6 +1162,16 @@ public interface EmulatorConfig {
         /** Allows invoking plain HTTP endpoints. By default, AWS only allows HTTPS. */
         @WithDefault("true")
         boolean allowPlaintextHttp();
+
+        /**
+         * Path to a Step Functions Local compatible mock configuration file
+         * ({@code MockConfigFile.json}). When set, {@code StartExecution} on
+         * {@code <stateMachineArn>#<testCaseName>} runs the state machine with that test
+         * case's mocked service integration responses. The main application.yml defaults
+         * this to the {@code SFN_MOCK_CONFIG} environment variable for drop-in
+         * compatibility with Step Functions Local.
+         */
+        Optional<String> mockConfigFile();
     }
 
     interface SwfServiceConfig {
