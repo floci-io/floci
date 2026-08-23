@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.ec2.Ec2ImageCatalog;
 import io.github.hectorvent.floci.services.ssm.model.Parameter;
 import io.github.hectorvent.floci.services.ssm.model.ParameterHistory;
 import io.github.hectorvent.floci.services.ssm.model.PatchBaselineIdentity;
@@ -21,13 +22,17 @@ public class SsmService {
 
     private static final Logger LOG = Logger.getLogger(SsmService.class);
 
+    private static final String PUBLIC_PARAMETER_PREFIX = "/aws/service/";
+
     private final StorageBackend<String, Parameter> parameterStore;
     private final StorageBackend<String, List<ParameterHistory>> historyStore;
     private final int maxParameterHistory;
     private final RegionResolver regionResolver;
+    private final Ec2ImageCatalog imageCatalog;
 
     @Inject
-    public SsmService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver) {
+    public SsmService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver,
+                       Ec2ImageCatalog imageCatalog) {
         this(
                 storageFactory.create("ssm", "ssm-parameters.json",
                         new TypeReference<>() {
@@ -36,7 +41,8 @@ public class SsmService {
                         new TypeReference<>() {
                         }),
                 config.services().ssm().maxParameterHistory(),
-                regionResolver
+                regionResolver,
+                imageCatalog
         );
     }
 
@@ -47,16 +53,23 @@ public class SsmService {
                StorageBackend<String, List<ParameterHistory>> historyStore,
                int maxParameterHistory) {
         this(parameterStore, historyStore, maxParameterHistory,
-                new RegionResolver("us-east-1", "000000000000"));
+                new RegionResolver("us-east-1", "000000000000"), null);
     }
 
     SsmService(StorageBackend<String, Parameter> parameterStore,
                StorageBackend<String, List<ParameterHistory>> historyStore,
                int maxParameterHistory, RegionResolver regionResolver) {
+        this(parameterStore, historyStore, maxParameterHistory, regionResolver, null);
+    }
+
+    SsmService(StorageBackend<String, Parameter> parameterStore,
+               StorageBackend<String, List<ParameterHistory>> historyStore,
+               int maxParameterHistory, RegionResolver regionResolver, Ec2ImageCatalog imageCatalog) {
         this.parameterStore = parameterStore;
         this.historyStore = historyStore;
         this.maxParameterHistory = maxParameterHistory;
         this.regionResolver = regionResolver;
+        this.imageCatalog = imageCatalog;
     }
 
     /**
@@ -90,9 +103,41 @@ public class SsmService {
 
     public Parameter getParameter(String name, String region) {
         String storageKey = regionKey(region, name);
-        return parameterStore.get(storageKey)
-                .orElseThrow(() -> new AwsException("ParameterNotFound",
-                        "Parameter " + name + " not found.", 400));
+        Optional<Parameter> existing = parameterStore.get(storageKey);
+        if (existing.isPresent()) {
+            return existing.get();
+        }
+        Optional<Parameter> seeded = seedPublicAmiParameter(name, region, storageKey);
+        if (seeded.isPresent()) {
+            return seeded.get();
+        }
+        throw new AwsException("ParameterNotFound", "Parameter " + name + " not found.", 400);
+    }
+
+    /**
+     * AWS itself publishes read-only AMI-id parameters under "/aws/service/"
+     * in every account with no setup - see
+     * https://docs.aws.amazon.com/systems-manager/latest/userguide/parameter-store-public-parameters-ami.html
+     * A bare GetParameter for one of the names the EC2 image catalog knows
+     * about is answered from the catalog and persisted (write-through) on
+     * first access, rather than requiring every consumer to seed it by hand.
+     * A name floci does not have a catalog answer for still 404s: this is a
+     * targeted fallback for the documented public-parameter family, not a
+     * blanket catch-all for "/aws/service/".
+     */
+    private Optional<Parameter> seedPublicAmiParameter(String name, String region, String storageKey) {
+        if (imageCatalog == null || !name.startsWith(PUBLIC_PARAMETER_PREFIX)) {
+            return Optional.empty();
+        }
+        return imageCatalog.findByPublicParameterName(name).map(image -> {
+            Parameter parameter = new Parameter(name, image.imageId, "String");
+            parameter.setDescription("Seeded from the floci EC2 image catalog for " + name);
+            parameter.setArn(regionResolver.buildArn("ssm", region, "parameter" + name));
+            parameterStore.put(storageKey, parameter);
+            addHistory(storageKey, parameter);
+            LOG.infov("Seeded public AMI parameter: {0} -> {1} in region {2}", name, image.imageId, region);
+            return parameter;
+        });
     }
 
     public List<Parameter> getParameters(List<String> names, String region) {
