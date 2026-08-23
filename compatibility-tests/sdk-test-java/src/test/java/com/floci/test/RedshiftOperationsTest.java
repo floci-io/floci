@@ -58,6 +58,7 @@ class RedshiftOperationsTest {
     private static final List<String> clustersToCleanup = new ArrayList<>();
     private static final List<String> snapshotsToCleanup = new ArrayList<>();
     private static final List<String> parameterGroupsToCleanup = new ArrayList<>();
+    private static final java.util.List<String> subnetGroupsToCleanup = new java.util.ArrayList<>();
 
     @BeforeAll
     static void setup() {
@@ -92,6 +93,15 @@ class RedshiftOperationsTest {
                             .build());
                 } catch (Exception e) {
                     LOG.log(Level.WARNING, "Failed to clean up Redshift parameter group " + pgName, e);
+                }
+            }
+            for (String subnetGroupName : subnetGroupsToCleanup) {
+                try {
+                    client.deleteClusterSubnetGroup(software.amazon.awssdk.services.redshift.model.DeleteClusterSubnetGroupRequest.builder()
+                            .clusterSubnetGroupName(subnetGroupName)
+                            .build());
+                } catch (Exception e) {
+                    LOG.log(Level.WARNING, "Failed to clean up Redshift cluster subnet group " + subnetGroupName, e);
                 }
             }
             client.close();
@@ -237,6 +247,63 @@ class RedshiftOperationsTest {
                 .parameterGroupName(pgName)
                 .build());
         parameterGroupsToCleanup.remove(pgName);
+    }
+
+    @Test
+    @Order(3)
+    void testTaggingAndSubnetGroupAndModify() {
+        // Cluster subnet group
+        String subnetGroupName = "sdk-test-subnet-group";
+        client.createClusterSubnetGroup(software.amazon.awssdk.services.redshift.model.CreateClusterSubnetGroupRequest.builder()
+                .clusterSubnetGroupName(subnetGroupName)
+                .description("SDK test subnet group")
+                .subnetIds("subnet-aaa", "subnet-bbb")
+                .build());
+        subnetGroupsToCleanup.add(subnetGroupName);
+
+        var describedGroups = client.describeClusterSubnetGroups(
+                software.amazon.awssdk.services.redshift.model.DescribeClusterSubnetGroupsRequest.builder()
+                        .clusterSubnetGroupName(subnetGroupName)
+                        .build());
+        assertThat(describedGroups.clusterSubnetGroups()).hasSize(1);
+        assertThat(describedGroups.clusterSubnetGroups().get(0).subnets()).hasSize(2);
+
+        // Cluster + tagging + modify + reboot
+        String clusterId = "sdk-test-tag-cluster";
+        CreateClusterResponse created = client.createCluster(CreateClusterRequest.builder()
+                .clusterIdentifier(clusterId)
+                .nodeType("dc2.large")
+                .masterUsername(USERNAME)
+                .masterUserPassword(PASSWORD)
+                .build());
+        clustersToCleanup.add(clusterId);
+        String arn = "arn:aws:redshift:us-east-1:000000000000:cluster:" + clusterId;
+
+        client.createTags(software.amazon.awssdk.services.redshift.model.CreateTagsRequest.builder()
+                .resourceName(arn)
+                .tags(software.amazon.awssdk.services.redshift.model.Tag.builder().key("env").value("test").build())
+                .build());
+
+        var described = client.describeTags(software.amazon.awssdk.services.redshift.model.DescribeTagsRequest.builder()
+                .resourceName(arn)
+                .build());
+        assertThat(described.taggedResources()).anyMatch(t -> "env".equals(t.tag().key()) && "test".equals(t.tag().value()));
+
+        client.deleteTags(software.amazon.awssdk.services.redshift.model.DeleteTagsRequest.builder()
+                .resourceName(arn)
+                .tagKeys("env")
+                .build());
+
+        var modified = client.modifyCluster(software.amazon.awssdk.services.redshift.model.ModifyClusterRequest.builder()
+                .clusterIdentifier(clusterId)
+                .nodeType("ra3.xlplus")
+                .build());
+        assertThat(modified.cluster().nodeType()).isEqualTo("ra3.xlplus");
+
+        var rebooted = client.rebootCluster(software.amazon.awssdk.services.redshift.model.RebootClusterRequest.builder()
+                .clusterIdentifier(clusterId)
+                .build());
+        assertThat(rebooted.cluster().clusterStatus()).isEqualTo("available");
     }
 
     private static Connection awaitPostgresConnection(String host, int port, String username, String password) throws Exception {
