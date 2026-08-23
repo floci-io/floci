@@ -1,9 +1,12 @@
 package io.github.hectorvent.floci.services.cognitoidentity.model;
 
+import io.quarkus.runtime.annotations.RegisterForReflection;
+
 /**
  * A Cognito user pool attached to an identity pool
  * ({@code IdentityPool.CognitoIdentityProviders} member).
  */
+@RegisterForReflection
 public class CognitoIdentityProvider {
 
     private String providerName;

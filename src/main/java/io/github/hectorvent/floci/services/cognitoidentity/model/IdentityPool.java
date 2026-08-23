@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.cognitoidentity.model;
 
 import com.fasterxml.jackson.databind.JsonNode;
 
+import io.quarkus.runtime.annotations.RegisterForReflection;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -16,6 +17,7 @@ import java.util.Map;
  * ({@code SetIdentityPoolRoles}, {@code SetPrincipalTagAttributeMap}) but belong to the same
  * pool, so they are persisted alongside it and survive an {@code UpdateIdentityPool} replace.
  */
+@RegisterForReflection
 public class IdentityPool {
 
     private String identityPoolId;

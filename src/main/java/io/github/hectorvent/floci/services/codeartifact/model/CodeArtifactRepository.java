@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.codeartifact.model;
 
+import io.quarkus.runtime.annotations.RegisterForReflection;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -7,6 +8,7 @@ import java.util.List;
 import java.util.Map;
 
 /** A CodeArtifact repository and its resource policy. */
+@RegisterForReflection
 public class CodeArtifactRepository {
 
     private String name;

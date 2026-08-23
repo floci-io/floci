@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.datasync.model;
 
+import io.quarkus.runtime.annotations.RegisterForReflection;
 import java.util.List;
 import java.util.Optional;
 
@@ -11,6 +12,7 @@ import java.util.Optional;
  * the model marks required on create, and the members its {@code DescribeLocation*}
  * response echoes back from the create request.
  */
+@RegisterForReflection
 public enum DataSyncLocationType {
 
     AZURE_BLOB("AzureBlob", "azure-blob",

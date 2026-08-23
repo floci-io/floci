@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cognitoidentity.model;
 
+import io.quarkus.runtime.annotations.RegisterForReflection;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -7,6 +8,7 @@ import java.util.Map;
  * Mapping between principal tags and user attributes for one identity provider attached to
  * an identity pool ({@code SetPrincipalTagAttributeMap} / {@code GetPrincipalTagAttributeMap}).
  */
+@RegisterForReflection
 public class PrincipalTagAttributeMap {
 
     private String identityProviderName;

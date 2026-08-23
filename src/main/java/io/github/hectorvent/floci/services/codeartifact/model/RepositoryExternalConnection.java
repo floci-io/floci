@@ -1,6 +1,9 @@
 package io.github.hectorvent.floci.services.codeartifact.model;
 
+import io.quarkus.runtime.annotations.RegisterForReflection;
+
 /** An external connection from a CodeArtifact repository to a public package repository. */
+@RegisterForReflection
 public class RepositoryExternalConnection {
 
     private String externalConnectionName;

@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.datasync.model;
 
 import com.fasterxml.jackson.databind.JsonNode;
 
+import io.quarkus.runtime.annotations.RegisterForReflection;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -11,6 +12,7 @@ import java.util.Map;
  * credential members stripped and the service's documented defaults applied; every
  * {@code DescribeLocation*} answer is projected out of it.
  */
+@RegisterForReflection
 public class DataSyncLocation implements DataSyncTaggable {
 
     private String locationArn;
