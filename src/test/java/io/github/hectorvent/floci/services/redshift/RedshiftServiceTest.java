@@ -459,6 +459,23 @@ class RedshiftServiceTest {
     }
 
     @Test
+    void testModifyClusterParameterGroupPreservesMetadata() {
+        ClusterParameterGroup group = new ClusterParameterGroup("my-pg", "redshift-1.0", "custom pg");
+        when(parameterGroupBackend.get("my-pg")).thenReturn(Optional.of(group));
+
+        // Modify using 2-arg constructor (only name and value) - should preserve description and dataType
+        ClusterParameterGroup updated = service.modifyClusterParameterGroup("my-pg",
+                List.of(new Parameter("max_cursor_result_set_size", "1000")));
+
+        Parameter modified = updated.getParameters().stream()
+                .filter(p -> "max_cursor_result_set_size".equals(p.getParameterName()))
+                .findFirst().orElseThrow();
+        assertEquals("1000", modified.getParameterValue());
+        assertEquals("Maximum cursor result set size", modified.getDescription());
+        assertEquals("integer", modified.getDataType());
+    }
+
+    @Test
     void testCreateAndListTagsForCluster() {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("my-cluster");

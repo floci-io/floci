@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.redshift.container.RedshiftContainerM
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
 import io.github.hectorvent.floci.services.redshift.model.ClusterParameterGroup;
 import io.github.hectorvent.floci.services.redshift.model.Endpoint;
+import io.github.hectorvent.floci.services.redshift.model.Parameter;
 import io.github.hectorvent.floci.services.redshift.model.Snapshot;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
@@ -19,6 +20,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import io.quarkus.runtime.StartupEvent;
 import org.jboss.logging.Logger;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -313,7 +315,7 @@ public class RedshiftService {
         return parameterGroups.get(parameterGroupName);
     }
 
-    public List<io.github.hectorvent.floci.services.redshift.model.Parameter> describeClusterParameters(String parameterGroupName) {
+    public List<Parameter> describeClusterParameters(String parameterGroupName) {
         ClusterParameterGroup group = parameterGroups.get(parameterGroupName)
                 .orElseThrow(() -> new AwsException("ClusterParameterGroupNotFound",
                         "Cluster parameter group " + parameterGroupName + " not found", 404));
@@ -321,18 +323,25 @@ public class RedshiftService {
     }
 
     public synchronized ClusterParameterGroup modifyClusterParameterGroup(
-            String parameterGroupName, List<io.github.hectorvent.floci.services.redshift.model.Parameter> updates) {
+            String parameterGroupName, List<Parameter> updates) {
         ClusterParameterGroup group = parameterGroups.get(parameterGroupName)
                 .orElseThrow(() -> new AwsException("ClusterParameterGroupNotFound",
                         "Cluster parameter group " + parameterGroupName + " not found", 404));
 
-        List<io.github.hectorvent.floci.services.redshift.model.Parameter> current =
-                new java.util.ArrayList<>(group.getParameters());
-        for (io.github.hectorvent.floci.services.redshift.model.Parameter update : updates) {
+        List<Parameter> current = new ArrayList<>(group.getParameters());
+        for (Parameter update : updates) {
             boolean matched = false;
             for (int i = 0; i < current.size(); i++) {
-                if (current.get(i).getParameterName().equals(update.getParameterName())) {
-                    current.set(i, update);
+                Parameter existing = current.get(i);
+                if (existing.getParameterName().equals(update.getParameterName())) {
+                    // Preserve metadata (description, dataType) from existing parameter if not provided in update
+                    existing.setParameterValue(update.getParameterValue());
+                    if (update.getDescription() != null) {
+                        existing.setDescription(update.getDescription());
+                    }
+                    if (update.getDataType() != null) {
+                        existing.setDataType(update.getDataType());
+                    }
                     matched = true;
                     break;
                 }
