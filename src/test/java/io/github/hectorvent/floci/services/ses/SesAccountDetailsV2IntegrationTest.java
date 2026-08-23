@@ -240,4 +240,28 @@ class SesAccountDetailsV2IntegrationTest {
         .when().post("/v2/email/account/details").then().statusCode(400)
                 .body("__type", equalTo("SerializationException"));
     }
+
+    @Test
+    @Order(18)
+    void putDetails_productionAccessEnabled_topLevelStaysTrueAndNotInDetails() {
+        // ProductionAccessEnabled is a GetAccount top-level member, not an AccountDetails field. Floci
+        // has no sandbox and runs no production-access review, so the top-level flag stays true
+        // regardless of the value sent to PutAccountDetails, and it never appears inside Details. Use a
+        // dedicated region so this is independent of the other ordered cases.
+        String euAuth = "AWS4-HMAC-SHA256 Credential=AKID/20260101/eu-west-2/ses/aws4_request";
+        given().contentType("application/json").header("Authorization", euAuth)
+                .body("""
+                    {"MailType":"MARKETING","WebsiteURL":"https://example.org",
+                     "ProductionAccessEnabled":false}
+                    """)
+        .when().post("/v2/email/account/details").then().statusCode(200);
+
+        given().header("Authorization", euAuth)
+        .when().get("/v2/email/account").then().statusCode(200)
+                // The top-level flag stays true even though false was sent.
+                .body("ProductionAccessEnabled", equalTo(true))
+                // Details is present (configured) but carries no ProductionAccessEnabled member.
+                .body("Details.MailType", equalTo("MARKETING"))
+                .body("Details", not(hasKey("ProductionAccessEnabled")));
+    }
 }

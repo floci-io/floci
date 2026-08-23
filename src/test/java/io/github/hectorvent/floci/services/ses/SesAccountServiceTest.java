@@ -76,6 +76,9 @@ class SesAccountServiceTest {
         assertEquals("TRANSACTIONAL", d.mailType());
         assertEquals("https://example.com", d.websiteUrl());
         assertEquals("GRANTED", d.reviewStatus());
+        // ProductionAccessEnabled is stored as given (the GetAccount top-level flag stays true
+        // regardless — asserted at the controller layer).
+        assertTrue(d.productionAccessEnabled());
         assertTrue(service.findAccountDetails("eu-west-1").isEmpty());
     }
 
