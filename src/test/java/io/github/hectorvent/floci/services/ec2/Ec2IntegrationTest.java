@@ -3480,6 +3480,83 @@ class Ec2IntegrationTest {
             .body("Response.Errors.Error.Code", equalTo("DependencyViolation"));
     }
 
+    // Regression for lex00/floci#104: CreateNetworkAclEntry silently dropped
+    // both CidrBlock and Ipv6CidrBlock on the stored entry - the query
+    // handler only ever read the "CidrBlock" form param, and the model had
+    // no field to hold an IPv6 CIDR at all, so an entry created with
+    // --ipv6-cidr-block came back on the next DescribeNetworkAcls with
+    // neither field present. terraform-aws-modules/vpc's aws_default_
+    // network_acl resource always declares an IPv6 allow-all rule (rule
+    // 101) and creates it via exactly this call, so every subsequent
+    // refresh saw an entry with no CIDR at all where config declared one -
+    // a permanent, deterministic diff on every plan, confirmed to reproduce
+    // identically through plain, stock terraform with no choudoufu
+    // involved (choudoufu repo, live/e2e/corpus-security-group-complete).
+    @Test
+    @Order(314)
+    void createNetworkAclEntryPersistsIpv6CidrBlock() {
+        String vpc = newVpc("10.34.0.0/16");
+        String aclId = given()
+            .formParam("Action", "CreateNetworkAcl")
+            .formParam("VpcId", vpc)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().path("CreateNetworkAclResponse.networkAcl.networkAclId");
+
+        // The IPv4 allow-all rule (100): CidrBlock persists, no Ipv6CidrBlock.
+        given()
+            .formParam("Action", "CreateNetworkAclEntry")
+            .formParam("NetworkAclId", aclId)
+            .formParam("RuleNumber", "100")
+            .formParam("Protocol", "-1")
+            .formParam("RuleAction", "allow")
+            .formParam("Egress", "false")
+            .formParam("CidrBlock", "0.0.0.0/0")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .body("CreateNetworkAclEntryResponse.return", equalTo("true"));
+
+        // The IPv6 allow-all rule (101): Ipv6CidrBlock persists, no CidrBlock -
+        // exactly the shape terraform-aws-modules/vpc's aws_default_network_acl
+        // creates and the shape #104's repro hit.
+        given()
+            .formParam("Action", "CreateNetworkAclEntry")
+            .formParam("NetworkAclId", aclId)
+            .formParam("RuleNumber", "101")
+            .formParam("Protocol", "-1")
+            .formParam("RuleAction", "allow")
+            .formParam("Egress", "false")
+            .formParam("Ipv6CidrBlock", "::/0")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .body("CreateNetworkAclEntryResponse.return", equalTo("true"));
+
+        String body = given()
+            .formParam("Action", "DescribeNetworkAcls")
+            .formParam("NetworkAclId.1", aclId)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .body("DescribeNetworkAclsResponse.networkAclSet.item.entrySet.item.find { it.ruleNumber == '100' }.cidrBlock",
+                    equalTo("0.0.0.0/0"))
+            .body("DescribeNetworkAclsResponse.networkAclSet.item.entrySet.item.find { it.ruleNumber == '101' }.ipv6CidrBlock",
+                    equalTo("::/0"))
+            .extract().asString();
+
+        // Neither entry carries the OTHER cidr field at all - not present as an
+        // empty element, absent outright, matching what a real DescribeNetworkAcls
+        // response does for a rule whose other-family CIDR does not apply.
+        String entry100 = body.substring(body.indexOf("<ruleNumber>100</ruleNumber>"));
+        entry100 = entry100.substring(0, entry100.indexOf("</item>"));
+        org.hamcrest.MatcherAssert.assertThat(entry100, not(containsString("ipv6CidrBlock")));
+        String entry101 = body.substring(body.indexOf("<ruleNumber>101</ruleNumber>"));
+        entry101 = entry101.substring(0, entry101.indexOf("</item>"));
+        org.hamcrest.MatcherAssert.assertThat(entry101, not(containsString("<cidrBlock>")));
+    }
+
     @Test
     @Order(315)
     void describePrefixListsReturnsManagedS3() {

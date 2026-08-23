@@ -410,12 +410,18 @@ public class Ec2Service implements ContainerTeardown {
     }
 
     private NetworkAclEntry naclEntry(int ruleNumber, String protocol, String action, boolean egress, String cidr) {
+        return naclEntry(ruleNumber, protocol, action, egress, cidr, null);
+    }
+
+    private NetworkAclEntry naclEntry(int ruleNumber, String protocol, String action, boolean egress, String cidr,
+                                       String ipv6Cidr) {
         NetworkAclEntry entry = new NetworkAclEntry();
         entry.setRuleNumber(ruleNumber);
         entry.setProtocol(protocol);
         entry.setRuleAction(action);
         entry.setEgress(egress);
         entry.setCidrBlock(cidr);
+        entry.setIpv6CidrBlock(ipv6Cidr);
         return entry;
     }
 
@@ -495,8 +501,8 @@ public class Ec2Service implements ContainerTeardown {
     }
 
     public void createNetworkAclEntry(String region, String networkAclId, int ruleNumber, String protocol,
-                                      String ruleAction, boolean egress, String cidrBlock, Integer from, Integer to,
-                                      boolean replace) {
+                                      String ruleAction, boolean egress, String cidrBlock, String ipv6CidrBlock,
+                                      Integer from, Integer to, boolean replace) {
         synchronized (lockFor(key(region, networkAclId))) {
             NetworkAcl acl = getRequiredNetworkAcl(region, networkAclId);
             boolean exists = acl.getEntries().stream()
@@ -507,7 +513,7 @@ public class Ec2Service implements ContainerTeardown {
             }
             List<NetworkAclEntry> next = new ArrayList<>(acl.getEntries());
             next.removeIf(e -> e.getRuleNumber() == ruleNumber && e.isEgress() == egress);
-            NetworkAclEntry entry = naclEntry(ruleNumber, protocol, ruleAction, egress, cidrBlock);
+            NetworkAclEntry entry = naclEntry(ruleNumber, protocol, ruleAction, egress, cidrBlock, ipv6CidrBlock);
             entry.setPortRangeFrom(from);
             entry.setPortRangeTo(to);
             next.add(entry);
