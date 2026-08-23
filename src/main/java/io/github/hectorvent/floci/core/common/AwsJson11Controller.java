@@ -40,6 +40,7 @@ import io.github.hectorvent.floci.services.kinesis.KinesisJsonHandler;
 import io.github.hectorvent.floci.services.kinesisanalytics.KinesisAnalyticsV2JsonHandler;
 import io.github.hectorvent.floci.services.kms.KmsJsonHandler;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerJsonHandler;
+import io.github.hectorvent.floci.services.organizations.OrganizationsJsonHandler;
 import io.github.hectorvent.floci.services.ssm.Ec2MessagesJsonHandler;
 import io.github.hectorvent.floci.services.ssm.SsmJsonHandler;
 import jakarta.inject.Inject;
@@ -105,6 +106,7 @@ public class AwsJson11Controller {
     private final CloudControlJsonHandler cloudControlJsonHandler;
     private final ApplicationAutoScalingJsonHandler applicationAutoScalingJsonHandler;
     private final CloudHsmV2JsonHandler cloudHsmV2JsonHandler;
+    private final OrganizationsJsonHandler organizationsJsonHandler;
 
     @Inject
     public AwsJson11Controller(ObjectMapper objectMapper, ResolvedServiceCatalog catalog,
@@ -141,7 +143,8 @@ public class AwsJson11Controller {
                                LightsailJsonHandler lightsailJsonHandler,
                                CloudControlJsonHandler cloudControlJsonHandler,
                                ApplicationAutoScalingJsonHandler applicationAutoScalingJsonHandler,
-                               CloudHsmV2JsonHandler cloudHsmV2JsonHandler){
+                               CloudHsmV2JsonHandler cloudHsmV2JsonHandler,
+                               OrganizationsJsonHandler organizationsJsonHandler){
         this.objectMapper = objectMapper;
         this.strictBodyReader = objectMapper.reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
         this.catalog = catalog;
@@ -183,6 +186,7 @@ public class AwsJson11Controller {
         this.cloudControlJsonHandler = cloudControlJsonHandler;
         this.applicationAutoScalingJsonHandler = applicationAutoScalingJsonHandler;
         this.cloudHsmV2JsonHandler = cloudHsmV2JsonHandler;
+        this.organizationsJsonHandler = organizationsJsonHandler;
     }
 
     @POST
@@ -255,6 +259,10 @@ public class AwsJson11Controller {
                 case "lightsail" -> lightsailJsonHandler.handle(action, request, region);
                 case "cloudcontrol" -> cloudControlJsonHandler.handle(action, request, region);
                 case "cloudhsmv2" -> cloudHsmV2JsonHandler.handle(action, request, region);
+                // Organizations is global and account-scoped rather than region-scoped: every
+                // action is authorized against the calling account, so pass that instead of region.
+                case "organizations" ->
+                        organizationsJsonHandler.handle(action, request, regionResolver.getAccountId());
                 default -> null;
             };
             // catalog.matchTarget is protocol-agnostic: a JSON 1.0 target

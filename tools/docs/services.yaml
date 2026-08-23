@@ -38,6 +38,10 @@ services:
     doc: docs/services/docdb.md
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/docdb/DocDbQueryHandler.java, mode: switch }
+  - service: organizations
+    doc: docs/services/organizations.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/organizations/OrganizationsJsonHandler.java, mode: switch }
   - service: elasticache
     doc: docs/services/elasticache.md
     sources:

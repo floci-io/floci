@@ -97,6 +97,7 @@ nav:
     - SWF: services/swf.md
     - IAM: services/iam.md
     - STS: services/sts.md
+    - Organizations: services/organizations.md
     - ElastiCache: services/elasticache.md
     - MemoryDB: services/memorydb.md
     - RDS: services/rds.md

@@ -634,6 +634,7 @@ public interface EmulatorConfig {
         IotServiceConfig iot();
         IotDataServiceConfig iotdata();
         CloudHsmV2ServiceConfig cloudhsmv2();
+        OrganizationsServiceConfig organizations();
         RumServiceConfig rum();
         GuardDutyServiceConfig guardduty();
         EmrServerlessServiceConfig emrserverless();
@@ -1201,6 +1202,11 @@ public interface EmulatorConfig {
     }
 
     interface CloudHsmV2ServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface OrganizationsServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }
