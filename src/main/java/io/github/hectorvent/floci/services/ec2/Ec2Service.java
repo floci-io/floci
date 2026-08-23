@@ -4342,12 +4342,27 @@ public class Ec2Service implements ContainerTeardown {
             };
         }
         if (resource instanceof Volume vol) {
+            // #103 follow-up: attachment.* was previously unhandled and fell through to the
+            // `default -> true` catch-all below, so DescribeVolumes --filters
+            // attachment.instance-id/attachment.device matched every volume in the region
+            // instead of the one actually attached. Volumes[0] in the CLI output then depended
+            // on Map iteration order across every volume ever created, not on the filter --
+            // this reads as "nondeterministic" (sometimes the right volume, sometimes some
+            // other instance's default-sized one) but is a plain missing-filter bug, not a race.
             return switch (filterName) {
                 case "volume-id" -> matchesValue(values, vol.getVolumeId());
                 case "status" -> matchesValue(values, vol.getState());
                 case "volume-type" -> matchesValue(values, vol.getVolumeType());
                 case "availability-zone" -> matchesValue(values, vol.getAvailabilityZone());
                 case "encrypted" -> matchesValue(values, String.valueOf(vol.isEncrypted()));
+                case "attachment.instance-id" -> vol.getAttachments().stream()
+                        .anyMatch(a -> matchesValue(values, a.getInstanceId()));
+                case "attachment.device" -> vol.getAttachments().stream()
+                        .anyMatch(a -> matchesValue(values, a.getDevice()));
+                case "attachment.status" -> vol.getAttachments().stream()
+                        .anyMatch(a -> matchesValue(values, a.getState()));
+                case "attachment.delete-on-termination" -> vol.getAttachments().stream()
+                        .anyMatch(a -> matchesValue(values, String.valueOf(a.isDeleteOnTermination())));
                 default -> true;
             };
         }
