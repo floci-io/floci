@@ -1,7 +1,9 @@
 package io.github.hectorvent.floci.services.redshift.model;
 
 import io.quarkus.runtime.annotations.RegisterForReflection;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 @RegisterForReflection
@@ -12,6 +14,8 @@ public class Cluster {
     private String masterPassword;
     private String clusterStatus;
     private Endpoint endpoint;
+    private String clusterSubnetGroupName;
+    private List<String> vpcSecurityGroupIds = new ArrayList<>();
 
     public String getClusterIdentifier() { return clusterIdentifier; }
     public void setClusterIdentifier(String clusterIdentifier) { this.clusterIdentifier = clusterIdentifier; }
@@ -25,6 +29,10 @@ public class Cluster {
     public void setClusterStatus(String clusterStatus) { this.clusterStatus = clusterStatus; }
     public Endpoint getEndpoint() { return endpoint; }
     public void setEndpoint(Endpoint endpoint) { this.endpoint = endpoint; }
+    public String getClusterSubnetGroupName() { return clusterSubnetGroupName; }
+    public void setClusterSubnetGroupName(String clusterSubnetGroupName) { this.clusterSubnetGroupName = clusterSubnetGroupName; }
+    public List<String> getVpcSecurityGroupIds() { return vpcSecurityGroupIds; }
+    public void setVpcSecurityGroupIds(List<String> vpcSecurityGroupIds) { this.vpcSecurityGroupIds = vpcSecurityGroupIds; }
 
     private Map<String, String> tags = new LinkedHashMap<>();
 

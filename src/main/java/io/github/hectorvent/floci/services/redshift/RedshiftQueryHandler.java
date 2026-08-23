@@ -31,8 +31,11 @@ public class RedshiftQueryHandler {
             String nodeType = params.getFirst("NodeType");
             String masterUsername = params.getFirst("MasterUsername");
             String masterUserPassword = params.getFirst("MasterUserPassword");
+            String clusterSubnetGroupName = params.getFirst("ClusterSubnetGroupName");
+            List<String> vpcSecurityGroupIds = memberList(params, "VpcSecurityGroupIds");
 
-            Cluster cluster = service.createCluster(identifier, nodeType, masterUsername, masterUserPassword);
+            Cluster cluster = service.createCluster(identifier, nodeType, masterUsername, masterUserPassword,
+                    clusterSubnetGroupName, vpcSecurityGroupIds);
             String xml = new XmlBuilder()
                     .start("CreateClusterResponse")
                       .start("CreateClusterResult")
@@ -350,15 +353,24 @@ public class RedshiftQueryHandler {
             .elem("ClusterIdentifier", cluster.getClusterIdentifier())
             .elem("NodeType", cluster.getNodeType())
             .elem("MasterUsername", cluster.getMasterUsername())
-            .elem("ClusterStatus", cluster.getClusterStatus());
-        
+            .elem("ClusterStatus", cluster.getClusterStatus())
+            .elem("ClusterSubnetGroupName", cluster.getClusterSubnetGroupName());
+
+        if (cluster.getVpcSecurityGroupIds() != null && !cluster.getVpcSecurityGroupIds().isEmpty()) {
+            builder.start("VpcSecurityGroups");
+            for (String sgId : cluster.getVpcSecurityGroupIds()) {
+                builder.start("VpcSecurityGroup").elem("VpcSecurityGroupId", sgId).end("VpcSecurityGroup");
+            }
+            builder.end("VpcSecurityGroups");
+        }
+
         if (cluster.getEndpoint() != null) {
             builder.start("Endpoint")
                 .elem("Address", cluster.getEndpoint().getAddress())
                 .elem("Port", String.valueOf(cluster.getEndpoint().getPort()))
                 .end("Endpoint");
         }
-        
+
         return builder.end("Cluster").build();
     }
 

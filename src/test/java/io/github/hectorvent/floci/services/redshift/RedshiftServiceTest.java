@@ -146,6 +146,18 @@ class RedshiftServiceTest {
     }
 
     @Test
+    void testCreateClusterWithVpcMetadata() {
+        when(clusterBackend.get(anyString())).thenReturn(Optional.empty());
+        when(cm.start(any(), any(), any(), any())).thenReturn(new RedshiftContainerHandle("c1", "my-cluster", "localhost", 5432));
+
+        Cluster cluster = service.createCluster("my-cluster", "dc2.large", "admin", "password123",
+                "my-subnet-group", List.of("sg-1", "sg-2"));
+
+        assertEquals("my-subnet-group", cluster.getClusterSubnetGroupName());
+        assertEquals(List.of("sg-1", "sg-2"), cluster.getVpcSecurityGroupIds());
+    }
+
+    @Test
     void testCreateClusterAlreadyExists() {
         when(clusterBackend.get("existing-cluster")).thenReturn(Optional.of(new Cluster()));
 

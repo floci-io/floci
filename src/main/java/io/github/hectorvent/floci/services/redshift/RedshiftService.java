@@ -82,6 +82,11 @@ public class RedshiftService {
     }
 
     public Cluster createCluster(String identifier, String nodeType, String username, String password) {
+        return createCluster(identifier, nodeType, username, password, null, List.of());
+    }
+
+    public Cluster createCluster(String identifier, String nodeType, String username, String password,
+                                  String clusterSubnetGroupName, List<String> vpcSecurityGroupIds) {
         if (clusters.get(identifier).isPresent()) {
             throw new AwsException("ClusterAlreadyExists", "Cluster " + identifier + " already exists", 400);
         }
@@ -91,6 +96,8 @@ public class RedshiftService {
         cluster.setNodeType(nodeType);
         cluster.setMasterUsername(username);
         cluster.setMasterPassword(password);
+        cluster.setClusterSubnetGroupName(clusterSubnetGroupName);
+        cluster.setVpcSecurityGroupIds(vpcSecurityGroupIds != null ? vpcSecurityGroupIds : List.of());
         cluster.setClusterStatus("creating");
         clusters.put(identifier, cluster);
         clusters.flush();
@@ -108,7 +115,7 @@ public class RedshiftService {
             clusters.flush();
             throw new AwsException("InternalFailure", "Failed to start container: " + e.getMessage(), 500);
         }
-        
+
         clusters.put(identifier, cluster);
         clusters.flush();
         return cluster;

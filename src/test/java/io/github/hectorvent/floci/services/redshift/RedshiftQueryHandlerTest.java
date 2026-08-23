@@ -38,7 +38,7 @@ class RedshiftQueryHandlerTest {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("test-cluster");
         cluster.setClusterStatus("available");
-        when(service.createCluster(any(), any(), any(), any())).thenReturn(cluster);
+        when(service.createCluster(any(), any(), any(), any(), any(), any())).thenReturn(cluster);
 
         Response response = handler.handle("CreateCluster", params);
 
