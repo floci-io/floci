@@ -257,7 +257,8 @@ public class OrganizationsTest {
             try {
                 client.deleteOrganization();
             } catch (RuntimeException e) {
-                System.err.println("Organizations cleanup failed, leaving the organization in place: " + e);
+                System.err.println("[WARN] Organizations cleanup failed, leaving the organization "
+                        + "in place: " + e.getMessage());
             }
         }
 

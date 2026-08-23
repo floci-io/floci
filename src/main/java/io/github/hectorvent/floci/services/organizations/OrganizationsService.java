@@ -64,8 +64,15 @@ public class OrganizationsService {
     static final String SERVICE_CONTROL_POLICY = "SERVICE_CONTROL_POLICY";
     private static final String RESOURCE_CONTROL_POLICY = "RESOURCE_CONTROL_POLICY";
 
-    /** Policy types AWS accepts on CreatePolicy and Enable/DisablePolicyType. */
-    private static final Set<String> POLICY_TYPES = Set.of(
+    /**
+     * Policy types AWS accepts on CreatePolicy and Enable/DisablePolicyType.
+     *
+     * <p>Declared as an ordered {@link List} because the validation error message renders it:
+     * {@code Set.of}'s iteration order is unspecified and salted per JVM run, so joining a set
+     * would make the same rejection read differently from one run to the next. The companion
+     * {@code *_SET} keeps membership checks O(1).
+     */
+    private static final List<String> POLICY_TYPES = List.of(
             SERVICE_CONTROL_POLICY,
             RESOURCE_CONTROL_POLICY,
             "TAG_POLICY",
@@ -75,18 +82,22 @@ public class OrganizationsService {
             "DECLARATIVE_POLICY_EC2",
             "SECURITYHUB_POLICY");
 
+    private static final Set<String> POLICY_TYPE_SET = Set.copyOf(POLICY_TYPES);
+
     /**
      * {@code DescribeEffectivePolicy} is defined only for the inheritable policy types. AWS
      * rejects the two access-control types outright — they are evaluated as a deny-by-intersection
      * chain rather than merged into a single effective document, so there is nothing to return.
      */
-    private static final Set<String> EFFECTIVE_POLICY_TYPES = Set.of(
+    private static final List<String> EFFECTIVE_POLICY_TYPES = List.of(
             "TAG_POLICY",
             "BACKUP_POLICY",
             "AISERVICES_OPT_OUT_POLICY",
             "CHATBOT_POLICY",
             "DECLARATIVE_POLICY_EC2",
             "SECURITYHUB_POLICY");
+
+    private static final Set<String> EFFECTIVE_POLICY_TYPE_SET = Set.copyOf(EFFECTIVE_POLICY_TYPES);
 
     private static final String FEATURE_SET_ALL = "ALL";
     private static final String FEATURE_SET_CONSOLIDATED_BILLING = "CONSOLIDATED_BILLING";
@@ -732,7 +743,7 @@ public class OrganizationsService {
      */
     public EffectivePolicy describeEffectivePolicy(String callerAccountId, String policyType, String targetId) {
         Organization organization = requireOrganizationForCaller(callerAccountId);
-        if (policyType == null || !EFFECTIVE_POLICY_TYPES.contains(policyType)) {
+        if (policyType == null || !EFFECTIVE_POLICY_TYPE_SET.contains(policyType)) {
             throw invalidInput("PolicyType must be one of " + String.join(", ", EFFECTIVE_POLICY_TYPES) + ".");
         }
         String effectiveTarget = targetId == null || targetId.isEmpty() ? callerAccountId : targetId;
@@ -966,11 +977,14 @@ public class OrganizationsService {
         handshake.getParties().add(new HandshakeParty(organization.getId(), "ORGANIZATION"));
         handshake.getParties().add(new HandshakeParty(targetId, resolvedType));
 
+        // MASTER_EMAIL and MASTER_NAME are the two child resources AWS defines on an INVITE's
+        // ORGANIZATION resource. HandshakeResourceType is a closed enum, so emitting anything
+        // outside it (an account id, say) deserializes as UNKNOWN_TO_SDK_VERSION in the SDK.
         HandshakeResource organizationResource = new HandshakeResource(organization.getId(), "ORGANIZATION");
         organizationResource.getResources()
-                .add(new HandshakeResource(organization.getMasterAccountId(), "MASTER_ACCOUNT_ID"));
-        organizationResource.getResources()
                 .add(new HandshakeResource(organization.getMasterAccountEmail(), "MASTER_EMAIL"));
+        organizationResource.getResources()
+                .add(new HandshakeResource(managementAccountName(organization), "MASTER_NAME"));
         handshake.getResources().add(organizationResource);
         handshake.getResources().add(new HandshakeResource(targetId, resolvedType));
         if (notes != null && !notes.isEmpty()) {
@@ -1051,11 +1065,17 @@ public class OrganizationsService {
 
     public List<Handshake> listHandshakesForAccount(String callerAccountId, List<String> states,
                                                     String actionFilter) {
+        // The organizations a handshake could belong to are scanned once, not once per handshake:
+        // organizationById is itself a full scan, so calling it in the loop made this quadratic.
+        Map<String, String> masterByOrganizationId = new LinkedHashMap<>();
+        for (Organization organization : organizations.scanAllAccounts()) {
+            masterByOrganizationId.put(organization.getId(), organization.getMasterAccountId());
+        }
+
         List<Handshake> matching = new ArrayList<>();
         for (Handshake handshake : handshakes.scanAllAccounts()) {
-            Organization organization = organizationById(handshake.getOrganizationId()).orElse(null);
             boolean visible = isInvitee(handshake, callerAccountId)
-                    || (organization != null && organization.getMasterAccountId().equals(callerAccountId));
+                    || callerAccountId.equals(masterByOrganizationId.get(handshake.getOrganizationId()));
             if (visible) {
                 matching.add(handshake);
             }
@@ -1427,6 +1447,15 @@ public class OrganizationsService {
                 "Unable to allocate a unique account id.", 400);
     }
 
+    /** The management account's display name, falling back to its id if the record is missing. */
+    private String managementAccountName(Organization organization) {
+        return accountsIn(organization).stream()
+                .filter(account -> account.getId().equals(organization.getMasterAccountId()))
+                .map(OrganizationAccount::getName)
+                .findFirst()
+                .orElse(organization.getMasterAccountId());
+    }
+
     private Handshake newHandshake(Organization organization, String action) {
         Instant now = Instant.now();
         Handshake handshake = new Handshake();
@@ -1585,7 +1614,7 @@ public class OrganizationsService {
     // ──────────────────────────── Validation ────────────────────────────
 
     private void validatePolicyType(String type) {
-        if (type == null || !POLICY_TYPES.contains(type)) {
+        if (type == null || !POLICY_TYPE_SET.contains(type)) {
             throw invalidInput("PolicyType must be one of " + String.join(", ", POLICY_TYPES) + ".");
         }
     }

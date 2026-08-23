@@ -10,6 +10,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.util.List;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
@@ -108,6 +110,23 @@ class OrganizationsCrossAccountIntegrationTest {
 
     @Test
     @Order(4)
+    void handshakeResourcesUseOnlyTypesFromTheAwsEnum() {
+        // HandshakeResourceType is a closed enum; a value outside it deserializes as
+        // UNKNOWN_TO_SDK_VERSION in the SDK rather than failing loudly, so pin the exact types.
+        organizations(MANAGEMENT_ACCOUNT, "DescribeHandshake", "{\"HandshakeId\":\"" + inviteHandshakeId + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Handshake.Resources.Type", org.hamcrest.Matchers.everyItem(
+                    org.hamcrest.Matchers.in(List.of("ACCOUNT", "ORGANIZATION", "ORGANIZATION_FEATURE_SET",
+                            "EMAIL", "MASTER_EMAIL", "MASTER_NAME", "NOTES", "PARENT_HANDSHAKE"))))
+            .body("Handshake.Resources.find { it.Type == 'ORGANIZATION' }.Resources.Type",
+                    org.hamcrest.Matchers.containsInAnyOrder("MASTER_EMAIL", "MASTER_NAME"));
+    }
+
+    @Test
+    @Order(5)
     void duplicateInvitationIsRejectedWhileTheFirstIsOpen() {
         organizations(MANAGEMENT_ACCOUNT, "InviteAccountToOrganization",
                 "{\"Target\":{\"Id\":\"" + INVITED_ACCOUNT + "\",\"Type\":\"ACCOUNT\"}}")
@@ -119,7 +138,7 @@ class OrganizationsCrossAccountIntegrationTest {
     }
 
     @Test
-    @Order(5)
+    @Order(6)
     void anotherAccountCannotAcceptSomeoneElsesInvitation() {
         organizations(OTHER_ACCOUNT, "AcceptHandshake", "{\"HandshakeId\":\"" + inviteHandshakeId + "\"}")
         .when()
@@ -130,7 +149,7 @@ class OrganizationsCrossAccountIntegrationTest {
     }
 
     @Test
-    @Order(6)
+    @Order(7)
     void theInviteeCanDescribeTheHandshake() {
         organizations(INVITED_ACCOUNT, "DescribeHandshake", "{\"HandshakeId\":\"" + inviteHandshakeId + "\"}")
         .when()
@@ -142,7 +161,7 @@ class OrganizationsCrossAccountIntegrationTest {
     }
 
     @Test
-    @Order(7)
+    @Order(8)
     void acceptHandshakeJoinsTheOrganization() {
         organizations(INVITED_ACCOUNT, "AcceptHandshake", "{\"HandshakeId\":\"" + inviteHandshakeId + "\"}")
         .when()
@@ -162,7 +181,7 @@ class OrganizationsCrossAccountIntegrationTest {
     }
 
     @Test
-    @Order(8)
+    @Order(9)
     void aMemberAccountCanReadTheOrganization() {
         organizations(INVITED_ACCOUNT, "DescribeOrganization", "{}")
         .when()
@@ -188,7 +207,7 @@ class OrganizationsCrossAccountIntegrationTest {
     }
 
     @Test
-    @Order(9)
+    @Order(10)
     void aMemberAccountCannotMutateTheOrganization() {
         organizations(INVITED_ACCOUNT, "CreateOrganizationalUnit",
                 "{\"ParentId\":\"r-0000\",\"Name\":\"Nope\"}")
@@ -208,7 +227,7 @@ class OrganizationsCrossAccountIntegrationTest {
     }
 
     @Test
-    @Order(10)
+    @Order(11)
     void invitingAnExistingMemberFails() {
         organizations(MANAGEMENT_ACCOUNT, "InviteAccountToOrganization",
                 "{\"Target\":{\"Id\":\"" + INVITED_ACCOUNT + "\",\"Type\":\"ACCOUNT\"}}")
@@ -220,7 +239,7 @@ class OrganizationsCrossAccountIntegrationTest {
     }
 
     @Test
-    @Order(11)
+    @Order(12)
     void declineHandshake() {
         declinedHandshakeId = organizations(MANAGEMENT_ACCOUNT, "InviteAccountToOrganization",
                 "{\"Target\":{\"Id\":\"" + OTHER_ACCOUNT + "\",\"Type\":\"ACCOUNT\"}}")
@@ -246,7 +265,7 @@ class OrganizationsCrossAccountIntegrationTest {
     }
 
     @Test
-    @Order(12)
+    @Order(13)
     void cancelHandshake() {
         canceledHandshakeId = organizations(MANAGEMENT_ACCOUNT, "InviteAccountToOrganization",
                 "{\"Target\":{\"Id\":\"" + OTHER_ACCOUNT + "\",\"Type\":\"ACCOUNT\"}}")
@@ -272,7 +291,7 @@ class OrganizationsCrossAccountIntegrationTest {
     }
 
     @Test
-    @Order(13)
+    @Order(14)
     void actingOnAClosedHandshakeFails() {
         organizations(OTHER_ACCOUNT, "AcceptHandshake", "{\"HandshakeId\":\"" + canceledHandshakeId + "\"}")
         .when()
@@ -283,7 +302,7 @@ class OrganizationsCrossAccountIntegrationTest {
     }
 
     @Test
-    @Order(14)
+    @Order(15)
     void listHandshakes() {
         organizations(MANAGEMENT_ACCOUNT, "ListHandshakesForOrganization", "{}")
         .when()
@@ -312,7 +331,7 @@ class OrganizationsCrossAccountIntegrationTest {
     }
 
     @Test
-    @Order(15)
+    @Order(16)
     void listHandshakesForOrganizationIsManagementAccountOnly() {
         organizations(INVITED_ACCOUNT, "ListHandshakesForOrganization", "{}")
         .when()
@@ -323,7 +342,7 @@ class OrganizationsCrossAccountIntegrationTest {
     }
 
     @Test
-    @Order(16)
+    @Order(17)
     void theManagementAccountCannotLeave() {
         organizations(MANAGEMENT_ACCOUNT, "LeaveOrganization", "{}")
         .when()
@@ -334,7 +353,7 @@ class OrganizationsCrossAccountIntegrationTest {
     }
 
     @Test
-    @Order(17)
+    @Order(18)
     void aMemberAccountCanLeave() {
         organizations(INVITED_ACCOUNT, "LeaveOrganization", "{}")
         .when()
@@ -358,7 +377,7 @@ class OrganizationsCrossAccountIntegrationTest {
     }
 
     @Test
-    @Order(18)
+    @Order(19)
     void tearDownOrganization() {
         organizations(MANAGEMENT_ACCOUNT, "DeleteOrganization", "{}")
         .when()
