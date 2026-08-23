@@ -30,6 +30,10 @@ services:
     doc: docs/services/cloudtrail.md
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/cloudtrail/CloudTrailJsonHandler.java, mode: switch }
+  - service: cognitoidentity
+    doc: docs/services/cognitoidentity.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/cognitoidentity/CognitoIdentityJsonHandler.java, mode: switch }
   - service: docdb
     doc: docs/services/docdb.md
     sources:
@@ -50,6 +54,10 @@ services:
     doc: docs/services/firehose.md
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/firehose/FirehoseJsonHandler.java, mode: switch }
+  - service: globalaccelerator
+    doc: docs/services/globalaccelerator.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/globalaccelerator/GlobalAcceleratorJsonHandler.java, mode: switch }
   - service: kinesis
     doc: docs/services/kinesis.md
     sources:
@@ -118,6 +126,7 @@ deferred_handlers:
   - { path: src/main/java/io/github/hectorvent/floci/services/cognito/CognitoJsonHandler.java }  # non-tabular doc (grouped/inline); separate docs effort
   - { path: src/main/java/io/github/hectorvent/floci/services/configservice/ConfigServiceJsonHandler.java }  # non-tabular doc (grouped/inline)
   - { path: src/main/java/io/github/hectorvent/floci/services/cur/CurJsonHandler.java }  # no standalone action table yet
+  - { path: src/main/java/io/github/hectorvent/floci/services/datasync/DataSyncJsonHandler.java }  # doc groups per-location-type actions (`CreateLocation*`/`DescribeLocation*`/`UpdateLocation*`); needs de-grouping
   - { path: src/main/java/io/github/hectorvent/floci/services/dynamodb/DynamoDbJsonHandler.java }  # multi-table doc
   - { path: src/main/java/io/github/hectorvent/floci/services/dynamodb/DynamoDbStreamsJsonHandler.java }  # multi-table doc
   - { path: src/main/java/io/github/hectorvent/floci/services/ec2/Ec2QueryHandler.java }  # non-tabular doc (grouped/inline)

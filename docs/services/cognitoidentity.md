@@ -9,8 +9,9 @@ management plane; the identity and credential-vending data plane is not emulated
 
 ## Supported Actions
 
+<!-- floci:actions:start -->
 | Action | Description |
-|---|---|
+| --- | --- |
 | `CreateIdentityPool` | Create a pool; returns the whole pool including tags |
 | `DescribeIdentityPool` | Read a pool by id |
 | `UpdateIdentityPool` | Replace a pool's configuration wholesale |
@@ -23,6 +24,7 @@ management plane; the identity and credential-vending data plane is not emulated
 | `ListTagsForResource` | List a pool's tags |
 | `SetPrincipalTagAttributeMap` | Map principal tags to user attributes for one provider |
 | `GetPrincipalTagAttributeMap` | Read a provider's principal tag attribute map |
+<!-- floci:actions:end -->
 
 Pool ids use the AWS `<region>:<uuid>` format (`us-east-1:0f4a…`), and pool ARNs the
 documented `arn:aws:cognito-identity:<region>:<account>:identitypool/<poolId>` form, so

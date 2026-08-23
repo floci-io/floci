@@ -6,8 +6,9 @@
 
 ## Supported Actions
 
+<!-- floci:actions:start -->
 | Action | Description |
-|---|---|
+| --- | --- |
 | `CreateAccelerator` | Create a standard accelerator; returns `DEPLOYED` immediately |
 | `DescribeAccelerator` | Get an accelerator including its static IP sets and DNS name |
 | `UpdateAccelerator` | Rename, enable/disable, or change the IP address type |
@@ -30,6 +31,7 @@
 | `TagResource` | Tag an accelerator, listener, or endpoint group |
 | `UntagResource` | Remove tags from an accelerator, listener, or endpoint group |
 | `ListTagsForResource` | List tags on an accelerator, listener, or endpoint group |
+<!-- floci:actions:end -->
 
 ## ARNs
 
