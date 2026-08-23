@@ -61,7 +61,8 @@ class AutoScalingPolicyCfnProvisionerTest {
         ScalingPolicy policy = new ScalingPolicy();
         policy.setPolicyArn(ARN);
         when(autoScalingService.putScalingPolicy(eq(REGION), eq("my-asg"), eq("my-policy"),
-                eq("SimpleScaling"), eq("ChangeInCapacity"), eq(1), eq(60), isNull(), isNull()))
+                eq("SimpleScaling"), eq("ChangeInCapacity"), eq(1), eq(60), isNull(), isNull(), isNull(),
+                isNull(), isNull()))
                 .thenReturn(policy);
         StackResource r = resource();
         ObjectNode props = mapper.createObjectNode()
@@ -84,7 +85,7 @@ class AutoScalingPolicyCfnProvisionerTest {
         ScalingPolicy created = new ScalingPolicy();
         created.setPolicyArn(ARN);
         when(autoScalingService.putScalingPolicy(eq(REGION), eq("my-asg"), anyString(),
-                any(), any(), anyInt(), anyInt(), any(), any())).thenReturn(created);
+                any(), any(), anyInt(), any(), any(), any(), any(), any(), any())).thenReturn(created);
         StackResource r = resource();
         ObjectNode props = mapper.createObjectNode().put("AutoScalingGroupName", "my-asg");
 
@@ -97,7 +98,7 @@ class AutoScalingPolicyCfnProvisionerTest {
 
         ArgumentCaptor<String> nameCaptor = ArgumentCaptor.forClass(String.class);
         verify(autoScalingService, times(2)).putScalingPolicy(eq(REGION), eq("my-asg"),
-                nameCaptor.capture(), any(), any(), anyInt(), anyInt(), any(), any());
+                nameCaptor.capture(), any(), any(), anyInt(), any(), any(), any(), any(), any(), any());
         assertEquals(generatedName, nameCaptor.getAllValues().get(0));
         assertEquals(generatedName, nameCaptor.getAllValues().get(1));
     }
@@ -106,7 +107,8 @@ class AutoScalingPolicyCfnProvisionerTest {
     void targetTrackingConfigurationIsParsed() {
         ScalingPolicy policy = new ScalingPolicy();
         policy.setPolicyArn(ARN);
-        when(autoScalingService.putScalingPolicy(any(), any(), any(), any(), any(), anyInt(), anyInt(), any(), any()))
+        when(autoScalingService.putScalingPolicy(any(), any(), any(), any(), any(), anyInt(), any(), any(), any(),
+                any(), any(), any()))
                 .thenReturn(policy);
         StackResource r = resource();
         ObjectNode props = mapper.createObjectNode()
@@ -121,8 +123,8 @@ class AutoScalingPolicyCfnProvisionerTest {
 
         ArgumentCaptor<ScalingPolicy.TargetTrackingConfiguration> captor =
                 ArgumentCaptor.forClass(ScalingPolicy.TargetTrackingConfiguration.class);
-        verify(autoScalingService).putScalingPolicy(any(), any(), any(), any(), any(), anyInt(), anyInt(), any(),
-                captor.capture());
+        verify(autoScalingService).putScalingPolicy(any(), any(), any(), any(), any(), anyInt(), any(), any(), any(),
+                captor.capture(), any(), any());
         assertEquals(50.0, captor.getValue().getTargetValue());
         assertEquals("ASGAverageCPUUtilization",
                 captor.getValue().getPredefinedMetricSpecification().getPredefinedMetricType());

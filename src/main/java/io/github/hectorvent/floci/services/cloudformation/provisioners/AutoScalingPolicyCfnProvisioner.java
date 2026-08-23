@@ -50,13 +50,23 @@ public class AutoScalingPolicyCfnProvisioner implements CfnResourceProvisioner {
         String scalingAdjustmentStr = ctx.resolveOptional(props, "ScalingAdjustment");
         int scalingAdjustment = scalingAdjustmentStr != null ? Integer.parseInt(scalingAdjustmentStr) : 0;
         String cooldownStr = ctx.resolveOptional(props, "Cooldown");
-        int cooldown = cooldownStr != null ? Integer.parseInt(cooldownStr) : 0;
+        // Leave unset as null (not 0): AutoScalingService#putScalingPolicy only applies its
+        // SimpleScaling-only 300 default, or leaves it absent for every other policy type,
+        // when it sees null - a literal 0 here would defeat that per-type default.
+        Integer cooldown = cooldownStr != null ? Integer.valueOf(cooldownStr) : null;
         String warmupStr = ctx.resolveOptional(props, "EstimatedInstanceWarmup");
         Integer estimatedInstanceWarmup = warmupStr != null ? Integer.valueOf(warmupStr) : null;
+        String enabledStr = ctx.resolveOptional(props, "Enabled");
+        Boolean enabled = enabledStr != null ? Boolean.valueOf(enabledStr) : null;
         ScalingPolicy.TargetTrackingConfiguration targetTracking = parseTargetTracking(props, ctx);
 
+        // StepAdjustments and PredictiveScalingConfiguration aren't wired for this CFN
+        // resource type (no local schema/test coverage asked for them yet); the
+        // TargetTracking-only shape this provisioner already supported is unaffected by
+        // putScalingPolicy's newer trailing parameters.
         ScalingPolicy policy = autoScalingService.putScalingPolicy(ctx.region(), asgName, policyName,
-                policyType, adjustmentType, scalingAdjustment, cooldown, estimatedInstanceWarmup, targetTracking);
+                policyType, adjustmentType, scalingAdjustment, cooldown, enabled, estimatedInstanceWarmup,
+                targetTracking, null, null);
 
         r.setPhysicalId(policy.getPolicyArn());
         // AWS::AutoScaling::ScalingPolicy's only documented Fn::GetAtt attribute (Ref returns the
