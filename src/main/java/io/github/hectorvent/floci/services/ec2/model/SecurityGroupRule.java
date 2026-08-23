@@ -20,6 +20,7 @@ public class SecurityGroupRule {
     private String cidrIpv4;
     private String cidrIpv6;
     private ReferencedSecurityGroup referencedGroupInfo;
+    private String prefixListId;
     private String description;
     private List<Tag> tags = new ArrayList<>();
 
@@ -56,6 +57,9 @@ public class SecurityGroupRule {
     public void setReferencedGroupInfo(ReferencedSecurityGroup referencedGroupInfo) {
         this.referencedGroupInfo = referencedGroupInfo;
     }
+
+    public String getPrefixListId() { return prefixListId; }
+    public void setPrefixListId(String prefixListId) { this.prefixListId = prefixListId; }
 
     public String getDescription() { return description; }
     public void setDescription(String description) { this.description = description; }
