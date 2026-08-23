@@ -912,9 +912,12 @@ public class AutoScalingQueryHandler {
                 p.getFirst("PolicyType"),
                 p.getFirst("AdjustmentType"),
                 intParam(p, "ScalingAdjustment", 0),
-                intParam(p, "Cooldown", 300),
+                nullableIntParam(p, "Cooldown"),
+                nullableBoolParam(p, "Enabled"),
                 nullableIntParam(p, "EstimatedInstanceWarmup"),
-                parseTargetTrackingConfiguration(p));
+                parseTargetTrackingConfiguration(p),
+                parseStepAdjustments(p),
+                parsePredictiveScalingConfiguration(p));
         return ok(new XmlBuilder()
                 .start("PutScalingPolicyResponse", NS)
                   .start("PutScalingPolicyResult")
@@ -947,12 +950,15 @@ public class AutoScalingQueryHandler {
                .elem("AutoScalingGroupName", policy.getAutoScalingGroupName())
                .elem("PolicyType", policy.getPolicyType() != null ? policy.getPolicyType() : "SimpleScaling")
                .elem("ScalingAdjustment", String.valueOf(policy.getScalingAdjustment()))
-               .elem("Cooldown", String.valueOf(policy.getCooldown()));
+               .elem("Enabled", String.valueOf(policy.getEnabled() != null ? policy.getEnabled() : Boolean.TRUE));
+            if (policy.getCooldown() != null) { xml.elem("Cooldown", String.valueOf(policy.getCooldown())); }
             if (policy.getAdjustmentType() != null) { xml.elem("AdjustmentType", policy.getAdjustmentType()); }
             if (policy.getEstimatedInstanceWarmup() != null) {
                 xml.elem("EstimatedInstanceWarmup", String.valueOf(policy.getEstimatedInstanceWarmup()));
             }
             appendTargetTrackingConfigurationXml(xml, policy.getTargetTrackingConfiguration());
+            appendStepAdjustmentsXml(xml, policy.getStepAdjustments());
+            appendPredictiveScalingConfigurationXml(xml, policy.getPredictiveScalingConfiguration());
             xml.end("member");
         }
         xml.end("ScalingPolicies")
@@ -1041,10 +1047,141 @@ public class AutoScalingQueryHandler {
             ScalingPolicy.PredefinedMetricSpecification specification =
                     new ScalingPolicy.PredefinedMetricSpecification();
             specification.setPredefinedMetricType(predefinedMetricType);
+            specification.setResourceLabel(p.getFirst(
+                    "TargetTrackingConfiguration.PredefinedMetricSpecification.ResourceLabel"));
             configuration.setPredefinedMetricSpecification(specification);
         }
         configuration.setTargetValue(targetValue);
         return configuration;
+    }
+
+    // parseStepAdjustments / appendStepAdjustmentsXml and
+    // parsePredictiveScalingConfiguration / appendPredictiveScalingConfigurationXml:
+    // see ScalingPolicy's own doc comment on stepAdjustments and
+    // predictiveScalingConfiguration for why these exist. Field names and
+    // shapes are taken from aws-sdk-go-v2's service/autoscaling/types
+    // (StepAdjustment, PredictiveScalingConfiguration,
+    // PredictiveScalingMetricSpecification), not guessed.
+    private static List<ScalingPolicy.StepAdjustment> parseStepAdjustments(MultivaluedMap<String, String> p) {
+        List<ScalingPolicy.StepAdjustment> result = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String prefix = "StepAdjustments.member." + i + ".";
+            String scalingAdjustment = p.getFirst(prefix + "ScalingAdjustment");
+            if (scalingAdjustment == null) { break; }
+            ScalingPolicy.StepAdjustment step = new ScalingPolicy.StepAdjustment();
+            step.setScalingAdjustment(Integer.parseInt(scalingAdjustment));
+            step.setMetricIntervalLowerBound(nullableDoubleParam(p, prefix + "MetricIntervalLowerBound"));
+            step.setMetricIntervalUpperBound(nullableDoubleParam(p, prefix + "MetricIntervalUpperBound"));
+            result.add(step);
+        }
+        return result;
+    }
+
+    private static void appendStepAdjustmentsXml(XmlBuilder xml, List<ScalingPolicy.StepAdjustment> steps) {
+        if (steps == null || steps.isEmpty()) {
+            return;
+        }
+        xml.start("StepAdjustments");
+        for (ScalingPolicy.StepAdjustment step : steps) {
+            xml.start("member").elem("ScalingAdjustment", String.valueOf(step.getScalingAdjustment()));
+            if (step.getMetricIntervalLowerBound() != null) {
+                xml.elem("MetricIntervalLowerBound", String.valueOf(step.getMetricIntervalLowerBound()));
+            }
+            if (step.getMetricIntervalUpperBound() != null) {
+                xml.elem("MetricIntervalUpperBound", String.valueOf(step.getMetricIntervalUpperBound()));
+            }
+            xml.end("member");
+        }
+        xml.end("StepAdjustments");
+    }
+
+    private static ScalingPolicy.PredefinedMetricSpecification parsePredefinedMetricSpecification(
+            MultivaluedMap<String, String> p, String prefix) {
+        String type = p.getFirst(prefix + ".PredefinedMetricType");
+        if (type == null) { return null; }
+        ScalingPolicy.PredefinedMetricSpecification spec = new ScalingPolicy.PredefinedMetricSpecification();
+        spec.setPredefinedMetricType(type);
+        spec.setResourceLabel(p.getFirst(prefix + ".ResourceLabel"));
+        return spec;
+    }
+
+    private static void appendPredefinedMetricSpecificationXml(
+            XmlBuilder xml, String elementName, ScalingPolicy.PredefinedMetricSpecification spec) {
+        if (spec == null) { return; }
+        xml.start(elementName);
+        if (spec.getPredefinedMetricType() != null) { xml.elem("PredefinedMetricType", spec.getPredefinedMetricType()); }
+        if (spec.getResourceLabel() != null) { xml.elem("ResourceLabel", spec.getResourceLabel()); }
+        xml.end(elementName);
+    }
+
+    private static ScalingPolicy.PredictiveScalingConfiguration parsePredictiveScalingConfiguration(
+            MultivaluedMap<String, String> p) {
+        String base = "PredictiveScalingConfiguration.";
+        List<ScalingPolicy.PredictiveScalingMetricSpecification> specs = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String specPrefix = base + "MetricSpecifications.member." + i + ".";
+            Double targetValue = nullableDoubleParam(p, specPrefix + "TargetValue");
+            ScalingPolicy.PredefinedMetricSpecification scaling =
+                    parsePredefinedMetricSpecification(p, specPrefix + "PredefinedScalingMetricSpecification");
+            ScalingPolicy.PredefinedMetricSpecification load =
+                    parsePredefinedMetricSpecification(p, specPrefix + "PredefinedLoadMetricSpecification");
+            ScalingPolicy.PredefinedMetricSpecification pair =
+                    parsePredefinedMetricSpecification(p, specPrefix + "PredefinedMetricPairSpecification");
+            if (targetValue == null && scaling == null && load == null && pair == null) { break; }
+            ScalingPolicy.PredictiveScalingMetricSpecification spec = new ScalingPolicy.PredictiveScalingMetricSpecification();
+            spec.setTargetValue(targetValue);
+            spec.setPredefinedScalingMetricSpecification(scaling);
+            spec.setPredefinedLoadMetricSpecification(load);
+            spec.setPredefinedMetricPairSpecification(pair);
+            specs.add(spec);
+        }
+        if (specs.isEmpty()) {
+            return null;
+        }
+        ScalingPolicy.PredictiveScalingConfiguration configuration = new ScalingPolicy.PredictiveScalingConfiguration();
+        configuration.setMetricSpecifications(specs);
+        configuration.setMode(p.getFirst(base + "Mode"));
+        configuration.setSchedulingBufferTime(nullableIntParamStatic(p, base + "SchedulingBufferTime"));
+        configuration.setMaxCapacityBreachBehavior(p.getFirst(base + "MaxCapacityBreachBehavior"));
+        configuration.setMaxCapacityBuffer(nullableIntParamStatic(p, base + "MaxCapacityBuffer"));
+        return configuration;
+    }
+
+    private static Integer nullableIntParamStatic(MultivaluedMap<String, String> p, String key) {
+        String v = p.getFirst(key);
+        return v == null || v.isBlank() ? null : Integer.parseInt(v);
+    }
+
+    private static void appendPredictiveScalingConfigurationXml(
+            XmlBuilder xml, ScalingPolicy.PredictiveScalingConfiguration configuration) {
+        if (configuration == null) {
+            return;
+        }
+        xml.start("PredictiveScalingConfiguration");
+        xml.start("MetricSpecifications");
+        for (ScalingPolicy.PredictiveScalingMetricSpecification spec : configuration.getMetricSpecifications()) {
+            xml.start("member");
+            if (spec.getTargetValue() != null) { xml.elem("TargetValue", String.valueOf(spec.getTargetValue())); }
+            appendPredefinedMetricSpecificationXml(xml, "PredefinedScalingMetricSpecification",
+                    spec.getPredefinedScalingMetricSpecification());
+            appendPredefinedMetricSpecificationXml(xml, "PredefinedLoadMetricSpecification",
+                    spec.getPredefinedLoadMetricSpecification());
+            appendPredefinedMetricSpecificationXml(xml, "PredefinedMetricPairSpecification",
+                    spec.getPredefinedMetricPairSpecification());
+            xml.end("member");
+        }
+        xml.end("MetricSpecifications");
+        if (configuration.getMode() != null) { xml.elem("Mode", configuration.getMode()); }
+        if (configuration.getSchedulingBufferTime() != null) {
+            xml.elem("SchedulingBufferTime", String.valueOf(configuration.getSchedulingBufferTime()));
+        }
+        if (configuration.getMaxCapacityBreachBehavior() != null) {
+            xml.elem("MaxCapacityBreachBehavior", configuration.getMaxCapacityBreachBehavior());
+        }
+        if (configuration.getMaxCapacityBuffer() != null) {
+            xml.elem("MaxCapacityBuffer", String.valueOf(configuration.getMaxCapacityBuffer()));
+        }
+        xml.end("PredictiveScalingConfiguration");
     }
 
     private static void appendTargetTrackingConfigurationXml(
@@ -1059,6 +1196,9 @@ public class AutoScalingQueryHandler {
             xml.start("PredefinedMetricSpecification");
             if (predefinedMetric.getPredefinedMetricType() != null) {
                 xml.elem("PredefinedMetricType", predefinedMetric.getPredefinedMetricType());
+            }
+            if (predefinedMetric.getResourceLabel() != null) {
+                xml.elem("ResourceLabel", predefinedMetric.getResourceLabel());
             }
             xml.end("PredefinedMetricSpecification");
         }

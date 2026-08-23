@@ -681,7 +681,7 @@ public class CloudWatchMetricsQueryHandler {
         a.setPeriod(parseIntParam(params, "Period", 60));
         a.setUnit(params.getFirst("Unit"));
         a.setEvaluationPeriods(parseIntParam(params, "EvaluationPeriods", 1));
-        a.setDatapointsToAlarm(parseIntParam(params, "DatapointsToAlarm", a.getEvaluationPeriods()));
+        a.setDatapointsToAlarm(parseIntegerParam(params, "DatapointsToAlarm"));
         a.setThreshold(parseDouble(params.getFirst("Threshold"), 0));
         a.setComparisonOperator(params.getFirst("ComparisonOperator"));
         a.setTreatMissingData(params.getFirst("TreatMissingData"));
@@ -758,7 +758,7 @@ public class CloudWatchMetricsQueryHandler {
                 .elem("Period", String.valueOf(a.getPeriod()))
                 .elem("Unit", a.getUnit())
                 .elem("EvaluationPeriods", String.valueOf(a.getEvaluationPeriods()))
-                .elem("DatapointsToAlarm", String.valueOf(a.getDatapointsToAlarm()))
+                .elem("DatapointsToAlarm", a.getDatapointsToAlarm() == null ? null : String.valueOf(a.getDatapointsToAlarm()))
                 .elem("Threshold", String.valueOf(a.getThreshold()))
                 .elem("ComparisonOperator", a.getComparisonOperator())
                 .elem("TreatMissingData", a.getTreatMissingData());

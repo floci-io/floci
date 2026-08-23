@@ -677,22 +677,37 @@ public class AutoScalingService {
 
     public ScalingPolicy putScalingPolicy(String region, String asgName, String policyName,
                                            String policyType, String adjustmentType,
-                                           int scalingAdjustment, int cooldown,
+                                           int scalingAdjustment, Integer cooldown,
+                                           Boolean enabled,
                                            Integer estimatedInstanceWarmup,
-                                           ScalingPolicy.TargetTrackingConfiguration targetTrackingConfiguration) {
+                                           ScalingPolicy.TargetTrackingConfiguration targetTrackingConfiguration,
+                                           List<ScalingPolicy.StepAdjustment> stepAdjustments,
+                                           ScalingPolicy.PredictiveScalingConfiguration predictiveScalingConfiguration) {
         requireGroup(region, asgName);
         String key = policyKey(region, asgName, policyName);
         ScalingPolicy policy = policies.computeIfAbsent(key, k -> new ScalingPolicy());
+        String resolvedType = policyType != null ? policyType : "SimpleScaling";
         policy.setPolicyName(policyName);
         policy.setPolicyArn(AwsArnUtils.Arn.of("autoscaling", region, regionResolver.getAccountId(),
                 "scalingPolicy:" + asgName + ":" + policyName).toString());
         policy.setAutoScalingGroupName(asgName);
-        policy.setPolicyType(policyType != null ? policyType : "SimpleScaling");
+        policy.setPolicyType(resolvedType);
         policy.setAdjustmentType(adjustmentType);
         policy.setScalingAdjustment(scalingAdjustment);
-        policy.setCooldown(cooldown);
+        // Cooldown's own AWS-documented default of 300 applies only to
+        // SimpleScaling; every other policy type either sends its own
+        // cooldown explicitly or gets none at all - see ScalingPolicy's
+        // doc comment on this field for the crossing that surfaced the
+        // difference (a StepScaling/PredictiveScaling/TargetTrackingScaling
+        // policy read back 300 forever with no way to reach null).
+        policy.setCooldown(cooldown != null ? cooldown : ("SimpleScaling".equals(resolvedType) ? 300 : null));
+        // Enabled defaults true - the schema's own default when a caller
+        // omits it, and what a freshly created policy is in real AWS.
+        policy.setEnabled(enabled != null ? enabled : Boolean.TRUE);
         policy.setEstimatedInstanceWarmup(estimatedInstanceWarmup);
         policy.setTargetTrackingConfiguration(targetTrackingConfiguration);
+        policy.setStepAdjustments(stepAdjustments);
+        policy.setPredictiveScalingConfiguration(predictiveScalingConfiguration);
         policy.setRegion(region);
         policies.put(key, policy);
         return policy;

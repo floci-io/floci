@@ -76,10 +76,10 @@ public class Ec2LaunchTemplateCfnProvisioner implements CfnResourceProvisioner {
         if (existing != null && name.equals(existing.getLaunchTemplateName())) {
             lt = ec2Service.createLaunchTemplateVersion(ctx.region(), previousId, null, null,
                     imageId, instanceType, keyName, securityGroupIds, null, encodedUserData,
-                    iamInstanceProfileArn, null);
+                    iamInstanceProfileArn, null, null, null);
         } else {
             lt = ec2Service.createLaunchTemplate(ctx.region(), name, imageId, instanceType, keyName,
-                    securityGroupIds, null, encodedUserData, iamInstanceProfileArn, null, null);
+                    securityGroupIds, null, encodedUserData, iamInstanceProfileArn, null, null, null, null);
             // A changed name is a replacement: drop the template the previous execution created,
             // once the new one exists, so the old one is not left behind.
             if (existing != null) {

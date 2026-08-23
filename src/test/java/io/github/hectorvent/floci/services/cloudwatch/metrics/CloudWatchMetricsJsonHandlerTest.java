@@ -197,21 +197,38 @@ class CloudWatchMetricsJsonHandlerTest {
     }
 
     /**
-     * lex00/floci#93: creating an alarm with no explicit DatapointsToAlarm must default
-     * it to EvaluationPeriods (real AWS create-time semantics), and DescribeAlarms must
-     * echo that value back. Before the fix, DescribeAlarms' JSON/CBOR response builder
-     * simply omitted the field, so the AWS provider's own create-time default of
-     * datapoints_to_alarm = evaluation_periods never matched the (missing) read value,
-     * producing an endless "1 -> null" drift.
+     * lex00/floci#93, CORRECTED: creating an alarm with no explicit DatapointsToAlarm must
+     * leave the field entirely absent from DescribeAlarms, not default it to
+     * EvaluationPeriods.
+     *
+     * #93 (and the fix that grew out of it, #94) assumed the opposite - that real AWS
+     * echoes DatapointsToAlarm = EvaluationPeriods on a fresh alarm - and closed the issue
+     * as "the actual cause is client-side, in hashicorp/terraform-provider-aws itself"
+     * because a non-Computed Optional schema attribute's planned value always comes from
+     * config, so no emulator response could ever suppress the diff. That diagnosis of the
+     * SDKv2 mechanics is correct, but the premise under it was never checked against real
+     * AWS - it was inferred. Checked directly today (no Terraform, no floci - a bare
+     * `aws cloudwatch put-metric-alarm` / `describe-alarms` round trip against real AWS,
+     * us-east-1, an alarm with EvaluationPeriods=1 and DatapointsToAlarm never set):
+     * DescribeAlarms' response carries no DatapointsToAlarm field at all. So the premise
+     * was backwards, and so was the conclusion: the field being genuinely absent from both
+     * the refreshed prior AND the config-derived plan is exactly what makes the two agree
+     * and the diff vanish - which is a floci-side fix after all, unlike #93's amended
+     * closing note.
+     *
+     * Surfaced again, independently, by live/e2e/corpus-autoscaling-complete's
+     * module.auto_rollback and module.step_scaling_alarm alarms (neither sets
+     * datapoints_to_alarm), whose stateless replans proposed
+     * `- datapoints_to_alarm = 1 -> null` on every run.
      */
     @Test
-    void describeAlarms_noExplicitDatapointsToAlarm_defaultsToEvaluationPeriods() {
+    void describeAlarms_noExplicitDatapointsToAlarm_omitsTheFieldEntirely() {
         Response putResp = handler.handle("PutMetricAlarm", putAlarmReq("NoDatapointsAlarm", 3, null), REGION);
         assertEquals(200, putResp.getStatus());
 
         ObjectNode alarm = describeAlarm("NoDatapointsAlarm");
-        assertTrue(alarm.has("DatapointsToAlarm"), "DescribeAlarms must always report DatapointsToAlarm");
-        assertEquals(3, alarm.get("DatapointsToAlarm").asInt());
+        assertTrue(!alarm.has("DatapointsToAlarm"),
+                "DescribeAlarms must omit DatapointsToAlarm when it was never explicitly set - real AWS does, confirmed directly");
         assertEquals(3, alarm.get("EvaluationPeriods").asInt());
     }
 
@@ -223,5 +240,36 @@ class CloudWatchMetricsJsonHandlerTest {
         ObjectNode alarm = describeAlarm("ExplicitDatapointsAlarm");
         assertEquals(2, alarm.get("DatapointsToAlarm").asInt());
         assertEquals(5, alarm.get("EvaluationPeriods").asInt());
+    }
+
+    /**
+     * TreatMissingData was parsed and stored correctly by handlePutMetricAlarm, but
+     * handleDescribeAlarms' JSON response builder never wrote it into the response node
+     * at all - explicitly set or not. Surfaced by
+     * live/e2e/corpus-autoscaling-complete's module.auto_rollback alarm, which sets
+     * treat_missing_data = "notBreaching" explicitly: every stateless replan proposed
+     * `treat_missing_data = "missing" -> "notBreaching"` forever, because the read side
+     * could never see what was actually configured.
+     */
+    @Test
+    void describeAlarms_explicitTreatMissingData_roundTrips() {
+        ObjectNode req = putAlarmReq("TreatMissingDataAlarm", 1, null);
+        req.put("TreatMissingData", "notBreaching");
+        Response putResp = handler.handle("PutMetricAlarm", req, REGION);
+        assertEquals(200, putResp.getStatus());
+
+        ObjectNode alarm = describeAlarm("TreatMissingDataAlarm");
+        assertEquals("notBreaching", alarm.get("TreatMissingData").asText());
+    }
+
+    @Test
+    void describeAlarms_noExplicitTreatMissingData_omitsTheField() {
+        Response putResp = handler.handle("PutMetricAlarm", putAlarmReq("NoTreatMissingDataAlarm", 1, null), REGION);
+        assertEquals(200, putResp.getStatus());
+
+        ObjectNode alarm = describeAlarm("NoTreatMissingDataAlarm");
+        assertTrue(!alarm.has("TreatMissingData"),
+                "DescribeAlarms must omit TreatMissingData when it was never explicitly set, the same way DatapointsToAlarm must - "
+                        + "the AWS provider supplies its own client-side default of \"missing\" in that case");
     }
 }

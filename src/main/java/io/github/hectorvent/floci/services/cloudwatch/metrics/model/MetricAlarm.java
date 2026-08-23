@@ -31,10 +31,29 @@ public class MetricAlarm {
     private int period;
     private String unit;
     private int evaluationPeriods;
-    private int datapointsToAlarm;
+
+    // Nullable, and null by default: real AWS's PutMetricAlarm.DatapointsToAlarm is only
+    // stored/returned when a caller explicitly sets it - confirmed directly against real AWS
+    // (no Terraform, no floci in the loop): a fresh alarm created with no DatapointsToAlarm and
+    // EvaluationPeriods=1 comes back from DescribeAlarms with no DatapointsToAlarm field at all,
+    // not EvaluationPeriods echoed back as a derived default. Surfaced by
+    // live/e2e/corpus-autoscaling-complete's module.auto_rollback/module.step_scaling_alarm
+    // alarms, which never set this argument: every stateless replan proposed
+    // `- datapoints_to_alarm = 1 -> null` forever, because this field used to default itself to
+    // evaluationPeriods on every create.
+    private Integer datapointsToAlarm;
     private double threshold;
     private String comparisonOperator;
-    private String treatMissingData = "missing";
+
+    // Nullable, and null by default for the same reason: real AWS omits TreatMissingData from
+    // DescribeAlarms when a caller never set it (confirmed the same way), and the AWS provider's
+    // own Read function supplies its OWN client-side default of "missing" in that case
+    // (internal/service/cloudwatch/metric_alarm.go) - a value this store must never invent on
+    // its own, because the alarm that DOES set it (module.auto_rollback sets
+    // treat_missing_data = "notBreaching") needs that exact value read back, and floci's
+    // DescribeAlarms JSON handler never wrote the field into the response at all, explicitly set
+    // or not.
+    private String treatMissingData;
     private String evaluateLowSampleCountPercentile;
     private Map<String, String> tags = new HashMap<>();
 
@@ -101,8 +120,8 @@ public class MetricAlarm {
     public int getEvaluationPeriods() { return evaluationPeriods; }
     public void setEvaluationPeriods(int evaluationPeriods) { this.evaluationPeriods = evaluationPeriods; }
 
-    public int getDatapointsToAlarm() { return datapointsToAlarm; }
-    public void setDatapointsToAlarm(int datapointsToAlarm) { this.datapointsToAlarm = datapointsToAlarm; }
+    public Integer getDatapointsToAlarm() { return datapointsToAlarm; }
+    public void setDatapointsToAlarm(Integer datapointsToAlarm) { this.datapointsToAlarm = datapointsToAlarm; }
 
     public double getThreshold() { return threshold; }
     public void setThreshold(double threshold) { this.threshold = threshold; }
