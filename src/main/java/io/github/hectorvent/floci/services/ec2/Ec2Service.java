@@ -5007,6 +5007,8 @@ public class Ec2Service implements ContainerTeardown {
                 case "instance-type" -> matchesValue(values, inst.getInstanceType());
                 case "vpc-id" -> matchesValue(values, inst.getVpcId());
                 case "subnet-id" -> matchesValue(values, inst.getSubnetId());
+                case "availabilityZone", "availability-zone" -> inst.getPlacement() != null
+                        && matchesValue(values, inst.getPlacement().getAvailabilityZone());
                 default -> true;
             };
         }
