@@ -22,6 +22,8 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.Arrays;
+import java.util.HashMap;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -52,11 +54,16 @@ class FirehoseServiceTest {
     @BeforeEach
     void setUp() {
         storageFactory = Mockito.mock(StorageFactory.class);
-        // A backend per create() call, not one shared instance: Firehose and Kinesis
-        // both take a store from this factory, and a shared one would put KinesisStream
-        // values in the map FirehoseService.scan() reads as delivery streams.
+        // A backend per store, keyed by file name, exactly as the real StorageFactory
+        // reuses backends by path. One shared instance would put KinesisStream values in
+        // the map FirehoseService.scan() reads as delivery streams; a fresh instance per
+        // create() call would make a second service over "the same storage" impossible
+        // to build, which is what the restart test needs.
+        Map<String, AccountAwareStorageBackend<?>> backends = new HashMap<>();
         when(storageFactory.create(anyString(), anyString(), any()))
-                .thenAnswer(invocation -> AccountAwareStorageBackend.inMemory("000000000000"));
+                .thenAnswer(invocation -> backends.computeIfAbsent(
+                        invocation.getArgument(0) + "/" + invocation.getArgument(1),
+                        k -> AccountAwareStorageBackend.inMemory("000000000000")));
         s3Service = Mockito.mock(S3Service.class);
         clock = new MutableClock();
         firehoseService = newService(0);
@@ -519,6 +526,24 @@ class FirehoseServiceTest {
         firehoseService.flush("plain-stream");
 
         verifyNothingDelivered();
+    }
+
+    @Test
+    void kinesisSourceCheckpointSurvivesARestart() {
+        createSourcedDeliveryStream("sourced-stream", "src-stream");
+        kinesisService.putRecord("src-stream", "hello".getBytes(StandardCharsets.UTF_8), "pk", "us-east-1");
+        firehoseService.pollKinesisSources();
+        firehoseService.flush("sourced-stream");
+
+        // Restart: a fresh service over the same storage, the way the emulator comes back
+        // up against its persisted state. The delivery stream and the source stream's
+        // records both survive, so an in-memory-only checkpoint would rebuild the iterator
+        // from DeliveryStartTimestamp and deliver "hello" to S3 a second time.
+        firehoseService = newService(0);
+        firehoseService.pollKinesisSources();
+        firehoseService.flush("sourced-stream");
+
+        assertEquals("hello\n", delivered("sink").text());
     }
 
     @Test

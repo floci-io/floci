@@ -53,7 +53,15 @@ public class FirehoseService {
     // Per delivery stream, the shard iterator each source shard has been consumed to.
     // Iterators are the checkpoint: a delivery stream restarted mid-shard resumes from
     // the tip it reached, and one that has never polled starts at DeliveryStartTimestamp.
-    private final Map<String, Map<String, String>> sourceIterators = new ConcurrentHashMap<>();
+    //
+    // Persisted, unlike buffers/bufferSince above, because losing it is not merely losing
+    // what was in flight: an emulator restart would rebuild every iterator from
+    // DeliveryStartTimestamp and re-deliver the source stream's whole retained history to
+    // S3. A Kinesis shard iterator is a self-describing token
+    // (streamName|shardId|type|sequenceNumber|index|timestamp, base64) with no
+    // JVM-lifetime component, and KinesisService never trims a shard's record list, so a
+    // checkpoint written before a restart still resolves to the same position after one.
+    private final StorageBackend<String, Map<String, String>> sourceIteratorStore;
     private final Clock clock;
     private final long tickIntervalSeconds;
     private final int flushRecordCount;
@@ -65,6 +73,8 @@ public class FirehoseService {
                            RegionResolver regionResolver, Clock clock, EmulatorConfig config) {
         this.streamStore = storageFactory.create("firehose", "streams.json",
                 new TypeReference<Map<String, DeliveryStreamDescription>>() {});
+        this.sourceIteratorStore = storageFactory.create("firehose", "source-iterators.json",
+                new TypeReference<Map<String, Map<String, String>>>() {});
         this.s3Service = s3Service;
         this.kinesisService = kinesisService;
         this.regionResolver = regionResolver;
@@ -318,7 +328,7 @@ public class FirehoseService {
         // reached the bucket after DeleteDeliveryStream completed.
         buffers.remove(name);
         bufferSince.remove(name);
-        sourceIterators.remove(name);
+        sourceIteratorStore.delete(name);
         LOG.infov("Deleted Firehose delivery stream: {0}", name);
     }
 
@@ -370,8 +380,10 @@ public class FirehoseService {
         String region = arn.region() == null || arn.region().isBlank()
                 ? regionResolver.getDefaultRegion() : arn.region();
         KinesisStream sourceStream = kinesisService.describeStream(sourceName, region);
+        // Copied out and written back whole: the store may hand back its own instance,
+        // and a persistent backend only learns of a change through put().
         Map<String, String> iterators =
-                sourceIterators.computeIfAbsent(deliveryStreamName, k -> new ConcurrentHashMap<>());
+                new LinkedHashMap<>(sourceIteratorStore.get(deliveryStreamName).orElseGet(Map::of));
         for (KinesisShard shard : sourceStream.getShards()) {
             String iterator = iterators.get(shard.getShardId());
             if (iterator == null) {
@@ -396,6 +408,10 @@ public class FirehoseService {
                     .map(record -> new Record(record.getData()))
                     .toList());
         }
+        // After the records are buffered, so a crash between the two re-reads them
+        // rather than dropping them. A graceful shutdown cannot lose them at all:
+        // onPreShutdown drains the buffers to S3 before storage is flushed to disk.
+        sourceIteratorStore.put(deliveryStreamName, iterators);
     }
 
     public void putRecord(String streamName, Record record) {
