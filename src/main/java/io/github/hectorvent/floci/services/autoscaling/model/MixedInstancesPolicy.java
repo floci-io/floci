@@ -62,6 +62,17 @@ public class MixedInstancesPolicy {
         // botocore's autoscaling service model) that terraform-aws-autoscaling's
         // module.mixed_instance sets; previously dropped on create and never echoed back.
         private String weightedCapacity;
+        // lex00/floci#112's round-5 re-measure: an attribute-based override
+        // (LaunchTemplateOverrides.InstanceRequirements) - the alternative to naming an explicit
+        // InstanceType, used by terraform-aws-autoscaling's own module.instance_requirements
+        // example - had no field at all, and the parser's own loop used InstanceType's presence
+        // as its sole "is there another override" signal, so an override that set ONLY
+        // InstanceRequirements (mutually exclusive with InstanceType by AWS's own design) was
+        // never even reached, dropping the whole Overrides list, not just this one field. Oracle:
+        // botocore's autoscaling/2011-01-01/service-2.json LaunchTemplateOverrides/
+        // InstanceRequirements shapes; scoped to the sub-fields terraform-aws-autoscaling's own
+        // example actually sets rather than every field AWS documents.
+        private InstanceRequirements instanceRequirements;
 
         public LaunchTemplateOverride() {}
 
@@ -70,6 +81,96 @@ public class MixedInstancesPolicy {
 
         public String getWeightedCapacity() { return weightedCapacity; }
         public void setWeightedCapacity(String v) { this.weightedCapacity = v; }
+
+        public InstanceRequirements getInstanceRequirements() { return instanceRequirements; }
+        public void setInstanceRequirements(InstanceRequirements v) { this.instanceRequirements = v; }
+    }
+
+    @RegisterForReflection
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public static class InstanceRequirements {
+        private IntRange vCpuCount;
+        private IntRange memoryMiB;
+        private List<String> cpuManufacturers = new ArrayList<>();
+        private DoubleRange memoryGiBPerVCpu;
+        private List<String> excludedInstanceTypes = new ArrayList<>();
+        private List<String> instanceGenerations = new ArrayList<>();
+        private List<String> localStorageTypes = new ArrayList<>();
+        private Integer maxSpotPriceAsPercentageOfOptimalOnDemandPrice;
+        private String bareMetal;
+        private String burstablePerformance;
+        private List<String> allowedInstanceTypes = new ArrayList<>();
+
+        public IntRange getVCpuCount() { return vCpuCount; }
+        public void setVCpuCount(IntRange v) { this.vCpuCount = v; }
+
+        public IntRange getMemoryMiB() { return memoryMiB; }
+        public void setMemoryMiB(IntRange v) { this.memoryMiB = v; }
+
+        public List<String> getCpuManufacturers() { return cpuManufacturers; }
+        public void setCpuManufacturers(List<String> v) { this.cpuManufacturers = v != null ? new ArrayList<>(v) : new ArrayList<>(); }
+
+        public DoubleRange getMemoryGiBPerVCpu() { return memoryGiBPerVCpu; }
+        public void setMemoryGiBPerVCpu(DoubleRange v) { this.memoryGiBPerVCpu = v; }
+
+        public List<String> getExcludedInstanceTypes() { return excludedInstanceTypes; }
+        public void setExcludedInstanceTypes(List<String> v) { this.excludedInstanceTypes = v != null ? new ArrayList<>(v) : new ArrayList<>(); }
+
+        public List<String> getInstanceGenerations() { return instanceGenerations; }
+        public void setInstanceGenerations(List<String> v) { this.instanceGenerations = v != null ? new ArrayList<>(v) : new ArrayList<>(); }
+
+        public List<String> getLocalStorageTypes() { return localStorageTypes; }
+        public void setLocalStorageTypes(List<String> v) { this.localStorageTypes = v != null ? new ArrayList<>(v) : new ArrayList<>(); }
+
+        public Integer getMaxSpotPriceAsPercentageOfOptimalOnDemandPrice() { return maxSpotPriceAsPercentageOfOptimalOnDemandPrice; }
+        public void setMaxSpotPriceAsPercentageOfOptimalOnDemandPrice(Integer v) { this.maxSpotPriceAsPercentageOfOptimalOnDemandPrice = v; }
+
+        public String getBareMetal() { return bareMetal; }
+        public void setBareMetal(String v) { this.bareMetal = v; }
+
+        public String getBurstablePerformance() { return burstablePerformance; }
+        public void setBurstablePerformance(String v) { this.burstablePerformance = v; }
+
+        public List<String> getAllowedInstanceTypes() { return allowedInstanceTypes; }
+        public void setAllowedInstanceTypes(List<String> v) { this.allowedInstanceTypes = v != null ? new ArrayList<>(v) : new ArrayList<>(); }
+
+        public boolean isEmpty() {
+            return vCpuCount == null && memoryMiB == null && cpuManufacturers.isEmpty()
+                    && memoryGiBPerVCpu == null && excludedInstanceTypes.isEmpty()
+                    && instanceGenerations.isEmpty() && localStorageTypes.isEmpty()
+                    && maxSpotPriceAsPercentageOfOptimalOnDemandPrice == null && bareMetal == null
+                    && burstablePerformance == null && allowedInstanceTypes.isEmpty();
+        }
+    }
+
+    @RegisterForReflection
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public static class IntRange {
+        private Integer min;
+        private Integer max;
+
+        public IntRange() {}
+
+        public Integer getMin() { return min; }
+        public void setMin(Integer v) { this.min = v; }
+
+        public Integer getMax() { return max; }
+        public void setMax(Integer v) { this.max = v; }
+    }
+
+    @RegisterForReflection
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public static class DoubleRange {
+        private Double min;
+        private Double max;
+
+        public DoubleRange() {}
+
+        public Double getMin() { return min; }
+        public void setMin(Double v) { this.min = v; }
+
+        public Double getMax() { return max; }
+        public void setMax(Double v) { this.max = v; }
     }
 
     @RegisterForReflection

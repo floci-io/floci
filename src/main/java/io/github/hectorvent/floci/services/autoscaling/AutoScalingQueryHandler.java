@@ -266,6 +266,9 @@ public class AutoScalingQueryHandler {
            .elem("HealthCheckType", asg.getHealthCheckType())
            .elem("HealthCheckGracePeriod", String.valueOf(asg.getHealthCheckGracePeriod()))
            .elem("CreatedTime", ISO_FMT.format(asg.getCreatedTime()));
+        if (asg.getDesiredCapacityType() != null) {
+            xml.elem("DesiredCapacityType", asg.getDesiredCapacityType());
+        }
 
         if (asg.getLaunchConfigurationName() != null) {
             xml.elem("LaunchConfigurationName", asg.getLaunchConfigurationName());
@@ -284,6 +287,9 @@ public class AutoScalingQueryHandler {
             xml.end("LaunchTemplate");
         }
         appendMixedInstancesPolicyXml(xml, asg.getMixedInstancesPolicy());
+        // lex00/floci#112's round-5 re-measure: see appendWarmPoolConfigurationXml's own doc
+        // comment for why DescribeAutoScalingGroups itself needs this, not just DescribeWarmPool.
+        appendWarmPoolConfigurationXml(xml, service.describeWarmPool(asg.getRegion(), asg.getAutoScalingGroupName()));
 
         xml.start("AvailabilityZones");
         for (String az : asg.getAvailabilityZones()) { xml.elem("member", az); }
@@ -578,23 +584,33 @@ public class AutoScalingQueryHandler {
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeWarmPoolResponse", NS)
                   .start("DescribeWarmPoolResult");
-        if (pool != null) {
-            xml.start("WarmPoolConfiguration");
-            if (pool.getMaxGroupPreparedCapacity() != null) {
-                xml.elem("MaxGroupPreparedCapacity", String.valueOf(pool.getMaxGroupPreparedCapacity()));
-            }
-            xml.elem("MinSize", String.valueOf(pool.getMinSize()))
-               .elem("PoolState", pool.getPoolState())
-               .start("InstanceReusePolicy")
-                 .elem("ReuseOnScaleIn", String.valueOf(pool.isReuseOnScaleIn()))
-               .end("InstanceReusePolicy")
-               .end("WarmPoolConfiguration");
-        }
+        appendWarmPoolConfigurationXml(xml, pool);
         xml.start("Instances").end("Instances")
            .end("DescribeWarmPoolResult")
            .raw(AwsQueryResponse.responseMetadata())
            .end("DescribeWarmPoolResponse");
         return ok(xml.build());
+    }
+
+    // lex00/floci#112's round-5 re-measure: botocore's own AutoScalingGroup shape documents
+    // WarmPoolConfiguration as a member of DescribeAutoScalingGroups' own response, not only
+    // reachable via the separate DescribeWarmPool action - terraform-aws-autoscaling's own
+    // warm_pool example reads the group's warm pool state this way, so appendAsgXml below needs
+    // this too, not just handleDescribeWarmPool. Shared so the two never drift.
+    private static void appendWarmPoolConfigurationXml(XmlBuilder xml, WarmPoolConfiguration pool) {
+        if (pool == null) {
+            return;
+        }
+        xml.start("WarmPoolConfiguration");
+        if (pool.getMaxGroupPreparedCapacity() != null) {
+            xml.elem("MaxGroupPreparedCapacity", String.valueOf(pool.getMaxGroupPreparedCapacity()));
+        }
+        xml.elem("MinSize", String.valueOf(pool.getMinSize()))
+           .elem("PoolState", pool.getPoolState())
+           .start("InstanceReusePolicy")
+             .elem("ReuseOnScaleIn", String.valueOf(pool.isReuseOnScaleIn()))
+           .end("InstanceReusePolicy")
+           .end("WarmPoolConfiguration");
     }
 
     private Response handleDeleteWarmPool(MultivaluedMap<String, String> p, String region) {
@@ -674,6 +690,7 @@ public class AutoScalingQueryHandler {
                     if (override.getWeightedCapacity() != null) {
                         xml.elem("WeightedCapacity", override.getWeightedCapacity());
                     }
+                    appendMixedInstancesOverrideInstanceRequirementsXml(xml, override.getInstanceRequirements());
                     xml.end("member");
                 }
                 xml.end("Overrides");
@@ -696,6 +713,73 @@ public class AutoScalingQueryHandler {
             xml.end("InstancesDistribution");
         }
         xml.end("MixedInstancesPolicy");
+    }
+
+    // lex00/floci#112's round-5 re-measure: see MixedInstancesPolicy.LaunchTemplateOverride's own
+    // doc comment on instanceRequirements for why this exists.
+    private static void appendMixedInstancesOverrideInstanceRequirementsXml(
+            XmlBuilder xml, MixedInstancesPolicy.InstanceRequirements requirements) {
+        if (requirements == null || requirements.isEmpty()) {
+            return;
+        }
+        xml.start("InstanceRequirements");
+        if (requirements.getVCpuCount() != null) {
+            xml.start("VCpuCount");
+            if (requirements.getVCpuCount().getMin() != null) {
+                xml.elem("Min", String.valueOf(requirements.getVCpuCount().getMin()));
+            }
+            if (requirements.getVCpuCount().getMax() != null) {
+                xml.elem("Max", String.valueOf(requirements.getVCpuCount().getMax()));
+            }
+            xml.end("VCpuCount");
+        }
+        if (requirements.getMemoryMiB() != null) {
+            xml.start("MemoryMiB");
+            if (requirements.getMemoryMiB().getMin() != null) {
+                xml.elem("Min", String.valueOf(requirements.getMemoryMiB().getMin()));
+            }
+            if (requirements.getMemoryMiB().getMax() != null) {
+                xml.elem("Max", String.valueOf(requirements.getMemoryMiB().getMax()));
+            }
+            xml.end("MemoryMiB");
+        }
+        appendStringMemberList(xml, "CpuManufacturers", requirements.getCpuManufacturers());
+        if (requirements.getMemoryGiBPerVCpu() != null) {
+            xml.start("MemoryGiBPerVCpu");
+            if (requirements.getMemoryGiBPerVCpu().getMin() != null) {
+                xml.elem("Min", String.valueOf(requirements.getMemoryGiBPerVCpu().getMin()));
+            }
+            if (requirements.getMemoryGiBPerVCpu().getMax() != null) {
+                xml.elem("Max", String.valueOf(requirements.getMemoryGiBPerVCpu().getMax()));
+            }
+            xml.end("MemoryGiBPerVCpu");
+        }
+        appendStringMemberList(xml, "ExcludedInstanceTypes", requirements.getExcludedInstanceTypes());
+        appendStringMemberList(xml, "InstanceGenerations", requirements.getInstanceGenerations());
+        appendStringMemberList(xml, "LocalStorageTypes", requirements.getLocalStorageTypes());
+        if (requirements.getMaxSpotPriceAsPercentageOfOptimalOnDemandPrice() != null) {
+            xml.elem("MaxSpotPriceAsPercentageOfOptimalOnDemandPrice",
+                    String.valueOf(requirements.getMaxSpotPriceAsPercentageOfOptimalOnDemandPrice()));
+        }
+        if (requirements.getBareMetal() != null) {
+            xml.elem("BareMetal", requirements.getBareMetal());
+        }
+        if (requirements.getBurstablePerformance() != null) {
+            xml.elem("BurstablePerformance", requirements.getBurstablePerformance());
+        }
+        appendStringMemberList(xml, "AllowedInstanceTypes", requirements.getAllowedInstanceTypes());
+        xml.end("InstanceRequirements");
+    }
+
+    private static void appendStringMemberList(XmlBuilder xml, String elementName, List<String> values) {
+        if (values == null || values.isEmpty()) {
+            return;
+        }
+        xml.start(elementName);
+        for (String value : values) {
+            xml.elem("member", value);
+        }
+        xml.end(elementName);
     }
 
     private static void appendMixedLaunchTemplateSpecificationXml(
@@ -1147,8 +1231,9 @@ public class AutoScalingQueryHandler {
             if (name == null) break;
             dimensions.add(new ScalingPolicy.MetricDimension(name, p.getFirst(prefix + ".Dimensions.member." + i + ".Value")));
         }
+        List<ScalingPolicy.TargetTrackingMetricDataQuery> metrics = parseTargetTrackingMetricDataQueries(p, prefix + ".Metrics");
         if (metricName == null && namespace == null && statistic == null && unit == null
-                && period == null && dimensions.isEmpty()) {
+                && period == null && dimensions.isEmpty() && metrics.isEmpty()) {
             return null;
         }
         ScalingPolicy.CustomizedMetricSpecification spec = new ScalingPolicy.CustomizedMetricSpecification();
@@ -1158,7 +1243,68 @@ public class AutoScalingQueryHandler {
         spec.setStatistic(statistic);
         spec.setUnit(unit);
         spec.setPeriod(period != null && !period.isBlank() ? Integer.parseInt(period) : null);
+        spec.setMetrics(metrics);
         return spec;
+    }
+
+    // lex00/floci#122: the metric-math form of CustomizedMetricSpecification - see
+    // ScalingPolicy.CustomizedMetricSpecification's own doc comment on `metrics` for why this
+    // exists. Field names/nesting taken from botocore's autoscaling/2011-01-01/service-2.json
+    // TargetTrackingMetricDataQuery/TargetTrackingMetricStat/Metric shapes.
+    private static List<ScalingPolicy.TargetTrackingMetricDataQuery> parseTargetTrackingMetricDataQueries(
+            MultivaluedMap<String, String> p, String basePrefix) {
+        List<ScalingPolicy.TargetTrackingMetricDataQuery> result = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String prefix = basePrefix + ".member." + i;
+            String id = p.getFirst(prefix + ".Id");
+            String expression = p.getFirst(prefix + ".Expression");
+            String label = p.getFirst(prefix + ".Label");
+            String period = p.getFirst(prefix + ".Period");
+            String returnData = p.getFirst(prefix + ".ReturnData");
+            String statPrefix = prefix + ".MetricStat";
+            String stat = p.getFirst(statPrefix + ".Stat");
+            String metricPrefix = statPrefix + ".Metric";
+            String metricNamespace = p.getFirst(metricPrefix + ".Namespace");
+            String metricName = p.getFirst(metricPrefix + ".MetricName");
+            String metricUnit = p.getFirst(statPrefix + ".Unit");
+            String metricPeriod = p.getFirst(statPrefix + ".Period");
+            List<ScalingPolicy.MetricDimension> dimensions = new ArrayList<>();
+            for (int d = 1; ; d++) {
+                String name = p.getFirst(metricPrefix + ".Dimensions.member." + d + ".Name");
+                if (name == null) break;
+                dimensions.add(new ScalingPolicy.MetricDimension(
+                        name, p.getFirst(metricPrefix + ".Dimensions.member." + d + ".Value")));
+            }
+            if (id == null && expression == null && label == null && period == null
+                    && returnData == null && stat == null && metricNamespace == null
+                    && metricName == null && metricUnit == null && metricPeriod == null
+                    && dimensions.isEmpty()) {
+                break;
+            }
+            ScalingPolicy.TargetTrackingMetricDataQuery query = new ScalingPolicy.TargetTrackingMetricDataQuery();
+            query.setId(id);
+            query.setExpression(expression);
+            query.setLabel(label);
+            query.setPeriod(period != null && !period.isBlank() ? Integer.parseInt(period) : null);
+            query.setReturnData(returnData != null ? Boolean.parseBoolean(returnData) : null);
+            if (stat != null || metricNamespace != null || metricName != null || metricUnit != null
+                    || metricPeriod != null || !dimensions.isEmpty()) {
+                ScalingPolicy.TargetTrackingMetricStat metricStat = new ScalingPolicy.TargetTrackingMetricStat();
+                metricStat.setStat(stat);
+                metricStat.setUnit(metricUnit);
+                metricStat.setPeriod(metricPeriod != null && !metricPeriod.isBlank() ? Integer.parseInt(metricPeriod) : null);
+                if (metricNamespace != null || metricName != null || !dimensions.isEmpty()) {
+                    ScalingPolicy.Metric metric = new ScalingPolicy.Metric();
+                    metric.setNamespace(metricNamespace);
+                    metric.setMetricName(metricName);
+                    metric.setDimensions(dimensions);
+                    metricStat.setMetric(metric);
+                }
+                query.setMetricStat(metricStat);
+            }
+            result.add(query);
+        }
+        return result;
     }
 
     // parseStepAdjustments / appendStepAdjustmentsXml and
@@ -1336,6 +1482,7 @@ public class AutoScalingQueryHandler {
             if (customizedMetric.getPeriod() != null) {
                 xml.elem("Period", String.valueOf(customizedMetric.getPeriod()));
             }
+            appendTargetTrackingMetricDataQueriesXml(xml, customizedMetric.getMetrics());
             xml.end("CustomizedMetricSpecification");
         }
         if (configuration.getTargetValue() != null) {
@@ -1345,6 +1492,51 @@ public class AutoScalingQueryHandler {
             xml.elem("DisableScaleIn", String.valueOf(configuration.getDisableScaleIn()));
         }
         xml.end("TargetTrackingConfiguration");
+    }
+
+    // lex00/floci#122: writes CustomizedMetricSpecification's Metrics (metric-math) list back -
+    // see ScalingPolicy.CustomizedMetricSpecification's own doc comment on `metrics` for why.
+    private static void appendTargetTrackingMetricDataQueriesXml(
+            XmlBuilder xml, List<ScalingPolicy.TargetTrackingMetricDataQuery> metrics) {
+        if (metrics == null || metrics.isEmpty()) {
+            return;
+        }
+        xml.start("Metrics");
+        for (ScalingPolicy.TargetTrackingMetricDataQuery query : metrics) {
+            xml.start("member");
+            if (query.getId() != null) { xml.elem("Id", query.getId()); }
+            if (query.getExpression() != null) { xml.elem("Expression", query.getExpression()); }
+            ScalingPolicy.TargetTrackingMetricStat metricStat = query.getMetricStat();
+            if (metricStat != null) {
+                xml.start("MetricStat");
+                ScalingPolicy.Metric metric = metricStat.getMetric();
+                if (metric != null) {
+                    xml.start("Metric");
+                    if (metric.getNamespace() != null) { xml.elem("Namespace", metric.getNamespace()); }
+                    if (metric.getMetricName() != null) { xml.elem("MetricName", metric.getMetricName()); }
+                    if (!metric.getDimensions().isEmpty()) {
+                        xml.start("Dimensions");
+                        for (ScalingPolicy.MetricDimension dimension : metric.getDimensions()) {
+                            xml.start("member")
+                               .elem("Name", dimension.getName())
+                               .elem("Value", dimension.getValue())
+                               .end("member");
+                        }
+                        xml.end("Dimensions");
+                    }
+                    xml.end("Metric");
+                }
+                if (metricStat.getStat() != null) { xml.elem("Stat", metricStat.getStat()); }
+                if (metricStat.getUnit() != null) { xml.elem("Unit", metricStat.getUnit()); }
+                if (metricStat.getPeriod() != null) { xml.elem("Period", String.valueOf(metricStat.getPeriod())); }
+                xml.end("MetricStat");
+            }
+            if (query.getLabel() != null) { xml.elem("Label", query.getLabel()); }
+            if (query.getPeriod() != null) { xml.elem("Period", String.valueOf(query.getPeriod())); }
+            if (query.getReturnData() != null) { xml.elem("ReturnData", String.valueOf(query.getReturnData())); }
+            xml.end("member");
+        }
+        xml.end("Metrics");
     }
 
     // ── Activities ────────────────────────────────────────────────────────────
@@ -1521,13 +1713,16 @@ public class AutoScalingQueryHandler {
             capacityReservationSpecification.setCapacityReservationPreference(capacityReservationPreference);
         }
 
+        String desiredCapacityType = p.getFirst("DesiredCapacityType");
+
         if (defaultInstanceWarmup == null && capacityRebalance == null && maxInstanceLifetime == null
                 && serviceLinkedRoleArn == null && maintenancePolicy == null && azDistribution == null
-                && capacityReservationSpecification == null) {
+                && capacityReservationSpecification == null && desiredCapacityType == null) {
             return null;
         }
         return new AsgOptionalFields(defaultInstanceWarmup, capacityRebalance, maxInstanceLifetime,
-                serviceLinkedRoleArn, maintenancePolicy, azDistribution, capacityReservationSpecification);
+                serviceLinkedRoleArn, maintenancePolicy, azDistribution, capacityReservationSpecification,
+                desiredCapacityType);
     }
 
     private MixedInstancesPolicy parseMixedInstancesPolicy(MultivaluedMap<String, String> p) {
@@ -1580,21 +1775,86 @@ public class AutoScalingQueryHandler {
         return false;
     }
 
+    // lex00/floci#112's round-5 re-measure: this loop used to treat InstanceType's presence as
+    // the sole "is there another override" signal, so an attribute-based override that set ONLY
+    // InstanceRequirements (mutually exclusive with InstanceType by AWS's own design - see
+    // MixedInstancesPolicy.LaunchTemplateOverride's own doc comment) was never reached at all,
+    // dropping the entire Overrides list rather than just the missing field.
     private List<MixedInstancesPolicy.LaunchTemplateOverride> parseMixedLaunchTemplateOverrides(
             MultivaluedMap<String, String> p) {
         List<MixedInstancesPolicy.LaunchTemplateOverride> result = new ArrayList<>();
         for (int i = 1; ; i++) {
-            String instanceType = p.getFirst("MixedInstancesPolicy.LaunchTemplate.Overrides.member."
-                    + i + ".InstanceType");
-            if (instanceType == null) { break; }
+            String prefix = "MixedInstancesPolicy.LaunchTemplate.Overrides.member." + i;
+            String instanceType = p.getFirst(prefix + ".InstanceType");
+            String weightedCapacity = p.getFirst(prefix + ".WeightedCapacity");
+            MixedInstancesPolicy.InstanceRequirements instanceRequirements =
+                    parseMixedInstancesOverrideInstanceRequirements(p, prefix + ".InstanceRequirements");
+            if (instanceType == null && weightedCapacity == null && instanceRequirements == null) {
+                break;
+            }
             MixedInstancesPolicy.LaunchTemplateOverride override =
                     new MixedInstancesPolicy.LaunchTemplateOverride();
             override.setInstanceType(instanceType);
-            override.setWeightedCapacity(p.getFirst("MixedInstancesPolicy.LaunchTemplate.Overrides.member."
-                    + i + ".WeightedCapacity"));
+            override.setWeightedCapacity(weightedCapacity);
+            override.setInstanceRequirements(instanceRequirements);
             result.add(override);
         }
         return result;
+    }
+
+    private MixedInstancesPolicy.InstanceRequirements parseMixedInstancesOverrideInstanceRequirements(
+            MultivaluedMap<String, String> p, String prefix) {
+        Integer vCpuMin = nullableIntParam(p, prefix + ".VCpuCount.Min");
+        Integer vCpuMax = nullableIntParam(p, prefix + ".VCpuCount.Max");
+        Integer memoryMiBMin = nullableIntParam(p, prefix + ".MemoryMiB.Min");
+        Integer memoryMiBMax = nullableIntParam(p, prefix + ".MemoryMiB.Max");
+        List<String> cpuManufacturers = memberList(p, prefix + ".CpuManufacturers");
+        Double memoryGiBPerVCpuMin = nullableDoubleParam(p, prefix + ".MemoryGiBPerVCpu.Min");
+        Double memoryGiBPerVCpuMax = nullableDoubleParam(p, prefix + ".MemoryGiBPerVCpu.Max");
+        List<String> excludedInstanceTypes = memberList(p, prefix + ".ExcludedInstanceTypes");
+        List<String> instanceGenerations = memberList(p, prefix + ".InstanceGenerations");
+        List<String> localStorageTypes = memberList(p, prefix + ".LocalStorageTypes");
+        Integer maxSpotPricePct = nullableIntParam(p, prefix + ".MaxSpotPriceAsPercentageOfOptimalOnDemandPrice");
+        String bareMetal = p.getFirst(prefix + ".BareMetal");
+        String burstablePerformance = p.getFirst(prefix + ".BurstablePerformance");
+        List<String> allowedInstanceTypes = memberList(p, prefix + ".AllowedInstanceTypes");
+
+        boolean present = vCpuMin != null || vCpuMax != null || memoryMiBMin != null || memoryMiBMax != null
+                || !cpuManufacturers.isEmpty() || memoryGiBPerVCpuMin != null || memoryGiBPerVCpuMax != null
+                || !excludedInstanceTypes.isEmpty() || !instanceGenerations.isEmpty()
+                || !localStorageTypes.isEmpty() || maxSpotPricePct != null || bareMetal != null
+                || burstablePerformance != null || !allowedInstanceTypes.isEmpty();
+        if (!present) {
+            return null;
+        }
+        MixedInstancesPolicy.InstanceRequirements requirements = new MixedInstancesPolicy.InstanceRequirements();
+        if (vCpuMin != null || vCpuMax != null) {
+            MixedInstancesPolicy.IntRange range = new MixedInstancesPolicy.IntRange();
+            range.setMin(vCpuMin);
+            range.setMax(vCpuMax);
+            requirements.setVCpuCount(range);
+        }
+        if (memoryMiBMin != null || memoryMiBMax != null) {
+            MixedInstancesPolicy.IntRange range = new MixedInstancesPolicy.IntRange();
+            range.setMin(memoryMiBMin);
+            range.setMax(memoryMiBMax);
+            requirements.setMemoryMiB(range);
+        }
+        requirements.setCpuManufacturers(cpuManufacturers);
+        if (memoryGiBPerVCpuMin != null || memoryGiBPerVCpuMax != null) {
+            MixedInstancesPolicy.DoubleRange range = new MixedInstancesPolicy.DoubleRange();
+            range.setMin(memoryGiBPerVCpuMin);
+            range.setMax(memoryGiBPerVCpuMax);
+            requirements.setMemoryGiBPerVCpu(range);
+        }
+        requirements.setExcludedInstanceTypes(excludedInstanceTypes);
+        requirements.setInstanceGenerations(instanceGenerations);
+        requirements.setLocalStorageTypes(localStorageTypes);
+        requirements.setMaxSpotPriceAsPercentageOfOptimalOnDemandPrice(maxSpotPricePct);
+        requirements.setBareMetal(bareMetal);
+        requirements.setBurstablePerformance(burstablePerformance);
+        requirements.setAllowedInstanceTypes(allowedInstanceTypes);
+        return requirements;
     }
 
     private ParsedTags parseTags(MultivaluedMap<String, String> p) {
