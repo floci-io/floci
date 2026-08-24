@@ -127,7 +127,8 @@ and test with an SDK-encoded ARN. Streaming is out of scope; the stub returns a 
 
 Implement a `TagHandler` (not a controller): `serviceKey()="bedrock-agentcore"`, `tagsBodyKey()="tags"`,
 `tagsBodyIsList()=false`, `tagKeysQueryName()="tagKeys"`. Body `{"tags":{"k":"v"}}`. Template:
-`services/scheduler/SchedulerTagHandler.java`.
+`services/scheduler/SchedulerTagHandler.java`. Taggable resources — dispatched by the ARN's resource
+segment: `agent/` (runtimes), `gateway/`, and `memory/`; other AgentCore ARNs get `ValidationException`.
 
 ### Workload Identity (control plane) — RPC-in-path
 
@@ -150,12 +151,15 @@ parent `gatewayArn`). Mutations return 202. `protocolType`: gateway `MCP`, targe
 
 ### Memory (control plane) — action-suffix REST
 
-`POST /memories/create` (202, required `name` + `eventExpiryDuration` int 3–365),
-`GET /memories/{memoryId}/details?view={view}` (200), `PUT /memories/{memoryId}/update` (202),
+`POST /memories/create` (202, required `name` + `eventExpiryDuration` int 3–365; optional
+`description`, `encryptionKeyArn`, `memoryExecutionRoleArn`, `tags` map),
+`GET /memories/{memoryId}/details?view={view}` (200), `PUT /memories/{memoryId}/update` (202, accepts
+`description`, `eventExpiryDuration` 3–365, `memoryExecutionRoleArn` — not `encryptionKeyArn`),
 `DELETE /memories/{memoryId}/delete?clientToken={t}` (202), `POST /memories/?maxResults=&nextToken=` (200 list).
 `memoryId` `[a-zA-Z][a-zA-Z0-9-_]{0,99}-[a-zA-Z0-9]{10}`; ARN unpublished — synthesize
 `arn:aws:bedrock-agentcore:<region>:<account>:memory/<memoryId>`. status `CREATING|ACTIVE|FAILED|DELETING|UPDATING`
 → return `ACTIVE`. `clientToken` is a body field on Create/Update but a query param on Delete.
+The Memory response shape has no `tags` field — tags surface only through `ListTagsForResource`.
 
 ## Upgrade path — extending beyond the MVP
 

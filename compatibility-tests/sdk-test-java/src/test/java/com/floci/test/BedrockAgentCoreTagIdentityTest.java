@@ -91,6 +91,41 @@ class BedrockAgentCoreTagIdentityTest {
     }
 
     @Test
+    @Order(4)
+    void memoryTagRoundTripViaSdk() {
+        String memName = "memtag" + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+        CreateMemoryResponse created = client.createMemory(CreateMemoryRequest.builder()
+                .name(memName)
+                .eventExpiryDuration(30)
+                .tags(Map.of("team", "core"))
+                .build());
+        String memoryArn = created.memory().arn();
+        try {
+            // tags provided at create time surface through ListTagsForResource only
+            assertThat(client.listTagsForResource(ListTagsForResourceRequest.builder()
+                    .resourceArn(memoryArn).build()).tags()).containsEntry("team", "core");
+
+            client.tagResource(TagResourceRequest.builder()
+                    .resourceArn(memoryArn).tags(Map.of("env", "prod")).build());
+            assertThat(client.listTagsForResource(ListTagsForResourceRequest.builder()
+                    .resourceArn(memoryArn).build()).tags())
+                    .containsEntry("env", "prod").containsEntry("team", "core");
+
+            client.untagResource(UntagResourceRequest.builder()
+                    .resourceArn(memoryArn).tagKeys(List.of("env")).build());
+            assertThat(client.listTagsForResource(ListTagsForResourceRequest.builder()
+                    .resourceArn(memoryArn).build()).tags())
+                    .doesNotContainKey("env").containsEntry("team", "core");
+        } finally {
+            try {
+                client.deleteMemory(DeleteMemoryRequest.builder()
+                        .memoryId(created.memory().id()).build());
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    @Test
     @Order(2)
     void workloadIdentityCrud() {
         CreateWorkloadIdentityResponse created = client.createWorkloadIdentity(
