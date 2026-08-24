@@ -53,6 +53,18 @@ public class DbInstance {
     private int backupRetentionPeriod = 1;
     private boolean performanceInsightsEnabled;
 
+    // lex00/floci#120: DescribeDBInstances never echoed back these documented, client-set
+    // fields at all - PreferredBackupWindow was hardcoded to a fixed placeholder, the rest had
+    // no field at all and were simply dropped. Oracle: botocore's rds/2014-10-31/service-2.json
+    // DBInstance shape.
+    private String preferredBackupWindow;
+    private Integer monitoringInterval;
+    private String monitoringRoleArn;
+    private Integer performanceInsightsRetentionPeriod;
+    private String engineLifecycleSupport;
+    private List<String> enabledCloudwatchLogsExports = new ArrayList<>();
+    private Integer maxAllocatedStorage;
+
     private String dockerVolumeName;
     private String volumeId;
 
@@ -209,4 +221,30 @@ public class DbInstance {
 
     public boolean isPerformanceInsightsEnabled() { return performanceInsightsEnabled; }
     public void setPerformanceInsightsEnabled(boolean performanceInsightsEnabled) { this.performanceInsightsEnabled = performanceInsightsEnabled; }
+
+    public String getPreferredBackupWindow() { return preferredBackupWindow; }
+    public void setPreferredBackupWindow(String preferredBackupWindow) { this.preferredBackupWindow = preferredBackupWindow; }
+
+    public Integer getMonitoringInterval() { return monitoringInterval; }
+    public void setMonitoringInterval(Integer monitoringInterval) { this.monitoringInterval = monitoringInterval; }
+
+    public String getMonitoringRoleArn() { return monitoringRoleArn; }
+    public void setMonitoringRoleArn(String monitoringRoleArn) { this.monitoringRoleArn = monitoringRoleArn; }
+
+    public Integer getPerformanceInsightsRetentionPeriod() { return performanceInsightsRetentionPeriod; }
+    public void setPerformanceInsightsRetentionPeriod(Integer performanceInsightsRetentionPeriod) {
+        this.performanceInsightsRetentionPeriod = performanceInsightsRetentionPeriod;
+    }
+
+    public String getEngineLifecycleSupport() { return engineLifecycleSupport; }
+    public void setEngineLifecycleSupport(String engineLifecycleSupport) { this.engineLifecycleSupport = engineLifecycleSupport; }
+
+    public List<String> getEnabledCloudwatchLogsExports() { return enabledCloudwatchLogsExports; }
+    public void setEnabledCloudwatchLogsExports(List<String> enabledCloudwatchLogsExports) {
+        this.enabledCloudwatchLogsExports = enabledCloudwatchLogsExports != null
+                ? new ArrayList<>(enabledCloudwatchLogsExports) : new ArrayList<>();
+    }
+
+    public Integer getMaxAllocatedStorage() { return maxAllocatedStorage; }
+    public void setMaxAllocatedStorage(Integer maxAllocatedStorage) { this.maxAllocatedStorage = maxAllocatedStorage; }
 }

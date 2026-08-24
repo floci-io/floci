@@ -39,6 +39,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -56,6 +57,8 @@ import java.util.regex.Pattern;
 public class RdsService implements Resettable {
 
     private static final Logger LOG = Logger.getLogger(RdsService.class);
+    // AWS's own CreateDBInstance default when PreferredBackupWindow is omitted.
+    private static final String DEFAULT_PREFERRED_BACKUP_WINDOW = "04:00-06:00";
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final List<ManagedClusterParameterGroup> MANAGED_CLUSTER_PARAMETER_GROUPS = List.of(
             managedDefault("aurora-mysql5.7"),
@@ -433,6 +436,120 @@ public class RdsService implements Resettable {
         instance.setCopyTagsToSnapshot(copyTagsToSnapshot);
         instance.setBackupRetentionPeriod(backupRetentionPeriod);
         instance.setPerformanceInsightsEnabled(performanceInsightsEnabled);
+        instances.put(id, instance);
+        return instance;
+    }
+
+    // lex00/floci#120: DescribeDBInstances never echoed back several documented, client-set
+    // fields at all - PreferredBackupWindow/MonitoringInterval/MonitoringRoleArn/
+    // PerformanceInsightsRetentionPeriod/EngineLifecycleSupport/EnabledCloudwatchLogsExports/
+    // MaxAllocatedStorage were either hardcoded (PreferredBackupWindow) or simply not stored
+    // anywhere (the rest). Same post-create-attribute-setter shape as
+    // setCreateTimeInstanceAttributes above, so CreateDBInstance's own overload chain doesn't
+    // need to grow. `preferredBackupWindow` defaults to AWS's own "04:00-06:00" default when
+    // the request never set it, matching what every DBInstance already showed before this fix
+    // (now sourced from a real default constant instead of being unconditionally hardcoded).
+    public DbInstance setCreateTimeInstanceOptionalFields(String id, String preferredBackupWindow,
+                                                          Integer monitoringInterval, String monitoringRoleArn,
+                                                          Integer performanceInsightsRetentionPeriod,
+                                                          String engineLifecycleSupport,
+                                                          List<String> enabledCloudwatchLogsExports,
+                                                          Integer maxAllocatedStorage) {
+        DbInstance instance = getDbInstance(id);
+        instance.setPreferredBackupWindow(
+                preferredBackupWindow != null && !preferredBackupWindow.isBlank()
+                        ? preferredBackupWindow : DEFAULT_PREFERRED_BACKUP_WINDOW);
+        instance.setMonitoringInterval(monitoringInterval);
+        instance.setMonitoringRoleArn(monitoringRoleArn);
+        instance.setPerformanceInsightsRetentionPeriod(performanceInsightsRetentionPeriod);
+        instance.setEngineLifecycleSupport(engineLifecycleSupport);
+        if (enabledCloudwatchLogsExports != null && !enabledCloudwatchLogsExports.isEmpty()) {
+            instance.setEnabledCloudwatchLogsExports(enabledCloudwatchLogsExports);
+        }
+        instance.setMaxAllocatedStorage(maxAllocatedStorage);
+        instances.put(id, instance);
+        return instance;
+    }
+
+    // lex00/floci#120: real per-request semantics, applied to an existing instance from
+    // ModifyDBInstance - only overwrites fields the request actually set (nulls mean "leave
+    // alone"), unlike setCreateTimeInstanceOptionalFields above which always sets outright at
+    // create time.
+    public DbInstance modifyInstanceOptionalFields(String id, String preferredBackupWindow,
+                                                   Integer monitoringInterval, String monitoringRoleArn,
+                                                   Integer performanceInsightsRetentionPeriod,
+                                                   String engineLifecycleSupport,
+                                                   List<String> enableCloudwatchLogsExports,
+                                                   List<String> disableCloudwatchLogsExports,
+                                                   Integer maxAllocatedStorage) {
+        DbInstance instance = getDbInstance(id);
+        if (preferredBackupWindow != null && !preferredBackupWindow.isBlank()) {
+            instance.setPreferredBackupWindow(preferredBackupWindow);
+        }
+        if (monitoringInterval != null) {
+            instance.setMonitoringInterval(monitoringInterval);
+        }
+        if (monitoringRoleArn != null) {
+            instance.setMonitoringRoleArn(monitoringRoleArn);
+        }
+        if (performanceInsightsRetentionPeriod != null) {
+            instance.setPerformanceInsightsRetentionPeriod(performanceInsightsRetentionPeriod);
+        }
+        if (engineLifecycleSupport != null) {
+            instance.setEngineLifecycleSupport(engineLifecycleSupport);
+        }
+        if ((enableCloudwatchLogsExports != null && !enableCloudwatchLogsExports.isEmpty())
+                || (disableCloudwatchLogsExports != null && !disableCloudwatchLogsExports.isEmpty())) {
+            LinkedHashSet<String> exports = new LinkedHashSet<>(instance.getEnabledCloudwatchLogsExports());
+            if (enableCloudwatchLogsExports != null) {
+                exports.addAll(enableCloudwatchLogsExports);
+            }
+            if (disableCloudwatchLogsExports != null) {
+                exports.removeAll(disableCloudwatchLogsExports);
+            }
+            instance.setEnabledCloudwatchLogsExports(new ArrayList<>(exports));
+        }
+        if (maxAllocatedStorage != null) {
+            instance.setMaxAllocatedStorage(maxAllocatedStorage);
+        }
+        instances.put(id, instance);
+        return instance;
+    }
+
+    // lex00/floci#120: Endpoint.Port previously always came from allocateProxyPort's own
+    // base/max range, ignoring whatever Port/DBPortNumber a client requested at Create or
+    // Modify time - see allocateProxyPort(Integer)'s own doc comment for the collision
+    // fallback this honors. Re-points this instance's own local TCP listener at the exact
+    // requested port when it's free, so the returned Endpoint.Port stays a real, connectable
+    // value rather than diverging metadata.
+    // Create-time-only wrapper: unlike ModifyDBInstance's DBPortNumber (where "not set" means
+    // "leave alone"), CreateDBInstance's Port defaults to the engine's own standard port when
+    // omitted - matching real AWS, which never leaves a running instance on a made-up port.
+    public DbInstance applyCreateTimePort(String id, Integer requestedPort) {
+        DbInstance instance = getDbInstance(id);
+        int effectivePort = requestedPort != null && requestedPort > 0
+                ? requestedPort : instance.getEngine().defaultPort();
+        return applyRequestedPort(id, effectivePort);
+    }
+
+    public DbInstance applyRequestedPort(String id, Integer requestedPort) {
+        DbInstance instance = getDbInstance(id);
+        if (requestedPort == null || requestedPort <= 0 || requestedPort == instance.getProxyPort()) {
+            return instance;
+        }
+        boolean mock = config.services().rds().mock();
+        int oldPort = instance.getProxyPort();
+        int newPort = allocateProxyPort(requestedPort);
+        if (!mock && hasBackend(instance.getContainerHost(), instance.getContainerPort())) {
+            proxyManager.stopProxy(id);
+            proxyManager.startProxy(id, instance.getEngine(), instance.isIamDatabaseAuthenticationEnabled(),
+                    newPort, instance.getContainerHost(), instance.getContainerPort(),
+                    instance.getMasterUsername(), instance.getMasterPassword(), instance.getDbName(),
+                    (user, pw) -> validateDbPassword(id, user, pw));
+        }
+        releaseProxyPort(oldPort);
+        instance.setProxyPort(newPort);
+        instance.setEndpoint(mock ? new DbEndpoint("localhost", newPort) : proxyEndpoint(newPort));
         instances.put(id, instance);
         return instance;
     }
@@ -1103,9 +1220,18 @@ public class RdsService implements Resettable {
 
     public DbParameterGroup modifyDbParameterGroup(String name,
                                                     java.util.Map<String, String> parameters) {
+        return modifyDbParameterGroup(name, parameters, Map.of());
+    }
+
+    // lex00/floci#120: see DbParameterGroup's own doc comment for the oracle/context.
+    public DbParameterGroup modifyDbParameterGroup(String name, java.util.Map<String, String> parameters,
+                                                    java.util.Map<String, String> applyMethods) {
         DbParameterGroup group = getDbParameterGroup(name);
         if (parameters != null) {
             group.getParameters().putAll(parameters);
+        }
+        if (applyMethods != null) {
+            group.getParameterApplyMethods().putAll(applyMethods);
         }
         parameterGroups.put(name, group);
         return group;
@@ -1425,6 +1551,22 @@ public class RdsService implements Resettable {
     }
 
     private int allocateProxyPort() {
+        return allocateProxyPort(null);
+    }
+
+    // lex00/floci#120: Endpoint.Port previously always came from this method's own
+    // base/max range (e.g. 7001/7002), completely ignoring whatever Port a client actually
+    // requested - "a made-up, non-configured value, different per instance", worse than
+    // absence per the issue's own framing. A `preferredPort` is honored outright when it's
+    // free, which is the common case (most estates never collide on the same explicit port);
+    // on collision this falls back to the existing range-scan exactly as before, since two
+    // instances sharing one emulator host cannot both literally listen on the same port -
+    // an unavoidable, honestly-documented limit of floci's shared-host proxy architecture,
+    // not a regression relative to the prior always-different behavior.
+    private int allocateProxyPort(Integer preferredPort) {
+        if (preferredPort != null && preferredPort > 0 && usedPorts.add(preferredPort)) {
+            return preferredPort;
+        }
         int base = config.services().rds().proxyBasePort();
         int max = config.services().rds().proxyMaxPort();
         for (int port = base; port <= max; port++) {

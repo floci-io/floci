@@ -13,6 +13,10 @@ public class DbParameterGroup {
     private String description;
     private String dbParameterGroupArn;
     private Map<String, String> parameters = new HashMap<>();
+    // lex00/floci#120: DescribeDBParameters never echoed back ApplyMethod at all - every
+    // parameter created with any apply_method came back indistinguishable from one that never
+    // set it. Oracle: botocore's rds/2014-10-31/service-2.json Parameter shape.
+    private Map<String, String> parameterApplyMethods = new HashMap<>();
     private Map<String, String> tags = new HashMap<>();
 
     public DbParameterGroup() {}
@@ -35,6 +39,11 @@ public class DbParameterGroup {
 
     public Map<String, String> getParameters() { return parameters; }
     public void setParameters(Map<String, String> parameters) { this.parameters = parameters; }
+
+    public Map<String, String> getParameterApplyMethods() { return parameterApplyMethods; }
+    public void setParameterApplyMethods(Map<String, String> parameterApplyMethods) {
+        this.parameterApplyMethods = parameterApplyMethods != null ? new HashMap<>(parameterApplyMethods) : new HashMap<>();
+    }
 
     public String getDbParameterGroupArn() { return dbParameterGroupArn; }
     public void setDbParameterGroupArn(String dbParameterGroupArn) { this.dbParameterGroupArn = dbParameterGroupArn; }

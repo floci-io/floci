@@ -128,6 +128,15 @@ public class RdsQueryHandler {
         int backupRetentionPeriod = backupRetentionPeriodStr != null
                 ? parseIntSafe(backupRetentionPeriodStr, 1) : 1;
         boolean performanceInsightsEnabled = "true".equalsIgnoreCase(params.getFirst("EnablePerformanceInsights"));
+        // lex00/floci#120: see DbInstance's own doc comment for the oracle and what was dropped.
+        String preferredBackupWindow = params.getFirst("PreferredBackupWindow");
+        Integer portParam = nullableIntParam(params, "Port");
+        Integer monitoringInterval = nullableIntParam(params, "MonitoringInterval");
+        String monitoringRoleArn = params.getFirst("MonitoringRoleArn");
+        Integer performanceInsightsRetentionPeriod = nullableIntParam(params, "PerformanceInsightsRetentionPeriod");
+        String engineLifecycleSupport = params.getFirst("EngineLifecycleSupport");
+        List<String> enabledCloudwatchLogsExports = memberList(params, "EnableCloudwatchLogsExports");
+        Integer maxAllocatedStorage = nullableIntParam(params, "MaxAllocatedStorage");
 
         if (dbInstanceClass == null) {
             dbInstanceClass = "db.t3.micro";
@@ -145,6 +154,10 @@ public class RdsQueryHandler {
             instance = service.setCreateTimeInstanceAttributes(id, storageEncrypted, deletionProtection,
                     autoMinorVersionUpgrade, copyTagsToSnapshot, backupRetentionPeriod,
                     performanceInsightsEnabled);
+            instance = service.setCreateTimeInstanceOptionalFields(id, preferredBackupWindow,
+                    monitoringInterval, monitoringRoleArn, performanceInsightsRetentionPeriod,
+                    engineLifecycleSupport, enabledCloudwatchLogsExports, maxAllocatedStorage);
+            instance = service.applyCreateTimePort(id, portParam);
             String result = dbInstanceXml(instance);
             return Response.ok(AwsQueryResponse.envelope("CreateDBInstance", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {
@@ -210,10 +223,27 @@ public class RdsQueryHandler {
         String iamStr = params.getFirst("EnableIAMDatabaseAuthentication");
         Boolean iamEnabled = iamStr != null ? Boolean.parseBoolean(iamStr) : null;
         String dbSubnetGroupName = params.getFirst("DBSubnetGroupName");
+        // lex00/floci#120: see DbInstance's own doc comment for the oracle.
+        String preferredBackupWindow = params.getFirst("PreferredBackupWindow");
+        Integer dbPortNumber = nullableIntParam(params, "DBPortNumber");
+        Integer monitoringInterval = nullableIntParam(params, "MonitoringInterval");
+        String monitoringRoleArn = params.getFirst("MonitoringRoleArn");
+        Integer performanceInsightsRetentionPeriod = nullableIntParam(params, "PerformanceInsightsRetentionPeriod");
+        String engineLifecycleSupport = params.getFirst("EngineLifecycleSupport");
+        List<String> enableCloudwatchLogsExports =
+                memberList(params, "CloudwatchLogsExportConfiguration.EnableLogTypes");
+        List<String> disableCloudwatchLogsExports =
+                memberList(params, "CloudwatchLogsExportConfiguration.DisableLogTypes");
+        Integer maxAllocatedStorage = nullableIntParam(params, "MaxAllocatedStorage");
         try {
             List<String> vpcSecurityGroupIds = vpcSecurityGroupIds(params);
             DbInstance instance = service.modifyDbInstance(
                     id, newPassword, iamEnabled, dbSubnetGroupName, vpcSecurityGroupIds);
+            instance = service.modifyInstanceOptionalFields(id, preferredBackupWindow,
+                    monitoringInterval, monitoringRoleArn, performanceInsightsRetentionPeriod,
+                    engineLifecycleSupport, enableCloudwatchLogsExports, disableCloudwatchLogsExports,
+                    maxAllocatedStorage);
+            instance = service.applyRequestedPort(id, dbPortNumber);
             String result = dbInstanceXml(instance);
             return Response.ok(AwsQueryResponse.envelope("ModifyDBInstance", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {
@@ -499,6 +529,7 @@ public class RdsQueryHandler {
             return AwsQueryResponse.error("InvalidParameterValue", "DBParameterGroupName is required.", AwsNamespaces.RDS, 400);
         }
         Map<String, String> parameters = new HashMap<>();
+        Map<String, String> applyMethods = new HashMap<>();
         for (int n = 1; ; n++) {
             String paramName = params.getFirst("Parameters.Parameter." + n + ".ParameterName");
             if (paramName == null) {
@@ -508,9 +539,14 @@ public class RdsQueryHandler {
             if (paramValue != null) {
                 parameters.put(paramName, paramValue);
             }
+            // lex00/floci#120: see DbParameterGroup's own doc comment for the oracle/context.
+            String applyMethod = params.getFirst("Parameters.Parameter." + n + ".ApplyMethod");
+            if (applyMethod != null) {
+                applyMethods.put(paramName, applyMethod);
+            }
         }
         try {
-            DbParameterGroup group = service.modifyDbParameterGroup(name, parameters);
+            DbParameterGroup group = service.modifyDbParameterGroup(name, parameters, applyMethods);
             String result = new XmlBuilder()
                     .elem("DBParameterGroupName", group.getDbParameterGroupName())
                     .build();
@@ -532,8 +568,13 @@ public class RdsQueryHandler {
                 xml.start("Parameter")
                    .elem("ParameterName", entry.getKey())
                    .elem("ParameterValue", entry.getValue())
-                   .elem("IsModifiable", true)
-                   .end("Parameter");
+                   .elem("IsModifiable", true);
+                // lex00/floci#120: see DbParameterGroup's own doc comment for the oracle/context.
+                String applyMethod = group.getParameterApplyMethods().get(entry.getKey());
+                if (applyMethod != null && !applyMethod.isBlank()) {
+                    xml.elem("ApplyMethod", applyMethod);
+                }
+                xml.end("Parameter");
             }
             xml.end("Parameters").start("Marker").end("Marker");
             return Response.ok(AwsQueryResponse.envelope("DescribeDBParameters", AwsNamespaces.RDS, xml.build())).build();
@@ -700,13 +741,37 @@ public class RdsQueryHandler {
            .elem("PubliclyAccessible", false)
            .elem("AvailabilityZone", i.getAvailabilityZone() != null ? i.getAvailabilityZone() : config.defaultAvailabilityZone())
            .elem("PreferredMaintenanceWindow", "mon:00:00-mon:03:00")
-           .elem("PreferredBackupWindow", "04:00-06:00")
+           .elem("PreferredBackupWindow", i.getPreferredBackupWindow() != null ? i.getPreferredBackupWindow() : "04:00-06:00")
            .elem("BackupRetentionPeriod", i.getBackupRetentionPeriod())
            .elem("AutoMinorVersionUpgrade", i.isAutoMinorVersionUpgrade())
            .elem("DeletionProtection", i.isDeletionProtection())
            .elem("CopyTagsToSnapshot", i.isCopyTagsToSnapshot())
-           .elem("PerformanceInsightsEnabled", i.isPerformanceInsightsEnabled())
-           .raw(vpcSecurityGroupsXml(i))
+           .elem("PerformanceInsightsEnabled", i.isPerformanceInsightsEnabled());
+        // lex00/floci#120: previously either hardcoded (PreferredBackupWindow above) or simply
+        // never stored/returned at all - see DbInstance's own doc comment for the oracle.
+        if (i.getMonitoringInterval() != null) {
+            xml.elem("MonitoringInterval", i.getMonitoringInterval());
+        }
+        if (i.getMonitoringRoleArn() != null && !i.getMonitoringRoleArn().isBlank()) {
+            xml.elem("MonitoringRoleArn", i.getMonitoringRoleArn());
+        }
+        if (i.isPerformanceInsightsEnabled() && i.getPerformanceInsightsRetentionPeriod() != null) {
+            xml.elem("PerformanceInsightsRetentionPeriod", i.getPerformanceInsightsRetentionPeriod());
+        }
+        if (i.getEngineLifecycleSupport() != null && !i.getEngineLifecycleSupport().isBlank()) {
+            xml.elem("EngineLifecycleSupport", i.getEngineLifecycleSupport());
+        }
+        if (!i.getEnabledCloudwatchLogsExports().isEmpty()) {
+            xml.start("EnabledCloudwatchLogsExports");
+            for (String logType : i.getEnabledCloudwatchLogsExports()) {
+                xml.elem("member", logType);
+            }
+            xml.end("EnabledCloudwatchLogsExports");
+        }
+        if (i.getMaxAllocatedStorage() != null) {
+            xml.elem("MaxAllocatedStorage", i.getMaxAllocatedStorage());
+        }
+        xml.raw(vpcSecurityGroupsXml(i))
            .raw(dbParameterGroupsXml(i))
            .raw(dbSubnetGroupXml(dbSubnetGroupForInstance(i)))
            .elem("DbiResourceId", i.getDbiResourceId())
@@ -1049,6 +1114,18 @@ public class RdsQueryHandler {
             return Integer.parseInt(value);
         } catch (NumberFormatException e) {
             return defaultValue;
+        }
+    }
+
+    private static Integer nullableIntParam(MultivaluedMap<String, String> params, String name) {
+        String value = params.getFirst(name);
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            return Integer.parseInt(value);
+        } catch (NumberFormatException e) {
+            throw new AwsException("InvalidParameterValue", name + " is not a valid integer.", 400);
         }
     }
 
