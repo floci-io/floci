@@ -95,6 +95,25 @@ public class LaunchTemplateData {
         this.securityGroupIds = securityGroupIds != null ? new ArrayList<>(securityGroupIds) : new ArrayList<>();
     }
 
+    // lex00/floci#123: getSecurityGroupIds() above must stay the literal,
+    // as-set top-level SecurityGroupIds list - DescribeLaunchTemplateVersions
+    // echoes it back verbatim, and real AWS keeps it and
+    // NetworkInterfaces[].Groups mutually exclusive (the terraform
+    // provider's own docs describe vpc_security_group_ids and
+    // network_interfaces.security_groups that way). RunInstances resolving
+    // a launch template into an actual instance's security groups, though,
+    // legitimately needs the UNION of both - a template that only ever set
+    // groups per-network-interface still has to launch into those groups -
+    // so that internal-only resolution gets its own method rather than
+    // reusing (and re-polluting) the wire-facing field.
+    public List<String> getEffectiveSecurityGroupIds() {
+        java.util.LinkedHashSet<String> effective = new java.util.LinkedHashSet<>(securityGroupIds);
+        for (NetworkInterfaceSpecification ni : networkInterfaces) {
+            effective.addAll(ni.getGroups());
+        }
+        return new ArrayList<>(effective);
+    }
+
     public List<Tag> getInstanceTags() { return instanceTags; }
     public void setInstanceTags(List<Tag> instanceTags) {
         this.instanceTags = instanceTags != null ? new ArrayList<>(instanceTags) : new ArrayList<>();
@@ -312,6 +331,12 @@ public class LaunchTemplateData {
         private String interfaceType;
         private Integer ipv6AddressCount;
         private String networkInterfaceId;
+        // lex00/floci#119's round-5 re-measure (choudoufu's own round-5 repin, ae2a613b25):
+        // a network interface's ConnectionTrackingSpecification (TcpEstablishedTimeout/
+        // UdpStreamTimeout/UdpTimeout) had no field at all, so
+        // DescribeLaunchTemplateVersions could never echo it back. Oracle: botocore's
+        // ec2/2016-11-15/service-2.json ConnectionTrackingSpecificationRequest/-Response shapes.
+        private ConnectionTrackingSpecification connectionTrackingSpecification;
 
         public Integer getDeviceIndex() { return deviceIndex; }
         public void setDeviceIndex(Integer v) { this.deviceIndex = v; }
@@ -345,6 +370,30 @@ public class LaunchTemplateData {
 
         public String getNetworkInterfaceId() { return networkInterfaceId; }
         public void setNetworkInterfaceId(String v) { this.networkInterfaceId = v; }
+
+        public ConnectionTrackingSpecification getConnectionTrackingSpecification() { return connectionTrackingSpecification; }
+        public void setConnectionTrackingSpecification(ConnectionTrackingSpecification v) { this.connectionTrackingSpecification = v; }
+    }
+
+    @RegisterForReflection
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public static class ConnectionTrackingSpecification {
+        private Integer tcpEstablishedTimeout;
+        private Integer udpStreamTimeout;
+        private Integer udpTimeout;
+
+        public Integer getTcpEstablishedTimeout() { return tcpEstablishedTimeout; }
+        public void setTcpEstablishedTimeout(Integer v) { this.tcpEstablishedTimeout = v; }
+
+        public Integer getUdpStreamTimeout() { return udpStreamTimeout; }
+        public void setUdpStreamTimeout(Integer v) { this.udpStreamTimeout = v; }
+
+        public Integer getUdpTimeout() { return udpTimeout; }
+        public void setUdpTimeout(Integer v) { this.udpTimeout = v; }
+
+        public boolean isEmpty() {
+            return tcpEstablishedTimeout == null && udpStreamTimeout == null && udpTimeout == null;
+        }
     }
 
     @RegisterForReflection

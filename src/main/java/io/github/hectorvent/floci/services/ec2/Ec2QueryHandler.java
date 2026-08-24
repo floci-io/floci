@@ -612,7 +612,7 @@ public class Ec2QueryHandler {
             userData = firstNonBlank(userData, launchTemplateData.getUserData());
             iamInstanceProfileArn = firstNonBlank(iamInstanceProfileArn, launchTemplateData.getIamInstanceProfileArn());
             if (sgIds.isEmpty()) {
-                sgIds = new ArrayList<>(launchTemplateData.getSecurityGroupIds());
+                sgIds = new ArrayList<>(launchTemplateData.getEffectiveSecurityGroupIds());
             }
             if (!launchTemplateData.getInstanceTags().isEmpty()) {
                 Map<String, Tag> mergedTags = new LinkedHashMap<>();
@@ -3817,6 +3817,20 @@ public class Ec2QueryHandler {
                 if (ni.getNetworkCardIndex() != null) xml.elem("networkCardIndex", String.valueOf(ni.getNetworkCardIndex()));
                 if (ni.getInterfaceType() != null) xml.elem("interfaceType", ni.getInterfaceType());
                 if (ni.getIpv6AddressCount() != null) xml.elem("ipv6AddressCount", String.valueOf(ni.getIpv6AddressCount()));
+                LaunchTemplateData.ConnectionTrackingSpecification connectionTracking = ni.getConnectionTrackingSpecification();
+                if (connectionTracking != null && !connectionTracking.isEmpty()) {
+                    xml.start("connectionTrackingSpecification");
+                    if (connectionTracking.getTcpEstablishedTimeout() != null) {
+                        xml.elem("tcpEstablishedTimeout", String.valueOf(connectionTracking.getTcpEstablishedTimeout()));
+                    }
+                    if (connectionTracking.getUdpStreamTimeout() != null) {
+                        xml.elem("udpStreamTimeout", String.valueOf(connectionTracking.getUdpStreamTimeout()));
+                    }
+                    if (connectionTracking.getUdpTimeout() != null) {
+                        xml.elem("udpTimeout", String.valueOf(connectionTracking.getUdpTimeout()));
+                    }
+                    xml.end("connectionTrackingSpecification");
+                }
                 xml.end("item");
             }
             xml.end("networkInterfaceSet");
@@ -3891,25 +3905,18 @@ public class Ec2QueryHandler {
         return enabled == null || enabled.isBlank() ? null : Boolean.parseBoolean(enabled);
     }
 
+    // lex00/floci#123: this used to also fold in every
+    // LaunchTemplateData.NetworkInterface.N.{Groups,GroupId,SecurityGroupId}
+    // value, so a launch template whose security groups were set ONLY on a
+    // network interface (never at the top level) echoed those same group
+    // IDs back on the top-level SecurityGroupIds field too on
+    // DescribeLaunchTemplateVersions - which real AWS does not do; the two
+    // are documented as mutually exclusive. This must stay the literal
+    // top-level SecurityGroupId list only - see
+    // LaunchTemplateData.getEffectiveSecurityGroupIds() for the merged view
+    // RunInstances' own template resolution still legitimately needs.
     private List<String> parseLaunchTemplateSecurityGroupIds(MultivaluedMap<String, String> p) {
-        LinkedHashSet<String> groups = new LinkedHashSet<>(getList(p, "LaunchTemplateData.SecurityGroupId"));
-        for (int i = 1; ; i++) {
-            boolean sawInterface = false;
-            for (String prefix : List.of(
-                    "LaunchTemplateData.NetworkInterface." + i + ".Groups",
-                    "LaunchTemplateData.NetworkInterface." + i + ".GroupId",
-                    "LaunchTemplateData.NetworkInterface." + i + ".SecurityGroupId")) {
-                List<String> values = getList(p, prefix);
-                if (!values.isEmpty()) {
-                    sawInterface = true;
-                    groups.addAll(values);
-                }
-            }
-            if (!sawInterface && p.getFirst("LaunchTemplateData.NetworkInterface." + i + ".DeviceIndex") == null) {
-                break;
-            }
-        }
-        return new ArrayList<>(groups);
+        return getList(p, "LaunchTemplateData.SecurityGroupId");
     }
 
     private List<BlockDeviceMapping> parseLaunchTemplateBlockDeviceMappings(MultivaluedMap<String, String> p) {
@@ -4028,10 +4035,12 @@ public class Ec2QueryHandler {
             String ipv6AddressCount = p.getFirst(prefix + ".Ipv6AddressCount");
             String networkInterfaceId = p.getFirst(prefix + ".NetworkInterfaceId");
             List<String> groups = getList(p, prefix + ".SecurityGroupId", prefix + ".Groups", prefix + ".GroupId");
+            LaunchTemplateData.ConnectionTrackingSpecification connectionTracking =
+                    parseLaunchTemplateConnectionTrackingSpecification(p, prefix + ".ConnectionTrackingSpecification");
             boolean present = deviceIndex != null || subnetId != null || associatePublicIp != null
                     || deleteOnTermination != null || description != null || privateIpAddress != null
                     || networkCardIndex != null || interfaceType != null || ipv6AddressCount != null
-                    || networkInterfaceId != null || !groups.isEmpty();
+                    || networkInterfaceId != null || !groups.isEmpty() || connectionTracking != null;
             if (!present) {
                 break;
             }
@@ -4047,9 +4056,27 @@ public class Ec2QueryHandler {
             spec.setInterfaceType(interfaceType);
             spec.setIpv6AddressCount(parseOptionalInt(ipv6AddressCount, prefix + ".Ipv6AddressCount"));
             spec.setNetworkInterfaceId(networkInterfaceId);
+            spec.setConnectionTrackingSpecification(connectionTracking);
             result.add(spec);
         }
         return result;
+    }
+
+    // lex00/floci#119's round-5 re-measure: see LaunchTemplateData.NetworkInterfaceSpecification's
+    // own doc comment on connectionTrackingSpecification for why this exists.
+    private LaunchTemplateData.ConnectionTrackingSpecification parseLaunchTemplateConnectionTrackingSpecification(
+            MultivaluedMap<String, String> p, String prefix) {
+        String tcpEstablishedTimeout = p.getFirst(prefix + ".TcpEstablishedTimeout");
+        String udpStreamTimeout = p.getFirst(prefix + ".UdpStreamTimeout");
+        String udpTimeout = p.getFirst(prefix + ".UdpTimeout");
+        if (tcpEstablishedTimeout == null && udpStreamTimeout == null && udpTimeout == null) {
+            return null;
+        }
+        LaunchTemplateData.ConnectionTrackingSpecification spec = new LaunchTemplateData.ConnectionTrackingSpecification();
+        spec.setTcpEstablishedTimeout(parseOptionalInt(tcpEstablishedTimeout, prefix + ".TcpEstablishedTimeout"));
+        spec.setUdpStreamTimeout(parseOptionalInt(udpStreamTimeout, prefix + ".UdpStreamTimeout"));
+        spec.setUdpTimeout(parseOptionalInt(udpTimeout, prefix + ".UdpTimeout"));
+        return spec;
     }
 
     private Placement parseLaunchTemplatePlacement(MultivaluedMap<String, String> p) {

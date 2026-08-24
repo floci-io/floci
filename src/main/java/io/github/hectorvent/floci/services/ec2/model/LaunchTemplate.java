@@ -92,6 +92,23 @@ public class LaunchTemplate {
     public List<String> getSecurityGroupIds() { return securityGroupIds; }
     public void setSecurityGroupIds(List<String> securityGroupIds) { this.securityGroupIds = securityGroupIds; }
 
+    // lex00/floci#123: getSecurityGroupIds() above must stay the literal
+    // top-level SecurityGroupIds this template/version was created with -
+    // see LaunchTemplateData.getEffectiveSecurityGroupIds()'s own doc
+    // comment. AutoScalingReconciler resolving a launch template into the
+    // security groups an actual reconciled instance gets needs the same
+    // union-of-top-level-and-per-interface view RunInstances needs, so it
+    // gets the same kind of accessor here rather than reading the
+    // wire-facing field directly.
+    public List<String> getEffectiveSecurityGroupIds() {
+        java.util.LinkedHashSet<String> effective = new java.util.LinkedHashSet<>(
+                securityGroupIds != null ? securityGroupIds : List.of());
+        for (LaunchTemplateData.NetworkInterfaceSpecification ni : networkInterfaces) {
+            effective.addAll(ni.getGroups());
+        }
+        return new ArrayList<>(effective);
+    }
+
     public List<Tag> getTags() { return tags; }
     public void setTags(List<Tag> tags) { this.tags = tags; }
 
