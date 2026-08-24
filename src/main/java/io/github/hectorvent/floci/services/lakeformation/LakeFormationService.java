@@ -20,26 +20,30 @@ public class LakeFormationService {
         this.regionResolver = regionResolver;
     }
 
-    public PutDataLakeSettingsResponse putDataLakeSettings(PutDataLakeSettingsRequest request) {
+    public PutDataLakeSettingsResponse putDataLakeSettings(String region, PutDataLakeSettingsRequest request) {
         String catalogId = request.getCatalogId() != null ? request.getCatalogId() : regionResolver.getAccountId();
-        storage.putDataLakeSettings(catalogId, request.getDataLakeSettings());
+        storage.putDataLakeSettings(region, catalogId, request.getDataLakeSettings());
         return new PutDataLakeSettingsResponse();
     }
 
-    public GetDataLakeSettingsResponse getDataLakeSettings(GetDataLakeSettingsRequest request) {
+    public GetDataLakeSettingsResponse getDataLakeSettings(String region, GetDataLakeSettingsRequest request) {
         String catalogId = request.getCatalogId() != null ? request.getCatalogId() : regionResolver.getAccountId();
-        DataLakeSettings settings = storage.getDataLakeSettings(catalogId).orElseGet(DataLakeSettings::new);
+        DataLakeSettings settings = storage.getDataLakeSettings(region, catalogId).orElseGet(DataLakeSettings::new);
         
         GetDataLakeSettingsResponse response = new GetDataLakeSettingsResponse();
         response.setDataLakeSettings(settings);
         return response;
     }
 
-    public RegisterResourceResponse registerResource(RegisterResourceRequest request) {
+    public RegisterResourceResponse registerResource(String region, RegisterResourceRequest request) {
         if (request.getResourceArn() == null) {
             throw new AwsException("InvalidInputException", "ResourceArn is required", 400);
         }
+        if (storage.describeResource(region, request.getResourceArn()).isPresent()) {
+            throw new AwsException("AlreadyExistsException", "Resource is already registered", 400);
+        }
         storage.registerResource(
+                region,
                 request.getResourceArn(),
                 request.getRoleArn(),
                 Boolean.TRUE.equals(request.getUseServiceLinkedRole()),
@@ -48,16 +52,20 @@ public class LakeFormationService {
         return new RegisterResourceResponse();
     }
 
-    public DeregisterResourceResponse deregisterResource(DeregisterResourceRequest request) {
+    public DeregisterResourceResponse deregisterResource(String region, DeregisterResourceRequest request) {
         if (request.getResourceArn() == null) {
             throw new AwsException("InvalidInputException", "ResourceArn is required", 400);
         }
-        storage.deregisterResource(request.getResourceArn());
+        if (storage.describeResource(region, request.getResourceArn()).isEmpty()) {
+            throw new AwsException("EntityNotFoundException", "Resource not found", 400);
+        }
+        storage.deregisterResource(region, request.getResourceArn());
         return new DeregisterResourceResponse();
     }
 
-    public ListResourcesResponse listResources(ListResourcesRequest request) {
+    public ListResourcesResponse listResources(String region, ListResourcesRequest request) {
         List<ResourceInfo> resources = storage.listResources(
+                region,
                 request.getFilterConditionList() != null && !request.getFilterConditionList().isEmpty()
                         ? request.getFilterConditionList().get(0) : null,
                 request.getMaxResults(),
@@ -68,8 +76,8 @@ public class LakeFormationService {
         return response;
     }
 
-    public DescribeResourceResponse describeResource(DescribeResourceRequest request) {
-        ResourceInfo info = storage.describeResource(request.getResourceArn())
+    public DescribeResourceResponse describeResource(String region, DescribeResourceRequest request) {
+        ResourceInfo info = storage.describeResource(region, request.getResourceArn())
                 .orElseThrow(() -> new AwsException("EntityNotFoundException", "Resource not found", 400));
         
         DescribeResourceResponse response = new DescribeResourceResponse();
@@ -77,7 +85,7 @@ public class LakeFormationService {
         return response;
     }
 
-    public GrantPermissionsResponse grantPermissions(GrantPermissionsRequest request) {
+    public GrantPermissionsResponse grantPermissions(String region, GrantPermissionsRequest request) {
         String catalogId = request.getCatalogId() != null ? request.getCatalogId() : regionResolver.getAccountId();
         
         PrincipalResourcePermissions p = new PrincipalResourcePermissions();
@@ -86,11 +94,11 @@ public class LakeFormationService {
         p.setPermissions(request.getPermissions());
         p.setPermissionsWithGrantOption(request.getPermissionsWithGrantOption());
         
-        storage.grantPermissions(catalogId, p);
+        storage.grantPermissions(region, catalogId, p);
         return new GrantPermissionsResponse();
     }
 
-    public RevokePermissionsResponse revokePermissions(RevokePermissionsRequest request) {
+    public RevokePermissionsResponse revokePermissions(String region, RevokePermissionsRequest request) {
         String catalogId = request.getCatalogId() != null ? request.getCatalogId() : regionResolver.getAccountId();
         
         PrincipalResourcePermissions p = new PrincipalResourcePermissions();
@@ -99,14 +107,15 @@ public class LakeFormationService {
         p.setPermissions(request.getPermissions());
         p.setPermissionsWithGrantOption(request.getPermissionsWithGrantOption());
         
-        storage.revokePermissions(catalogId, p);
+        storage.revokePermissions(region, catalogId, p);
         return new RevokePermissionsResponse();
     }
 
-    public ListPermissionsResponse listPermissions(ListPermissionsRequest request) {
+    public ListPermissionsResponse listPermissions(String region, ListPermissionsRequest request) {
         String catalogId = request.getCatalogId() != null ? request.getCatalogId() : regionResolver.getAccountId();
         
         List<PrincipalResourcePermissions> permissions = storage.listPermissions(
+                region,
                 catalogId,
                 request.getPrincipal(),
                 request.getResource(),
@@ -121,18 +130,21 @@ public class LakeFormationService {
         return response;
     }
 
-    public CreateLFTagResponse createLFTag(CreateLFTagRequest request) {
+    public CreateLFTagResponse createLFTag(String region, CreateLFTagRequest request) {
         String catalogId = request.getCatalogId() != null ? request.getCatalogId() : regionResolver.getAccountId();
         if (request.getTagKey() == null) {
             throw new AwsException("InvalidInputException", "TagKey is required", 400);
         }
-        storage.createLFTag(catalogId, request.getTagKey(), request.getTagValues());
+        if (storage.getLFTag(region, catalogId, request.getTagKey()).isPresent()) {
+            throw new AwsException("AlreadyExistsException", "Tag already exists", 400);
+        }
+        storage.createLFTag(region, catalogId, request.getTagKey(), request.getTagValues());
         return new CreateLFTagResponse();
     }
 
-    public GetLFTagResponse getLFTag(GetLFTagRequest request) {
+    public GetLFTagResponse getLFTag(String region, GetLFTagRequest request) {
         String catalogId = request.getCatalogId() != null ? request.getCatalogId() : regionResolver.getAccountId();
-        LFTag tag = storage.getLFTag(catalogId, request.getTagKey())
+        LFTag tag = storage.getLFTag(region, catalogId, request.getTagKey())
                 .orElseThrow(() -> new AwsException("EntityNotFoundException", "LF-Tag not found", 400));
         
         GetLFTagResponse response = new GetLFTagResponse();
@@ -142,52 +154,52 @@ public class LakeFormationService {
         return response;
     }
 
-    public UpdateLFTagResponse updateLFTag(UpdateLFTagRequest request) {
+    public UpdateLFTagResponse updateLFTag(String region, UpdateLFTagRequest request) {
         String catalogId = request.getCatalogId() != null ? request.getCatalogId() : regionResolver.getAccountId();
         // check exists
-        storage.getLFTag(catalogId, request.getTagKey())
+        storage.getLFTag(region, catalogId, request.getTagKey())
                 .orElseThrow(() -> new AwsException("EntityNotFoundException", "LF-Tag not found", 400));
         
-        storage.updateLFTag(catalogId, request.getTagKey(), request.getTagValuesToAdd(), request.getTagValuesToDelete());
+        storage.updateLFTag(region, catalogId, request.getTagKey(), request.getTagValuesToAdd(), request.getTagValuesToDelete());
         return new UpdateLFTagResponse();
     }
 
-    public DeleteLFTagResponse deleteLFTag(DeleteLFTagRequest request) {
+    public DeleteLFTagResponse deleteLFTag(String region, DeleteLFTagRequest request) {
         String catalogId = request.getCatalogId() != null ? request.getCatalogId() : regionResolver.getAccountId();
-        storage.getLFTag(catalogId, request.getTagKey())
+        storage.getLFTag(region, catalogId, request.getTagKey())
                 .orElseThrow(() -> new AwsException("EntityNotFoundException", "LF-Tag not found", 400));
         
-        storage.deleteLFTag(catalogId, request.getTagKey());
+        storage.deleteLFTag(region, catalogId, request.getTagKey());
         return new DeleteLFTagResponse();
     }
 
-    public ListLFTagsResponse listLFTags(ListLFTagsRequest request) {
+    public ListLFTagsResponse listLFTags(String region, ListLFTagsRequest request) {
         String catalogId = request.getCatalogId() != null ? request.getCatalogId() : regionResolver.getAccountId();
-        List<LFTagPair> tags = storage.listLFTags(catalogId, request.getResourceShareType(), request.getMaxResults(), request.getNextToken());
+        List<LFTagPair> tags = storage.listLFTags(region, catalogId, request.getResourceShareType(), request.getMaxResults(), request.getNextToken());
         
         ListLFTagsResponse response = new ListLFTagsResponse();
         response.setLfTags(tags);
         return response;
     }
 
-    public AddLFTagsToResourceResponse addLFTagsToResource(AddLFTagsToResourceRequest request) {
+    public AddLFTagsToResourceResponse addLFTagsToResource(String region, AddLFTagsToResourceRequest request) {
         String catalogId = request.getCatalogId() != null ? request.getCatalogId() : regionResolver.getAccountId();
         if (request.getResource() == null) {
             throw new AwsException("InvalidInputException", "Resource is required", 400);
         }
-        storage.addLFTagsToResource(catalogId, request.getResource(), request.getLfTags());
+        storage.addLFTagsToResource(region, catalogId, request.getResource(), request.getLfTags());
         
         AddLFTagsToResourceResponse response = new AddLFTagsToResourceResponse();
         response.setFailures(List.of()); // Success for all
         return response;
     }
 
-    public RemoveLFTagsFromResourceResponse removeLFTagsFromResource(RemoveLFTagsFromResourceRequest request) {
+    public RemoveLFTagsFromResourceResponse removeLFTagsFromResource(String region, RemoveLFTagsFromResourceRequest request) {
         String catalogId = request.getCatalogId() != null ? request.getCatalogId() : regionResolver.getAccountId();
         if (request.getResource() == null) {
             throw new AwsException("InvalidInputException", "Resource is required", 400);
         }
-        storage.removeLFTagsFromResource(catalogId, request.getResource(), request.getLfTags());
+        storage.removeLFTagsFromResource(region, catalogId, request.getResource(), request.getLfTags());
         
         RemoveLFTagsFromResourceResponse response = new RemoveLFTagsFromResourceResponse();
         response.setFailures(List.of()); // Success for all

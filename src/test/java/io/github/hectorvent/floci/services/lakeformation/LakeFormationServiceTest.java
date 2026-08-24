@@ -39,10 +39,10 @@ class LakeFormationServiceTest {
         DataLakeSettings settings = new DataLakeSettings();
         req.setDataLakeSettings(settings);
 
-        PutDataLakeSettingsResponse res = service.putDataLakeSettings(req);
+        PutDataLakeSettingsResponse res = service.putDataLakeSettings("us-east-1", req);
         
         assertNotNull(res);
-        verify(storage).putDataLakeSettings("custom-catalog", settings);
+        verify(storage).putDataLakeSettings("us-east-1", "custom-catalog", settings);
     }
 
     @Test
@@ -52,17 +52,30 @@ class LakeFormationServiceTest {
         req.setRoleArn("arn:aws:iam::123:role/MyRole");
         req.setUseServiceLinkedRole(true);
 
-        RegisterResourceResponse res = service.registerResource(req);
+        when(storage.describeResource(anyString(), anyString())).thenReturn(Optional.empty());
+
+        RegisterResourceResponse res = service.registerResource("us-east-1", req);
         
         assertNotNull(res);
-        verify(storage).registerResource("arn:aws:s3:::my-bucket", "arn:aws:iam::123:role/MyRole", true, null);
+        verify(storage).registerResource("us-east-1", "arn:aws:s3:::my-bucket", "arn:aws:iam::123:role/MyRole", true, null);
+    }
+
+    @Test
+    void testRegisterResourceAlreadyExists() {
+        RegisterResourceRequest req = new RegisterResourceRequest();
+        req.setResourceArn("arn:aws:s3:::my-bucket");
+
+        when(storage.describeResource("us-east-1", "arn:aws:s3:::my-bucket")).thenReturn(Optional.of(new ResourceInfo()));
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.registerResource("us-east-1", req));
+        assertEquals("AlreadyExistsException", ex.getErrorCode());
     }
 
     @Test
     void testRegisterResourceMissingArn() {
         RegisterResourceRequest req = new RegisterResourceRequest();
         
-        AwsException ex = assertThrows(AwsException.class, () -> service.registerResource(req));
+        AwsException ex = assertThrows(AwsException.class, () -> service.registerResource("us-east-1", req));
         assertEquals("InvalidInputException", ex.getErrorCode());
     }
 
@@ -73,9 +86,9 @@ class LakeFormationServiceTest {
         
         ResourceInfo info = new ResourceInfo();
         info.setResourceArn("arn:aws:s3:::my-bucket");
-        when(storage.describeResource("arn:aws:s3:::my-bucket")).thenReturn(Optional.of(info));
+        when(storage.describeResource("us-east-1", "arn:aws:s3:::my-bucket")).thenReturn(Optional.of(info));
 
-        DescribeResourceResponse res = service.describeResource(req);
+        DescribeResourceResponse res = service.describeResource("us-east-1", req);
         assertNotNull(res.getResourceInfo());
         assertEquals("arn:aws:s3:::my-bucket", res.getResourceInfo().getResourceArn());
     }
@@ -84,9 +97,9 @@ class LakeFormationServiceTest {
     void testDescribeResourceNotFound() {
         DescribeResourceRequest req = new DescribeResourceRequest();
         req.setResourceArn("arn:aws:s3:::my-bucket");
-        when(storage.describeResource(anyString())).thenReturn(Optional.empty());
+        when(storage.describeResource(anyString(), anyString())).thenReturn(Optional.empty());
 
-        AwsException ex = assertThrows(AwsException.class, () -> service.describeResource(req));
+        AwsException ex = assertThrows(AwsException.class, () -> service.describeResource("us-east-1", req));
         assertEquals("EntityNotFoundException", ex.getErrorCode());
     }
 
@@ -95,11 +108,24 @@ class LakeFormationServiceTest {
         CreateLFTagRequest req = new CreateLFTagRequest();
         req.setTagKey("my-tag");
         req.setTagValues(List.of("val1", "val2"));
+        when(storage.getLFTag(anyString(), anyString(), anyString())).thenReturn(Optional.empty());
 
-        CreateLFTagResponse res = service.createLFTag(req);
+        CreateLFTagResponse res = service.createLFTag("us-east-1", req);
         assertNotNull(res);
         
-        verify(storage).createLFTag("123456789012", "my-tag", List.of("val1", "val2"));
+        verify(storage).createLFTag("us-east-1", "123456789012", "my-tag", List.of("val1", "val2"));
+    }
+
+    @Test
+    void testCreateLFTagAlreadyExists() {
+        CreateLFTagRequest req = new CreateLFTagRequest();
+        req.setTagKey("my-tag");
+        req.setTagValues(List.of("val1"));
+
+        when(storage.getLFTag("us-east-1", "123456789012", "my-tag")).thenReturn(Optional.of(new LFTag()));
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.createLFTag("us-east-1", req));
+        assertEquals("AlreadyExistsException", ex.getErrorCode());
     }
 
     @Test
@@ -110,9 +136,9 @@ class LakeFormationServiceTest {
         LFTag tag = new LFTag();
         tag.setTagKey("my-tag");
         tag.setTagValues(List.of("val1"));
-        when(storage.getLFTag("123456789012", "my-tag")).thenReturn(Optional.of(tag));
+        when(storage.getLFTag("us-east-1", "123456789012", "my-tag")).thenReturn(Optional.of(tag));
 
-        GetLFTagResponse res = service.getLFTag(req);
+        GetLFTagResponse res = service.getLFTag("us-east-1", req);
         assertEquals("123456789012", res.getCatalogId());
         assertEquals("my-tag", res.getTagKey());
         assertEquals(List.of("val1"), res.getTagValues());

@@ -19,42 +19,29 @@ class LakeFormationIntegrationTest {
         RestAssuredJsonUtils.configureAwsContentTypes();
     }
 
-    private static final String CONTENT_TYPE = "application/x-amz-json-1.1";
+    private static final String CONTENT_TYPE = "application/json";
     private static final String AUTH_HEADER = "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20201022/us-east-1/lakeformation/aws4_request, SignedHeaders=host;x-amz-date, Signature=dummy";
 
-    @Test
-    void unknownAction_returnsUnknownOperationError() {
-        given()
-            .contentType(CONTENT_TYPE)
-            .header("X-Amz-Target", "AWSLakeFormation.UnknownAction")
-            .header("Authorization", AUTH_HEADER)
-            .body("{}")
-        .when()
-            .post("/")
-        .then()
-            .statusCode(400)
-            .body("__type", equalTo("UnknownOperationException"));
-    }
+
+
 
     @Test
     void putAndGetDataLakeSettings() {
         given()
             .contentType(CONTENT_TYPE)
-            .header("X-Amz-Target", "AWSLakeFormation.PutDataLakeSettings")
             .header("Authorization", AUTH_HEADER)
             .body("{\"DataLakeSettings\":{\"DataLakeAdmins\":[{\"DataLakePrincipalIdentifier\":\"arn:aws:iam::111122223333:user/admin\"}]}}")
         .when()
-            .post("/")
+            .post("/PutDataLakeSettings")
         .then()
             .statusCode(200);
 
         given()
             .contentType(CONTENT_TYPE)
-            .header("X-Amz-Target", "AWSLakeFormation.GetDataLakeSettings")
             .header("Authorization", AUTH_HEADER)
             .body("{}")
         .when()
-            .post("/")
+            .post("/GetDataLakeSettings")
         .then()
             .statusCode(200)
             .body("DataLakeSettings.DataLakeAdmins[0].DataLakePrincipalIdentifier", equalTo("arn:aws:iam::111122223333:user/admin"));
@@ -64,21 +51,19 @@ class LakeFormationIntegrationTest {
     void createAndGetLFTag() {
         given()
             .contentType(CONTENT_TYPE)
-            .header("X-Amz-Target", "AWSLakeFormation.CreateLFTag")
             .header("Authorization", AUTH_HEADER)
             .body("{\"TagKey\":\"department\",\"TagValues\":[\"sales\",\"engineering\"]}")
         .when()
-            .post("/")
+            .post("/CreateLFTag")
         .then()
             .statusCode(200);
 
         given()
             .contentType(CONTENT_TYPE)
-            .header("X-Amz-Target", "AWSLakeFormation.GetLFTag")
             .header("Authorization", AUTH_HEADER)
             .body("{\"TagKey\":\"department\"}")
         .when()
-            .post("/")
+            .post("/GetLFTag")
         .then()
             .statusCode(200)
             .body("TagKey", equalTo("department"))
@@ -89,34 +74,31 @@ class LakeFormationIntegrationTest {
     void updateLFTag() {
         given()
             .contentType(CONTENT_TYPE)
-            .header("X-Amz-Target", "AWSLakeFormation.CreateLFTag")
             .header("Authorization", AUTH_HEADER)
-            .body("{\"TagKey\":\"department\",\"TagValues\":[\"sales\"]}")
+            .body("{\"TagKey\":\"department2\",\"TagValues\":[\"sales\"]}")
         .when()
-            .post("/")
+            .post("/CreateLFTag")
         .then()
             .statusCode(200);
 
         given()
             .contentType(CONTENT_TYPE)
-            .header("X-Amz-Target", "AWSLakeFormation.UpdateLFTag")
             .header("Authorization", AUTH_HEADER)
-            .body("{\"TagKey\":\"department\",\"TagValuesToAdd\":[\"marketing\"],\"TagValuesToDelete\":[\"sales\"]}")
+            .body("{\"TagKey\":\"department2\",\"TagValuesToAdd\":[\"marketing\"],\"TagValuesToDelete\":[\"sales\"]}")
         .when()
-            .post("/")
+            .post("/UpdateLFTag")
         .then()
             .statusCode(200);
 
         given()
             .contentType(CONTENT_TYPE)
-            .header("X-Amz-Target", "AWSLakeFormation.GetLFTag")
             .header("Authorization", AUTH_HEADER)
-            .body("{\"TagKey\":\"department\"}")
+            .body("{\"TagKey\":\"department2\"}")
         .when()
-            .post("/")
+            .post("/GetLFTag")
         .then()
             .statusCode(200)
-            .body("TagKey", equalTo("department"))
+            .body("TagKey", equalTo("department2"))
             .body("TagValues", contains("marketing"));
     }
 
@@ -130,21 +112,19 @@ class LakeFormationIntegrationTest {
 
         given()
             .contentType(CONTENT_TYPE)
-            .header("X-Amz-Target", "AWSLakeFormation.GrantPermissions")
             .header("Authorization", AUTH_HEADER)
             .body(grantBody)
         .when()
-            .post("/")
+            .post("/GrantPermissions")
         .then()
             .statusCode(200);
 
         given()
             .contentType(CONTENT_TYPE)
-            .header("X-Amz-Target", "AWSLakeFormation.ListPermissions")
             .header("Authorization", AUTH_HEADER)
             .body("{}")
         .when()
-            .post("/")
+            .post("/ListPermissions")
         .then()
             .statusCode(200)
             .body("PrincipalResourcePermissions[0].Principal.DataLakePrincipalIdentifier", equalTo("arn:aws:iam::111122223333:role/my-role"))
@@ -163,11 +143,10 @@ class LakeFormationIntegrationTest {
 
         given()
             .contentType(CONTENT_TYPE)
-            .header("X-Amz-Target", "AWSLakeFormation.GrantPermissions")
             .header("Authorization", AUTH_HEADER)
             .body(grantBody)
         .when()
-            .post("/")
+            .post("/GrantPermissions")
         .then()
             .statusCode(200);
 
@@ -179,21 +158,19 @@ class LakeFormationIntegrationTest {
 
         given()
             .contentType(CONTENT_TYPE)
-            .header("X-Amz-Target", "AWSLakeFormation.RevokePermissions")
             .header("Authorization", AUTH_HEADER)
             .body(revokeBody)
         .when()
-            .post("/")
+            .post("/RevokePermissions")
         .then()
             .statusCode(200);
 
         given()
             .contentType(CONTENT_TYPE)
-            .header("X-Amz-Target", "AWSLakeFormation.ListPermissions")
             .header("Authorization", AUTH_HEADER)
             .body("{}")
         .when()
-            .post("/")
+            .post("/ListPermissions")
         .then()
             .statusCode(200)
             .body("PrincipalResourcePermissions[0].Permissions", contains("SELECT"));

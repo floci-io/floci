@@ -32,45 +32,45 @@ public class MemoryLakeFormationStorage implements LakeFormationStorage {
     }
 
     @Override
-    public void putDataLakeSettings(String catalogId, DataLakeSettings settings) {
-        settingsStorage.put(catalogId, settings);
+    public void putDataLakeSettings(String region, String catalogId, DataLakeSettings settings) {
+        settingsStorage.put(region + ":" + catalogId, settings);
     }
 
     @Override
-    public Optional<DataLakeSettings> getDataLakeSettings(String catalogId) {
-        return settingsStorage.get(catalogId);
+    public Optional<DataLakeSettings> getDataLakeSettings(String region, String catalogId) {
+        return settingsStorage.get(region + ":" + catalogId);
     }
 
     @Override
-    public void registerResource(String resourceArn, String roleArn, boolean useServiceLinkedRole, Boolean withFederation) {
+    public void registerResource(String region, String resourceArn, String roleArn, boolean useServiceLinkedRole, Boolean withFederation) {
         ResourceInfo info = new ResourceInfo();
         info.setResourceArn(resourceArn);
         info.setRoleArn(roleArn);
         info.setWithFederation(withFederation);
         // Use arn as key for storage
-        resourcesStorage.put(resourceArn, info);
+        resourcesStorage.put(region + ":" + resourceArn, info);
     }
 
     @Override
-    public void deregisterResource(String resourceArn) {
-        resourcesStorage.delete(resourceArn);
+    public void deregisterResource(String region, String resourceArn) {
+        resourcesStorage.delete(region + ":" + resourceArn);
     }
 
     @Override
-    public List<ResourceInfo> listResources(FilterCondition filterCondition, Integer maxResults, String nextToken) {
+    public List<ResourceInfo> listResources(String region, FilterCondition filterCondition, Integer maxResults, String nextToken) {
         // Very basic pagination: returns all resources for now
         // In a real implementation this would apply the filter and handle pagination tokens.
-        return new ArrayList<>(resourcesStorage.scan(k -> true));
+        return new ArrayList<>(resourcesStorage.scan(k -> k.startsWith(region + ":")));
     }
 
     @Override
-    public Optional<ResourceInfo> describeResource(String resourceArn) {
-        return resourcesStorage.get(resourceArn);
+    public Optional<ResourceInfo> describeResource(String region, String resourceArn) {
+        return resourcesStorage.get(region + ":" + resourceArn);
     }
 
     @Override
-    public void grantPermissions(String catalogId, PrincipalResourcePermissions permissions) {
-        String key = buildPermissionsKey(catalogId, permissions);
+    public void grantPermissions(String region, String catalogId, PrincipalResourcePermissions permissions) {
+        String key = region + ":" + buildPermissionsKey(catalogId, permissions);
         PrincipalResourcePermissions existing = permissionsStorage.get(key).orElse(null);
         if (existing != null) {
             if (permissions.getPermissions() != null) {
@@ -98,8 +98,8 @@ public class MemoryLakeFormationStorage implements LakeFormationStorage {
     }
 
     @Override
-    public void revokePermissions(String catalogId, PrincipalResourcePermissions permissions) {
-        String key = buildPermissionsKey(catalogId, permissions);
+    public void revokePermissions(String region, String catalogId, PrincipalResourcePermissions permissions) {
+        String key = region + ":" + buildPermissionsKey(catalogId, permissions);
         permissionsStorage.get(key).ifPresent(existing -> {
             boolean empty = true;
             if (existing.getPermissions() != null && permissions.getPermissions() != null) {
@@ -133,27 +133,27 @@ public class MemoryLakeFormationStorage implements LakeFormationStorage {
     }
 
     @Override
-    public List<PrincipalResourcePermissions> listPermissions(String catalogId, DataLakePrincipal principal, Resource resource, String resourceType, boolean includeRelated, Integer maxResults, String nextToken) {
+    public List<PrincipalResourcePermissions> listPermissions(String region, String catalogId, DataLakePrincipal principal, Resource resource, String resourceType, boolean includeRelated, Integer maxResults, String nextToken) {
         // Return all explicit grants for now to satisfy Terraform state syncing
-        return new ArrayList<>(permissionsStorage.scan(k -> k.startsWith(catalogId + ":")));
+        return new ArrayList<>(permissionsStorage.scan(k -> k.startsWith(region + ":" + catalogId + ":")));
     }
 
     @Override
-    public void createLFTag(String catalogId, String tagKey, List<String> tagValues) {
+    public void createLFTag(String region, String catalogId, String tagKey, List<String> tagValues) {
         LFTag tag = new LFTag();
         tag.setTagKey(tagKey);
         tag.setTagValues(tagValues);
-        lfTagsStorage.put(catalogId + ":" + tagKey, tag);
+        lfTagsStorage.put(region + ":" + catalogId + ":" + tagKey, tag);
     }
 
     @Override
-    public Optional<LFTag> getLFTag(String catalogId, String tagKey) {
-        return lfTagsStorage.get(catalogId + ":" + tagKey);
+    public Optional<LFTag> getLFTag(String region, String catalogId, String tagKey) {
+        return lfTagsStorage.get(region + ":" + catalogId + ":" + tagKey);
     }
 
     @Override
-    public void updateLFTag(String catalogId, String tagKey, List<String> tagValuesToAdd, List<String> tagValuesToDelete) {
-        lfTagsStorage.get(catalogId + ":" + tagKey).ifPresent(tag -> {
+    public void updateLFTag(String region, String catalogId, String tagKey, List<String> tagValuesToAdd, List<String> tagValuesToDelete) {
+        lfTagsStorage.get(region + ":" + catalogId + ":" + tagKey).ifPresent(tag -> {
             List<String> currentValues = new ArrayList<>(tag.getTagValues() != null ? tag.getTagValues() : List.of());
             if (tagValuesToDelete != null) {
                 currentValues.removeAll(tagValuesToDelete);
@@ -166,18 +166,18 @@ public class MemoryLakeFormationStorage implements LakeFormationStorage {
                 }
             }
             tag.setTagValues(currentValues);
-            lfTagsStorage.put(catalogId + ":" + tagKey, tag);
+            lfTagsStorage.put(region + ":" + catalogId + ":" + tagKey, tag);
         });
     }
 
     @Override
-    public void deleteLFTag(String catalogId, String tagKey) {
-        lfTagsStorage.delete(catalogId + ":" + tagKey);
+    public void deleteLFTag(String region, String catalogId, String tagKey) {
+        lfTagsStorage.delete(region + ":" + catalogId + ":" + tagKey);
     }
 
     @Override
-    public List<LFTagPair> listLFTags(String catalogId, String resourceShareType, Integer maxResults, String nextToken) {
-        return lfTagsStorage.scan(k -> k.startsWith(catalogId + ":")).stream()
+    public List<LFTagPair> listLFTags(String region, String catalogId, String resourceShareType, Integer maxResults, String nextToken) {
+        return lfTagsStorage.scan(k -> k.startsWith(region + ":" + catalogId + ":")).stream()
                 .map(tag -> {
                     LFTagPair pair = new LFTagPair();
                     pair.setCatalogId(catalogId);
@@ -189,8 +189,8 @@ public class MemoryLakeFormationStorage implements LakeFormationStorage {
     }
 
     @Override
-    public void addLFTagsToResource(String catalogId, Resource resource, List<LFTagPair> lfTags) {
-        String resourceKey = catalogId + ":" + getResourceKey(resource);
+    public void addLFTagsToResource(String region, String catalogId, Resource resource, List<LFTagPair> lfTags) {
+        String resourceKey = region + ":" + catalogId + ":" + getResourceKey(resource);
         List<LFTagPair> currentTags = resourceTagsStorage.get(resourceKey).orElse(new ArrayList<>());
         
         for (LFTagPair newTag : lfTags) {
@@ -203,8 +203,8 @@ public class MemoryLakeFormationStorage implements LakeFormationStorage {
     }
 
     @Override
-    public void removeLFTagsFromResource(String catalogId, Resource resource, List<LFTagPair> lfTags) {
-        String resourceKey = catalogId + ":" + getResourceKey(resource);
+    public void removeLFTagsFromResource(String region, String catalogId, Resource resource, List<LFTagPair> lfTags) {
+        String resourceKey = region + ":" + catalogId + ":" + getResourceKey(resource);
         resourceTagsStorage.get(resourceKey).ifPresent(currentTags -> {
             for (LFTagPair tagToRemove : lfTags) {
                 for (LFTagPair currentTag : currentTags) {

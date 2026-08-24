@@ -490,9 +490,9 @@ public class ResolvedServiceCatalog {
                 descriptor("lakeformation", "lakeformation", config.services().lakeformation().enabled(), true,
                         "lakeformation",
                         storageMode(config.storage().services().lakeformation().mode(), config.storage().mode()),
-                        config.storage().services().lakeformation().flushIntervalMs(), null, ServiceProtocol.JSON,
-                        protocols(ServiceProtocol.JSON),
-                        Set.of("AWSLakeFormation."), Set.of("lakeformation"), Set.of(), Set.of())
+                        config.storage().services().lakeformation().flushIntervalMs(), null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON),
+                        Set.of(), Set.of("lakeformation"), Set.of(), Set.of(io.github.hectorvent.floci.services.lakeformation.LakeFormationController.class))
         ));
     }
 
