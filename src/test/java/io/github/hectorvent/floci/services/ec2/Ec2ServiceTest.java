@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
+import io.github.hectorvent.floci.services.ec2.model.Address;
 import io.github.hectorvent.floci.services.ec2.model.BlockDeviceMapping;
 import io.github.hectorvent.floci.services.ec2.model.EbsBlockDevice;
 import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
@@ -2730,6 +2731,85 @@ class Ec2ServiceTest {
 
     private static List<String> cidrsOf(List<TransitGatewayRoute> routes) {
         return routes.stream().map(TransitGatewayRoute::getDestinationCidrBlock).sorted().toList();
+    }
+
+
+    // ─── Elastic IP reachability ──────────────────────────────────────────────
+
+    /**
+     * An allocated EIP's 54.x.x.x address is invented and routes nowhere. Terraform surfaces it
+     * as aws_eip.x.public_ip and Terratest dials it, so association must re-point it at the
+     * address the instance can actually be reached on.
+     */
+    @Test
+    void associateAddressRepointsTheEipAtAReachableAddress() {
+        Ec2ContainerManager containerManager = mock(Ec2ContainerManager.class);
+        when(containerManager.reachablePublicAddress(argThat(i -> i != null))).thenReturn("192.168.215.9");
+        Ec2Service service = eipService(containerManager);
+        String instanceId = launchOne(service);
+
+        Address allocated = service.allocateAddress("us-east-1");
+        String inventedIp = allocated.getPublicIp();
+        Address associated = service.associateAddress("us-east-1", allocated.getAllocationId(), instanceId);
+
+        assertEquals("192.168.215.9", associated.getPublicIp());
+        assertNotEquals(inventedIp, associated.getPublicIp());
+        assertEquals("192.168.215.9",
+                service.describeInstances("us-east-1", List.of(instanceId), Map.of())
+                        .getFirst().getInstances().getFirst().getPublicIpAddress());
+    }
+
+    /**
+     * DescribeAddresses is where Terraform refreshes public_ip, and Docker hands out a new
+     * bridge IP after a stop/start, so the association has to be re-resolved on read.
+     */
+    @Test
+    void describeAddressesReResolvesAnAssociatedEipAfterTheContainerIpChanges() {
+        Ec2ContainerManager containerManager = mock(Ec2ContainerManager.class);
+        when(containerManager.reachablePublicAddress(argThat(i -> i != null))).thenReturn("192.168.215.9");
+        Ec2Service service = eipService(containerManager);
+        String instanceId = launchOne(service);
+        Address allocated = service.allocateAddress("us-east-1");
+        service.associateAddress("us-east-1", allocated.getAllocationId(), instanceId);
+
+        when(containerManager.reachablePublicAddress(argThat(i -> i != null))).thenReturn("192.168.215.42");
+
+        Address refreshed = service.describeAddresses("us-east-1", List.of(allocated.getAllocationId()), Map.of())
+                .getFirst();
+        assertEquals("192.168.215.42", refreshed.getPublicIp());
+    }
+
+    /** With no instance behind it there is nothing reachable left, so the allocation is restored. */
+    @Test
+    void disassociateAddressRestoresTheAllocatedAddress() {
+        Ec2ContainerManager containerManager = mock(Ec2ContainerManager.class);
+        when(containerManager.reachablePublicAddress(argThat(i -> i != null))).thenReturn("192.168.215.9");
+        Ec2Service service = eipService(containerManager);
+        String instanceId = launchOne(service);
+        Address allocated = service.allocateAddress("us-east-1");
+        String inventedIp = allocated.getPublicIp();
+        Address associated = service.associateAddress("us-east-1", allocated.getAllocationId(), instanceId);
+
+        service.disassociateAddress("us-east-1", associated.getAssociationId());
+
+        Address after = service.describeAddresses("us-east-1", List.of(allocated.getAllocationId()), Map.of())
+                .getFirst();
+        assertEquals(inventedIp, after.getPublicIp());
+        assertNull(after.getInstanceId());
+        assertNull(after.getAssociationId());
+    }
+
+    private static Ec2Service eipService(Ec2ContainerManager containerManager) {
+        return new Ec2Service(mockConfig(true), containerManager,
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+    }
+
+    private static String launchOne(Ec2Service service) {
+        return service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), null, null, List.of(), null, null)
+                .getInstances().getFirst().getInstanceId();
     }
 
     private static EmulatorConfig mockConfig(boolean ec2Mock) {
