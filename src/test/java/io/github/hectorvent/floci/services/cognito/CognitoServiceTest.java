@@ -13,7 +13,9 @@ import io.github.hectorvent.floci.services.cognito.model.UserPool;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolClient;
 import io.github.hectorvent.floci.services.cognito.verification.CognitoMessageDispatcher;
 import io.github.hectorvent.floci.services.cognito.verification.VerificationCode;
+import io.github.hectorvent.floci.services.cognito.verification.VerificationCodeException;
 import io.github.hectorvent.floci.services.cognito.verification.VerificationCodeService;
+import org.mockito.ArgumentCaptor;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -1289,6 +1291,224 @@ class CognitoServiceTest {
                 service.confirmSignUp("missing-client", "carol", "123456"));
         assertEquals("ResourceNotFoundException", ex.getErrorCode());
         assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void expiredPendingEmailCodeLeavesActiveAttributeAndVerifiedFlagUnchanged() {
+        VerificationCodeService verificationCodeService = mock(VerificationCodeService.class);
+        CognitoMessageDispatcher messageDispatcher = mock(CognitoMessageDispatcher.class);
+        when(verificationCodeService.issue(any(), any(),
+                eq(VerificationCode.Purpose.EMAIL_ATTRIBUTE_VERIFICATION), any()))
+                .thenReturn("123456");
+
+        CognitoService serviceWithVerification = new CognitoService(
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                "http://localhost:4566",
+                regionResolver,
+                null,
+                verificationCodeService,
+                messageDispatcher);
+        UserPool pool = serviceWithVerification.createUserPool(Map.of(
+                "PoolName", "PendingEmailExpiryPool",
+                "AutoVerifiedAttributes", List.of("email"),
+                "UserAttributeUpdateSettings", Map.of(
+                        "AttributesRequireVerificationBeforeUpdate", List.of("email"))),
+                "us-east-1");
+        UserPoolClient client = serviceWithVerification.createUserPoolClient(
+                pool.getId(), "pending-email-expiry-client", false, false, List.of(), List.of());
+        serviceWithVerification.adminCreateUser(pool.getId(), "alice", Map.of(
+                "email", "old@example.com",
+                "email_verified", "true"), "TempPass1!");
+        serviceWithVerification.adminSetUserPassword(
+                pool.getId(), "alice", "Permanent1!", true);
+
+        Map<String, Object> authResult = serviceWithVerification.initiateAuth(
+                client.getClientId(), "USER_PASSWORD_AUTH",
+                Map.of("USERNAME", "alice", "PASSWORD", "Permanent1!"));
+        String accessToken = (String) ((Map<String, Object>) authResult.get("AuthenticationResult"))
+                .get("AccessToken");
+
+        serviceWithVerification.updateUserAttributes(
+                accessToken, Map.of("email", "new@example.com"));
+        doThrow(new VerificationCodeException(
+                VerificationCodeException.Kind.EXPIRED,
+                "Invalid code provided, please request code again"))
+                .when(verificationCodeService)
+                .consume(pool.getId(), "alice",
+                        VerificationCode.Purpose.EMAIL_ATTRIBUTE_VERIFICATION, "123456");
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> serviceWithVerification.verifyUserAttribute(accessToken, "email", "123456"));
+
+        assertEquals("ExpiredCodeException", error.getErrorCode());
+        CognitoUser unchanged = serviceWithVerification.adminGetUser(pool.getId(), "alice");
+        assertEquals("old@example.com", unchanged.getAttributes().get("email"));
+        assertEquals("true", unchanged.getAttributes().get("email_verified"));
+        assertEquals("new@example.com", unchanged.getPendingAttributes().get("email"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void verificationCodeForRequiredEmailUpdateUsesPendingDestination() {
+        VerificationCodeService verificationCodeService = mock(VerificationCodeService.class);
+        CognitoMessageDispatcher messageDispatcher = mock(CognitoMessageDispatcher.class);
+        when(verificationCodeService.issue(any(), any(),
+                eq(VerificationCode.Purpose.EMAIL_ATTRIBUTE_VERIFICATION), any()))
+                .thenReturn("123456");
+
+        CognitoService serviceWithVerification = new CognitoService(
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                "http://localhost:4566",
+                regionResolver,
+                null,
+                verificationCodeService,
+                messageDispatcher);
+        UserPool pool = serviceWithVerification.createUserPool(Map.of(
+                "PoolName", "PendingEmailDeliveryPool",
+                "AutoVerifiedAttributes", List.of("email"),
+                "UserAttributeUpdateSettings", Map.of(
+                        "AttributesRequireVerificationBeforeUpdate", List.of("email"))),
+                "us-east-1");
+        UserPoolClient client = serviceWithVerification.createUserPoolClient(
+                pool.getId(), "pending-email-delivery-client", false, false, List.of(), List.of());
+        serviceWithVerification.adminCreateUser(pool.getId(), "alice", Map.of(
+                "email", "old@example.com",
+                "email_verified", "true"), "TempPass1!");
+        serviceWithVerification.adminSetUserPassword(
+                pool.getId(), "alice", "Permanent1!", true);
+
+        Map<String, Object> authResult = serviceWithVerification.initiateAuth(
+                client.getClientId(), "USER_PASSWORD_AUTH",
+                Map.of("USERNAME", "alice", "PASSWORD", "Permanent1!"));
+        String accessToken = (String) ((Map<String, Object>) authResult.get("AuthenticationResult"))
+                .get("AccessToken");
+        serviceWithVerification.updateUserAttributes(
+                accessToken, Map.of("email", "new@example.com"));
+        clearInvocations(messageDispatcher);
+
+        Map<String, Object> delivery = serviceWithVerification
+                .getUserAttributeVerificationCode(accessToken, "email");
+
+        assertEquals("n***@e***", delivery.get("Destination"));
+        ArgumentCaptor<CognitoUser> deliveryUser = ArgumentCaptor.forClass(CognitoUser.class);
+        verify(messageDispatcher).dispatch(
+                eq(pool), deliveryUser.capture(),
+                eq(VerificationCode.Purpose.EMAIL_ATTRIBUTE_VERIFICATION),
+                eq("123456"), eq(List.of("EMAIL")));
+        assertEquals("new@example.com", deliveryUser.getValue().getAttributes().get("email"));
+        assertEquals("old@example.com",
+                serviceWithVerification.adminGetUser(pool.getId(), "alice").getAttributes().get("email"));
+    }
+
+    @Test
+    void adminContactUpdateClearsOnlyMatchingPendingValueAndVerificationCode() {
+        VerificationCodeService verificationCodeService = mock(VerificationCodeService.class);
+        CognitoMessageDispatcher messageDispatcher = mock(CognitoMessageDispatcher.class);
+        PendingContactFixture fixture = createPendingContactFixture(
+                verificationCodeService, messageDispatcher);
+        clearInvocations(verificationCodeService);
+
+        fixture.service().adminUpdateUserAttributes(fixture.pool().getId(), "alice", Map.of(
+                "email", "admin@example.com",
+                "custom:note", "updated"));
+        fixture.service().adminUpdateUserAttributes(fixture.pool().getId(), "alice", Map.of(
+                "email", "admin@example.com"));
+
+        CognitoUser updated = fixture.service().adminGetUser(fixture.pool().getId(), "alice");
+        assertEquals("admin@example.com", updated.getAttributes().get("email"));
+        assertEquals("updated", updated.getAttributes().get("custom:note"));
+        assertFalse(updated.getPendingAttributes().containsKey("email"));
+        assertEquals("+12025550101", updated.getPendingAttributes().get("phone_number"));
+        verify(verificationCodeService, times(2)).invalidatePrevious(
+                fixture.pool().getId(), "alice",
+                VerificationCode.Purpose.EMAIL_ATTRIBUTE_VERIFICATION);
+        verify(verificationCodeService, never()).invalidatePrevious(
+                fixture.pool().getId(), "alice",
+                VerificationCode.Purpose.PHONE_ATTRIBUTE_VERIFICATION);
+    }
+
+    @Test
+    void adminContactDeleteClearsOnlyMatchingPendingValueAndVerificationCode() {
+        VerificationCodeService verificationCodeService = mock(VerificationCodeService.class);
+        CognitoMessageDispatcher messageDispatcher = mock(CognitoMessageDispatcher.class);
+        PendingContactFixture fixture = createPendingContactFixture(
+                verificationCodeService, messageDispatcher);
+        clearInvocations(verificationCodeService);
+
+        fixture.service().adminDeleteUserAttributes(
+                fixture.pool().getId(), "alice", List.of("phone_number", "custom:note"));
+        fixture.service().adminDeleteUserAttributes(
+                fixture.pool().getId(), "alice", List.of("phone_number"));
+
+        CognitoUser updated = fixture.service().adminGetUser(fixture.pool().getId(), "alice");
+        assertFalse(updated.getAttributes().containsKey("phone_number"));
+        assertFalse(updated.getAttributes().containsKey("custom:note"));
+        assertFalse(updated.getPendingAttributes().containsKey("phone_number"));
+        assertEquals("new@example.com", updated.getPendingAttributes().get("email"));
+        verify(verificationCodeService, times(2)).invalidatePrevious(
+                fixture.pool().getId(), "alice",
+                VerificationCode.Purpose.PHONE_ATTRIBUTE_VERIFICATION);
+        verify(verificationCodeService, never()).invalidatePrevious(
+                fixture.pool().getId(), "alice",
+                VerificationCode.Purpose.EMAIL_ATTRIBUTE_VERIFICATION);
+    }
+
+    @SuppressWarnings("unchecked")
+    private PendingContactFixture createPendingContactFixture(
+            VerificationCodeService verificationCodeService,
+            CognitoMessageDispatcher messageDispatcher) {
+        when(verificationCodeService.issue(any(), any(), any(), any())).thenReturn("123456");
+        CognitoService serviceWithVerification = new CognitoService(
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                "http://localhost:4566",
+                regionResolver,
+                null,
+                verificationCodeService,
+                messageDispatcher);
+        UserPool pool = serviceWithVerification.createUserPool(Map.of(
+                "PoolName", "AdminPendingContactPool",
+                "AutoVerifiedAttributes", List.of("email", "phone_number"),
+                "UserAttributeUpdateSettings", Map.of(
+                        "AttributesRequireVerificationBeforeUpdate", List.of("email", "phone_number"))),
+                "us-east-1");
+        UserPoolClient client = serviceWithVerification.createUserPoolClient(
+                pool.getId(), "admin-pending-contact-client", false, false, List.of(), List.of());
+        serviceWithVerification.adminCreateUser(pool.getId(), "alice", Map.of(
+                "email", "old@example.com",
+                "email_verified", "true",
+                "phone_number", "+12025550100",
+                "phone_number_verified", "true",
+                "custom:note", "original"), "TempPass1!");
+        serviceWithVerification.adminSetUserPassword(
+                pool.getId(), "alice", "Permanent1!", true);
+        Map<String, Object> authResult = serviceWithVerification.initiateAuth(
+                client.getClientId(), "USER_PASSWORD_AUTH",
+                Map.of("USERNAME", "alice", "PASSWORD", "Permanent1!"));
+        String accessToken = (String) ((Map<String, Object>) authResult.get("AuthenticationResult"))
+                .get("AccessToken");
+        serviceWithVerification.updateUserAttributes(accessToken, Map.of(
+                "email", "new@example.com",
+                "phone_number", "+12025550101"));
+        return new PendingContactFixture(serviceWithVerification, pool);
+    }
+
+    private record PendingContactFixture(CognitoService service, UserPool pool) {
     }
 
     @Test
