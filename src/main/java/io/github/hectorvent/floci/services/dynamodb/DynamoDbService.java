@@ -1753,7 +1753,7 @@ public class DynamoDbService {
                     throw new AwsException("ValidationException",
                             "The parameter cannot be converted to a numeric value", 400);
                 }
-            } else if (valuePart.startsWith("if_not_exists(")) {
+            } else if (startsWithFunctionCall(valuePart, "if_not_exists")) {
                 // if_not_exists(attrRef, fallbackExpr) evaluates to:
                 //   attrRef's current value  — when attrRef exists in the item
                 //   fallbackExpr             — otherwise
@@ -1776,7 +1776,7 @@ public class DynamoDbService {
                         setValueAtPath(item, attrPath, resolved, exprAttrNames);
                     }
                 }
-            } else if (valuePart.toLowerCase().startsWith("list_append(")) {
+            } else if (startsWithFunctionCall(valuePart.toLowerCase(), "list_append")) {
                 int open = valuePart.indexOf('(');
                 int close = valuePart.lastIndexOf(')');
                 if (open >= 0 && close > open) {
@@ -1854,7 +1854,7 @@ public class DynamoDbService {
 
     private JsonNode evaluateSetExpr(ObjectNode item, String expr,
                                      JsonNode exprAttrNames, JsonNode exprAttrValues) {
-        if (expr.toLowerCase().startsWith("if_not_exists(")) {
+        if (startsWithFunctionCall(expr.toLowerCase(), "if_not_exists")) {
             String[] args = extractFunctionArgs(expr);
             if (args.length == 2) {
                 String checkAttr = resolveAttributeName(args[0].trim(), exprAttrNames);
@@ -2452,6 +2452,18 @@ public class DynamoDbService {
             }
         }
         return -1;
+    }
+
+    /**
+     * Whether {@code value} opens with a call to {@code functionName}, tolerating optional
+     * whitespace between the function name and the opening parenthesis. DynamoDB's
+     * UpdateExpression grammar is whitespace-insensitive there, but SDKs commonly emit the
+     * spaced form (e.g. PynamoDB always generates {@code "list_append (x, y)"}), which a plain
+     * {@code startsWith(functionName + "(")} rejects.
+     */
+    private static boolean startsWithFunctionCall(String value, String functionName) {
+        return value.startsWith(functionName)
+                && value.substring(functionName.length()).stripLeading().startsWith("(");
     }
 
     private String[] extractFunctionArgs(String funcCall) {
