@@ -68,6 +68,8 @@ import static io.github.hectorvent.floci.core.common.ReservedTags.rejectUnknownR
 @ApplicationScoped
 public class CognitoService {
     private static final int DEFAULT_REFRESH_TOKEN_VALIDITY_DAYS = 30;
+    // JVM-local stripes bound lock memory without retaining one lock for every user key.
+    private static final int USER_LOCK_STRIPES = 512;
 
     private static final Logger LOG = Logger.getLogger(CognitoService.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -109,9 +111,23 @@ public class CognitoService {
     private final LambdaService lambdaService;
     private final VerificationCodeService verificationCodeService;
     private final CognitoMessageDispatcher messageDispatcher;
+    private final Object[] userLocks = newUserLockStripes();
 
     // Keyed by session token; contains SRP ephemeral state (bPrivate, B, A, secretBlock)
     private final CognitoAuthFlowHandler authFlowHandler;
+
+    private static Object[] newUserLockStripes() {
+        Object[] stripes = new Object[USER_LOCK_STRIPES];
+        for (int i = 0; i < stripes.length; i++) {
+            stripes[i] = new Object();
+        }
+        return stripes;
+    }
+
+    private Object userLock(String poolId, String username) {
+        String key = userKey(poolId, username);
+        return userLocks[Math.floorMod(key.hashCode(), USER_LOCK_STRIPES)];
+    }
 
     @Inject
     public CognitoService(StorageFactory storageFactory, EmulatorConfig emulatorConfig,
@@ -1010,6 +1026,15 @@ public class CognitoService {
     }
 
     public void adminUpdateUserAttributes(String userPoolId, String username, Map<String, String> attributes) {
+        CognitoUser resolvedUser = adminGetUser(userPoolId, username);
+        synchronized (userLock(userPoolId, resolvedUser.getUsername())) {
+            adminUpdateUserAttributesUnderUserLock(
+                    userPoolId, resolvedUser.getUsername(), attributes);
+        }
+    }
+
+    private void adminUpdateUserAttributesUnderUserLock(
+            String userPoolId, String username, Map<String, String> attributes) {
         CognitoUser user = adminGetUser(userPoolId, username);
         attributes.keySet().forEach(attributeName ->
                 clearPendingAttributeVerification(userPoolId, user, attributeName));
@@ -1019,6 +1044,15 @@ public class CognitoService {
     }
 
     public void adminDeleteUserAttributes(String userPoolId, String username, List<String> attributeNames) {
+        CognitoUser resolvedUser = adminGetUser(userPoolId, username);
+        synchronized (userLock(userPoolId, resolvedUser.getUsername())) {
+            adminDeleteUserAttributesUnderUserLock(
+                    userPoolId, resolvedUser.getUsername(), attributeNames);
+        }
+    }
+
+    private void adminDeleteUserAttributesUnderUserLock(
+            String userPoolId, String username, List<String> attributeNames) {
         CognitoUser user = adminGetUser(userPoolId, username);
         for (String attrName : attributeNames) {
             user.getAttributes().remove(attrName);
@@ -1612,6 +1646,13 @@ public class CognitoService {
         Long iat = extractIatFromToken(accessToken);
         validateUserNotGloballySignedOut(username, poolId, "access", iat != null ? iat : 0L);
 
+        synchronized (userLock(poolId, username)) {
+            return getUserAttributeVerificationCodeUnderUserLock(poolId, username, attributeName);
+        }
+    }
+
+    private Map<String, Object> getUserAttributeVerificationCodeUnderUserLock(
+            String poolId, String username, String attributeName) {
         if (!"email".equals(attributeName) && !"phone_number".equals(attributeName)) {
             throw new AwsException("InvalidParameterException",
                     "Invalid attribute name. Only phone_number and email can be verified.", 400);
@@ -1663,6 +1704,13 @@ public class CognitoService {
         Long iat = extractIatFromToken(accessToken);
         validateUserNotGloballySignedOut(username, poolId, "access", iat != null ? iat : 0L);
 
+        synchronized (userLock(poolId, username)) {
+            verifyUserAttributeUnderUserLock(poolId, username, attributeName, code);
+        }
+    }
+
+    private void verifyUserAttributeUnderUserLock(
+            String poolId, String username, String attributeName, String code) {
         if (!"email".equals(attributeName) && !"phone_number".equals(attributeName)) {
             throw new AwsException("InvalidParameterException",
                     "Invalid attribute name. Only phone_number and email can be verified.", 400);
@@ -1711,6 +1759,13 @@ public class CognitoService {
         Long iat = extractIatFromToken(accessToken);
         validateUserNotGloballySignedOut(username, poolId, "access", iat != null ? iat : 0L);
 
+        synchronized (userLock(poolId, username)) {
+            return updateUserAttributesUnderUserLock(poolId, username, attributes);
+        }
+    }
+
+    private List<Map<String, Object>> updateUserAttributesUnderUserLock(
+            String poolId, String username, Map<String, String> attributes) {
         UserPool pool = describeUserPool(poolId);
         CognitoUser currentUser = adminGetUser(poolId, username);
         CognitoUser updatedUser = MAPPER.convertValue(currentUser, CognitoUser.class);
