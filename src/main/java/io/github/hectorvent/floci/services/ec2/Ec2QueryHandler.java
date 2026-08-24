@@ -350,6 +350,17 @@ public class Ec2QueryHandler {
         throw new AwsException("InvalidParameterValue", name + " is not a valid boolean.", 400);
     }
 
+    private Double parseOptionalDouble(String value, String name) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            return Double.parseDouble(value);
+        } catch (NumberFormatException e) {
+            throw new AwsException("InvalidParameterValue", name + " is not a valid number.", 400);
+        }
+    }
+
     /**
      * Reads the {@code IpPermissions.N} list of an authorize/revoke request.
      *
@@ -2546,21 +2557,13 @@ public class Ec2QueryHandler {
     // ─── Launch Template handlers ─────────────────────────────────────────────
 
     private Response handleCreateLaunchTemplate(MultivaluedMap<String, String> p, String region) {
-        String encodedUserData = p.getFirst("LaunchTemplateData.UserData");
+        LaunchTemplateData data = parseLaunchTemplateData(p);
+        data.setVersionDescription(p.getFirst("VersionDescription"));
         LaunchTemplate launchTemplate = service.createLaunchTemplate(
                 region,
                 p.getFirst("LaunchTemplateName"),
-                p.getFirst("LaunchTemplateData.ImageId"),
-                p.getFirst("LaunchTemplateData.InstanceType"),
-                p.getFirst("LaunchTemplateData.KeyName"),
-                parseLaunchTemplateSecurityGroupIds(p),
-                decodeUserData(encodedUserData),
-                encodedUserData,
-                resolveIamInstanceProfileArn(p, "LaunchTemplateData.IamInstanceProfile"),
-                parseTagsForResource(p, "launch-template"),
-                parseLaunchTemplateDataTagsForResource(p, "instance"),
-                parseLaunchTemplateMetadataOptions(p),
-                parseLaunchTemplateMonitoring(p));
+                data,
+                parseTagsForResource(p, "launch-template"));
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateLaunchTemplateResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -2570,28 +2573,50 @@ public class Ec2QueryHandler {
     }
 
     private Response handleCreateLaunchTemplateVersion(MultivaluedMap<String, String> p, String region) {
-        String encodedUserData = p.getFirst("LaunchTemplateData.UserData");
+        LaunchTemplateData data = parseLaunchTemplateData(p);
+        data.setVersionDescription(p.getFirst("VersionDescription"));
         LaunchTemplate launchTemplate = service.createLaunchTemplateVersion(
                 region,
                 p.getFirst("LaunchTemplateId"),
                 p.getFirst("LaunchTemplateName"),
                 p.getFirst("SourceVersion"),
-                p.getFirst("LaunchTemplateData.ImageId"),
-                p.getFirst("LaunchTemplateData.InstanceType"),
-                p.getFirst("LaunchTemplateData.KeyName"),
-                parseLaunchTemplateSecurityGroupIds(p),
-                decodeUserData(encodedUserData),
-                encodedUserData,
-                resolveIamInstanceProfileArn(p, "LaunchTemplateData.IamInstanceProfile"),
-                parseLaunchTemplateDataTagsForResource(p, "instance"),
-                parseLaunchTemplateMetadataOptions(p),
-                parseLaunchTemplateMonitoring(p));
+                data);
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateLaunchTemplateVersionResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
                 .start("launchTemplateVersion").raw(launchTemplateVersionXml(launchTemplate)).end("launchTemplateVersion")
                 .end("CreateLaunchTemplateVersionResponse");
         return xmlResponse(xml.build());
+    }
+
+    // Builds the full LaunchTemplateData from a CreateLaunchTemplate[Version] request - see
+    // LaunchTemplateData's own doc comment (lex00/floci#119) for which AWS fields this covers
+    // and which are deliberately left out.
+    private LaunchTemplateData parseLaunchTemplateData(MultivaluedMap<String, String> p) {
+        LaunchTemplateData data = new LaunchTemplateData();
+        String encodedUserData = p.getFirst("LaunchTemplateData.UserData");
+        data.setImageId(p.getFirst("LaunchTemplateData.ImageId"));
+        data.setInstanceType(p.getFirst("LaunchTemplateData.InstanceType"));
+        data.setKeyName(p.getFirst("LaunchTemplateData.KeyName"));
+        data.setUserData(decodeUserData(encodedUserData));
+        data.setEncodedUserData(encodedUserData);
+        data.setIamInstanceProfileArn(resolveIamInstanceProfileArn(p, "LaunchTemplateData.IamInstanceProfile"));
+        data.setSecurityGroupIds(parseLaunchTemplateSecurityGroupIds(p));
+        data.setInstanceTags(parseLaunchTemplateDataTagsForResource(p, "instance"));
+        data.setMetadataOptions(parseLaunchTemplateMetadataOptions(p));
+        data.setMonitoringEnabled(parseLaunchTemplateMonitoring(p));
+        data.setEbsOptimized(parseOptionalBoolean(
+                p.getFirst("LaunchTemplateData.EbsOptimized"), "LaunchTemplateData.EbsOptimized"));
+        data.setBlockDeviceMappings(parseLaunchTemplateBlockDeviceMappings(p));
+        data.setCapacityReservationSpecification(parseLaunchTemplateCapacityReservationSpecification(p));
+        data.setCpuOptions(parseLaunchTemplateCpuOptions(p));
+        data.setInstanceMarketOptions(parseLaunchTemplateInstanceMarketOptions(p));
+        data.setMaintenanceOptions(parseLaunchTemplateMaintenanceOptions(p));
+        data.setNetworkInterfaces(parseLaunchTemplateNetworkInterfaces(p));
+        data.setPlacement(parseLaunchTemplatePlacement(p));
+        data.setTagSpecifications(parseLaunchTemplateTagSpecifications(p));
+        data.setInstanceRequirements(parseLaunchTemplateInstanceRequirements(p));
+        return data;
     }
 
     private Response handleDescribeLaunchTemplates(MultivaluedMap<String, String> p, String region) {
@@ -3106,6 +3131,83 @@ public class Ec2QueryHandler {
         return xml.build();
     }
 
+    // The generic tagSpecifications field is what the query-param path (CreateLaunchTemplate[Version])
+    // populates, and is the accurate source once it's set. Templates created only through the CFN
+    // provisioner (which never parses LaunchTemplateData.TagSpecification.N.*, only the plain
+    // instanceTags convenience field) still need their "instance" tags to show up here, so fall
+    // back to synthesizing that one entry when tagSpecifications is empty but instanceTags is not.
+    private List<LaunchTemplateData.TagSpecification> effectiveTagSpecifications(LaunchTemplate launchTemplate) {
+        if (launchTemplate.getTagSpecifications() != null && !launchTemplate.getTagSpecifications().isEmpty()) {
+            return launchTemplate.getTagSpecifications();
+        }
+        if (launchTemplate.getInstanceTags() != null && !launchTemplate.getInstanceTags().isEmpty()) {
+            return List.of(new LaunchTemplateData.TagSpecification("instance", launchTemplate.getInstanceTags()));
+        }
+        return List.of();
+    }
+
+    private String instanceRequirementsXml(LaunchTemplateData.InstanceRequirements req) {
+        XmlBuilder xml = new XmlBuilder().start("instanceRequirements");
+        writeIntRange(xml, "vCpuCount", req.getVCpuCount());
+        writeIntRange(xml, "memoryMiB", req.getMemoryMiB());
+        writeStringSet(xml, "cpuManufacturerSet", req.getCpuManufacturers());
+        writeDoubleRange(xml, "memoryGiBPerVCpu", req.getMemoryGiBPerVCpu());
+        writeStringSet(xml, "excludedInstanceTypeSet", req.getExcludedInstanceTypes());
+        writeStringSet(xml, "instanceGenerationSet", req.getInstanceGenerations());
+        if (req.getSpotMaxPricePercentageOverLowestPrice() != null) {
+            xml.elem("spotMaxPricePercentageOverLowestPrice", String.valueOf(req.getSpotMaxPricePercentageOverLowestPrice()));
+        }
+        if (req.getOnDemandMaxPricePercentageOverLowestPrice() != null) {
+            xml.elem("onDemandMaxPricePercentageOverLowestPrice", String.valueOf(req.getOnDemandMaxPricePercentageOverLowestPrice()));
+        }
+        if (req.getBareMetal() != null) xml.elem("bareMetal", req.getBareMetal());
+        if (req.getBurstablePerformance() != null) xml.elem("burstablePerformance", req.getBurstablePerformance());
+        if (req.getRequireHibernateSupport() != null) {
+            xml.elem("requireHibernateSupport", String.valueOf(req.getRequireHibernateSupport()));
+        }
+        writeIntRange(xml, "networkInterfaceCount", req.getNetworkInterfaceCount());
+        if (req.getLocalStorage() != null) xml.elem("localStorage", req.getLocalStorage());
+        writeStringSet(xml, "localStorageTypeSet", req.getLocalStorageTypes());
+        writeDoubleRange(xml, "totalLocalStorageGB", req.getTotalLocalStorageGB());
+        writeIntRange(xml, "baselineEbsBandwidthMbps", req.getBaselineEbsBandwidthMbps());
+        writeStringSet(xml, "acceleratorTypeSet", req.getAcceleratorTypes());
+        writeIntRange(xml, "acceleratorCount", req.getAcceleratorCount());
+        writeStringSet(xml, "acceleratorManufacturerSet", req.getAcceleratorManufacturers());
+        writeStringSet(xml, "acceleratorNameSet", req.getAcceleratorNames());
+        writeIntRange(xml, "acceleratorTotalMemoryMiB", req.getAcceleratorTotalMemoryMiB());
+        writeDoubleRange(xml, "networkBandwidthGbps", req.getNetworkBandwidthGbps());
+        writeStringSet(xml, "allowedInstanceTypeSet", req.getAllowedInstanceTypes());
+        if (req.getMaxSpotPriceAsPercentageOfOptimalOnDemandPrice() != null) {
+            xml.elem("maxSpotPriceAsPercentageOfOptimalOnDemandPrice",
+                    String.valueOf(req.getMaxSpotPriceAsPercentageOfOptimalOnDemandPrice()));
+        }
+        xml.end("instanceRequirements");
+        return xml.build();
+    }
+
+    private void writeIntRange(XmlBuilder xml, String name, LaunchTemplateData.IntRange range) {
+        if (range == null || range.isEmpty()) return;
+        xml.start(name);
+        if (range.getMin() != null) xml.elem("min", String.valueOf(range.getMin()));
+        if (range.getMax() != null) xml.elem("max", String.valueOf(range.getMax()));
+        xml.end(name);
+    }
+
+    private void writeDoubleRange(XmlBuilder xml, String name, LaunchTemplateData.DoubleRange range) {
+        if (range == null || range.isEmpty()) return;
+        xml.start(name);
+        if (range.getMin() != null) xml.elem("min", String.valueOf(range.getMin()));
+        if (range.getMax() != null) xml.elem("max", String.valueOf(range.getMax()));
+        xml.end(name);
+    }
+
+    private void writeStringSet(XmlBuilder xml, String name, List<String> values) {
+        if (values == null || values.isEmpty()) return;
+        xml.start(name);
+        for (String v : values) xml.elem("item", v);
+        xml.end(name);
+    }
+
     private String launchTemplateVersionXml(LaunchTemplate launchTemplate) {
         XmlBuilder xml = new XmlBuilder()
                 .elem("launchTemplateId", launchTemplate.getLaunchTemplateId())
@@ -3116,8 +3218,11 @@ public class Ec2QueryHandler {
         if (launchTemplate.getCreateTime() != null) {
             xml.elem("createTime", ISO_FMT.format(launchTemplate.getCreateTime()));
         }
-        xml.elem("createdBy", launchTemplate.getCreatedBy())
-                .start("launchTemplateData")
+        xml.elem("createdBy", launchTemplate.getCreatedBy());
+        if (launchTemplate.getVersionDescription() != null) {
+            xml.elem("versionDescription", launchTemplate.getVersionDescription());
+        }
+        xml.start("launchTemplateData")
                 .elem("imageId", launchTemplate.getImageId())
                 .elem("instanceType", launchTemplate.getInstanceType());
         if (launchTemplate.getKeyName() != null) {
@@ -3136,13 +3241,140 @@ public class Ec2QueryHandler {
             xml.elem("item", securityGroupId);
         }
         xml.end("securityGroupIdSet");
-        if (launchTemplate.getInstanceTags() != null && !launchTemplate.getInstanceTags().isEmpty()) {
-            xml.start("tagSpecificationSet")
-                    .start("item")
-                    .elem("resourceType", "instance")
-                    .raw(tagSetXml(launchTemplate.getInstanceTags()))
-                    .end("item")
-                    .end("tagSpecificationSet");
+        List<LaunchTemplateData.TagSpecification> tagSpecifications = effectiveTagSpecifications(launchTemplate);
+        if (!tagSpecifications.isEmpty()) {
+            xml.start("tagSpecificationSet");
+            for (LaunchTemplateData.TagSpecification spec : tagSpecifications) {
+                xml.start("item")
+                        .elem("resourceType", spec.getResourceType())
+                        .raw(tagSetXml(spec.getTags()))
+                        .end("item");
+            }
+            xml.end("tagSpecificationSet");
+        }
+        if (launchTemplate.getEbsOptimized() != null) {
+            xml.elem("ebsOptimized", String.valueOf(launchTemplate.getEbsOptimized()));
+        }
+        if (!launchTemplate.getBlockDeviceMappings().isEmpty()) {
+            xml.start("blockDeviceMappingSet");
+            for (BlockDeviceMapping mapping : launchTemplate.getBlockDeviceMappings()) {
+                xml.start("item");
+                if (mapping.getDeviceName() != null) {
+                    xml.elem("deviceName", mapping.getDeviceName());
+                }
+                if (mapping.getVirtualName() != null) {
+                    xml.elem("virtualName", mapping.getVirtualName());
+                }
+                if (mapping.getNoDevice() != null) {
+                    xml.elem("noDevice", mapping.getNoDevice());
+                }
+                EbsBlockDevice ebs = mapping.getEbs();
+                if (ebs != null) {
+                    xml.start("ebs");
+                    if (ebs.getSnapshotId() != null) xml.elem("snapshotId", ebs.getSnapshotId());
+                    if (ebs.getVolumeSize() != null) xml.elem("volumeSize", String.valueOf(ebs.getVolumeSize()));
+                    if (ebs.getVolumeType() != null) xml.elem("volumeType", ebs.getVolumeType());
+                    if (ebs.getDeleteOnTermination() != null) xml.elem("deleteOnTermination", String.valueOf(ebs.getDeleteOnTermination()));
+                    if (ebs.getEncrypted() != null) xml.elem("encrypted", String.valueOf(ebs.getEncrypted()));
+                    if (ebs.getIops() != null) xml.elem("iops", String.valueOf(ebs.getIops()));
+                    if (ebs.getThroughput() != null) xml.elem("throughput", String.valueOf(ebs.getThroughput()));
+                    if (ebs.getKmsKeyId() != null) xml.elem("kmsKeyId", ebs.getKmsKeyId());
+                    xml.end("ebs");
+                }
+                xml.end("item");
+            }
+            xml.end("blockDeviceMappingSet");
+        }
+        LaunchTemplateData.CapacityReservationSpecification crs = launchTemplate.getCapacityReservationSpecification();
+        if (crs != null && !crs.isEmpty()) {
+            xml.start("capacityReservationSpecification");
+            if (crs.getCapacityReservationPreference() != null) {
+                xml.elem("capacityReservationPreference", crs.getCapacityReservationPreference());
+            }
+            LaunchTemplateData.CapacityReservationTarget target = crs.getCapacityReservationTarget();
+            if (target != null && !target.isEmpty()) {
+                xml.start("capacityReservationTarget");
+                if (target.getCapacityReservationId() != null) {
+                    xml.elem("capacityReservationId", target.getCapacityReservationId());
+                }
+                if (target.getCapacityReservationResourceGroupArn() != null) {
+                    xml.elem("capacityReservationResourceGroupArn", target.getCapacityReservationResourceGroupArn());
+                }
+                xml.end("capacityReservationTarget");
+            }
+            xml.end("capacityReservationSpecification");
+        }
+        LaunchTemplateData.CpuOptions cpuOptions = launchTemplate.getCpuOptions();
+        if (cpuOptions != null && !cpuOptions.isEmpty()) {
+            xml.start("cpuOptions");
+            if (cpuOptions.getCoreCount() != null) xml.elem("coreCount", String.valueOf(cpuOptions.getCoreCount()));
+            if (cpuOptions.getThreadsPerCore() != null) xml.elem("threadsPerCore", String.valueOf(cpuOptions.getThreadsPerCore()));
+            if (cpuOptions.getAmdSevSnp() != null) xml.elem("amdSevSnp", cpuOptions.getAmdSevSnp());
+            xml.end("cpuOptions");
+        }
+        LaunchTemplateData.InstanceMarketOptions marketOptions = launchTemplate.getInstanceMarketOptions();
+        if (marketOptions != null && !marketOptions.isEmpty()) {
+            xml.start("instanceMarketOptions");
+            if (marketOptions.getMarketType() != null) xml.elem("marketType", marketOptions.getMarketType());
+            LaunchTemplateData.SpotOptions spot = marketOptions.getSpotOptions();
+            if (spot != null && !spot.isEmpty()) {
+                xml.start("spotOptions");
+                if (spot.getMaxPrice() != null) xml.elem("maxPrice", spot.getMaxPrice());
+                if (spot.getSpotInstanceType() != null) xml.elem("spotInstanceType", spot.getSpotInstanceType());
+                if (spot.getBlockDurationMinutes() != null) xml.elem("blockDurationMinutes", String.valueOf(spot.getBlockDurationMinutes()));
+                if (spot.getValidUntil() != null) xml.elem("validUntil", spot.getValidUntil());
+                if (spot.getInstanceInterruptionBehavior() != null) xml.elem("instanceInterruptionBehavior", spot.getInstanceInterruptionBehavior());
+                xml.end("spotOptions");
+            }
+            xml.end("instanceMarketOptions");
+        }
+        LaunchTemplateData.MaintenanceOptions maintenanceOptions = launchTemplate.getMaintenanceOptions();
+        if (maintenanceOptions != null && !maintenanceOptions.isEmpty()) {
+            xml.start("maintenanceOptions")
+                    .elem("autoRecovery", maintenanceOptions.getAutoRecovery())
+                    .end("maintenanceOptions");
+        }
+        if (!launchTemplate.getNetworkInterfaces().isEmpty()) {
+            xml.start("networkInterfaceSet");
+            for (LaunchTemplateData.NetworkInterfaceSpecification ni : launchTemplate.getNetworkInterfaces()) {
+                xml.start("item");
+                if (ni.getDeviceIndex() != null) xml.elem("deviceIndex", String.valueOf(ni.getDeviceIndex()));
+                if (ni.getSubnetId() != null) xml.elem("subnetId", ni.getSubnetId());
+                if (ni.getNetworkInterfaceId() != null) xml.elem("networkInterfaceId", ni.getNetworkInterfaceId());
+                if (!ni.getGroups().isEmpty()) {
+                    xml.start("groupSet");
+                    for (String g : ni.getGroups()) xml.elem("groupId", g);
+                    xml.end("groupSet");
+                }
+                if (ni.getAssociatePublicIpAddress() != null) xml.elem("associatePublicIpAddress", String.valueOf(ni.getAssociatePublicIpAddress()));
+                if (ni.getDeleteOnTermination() != null) xml.elem("deleteOnTermination", String.valueOf(ni.getDeleteOnTermination()));
+                if (ni.getDescription() != null) xml.elem("description", ni.getDescription());
+                if (ni.getPrivateIpAddress() != null) xml.elem("privateIpAddress", ni.getPrivateIpAddress());
+                if (ni.getNetworkCardIndex() != null) xml.elem("networkCardIndex", String.valueOf(ni.getNetworkCardIndex()));
+                if (ni.getInterfaceType() != null) xml.elem("interfaceType", ni.getInterfaceType());
+                if (ni.getIpv6AddressCount() != null) xml.elem("ipv6AddressCount", String.valueOf(ni.getIpv6AddressCount()));
+                xml.end("item");
+            }
+            xml.end("networkInterfaceSet");
+        }
+        Placement placement = launchTemplate.getPlacement();
+        if (placement != null && !placement.isEmpty()) {
+            xml.start("placement");
+            if (placement.getAvailabilityZone() != null) xml.elem("availabilityZone", placement.getAvailabilityZone());
+            if (placement.getAvailabilityZoneId() != null) xml.elem("availabilityZoneId", placement.getAvailabilityZoneId());
+            if (placement.getAffinity() != null) xml.elem("affinity", placement.getAffinity());
+            if (placement.getGroupName() != null) xml.elem("groupName", placement.getGroupName());
+            if (placement.getHostId() != null) xml.elem("hostId", placement.getHostId());
+            if (placement.getTenancy() != null) xml.elem("tenancy", placement.getTenancy());
+            if (placement.getSpreadDomain() != null) xml.elem("spreadDomain", placement.getSpreadDomain());
+            if (placement.getHostResourceGroupArn() != null) xml.elem("hostResourceGroupArn", placement.getHostResourceGroupArn());
+            if (placement.getPartitionNumber() != null) xml.elem("partitionNumber", String.valueOf(placement.getPartitionNumber()));
+            if (placement.getGroupId() != null) xml.elem("groupId", placement.getGroupId());
+            xml.end("placement");
+        }
+        LaunchTemplateData.InstanceRequirements requirements = launchTemplate.getInstanceRequirements();
+        if (requirements != null && !requirements.isEmpty()) {
+            xml.raw(instanceRequirementsXml(requirements));
         }
         LaunchTemplateData.MetadataOptions metadataOptions = launchTemplate.getMetadataOptions();
         if (metadataOptions != null && !metadataOptions.isEmpty()) {
@@ -3214,6 +3446,259 @@ public class Ec2QueryHandler {
             }
         }
         return new ArrayList<>(groups);
+    }
+
+    private List<BlockDeviceMapping> parseLaunchTemplateBlockDeviceMappings(MultivaluedMap<String, String> p) {
+        List<BlockDeviceMapping> mappings = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String prefix = "LaunchTemplateData.BlockDeviceMapping." + i;
+            String deviceName = p.getFirst(prefix + ".DeviceName");
+            String virtualName = p.getFirst(prefix + ".VirtualName");
+            String noDevice = p.getFirst(prefix + ".NoDevice");
+            String snapshotId = p.getFirst(prefix + ".Ebs.SnapshotId");
+            String volumeSize = p.getFirst(prefix + ".Ebs.VolumeSize");
+            String volumeType = p.getFirst(prefix + ".Ebs.VolumeType");
+            String deleteOnTermination = p.getFirst(prefix + ".Ebs.DeleteOnTermination");
+            String encrypted = p.getFirst(prefix + ".Ebs.Encrypted");
+            String iops = p.getFirst(prefix + ".Ebs.Iops");
+            String throughput = p.getFirst(prefix + ".Ebs.Throughput");
+            String kmsKeyId = p.getFirst(prefix + ".Ebs.KmsKeyId");
+            boolean hasEbs = snapshotId != null || volumeSize != null || volumeType != null
+                    || deleteOnTermination != null || encrypted != null || iops != null
+                    || throughput != null || kmsKeyId != null;
+            if (deviceName == null && virtualName == null && noDevice == null && !hasEbs) {
+                break;
+            }
+            BlockDeviceMapping mapping = new BlockDeviceMapping();
+            mapping.setDeviceName(deviceName);
+            mapping.setVirtualName(virtualName);
+            mapping.setNoDevice(noDevice);
+            if (hasEbs) {
+                EbsBlockDevice ebs = new EbsBlockDevice();
+                ebs.setSnapshotId(snapshotId);
+                ebs.setVolumeSize(parseOptionalInt(volumeSize, prefix + ".Ebs.VolumeSize"));
+                ebs.setVolumeType(volumeType);
+                ebs.setDeleteOnTermination(parseOptionalBoolean(deleteOnTermination, prefix + ".Ebs.DeleteOnTermination"));
+                ebs.setEncrypted(parseOptionalBoolean(encrypted, prefix + ".Ebs.Encrypted"));
+                ebs.setIops(parseOptionalInt(iops, prefix + ".Ebs.Iops"));
+                ebs.setThroughput(parseOptionalInt(throughput, prefix + ".Ebs.Throughput"));
+                ebs.setKmsKeyId(kmsKeyId);
+                mapping.setEbs(ebs);
+            }
+            mappings.add(mapping);
+        }
+        return mappings;
+    }
+
+    private LaunchTemplateData.CapacityReservationSpecification parseLaunchTemplateCapacityReservationSpecification(
+            MultivaluedMap<String, String> p) {
+        String prefix = "LaunchTemplateData.CapacityReservationSpecification";
+        String preference = p.getFirst(prefix + ".CapacityReservationPreference");
+        String targetId = p.getFirst(prefix + ".CapacityReservationTarget.CapacityReservationId");
+        String targetArn = p.getFirst(prefix + ".CapacityReservationTarget.CapacityReservationResourceGroupArn");
+        if (preference == null && targetId == null && targetArn == null) {
+            return null;
+        }
+        LaunchTemplateData.CapacityReservationSpecification spec = new LaunchTemplateData.CapacityReservationSpecification();
+        spec.setCapacityReservationPreference(preference);
+        if (targetId != null || targetArn != null) {
+            LaunchTemplateData.CapacityReservationTarget target = new LaunchTemplateData.CapacityReservationTarget();
+            target.setCapacityReservationId(targetId);
+            target.setCapacityReservationResourceGroupArn(targetArn);
+            spec.setCapacityReservationTarget(target);
+        }
+        return spec;
+    }
+
+    private LaunchTemplateData.CpuOptions parseLaunchTemplateCpuOptions(MultivaluedMap<String, String> p) {
+        String prefix = "LaunchTemplateData.CpuOptions";
+        LaunchTemplateData.CpuOptions opts = new LaunchTemplateData.CpuOptions();
+        opts.setCoreCount(parseOptionalInt(p.getFirst(prefix + ".CoreCount"), prefix + ".CoreCount"));
+        opts.setThreadsPerCore(parseOptionalInt(p.getFirst(prefix + ".ThreadsPerCore"), prefix + ".ThreadsPerCore"));
+        opts.setAmdSevSnp(p.getFirst(prefix + ".AmdSevSnp"));
+        return opts.isEmpty() ? null : opts;
+    }
+
+    private LaunchTemplateData.InstanceMarketOptions parseLaunchTemplateInstanceMarketOptions(
+            MultivaluedMap<String, String> p) {
+        String prefix = "LaunchTemplateData.InstanceMarketOptions";
+        LaunchTemplateData.InstanceMarketOptions opts = new LaunchTemplateData.InstanceMarketOptions();
+        opts.setMarketType(p.getFirst(prefix + ".MarketType"));
+        String spotPrefix = prefix + ".SpotOptions";
+        LaunchTemplateData.SpotOptions spot = new LaunchTemplateData.SpotOptions();
+        spot.setMaxPrice(p.getFirst(spotPrefix + ".MaxPrice"));
+        spot.setSpotInstanceType(p.getFirst(spotPrefix + ".SpotInstanceType"));
+        spot.setBlockDurationMinutes(parseOptionalInt(
+                p.getFirst(spotPrefix + ".BlockDurationMinutes"), spotPrefix + ".BlockDurationMinutes"));
+        spot.setValidUntil(p.getFirst(spotPrefix + ".ValidUntil"));
+        spot.setInstanceInterruptionBehavior(p.getFirst(spotPrefix + ".InstanceInterruptionBehavior"));
+        if (!spot.isEmpty()) {
+            opts.setSpotOptions(spot);
+        }
+        return opts.isEmpty() ? null : opts;
+    }
+
+    private LaunchTemplateData.MaintenanceOptions parseLaunchTemplateMaintenanceOptions(MultivaluedMap<String, String> p) {
+        String autoRecovery = p.getFirst("LaunchTemplateData.MaintenanceOptions.AutoRecovery");
+        if (autoRecovery == null) {
+            return null;
+        }
+        LaunchTemplateData.MaintenanceOptions opts = new LaunchTemplateData.MaintenanceOptions();
+        opts.setAutoRecovery(autoRecovery);
+        return opts;
+    }
+
+    private List<LaunchTemplateData.NetworkInterfaceSpecification> parseLaunchTemplateNetworkInterfaces(
+            MultivaluedMap<String, String> p) {
+        List<LaunchTemplateData.NetworkInterfaceSpecification> result = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String prefix = "LaunchTemplateData.NetworkInterface." + i;
+            String deviceIndex = p.getFirst(prefix + ".DeviceIndex");
+            String subnetId = p.getFirst(prefix + ".SubnetId");
+            String associatePublicIp = p.getFirst(prefix + ".AssociatePublicIpAddress");
+            String deleteOnTermination = p.getFirst(prefix + ".DeleteOnTermination");
+            String description = p.getFirst(prefix + ".Description");
+            String privateIpAddress = p.getFirst(prefix + ".PrivateIpAddress");
+            String networkCardIndex = p.getFirst(prefix + ".NetworkCardIndex");
+            String interfaceType = p.getFirst(prefix + ".InterfaceType");
+            String ipv6AddressCount = p.getFirst(prefix + ".Ipv6AddressCount");
+            String networkInterfaceId = p.getFirst(prefix + ".NetworkInterfaceId");
+            List<String> groups = getList(p, prefix + ".SecurityGroupId", prefix + ".Groups", prefix + ".GroupId");
+            boolean present = deviceIndex != null || subnetId != null || associatePublicIp != null
+                    || deleteOnTermination != null || description != null || privateIpAddress != null
+                    || networkCardIndex != null || interfaceType != null || ipv6AddressCount != null
+                    || networkInterfaceId != null || !groups.isEmpty();
+            if (!present) {
+                break;
+            }
+            LaunchTemplateData.NetworkInterfaceSpecification spec = new LaunchTemplateData.NetworkInterfaceSpecification();
+            spec.setDeviceIndex(parseOptionalInt(deviceIndex, prefix + ".DeviceIndex"));
+            spec.setSubnetId(subnetId);
+            spec.setGroups(groups);
+            spec.setAssociatePublicIpAddress(parseOptionalBoolean(associatePublicIp, prefix + ".AssociatePublicIpAddress"));
+            spec.setDeleteOnTermination(parseOptionalBoolean(deleteOnTermination, prefix + ".DeleteOnTermination"));
+            spec.setDescription(description);
+            spec.setPrivateIpAddress(privateIpAddress);
+            spec.setNetworkCardIndex(parseOptionalInt(networkCardIndex, prefix + ".NetworkCardIndex"));
+            spec.setInterfaceType(interfaceType);
+            spec.setIpv6AddressCount(parseOptionalInt(ipv6AddressCount, prefix + ".Ipv6AddressCount"));
+            spec.setNetworkInterfaceId(networkInterfaceId);
+            result.add(spec);
+        }
+        return result;
+    }
+
+    private Placement parseLaunchTemplatePlacement(MultivaluedMap<String, String> p) {
+        String prefix = "LaunchTemplateData.Placement";
+        String availabilityZone = p.getFirst(prefix + ".AvailabilityZone");
+        String availabilityZoneId = p.getFirst(prefix + ".AvailabilityZoneId");
+        String affinity = p.getFirst(prefix + ".Affinity");
+        String groupName = p.getFirst(prefix + ".GroupName");
+        String hostId = p.getFirst(prefix + ".HostId");
+        String tenancy = p.getFirst(prefix + ".Tenancy");
+        String spreadDomain = p.getFirst(prefix + ".SpreadDomain");
+        String hostResourceGroupArn = p.getFirst(prefix + ".HostResourceGroupArn");
+        String partitionNumber = p.getFirst(prefix + ".PartitionNumber");
+        String groupId = p.getFirst(prefix + ".GroupId");
+        if (availabilityZone == null && availabilityZoneId == null && affinity == null && groupName == null
+                && hostId == null && tenancy == null && spreadDomain == null && hostResourceGroupArn == null
+                && partitionNumber == null && groupId == null) {
+            return null;
+        }
+        Placement placement = new Placement();
+        placement.setAvailabilityZone(availabilityZone);
+        placement.setAvailabilityZoneId(availabilityZoneId);
+        placement.setAffinity(affinity);
+        placement.setGroupName(groupName);
+        placement.setHostId(hostId);
+        if (tenancy != null) {
+            placement.setTenancy(tenancy);
+        }
+        placement.setSpreadDomain(spreadDomain);
+        placement.setHostResourceGroupArn(hostResourceGroupArn);
+        placement.setPartitionNumber(parseOptionalInt(partitionNumber, prefix + ".PartitionNumber"));
+        placement.setGroupId(groupId);
+        return placement;
+    }
+
+    // Generic across every resource type, unlike parseLaunchTemplateDataTagsForResource (which
+    // only extracts one resourceType at a time for the instanceTags convenience field) - this is
+    // what lets DescribeLaunchTemplateVersions echo back TagSpecifications for resource types
+    // other than "instance" (e.g. "volume", "network-interface").
+    private List<LaunchTemplateData.TagSpecification> parseLaunchTemplateTagSpecifications(MultivaluedMap<String, String> p) {
+        List<LaunchTemplateData.TagSpecification> result = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String resType = p.getFirst("LaunchTemplateData.TagSpecification." + i + ".ResourceType");
+            if (resType == null) break;
+            List<Tag> tagList = new ArrayList<>();
+            for (int j = 1; ; j++) {
+                String key = p.getFirst("LaunchTemplateData.TagSpecification." + i + ".Tag." + j + ".Key");
+                if (key == null) break;
+                String value = p.getFirst("LaunchTemplateData.TagSpecification." + i + ".Tag." + j + ".Value");
+                tagList.add(new Tag(key, value));
+            }
+            result.add(new LaunchTemplateData.TagSpecification(resType, tagList));
+        }
+        return result;
+    }
+
+    private LaunchTemplateData.IntRange parseIntRange(MultivaluedMap<String, String> p, String prefix) {
+        String min = p.getFirst(prefix + ".Min");
+        String max = p.getFirst(prefix + ".Max");
+        if (min == null && max == null) {
+            return null;
+        }
+        return new LaunchTemplateData.IntRange(parseOptionalInt(min, prefix + ".Min"), parseOptionalInt(max, prefix + ".Max"));
+    }
+
+    private LaunchTemplateData.DoubleRange parseDoubleRange(MultivaluedMap<String, String> p, String prefix) {
+        String min = p.getFirst(prefix + ".Min");
+        String max = p.getFirst(prefix + ".Max");
+        if (min == null && max == null) {
+            return null;
+        }
+        return new LaunchTemplateData.DoubleRange(
+                parseOptionalDouble(min, prefix + ".Min"), parseOptionalDouble(max, prefix + ".Max"));
+    }
+
+    // Covers the InstanceRequirements(Request) subset terraform's aws_launch_template
+    // instance_requirements block commonly sets - see LaunchTemplateData.InstanceRequirements's
+    // own doc comment for what's deliberately out of scope.
+    private LaunchTemplateData.InstanceRequirements parseLaunchTemplateInstanceRequirements(MultivaluedMap<String, String> p) {
+        String prefix = "LaunchTemplateData.InstanceRequirements";
+        LaunchTemplateData.InstanceRequirements req = new LaunchTemplateData.InstanceRequirements();
+        req.setVCpuCount(parseIntRange(p, prefix + ".VCpuCount"));
+        req.setMemoryMiB(parseIntRange(p, prefix + ".MemoryMiB"));
+        req.setCpuManufacturers(getList(p, prefix + ".CpuManufacturer"));
+        req.setMemoryGiBPerVCpu(parseDoubleRange(p, prefix + ".MemoryGiBPerVCpu"));
+        req.setExcludedInstanceTypes(getList(p, prefix + ".ExcludedInstanceType"));
+        req.setInstanceGenerations(getList(p, prefix + ".InstanceGeneration"));
+        req.setSpotMaxPricePercentageOverLowestPrice(parseOptionalInt(
+                p.getFirst(prefix + ".SpotMaxPricePercentageOverLowestPrice"),
+                prefix + ".SpotMaxPricePercentageOverLowestPrice"));
+        req.setOnDemandMaxPricePercentageOverLowestPrice(parseOptionalInt(
+                p.getFirst(prefix + ".OnDemandMaxPricePercentageOverLowestPrice"),
+                prefix + ".OnDemandMaxPricePercentageOverLowestPrice"));
+        req.setBareMetal(p.getFirst(prefix + ".BareMetal"));
+        req.setBurstablePerformance(p.getFirst(prefix + ".BurstablePerformance"));
+        req.setRequireHibernateSupport(parseOptionalBoolean(
+                p.getFirst(prefix + ".RequireHibernateSupport"), prefix + ".RequireHibernateSupport"));
+        req.setNetworkInterfaceCount(parseIntRange(p, prefix + ".NetworkInterfaceCount"));
+        req.setLocalStorage(p.getFirst(prefix + ".LocalStorage"));
+        req.setLocalStorageTypes(getList(p, prefix + ".LocalStorageType"));
+        req.setTotalLocalStorageGB(parseDoubleRange(p, prefix + ".TotalLocalStorageGB"));
+        req.setBaselineEbsBandwidthMbps(parseIntRange(p, prefix + ".BaselineEbsBandwidthMbps"));
+        req.setAcceleratorTypes(getList(p, prefix + ".AcceleratorType"));
+        req.setAcceleratorCount(parseIntRange(p, prefix + ".AcceleratorCount"));
+        req.setAcceleratorManufacturers(getList(p, prefix + ".AcceleratorManufacturer"));
+        req.setAcceleratorNames(getList(p, prefix + ".AcceleratorName"));
+        req.setAcceleratorTotalMemoryMiB(parseIntRange(p, prefix + ".AcceleratorTotalMemoryMiB"));
+        req.setNetworkBandwidthGbps(parseDoubleRange(p, prefix + ".NetworkBandwidthGbps"));
+        req.setAllowedInstanceTypes(getList(p, prefix + ".AllowedInstanceType"));
+        req.setMaxSpotPriceAsPercentageOfOptimalOnDemandPrice(parseOptionalInt(
+                p.getFirst(prefix + ".MaxSpotPriceAsPercentageOfOptimalOnDemandPrice"),
+                prefix + ".MaxSpotPriceAsPercentageOfOptimalOnDemandPrice"));
+        return req.isEmpty() ? null : req;
     }
 
     private String decodeUserData(String userDataEncoded) {

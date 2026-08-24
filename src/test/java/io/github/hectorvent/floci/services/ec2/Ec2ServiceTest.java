@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
 import io.github.hectorvent.floci.services.ec2.model.Image;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
+import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
 import io.github.hectorvent.floci.services.ec2.model.ManagedPrefixList;
 import io.github.hectorvent.floci.services.ec2.model.PrefixListEntry;
 import io.github.hectorvent.floci.services.ec2.model.NetworkInterface;
@@ -178,14 +179,21 @@ class Ec2ServiceTest {
                 mock(Ec2PortForwardManager.class),
                 mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
                 new InMemoryStorageFactory());
-        LaunchTemplate template = service.createLaunchTemplate("us-east-1", "app-template",
-                "ami-source", "t3.micro", "app-key", List.of("sg-source"),
-                "source-user-data", "c291cmNlLXVzZXItZGF0YQ==",
-                "arn:aws:iam::000000000000:instance-profile/app-profile",
-                List.of(), List.of(new Tag("Role", "source")), null, null);
+        LaunchTemplateData sourceData = new LaunchTemplateData();
+        sourceData.setImageId("ami-source");
+        sourceData.setInstanceType("t3.micro");
+        sourceData.setKeyName("app-key");
+        sourceData.setSecurityGroupIds(List.of("sg-source"));
+        sourceData.setUserData("source-user-data");
+        sourceData.setEncodedUserData("c291cmNlLXVzZXItZGF0YQ==");
+        sourceData.setIamInstanceProfileArn("arn:aws:iam::000000000000:instance-profile/app-profile");
+        sourceData.setInstanceTags(List.of(new Tag("Role", "source")));
+        LaunchTemplate template = service.createLaunchTemplate("us-east-1", "app-template", sourceData, List.of());
 
+        LaunchTemplateData versionOverrides = new LaunchTemplateData();
+        versionOverrides.setInstanceType("t3.small");
         service.createLaunchTemplateVersion("us-east-1", template.getLaunchTemplateId(), null,
-                "1", null, "t3.small", null, List.of(), null, null, null, List.of(), null, null);
+                "1", versionOverrides);
 
         LaunchTemplate version = service.describeLaunchTemplateVersions(
                 "us-east-1", template.getLaunchTemplateId(), null, List.of("2")).getFirst();

@@ -2831,14 +2831,8 @@ public class Ec2Service implements ContainerTeardown {
 
     // ─── Launch Templates ─────────────────────────────────────────────────────
 
-    public LaunchTemplate createLaunchTemplate(String region, String name, String imageId,
-                                               String instanceType, String keyName,
-                                               List<String> securityGroupIds, String userData,
-                                               String encodedUserData,
-                                               String iamInstanceProfileArn,
-                                               List<Tag> launchTemplateTags, List<Tag> instanceTags,
-                                               LaunchTemplateData.MetadataOptions metadataOptions,
-                                               Boolean monitoringEnabled) {
+    public LaunchTemplate createLaunchTemplate(String region, String name, LaunchTemplateData data,
+                                               List<Tag> launchTemplateTags) {
         ensureDefaultResources(region);
         if (name == null || name.isBlank()) {
             throw new AwsException("MissingParameter", "The request must contain the parameter LaunchTemplateName", 400);
@@ -2849,6 +2843,9 @@ public class Ec2Service implements ContainerTeardown {
             throw new AwsException("InvalidLaunchTemplateName.AlreadyExistsException",
                     "Launch template name already in use.", 400);
         }
+        if (data == null) {
+            data = new LaunchTemplateData();
+        }
 
         LaunchTemplate launchTemplate = new LaunchTemplate();
         launchTemplate.setLaunchTemplateId("lt-" + randomHex(17));
@@ -2856,38 +2853,18 @@ public class Ec2Service implements ContainerTeardown {
         launchTemplate.setCreateTime(Instant.now());
         launchTemplate.setCreatedBy(AwsArnUtils.Arn.of("iam", "", accountId, "root").toString());
         launchTemplate.setRegion(region);
-        launchTemplate.setImageId(imageId);
-        launchTemplate.setInstanceType(instanceType);
-        launchTemplate.setKeyName(keyName);
-        launchTemplate.setUserData(userData);
-        launchTemplate.setEncodedUserData(encodedUserData);
-        launchTemplate.setIamInstanceProfileArn(iamInstanceProfileArn);
-        launchTemplate.setMetadataOptions(metadataOptions);
-        launchTemplate.setMonitoringEnabled(monitoringEnabled);
-        if (securityGroupIds != null) {
-            launchTemplate.setSecurityGroupIds(new ArrayList<>(securityGroupIds));
-        }
         if (launchTemplateTags != null && !launchTemplateTags.isEmpty()) {
             launchTemplate.setTags(new ArrayList<>(launchTemplateTags));
             tags.put(launchTemplate.getLaunchTemplateId(), new ArrayList<>(launchTemplateTags));
         }
-        if (instanceTags != null && !instanceTags.isEmpty()) {
-            launchTemplate.setInstanceTags(new ArrayList<>(instanceTags));
-        }
-        launchTemplate.getVersions().put("1", dataFrom(launchTemplate));
+        applyData(launchTemplate, data);
+        launchTemplate.getVersions().put("1", new LaunchTemplateData(data));
         launchTemplates.put(key(region, launchTemplate.getLaunchTemplateId()), launchTemplate);
         return launchTemplate;
     }
 
     public LaunchTemplate createLaunchTemplateVersion(String region, String id, String name,
-                                                      String sourceVersion,
-                                                      String imageId, String instanceType, String keyName,
-                                                      List<String> securityGroupIds, String userData,
-                                                      String encodedUserData,
-                                                      String iamInstanceProfileArn,
-                                                      List<Tag> instanceTags,
-                                                      LaunchTemplateData.MetadataOptions metadataOptions,
-                                                      Boolean monitoringEnabled) {
+                                                      String sourceVersion, LaunchTemplateData overrides) {
         ensureDefaultResources(region);
         LaunchTemplate launchTemplate = findLaunchTemplate(region, id, name);
         ensureLaunchTemplateVersions(launchTemplate);
@@ -2895,38 +2872,83 @@ public class Ec2Service implements ContainerTeardown {
         LaunchTemplateData data = new LaunchTemplateData(versionData(launchTemplate,
                 resolveLaunchTemplateVersion(launchTemplate, sourceVersion, launchTemplate.getLatestVersionNumber())));
         launchTemplate.setLatestVersionNumber(String.valueOf(latestVersion));
-        if (imageId != null && !imageId.isBlank()) {
-            data.setImageId(imageId);
-        }
-        if (instanceType != null && !instanceType.isBlank()) {
-            data.setInstanceType(instanceType);
-        }
-        if (keyName != null && !keyName.isBlank()) {
-            data.setKeyName(keyName);
-        }
-        if (userData != null && !userData.isBlank()) {
-            data.setUserData(userData);
-            data.setEncodedUserData(encodedUserData);
-        }
-        if (iamInstanceProfileArn != null && !iamInstanceProfileArn.isBlank()) {
-            data.setIamInstanceProfileArn(iamInstanceProfileArn);
-        }
-        if (metadataOptions != null) {
-            data.setMetadataOptions(metadataOptions);
-        }
-        if (monitoringEnabled != null) {
-            data.setMonitoringEnabled(monitoringEnabled);
-        }
-        if (securityGroupIds != null && !securityGroupIds.isEmpty()) {
-            data.setSecurityGroupIds(securityGroupIds);
-        }
-        if (instanceTags != null && !instanceTags.isEmpty()) {
-            data.setInstanceTags(instanceTags);
-        }
+        mergeLaunchTemplateData(data, overrides);
         launchTemplate.getVersions().put(String.valueOf(latestVersion), data);
         applyData(launchTemplate, data);
         launchTemplates.put(key(region, launchTemplate.getLaunchTemplateId()), launchTemplate);
         return launchTemplate;
+    }
+
+    // Applies each field of `overrides` onto `base` only where the override actually supplies a
+    // value - CreateLaunchTemplateVersion's real semantics are "start from the source version,
+    // change only what this request sets", not "replace wholesale". Mirrors what this method's
+    // predecessor did field-by-field before lex00/floci#119 widened the field set enough that the
+    // per-field `if (x != null) ...` block became its own source of drift risk.
+    private void mergeLaunchTemplateData(LaunchTemplateData base, LaunchTemplateData overrides) {
+        if (overrides == null) {
+            return;
+        }
+        if (overrides.getImageId() != null && !overrides.getImageId().isBlank()) {
+            base.setImageId(overrides.getImageId());
+        }
+        if (overrides.getInstanceType() != null && !overrides.getInstanceType().isBlank()) {
+            base.setInstanceType(overrides.getInstanceType());
+        }
+        if (overrides.getKeyName() != null && !overrides.getKeyName().isBlank()) {
+            base.setKeyName(overrides.getKeyName());
+        }
+        if (overrides.getUserData() != null && !overrides.getUserData().isBlank()) {
+            base.setUserData(overrides.getUserData());
+            base.setEncodedUserData(overrides.getEncodedUserData());
+        }
+        if (overrides.getIamInstanceProfileArn() != null && !overrides.getIamInstanceProfileArn().isBlank()) {
+            base.setIamInstanceProfileArn(overrides.getIamInstanceProfileArn());
+        }
+        if (overrides.getMetadataOptions() != null) {
+            base.setMetadataOptions(overrides.getMetadataOptions());
+        }
+        if (overrides.getMonitoringEnabled() != null) {
+            base.setMonitoringEnabled(overrides.getMonitoringEnabled());
+        }
+        if (overrides.getVersionDescription() != null && !overrides.getVersionDescription().isBlank()) {
+            base.setVersionDescription(overrides.getVersionDescription());
+        }
+        if (overrides.getEbsOptimized() != null) {
+            base.setEbsOptimized(overrides.getEbsOptimized());
+        }
+        if (overrides.getSecurityGroupIds() != null && !overrides.getSecurityGroupIds().isEmpty()) {
+            base.setSecurityGroupIds(overrides.getSecurityGroupIds());
+        }
+        if (overrides.getInstanceTags() != null && !overrides.getInstanceTags().isEmpty()) {
+            base.setInstanceTags(overrides.getInstanceTags());
+        }
+        if (overrides.getBlockDeviceMappings() != null && !overrides.getBlockDeviceMappings().isEmpty()) {
+            base.setBlockDeviceMappings(overrides.getBlockDeviceMappings());
+        }
+        if (overrides.getCapacityReservationSpecification() != null) {
+            base.setCapacityReservationSpecification(overrides.getCapacityReservationSpecification());
+        }
+        if (overrides.getCpuOptions() != null) {
+            base.setCpuOptions(overrides.getCpuOptions());
+        }
+        if (overrides.getInstanceMarketOptions() != null) {
+            base.setInstanceMarketOptions(overrides.getInstanceMarketOptions());
+        }
+        if (overrides.getMaintenanceOptions() != null) {
+            base.setMaintenanceOptions(overrides.getMaintenanceOptions());
+        }
+        if (overrides.getNetworkInterfaces() != null && !overrides.getNetworkInterfaces().isEmpty()) {
+            base.setNetworkInterfaces(overrides.getNetworkInterfaces());
+        }
+        if (overrides.getPlacement() != null) {
+            base.setPlacement(overrides.getPlacement());
+        }
+        if (overrides.getTagSpecifications() != null && !overrides.getTagSpecifications().isEmpty()) {
+            base.setTagSpecifications(overrides.getTagSpecifications());
+        }
+        if (overrides.getInstanceRequirements() != null) {
+            base.setInstanceRequirements(overrides.getInstanceRequirements());
+        }
     }
 
     public List<LaunchTemplate> describeLaunchTemplateVersions(String region, String id, String name,
@@ -3070,6 +3092,17 @@ public class Ec2Service implements ContainerTeardown {
         data.setInstanceTags(launchTemplate.getInstanceTags());
         data.setMetadataOptions(launchTemplate.getMetadataOptions());
         data.setMonitoringEnabled(launchTemplate.getMonitoringEnabled());
+        data.setVersionDescription(launchTemplate.getVersionDescription());
+        data.setEbsOptimized(launchTemplate.getEbsOptimized());
+        data.setBlockDeviceMappings(launchTemplate.getBlockDeviceMappings());
+        data.setCapacityReservationSpecification(launchTemplate.getCapacityReservationSpecification());
+        data.setCpuOptions(launchTemplate.getCpuOptions());
+        data.setInstanceMarketOptions(launchTemplate.getInstanceMarketOptions());
+        data.setMaintenanceOptions(launchTemplate.getMaintenanceOptions());
+        data.setNetworkInterfaces(launchTemplate.getNetworkInterfaces());
+        data.setPlacement(launchTemplate.getPlacement());
+        data.setTagSpecifications(launchTemplate.getTagSpecifications());
+        data.setInstanceRequirements(launchTemplate.getInstanceRequirements());
         return data;
     }
 
@@ -3084,6 +3117,17 @@ public class Ec2Service implements ContainerTeardown {
         launchTemplate.setInstanceTags(data.getInstanceTags());
         launchTemplate.setMetadataOptions(data.getMetadataOptions());
         launchTemplate.setMonitoringEnabled(data.getMonitoringEnabled());
+        launchTemplate.setVersionDescription(data.getVersionDescription());
+        launchTemplate.setEbsOptimized(data.getEbsOptimized());
+        launchTemplate.setBlockDeviceMappings(data.getBlockDeviceMappings());
+        launchTemplate.setCapacityReservationSpecification(data.getCapacityReservationSpecification());
+        launchTemplate.setCpuOptions(data.getCpuOptions());
+        launchTemplate.setInstanceMarketOptions(data.getInstanceMarketOptions());
+        launchTemplate.setMaintenanceOptions(data.getMaintenanceOptions());
+        launchTemplate.setNetworkInterfaces(data.getNetworkInterfaces());
+        launchTemplate.setPlacement(data.getPlacement());
+        launchTemplate.setTagSpecifications(data.getTagSpecifications());
+        launchTemplate.setInstanceRequirements(data.getInstanceRequirements());
     }
 
     private LaunchTemplate copyForVersion(LaunchTemplate source, String versionNumber) {

@@ -14,6 +14,7 @@ public class EbsBlockDevice {
     private Boolean encrypted;
     private Integer iops;
     private Integer throughput;
+    private String kmsKeyId;
 
     public EbsBlockDevice() {}
 
@@ -37,4 +38,7 @@ public class EbsBlockDevice {
 
     public Integer getThroughput() { return throughput; }
     public void setThroughput(Integer throughput) { this.throughput = throughput; }
+
+    public String getKmsKeyId() { return kmsKeyId; }
+    public void setKmsKeyId(String kmsKeyId) { this.kmsKeyId = kmsKeyId; }
 }

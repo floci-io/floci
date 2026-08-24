@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
+import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -72,14 +73,20 @@ public class Ec2LaunchTemplateCfnProvisioner implements CfnResourceProvisioner {
         // omitted one minted a second randomly named template and orphaned the first. A template
         // whose name has not changed is updated in place by publishing a new version, which is how
         // AWS::EC2::LaunchTemplate behaves when only its LaunchTemplateData changes.
+        LaunchTemplateData ltData = new LaunchTemplateData();
+        ltData.setImageId(imageId);
+        ltData.setInstanceType(instanceType);
+        ltData.setKeyName(keyName);
+        ltData.setEncodedUserData(encodedUserData);
+        ltData.setIamInstanceProfileArn(iamInstanceProfileArn);
+        if (securityGroupIds != null) {
+            ltData.setSecurityGroupIds(securityGroupIds);
+        }
         LaunchTemplate lt;
         if (existing != null && name.equals(existing.getLaunchTemplateName())) {
-            lt = ec2Service.createLaunchTemplateVersion(ctx.region(), previousId, null, null,
-                    imageId, instanceType, keyName, securityGroupIds, null, encodedUserData,
-                    iamInstanceProfileArn, null, null, null);
+            lt = ec2Service.createLaunchTemplateVersion(ctx.region(), previousId, null, null, ltData);
         } else {
-            lt = ec2Service.createLaunchTemplate(ctx.region(), name, imageId, instanceType, keyName,
-                    securityGroupIds, null, encodedUserData, iamInstanceProfileArn, null, null, null, null);
+            lt = ec2Service.createLaunchTemplate(ctx.region(), name, ltData, null);
             // A changed name is a replacement: drop the template the previous execution created,
             // once the new one exists, so the old one is not left behind.
             if (existing != null) {
