@@ -115,14 +115,16 @@ public class DocDbContainerManager {
                 .withName(containerName)
                 .withDockerNetwork(config.services().docdb().dockerNetwork())
                 .withLogRotation()
-                .withEnv(envVars);
+                .withEnv(envVars)
+                .withLabels(ContainerStorageHelper.resourceIdentityLabels(
+                        "docdb", clusterId, regionResolver.getAccountId(), regionResolver.getDefaultRegion()));
 
         if (!containerDetector.isRunningInContainer()) {
             specBuilder.withDynamicPort(MONGO_PORT);
         } else {
             specBuilder.withExposedPort(MONGO_PORT);
         }
-        
+
 
         ContainerSpec spec = specBuilder.build();
         ContainerInfo info = lifecycleManager.createAndStart(spec);

@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.ses;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.route53.Route53Service;
@@ -10,6 +11,7 @@ import io.github.hectorvent.floci.services.route53.model.HostedZone;
 import io.github.hectorvent.floci.services.route53.model.ResourceRecord;
 import io.github.hectorvent.floci.services.route53.model.ResourceRecordSet;
 import io.github.hectorvent.floci.services.ses.model.AccountSuppressionAttributes;
+import io.github.hectorvent.floci.services.ses.model.AccountDetails;
 import io.github.hectorvent.floci.services.ses.model.AccountVdmAttributes;
 import io.github.hectorvent.floci.services.ses.model.ArchivingOptions;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntry;
@@ -117,6 +119,9 @@ public class SesService {
     // placeholder and the List-Unsubscribe header) that resolve to Floci's own unsubscribe endpoint.
     private final String baseUrl;
     private final Route53Service route53Service;
+    // Resolves the caller's account per request so send-event payloads report the sending account, not
+    // the fixed default. Null in the package-private test constructors (falls back to defaultAccountId).
+    private final RegionResolver regionResolver;
     private final Clock clock;
     private final ConcurrentHashMap<String, DkimLookupCacheEntry> dkimLookupCache = new ConcurrentHashMap<>();
 
@@ -128,7 +133,7 @@ public class SesService {
                        SesTemplateService templateService, SesSentEmailService sentEmailService,
                        SmtpRelay smtpRelay, ObjectMapper objectMapper,
                        SesEventPublisher eventPublisher, EmulatorConfig config, Route53Service route53Service,
-                       Clock clock) {
+                       RegionResolver regionResolver, Clock clock) {
         this.identityStore = storageFactory.create("ses", "ses-identities.json",
                 new TypeReference<Map<String, Identity>>() {});
         this.sentEmailService = sentEmailService;
@@ -148,6 +153,7 @@ public class SesService {
         this.defaultAccountId = config.defaultAccountId();
         this.baseUrl = config.effectiveBaseUrl();
         this.route53Service = route53Service;
+        this.regionResolver = regionResolver;
         this.clock = clock;
     }
 
@@ -202,6 +208,7 @@ public class SesService {
         this.defaultAccountId = "000000000000";
         this.baseUrl = "http://localhost:4566";
         this.route53Service = route53Service;
+        this.regionResolver = null;
         this.clock = clock;
     }
 
@@ -500,7 +507,9 @@ public class SesService {
         List<String> envelope = envelopeDestinations != null
                 ? envelopeDestinations : Collections.emptyList();
         Instant timestamp = Instant.now();
-        String sendingAccountId = defaultAccountId;
+        // Report the caller's account (resolved per request) in the event payload and source ARN,
+        // falling back to the default account outside a request context (e.g. unit tests).
+        String sendingAccountId = regionResolver != null ? regionResolver.getAccountId() : defaultAccountId;
         String sourceArn = (source == null || source.isBlank())
                 ? null
                 : AwsArnUtils.Arn.of("ses", region, sendingAccountId,
@@ -1122,6 +1131,17 @@ public class SesService {
 
     public void setAccountSendingEnabled(String region, boolean enabled) {
         accountService.setAccountSendingEnabled(region, enabled);
+    }
+
+    public Optional<AccountDetails> findAccountDetails(String region) {
+        return accountService.findAccountDetails(region);
+    }
+
+    public AccountDetails putAccountDetails(String region, String mailType, String websiteUrl,
+                                            String contactLanguage, String useCaseDescription,
+                                            List<String> additionalContacts, boolean productionAccessEnabled) {
+        return accountService.putAccountDetails(region, mailType, websiteUrl, contactLanguage,
+                useCaseDescription, additionalContacts, productionAccessEnabled);
     }
 
     public Optional<AccountVdmAttributes> findAccountVdmAttributes(String region) {

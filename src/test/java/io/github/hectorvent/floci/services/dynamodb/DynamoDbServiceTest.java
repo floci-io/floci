@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.services.dynamodb.model.AttributeDefinition;
 import io.github.hectorvent.floci.services.dynamodb.model.ConditionalCheckFailedException;
 import io.github.hectorvent.floci.services.dynamodb.model.GlobalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
+import io.github.hectorvent.floci.services.dynamodb.model.LocalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -98,6 +99,158 @@ class DynamoDbServiceTest {
                         5L, 5L, "eu-west-1"));
         assertEquals("ValidationException", ex.getErrorCode());
         assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void createTableRejectsLocalSecondaryIndexWithMultipleSortKeyAttributes() {
+        LocalSecondaryIndex lsi = new LocalSecondaryIndex(
+                "LSI1",
+                List.of(
+                        new KeySchemaElement("PK", "HASH"),
+                        new KeySchemaElement("LSI1A", "RANGE"),
+                        new KeySchemaElement("LSI1B", "RANGE")),
+                null, "ALL");
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.createTable("lsi-multi-sort",
+                List.of(
+                        new KeySchemaElement("PK", "HASH"),
+                        new KeySchemaElement("SK", "RANGE")),
+                List.of(
+                        new AttributeDefinition("PK", "S"),
+                        new AttributeDefinition("SK", "S"),
+                        new AttributeDefinition("LSI1A", "S"),
+                        new AttributeDefinition("LSI1B", "S")),
+                5L, 5L, List.of(), List.of(lsi), "eu-west-1"));
+
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void createTableRejectsLocalSecondaryIndexWithNoSortKey() {
+        LocalSecondaryIndex lsi = new LocalSecondaryIndex(
+                "LSI1",
+                List.of(new KeySchemaElement("PK", "HASH")),
+                null, "ALL");
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.createTable("lsi-no-sort",
+                List.of(
+                        new KeySchemaElement("PK", "HASH"),
+                        new KeySchemaElement("SK", "RANGE")),
+                List.of(
+                        new AttributeDefinition("PK", "S"),
+                        new AttributeDefinition("SK", "S")),
+                5L, 5L, List.of(), List.of(lsi), "eu-west-1"));
+
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void createTableRejectsGsiWithMoreThanFourSortKeyAttributes() {
+        GlobalSecondaryIndex gsi = new GlobalSecondaryIndex(
+                "GSI1",
+                List.of(
+                        new KeySchemaElement("PK", "HASH"),
+                        new KeySchemaElement("A", "RANGE"),
+                        new KeySchemaElement("B", "RANGE"),
+                        new KeySchemaElement("C", "RANGE"),
+                        new KeySchemaElement("D", "RANGE"),
+                        new KeySchemaElement("E", "RANGE")),
+                null, "ALL", null);
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.createTable("gsi-too-many-sort-keys",
+                List.of(new KeySchemaElement("PK", "HASH")),
+                List.of(
+                        new AttributeDefinition("PK", "S"),
+                        new AttributeDefinition("A", "S"),
+                        new AttributeDefinition("B", "S"),
+                        new AttributeDefinition("C", "S"),
+                        new AttributeDefinition("D", "S"),
+                        new AttributeDefinition("E", "S")),
+                5L, 5L, List.of(gsi), "eu-west-1"));
+
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void createTableRejectsGsiWithMoreThanFourPartitionKeyAttributes() {
+        GlobalSecondaryIndex gsi = new GlobalSecondaryIndex(
+                "GSI1",
+                List.of(
+                        new KeySchemaElement("A", "HASH"),
+                        new KeySchemaElement("B", "HASH"),
+                        new KeySchemaElement("C", "HASH"),
+                        new KeySchemaElement("D", "HASH"),
+                        new KeySchemaElement("E", "HASH")),
+                null, "ALL", null);
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.createTable("gsi-too-many-hash-keys",
+                List.of(new KeySchemaElement("PK", "HASH")),
+                List.of(
+                        new AttributeDefinition("PK", "S"),
+                        new AttributeDefinition("A", "S"),
+                        new AttributeDefinition("B", "S"),
+                        new AttributeDefinition("C", "S"),
+                        new AttributeDefinition("D", "S"),
+                        new AttributeDefinition("E", "S")),
+                5L, 5L, List.of(gsi), "eu-west-1"));
+
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void updateTableRejectsGsiCreateWithMoreThanFourSortKeyAttributes() {
+        createUsersTable("eu-west-1");
+        GlobalSecondaryIndex gsi = new GlobalSecondaryIndex(
+                "GSI1",
+                List.of(
+                        new KeySchemaElement("userId", "HASH"),
+                        new KeySchemaElement("A", "RANGE"),
+                        new KeySchemaElement("B", "RANGE"),
+                        new KeySchemaElement("C", "RANGE"),
+                        new KeySchemaElement("D", "RANGE"),
+                        new KeySchemaElement("E", "RANGE")),
+                null, "ALL", null);
+        List<AttributeDefinition> newAttrs = List.of(
+                new AttributeDefinition("A", "S"), new AttributeDefinition("B", "S"),
+                new AttributeDefinition("C", "S"), new AttributeDefinition("D", "S"),
+                new AttributeDefinition("E", "S"));
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.updateTable(
+                "Users", null, null, List.of(gsi), List.of(), newAttrs, "eu-west-1"));
+
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void updateTableRejectsGsiArityWithoutApplyingThroughputChange() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+        GlobalSecondaryIndex invalidGsi = new GlobalSecondaryIndex(
+                "GSI1",
+                List.of(
+                        new KeySchemaElement("A", "HASH"),
+                        new KeySchemaElement("B", "HASH"),
+                        new KeySchemaElement("C", "HASH"),
+                        new KeySchemaElement("D", "HASH"),
+                        new KeySchemaElement("E", "HASH")),
+                null, "ALL", null);
+        List<AttributeDefinition> newAttrs = List.of(
+                new AttributeDefinition("A", "S"), new AttributeDefinition("B", "S"),
+                new AttributeDefinition("C", "S"), new AttributeDefinition("D", "S"),
+                new AttributeDefinition("E", "S"));
+
+        assertThrows(AwsException.class, () -> service.updateTable(
+                "Users", 10L, 10L, List.of(invalidGsi), List.of(), newAttrs, region));
+
+        TableDefinition after = service.describeTable("Users", region);
+        assertEquals(5L, after.getProvisionedThroughput().getReadCapacityUnits());
+        assertEquals(5L, after.getProvisionedThroughput().getWriteCapacityUnits());
+        assertTrue(after.getGlobalSecondaryIndexes().isEmpty());
     }
 
     @Test
@@ -412,21 +565,7 @@ class DynamoDbServiceTest {
     @Test
     void queryOnCompositeSortKeyGsiRespectsScanIndexForward() {
         String region = "us-east-1";
-        GlobalSecondaryIndex gsi = new GlobalSecondaryIndex(
-                "memberIndex",
-                List.of(
-                        new KeySchemaElement("memberName", "HASH"),
-                        new KeySchemaElement("state", "RANGE"),
-                        new KeySchemaElement("createdAt", "RANGE")),
-                null, "ALL", null);
-        service.createTable("Requests",
-                List.of(new KeySchemaElement("requestId", "HASH")),
-                List.of(
-                        new AttributeDefinition("requestId", "S"),
-                        new AttributeDefinition("memberName", "S"),
-                        new AttributeDefinition("state", "S"),
-                        new AttributeDefinition("createdAt", "S")),
-                5L, 5L, List.of(gsi), region);
+        createRequestsTableWithCompositeSortKeyGsi(region);
 
         // Same memberName + state. Deliberately make base-table key order (requestId: a, b, c)
         // DISAGREE with createdAt order, so a correct result can only come from sorting on the
@@ -460,6 +599,124 @@ class DynamoDbServiceTest {
                 descending.items().stream()
                         .map(result -> result.get("createdAt").get("S").asText())
                         .toList());
+    }
+
+    @Test
+    void queryOnCompositeSortKeyGsiExcludesItemsMissingTrailingIndexKey() {
+        String region = "us-east-1";
+        createRequestsTableWithCompositeSortKeyGsi(region);
+        service.putItem("Requests", item("requestId", "complete", "memberName", "alice",
+                "state", "ACTIVE", "createdAt", "2026-07-14T00:00:01Z"), region);
+        service.putItem("Requests", item("requestId", "incomplete", "memberName", "alice",
+                "state", "ACTIVE"), region);
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":pk", attributeValue("S", "alice"));
+
+        DynamoDbService.QueryResult results = service.query("Requests", null, exprValues,
+                "memberName = :pk", null, null, true, "memberIndex", null, null, region);
+
+        assertEquals(List.of("complete"), results.items().stream()
+                .map(result -> result.get("requestId").get("S").asText())
+                .toList());
+    }
+
+    private void createRequestsTableWithCompositeSortKeyGsi(String region) {
+        GlobalSecondaryIndex gsi = new GlobalSecondaryIndex(
+                "memberIndex",
+                List.of(
+                        new KeySchemaElement("memberName", "HASH"),
+                        new KeySchemaElement("state", "RANGE"),
+                        new KeySchemaElement("createdAt", "RANGE")),
+                null, "ALL", null);
+        service.createTable("Requests",
+                List.of(new KeySchemaElement("requestId", "HASH")),
+                List.of(
+                        new AttributeDefinition("requestId", "S"),
+                        new AttributeDefinition("memberName", "S"),
+                        new AttributeDefinition("state", "S"),
+                        new AttributeDefinition("createdAt", "S")),
+                5L, 5L, List.of(gsi), region);
+    }
+
+    private void createTableWithCompositePartitionKeyGsi(String region) {
+        GlobalSecondaryIndex gsi = new GlobalSecondaryIndex(
+                "tenantRegionIndex",
+                List.of(
+                        new KeySchemaElement("tenantId", "HASH"),
+                        new KeySchemaElement("region", "HASH"),
+                        new KeySchemaElement("createdAt", "RANGE")),
+                null, "ALL", null);
+        service.createTable("Accounts",
+                List.of(new KeySchemaElement("id", "HASH")),
+                List.of(
+                        new AttributeDefinition("id", "S"),
+                        new AttributeDefinition("tenantId", "S"),
+                        new AttributeDefinition("region", "S"),
+                        new AttributeDefinition("createdAt", "S")),
+                5L, 5L, List.of(gsi), region);
+        service.putItem("Accounts",
+                item("id", "1", "tenantId", "acme", "region", "us", "createdAt", "2026-01-01"), region);
+        service.putItem("Accounts",
+                item("id", "2", "tenantId", "acme", "region", "eu", "createdAt", "2026-01-02"), region);
+    }
+
+    @Test
+    void queryOnCompositePartitionKeyGsiRequiresEveryHashAttribute() {
+        String region = "eu-west-1";
+        createTableWithCompositePartitionKeyGsi(region);
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":t", attributeValue("S", "acme"));
+
+        AwsException error = assertThrows(AwsException.class, () -> service.query(
+                "Accounts", null, exprValues, "tenantId = :t",
+                null, null, null, "tenantRegionIndex", null, null, region));
+        assertEquals("ValidationException", error.getErrorCode());
+    }
+
+    @Test
+    void queryOnCompositePartitionKeyGsiFiltersByEveryHashAttribute() {
+        String region = "eu-west-1";
+        createTableWithCompositePartitionKeyGsi(region);
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":t", attributeValue("S", "acme"));
+        exprValues.set(":r", attributeValue("S", "us"));
+
+        DynamoDbService.QueryResult results = service.query(
+                "Accounts", null, exprValues, "tenantId = :t AND region = :r",
+                null, null, null, "tenantRegionIndex", null, null, region);
+
+        assertEquals(List.of("1"), results.items().stream()
+                .map(item -> item.get("id").get("S").asText())
+                .toList());
+    }
+
+    @Test
+    void legacyQueryOnCompositePartitionKeyGsiFiltersByEveryHashAttribute() {
+        String region = "eu-west-1";
+        createTableWithCompositePartitionKeyGsi(region);
+
+        ObjectNode keyConditions = mapper.createObjectNode();
+        keyConditions.set("tenantId", legacyEqCondition("acme"));
+        keyConditions.set("region", legacyEqCondition("us"));
+
+        DynamoDbService.QueryResult results = service.query("Accounts", keyConditions, null, null,
+                null, null, null, "tenantRegionIndex", null, null, region);
+
+        assertEquals(List.of("1"), results.items().stream()
+                .map(item -> item.get("id").get("S").asText())
+                .toList());
+    }
+
+    private ObjectNode legacyEqCondition(String value) {
+        ObjectNode condition = mapper.createObjectNode();
+        condition.put("ComparisonOperator", "EQ");
+        var attrList = mapper.createArrayNode();
+        attrList.add(attributeValue("S", value));
+        condition.set("AttributeValueList", attrList);
+        return condition;
     }
 
     @Test
@@ -609,6 +866,34 @@ class DynamoDbServiceTest {
         assertThrows(AwsException.class, () -> service.deleteItem("NoTable", item("id", "1"), region));
         assertThrows(AwsException.class, () -> service.query("NoTable", null, null, null, null, null, region));
         assertThrows(AwsException.class, () -> service.scan("NoTable", null, null, null, null, null, null, region));
+    }
+
+    @Test
+    void scanRejectsUnknownIndexOnEmptyTable() {
+        String region = "eu-west-1";
+        createOrdersTable(region);
+
+        AwsException error = assertThrows(AwsException.class, () -> service.scan(
+                "Orders", null, null, null, null, null, null, "missing-index", region));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("The table does not have the specified index: missing-index", error.getMessage());
+    }
+
+    @Test
+    void queryRejectsNonKeyConditionOnEmptyTable() {
+        String region = "eu-west-1";
+        createOrdersTable(region);
+        ObjectNode values = mapper.createObjectNode();
+        values.set(":customer", attributeValue("S", "c1"));
+        values.set(":total", attributeValue("N", "10"));
+
+        AwsException error = assertThrows(AwsException.class, () -> service.query(
+                "Orders", null, values, "customerId = :customer AND total > :total",
+                null, null, null, null, null, null, region));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("Query key condition not supported", error.getMessage());
     }
 
     @Test
@@ -2237,7 +2522,7 @@ class DynamoDbServiceTest {
     @Test
     void updateItemConditionFailedReturnValuesNone() {
         createOrdersTable("us-east-1");
-    
+
         ObjectNode order = item("customerId", "1", "orderId", "sort1", "testAttr", "testVal");
         ObjectNode key = item("customerId", "1", "orderId", "sort1");
         service.putItem("Orders", order, "us-east-1");
@@ -2290,10 +2575,10 @@ class DynamoDbServiceTest {
     @Test
     void putItemNetNewConditionFailedReturnValuesNone() {
         createOrdersTable("us-east-1");
-    
+
         ObjectNode order = item("customerId", "1", "orderId", "sort1", "testAttr", "testVal");
         ObjectNode key = item("customerId", "1", "orderId", "sort1");
-        ConditionalCheckFailedException ex = assertThrows(ConditionalCheckFailedException.class, () -> 
+        ConditionalCheckFailedException ex = assertThrows(ConditionalCheckFailedException.class, () ->
             service.putItem("Orders", order, "attribute_exists(customerId)", null, null, "us-east-1", "NONE"));
 
         JsonNode stored = service.getItem("Orders", key, "us-east-1");
@@ -2305,10 +2590,10 @@ class DynamoDbServiceTest {
     @Test
     void putItemNetNewConditionFailedReturnValuesAllOld() {
         createOrdersTable("us-east-1");
-    
+
         ObjectNode order = item("customerId", "1", "orderId", "sort1", "testAttr", "testVal");
         ObjectNode key = item("customerId", "1", "orderId", "sort1");
-        ConditionalCheckFailedException ex = assertThrows(ConditionalCheckFailedException.class, () -> 
+        ConditionalCheckFailedException ex = assertThrows(ConditionalCheckFailedException.class, () ->
             service.putItem("Orders", order, "attribute_exists(customerId)", null, null, "us-east-1", "ALL_OLD"));
 
         JsonNode stored = service.getItem("Orders", key, "us-east-1");
@@ -2316,18 +2601,18 @@ class DynamoDbServiceTest {
 
         assertNull(ex.getItem());
     }
-    
+
     @Test
     void putItemExistingConditionFailedReturnValuesNone() {
         createOrdersTable("us-east-1");
-    
+
         ObjectNode order1 = item("customerId", "1", "orderId", "sort1", "testAttr", "testVal");
         ObjectNode order2 = item("customerId", "1", "orderId", "sort1", "testAttr", "testVal1");
         ObjectNode key = item("customerId", "1", "orderId", "sort1");
 
         service.putItem("Orders", order1, "us-east-1");
 
-        ConditionalCheckFailedException ex = assertThrows(ConditionalCheckFailedException.class, () -> 
+        ConditionalCheckFailedException ex = assertThrows(ConditionalCheckFailedException.class, () ->
             service.putItem("Orders", order2, "attribute_exists(someAttr)", null, null, "us-east-1", "NONE"));
 
         JsonNode stored = service.getItem("Orders", key, "us-east-1");
@@ -2348,7 +2633,7 @@ class DynamoDbServiceTest {
 
         service.putItem("Orders", order1, "us-east-1");
 
-        ConditionalCheckFailedException ex = assertThrows(ConditionalCheckFailedException.class, () -> 
+        ConditionalCheckFailedException ex = assertThrows(ConditionalCheckFailedException.class, () ->
             service.putItem("Orders", order2, "attribute_exists(someAttr)", null, null, "us-east-1", "ALL_OLD"));
 
         JsonNode stored = service.getItem("Orders", key, "us-east-1");
@@ -2362,18 +2647,18 @@ class DynamoDbServiceTest {
         assertEquals("testVal", returnedItem.get("testAttr").get("S").asText());
     }
 
-    
-    
+
+
     @Test
     void deleteItemConditionFailedReturnValuesNone() {
         createOrdersTable("us-east-1");
-    
+
         ObjectNode order = item("customerId", "1", "orderId", "sort1");
         ObjectNode key = item("customerId", "1", "orderId", "sort1");
 
         service.putItem("Orders", order, "us-east-1");
 
-        ConditionalCheckFailedException ex = assertThrows(ConditionalCheckFailedException.class, () -> 
+        ConditionalCheckFailedException ex = assertThrows(ConditionalCheckFailedException.class, () ->
             service.deleteItem("Orders", key, "attribute_exists(someAttr)", null, null, "us-east-1", "NONE"));
 
         JsonNode stored = service.getItem("Orders", key, "us-east-1");
@@ -2391,7 +2676,7 @@ class DynamoDbServiceTest {
 
         service.putItem("Orders", order, "us-east-1");
 
-        ConditionalCheckFailedException ex = assertThrows(ConditionalCheckFailedException.class, () -> 
+        ConditionalCheckFailedException ex = assertThrows(ConditionalCheckFailedException.class, () ->
             service.deleteItem("Orders", key, "attribute_exists(someAttr)", null, null, "us-east-1", "ALL_OLD"));
 
         JsonNode stored = service.getItem("Orders", key, "us-east-1");

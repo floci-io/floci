@@ -3,20 +3,9 @@ package io.github.hectorvent.floci.services.ses;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
-import io.github.hectorvent.floci.services.ses.model.AccountSuppressionAttributes;
-import io.github.hectorvent.floci.services.ses.model.AccountVdmAttributes;
-import io.github.hectorvent.floci.services.ses.model.ConfigurationSet;
 import io.github.hectorvent.floci.services.ses.model.Contact;
-import io.github.hectorvent.floci.services.ses.model.ContactList;
-import io.github.hectorvent.floci.services.ses.model.CustomVerificationEmailTemplate;
-import io.github.hectorvent.floci.services.ses.model.DedicatedIpPool;
-import io.github.hectorvent.floci.services.ses.model.EmailTemplate;
-import io.github.hectorvent.floci.services.ses.model.Identity;
 import io.github.hectorvent.floci.services.ses.model.ListManagementOptions;
 import io.github.hectorvent.floci.services.ses.model.MessageHeader;
-import io.github.hectorvent.floci.services.ses.model.ReceiptRuleSet;
-import io.github.hectorvent.floci.services.ses.model.SentEmail;
-import io.github.hectorvent.floci.services.ses.model.SuppressedDestination;
 import io.github.hectorvent.floci.services.ses.model.Topic;
 import io.github.hectorvent.floci.services.ses.model.TopicPreference;
 import org.junit.jupiter.api.BeforeEach;
@@ -26,7 +15,6 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
-import java.time.Clock;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -57,22 +45,9 @@ class SesServiceListManagementTest {
 
     @BeforeEach
     void setUp() {
-        contactStore = new InMemoryStorage<>();
-        service = new SesService(
-                new InMemoryStorage<String, Identity>(),
-                new SesSentEmailService(new InMemoryStorage<String, SentEmail>()),
-                new SesAccountService(new InMemoryStorage<String, Boolean>(), new InMemoryStorage<String, AccountVdmAttributes>()),
-                new SesTemplateService(new InMemoryStorage<String, EmailTemplate>()),
-                new InMemoryStorage<String, ConfigurationSet>(),
-                new SesSuppressionService(new InMemoryStorage<String, SuppressedDestination>(), new InMemoryStorage<String, AccountSuppressionAttributes>()),
-                new SesDedicatedIpService(new InMemoryStorage<String, DedicatedIpPool>()),
-                new SesContactService(new InMemoryStorage<String, ContactList>(), contactStore, Clock.systemUTC()),
-                new SesPolicyService(new InMemoryStorage<String, String>(), new ObjectMapper()),
-                new SesReceiptRuleService(new InMemoryStorage<String, ReceiptRuleSet>(), Clock.systemUTC()),
-                new SesCvetService(new InMemoryStorage<String, CustomVerificationEmailTemplate>()),
-                smtpRelay,
-                new ObjectMapper(),
-                Clock.systemUTC());
+        SesServiceTestBuilder builder = SesServiceTestBuilder.create().smtpRelay(smtpRelay);
+        contactStore = builder.contactStore();
+        service = builder.build();
 
         // Sports defaults OPT_IN, Promos defaults OPT_OUT.
         service.createContactList(LIST, "desc", List.of(

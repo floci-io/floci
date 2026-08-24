@@ -42,6 +42,10 @@ services:
     doc: docs/services/efs.md
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/efs/EfsController.java, mode: rest }
+  - service: organizations
+    doc: docs/services/organizations.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/organizations/OrganizationsJsonHandler.java, mode: switch }
   - service: elasticache
     doc: docs/services/elasticache.md
     sources:

@@ -107,6 +107,7 @@ class ContainerLauncherTest {
         when(config.tls()).thenReturn(tls);
         lenient().when(tls.enabled()).thenReturn(false);
         lenient().when(config.defaultRegion()).thenReturn("us-east-1");
+        lenient().when(config.defaultAccountId()).thenReturn("000000000000");
         lenient().when(config.hostname()).thenReturn(Optional.empty());
         // The large-code path resolves a code-volume completion marker under the storage persistent path.
         lenient().when(config.storage()).thenReturn(storage);
@@ -208,6 +209,29 @@ class ContainerLauncherTest {
                 .filter(m -> m.getType() == MountType.VOLUME && "/var/task".equals(m.getTarget()))
                 .findFirst()
                 .orElse(null);
+    }
+
+    @Test
+    void launchFunction_labelsContainerWithResourceIdentity() throws Exception {
+        Path codePath = Files.createDirectory(tempDir.resolve("code"));
+
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("standard-fn");
+        fn.setFunctionArn("arn:aws:lambda:us-west-2:222222222222:function:standard-fn");
+        fn.setRuntime("nodejs20.x");
+        fn.setHandler("index.handler");
+        fn.setCodeLocalPath(codePath.toString());
+
+        launcher.launch(fn);
+
+        ContainerSpec spec = captureRealContainerSpec();
+        assertEquals(Map.of(
+                "io.floci", "aws",
+                "io.floci.service", "lambda",
+                "io.floci.resource-id", "standard-fn",
+                "io.floci.account", "222222222222",
+                "io.floci.region", "us-west-2"),
+                spec.labels());
     }
 
     @Test

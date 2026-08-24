@@ -30,10 +30,12 @@ public class KinesisService {
     private static final String DEFAULT_STREAM_MODE = "PROVISIONED";
     private static final int DEFAULT_INSPECTION_RECORD_LIMIT = 100;
     private static final int MAX_INSPECTION_RECORD_LIMIT = 1000;
-    // AWS default per-stream maximum record size (data blob + partition key).
-    // Raisable per stream via UpdateMaxRecordSize, which floci doesn't
-    // implement, so every stream sits at the default.
-    private static final int MAX_RECORD_SIZE_BYTES = 1_048_576;
+    // MaxRecordSizeInKiB bounds, as AWS constrains them on CreateStream and
+    // UpdateMaxRecordSize. The per-stream default lives on KinesisStream.
+    private static final int MIN_RECORD_SIZE_KIB = 1024;
+    private static final int MAX_RECORD_SIZE_KIB = 10240;
+    private static final int MAX_RECORDS_PER_REQUEST = 500;
+    private static final int MAX_REQUEST_SIZE_BYTES = 10 * 1024 * 1024;
 
     private final StorageBackend<String, KinesisStream> store;
     private final StorageBackend<String, KinesisConsumer> consumerStore;
@@ -62,10 +64,23 @@ public class KinesisService {
     }
 
     public KinesisStream createStream(String streamName, int shardCount, String streamMode, String region) {
+        return createStream(streamName, shardCount, streamMode, null, region);
+    }
+
+    /**
+     * @param maxRecordSizeInKiB CreateStream's optional MaxRecordSizeInKiB; null leaves the stream
+     *                           at the AWS default. It is a distinct value from 0, which AWS
+     *                           rejects as below the documented minimum.
+     */
+    public KinesisStream createStream(String streamName, int shardCount, String streamMode,
+                                      Integer maxRecordSizeInKiB, String region) {
         String resolvedMode = streamMode != null ? streamMode : DEFAULT_STREAM_MODE;
         if (!VALID_STREAM_MODES.contains(resolvedMode)) {
             throw new AwsException("InvalidArgumentException",
                     "StreamMode must be PROVISIONED or ON_DEMAND, got: " + resolvedMode, 400);
+        }
+        if (maxRecordSizeInKiB != null) {
+            validateMaxRecordSize(maxRecordSizeInKiB, "InvalidArgumentException");
         }
 
         String storageKey = regionKey(region, streamName);
@@ -77,6 +92,9 @@ public class KinesisService {
         KinesisStream stream = new KinesisStream(streamName, arn);
         stream.setAccountId(regionResolver.getAccountId());
         stream.setStreamMode(resolvedMode);
+        if (maxRecordSizeInKiB != null) {
+            stream.setMaxRecordSizeInKiB(maxRecordSizeInKiB);
+        }
 
         for (int i = 0; i < shardCount; i++) {
             String shardId = String.format("shardId-%012d", i);
@@ -372,19 +390,82 @@ public class KinesisService {
         return putRecordWithShardId(streamName, data, partitionKey, region).sequenceNumber();
     }
 
-    public void validateRecordSize(byte[] data, String partitionKey) {
-        int size = (data != null ? data.length : 0)
+    /** Record size as AWS measures it: the data blob plus the partition key. */
+    static int recordSize(int dataBytes, String partitionKey) {
+        return dataBytes
                 + (partitionKey != null ? partitionKey.getBytes(StandardCharsets.UTF_8).length : 0);
-        if (size > MAX_RECORD_SIZE_BYTES) {
+    }
+
+    public void validateRecordSize(KinesisStream stream, byte[] data, String partitionKey) {
+        int size = recordSize(data != null ? data.length : 0, partitionKey);
+        int max = stream.getMaxRecordSizeInKiB() * 1024;
+        if (size > max) {
             throw new AwsException("InvalidArgumentException",
                     "Record size (data + partition key) of " + size + " bytes exceeds the maximum of "
-                            + MAX_RECORD_SIZE_BYTES + " bytes.", 400);
+                            + max + " bytes.", 400);
         }
+    }
+
+    /**
+     * The request-wide PutRecords caps. Both reject the whole request rather than failing records
+     * individually, because PutRecordsResultEntry.ErrorCode carries only throughput and internal
+     * errors — the same reason the per-record size check aborts the batch.
+     */
+    void validateRecordCount(int recordCount) {
+        if (recordCount < 1) {
+            throw new AwsException("InvalidArgumentException",
+                    "A PutRecords request requires at least one record.", 400);
+        }
+        if (recordCount > MAX_RECORDS_PER_REQUEST) {
+            throw new AwsException("InvalidArgumentException",
+                    "A PutRecords request supports at most " + MAX_RECORDS_PER_REQUEST
+                            + " records, got " + recordCount + ".", 400);
+        }
+    }
+
+    void validateRequestSize(long totalBytes) {
+        if (totalBytes > MAX_REQUEST_SIZE_BYTES) {
+            throw new AwsException("InvalidArgumentException",
+                    "A PutRecords request (data + partition keys) is limited to " + MAX_REQUEST_SIZE_BYTES
+                            + " bytes, got " + totalBytes + ".", 400);
+        }
+    }
+
+    /**
+     * The bounds are the same on both actions but the code each publishes for a violation is not:
+     * UpdateMaxRecordSize documents ValidationException for an out-of-range size, while CreateStream
+     * reserves ValidationException for the on-demand case and describes InvalidArgumentException as
+     * "a specified parameter exceeds its restrictions".
+     */
+    private static void validateMaxRecordSize(int maxRecordSizeInKiB, String errorCode) {
+        if (maxRecordSizeInKiB < MIN_RECORD_SIZE_KIB || maxRecordSizeInKiB > MAX_RECORD_SIZE_KIB) {
+            throw new AwsException(errorCode,
+                    "MaxRecordSizeInKiB must be between " + MIN_RECORD_SIZE_KIB + " and "
+                            + MAX_RECORD_SIZE_KIB + ", got " + maxRecordSizeInKiB + ".", 400);
+        }
+    }
+
+    public void updateMaxRecordSize(String streamName, int maxRecordSizeInKiB, String region) {
+        KinesisStream stream = resolveStream(streamName, region);
+        validateMaxRecordSize(maxRecordSizeInKiB, "ValidationException");
+        if ("ON_DEMAND".equals(stream.getStreamMode())) {
+            throw new AwsException("ValidationException",
+                    "UpdateMaxRecordSize is only supported for data streams with the provisioned capacity mode.",
+                    400);
+        }
+        if (!"ACTIVE".equals(stream.getStreamStatus())) {
+            throw new AwsException("ResourceInUseException",
+                    "Stream " + streamName + " is not ACTIVE (current state: "
+                            + stream.getStreamStatus() + ")", 400);
+        }
+        stream.setMaxRecordSizeInKiB(maxRecordSizeInKiB);
+        store.put(regionKey(region, streamName), stream);
+        LOG.infov("Updated max record size for {0} to {1} KiB", streamName, maxRecordSizeInKiB);
     }
 
     public PutRecordResult putRecordWithShardId(String streamName, byte[] data, String partitionKey, String region) {
         KinesisStream stream = resolveStream(streamName, region);
-        validateRecordSize(data, partitionKey);
+        validateRecordSize(stream, data, partitionKey);
         KinesisShard shard = selectShard(stream, partitionKey);
 
         String sequenceNumber = String.valueOf(sequenceGenerator.incrementAndGet());

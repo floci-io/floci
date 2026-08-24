@@ -187,7 +187,12 @@ class SharedClusterIdentifierIntegrationTest {
         assertTrue(rdsService.listTagsForResource(
                 "arn:aws:rds:us-east-1:000000000000:cluster:" + id, "us-east-1").isEmpty());
 
-        docDbService.deleteDbCluster(id);
+        // Deleted over the endpoint: the record lives under its own region's key, and a direct
+        // call from the test thread carries no request to take a region from.
+        queryIn("eu-west-1", "DeleteDBCluster")
+                .formParam("DBClusterIdentifier", id)
+                .formParam("SkipFinalSnapshot", "true")
+        .when().post("/").then().statusCode(200);
         rdsService.deleteDbCluster(id, "us-east-1");
     }
 

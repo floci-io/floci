@@ -2405,9 +2405,18 @@ public class Ec2QueryHandler {
     private Response handleCreateRoute(MultivaluedMap<String, String> p, String region) {
         String rtId = p.getFirst("RouteTableId");
         String dest = p.getFirst("DestinationCidrBlock");
+        String destIpv6 = p.getFirst("DestinationIpv6CidrBlock");
+        // A prefix list is a destination in its own right per the CreateRoute reference. The
+        // prefix list itself is not modelled, but the id is stored and reported so the route
+        // stays addressable by DeleteRoute and ReplaceRoute.
+        String destPrefixList = p.getFirst("DestinationPrefixListId");
         String gwId = p.getFirst("GatewayId");
         String natGwId = p.getFirst("NatGatewayId");
-        service.createRoute(region, rtId, dest, gwId, natGwId);
+        // The gateway itself is not modelled (CreateEgressOnlyInternetGateway is still
+        // unimplemented), but the id the caller sent is stored and reported back so an IPv6
+        // egress route is not silently rewritten into a targetless one.
+        String eigwId = p.getFirst("EgressOnlyInternetGatewayId");
+        service.createRoute(region, rtId, dest, destIpv6, destPrefixList, gwId, natGwId, eigwId);
         return booleanResponse("CreateRoute");
     }
 
@@ -2423,6 +2432,8 @@ public class Ec2QueryHandler {
         }
         String rtId = p.getFirst("RouteTableId");
         String dest = p.getFirst("DestinationCidrBlock");
+        String destIpv6 = p.getFirst("DestinationIpv6CidrBlock");
+        String destPrefixList = p.getFirst("DestinationPrefixListId");
         String gwId = p.getFirst("GatewayId");
         String natGwId = p.getFirst("NatGatewayId");
         // Resetting a route to the local target is expressible: `local` is the gateway id the
@@ -2434,14 +2445,16 @@ public class Ec2QueryHandler {
             }
             gwId = LOCAL_GATEWAY_ID;
         }
-        service.replaceRoute(region, rtId, dest, gwId, natGwId);
+        service.replaceRoute(region, rtId, dest, destIpv6, destPrefixList, gwId, natGwId);
         return booleanResponse("ReplaceRoute");
     }
 
     private Response handleDeleteRoute(MultivaluedMap<String, String> p, String region) {
         String rtId = p.getFirst("RouteTableId");
         String dest = p.getFirst("DestinationCidrBlock");
-        service.deleteRoute(region, rtId, dest);
+        String destIpv6 = p.getFirst("DestinationIpv6CidrBlock");
+        String destPrefixList = p.getFirst("DestinationPrefixListId");
+        service.deleteRoute(region, rtId, dest, destIpv6, destPrefixList);
         return booleanResponse("DeleteRoute");
     }
 
@@ -3197,8 +3210,11 @@ public class Ec2QueryHandler {
         for (Route r : rt.getRoutes()) {
             xml.start("item")
                     .elem("destinationCidrBlock", r.getDestinationCidrBlock())
+                    .elem("destinationIpv6CidrBlock", r.getDestinationIpv6CidrBlock())
+                    .elem("destinationPrefixListId", r.getDestinationPrefixListId())
                     .elem("gatewayId", r.getGatewayId())
                     .elem("natGatewayId", r.getNatGatewayId())
+                    .elem("egressOnlyInternetGatewayId", r.getEgressOnlyInternetGatewayId())
                     .elem("state", r.getState())
                     .elem("origin", r.getOrigin())
                     .end("item");

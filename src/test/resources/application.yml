@@ -200,6 +200,7 @@ floci:
     stepfunctions:
       enabled: true
       allow-plaintext-http: true
+      mock-config-file: ${SFN_MOCK_CONFIG:src/test/resources/fixtures/sfn-mock-config.json}
     swf:
       enabled: true
       timeout-sweep-enabled: true
@@ -324,6 +325,8 @@ floci:
     cloudhsmv2:
       enabled: true
     efs:
+      enabled: true
+    organizations:
       enabled: true
     rum:
       enabled: true

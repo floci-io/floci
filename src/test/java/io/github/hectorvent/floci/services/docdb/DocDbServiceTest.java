@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
+import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.docdb.container.DocDbContainerManager;
 import io.github.hectorvent.floci.services.docdb.model.DocDbCluster;
@@ -13,10 +14,12 @@ import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -182,5 +185,48 @@ class DocDbServiceTest {
         AwsException notAnArn = assertThrows(AwsException.class,
                 () -> docDbService.listTagsForResource("scoped-cluster"));
         assertTrue(notAnArn.getMessage().contains("Invalid resource name"));
+    }
+
+    @Test
+    void aRecordStoredUnderABareIdentifierIsFoundAndMovedUnderItsRegionalKey() {
+        // The upgrade path: records written before regions were part of the key sit under the
+        // bare identifier. They belong to the default region — that is the region they were
+        // created under — and are moved there on the first read, so the bare key is consulted
+        // once rather than for ever.
+        StorageBackend<String, DocDbCluster> clusterStore =
+                AccountAwareStorageBackend.inMemory("000000000000");
+        StorageBackend<String, DocDbInstance> instanceStore =
+                AccountAwareStorageBackend.inMemory("000000000000");
+        StorageFactory storageFactory = Mockito.mock(StorageFactory.class);
+        when(storageFactory.create(anyString(), anyString(), any())).thenAnswer(inv ->
+                "docdb-clusters.json".equals(inv.getArgument(1)) ? clusterStore : instanceStore);
+
+        EmulatorConfig config = Mockito.mock(EmulatorConfig.class);
+        var servicesConfig = Mockito.mock(EmulatorConfig.ServicesConfig.class);
+        var docdbConfig = Mockito.mock(EmulatorConfig.DocDbServiceConfig.class);
+        when(config.services()).thenReturn(servicesConfig);
+        when(servicesConfig.docdb()).thenReturn(docdbConfig);
+        when(docdbConfig.mock()).thenReturn(true);
+        DocDbService service = new DocDbService(config,
+                new RegionResolver("us-east-1", "000000000000"),
+                Mockito.mock(DocDbContainerManager.class), storageFactory);
+
+        DocDbCluster legacy = new DocDbCluster();
+        legacy.setDbClusterIdentifier("bare-key-cluster");
+        legacy.setStatus("available");
+        clusterStore.put("bare-key-cluster", legacy);
+
+        assertEquals("available", service.getDbCluster("bare-key-cluster").getStatus());
+        assertTrue(clusterStore.get("us-east-1::bare-key-cluster").isPresent(),
+                "the record should have been moved under its regional key");
+        assertTrue(clusterStore.get("bare-key-cluster").isEmpty(),
+                "the bare key should not be left behind");
+
+        // It is the default region's, and only that region's.
+        assertTrue(service.hasCluster("bare-key-cluster", "us-east-1"));
+        assertFalse(service.hasCluster("bare-key-cluster", "eu-west-1"));
+
+        // And it lists there, once rather than twice.
+        assertEquals(1, service.listDbClusters(null).size());
     }
 }

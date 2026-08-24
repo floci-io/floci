@@ -25,85 +25,248 @@ class BedrockAgentCoreGatewayIntegrationTest {
     @Test
     @Order(1)
     void createGateway() {
-        gatewayId = given().contentType("application/json").body(CREATE)
-                .when().post("/gateways/")
-                .then().statusCode(202)
+        gatewayId = given()
+                .contentType("application/json")
+                .body(CREATE)
+                .when()
+                .post("/gateways/")
+                .then()
+                .statusCode(202)
                 .body("gatewayId", notNullValue())
                 .body("gatewayArn", containsString(":gateway/"))
                 .body("status", equalTo("READY"))
                 .body("workloadIdentityDetails.workloadIdentityArn", notNullValue())
-                .extract().path("gatewayId");
+                .extract()
+                .path("gatewayId");
     }
 
     @Test
     @Order(2)
     void getAndListGateway() {
-        given().when().get("/gateways/" + gatewayId + "/")
-                .then().statusCode(200)
+        given()
+                .when()
+                .get("/gateways/" + gatewayId + "/")
+                .then()
+                .statusCode(200)
                 .body("name", equalTo("myGateway"))
                 .body("protocolType", equalTo("MCP"));
 
-        given().when().get("/gateways/")
-                .then().statusCode(200)
+        given()
+                .when()
+                .get("/gateways/")
+                .then()
+                .statusCode(200)
                 .body("items.gatewayId", hasItem(gatewayId));
     }
 
     @Test
     @Order(3)
-    void createAndGetTarget() {
-        targetId = given().contentType("application/json")
-                .body("{\"name\":\"t1\",\"targetConfiguration\":{\"mcp\":{\"lambda\":{}}}}")
-                .when().post("/gateways/" + gatewayId + "/targets/")
-                .then().statusCode(202)
-                .body("targetId", notNullValue())
-                .body("gatewayArn", containsString(":gateway/"))
-                .extract().path("targetId");
+    void listGatewaysAcceptsMaxResultsUpTo1000() {
+        given()
+                .queryParam("maxResults", 101)
+                .when()
+                .get("/gateways/")
+                .then()
+                .statusCode(200)
+                .body("items.gatewayId", hasItem(gatewayId));
 
-        given().when().get("/gateways/" + gatewayId + "/targets/" + targetId + "/")
-                .then().statusCode(200)
-                .body("targetId", equalTo(targetId))
-                .body("targetConfiguration.mcp.lambda", notNullValue());
+        given()
+                .queryParam("maxResults", 500)
+                .when()
+                .get("/gateways/")
+                .then()
+                .statusCode(200)
+                .body("items.gatewayId", hasItem(gatewayId));
 
-        given().when().get("/gateways/" + gatewayId + "/targets/")
-                .then().statusCode(200)
-                .body("items.targetId", hasItem(targetId));
+        given()
+                .queryParam("maxResults", 1000)
+                .when()
+                .get("/gateways/")
+                .then()
+                .statusCode(200)
+                .body("items.gatewayId", hasItem(gatewayId));
     }
 
     @Test
     @Order(4)
-    void updateGatewayAndTarget() {
-        given().contentType("application/json")
-                .body("{\"name\":\"myGateway\",\"authorizerType\":\"AWS_IAM\","
-                        + "\"roleArn\":\"arn:aws:iam::000000000000:role/gw2\",\"description\":\"updated gw\"}")
-                .when().put("/gateways/" + gatewayId + "/")
-                .then().statusCode(202);
-        given().when().get("/gateways/" + gatewayId + "/")
-                .then().statusCode(200)
-                .body("roleArn", equalTo("arn:aws:iam::000000000000:role/gw2"))
-                .body("description", equalTo("updated gw"));
+    void listGatewaysRejectsInvalidMaxResults() {
+        given()
+                .queryParam("maxResults", 0)
+                .when()
+                .get("/gateways/")
+                .then()
+                .statusCode(400)
+                .body("message",
+                        containsString("maxResults must be between 1 and 1000"));
 
-        given().contentType("application/json")
-                .body("{\"targetConfiguration\":{\"mcp\":{\"lambda\":{\"arn\":\"x\"}}},\"description\":\"t2\"}")
-                .when().put("/gateways/" + gatewayId + "/targets/" + targetId + "/")
-                .then().statusCode(202);
-        given().when().get("/gateways/" + gatewayId + "/targets/" + targetId + "/")
-                .then().statusCode(200)
-                .body("description", equalTo("t2"))
-                .body("targetConfiguration.mcp.lambda.arn", equalTo("x"));
+        given()
+                .queryParam("maxResults", 1001)
+                .when()
+                .get("/gateways/")
+                .then()
+                .statusCode(400)
+                .body("message",
+                        containsString("maxResults must be between 1 and 1000"));
     }
 
     @Test
     @Order(5)
+    void createAndGetTarget() {
+        targetId = given()
+                .contentType("application/json")
+                .body("""
+                        {"name":"t1","targetConfiguration":{"mcp":{"lambda":{}}}}
+                        """)
+                .when()
+                .post("/gateways/" + gatewayId + "/targets/")
+                .then()
+                .statusCode(202)
+                .body("targetId", notNullValue())
+                .body("gatewayArn", containsString(":gateway/"))
+                .extract()
+                .path("targetId");
+
+        given()
+                .when()
+                .get("/gateways/" + gatewayId + "/targets/" + targetId + "/")
+                .then()
+                .statusCode(200)
+                .body("targetId", equalTo(targetId))
+                .body("targetConfiguration.mcp.lambda", notNullValue());
+
+        given()
+                .when()
+                .get("/gateways/" + gatewayId + "/targets/")
+                .then()
+                .statusCode(200)
+                .body("items.targetId", hasItem(targetId));
+    }
+
+    @Test
+    @Order(6)
+    void listGatewayTargetsAcceptsMaxResultsUpTo1000() {
+        given()
+                .queryParam("maxResults", 101)
+                .when()
+                .get("/gateways/" + gatewayId + "/targets/")
+                .then()
+                .statusCode(200)
+                .body("items.targetId", hasItem(targetId));
+
+        given()
+                .queryParam("maxResults", 500)
+                .when()
+                .get("/gateways/" + gatewayId + "/targets/")
+                .then()
+                .statusCode(200)
+                .body("items.targetId", hasItem(targetId));
+
+        given()
+                .queryParam("maxResults", 1000)
+                .when()
+                .get("/gateways/" + gatewayId + "/targets/")
+                .then()
+                .statusCode(200)
+                .body("items.targetId", hasItem(targetId));
+    }
+
+    @Test
+    @Order(7)
+    void listGatewayTargetsRejectsInvalidMaxResults() {
+        given()
+                .queryParam("maxResults", 0)
+                .when()
+                .get("/gateways/" + gatewayId + "/targets/")
+                .then()
+                .statusCode(400)
+                .body("message",
+                        containsString("maxResults must be between 1 and 1000"));
+
+        given()
+                .queryParam("maxResults", 1001)
+                .when()
+                .get("/gateways/" + gatewayId + "/targets/")
+                .then()
+                .statusCode(400)
+                .body("message",
+                        containsString("maxResults must be between 1 and 1000"));
+    }
+
+    @Test
+    @Order(8)
+    void updateGatewayAndTarget() {
+        given()
+                .contentType("application/json")
+                .body("""
+                        {
+                          "name":"myGateway",
+                          "authorizerType":"AWS_IAM",
+                          "roleArn":"arn:aws:iam::000000000000:role/gw2",
+                          "description":"updated gw"
+                        }
+                        """)
+                .when()
+                .put("/gateways/" + gatewayId + "/")
+                .then()
+                .statusCode(202);
+
+        given()
+                .when()
+                .get("/gateways/" + gatewayId + "/")
+                .then()
+                .statusCode(200)
+                .body("roleArn",
+                        equalTo("arn:aws:iam::000000000000:role/gw2"))
+                .body("description", equalTo("updated gw"));
+
+        given()
+                .contentType("application/json")
+                .body("""
+                        {
+                          "targetConfiguration":{
+                            "mcp":{
+                              "lambda":{
+                                "arn":"x"
+                              }
+                            }
+                          },
+                          "description":"t2"
+                        }
+                        """)
+                .when()
+                .put("/gateways/" + gatewayId + "/targets/" + targetId + "/")
+                .then()
+                .statusCode(202);
+
+        given()
+                .when()
+                .get("/gateways/" + gatewayId + "/targets/" + targetId + "/")
+                .then()
+                .statusCode(200)
+                .body("description", equalTo("t2"))
+                .body("targetConfiguration.mcp.lambda.arn", equalTo("x"));
+    }
+    @Test
+    @Order(9)
     void deleteTargetAndGateway() {
-        given().when().delete("/gateways/" + gatewayId + "/targets/" + targetId + "/")
-                .then().statusCode(202)
+        given()
+                .when()
+                .delete("/gateways/" + gatewayId + "/targets/" + targetId + "/")
+                .then()
+                .statusCode(202)
                 .body("status", equalTo("DELETING"));
 
-        given().when().delete("/gateways/" + gatewayId + "/")
-                .then().statusCode(202)
+        given()
+                .when()
+                .delete("/gateways/" + gatewayId + "/")
+                .then()
+                .statusCode(202)
                 .body("status", equalTo("DELETING"));
 
-        given().when().get("/gateways/" + gatewayId + "/")
-                .then().statusCode(404);
+        given()
+                .when()
+                .get("/gateways/" + gatewayId + "/")
+                .then()
+                .statusCode(404);
     }
 }

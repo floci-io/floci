@@ -563,6 +563,82 @@ class EcsIntegrationTest {
             .body("taskArns", empty());
     }
 
+    @Test
+    @Order(25)
+    void registerTaskDefinitionRoundTripsRuntimePlatformAndLogConfiguration() {
+        String platformTaskDefArn = ecs("RegisterTaskDefinition")
+            .body("""
+                {
+                    "family": "task-with-runtime-platform",
+                    "requiresCompatibilities": ["FARGATE"],
+                    "networkMode": "awsvpc",
+                    "cpu": "256",
+                    "memory": "512",
+                    "runtimePlatform": {"cpuArchitecture": "ARM64", "operatingSystemFamily": "LINUX"},
+                    "containerDefinitions": [
+                        {
+                            "name": "app",
+                            "image": "nginx:latest",
+                            "essential": true,
+                            "logConfiguration": {
+                                "logDriver": "awslogs",
+                                "options": {
+                                    "awslogs-group": "/ecs/task-with-runtime-platform",
+                                    "awslogs-region": "%s",
+                                    "awslogs-stream-prefix": "ecs"
+                                },
+                                "secretOptions": []
+                            }
+                        }
+                    ]
+                }
+                """.formatted(REGION))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("taskDefinition.runtimePlatform.cpuArchitecture", equalTo("ARM64"))
+            .body("taskDefinition.runtimePlatform.operatingSystemFamily", equalTo("LINUX"))
+            .body("taskDefinition.containerDefinitions[0].logConfiguration.logDriver", equalTo("awslogs"))
+            .body("taskDefinition.containerDefinitions[0].logConfiguration.options.'awslogs-group'",
+                    equalTo("/ecs/task-with-runtime-platform"))
+            .body("taskDefinition.containerDefinitions[0].logConfiguration.options.'awslogs-region'", equalTo(REGION))
+            .body("taskDefinition.containerDefinitions[0].logConfiguration.options.'awslogs-stream-prefix'", equalTo("ecs"))
+        .extract()
+            .path("taskDefinition.taskDefinitionArn");
+
+        ecs("DescribeTaskDefinition")
+            .body("""
+                {"taskDefinition": "%s"}
+                """.formatted(platformTaskDefArn))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("taskDefinition.runtimePlatform.cpuArchitecture", equalTo("ARM64"))
+            .body("taskDefinition.runtimePlatform.operatingSystemFamily", equalTo("LINUX"))
+            .body("taskDefinition.containerDefinitions[0].logConfiguration.logDriver", equalTo("awslogs"))
+            .body("taskDefinition.containerDefinitions[0].logConfiguration.options.'awslogs-group'",
+                    equalTo("/ecs/task-with-runtime-platform"))
+            .body("taskDefinition.containerDefinitions[0].logConfiguration.options.'awslogs-region'", equalTo(REGION))
+            .body("taskDefinition.containerDefinitions[0].logConfiguration.options.'awslogs-stream-prefix'", equalTo("ecs"));
+    }
+
+    @Test
+    @Order(26)
+    void describeTaskDefinitionWithoutRuntimePlatformOrLogConfigurationOmitsBothKeys() {
+        ecs("DescribeTaskDefinition")
+            .body("""
+                {"taskDefinition": "%s:1"}
+                """.formatted(TASK_DEF_FAMILY))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("taskDefinition", not(hasKey("runtimePlatform")))
+            .body("taskDefinition.containerDefinitions[0]", not(hasKey("logConfiguration")));
+    }
+
     // ── Services ──────────────────────────────────────────────────────────────
 
     @Test

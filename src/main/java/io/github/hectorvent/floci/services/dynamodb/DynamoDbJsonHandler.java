@@ -814,6 +814,7 @@ public class DynamoDbJsonHandler {
 
         ExpressionEvaluator.validateExpression(keyConditionExpr, "KeyConditionExpression", exprAttrNames, exprAttrValues);
         ExpressionEvaluator.validateExpression(filterExpr, "FilterExpression", exprAttrNames, exprAttrValues);
+        ProjectionEvaluator.validateExpression(projectionExpression);
 
         if (select != null && !VALID_SELECT.contains(select)) {
             throw new AwsException("ValidationException",
@@ -827,10 +828,16 @@ public class DynamoDbJsonHandler {
                     "Select type SPECIFIC_ATTRIBUTES requires the ProjectionExpression to be provided.", 400);
         }
 
+        TableDefinition queryTable = dynamoDbService.describeTable(tableName, region);
+        DynamoDbAccessPath queryAccessPath = DynamoDbAccessPath.resolve(queryTable, indexName);
+        DynamoDbAccessPathValidator.validateQuery(queryAccessPath, keyConditions, keyConditionExpr,
+                filterExpr, queryFilter, exprAttrNames);
+        DynamoDbAccessPathValidator.validateSelection(queryTable, queryAccessPath, select,
+                projectionExpression, attributesToGet, exprAttrNames);
+
         // ConsistentRead on GSI check
         boolean consistentRead = request.path("ConsistentRead").asBoolean(false);
         if (consistentRead && indexName != null) {
-            TableDefinition queryTable = dynamoDbService.describeTable(tableName, region);
             if (queryTable.findGsi(indexName).isPresent()) {
                 throw new AwsException("ValidationException",
                         "Consistent reads are not supported on global secondary indexes", 400);
@@ -854,8 +861,7 @@ public class DynamoDbJsonHandler {
         }
 
         if (exclusiveStartKey != null) {
-            validateExclusiveStartKey(exclusiveStartKey,
-                    dynamoDbService.describeTable(tableName, region), indexName, false);
+            validateExclusiveStartKey(exclusiveStartKey, queryTable, indexName, false);
         }
 
         DynamoDbService.QueryResult result = dynamoDbService.query(tableName, keyConditions,
@@ -872,8 +878,7 @@ public class DynamoDbJsonHandler {
         }
         // Apply index projection (KEYS_ONLY / INCLUDE) when querying a secondary index
         if (indexName != null && projectionExpression == null && attributesToGet == null) {
-            TableDefinition queryTable = dynamoDbService.describeTable(tableName, region);
-            queryItems = applyIndexProjection(queryItems, indexName, queryTable, select);
+            queryItems = applyIndexProjection(queryItems, queryTable, queryAccessPath, select);
         }
         if (projectionExpression != null) {
             queryItems = queryItems.stream()
@@ -920,6 +925,9 @@ public class DynamoDbJsonHandler {
                 ? request.get("ExclusiveStartKey") : null;
         String select = request.has("Select") ? request.get("Select").asText() : null;
         String indexNameScan = request.has("IndexName") ? request.get("IndexName").asText() : null;
+        String projectionExpressionScan = request.has("ProjectionExpression")
+                ? request.get("ProjectionExpression").asText() : null;
+        JsonNode attributesToGetScan = request.has("AttributesToGet") ? request.get("AttributesToGet") : null;
         Integer segment = request.has("Segment") ? request.get("Segment").asInt() : null;
         Integer totalSegments = request.has("TotalSegments") ? request.get("TotalSegments").asInt() : null;
 
@@ -950,13 +958,32 @@ public class DynamoDbJsonHandler {
         }
 
         ExpressionEvaluator.validateExpression(filterExpr, "FilterExpression", exprAttrNames, exprAttrValues);
+        ProjectionEvaluator.validateExpression(projectionExpressionScan);
 
-        String projectionExpressionScan = request.has("ProjectionExpression")
-                ? request.get("ProjectionExpression").asText() : null;
+        if (select != null && !VALID_SELECT.contains(select)) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value '" + select + "' at 'select' failed to satisfy constraint: "
+                    + "Member must satisfy enum value set: [SPECIFIC_ATTRIBUTES, COUNT, ALL_ATTRIBUTES, ALL_PROJECTED_ATTRIBUTES]", 400);
+        }
+        if (projectionExpressionScan != null && attributesToGetScan != null) {
+            throw new AwsException("ValidationException",
+                    "Can not use both expression and non-expression parameters in the same request: "
+                    + "Non-expression parameters: {AttributesToGet} Expression parameters: {ProjectionExpression}", 400);
+        }
+        boolean hasAttributesToGetScan = attributesToGetScan != null && attributesToGetScan.size() > 0;
+        if ("SPECIFIC_ATTRIBUTES".equals(select)
+                && projectionExpressionScan == null && !hasAttributesToGetScan) {
+            throw new AwsException("ValidationException",
+                    "Select type SPECIFIC_ATTRIBUTES requires the ProjectionExpression to be provided.", 400);
+        }
+
+        TableDefinition scanTable = dynamoDbService.describeTable(tableName, region);
+        DynamoDbAccessPath scanAccessPath = DynamoDbAccessPath.resolve(scanTable, indexNameScan);
+        DynamoDbAccessPathValidator.validateSelection(scanTable, scanAccessPath, select,
+                projectionExpressionScan, attributesToGetScan, exprAttrNames);
 
         if (exclusiveStartKey != null) {
-            validateExclusiveStartKey(exclusiveStartKey,
-                    dynamoDbService.describeTable(tableName, region), indexNameScan, true);
+            validateExclusiveStartKey(exclusiveStartKey, scanTable, indexNameScan, true);
         }
 
         DynamoDbService.ScanResult result = dynamoDbService.scan(
@@ -974,11 +1001,9 @@ public class DynamoDbJsonHandler {
             }
         }
         // Apply index projection (KEYS_ONLY / INCLUDE) when scanning a secondary index
-        if (indexNameScan != null && projectionExpressionScan == null) {
-            TableDefinition scanTable = dynamoDbService.describeTable(tableName, region);
-            scanItems = applyIndexProjection(scanItems, indexNameScan, scanTable, select);
+        if (indexNameScan != null && projectionExpressionScan == null && attributesToGetScan == null) {
+            scanItems = applyIndexProjection(scanItems, scanTable, scanAccessPath, select);
         }
-        JsonNode attributesToGetScan = request.has("AttributesToGet") ? request.get("AttributesToGet") : null;
         if (projectionExpressionScan != null) {
             scanItems = scanItems.stream()
                     .map(i -> (JsonNode) ProjectionEvaluator.project(i, projectionExpressionScan, exprAttrNames))
@@ -1825,40 +1850,13 @@ public class DynamoDbJsonHandler {
     }
 
     // Filters items to only include the attributes projected into the given index.
-    // Returns items unchanged when projectionType is ALL or no matching index is found.
-    private List<JsonNode> applyIndexProjection(List<JsonNode> items, String indexName,
-                                                 TableDefinition table, String select) {
-        if (indexName == null || "ALL_ATTRIBUTES".equals(select)) return items;
-
-        String projectionType = "ALL";
-        List<String> nonKeyAttributes = new ArrayList<>();
-        Set<String> indexKeyNames = new HashSet<>();
-
-        for (GlobalSecondaryIndex gsi : table.getGlobalSecondaryIndexes()) {
-            if (gsi.getIndexName().equals(indexName)) {
-                projectionType = gsi.getProjectionType() != null ? gsi.getProjectionType() : "ALL";
-                nonKeyAttributes = gsi.getNonKeyAttributes() != null ? gsi.getNonKeyAttributes() : List.of();
-                gsi.getKeySchema().forEach(k -> indexKeyNames.add(k.getAttributeName()));
-                break;
-            }
-        }
-        for (LocalSecondaryIndex lsi : table.getLocalSecondaryIndexes()) {
-            if (lsi.getIndexName().equals(indexName)) {
-                projectionType = lsi.getProjectionType() != null ? lsi.getProjectionType() : "ALL";
-                nonKeyAttributes = lsi.getNonKeyAttributes() != null ? lsi.getNonKeyAttributes() : List.of();
-                lsi.getKeySchema().forEach(k -> indexKeyNames.add(k.getAttributeName()));
-                break;
-            }
+    private List<JsonNode> applyIndexProjection(List<JsonNode> items, TableDefinition table,
+                                                 DynamoDbAccessPath accessPath, String select) {
+        if ("ALL_ATTRIBUTES".equals(select) || "ALL".equals(accessPath.projectionType())) {
+            return items;
         }
 
-        if ("ALL".equals(projectionType)) return items;
-
-        Set<String> allowed = new HashSet<>(indexKeyNames);
-        allowed.add(table.getPartitionKeyName());
-        String sortKeyName = table.getSortKeyName();
-        if (sortKeyName != null) allowed.add(sortKeyName);
-        if ("INCLUDE".equals(projectionType)) allowed.addAll(nonKeyAttributes);
-
+        Set<String> allowed = accessPath.projectedAttributeNames(table);
         return items.stream().map(item -> {
             ObjectNode filtered = objectMapper.createObjectNode();
             item.fields().forEachRemaining(e -> {

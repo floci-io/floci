@@ -99,6 +99,7 @@ class EmulatorLifecycleTest {
         Mockito.lenient().when(elbv2ServiceConfig.enabled()).thenReturn(false);
         Mockito.lenient().when(config.tls()).thenReturn(tlsConfig);
         Mockito.lenient().when(tlsConfig.enabled()).thenReturn(false);
+        Mockito.lenient().when(config.port()).thenReturn(4566);
 
         emulatorLifecycle = new EmulatorLifecycle(
                 storageFactory, serviceRegistry, config,
@@ -252,6 +253,22 @@ class EmulatorLifecycleTest {
 
         verify(initializationHooksRunner).run(InitializationHook.START);
         verify(initLifecycleState).markStartCompleted();
+    }
+
+    @Test
+    @DisplayName("onHttpStart on a non-default floci.port (non-TLS) triggers hook execution (#2437)")
+    void onHttpStart_nonTls_triggersHooksOnCustomPort() throws IOException, InterruptedException {
+        Mockito.lenient().when(config.port()).thenReturn(4577);
+        when(tlsConfig.enabled()).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(true);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(true);
+
+        emulatorLifecycle.onHttpStart(new HttpServerStart(new HttpServerOptions().setPort(4577)));
+
+        verify(initializationHooksRunner).run(InitializationHook.START);
+        verify(initializationHooksRunner).run(InitializationHook.READY);
+        verify(initLifecycleState).markStartCompleted();
+        verify(initLifecycleState).markReadyCompleted();
     }
 
     @Test

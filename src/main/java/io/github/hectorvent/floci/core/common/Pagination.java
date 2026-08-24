@@ -25,12 +25,20 @@ public final class Pagination {
     private Pagination() {}
 
     public static <T> PaginatedResult<T> paginate(List<T> all, Function<T, String> cursorOf,
+                                                Integer maxResults, String nextToken,
+                                                int maxPage, String errorCode) {
+        return paginate(all, cursorOf, maxResults, nextToken, maxPage, maxPage, errorCode);
+    }
+
+    public static <T> PaginatedResult<T> paginate(List<T> all, Function<T, String> cursorOf,
                                                     Integer maxResults, String nextToken,
-                                                    int maxPage, String errorCode) {
-        if (maxResults != null && (maxResults < 1 || maxResults > maxPage)) {
-            throw new AwsException(errorCode, "maxResults must be between 1 and " + maxPage, 400);
+                                                    int defaultPageSize, int maxResultsLimit,
+                                                    String errorCode) {
+        if (maxResults != null && (maxResults < 1 || maxResults > maxResultsLimit)) {
+            throw new AwsException(errorCode,
+                    "maxResults must be between 1 and " + maxResultsLimit, 400);
         }
-        int limit = maxResults != null ? maxResults : maxPage;
+        int limit = maxResults != null ? maxResults : defaultPageSize;
 
         List<T> sorted = all.stream().sorted(Comparator.comparing(cursorOf)).collect(Collectors.toList());
         String after = decodeToken(nextToken, errorCode);

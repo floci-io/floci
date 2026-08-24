@@ -19,10 +19,13 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Function;
 
 @ApplicationScoped
 public class DocDbService {
@@ -40,7 +43,109 @@ public class DocDbService {
      * One monitor per stored record, taken by everything that writes it. A tag update is a
      * read-modify-write, so without a lock shared with delete it can put a deleted cluster back.
      */
+    /**
+     * One monitor per record, taken by everything that writes it, and retired with the record.
+     *
+     * <p>Retiring one means a straggler can hold the old monitor while a later caller takes a new
+     * one for the same key, so a write must not depend on the monitor alone for its safety: the
+     * writes that can outlive a delete check the record under the key is still theirs.
+     */
     private final ConcurrentHashMap<String, Object> writeLocks = new ConcurrentHashMap<>();
+
+    /**
+     * Storage key for a record: AWS scopes these identifiers per region, so the region is part of
+     * the key rather than something read back off the record. The shape matches
+     * {@code RdsService.dbResourceKey}, which solves the same problem for the same identifiers.
+     */
+    private String key(String id) {
+        return key(regionResolver.getRegion(), id);
+    }
+
+    private static String key(String region, String id) {
+        return region + "::" + id;
+    }
+
+    /**
+     * A cluster in one region, migrating a record written before regions were part of the key.
+     *
+     * <p>Such a record was created when every ARN came from the configured default region, so that
+     * is the region it belongs to — the same assumption the ARN backfill makes. It is moved under
+     * its regional key on first read, so the unscoped key is not consulted again.
+     */
+    private Optional<DocDbCluster> findCluster(String region, String id) {
+        Optional<DocDbCluster> scoped = clusters.get(key(region, id));
+        if (scoped.isPresent() || !region.equals(regionResolver.getDefaultRegion())) {
+            return scoped;
+        }
+        // Under the record's monitor, and read again inside it: the move is a read-modify-write,
+        // so a delete landing between the two would otherwise be undone by writing the record
+        // back under its new key. Monitors are reentrant, so callers already holding this one —
+        // delete among them — pass straight through.
+        synchronized (lockFor("cluster:" + key(region, id))) {
+            Optional<DocDbCluster> legacy = clusters.get(id);
+            legacy.ifPresent(cluster -> {
+                clusters.put(key(region, id), cluster);
+                clusters.delete(id);
+                LOG.debugv("Moved DocDB cluster {0} under its {1} key", id, region);
+            });
+            return legacy;
+        }
+    }
+
+    private Optional<DocDbInstance> findInstance(String region, String id) {
+        Optional<DocDbInstance> scoped = instances.get(key(region, id));
+        if (scoped.isPresent() || !region.equals(regionResolver.getDefaultRegion())) {
+            return scoped;
+        }
+        synchronized (lockFor("instance:" + key(region, id))) {
+            Optional<DocDbInstance> legacy = instances.get(id);
+            legacy.ifPresent(instance -> {
+                instances.put(key(region, id), instance);
+                instances.delete(id);
+                LOG.debugv("Moved DocDB instance {0} under its {1} key", id, region);
+            });
+            return legacy;
+        }
+    }
+
+    /**
+     * Writes a record filled in on read, unless it has been deleted meanwhile.
+     *
+     * <p>Filling a field in on read is still a write, and a read is not otherwise serialised
+     * against a delete — so without the record's monitor and a second look inside it, a reader
+     * that started before a delete puts the record back after it.
+     */
+    private <T> void persistIfStillPresent(StorageBackend<String, T> store, String monitor,
+                                           String key, T record) {
+        // Two things, because a field filled in on read is still a write. The monitor is the one
+        // every other writer of this record takes — naming it differently would be no mutual
+        // exclusion at all — and the record stored under the key has to still be this record, so
+        // that a delete, or a delete and a re-create under the same name, is not written over.
+        synchronized (lockFor(monitor)) {
+            if (store.get(key).orElse(null) == record) {
+                store.put(key, record);
+            }
+        }
+    }
+
+    /**
+     * Every record of one kind in one region, including any not yet moved under a regional key.
+     *
+     * <p>Two scans of a store a migration is moving records within can each miss what the other
+     * sees, so the unscoped keys are read first and the regional ones second: a record the first
+     * scan misses has been moved already, which the second scan therefore sees, and one the second
+     * misses had not been moved when the first ran. Anything seen twice is one record caught
+     * mid-move, so the list is reduced by identifier.
+     */
+    private <T> List<T> inRegion(StorageBackend<String, T> store, String region,
+                                 Function<T, String> identifier) {
+        Map<String, T> found = new LinkedHashMap<>();
+        if (region.equals(regionResolver.getDefaultRegion())) {
+            store.scan(k -> !k.contains("::")).forEach(r -> found.put(identifier.apply(r), r));
+        }
+        store.scan(k -> k.startsWith(region + "::")).forEach(r -> found.put(identifier.apply(r), r));
+        return List.copyOf(found.values());
+    }
 
     @Inject
     public DocDbService(EmulatorConfig config,
@@ -61,16 +166,12 @@ public class DocDbService {
     public DocDbCluster createDbCluster(String id, String engineVersion,
                                         String masterUsername, String masterPassword,
                                         boolean iamEnabled) {
-        synchronized (lockFor("cluster:" + id)) {
-            if (clusters.get(id).isPresent()) {
+        String region = regionResolver.getRegion();
+        synchronized (lockFor("cluster:" + key(region, id))) {
+            if (findCluster(region, id).isPresent()) {
                 throw new AwsException("DBClusterAlreadyExistsFault",
                         "DocDB cluster " + id + " already exists.", 400);
             }
-
-            // The caller's region, not the configured default: the ARN this create answers with is
-            // the one the caller tags by, and a tag call is checked against the region it is made
-            // from — an ARN naming somewhere else is one its own creator cannot use.
-            String region = regionResolver.getRegion();
 
             DocDbCluster cluster = new DocDbCluster();
             cluster.setDbClusterIdentifier(id);
@@ -113,7 +214,7 @@ public class DocDbService {
                 }
             }
 
-            clusters.put(id, cluster);
+            clusters.put(key(region, id), cluster);
             LOG.infov("DocDB cluster {0} created, endpoint={1}:{2}",
                     id, cluster.getEndpoint(), String.valueOf(cluster.getPort()));
             return cluster;
@@ -121,12 +222,13 @@ public class DocDbService {
     }
 
     public DocDbCluster getDbCluster(String id) {
-        DocDbCluster cluster = clusters.get(id).orElseThrow(() ->
+        String region = regionResolver.getRegion();
+        DocDbCluster cluster = findCluster(region, id).orElseThrow(() ->
                 new AwsException("DBClusterNotFoundFault",
                         "DocDB cluster " + id + " not found.", 404));
         if (cluster.getDbClusterArn() == null || cluster.getDbClusterArn().isBlank()) {
-            cluster.setDbClusterArn(legacyArn("cluster:" + id));
-            clusters.put(id, cluster);
+            cluster.setDbClusterArn(legacyArn(region, "cluster:" + id));
+            persistIfStillPresent(clusters, "cluster:" + key(region, id), key(region, id), cluster);
         }
         return cluster;
     }
@@ -134,14 +236,14 @@ public class DocDbService {
     /**
      * The ARN a record written before ARNs were stored should have had.
      *
-     * <p>The default region rather than the caller's: such a record was created when every ARN was
-     * built from the default, so that is the region it is in — and giving it the region of whoever
-     * happens to read it first would let a caller elsewhere claim it. Without an ARN a record
-     * cannot be told apart from another region's of the same identifier, and cannot be tagged
-     * through an ARN at all.
+     * <p>The region it is stored under, not the caller's: a record reaches a region's key either
+     * by having been created there or, for one written before regions were part of the key, by
+     * belonging to the default region. Taking the region of whoever happens to read it first would
+     * let a caller elsewhere claim it, and a record with no ARN cannot be told apart from another
+     * region's of the same identifier or tagged through an ARN at all.
      */
-    private String legacyArn(String resource) {
-        return regionResolver.buildArn("rds", regionResolver.getDefaultRegion(), resource);
+    private String legacyArn(String region, String resource) {
+        return regionResolver.buildArn("rds", region, resource);
     }
 
     public boolean hasCluster(String id) {
@@ -149,18 +251,14 @@ public class DocDbService {
     }
 
     /**
-     * Whether DocumentDB holds this cluster <em>in this region</em>.
-     *
-     * <p>The records are keyed by identifier alone, so the region has to come from the one place
-     * that carries it — the stored ARN. Without that, an RDS request naming a cluster DocumentDB
-     * holds somewhere else is answered from here, and a name RDS is free to reuse in another
-     * region stops being usable.
+     * Whether DocumentDB holds this cluster <em>in this region</em>. An identifier belongs to one
+     * region, so this is a lookup rather than a filter over every record of that name.
      */
     public boolean hasCluster(String id, String region) {
         if (id == null || id.isBlank()) {
             return false;
         }
-        return clusters.get(id).filter(c -> regionOf(c.getDbClusterArn()).equals(region)).isPresent();
+        return findCluster(region, id).isPresent();
     }
 
     /** Refuses a record whose own ARN is not the one that was asked for. */
@@ -204,27 +302,29 @@ public class DocDbService {
         if (id == null || id.isBlank()) {
             return false;
         }
-        return instances.get(id).filter(i -> regionOf(i.getDbInstanceArn()).equals(region)).isPresent();
+        return findInstance(region, id).isPresent();
     }
 
     public Collection<DocDbCluster> listDbClusters(String filterId) {
+        String region = regionResolver.getRegion();
         if (filterId != null && !filterId.isBlank()) {
             // The db-cluster-id filter accepts ARNs as well as identifiers. Match the
             // full ARN against each cluster's stored ARN rather than reducing it to
             // the bare identifier, so a cross-account or cross-region ARN does not
             // resolve a same-named local cluster.
             if (filterId.startsWith("arn:")) {
-                return clusters.scan(k -> true).stream()
+                return inRegion(clusters, region, DocDbCluster::getDbClusterIdentifier).stream()
                         .filter(c -> filterId.equalsIgnoreCase(c.getDbClusterArn()))
                         .toList();
             }
-            return clusters.scan(k -> k.equalsIgnoreCase(filterId));
+            return findCluster(region, filterId).map(List::of).orElseGet(List::of);
         }
-        return clusters.scan(k -> true);
+        return inRegion(clusters, region, DocDbCluster::getDbClusterIdentifier);
     }
 
     public DocDbCluster modifyDbCluster(String id, String engineVersion, Boolean iamEnabled) {
-        synchronized (lockFor("cluster:" + id)) {
+        String region = regionResolver.getRegion();
+        synchronized (lockFor("cluster:" + key(region, id))) {
             DocDbCluster cluster = getDbCluster(id);
             if (engineVersion != null && !engineVersion.isBlank()) {
                 cluster.setEngineVersion(engineVersion);
@@ -232,15 +332,16 @@ public class DocDbService {
             if (iamEnabled != null) {
                 cluster.setIamDatabaseAuthenticationEnabled(iamEnabled);
             }
-            clusters.put(id, cluster);
+            clusters.put(key(region, id), cluster);
             LOG.infov("DocDB cluster {0} modified", id);
             return cluster;
         }
     }
 
     public void deleteDbCluster(String id) {
-        synchronized (lockFor("cluster:" + id)) {
-            DocDbCluster cluster = clusters.get(id).orElseThrow(() ->
+        String region = regionResolver.getRegion();
+        synchronized (lockFor("cluster:" + key(region, id))) {
+            DocDbCluster cluster = findCluster(region, id).orElseThrow(() ->
                     new AwsException("DBClusterNotFoundFault",
                             "DocDB cluster " + id + " not found.", 404));
 
@@ -250,7 +351,7 @@ public class DocDbService {
             }
 
             cluster.setStatus("deleting");
-            clusters.put(id, cluster);
+            clusters.put(key(region, id), cluster);
 
             if (cluster.getContainerId() != null) {
                 containerManager.stop(new DocDbContainerHandle(
@@ -258,8 +359,8 @@ public class DocDbService {
                         cluster.getContainerHost(), cluster.getContainerPort()));
             }
 
-            clusters.delete(id);
-            writeLocks.remove("cluster:" + id);
+            clusters.delete(key(region, id));
+            writeLocks.remove("cluster:" + key(region, id));
             LOG.infov("DocDB cluster {0} deleted", id);
         }
     }
@@ -269,16 +370,16 @@ public class DocDbService {
     public DocDbInstance createDbInstance(String id, String dbClusterIdentifier,
                                           String dbInstanceClass, String engineVersion,
                                           boolean iamEnabled) {
+        String region = regionResolver.getRegion();
         // Instance monitor before cluster monitor, the one order every path that holds both uses.
-        synchronized (lockFor("instance:" + id)) {
-            synchronized (lockFor("cluster:" + dbClusterIdentifier)) {
-                if (instances.get(id).isPresent()) {
+        synchronized (lockFor("instance:" + key(region, id))) {
+            synchronized (lockFor("cluster:" + key(region, dbClusterIdentifier))) {
+                if (findInstance(region, id).isPresent()) {
                     throw new AwsException("DBInstanceAlreadyExists",
                             "DocDB instance " + id + " already exists.", 400);
                 }
 
                 DocDbCluster cluster = getDbCluster(dbClusterIdentifier);
-                String region = regionResolver.getRegion();
 
                 DocDbInstance instance = new DocDbInstance();
                 instance.setDbInstanceIdentifier(id);
@@ -295,9 +396,9 @@ public class DocDbService {
                 instance.setCreatedAt(Instant.now());
 
                 cluster.getDbClusterMembers().add(id);
-                clusters.put(dbClusterIdentifier, cluster);
+                clusters.put(key(region, dbClusterIdentifier), cluster);
 
-                instances.put(id, instance);
+                instances.put(key(region, id), instance);
                 LOG.infov("DocDB instance {0} created in cluster {1}", id, dbClusterIdentifier);
                         return instance;
             }
@@ -305,32 +406,35 @@ public class DocDbService {
     }
 
     public DocDbInstance getDbInstance(String id) {
-        DocDbInstance instance = instances.get(id).orElseThrow(() ->
+        String region = regionResolver.getRegion();
+        DocDbInstance instance = findInstance(region, id).orElseThrow(() ->
                 new AwsException("DBInstanceNotFound",
                         "DocDB instance " + id + " not found.", 404));
         if (instance.getDbInstanceArn() == null || instance.getDbInstanceArn().isBlank()) {
-            instance.setDbInstanceArn(legacyArn("db:" + id));
-            instances.put(id, instance);
+            instance.setDbInstanceArn(legacyArn(region, "db:" + id));
+            persistIfStillPresent(instances, "instance:" + key(region, id), key(region, id), instance);
         }
         return instance;
     }
 
     public Collection<DocDbInstance> listDbInstances(String filterId) {
+        String region = regionResolver.getRegion();
         if (filterId != null && !filterId.isBlank()) {
             // The db-instance-id filter accepts ARNs as well as identifiers; see
             // listDbClusters for why the match is against the stored ARN.
             if (filterId.startsWith("arn:")) {
-                return instances.scan(k -> true).stream()
+                return inRegion(instances, region, DocDbInstance::getDbInstanceIdentifier).stream()
                         .filter(i -> filterId.equalsIgnoreCase(i.getDbInstanceArn()))
                         .toList();
             }
-            return instances.scan(k -> k.equalsIgnoreCase(filterId));
+            return findInstance(region, filterId).map(List::of).orElseGet(List::of);
         }
-        return instances.scan(k -> true);
+        return inRegion(instances, region, DocDbInstance::getDbInstanceIdentifier);
     }
 
     public DocDbInstance modifyDbInstance(String id, String dbInstanceClass, Boolean iamEnabled) {
-        synchronized (lockFor("instance:" + id)) {
+        String region = regionResolver.getRegion();
+        synchronized (lockFor("instance:" + key(region, id))) {
             DocDbInstance instance = getDbInstance(id);
             if (dbInstanceClass != null && !dbInstanceClass.isBlank()) {
                 instance.setDbInstanceClass(dbInstanceClass);
@@ -338,29 +442,30 @@ public class DocDbService {
             if (iamEnabled != null) {
                 instance.setIamDatabaseAuthenticationEnabled(iamEnabled);
             }
-            instances.put(id, instance);
+            instances.put(key(region, id), instance);
             LOG.infov("DocDB instance {0} modified", id);
             return instance;
         }
     }
 
     public void deleteDbInstance(String id) {
-        synchronized (lockFor("instance:" + id)) {
-            DocDbInstance instance = instances.get(id).orElseThrow(() ->
+        String region = regionResolver.getRegion();
+        synchronized (lockFor("instance:" + key(region, id))) {
+            DocDbInstance instance = findInstance(region, id).orElseThrow(() ->
                     new AwsException("DBInstanceNotFound",
                             "DocDB instance " + id + " not found.", 404));
 
             String clusterId = instance.getDbClusterIdentifier();
-            synchronized (lockFor("cluster:" + clusterId)) {
-                DocDbCluster cluster = clusters.get(clusterId).orElse(null);
+            synchronized (lockFor("cluster:" + key(region, clusterId))) {
+                DocDbCluster cluster = findCluster(region, clusterId).orElse(null);
                 if (cluster != null) {
                     cluster.getDbClusterMembers().remove(id);
-                    clusters.put(clusterId, cluster);
+                    clusters.put(key(region, clusterId), cluster);
                 }
             }
 
-            instances.delete(id);
-            writeLocks.remove("instance:" + id);
+            instances.delete(key(region, id));
+            writeLocks.remove("instance:" + key(region, id));
             LOG.infov("DocDB instance {0} deleted", id);
         }
     }
@@ -451,18 +556,18 @@ public class DocDbService {
                 DocDbCluster cluster = getDbCluster(id);
                 requireArnNamesRecord(resourceName, cluster.getDbClusterArn(),
                         "DBClusterNotFoundFault", "DocDB cluster " + id + " not found.");
-                yield new TagTarget("cluster:" + id, cluster.getTags(), updated -> {
+                yield new TagTarget("cluster:" + key(id), cluster.getTags(), updated -> {
                     cluster.setTags(updated);
-                    clusters.put(id, cluster);
+                    clusters.put(key(id), cluster);
                 });
             }
             case "db" -> {
                 DocDbInstance instance = getDbInstance(id);
                 requireArnNamesRecord(resourceName, instance.getDbInstanceArn(),
                         "DBInstanceNotFound", "DocDB instance " + id + " not found.");
-                yield new TagTarget("instance:" + id, instance.getTags(), updated -> {
+                yield new TagTarget("instance:" + key(id), instance.getTags(), updated -> {
                     instance.setTags(updated);
-                    instances.put(id, instance);
+                    instances.put(key(id), instance);
                 });
             }
             default -> throw new AwsException("InvalidParameterValue",
