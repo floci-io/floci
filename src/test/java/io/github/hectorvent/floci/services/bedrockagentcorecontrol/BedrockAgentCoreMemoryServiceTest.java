@@ -89,6 +89,20 @@ class BedrockAgentCoreMemoryServiceTest {
     }
 
     @Test
+    void rejectedUpdateAppliesNothing() {
+        Memory memory = create("atomicUpd");
+        AwsException e = assertThrows(AwsException.class, () -> service.update(
+                memory.getMemoryId(), "should-not-stick", 999,
+                "arn:aws:iam::000000000000:role/should-not-stick", REGION));
+        assertEquals(400, e.getHttpStatus());
+
+        Memory after = service.get(memory.getMemoryId(), REGION);
+        assertEquals("desc", after.getDescription());
+        assertEquals(30, after.getEventExpiryDuration());
+        assertEquals(ROLE_ARN, after.getMemoryExecutionRoleArn());
+    }
+
+    @Test
     void tagOperationsRoundTripThroughTheArn() {
         Memory memory = create("tagMemory");
         String arn = service.arn(memory, REGION);

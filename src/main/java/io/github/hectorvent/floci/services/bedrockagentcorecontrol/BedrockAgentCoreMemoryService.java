@@ -92,12 +92,16 @@ public class BedrockAgentCoreMemoryService {
 
     public Memory update(String id, String description, Integer eventExpiryDuration,
                          String memoryExecutionRoleArn, String region) {
+        // Validate all inputs before mutating: get() returns the live stored object,
+        // so a throw after the first setter would leave a partially applied update.
+        if (eventExpiryDuration != null) {
+            validateExpiry(eventExpiryDuration);
+        }
         Memory memory = get(id, region);
         if (description != null) {
             memory.setDescription(description);
         }
         if (eventExpiryDuration != null) {
-            validateExpiry(eventExpiryDuration);
             memory.setEventExpiryDuration(eventExpiryDuration);
         }
         if (memoryExecutionRoleArn != null) {

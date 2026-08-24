@@ -82,15 +82,22 @@ class BedrockAgentCoreMemoryIntegrationTest {
     }
 
     @Test
-    @Order(3)
-    void updateMemoryRejectsOutOfRangeExpiry() {
-        given().contentType("application/json").body("{\"eventExpiryDuration\":2}")
+    @Order(4)
+    void updateMemoryRejectsOutOfRangeExpiryWithoutPartialMutation() {
+        given().contentType("application/json")
+                .body("{\"description\":\"should-not-stick\",\"eventExpiryDuration\":2}")
                 .when().put("/memories/" + memoryId + "/update")
                 .then().statusCode(400);
+
+        // The rejected update must not have applied any of its fields.
+        given().when().get("/memories/" + memoryId + "/details")
+                .then().statusCode(200)
+                .body("memory.description", equalTo("updated"))
+                .body("memory.eventExpiryDuration", equalTo(60));
     }
 
     @Test
-    @Order(4)
+    @Order(5)
     void deleteMemory() {
         given().when().delete("/memories/" + memoryId + "/delete")
                 .then().statusCode(202)
@@ -101,7 +108,7 @@ class BedrockAgentCoreMemoryIntegrationTest {
     }
 
     @Test
-    @Order(5)
+    @Order(6)
     void createMemoryRequiresExpiry() {
         given().contentType("application/json").body("{\"name\":\"noExpiry\"}")
                 .when().post("/memories/create")
@@ -109,7 +116,7 @@ class BedrockAgentCoreMemoryIntegrationTest {
     }
 
     @Test
-    @Order(6)
+    @Order(7)
     void eventExpiryDurationBoundaries() {
         // In range (3..365) → accepted.
         for (int v : new int[]{3, 365}) {
