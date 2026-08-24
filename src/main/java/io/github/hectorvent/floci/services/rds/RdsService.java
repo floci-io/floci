@@ -126,6 +126,13 @@ public class RdsService implements Resettable {
     private final StorageBackend<String, DbProxyTargetGroup> proxyTargetGroups;
     private final RdsContainerManager containerManager;
     private final RdsProxyManager proxyManager;
+    // CreateDBCluster/CreateDBInstance register the new resource only after the
+    // backing container is provisioned, and an image pull can hold that window
+    // open long enough for a client-side retry to pass the exists-check again
+    // and provision a second container for the same identifier. The sentinel
+    // serializes creates per identifier so the duplicate fails fast with the
+    // same fault a completed create produces.
+    private final Set<String> provisioningIds = ConcurrentHashMap.newKeySet();
     private final Ec2Service ec2Service;
     private final RegionResolver regionResolver;
     private final EmulatorConfig config;
@@ -461,6 +468,36 @@ public class RdsService implements Resettable {
                                        String optionGroupName,
                                        String region,
                                        boolean autoMinorVersionUpgrade) {
+        String provisioningKey = "instance:" + currentAccountId() + ":"
+                + dbResourceKey(effectiveRegion(region), id);
+        if (!provisioningIds.add(provisioningKey)) {
+            throw new AwsException("DBInstanceAlreadyExists",
+                    "DB instance " + id + " already exists.", 400);
+        }
+        try {
+            return doCreateDbInstance(id, engineParam, engineVersion, masterUsername,
+                    masterPassword, dbName, dbInstanceClass, allocatedStorage, iamEnabled,
+                    paramGroupName, dbSubnetGroupName, dbClusterIdentifier, availabilityZone,
+                    multiAz, manageMasterUserPassword, masterUserSecretKmsKeyId, tags,
+                    vpcSecurityGroupIds, optionGroupName, region, autoMinorVersionUpgrade);
+        } finally {
+            provisioningIds.remove(provisioningKey);
+        }
+    }
+
+    private DbInstance doCreateDbInstance(String id, String engineParam, String engineVersion,
+                                          String masterUsername, String masterPassword,
+                                          String dbName, String dbInstanceClass,
+                                          int allocatedStorage, boolean iamEnabled,
+                                          String paramGroupName, String dbSubnetGroupName,
+                                          String dbClusterIdentifier, String availabilityZone,
+                                          boolean multiAz, boolean manageMasterUserPassword,
+                                          String masterUserSecretKmsKeyId,
+                                          Map<String, String> tags,
+                                          List<String> vpcSecurityGroupIds,
+                                          String optionGroupName,
+                                          String region,
+                                          boolean autoMinorVersionUpgrade) {
         String effectiveRegion = effectiveRegion(region);
         String dbiResourceId = "db-" + java.util.UUID.randomUUID().toString()
                 .replace("-", "").substring(0, 24).toUpperCase();
@@ -1140,6 +1177,29 @@ public class RdsService implements Resettable {
                                      String availabilityZone, boolean multiAz, String region,
                                      Double serverlessV2MinCapacity, Double serverlessV2MaxCapacity,
                                      Integer serverlessV2SecondsUntilAutoPause) {
+        String provisioningKey = "cluster:" + currentAccountId() + ":"
+                + dbResourceKey(effectiveRegion(region), id);
+        if (!provisioningIds.add(provisioningKey)) {
+            throw new AwsException("DBClusterAlreadyExistsFault",
+                    "DB cluster " + id + " already exists.", 400);
+        }
+        try {
+            return doCreateDbCluster(id, engineParam, engineVersion, masterUsername, masterPassword,
+                    databaseName, iamEnabled, paramGroupName, dbSubnetGroupName, availabilityZone,
+                    multiAz, region, serverlessV2MinCapacity, serverlessV2MaxCapacity,
+                    serverlessV2SecondsUntilAutoPause);
+        } finally {
+            provisioningIds.remove(provisioningKey);
+        }
+    }
+
+    private DbCluster doCreateDbCluster(String id, String engineParam, String engineVersion,
+                                        String masterUsername, String masterPassword,
+                                        String databaseName, boolean iamEnabled,
+                                        String paramGroupName, String dbSubnetGroupName,
+                                        String availabilityZone, boolean multiAz, String region,
+                                        Double serverlessV2MinCapacity, Double serverlessV2MaxCapacity,
+                                        Integer serverlessV2SecondsUntilAutoPause) {
         String effectiveRegion = effectiveRegion(region);
         String clusterResourceId = "cluster-" + java.util.UUID.randomUUID().toString()
                 .replace("-", "").substring(0, 24).toUpperCase();
