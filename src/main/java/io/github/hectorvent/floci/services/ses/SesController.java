@@ -2450,11 +2450,22 @@ public class SesController {
         }
         List<Tag> out = new ArrayList<>();
         for (JsonNode t : tagsNode) {
-            out.add(new Tag(
-                    t.path("Key").asText(null),
-                    t.path("Value").asText(null)));
+            JsonNode key = t.path("Key");
+            JsonNode value = t.path("Value");
+            // A present-but-non-string Key/Value (number, boolean, object, array) is a wire
+            // deserialization error, not a coercible value: AWS restJson1 rejects it with
+            // SerializationException rather than turning 123 into "123". A missing/null member is left
+            // to the downstream service validation, matching AWS.
+            if (nonStringMember(key) || nonStringMember(value)) {
+                throw new AwsException("SerializationException", null, 400);
+            }
+            out.add(new Tag(key.asText(null), value.asText(null)));
         }
         return out;
+    }
+
+    private static boolean nonStringMember(JsonNode node) {
+        return !node.isMissingNode() && !node.isNull() && !node.isTextual();
     }
 
     /**

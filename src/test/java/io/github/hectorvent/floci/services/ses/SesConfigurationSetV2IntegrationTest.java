@@ -1241,6 +1241,33 @@ class SesConfigurationSetV2IntegrationTest {
             .body("DeliveryOptions.SendingPoolName", equalTo("v2-cs-pool-ref"));
     }
 
+    @Test
+    @Order(62)
+    void createConfigurationSet_nonStringTagKey_returnsSerializationException() {
+        // AWS restJson1 rejects a non-string tag member with SerializationException rather than
+        // coercing it (probe-confirmed: a numeric Key returns "NUMBER_VALUE can not be converted to a
+        // String"). Floci matches the type/status; its error body uses __type (project-wide).
+        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+            .body("{\"ConfigurationSetName\": \"v2-cs-nonstr-key\", \"Tags\": [{\"Key\": 123, \"Value\": \"v\"}]}")
+        .when().post("/v2/email/configuration-sets")
+        .then().statusCode(400).body("__type", equalTo("SerializationException"));
+    }
+
+    @Test
+    @Order(63)
+    void createConfigurationSet_nonStringTagValue_returnsSerializationException() {
+        // A boolean value and an object value are both non-string members and rejected the same way.
+        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+            .body("{\"ConfigurationSetName\": \"v2-cs-nonstr-val\", \"Tags\": [{\"Key\": \"k\", \"Value\": true}]}")
+        .when().post("/v2/email/configuration-sets")
+        .then().statusCode(400).body("__type", equalTo("SerializationException"));
+
+        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+            .body("{\"ConfigurationSetName\": \"v2-cs-nonstr-obj\", \"Tags\": [{\"Key\": \"k\", \"Value\": {\"x\": 1}}]}")
+        .when().post("/v2/email/configuration-sets")
+        .then().statusCode(400).body("__type", equalTo("SerializationException"));
+    }
+
     private static void putConfigSet(String name) {
         given().contentType("application/json").header("Authorization", AUTH_HEADER)
             .body("{\"ConfigurationSetName\": \"" + name + "\"}")
