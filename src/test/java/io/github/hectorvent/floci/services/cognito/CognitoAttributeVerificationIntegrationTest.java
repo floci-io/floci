@@ -337,6 +337,50 @@ class CognitoAttributeVerificationIntegrationTest {
                         "Unable to verify attribute: phone_number no value set to verify"));
     }
 
+    @Test
+    @Order(12)
+    void userAttributeUpdateSettingsRoundTripThroughCreateUpdateAndDescribe() throws Exception {
+        JsonNode created = cognitoJson("CreateUserPool", """
+                {
+                  "PoolName": "AttributeUpdateSettingsRoundTrip",
+                  "UserAttributeUpdateSettings": {
+                    "AttributesRequireVerificationBeforeUpdate": ["email", "phone_number"]
+                  }
+                }
+                """);
+        String configuredPoolId = created.path("UserPool").path("Id").asText();
+
+        cognitoAction("DescribeUserPool", """
+                {
+                  "UserPoolId": "%s"
+                }
+                """.formatted(configuredPoolId))
+                .then()
+                .statusCode(200)
+                .body("UserPool.UserAttributeUpdateSettings.AttributesRequireVerificationBeforeUpdate",
+                        equalTo(java.util.List.of("email", "phone_number")));
+
+        cognitoAction("UpdateUserPool", """
+                {
+                  "UserPoolId": "%s",
+                  "UserAttributeUpdateSettings": {
+                    "AttributesRequireVerificationBeforeUpdate": ["phone_number"]
+                  }
+                }
+                """.formatted(configuredPoolId))
+                .then()
+                .statusCode(200);
+
+        cognitoAction("DescribeUserPool", """
+                {
+                  "UserPoolId": "%s"
+                }
+                """.formatted(configuredPoolId))
+                .then()
+                .statusCode(200)
+                .body("UserPool.UserAttributeUpdateSettings.AttributesRequireVerificationBeforeUpdate",
+                        equalTo(java.util.List.of("phone_number")));
+    }
     private static void clearInspectionEndpoint(String path) {
         given()
                 .delete(path)
