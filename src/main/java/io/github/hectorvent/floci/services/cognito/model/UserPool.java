@@ -44,6 +44,7 @@ public class UserPool {
     private Map<String, Object> userPoolAddOns = new HashMap<>();
     private Map<String, Object> usernameConfiguration = new HashMap<>();
     private Map<String, Object> accountRecoverySetting = new HashMap<>();
+    private Map<String, Object> userAttributeUpdateSettings = new HashMap<>();
     private String userPoolTier = "ESSENTIALS";
 
     private String clientIdOverride = null;
@@ -150,6 +151,13 @@ public class UserPool {
 
     public Map<String, Object> getAccountRecoverySetting() { return accountRecoverySetting; }
     public void setAccountRecoverySetting(Map<String, Object> accountRecoverySetting) { this.accountRecoverySetting = accountRecoverySetting; }
+
+    public Map<String, Object> getUserAttributeUpdateSettings() { return userAttributeUpdateSettings; }
+    public void setUserAttributeUpdateSettings(Map<String, Object> userAttributeUpdateSettings) {
+        this.userAttributeUpdateSettings = userAttributeUpdateSettings == null
+                ? new HashMap<>()
+                : new HashMap<>(userAttributeUpdateSettings);
+    }
 
     public String getUserPoolTier() { return userPoolTier; }
     public void setUserPoolTier(String userPoolTier) { this.userPoolTier = userPoolTier; }
