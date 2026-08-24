@@ -532,24 +532,41 @@ public class RdsService implements Resettable {
         return applyRequestedPort(id, effectivePort);
     }
 
+    // lex00/floci#124: a second real DB instance requesting the exact same port an already-
+    // running instance holds (the common case - most engines' own examples, and terraform-aws-
+    // modules/terraform-aws-rds's own "complete-postgres" example among them, just hardcode the
+    // engine's standard port on every instance) used to get silently bumped to a synthetic port
+    // from allocateProxyPort's own fallback range - correct for the ONE real constraint floci's
+    // shared-host proxy has (two literal TCP listeners cannot both bind the same host port), but
+    // wrong for what DescribeDBInstances reports: real AWS has no cross-instance port-uniqueness
+    // constraint at all - every RDS instance is its own isolated network endpoint - so an
+    // explicit port request must be honored in the Endpoint.Port the API echoes back regardless
+    // of what any other instance already holds. The fix separates the two concerns that used to
+    // share one number: `newBindPort` below is allocateProxyPort's real, collision-checked
+    // internal listener port (unavoidably synthetic on genuine collision - the one honestly-
+    // documented limit of this architecture), while the DECLARED port baked into the Endpoint
+    // returned here is always exactly `requestedPort`, never subject to that fallback. The two
+    // only diverge in the rare same-literal-port multi-instance case; the common single-instance
+    // (or genuinely distinct explicit ports) case still gets a real, connectable Endpoint.Port
+    // because `newBindPort` there equals `requestedPort` outright.
     public DbInstance applyRequestedPort(String id, Integer requestedPort) {
         DbInstance instance = getDbInstance(id);
-        if (requestedPort == null || requestedPort <= 0 || requestedPort == instance.getProxyPort()) {
+        if (requestedPort == null || requestedPort <= 0 || requestedPort == instance.getEndpoint().port()) {
             return instance;
         }
         boolean mock = config.services().rds().mock();
-        int oldPort = instance.getProxyPort();
-        int newPort = allocateProxyPort(requestedPort);
+        int oldBindPort = instance.getProxyPort();
+        int newBindPort = allocateProxyPort(requestedPort);
         if (!mock && hasBackend(instance.getContainerHost(), instance.getContainerPort())) {
             proxyManager.stopProxy(id);
             proxyManager.startProxy(id, instance.getEngine(), instance.isIamDatabaseAuthenticationEnabled(),
-                    newPort, instance.getContainerHost(), instance.getContainerPort(),
+                    newBindPort, instance.getContainerHost(), instance.getContainerPort(),
                     instance.getMasterUsername(), instance.getMasterPassword(), instance.getDbName(),
                     (user, pw) -> validateDbPassword(id, user, pw));
         }
-        releaseProxyPort(oldPort);
-        instance.setProxyPort(newPort);
-        instance.setEndpoint(mock ? new DbEndpoint("localhost", newPort) : proxyEndpoint(newPort));
+        releaseProxyPort(oldBindPort);
+        instance.setProxyPort(newBindPort);
+        instance.setEndpoint(mock ? new DbEndpoint("localhost", requestedPort) : proxyEndpoint(requestedPort));
         instances.put(id, instance);
         return instance;
     }

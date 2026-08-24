@@ -93,19 +93,31 @@ class RdsInstanceOptionalFieldsTest {
         assertEquals(5432, instance.getProxyPort());
     }
 
+    // lex00/floci#124: this test used to assert the OPPOSITE - that a second instance
+    // explicitly requesting the same port an already-running instance holds gets silently
+    // bumped to a different Endpoint.Port. That was itself the bug: real AWS has no
+    // cross-instance port-uniqueness constraint at all - every RDS instance is its own isolated
+    // network endpoint - so DescribeDBInstances must echo back exactly what was requested for
+    // EVERY instance, including two that both asked for the identical value (terraform-aws-
+    // modules/terraform-aws-rds's own "complete-postgres" example does exactly this - hardcodes
+    // port 5432 on two separate aws_db_instance resources - and choudoufu's
+    // corpus-rds-complete-postgres crossing caught the resulting perpetual diff). The one real
+    // constraint floci's shared-host proxy actually has - two literal TCP listeners cannot bind
+    // the same host port - still exists, so it has to land on the INTERNAL bind port
+    // (getProxyPort(), never exposed via the wire API) instead of the declared Endpoint.Port.
     @Test
-    void createTimePortFallsBackOnCollisionRatherThanFailing() {
+    void createTimePortHonorsBothInstancesExplicitPortEvenWhenIdentical() {
         DbInstance a = create("db-a");
         a = rdsService.applyCreateTimePort("db-a", 5432);
         DbInstance b = create("db-b");
         b = rdsService.applyCreateTimePort("db-b", 5432);
 
-        // Both instances requested the same port - one real, functioning proxy port per
-        // instance is a hard constraint of floci's shared-host proxy architecture, so the second
-        // instance must fall back rather than both claiming to listen on the identical port.
         assertEquals(5432, a.getEndpoint().port());
-        assertNotEquals(5432, b.getEndpoint().port());
-        assertNotEquals(a.getEndpoint().port(), b.getEndpoint().port());
+        assertEquals(5432, b.getEndpoint().port());
+
+        // The internal real listener port is where the unavoidable same-host collision has to
+        // land instead - it cannot be identical for both, since only one can literally bind it.
+        assertNotEquals(a.getProxyPort(), b.getProxyPort());
     }
 
     @Test
