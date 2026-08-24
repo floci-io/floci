@@ -58,11 +58,18 @@ public class MixedInstancesPolicy {
     @JsonIgnoreProperties(ignoreUnknown = true)
     public static class LaunchTemplateOverride {
         private String instanceType;
+        // lex00/floci#112: real per-override field (LaunchTemplateOverrides.WeightedCapacity in
+        // botocore's autoscaling service model) that terraform-aws-autoscaling's
+        // module.mixed_instance sets; previously dropped on create and never echoed back.
+        private String weightedCapacity;
 
         public LaunchTemplateOverride() {}
 
         public String getInstanceType() { return instanceType; }
         public void setInstanceType(String v) { this.instanceType = v; }
+
+        public String getWeightedCapacity() { return weightedCapacity; }
+        public void setWeightedCapacity(String v) { this.weightedCapacity = v; }
     }
 
     @RegisterForReflection

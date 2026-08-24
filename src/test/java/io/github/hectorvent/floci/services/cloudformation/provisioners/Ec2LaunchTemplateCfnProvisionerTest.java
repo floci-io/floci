@@ -7,15 +7,20 @@ import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplate
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
+import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentMatcher;
 import org.mockito.InOrder;
 
 import java.util.HashMap;
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
+import java.util.function.Predicate;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.anyString;
@@ -59,11 +64,26 @@ class Ec2LaunchTemplateCfnProvisionerTest {
         return lt;
     }
 
+    /** Matches a LaunchTemplateData whose fields satisfy the given predicate. */
+    private static LaunchTemplateData ltData(Predicate<LaunchTemplateData> predicate) {
+        return argThat((ArgumentMatcher<LaunchTemplateData>) data -> data != null && predicate.test(data));
+    }
+
+    private static boolean fieldsEqual(LaunchTemplateData data, String imageId, String instanceType,
+                                       String keyName, List<String> securityGroupIds, String encodedUserData,
+                                       String iamInstanceProfileArn) {
+        return Objects.equals(imageId, data.getImageId())
+                && Objects.equals(instanceType, data.getInstanceType())
+                && Objects.equals(keyName, data.getKeyName())
+                && Objects.equals(securityGroupIds == null ? List.of() : securityGroupIds, data.getSecurityGroupIds())
+                && Objects.equals(encodedUserData, data.getEncodedUserData())
+                && Objects.equals(iamInstanceProfileArn, data.getIamInstanceProfileArn());
+    }
+
     @Test
     void setsPhysicalIdAndGetAttAttributes() {
-        when(ec2.createLaunchTemplate(eq("us-east-1"), eq("my-lt"), eq("ami-12345678"),
-                eq("t3.small"), isNull(), isNull(), isNull(), isNull(), isNull(), isNull(), isNull(),
-                isNull(), isNull()))
+        when(ec2.createLaunchTemplate(eq("us-east-1"), eq("my-lt"),
+                ltData(d -> fieldsEqual(d, "ami-12345678", "t3.small", null, null, null, null)), isNull()))
                 .thenReturn(template("lt-abc123"));
         ObjectNode data = mapper.createObjectNode()
                 .put("ImageId", "ami-12345678")
@@ -82,8 +102,7 @@ class Ec2LaunchTemplateCfnProvisionerTest {
 
     @Test
     void withoutNameGeneratesPhysicalName() {
-        when(ec2.createLaunchTemplate(eq("us-east-1"), anyString(), any(), any(), any(),
-                any(), any(), any(), any(), any(), any(), any(), any()))
+        when(ec2.createLaunchTemplate(eq("us-east-1"), anyString(), any(), isNull()))
                 .thenReturn(template("lt-gen"));
         StackResource r = resource("Lt");
 
@@ -91,8 +110,7 @@ class Ec2LaunchTemplateCfnProvisionerTest {
 
         verify(ec2).createLaunchTemplate(eq("us-east-1"),
                 org.mockito.ArgumentMatchers.matches("my-stack-Lt-[0-9a-f]{12}"),
-                isNull(), isNull(), isNull(), isNull(), isNull(), isNull(), isNull(), isNull(), isNull(),
-                isNull(), isNull());
+                ltData(d -> fieldsEqual(d, null, null, null, null, null, null)), isNull());
     }
 
     @Test
@@ -104,7 +122,7 @@ class Ec2LaunchTemplateCfnProvisionerTest {
         when(ec2.describeLaunchTemplates(eq("us-east-1"), eq(List.of("lt-abc123")), eq(List.of()), any()))
                 .thenReturn(List.of(existing));
         when(ec2.createLaunchTemplateVersion(eq("us-east-1"), eq("lt-abc123"), isNull(), isNull(),
-                eq("ami-updated"), any(), any(), any(), any(), any(), any(), any(), any(), any()))
+                ltData(d -> "ami-updated".equals(d.getImageId()))))
                 .thenReturn(template("lt-abc123"));
 
         ObjectNode props = mapper.createObjectNode().put("LaunchTemplateName", "my-lt");
@@ -115,8 +133,7 @@ class Ec2LaunchTemplateCfnProvisionerTest {
         provisioner.provision(r, props, ctx());
 
         assertEquals("lt-abc123", r.getPhysicalId());
-        verify(ec2, never()).createLaunchTemplate(any(), any(), any(), any(), any(),
-                any(), any(), any(), any(), any(), any(), any(), any());
+        verify(ec2, never()).createLaunchTemplate(any(), any(), any(), any());
         verify(ec2, never()).deleteLaunchTemplate(any(), any(), any());
     }
 
@@ -127,8 +144,7 @@ class Ec2LaunchTemplateCfnProvisionerTest {
         existing.setLaunchTemplateName("my-stack-Lt-0123456789ab");
         when(ec2.describeLaunchTemplates(eq("us-east-1"), eq(List.of("lt-gen")), eq(List.of()), any()))
                 .thenReturn(List.of(existing));
-        when(ec2.createLaunchTemplateVersion(eq("us-east-1"), eq("lt-gen"), isNull(), isNull(),
-                any(), any(), any(), any(), any(), any(), any(), any(), any(), any()))
+        when(ec2.createLaunchTemplateVersion(eq("us-east-1"), eq("lt-gen"), isNull(), isNull(), any()))
                 .thenReturn(template("lt-gen"));
 
         StackResource r = resource("Lt");
@@ -137,8 +153,7 @@ class Ec2LaunchTemplateCfnProvisionerTest {
         provisioner.provision(r, mapper.createObjectNode(), ctx());
 
         assertEquals("lt-gen", r.getPhysicalId());
-        verify(ec2, never()).createLaunchTemplate(any(), any(), any(), any(), any(),
-                any(), any(), any(), any(), any(), any(), any(), any());
+        verify(ec2, never()).createLaunchTemplate(any(), any(), any(), any());
     }
 
     @Test
@@ -147,8 +162,7 @@ class Ec2LaunchTemplateCfnProvisionerTest {
         existing.setLaunchTemplateName("old-name");
         when(ec2.describeLaunchTemplates(eq("us-east-1"), eq(List.of("lt-old")), eq(List.of()), any()))
                 .thenReturn(List.of(existing));
-        when(ec2.createLaunchTemplate(eq("us-east-1"), eq("new-name"), any(), any(), any(),
-                any(), any(), any(), any(), any(), any(), any(), any()))
+        when(ec2.createLaunchTemplate(eq("us-east-1"), eq("new-name"), any(), any()))
                 .thenReturn(template("lt-new"));
 
         StackResource r = resource("Lt");
@@ -159,15 +173,13 @@ class Ec2LaunchTemplateCfnProvisionerTest {
         assertEquals("lt-new", r.getPhysicalId());
         // Created before the old one is dropped, so a failed create leaves the original intact.
         InOrder order = inOrder(ec2);
-        order.verify(ec2).createLaunchTemplate(eq("us-east-1"), eq("new-name"), any(), any(), any(),
-                any(), any(), any(), any(), any(), any(), any(), any());
+        order.verify(ec2).createLaunchTemplate(eq("us-east-1"), eq("new-name"), any(), any());
         order.verify(ec2).deleteLaunchTemplate("us-east-1", "lt-old", null);
     }
 
     @Test
     void profileNameIsNormalizedToInstanceProfileArn() {
-        when(ec2.createLaunchTemplate(any(), any(), any(), any(), any(),
-                any(), any(), any(), any(), any(), any(), any(), any()))
+        when(ec2.createLaunchTemplate(any(), any(), any(), any()))
                 .thenReturn(template("lt-prof"));
         ObjectNode data = mapper.createObjectNode();
         data.putObject("IamInstanceProfile").put("Name", "my-profile");
@@ -176,16 +188,14 @@ class Ec2LaunchTemplateCfnProvisionerTest {
 
         provisioner.provision(resource("Lt"), props, ctx());
 
-        verify(ec2).createLaunchTemplate(eq("us-east-1"), anyString(), isNull(), isNull(), isNull(),
-                isNull(), isNull(), isNull(),
-                eq("arn:aws:iam::000000000000:instance-profile/my-profile"), isNull(), isNull(),
-                isNull(), isNull());
+        verify(ec2).createLaunchTemplate(eq("us-east-1"), anyString(),
+                ltData(d -> "arn:aws:iam::000000000000:instance-profile/my-profile".equals(d.getIamInstanceProfileArn())),
+                isNull());
     }
 
     @Test
     void profileArnIsPassedThrough() {
-        when(ec2.createLaunchTemplate(any(), any(), any(), any(), any(),
-                any(), any(), any(), any(), any(), any(), any(), any()))
+        when(ec2.createLaunchTemplate(any(), any(), any(), any()))
                 .thenReturn(template("lt-prof"));
         ObjectNode data = mapper.createObjectNode();
         data.putObject("IamInstanceProfile")
@@ -196,10 +206,10 @@ class Ec2LaunchTemplateCfnProvisionerTest {
 
         provisioner.provision(resource("Lt"), props, ctx());
 
-        verify(ec2).createLaunchTemplate(eq("us-east-1"), anyString(), isNull(), isNull(), isNull(),
-                eq(List.of("sg-1", "sg-2")), isNull(), isNull(),
-                eq("arn:aws:iam::000000000000:instance-profile/explicit"), isNull(), isNull(),
-                isNull(), isNull());
+        verify(ec2).createLaunchTemplate(eq("us-east-1"), anyString(),
+                ltData(d -> List.of("sg-1", "sg-2").equals(d.getSecurityGroupIds())
+                        && "arn:aws:iam::000000000000:instance-profile/explicit".equals(d.getIamInstanceProfileArn())),
+                isNull());
     }
 
     @Test

@@ -799,8 +799,16 @@ public class CloudFormationResourceProvisioner {
                 }
             }
         }
-        var lt = ec2Service.createLaunchTemplate(region, name, imageId, instanceType, keyName,
-                securityGroupIds, null, encodedUserData, iamInstanceProfileArn, null, null, null, null);
+        var ltData = new io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData();
+        ltData.setImageId(imageId);
+        ltData.setInstanceType(instanceType);
+        ltData.setKeyName(keyName);
+        ltData.setEncodedUserData(encodedUserData);
+        ltData.setIamInstanceProfileArn(iamInstanceProfileArn);
+        if (securityGroupIds != null) {
+            ltData.setSecurityGroupIds(securityGroupIds);
+        }
+        var lt = ec2Service.createLaunchTemplate(region, name, ltData, null);
         r.setPhysicalId(lt.getLaunchTemplateId());
         r.getAttributes().put("LaunchTemplateId", lt.getLaunchTemplateId());
         r.getAttributes().put("LatestVersionNumber", lt.getLatestVersionNumber());
@@ -1171,7 +1179,8 @@ public class CloudFormationResourceProvisioner {
                 parseIntProp(props, "HealthCheckGracePeriod", engine, 0),
                 resolveStringList(props, "TerminationPolicies", engine),
                 resolveAsgTags(props, engine),
-                resolveAsgTagPropagation(props, engine));
+                resolveAsgTagPropagation(props, engine),
+                null);
         // Ref returns the Auto Scaling group name; Fn::GetAtt Arn returns the ASG ARN.
         r.setPhysicalId(name);
         r.getAttributes().put("Arn", asg.getAutoScalingGroupArn());

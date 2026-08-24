@@ -24,6 +24,9 @@ import io.github.hectorvent.floci.services.ec2.model.Snapshot;
 import io.github.hectorvent.floci.services.ec2.model.SpotInstanceRequest;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
+import io.github.hectorvent.floci.services.ec2.model.TransitGateway;
+import io.github.hectorvent.floci.services.ec2.model.TransitGatewayRouteTable;
+import io.github.hectorvent.floci.services.ec2.model.TransitGatewayVpcAttachment;
 import io.github.hectorvent.floci.services.ec2.model.Volume;
 import io.github.hectorvent.floci.services.ec2.model.Vpc;
 import io.github.hectorvent.floci.services.ec2.model.VpcEndpoint;
@@ -169,6 +172,9 @@ class Ec2PublicIpOnLaunchTest {
                 load(dir, "ec2-customer-gateways.json", new TypeReference<Map<String, CustomerGateway>>() {}),
                 load(dir, "ec2-vpn-gateways.json", new TypeReference<Map<String, VpnGateway>>() {}),
                 load(dir, "ec2-capacity-reservations.json", new TypeReference<Map<String, CapacityReservation>>() {}),
+                load(dir, "ec2-transit-gateways.json", new TypeReference<Map<String, TransitGateway>>() {}),
+                load(dir, "ec2-transit-gateway-attachments.json", new TypeReference<Map<String, TransitGatewayVpcAttachment>>() {}),
+                load(dir, "ec2-transit-gateway-route-tables.json", new TypeReference<Map<String, TransitGatewayRouteTable>>() {}),
                 load(dir, "ec2-snapshot-block-public-access.json", new TypeReference<Map<String, String>>() {}),
                 load(dir, "ec2-tags.json", new TypeReference<Map<String, List<Tag>>>() {}));
     }

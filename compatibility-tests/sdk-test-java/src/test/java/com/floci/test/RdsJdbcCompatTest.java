@@ -43,8 +43,11 @@ class RdsJdbcCompatTest {
     private static final String USERNAME = "admin";
     private static final String PASSWORD = "secret123";
     private static final String DATABASE = "app";
-    private static final int PROXY_PORT_MIN = 7000;
-    private static final int PROXY_PORT_MAX = 7099;
+    // lex00/floci#120: Endpoint.Port now honors the client-supplied Port (or the
+    // engine's own standard port when omitted, matching real AWS) instead of a
+    // fixed internal proxy-range placeholder - a Postgres instance created without
+    // an explicit Port gets the real Postgres default, 5432.
+    private static final int POSTGRES_DEFAULT_PORT = 5432;
 
     private static RdsClient rds;
     private static String instanceId;
@@ -91,7 +94,7 @@ class RdsJdbcCompatTest {
             return;
         }
 
-        assertThat(proxyPort).isBetween(PROXY_PORT_MIN, PROXY_PORT_MAX);
+        assertThat(proxyPort).isEqualTo(POSTGRES_DEFAULT_PORT);
 
         Connection connection = awaitPostgresConnection(USERNAME, PASSWORD);
         try {
@@ -331,10 +334,11 @@ class RdsJdbcCompatTest {
         Integer replacementPort = replacement.dbInstance().endpoint().port();
         proxyPort = replacementPort;
 
-        // Port should be within the configured RDS proxy range and the connection
-        // should succeed. Don't assert exact port reuse as allocation order is
-        // an implementation detail that can vary across environments.
-        assertThat(replacementPort).isBetween(PROXY_PORT_MIN, PROXY_PORT_MAX);
+        // No explicit Port was requested here either, so the replacement instance
+        // gets the same real Postgres default the first one did (the first
+        // instance's delete released the port it held, but that's moot now -
+        // the port comes from the engine default, not a reused allocation slot).
+        assertThat(replacementPort).isEqualTo(POSTGRES_DEFAULT_PORT);
 
         Connection replacementConnection = awaitPostgresConnection(USERNAME, PASSWORD);
         try {

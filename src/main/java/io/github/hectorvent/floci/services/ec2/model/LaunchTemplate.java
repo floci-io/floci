@@ -31,6 +31,21 @@ public class LaunchTemplate {
     private List<Tag> instanceTags = new ArrayList<>();
     private LaunchTemplateData.MetadataOptions metadataOptions;
     private Boolean monitoringEnabled;
+    // lex00/floci#119: mirrors of LaunchTemplateData's own widened field set
+    // (see that class for the oracle/context). Kept in sync with the
+    // default version's data the same way imageId/instanceType/etc already
+    // were, via dataFrom/applyData in Ec2Service.
+    private String versionDescription;
+    private Boolean ebsOptimized;
+    private List<BlockDeviceMapping> blockDeviceMappings = new ArrayList<>();
+    private LaunchTemplateData.CapacityReservationSpecification capacityReservationSpecification;
+    private LaunchTemplateData.CpuOptions cpuOptions;
+    private LaunchTemplateData.InstanceMarketOptions instanceMarketOptions;
+    private LaunchTemplateData.MaintenanceOptions maintenanceOptions;
+    private List<LaunchTemplateData.NetworkInterfaceSpecification> networkInterfaces = new ArrayList<>();
+    private Placement placement;
+    private List<LaunchTemplateData.TagSpecification> tagSpecifications = new ArrayList<>();
+    private LaunchTemplateData.InstanceRequirements instanceRequirements;
     private Map<String, LaunchTemplateData> versions = new LinkedHashMap<>();
 
     public LaunchTemplate() {}
@@ -90,6 +105,45 @@ public class LaunchTemplate {
 
     public Boolean getMonitoringEnabled() { return monitoringEnabled; }
     public void setMonitoringEnabled(Boolean monitoringEnabled) { this.monitoringEnabled = monitoringEnabled; }
+
+    public String getVersionDescription() { return versionDescription; }
+    public void setVersionDescription(String versionDescription) { this.versionDescription = versionDescription; }
+
+    public Boolean getEbsOptimized() { return ebsOptimized; }
+    public void setEbsOptimized(Boolean ebsOptimized) { this.ebsOptimized = ebsOptimized; }
+
+    public List<BlockDeviceMapping> getBlockDeviceMappings() { return blockDeviceMappings; }
+    public void setBlockDeviceMappings(List<BlockDeviceMapping> blockDeviceMappings) {
+        this.blockDeviceMappings = blockDeviceMappings != null ? new ArrayList<>(blockDeviceMappings) : new ArrayList<>();
+    }
+
+    public LaunchTemplateData.CapacityReservationSpecification getCapacityReservationSpecification() { return capacityReservationSpecification; }
+    public void setCapacityReservationSpecification(LaunchTemplateData.CapacityReservationSpecification v) { this.capacityReservationSpecification = v; }
+
+    public LaunchTemplateData.CpuOptions getCpuOptions() { return cpuOptions; }
+    public void setCpuOptions(LaunchTemplateData.CpuOptions cpuOptions) { this.cpuOptions = cpuOptions; }
+
+    public LaunchTemplateData.InstanceMarketOptions getInstanceMarketOptions() { return instanceMarketOptions; }
+    public void setInstanceMarketOptions(LaunchTemplateData.InstanceMarketOptions v) { this.instanceMarketOptions = v; }
+
+    public LaunchTemplateData.MaintenanceOptions getMaintenanceOptions() { return maintenanceOptions; }
+    public void setMaintenanceOptions(LaunchTemplateData.MaintenanceOptions maintenanceOptions) { this.maintenanceOptions = maintenanceOptions; }
+
+    public List<LaunchTemplateData.NetworkInterfaceSpecification> getNetworkInterfaces() { return networkInterfaces; }
+    public void setNetworkInterfaces(List<LaunchTemplateData.NetworkInterfaceSpecification> networkInterfaces) {
+        this.networkInterfaces = networkInterfaces != null ? new ArrayList<>(networkInterfaces) : new ArrayList<>();
+    }
+
+    public Placement getPlacement() { return placement; }
+    public void setPlacement(Placement placement) { this.placement = placement; }
+
+    public List<LaunchTemplateData.TagSpecification> getTagSpecifications() { return tagSpecifications; }
+    public void setTagSpecifications(List<LaunchTemplateData.TagSpecification> tagSpecifications) {
+        this.tagSpecifications = tagSpecifications != null ? new ArrayList<>(tagSpecifications) : new ArrayList<>();
+    }
+
+    public LaunchTemplateData.InstanceRequirements getInstanceRequirements() { return instanceRequirements; }
+    public void setInstanceRequirements(LaunchTemplateData.InstanceRequirements instanceRequirements) { this.instanceRequirements = instanceRequirements; }
 
     public Map<String, LaunchTemplateData> getVersions() { return versions; }
     public void setVersions(Map<String, LaunchTemplateData> versions) {

@@ -49,7 +49,7 @@ class AutoScalingServiceTest {
                 "EC2",
                 0,
                 List.of("Default"),
-                java.util.Map.of(), java.util.Map.of());
+java.util.Map.of(), java.util.Map.of(), null);
     }
 
     @Test
@@ -202,7 +202,7 @@ class AutoScalingServiceTest {
                 "EC2",
                 0,
                 List.of("Default"),
-                java.util.Map.of(), java.util.Map.of()));
+java.util.Map.of(), java.util.Map.of(), null));
 
         assertEquals("ValidationError", error.getErrorCode());
         assertEquals(AutoScalingService.MISSING_LAUNCH_TEMPLATE_IMAGE_ID_MESSAGE, error.getMessage());
@@ -311,7 +311,7 @@ class AutoScalingServiceTest {
                 "EC2",
                 0,
                 List.of("Default"),
-                java.util.Map.of(), java.util.Map.of()));
+java.util.Map.of(), java.util.Map.of(), null));
 
         assertEquals("ValidationError", error.getErrorCode());
         assertEquals(AutoScalingService.INVALID_LAUNCH_TEMPLATE_MESSAGE, error.getMessage());
@@ -344,7 +344,7 @@ class AutoScalingServiceTest {
                 null,
                 null,
                 null,
-                null));
+                null, null));
 
         assertEquals("ValidationError", error.getErrorCode());
         assertEquals(AutoScalingService.MISSING_LAUNCH_TEMPLATE_IMAGE_ID_MESSAGE, error.getMessage());
@@ -371,7 +371,7 @@ class AutoScalingServiceTest {
                 null,
                 null,
                 null,
-                null));
+                null, null));
 
         assertEquals("ValidationError", error.getErrorCode());
         assertEquals("LaunchTemplateVersion requires a LaunchTemplateId or LaunchTemplateName.", error.getMessage());
@@ -404,7 +404,7 @@ class AutoScalingServiceTest {
                 null,
                 null,
                 null,
-                null));
+                null, null));
 
         assertEquals("ValidationError", error.getErrorCode());
         assertEquals(AutoScalingService.ACTIVE_INSTANCE_REFRESH_DESIRED_CONFIGURATION_MESSAGE, error.getMessage());
@@ -715,7 +715,7 @@ class AutoScalingServiceTest {
                 "EC2",
                 0,
                 List.of("Default"),
-                java.util.Map.of(), java.util.Map.of());
+java.util.Map.of(), java.util.Map.of(), null);
     }
 
     // ── Warm pools (lex00/floci#84) ────────────────────────────────────────────
@@ -804,7 +804,7 @@ class AutoScalingServiceTest {
         // orphaned, since a stale row would instead have made this call succeed.
         service.createAutoScalingGroup(REGION, "test-asg", null, "lt-original", null, "1", null,
                 0, 3, 1, 300, List.of("us-east-1a"), List.of("subnet-12345678"),
-                List.of(), List.of(), "EC2", 0, List.of("Default"), Map.of(), Map.of());
+                List.of(), List.of(), "EC2", 0, List.of("Default"), Map.of(), Map.of(), null);
         assertNull(service.describeWarmPool(REGION, "test-asg"));
     }
 

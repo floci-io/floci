@@ -115,6 +115,10 @@ class RdsQueryHandlerTest {
                 .thenReturn(instance);
         when(service.setCreateTimeInstanceAttributes("mydb", true, true, false, true, 7, true))
                 .thenReturn(instance);
+        when(service.setCreateTimeInstanceOptionalFields(eq("mydb"), any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(instance);
+        when(service.applyCreateTimePort(eq("mydb"), any()))
+                .thenReturn(instance);
 
         MultivaluedMap<String, String> p = params();
         p.add("DBInstanceIdentifier", "mydb");
@@ -141,6 +145,10 @@ class RdsQueryHandlerTest {
                 eq(java.util.Map.of()), eq(List.of()), isNull()))
                 .thenReturn(instance);
         when(service.setCreateTimeInstanceAttributes("mydb", false, false, true, false, 1, false))
+                .thenReturn(instance);
+        when(service.setCreateTimeInstanceOptionalFields(eq("mydb"), any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(instance);
+        when(service.applyCreateTimePort(eq("mydb"), any()))
                 .thenReturn(instance);
 
         MultivaluedMap<String, String> p = params();
@@ -363,6 +371,10 @@ class RdsQueryHandlerTest {
         when(service.setCreateTimeInstanceAttributes(eq("member1"), anyBoolean(), anyBoolean(), anyBoolean(),
                 anyBoolean(), anyInt(), anyBoolean()))
                 .thenReturn(instance);
+        when(service.setCreateTimeInstanceOptionalFields(eq("member1"), any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(instance);
+        when(service.applyCreateTimePort(eq("member1"), any()))
+                .thenReturn(instance);
 
         MultivaluedMap<String, String> p = params();
         p.add("DBInstanceIdentifier", "member1");
@@ -386,6 +398,10 @@ class RdsQueryHandlerTest {
                 .thenReturn(instance);
         when(service.setCreateTimeInstanceAttributes(eq("mydb"), anyBoolean(), anyBoolean(), anyBoolean(),
                 anyBoolean(), anyInt(), anyBoolean()))
+                .thenReturn(instance);
+        when(service.setCreateTimeInstanceOptionalFields(eq("mydb"), any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(instance);
+        when(service.applyCreateTimePort(eq("mydb"), any()))
                 .thenReturn(instance);
 
         MultivaluedMap<String, String> p = params();
@@ -571,6 +587,10 @@ class RdsQueryHandlerTest {
         when(service.setCreateTimeInstanceAttributes(eq("mydb"), anyBoolean(), anyBoolean(), anyBoolean(),
                 anyBoolean(), anyInt(), anyBoolean()))
                 .thenReturn(instance);
+        when(service.setCreateTimeInstanceOptionalFields(eq("mydb"), any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(instance);
+        when(service.applyCreateTimePort(eq("mydb"), any()))
+                .thenReturn(instance);
 
         MultivaluedMap<String, String> p = params();
         p.add("DBInstanceIdentifier", "mydb");
@@ -605,6 +625,10 @@ class RdsQueryHandlerTest {
                 .thenReturn(instance);
         when(service.setCreateTimeInstanceAttributes(eq("mydb"), anyBoolean(), anyBoolean(), anyBoolean(),
                 anyBoolean(), anyInt(), anyBoolean()))
+                .thenReturn(instance);
+        when(service.setCreateTimeInstanceOptionalFields(eq("mydb"), any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(instance);
+        when(service.applyCreateTimePort(eq("mydb"), any()))
                 .thenReturn(instance);
 
         MultivaluedMap<String, String> p = params();
@@ -766,7 +790,7 @@ class RdsQueryHandlerTest {
     @Test
     void modifyDbParameterGroup_ignoresParametersWithoutValue() {
         DbParameterGroup group = new DbParameterGroup("pg1", "postgres15", "test group");
-        when(service.modifyDbParameterGroup(eq("pg1"), eq(java.util.Map.of("max_connections", "200"))))
+        when(service.modifyDbParameterGroup(eq("pg1"), eq(java.util.Map.of("max_connections", "200")), any()))
                 .thenReturn(group);
 
         MultivaluedMap<String, String> p = params();
@@ -782,7 +806,7 @@ class RdsQueryHandlerTest {
         p.add("Parameters.Parameter.2.ParameterName", "ignored_without_value");
         handler.handle("ModifyDBParameterGroup", p);
 
-        verify(service).modifyDbParameterGroup("pg1", java.util.Map.of("max_connections", "200"));
+        verify(service).modifyDbParameterGroup("pg1", java.util.Map.of("max_connections", "200"), java.util.Map.of());
     }
 
     @Test

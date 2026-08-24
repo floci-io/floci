@@ -51,6 +51,8 @@ public class AutoScalingQueryHandler {
                 case "DescribeInstanceRefreshes"    -> handleDescribeInstanceRefreshes(p, region);
                 case "CreateOrUpdateTags"           -> handleCreateOrUpdateTags(p, region);
                 case "DeleteTags"                   -> handleDeleteTags(p, region);
+                case "EnableMetricsCollection"       -> handleEnableMetricsCollection(p, region);
+                case "DisableMetricsCollection"      -> handleDisableMetricsCollection(p, region);
                 // Warm pools
                 case "PutWarmPool"                  -> handlePutWarmPool(p, region);
                 case "DescribeWarmPool"             -> handleDescribeWarmPool(p, region);
@@ -190,7 +192,8 @@ public class AutoScalingQueryHandler {
                 intParam(p, "HealthCheckGracePeriod", 0),
                 memberList(p, "TerminationPolicies"),
                 parsedTags.tags(),
-                parsedTags.propagateAtLaunch());
+                parsedTags.propagateAtLaunch(),
+                parseAsgOptionalFields(p));
         return ok(new XmlBuilder()
                 .start("CreateAutoScalingGroupResponse", NS)
                   .raw(AwsQueryResponse.responseMetadata())
@@ -216,7 +219,8 @@ public class AutoScalingQueryHandler {
                 subnetIds.isEmpty() ? null : subnetIds,
                 p.getFirst("HealthCheckType"),
                 p.getFirst("HealthCheckGracePeriod") != null ? Integer.parseInt(p.getFirst("HealthCheckGracePeriod")) : null,
-                tps.isEmpty() ? null : tps);
+                tps.isEmpty() ? null : tps,
+                parseAsgOptionalFields(p));
         return ok(new XmlBuilder()
                 .start("UpdateAutoScalingGroupResponse", NS)
                   .raw(AwsQueryResponse.responseMetadata())
@@ -307,6 +311,17 @@ public class AutoScalingQueryHandler {
         }
         xml.end("SuspendedProcesses");
 
+        if (!asg.getEnabledMetrics().isEmpty()) {
+            xml.start("EnabledMetrics");
+            for (String metric : asg.getEnabledMetrics()) {
+                xml.start("member")
+                   .elem("Metric", metric)
+                   .elem("Granularity", "1Minute")
+                   .end("member");
+            }
+            xml.end("EnabledMetrics");
+        }
+
         xml.start("Instances");
         for (AsgInstance inst : asg.getInstances()) {
             xml.start("member")
@@ -337,6 +352,43 @@ public class AutoScalingQueryHandler {
         xml.end("Tags");
 
         if (asg.getStatus() != null) { xml.elem("Status", asg.getStatus()); }
+
+        if (asg.getDefaultInstanceWarmup() != null) {
+            xml.elem("DefaultInstanceWarmup", String.valueOf(asg.getDefaultInstanceWarmup()));
+        }
+        if (asg.getCapacityRebalance() != null) {
+            xml.elem("CapacityRebalance", String.valueOf(asg.getCapacityRebalance()));
+        }
+        if (asg.getMaxInstanceLifetime() != null) {
+            xml.elem("MaxInstanceLifetime", String.valueOf(asg.getMaxInstanceLifetime()));
+        }
+        if (asg.getServiceLinkedRoleArn() != null) {
+            xml.elem("ServiceLinkedRoleARN", asg.getServiceLinkedRoleArn());
+        }
+        AutoScalingGroup.InstanceMaintenancePolicy maintenancePolicy = asg.getInstanceMaintenancePolicy();
+        if (maintenancePolicy != null && !maintenancePolicy.isEmpty()) {
+            xml.start("InstanceMaintenancePolicy");
+            if (maintenancePolicy.getMinHealthyPercentage() != null) {
+                xml.elem("MinHealthyPercentage", String.valueOf(maintenancePolicy.getMinHealthyPercentage()));
+            }
+            if (maintenancePolicy.getMaxHealthyPercentage() != null) {
+                xml.elem("MaxHealthyPercentage", String.valueOf(maintenancePolicy.getMaxHealthyPercentage()));
+            }
+            xml.end("InstanceMaintenancePolicy");
+        }
+        AutoScalingGroup.AvailabilityZoneDistribution azDistribution = asg.getAvailabilityZoneDistribution();
+        if (azDistribution != null && !azDistribution.isEmpty()) {
+            xml.start("AvailabilityZoneDistribution")
+               .elem("CapacityDistributionStrategy", azDistribution.getCapacityDistributionStrategy())
+               .end("AvailabilityZoneDistribution");
+        }
+        AutoScalingGroup.CapacityReservationSpecification capacityReservationSpecification =
+                asg.getCapacityReservationSpecification();
+        if (capacityReservationSpecification != null && !capacityReservationSpecification.isEmpty()) {
+            xml.start("CapacityReservationSpecification")
+               .elem("CapacityReservationPreference", capacityReservationSpecification.getCapacityReservationPreference())
+               .end("CapacityReservationSpecification");
+        }
     }
 
     private Response handleSetDesiredCapacity(MultivaluedMap<String, String> p, String region) {
@@ -483,6 +535,22 @@ public class AutoScalingQueryHandler {
                 .end("DeleteTagsResponse").build());
     }
 
+    private Response handleEnableMetricsCollection(MultivaluedMap<String, String> p, String region) {
+        service.enableMetricsCollection(region, p.getFirst("AutoScalingGroupName"), memberList(p, "Metrics"));
+        return ok(new XmlBuilder()
+                .start("EnableMetricsCollectionResponse", NS)
+                  .raw(AwsQueryResponse.responseMetadata())
+                .end("EnableMetricsCollectionResponse").build());
+    }
+
+    private Response handleDisableMetricsCollection(MultivaluedMap<String, String> p, String region) {
+        service.disableMetricsCollection(region, p.getFirst("AutoScalingGroupName"), memberList(p, "Metrics"));
+        return ok(new XmlBuilder()
+                .start("DisableMetricsCollectionResponse", NS)
+                  .raw(AwsQueryResponse.responseMetadata())
+                .end("DisableMetricsCollectionResponse").build());
+    }
+
     // ── Warm pools ──────────────────────────────────────────────────────────────
     // Wire shapes verified directly against botocore's own
     // autoscaling/2011-01-01/service-2.json (PutWarmPoolType, DescribeWarmPoolType,
@@ -602,6 +670,9 @@ public class AutoScalingQueryHandler {
                     xml.start("member");
                     if (override.getInstanceType() != null) {
                         xml.elem("InstanceType", override.getInstanceType());
+                    }
+                    if (override.getWeightedCapacity() != null) {
+                        xml.elem("WeightedCapacity", override.getWeightedCapacity());
                     }
                     xml.end("member");
                 }
@@ -1038,8 +1109,11 @@ public class AutoScalingQueryHandler {
 
     private static ScalingPolicy.TargetTrackingConfiguration parseTargetTrackingConfiguration(MultivaluedMap<String, String> p) {
         String predefinedMetricType = p.getFirst("TargetTrackingConfiguration.PredefinedMetricSpecification.PredefinedMetricType");
+        ScalingPolicy.CustomizedMetricSpecification customizedMetric = parseCustomizedMetricSpecification(p);
         Double targetValue = nullableDoubleParam(p, "TargetTrackingConfiguration.TargetValue");
-        if (predefinedMetricType == null && targetValue == null) {
+        Boolean disableScaleIn = p.getFirst("TargetTrackingConfiguration.DisableScaleIn") != null
+                ? Boolean.parseBoolean(p.getFirst("TargetTrackingConfiguration.DisableScaleIn")) : null;
+        if (predefinedMetricType == null && customizedMetric == null && targetValue == null && disableScaleIn == null) {
             return null;
         }
         ScalingPolicy.TargetTrackingConfiguration configuration = new ScalingPolicy.TargetTrackingConfiguration();
@@ -1051,8 +1125,40 @@ public class AutoScalingQueryHandler {
                     "TargetTrackingConfiguration.PredefinedMetricSpecification.ResourceLabel"));
             configuration.setPredefinedMetricSpecification(specification);
         }
+        configuration.setCustomizedMetricSpecification(customizedMetric);
         configuration.setTargetValue(targetValue);
+        configuration.setDisableScaleIn(disableScaleIn);
         return configuration;
+    }
+
+    // lex00/floci#119's disclaimed sub-gap - see
+    // ScalingPolicy.TargetTrackingConfiguration.CustomizedMetricSpecification's own doc comment.
+    private static ScalingPolicy.CustomizedMetricSpecification parseCustomizedMetricSpecification(
+            MultivaluedMap<String, String> p) {
+        String prefix = "TargetTrackingConfiguration.CustomizedMetricSpecification";
+        String metricName = p.getFirst(prefix + ".MetricName");
+        String namespace = p.getFirst(prefix + ".Namespace");
+        String statistic = p.getFirst(prefix + ".Statistic");
+        String unit = p.getFirst(prefix + ".Unit");
+        String period = p.getFirst(prefix + ".Period");
+        List<ScalingPolicy.MetricDimension> dimensions = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String name = p.getFirst(prefix + ".Dimensions.member." + i + ".Name");
+            if (name == null) break;
+            dimensions.add(new ScalingPolicy.MetricDimension(name, p.getFirst(prefix + ".Dimensions.member." + i + ".Value")));
+        }
+        if (metricName == null && namespace == null && statistic == null && unit == null
+                && period == null && dimensions.isEmpty()) {
+            return null;
+        }
+        ScalingPolicy.CustomizedMetricSpecification spec = new ScalingPolicy.CustomizedMetricSpecification();
+        spec.setMetricName(metricName);
+        spec.setNamespace(namespace);
+        spec.setDimensions(dimensions);
+        spec.setStatistic(statistic);
+        spec.setUnit(unit);
+        spec.setPeriod(period != null && !period.isBlank() ? Integer.parseInt(period) : null);
+        return spec;
     }
 
     // parseStepAdjustments / appendStepAdjustmentsXml and
@@ -1202,8 +1308,41 @@ public class AutoScalingQueryHandler {
             }
             xml.end("PredefinedMetricSpecification");
         }
+        ScalingPolicy.CustomizedMetricSpecification customizedMetric = configuration.getCustomizedMetricSpecification();
+        if (customizedMetric != null) {
+            xml.start("CustomizedMetricSpecification");
+            if (customizedMetric.getMetricName() != null) {
+                xml.elem("MetricName", customizedMetric.getMetricName());
+            }
+            if (customizedMetric.getNamespace() != null) {
+                xml.elem("Namespace", customizedMetric.getNamespace());
+            }
+            if (!customizedMetric.getDimensions().isEmpty()) {
+                xml.start("Dimensions");
+                for (ScalingPolicy.MetricDimension dimension : customizedMetric.getDimensions()) {
+                    xml.start("member")
+                       .elem("Name", dimension.getName())
+                       .elem("Value", dimension.getValue())
+                       .end("member");
+                }
+                xml.end("Dimensions");
+            }
+            if (customizedMetric.getStatistic() != null) {
+                xml.elem("Statistic", customizedMetric.getStatistic());
+            }
+            if (customizedMetric.getUnit() != null) {
+                xml.elem("Unit", customizedMetric.getUnit());
+            }
+            if (customizedMetric.getPeriod() != null) {
+                xml.elem("Period", String.valueOf(customizedMetric.getPeriod()));
+            }
+            xml.end("CustomizedMetricSpecification");
+        }
         if (configuration.getTargetValue() != null) {
             xml.elem("TargetValue", String.valueOf(configuration.getTargetValue()));
+        }
+        if (configuration.getDisableScaleIn() != null) {
+            xml.elem("DisableScaleIn", String.valueOf(configuration.getDisableScaleIn()));
         }
         xml.end("TargetTrackingConfiguration");
     }
@@ -1351,6 +1490,46 @@ public class AutoScalingQueryHandler {
                 .toList();
     }
 
+    // lex00/floci#112: see AutoScalingGroup's own doc comment and AsgOptionalFields for context.
+    private AsgOptionalFields parseAsgOptionalFields(MultivaluedMap<String, String> p) {
+        Integer defaultInstanceWarmup = nullableIntParam(p, "DefaultInstanceWarmup");
+        Boolean capacityRebalance = p.getFirst("CapacityRebalance") != null
+                ? Boolean.parseBoolean(p.getFirst("CapacityRebalance")) : null;
+        Integer maxInstanceLifetime = nullableIntParam(p, "MaxInstanceLifetime");
+        String serviceLinkedRoleArn = p.getFirst("ServiceLinkedRoleARN");
+
+        AutoScalingGroup.InstanceMaintenancePolicy maintenancePolicy = null;
+        Integer minHealthy = nullableIntParam(p, "InstanceMaintenancePolicy.MinHealthyPercentage");
+        Integer maxHealthy = nullableIntParam(p, "InstanceMaintenancePolicy.MaxHealthyPercentage");
+        if (minHealthy != null || maxHealthy != null) {
+            maintenancePolicy = new AutoScalingGroup.InstanceMaintenancePolicy();
+            maintenancePolicy.setMinHealthyPercentage(minHealthy);
+            maintenancePolicy.setMaxHealthyPercentage(maxHealthy);
+        }
+
+        AutoScalingGroup.AvailabilityZoneDistribution azDistribution = null;
+        String capacityDistributionStrategy = p.getFirst("AvailabilityZoneDistribution.CapacityDistributionStrategy");
+        if (capacityDistributionStrategy != null) {
+            azDistribution = new AutoScalingGroup.AvailabilityZoneDistribution();
+            azDistribution.setCapacityDistributionStrategy(capacityDistributionStrategy);
+        }
+
+        AutoScalingGroup.CapacityReservationSpecification capacityReservationSpecification = null;
+        String capacityReservationPreference = p.getFirst("CapacityReservationSpecification.CapacityReservationPreference");
+        if (capacityReservationPreference != null) {
+            capacityReservationSpecification = new AutoScalingGroup.CapacityReservationSpecification();
+            capacityReservationSpecification.setCapacityReservationPreference(capacityReservationPreference);
+        }
+
+        if (defaultInstanceWarmup == null && capacityRebalance == null && maxInstanceLifetime == null
+                && serviceLinkedRoleArn == null && maintenancePolicy == null && azDistribution == null
+                && capacityReservationSpecification == null) {
+            return null;
+        }
+        return new AsgOptionalFields(defaultInstanceWarmup, capacityRebalance, maxInstanceLifetime,
+                serviceLinkedRoleArn, maintenancePolicy, azDistribution, capacityReservationSpecification);
+    }
+
     private MixedInstancesPolicy parseMixedInstancesPolicy(MultivaluedMap<String, String> p) {
         if (!hasAnyPrefix(p, "MixedInstancesPolicy.")) {
             return null;
@@ -1411,6 +1590,8 @@ public class AutoScalingQueryHandler {
             MixedInstancesPolicy.LaunchTemplateOverride override =
                     new MixedInstancesPolicy.LaunchTemplateOverride();
             override.setInstanceType(instanceType);
+            override.setWeightedCapacity(p.getFirst("MixedInstancesPolicy.LaunchTemplate.Overrides.member."
+                    + i + ".WeightedCapacity"));
             result.add(override);
         }
         return result;
