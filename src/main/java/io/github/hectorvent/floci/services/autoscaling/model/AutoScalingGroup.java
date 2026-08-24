@@ -43,6 +43,20 @@ public class AutoScalingGroup {
     private Map<String, Boolean> tagPropagateAtLaunch = new ConcurrentHashMap<>();
     private String status;  // null = active, "Delete in progress" = deleting
 
+    // lex00/floci#112: DescribeAutoScalingGroups dropped most of the resource's own optional
+    // fields - a stateless replan (like choudoufu's corpus-autoscaling-complete crossing) has
+    // nowhere to source these from and proposes a permanent in-place-update diff for every one a
+    // module call actually sets. Oracle: botocore's autoscaling/2011-01-01/service-2.json
+    // AutoScalingGroup shape.
+    private Integer defaultInstanceWarmup;
+    private Boolean capacityRebalance;
+    private List<String> enabledMetrics = new ArrayList<>();
+    private Integer maxInstanceLifetime;
+    private String serviceLinkedRoleArn;
+    private InstanceMaintenancePolicy instanceMaintenancePolicy;
+    private AvailabilityZoneDistribution availabilityZoneDistribution;
+    private CapacityReservationSpecification capacityReservationSpecification;
+
     public AutoScalingGroup() {}
 
     public String getAutoScalingGroupName() { return autoScalingGroupName; }
@@ -122,4 +136,65 @@ public class AutoScalingGroup {
 
     public String getStatus() { return status; }
     public void setStatus(String v) { this.status = v; }
+
+    public Integer getDefaultInstanceWarmup() { return defaultInstanceWarmup; }
+    public void setDefaultInstanceWarmup(Integer v) { this.defaultInstanceWarmup = v; }
+
+    public Boolean getCapacityRebalance() { return capacityRebalance; }
+    public void setCapacityRebalance(Boolean v) { this.capacityRebalance = v; }
+
+    public List<String> getEnabledMetrics() { return enabledMetrics; }
+    public void setEnabledMetrics(List<String> v) { this.enabledMetrics = v != null ? v : new ArrayList<>(); }
+
+    public Integer getMaxInstanceLifetime() { return maxInstanceLifetime; }
+    public void setMaxInstanceLifetime(Integer v) { this.maxInstanceLifetime = v; }
+
+    public String getServiceLinkedRoleArn() { return serviceLinkedRoleArn; }
+    public void setServiceLinkedRoleArn(String v) { this.serviceLinkedRoleArn = v; }
+
+    public InstanceMaintenancePolicy getInstanceMaintenancePolicy() { return instanceMaintenancePolicy; }
+    public void setInstanceMaintenancePolicy(InstanceMaintenancePolicy v) { this.instanceMaintenancePolicy = v; }
+
+    public AvailabilityZoneDistribution getAvailabilityZoneDistribution() { return availabilityZoneDistribution; }
+    public void setAvailabilityZoneDistribution(AvailabilityZoneDistribution v) { this.availabilityZoneDistribution = v; }
+
+    public CapacityReservationSpecification getCapacityReservationSpecification() { return capacityReservationSpecification; }
+    public void setCapacityReservationSpecification(CapacityReservationSpecification v) { this.capacityReservationSpecification = v; }
+
+    @RegisterForReflection
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public static class InstanceMaintenancePolicy {
+        private Integer minHealthyPercentage;
+        private Integer maxHealthyPercentage;
+
+        public Integer getMinHealthyPercentage() { return minHealthyPercentage; }
+        public void setMinHealthyPercentage(Integer v) { this.minHealthyPercentage = v; }
+
+        public Integer getMaxHealthyPercentage() { return maxHealthyPercentage; }
+        public void setMaxHealthyPercentage(Integer v) { this.maxHealthyPercentage = v; }
+
+        public boolean isEmpty() { return minHealthyPercentage == null && maxHealthyPercentage == null; }
+    }
+
+    @RegisterForReflection
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public static class AvailabilityZoneDistribution {
+        private String capacityDistributionStrategy;
+
+        public String getCapacityDistributionStrategy() { return capacityDistributionStrategy; }
+        public void setCapacityDistributionStrategy(String v) { this.capacityDistributionStrategy = v; }
+
+        public boolean isEmpty() { return capacityDistributionStrategy == null; }
+    }
+
+    @RegisterForReflection
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public static class CapacityReservationSpecification {
+        private String capacityReservationPreference;
+
+        public String getCapacityReservationPreference() { return capacityReservationPreference; }
+        public void setCapacityReservationPreference(String v) { this.capacityReservationPreference = v; }
+
+        public boolean isEmpty() { return capacityReservationPreference == null; }
+    }
 }

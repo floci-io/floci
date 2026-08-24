@@ -1179,7 +1179,8 @@ public class CloudFormationResourceProvisioner {
                 parseIntProp(props, "HealthCheckGracePeriod", engine, 0),
                 resolveStringList(props, "TerminationPolicies", engine),
                 resolveAsgTags(props, engine),
-                resolveAsgTagPropagation(props, engine));
+                resolveAsgTagPropagation(props, engine),
+                null);
         // Ref returns the Auto Scaling group name; Fn::GetAtt Arn returns the ASG ARN.
         r.setPhysicalId(name);
         r.getAttributes().put("Arn", asg.getAutoScalingGroupArn());

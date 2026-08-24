@@ -169,7 +169,8 @@ public class AutoScalingService {
                                                     String healthCheckType, int healthCheckGracePeriod,
                                                     List<String> terminationPolicies,
                                                     Map<String, String> tags,
-                                                    Map<String, Boolean> tagPropagateAtLaunch) {
+                                                    Map<String, Boolean> tagPropagateAtLaunch,
+                                                    AsgOptionalFields optionalFields) {
         String key = asgKey(region, name);
         if (groups.containsKey(key)) {
             throw new AwsException("AlreadyExists",
@@ -214,6 +215,9 @@ public class AutoScalingService {
         if (tagPropagateAtLaunch != null) {
             asg.getTagPropagateAtLaunch().putAll(tagPropagateAtLaunch);
         }
+        if (optionalFields != null) {
+            optionalFields.applyToNewGroup(asg);
+        }
         groups.put(key, asg);
         return asg;
     }
@@ -227,7 +231,8 @@ public class AutoScalingService {
                                         Integer defaultCooldown, List<String> availabilityZones,
                                         List<String> subnetIds,
                                         String healthCheckType, Integer healthCheckGracePeriod,
-                                        List<String> terminationPolicies) {
+                                        List<String> terminationPolicies,
+                                        AsgOptionalFields optionalFields) {
         AutoScalingGroup asg = requireGroup(region, name);
         validateLaunchSource(launchConfigName, launchTemplateId, launchTemplateName, mixedInstancesPolicy);
         if (launchTemplateVersion != null && launchTemplateId == null && launchTemplateName == null) {
@@ -274,6 +279,39 @@ public class AutoScalingService {
         if (healthCheckType != null) { asg.setHealthCheckType(healthCheckType); }
         if (healthCheckGracePeriod != null) { asg.setHealthCheckGracePeriod(healthCheckGracePeriod); }
         if (terminationPolicies != null) { asg.setTerminationPolicies(new ArrayList<>(terminationPolicies)); }
+        if (optionalFields != null) {
+            optionalFields.applyToExistingGroup(asg);
+        }
+        groups.put(asgKey(region, name), asg);
+    }
+
+    // lex00/floci#112: DescribeAutoScalingGroups' EnabledMetrics field had no source at all -
+    // EnableMetricsCollection/DisableMetricsCollection (the only two real AWS actions that set
+    // it; it is not part of Create/UpdateAutoScalingGroup) were not implemented.
+    private static final List<String> ALL_ASG_METRICS = List.of(
+            "GroupMinSize", "GroupMaxSize", "GroupDesiredCapacity", "GroupInServiceInstances",
+            "GroupPendingInstances", "GroupStandbyInstances", "GroupTerminatingInstances",
+            "GroupTotalInstances", "GroupInServiceCapacity", "GroupPendingCapacity",
+            "GroupStandbyCapacity", "GroupTerminatingCapacity", "GroupTotalCapacity");
+
+    public void enableMetricsCollection(String region, String name, List<String> metrics) {
+        AutoScalingGroup asg = requireGroup(region, name);
+        List<String> requested = (metrics == null || metrics.isEmpty()) ? ALL_ASG_METRICS : metrics;
+        LinkedHashSet<String> enabled = new LinkedHashSet<>(asg.getEnabledMetrics());
+        enabled.addAll(requested);
+        asg.setEnabledMetrics(new ArrayList<>(enabled));
+        groups.put(asgKey(region, name), asg);
+    }
+
+    public void disableMetricsCollection(String region, String name, List<String> metrics) {
+        AutoScalingGroup asg = requireGroup(region, name);
+        if (metrics == null || metrics.isEmpty()) {
+            asg.setEnabledMetrics(new ArrayList<>());
+        } else {
+            LinkedHashSet<String> enabled = new LinkedHashSet<>(asg.getEnabledMetrics());
+            enabled.removeAll(metrics);
+            asg.setEnabledMetrics(new ArrayList<>(enabled));
+        }
         groups.put(asgKey(region, name), asg);
     }
 
