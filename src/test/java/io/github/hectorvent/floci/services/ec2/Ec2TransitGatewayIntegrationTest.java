@@ -17,6 +17,7 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -666,19 +667,22 @@ class Ec2TransitGatewayIntegrationTest {
     @Test
     @Order(21)
     void aGatewayWithBothDefaultsDisabledMintsNoRouteTable() {
-        String bare = ec2()
+        // Both ids are genuinely absent (not merely empty) when neither default is minted -
+        // XmlBuilder#elem skips a null value's element entirely, so rest-assured's XmlPath never
+        // sees a String here at all (an absent element resolves to an empty NodeChildren, which
+        // satisfies neither nullValue() nor isEmptyString()); assert on the raw body instead.
+        io.restassured.response.ValidatableResponse response = ec2()
             .formParam("Action", "CreateTransitGateway")
             .formParam("Options.DefaultRouteTableAssociation", "disable")
             .formParam("Options.DefaultRouteTablePropagation", "disable")
         .when()
             .post("/")
         .then()
-            .statusCode(200)
-            .body("CreateTransitGatewayResponse.transitGateway.options.associationDefaultRouteTableId",
-                    emptyOrNullString())
-            .body("CreateTransitGatewayResponse.transitGateway.options.propagationDefaultRouteTableId",
-                    emptyOrNullString())
-            .extract().path("CreateTransitGatewayResponse.transitGateway.transitGatewayId");
+            .statusCode(200);
+        String body = response.extract().asString();
+        assertFalse(body.contains("associationDefaultRouteTableId"), body);
+        assertFalse(body.contains("propagationDefaultRouteTableId"), body);
+        String bare = response.extract().path("CreateTransitGatewayResponse.transitGateway.transitGatewayId");
 
         ec2()
             .formParam("Action", "DescribeTransitGatewayRouteTables")
