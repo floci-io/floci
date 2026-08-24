@@ -1011,6 +1011,8 @@ public class CognitoService {
 
     public void adminUpdateUserAttributes(String userPoolId, String username, Map<String, String> attributes) {
         CognitoUser user = adminGetUser(userPoolId, username);
+        attributes.keySet().forEach(attributeName ->
+                clearPendingAttributeVerification(userPoolId, user, attributeName));
         user.getAttributes().putAll(attributes);
         user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
         userStore.put(userKey(userPoolId, user.getUsername()), user);
@@ -1020,6 +1022,7 @@ public class CognitoService {
         CognitoUser user = adminGetUser(userPoolId, username);
         for (String attrName : attributeNames) {
             user.getAttributes().remove(attrName);
+            clearPendingAttributeVerification(userPoolId, user, attrName);
         }
         user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
         userStore.put(userKey(userPoolId, user.getUsername()), user);
@@ -2844,6 +2847,18 @@ public class CognitoService {
 
     private boolean isVerifiableContactAttribute(String attributeName) {
         return "email".equals(attributeName) || "phone_number".equals(attributeName);
+    }
+
+    private void clearPendingAttributeVerification(String userPoolId, CognitoUser user,
+                                                   String attributeName) {
+        if (!isVerifiableContactAttribute(attributeName)) {
+            return;
+        }
+        user.getPendingAttributes().remove(attributeName);
+        if (verificationCodeService != null) {
+            verificationCodeService.invalidatePrevious(
+                    userPoolId, user.getUsername(), verificationPurpose(attributeName));
+        }
     }
 
     private VerificationCode.Purpose verificationPurpose(String attributeName) {
