@@ -3153,22 +3153,25 @@ public class AslExecutor {
     }
 
     private boolean catchMatches(JsonNode catcher, String error) {
-        JsonNode errors = catcher.path("ErrorEquals");
+        var errors = catcher.path("ErrorEquals");
         if (!errors.isArray()) {
             return false;
         }
+        // States.Runtime is never retried or caught, even when named explicitly in
+        // ErrorEquals. Verified against real AWS: the execution fails immediately.
+        if ("States.Runtime".equals(error)) {
+            return false;
+        }
         for (JsonNode candidate : errors) {
-            String expected = candidate.asText();
+            var expected = candidate.asText();
             if (expected.equals(error)) {
                 return true;
             }
             if ("States.TaskFailed".equals(expected)
-                    && !"States.Timeout".equals(error)
-                    && !"States.Runtime".equals(error)) {
+                    && !"States.Timeout".equals(error)) {
                 return true;
             }
             if ("States.ALL".equals(expected)
-                    && !"States.Runtime".equals(error)
                     && !"States.DataLimitExceeded".equals(error)) {
                 return true;
             }

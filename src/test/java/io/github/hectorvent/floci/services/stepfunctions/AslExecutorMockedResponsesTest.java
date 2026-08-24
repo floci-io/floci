@@ -179,6 +179,46 @@ class AslExecutorMockedResponsesTest {
         assertTrue(execution.getCause().contains("attempt 1"));
     }
 
+    @Test
+    void statesRuntimeIsNotRetriedOrCaughtEvenWhenNamedExplicitly() throws Exception {
+        var mocks = testCase(Map.of("Call API", List.of(
+                throwStep(0, 0, "ApiGateway.429", "Too many requests"))));
+
+        var execution = run("""
+                {
+                  "StartAt": "Call API",
+                  "States": {
+                    "Call API": {
+                      "Type": "Task",
+                      "Resource": "%s",
+                      "End": true,
+                      "Retry": [
+                        {
+                          "ErrorEquals": ["ApiGateway.429"],
+                          "IntervalSeconds": 1,
+                          "BackoffRate": 1.0,
+                          "MaxAttempts": 2
+                        },
+                        {
+                          "ErrorEquals": ["States.Runtime"],
+                          "MaxAttempts": 3
+                        }
+                      ],
+                      "Catch": [{
+                        "ErrorEquals": ["States.Runtime"],
+                        "Next": "ShouldNotCatch"
+                      }]
+                    },
+                    "ShouldNotCatch": {"Type": "Pass", "End": true}
+                  }
+                }
+                """.formatted(UNSUPPORTED_RESOURCE), mocks);
+
+        assertEquals("FAILED", execution.getStatus());
+        assertEquals("States.Runtime", execution.getError());
+        assertTrue(execution.getCause().contains("attempt 1"));
+    }
+
     private MockedTestCase testCase(Map<String, List<MockedResponseStep>> stateResponses) {
         return new MockedTestCase("mock-test", "Case", stateResponses);
     }
