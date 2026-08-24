@@ -106,21 +106,24 @@ public class MemoryLakeFormationStorage implements LakeFormationStorage {
                 List<String> current = new ArrayList<>(existing.getPermissions());
                 current.removeAll(permissions.getPermissions());
                 existing.setPermissions(current);
-                if (!current.isEmpty()) {
-                    empty = false;
+                
+                if (existing.getPermissionsWithGrantOption() != null) {
+                    List<String> currentGrants = new ArrayList<>(existing.getPermissionsWithGrantOption());
+                    currentGrants.removeAll(permissions.getPermissions());
+                    existing.setPermissionsWithGrantOption(currentGrants);
                 }
-            } else if (existing.getPermissions() != null && !existing.getPermissions().isEmpty()) {
-                empty = false;
             }
             
             if (existing.getPermissionsWithGrantOption() != null && permissions.getPermissionsWithGrantOption() != null) {
                 List<String> current = new ArrayList<>(existing.getPermissionsWithGrantOption());
                 current.removeAll(permissions.getPermissionsWithGrantOption());
                 existing.setPermissionsWithGrantOption(current);
-                if (!current.isEmpty()) {
-                    empty = false;
-                }
-            } else if (existing.getPermissionsWithGrantOption() != null && !existing.getPermissionsWithGrantOption().isEmpty()) {
+            }
+
+            if (existing.getPermissions() != null && !existing.getPermissions().isEmpty()) {
+                empty = false;
+            }
+            if (existing.getPermissionsWithGrantOption() != null && !existing.getPermissionsWithGrantOption().isEmpty()) {
                 empty = false;
             }
 
