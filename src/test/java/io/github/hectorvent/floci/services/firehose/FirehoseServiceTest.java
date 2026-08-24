@@ -547,6 +547,46 @@ class FirehoseServiceTest {
     }
 
     @Test
+    void kinesisSourceRecordsBufferedButNeverFlushedSurviveARestart() {
+        createSourcedDeliveryStream("sourced-stream", "src-stream");
+        kinesisService.putRecord("src-stream", "hello".getBytes(StandardCharsets.UTF_8), "pk", "us-east-1");
+
+        // Poll, then crash. The record is in the in-memory buffer and no flush has run,
+        // so nothing reached S3 and nothing in memory survives.
+        firehoseService.pollKinesisSources();
+        verifyNothingDelivered();
+
+        // Restart. A checkpoint persisted at poll time would already have recorded the
+        // record as consumed, and the restored poller would skip past it forever --
+        // silent, permanent loss. Committing the checkpoint only on a successful flush
+        // means the restored poller reads it again and delivers it.
+        firehoseService = newService(0);
+        firehoseService.pollKinesisSources();
+        firehoseService.flush("sourced-stream");
+
+        assertEquals("hello\n", delivered("sink").text());
+    }
+
+    @Test
+    void aFailedDeliveryLeavesTheSourceCheckpointUncommitted() {
+        createSourcedDeliveryStream("sourced-stream", "src-stream");
+        kinesisService.putRecord("src-stream", "hello".getBytes(StandardCharsets.UTF_8), "pk", "us-east-1");
+        when(s3Service.putObject(anyString(), anyString(), any(byte[].class), anyString(),
+                anyMap(), any(PutObjectOptions.class))).thenThrow(new RuntimeException("s3 unavailable"));
+
+        firehoseService.pollKinesisSources();
+        firehoseService.flush("sourced-stream");
+
+        // The write failed, so the record is not durable and the checkpoint must not have
+        // moved: once S3 is back, the next poll has to read it again.
+        Mockito.reset(s3Service);
+        firehoseService.pollKinesisSources();
+        firehoseService.flush("sourced-stream");
+
+        assertEquals("hello\n", delivered("sink").text());
+    }
+
+    @Test
     void aMissingSourceStreamDoesNotStopOtherStreamsFromPolling() {
         // No createStream for "gone-stream": describeStream throws ResourceNotFound.
         firehoseService.createDeliveryStream("broken-stream", destination("arn:aws:s3:::sink", null),

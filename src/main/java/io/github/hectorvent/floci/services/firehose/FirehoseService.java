@@ -61,7 +61,27 @@ public class FirehoseService {
     // (streamName|shardId|type|sequenceNumber|index|timestamp, base64) with no
     // JVM-lifetime component, and KinesisService never trims a shard's record list, so a
     // checkpoint written before a restart still resolves to the same position after one.
+    //
+    // This store holds only COMMITTED positions: a shard is advanced here once the
+    // records read up to that point have actually landed in S3. See
+    // pendingSourceIterators for why the two halves cannot be one map.
     private final StorageBackend<String, Map<String, String>> sourceIteratorStore;
+    // The advanced-but-not-yet-durable half of the checkpoint, deliberately in memory.
+    //
+    // Polled records do not go straight to S3; they go into buffers above and reach S3
+    // only when a flush trips. Persisting the advanced iterator at poll time would let
+    // the durable checkpoint outrun durable delivery: a crash after the put but before
+    // the flush loses the buffer and resumes past records that never reached S3, which is
+    // silent, permanent loss. So the poller advances here, and only a flush that actually
+    // wrote to S3 promotes these into sourceIteratorStore.
+    //
+    // Losing this map costs nothing but duplicates: the restored poller re-reads records
+    // that were buffered and never delivered, and delivers them. Kinesis Data Firehose is
+    // at-least-once, so a duplicate is correct-if-untidy where a skip is not.
+    //
+    // Values are replaced whole, never mutated in place, so a flusher that snapshots one
+    // commits exactly the position that snapshot covered.
+    private final Map<String, Map<String, String>> pendingSourceIterators = new ConcurrentHashMap<>();
     private final Clock clock;
     private final long tickIntervalSeconds;
     private final int flushRecordCount;
@@ -100,7 +120,10 @@ public class FirehoseService {
 
     // ShutdownDelayInitiatedEvent fires before every ShutdownEvent observer, so this
     // drain lands the pending records in S3 while EmulatorLifecycle.onStop can still
-    // persist them to disk via storageFactory.flushAll().
+    // persist them to disk via storageFactory.flushAll(). Each flush also commits the
+    // source checkpoint it just made durable, so a graceful shutdown neither loses
+    // records nor re-delivers them; storageFactory.flushAll() then writes that
+    // checkpoint out with everything else.
     void onPreShutdown(@Observes ShutdownDelayInitiatedEvent ignored) {
         flushExecutor.shutdownNow();
         buffers.keySet().forEach(this::flush);
@@ -328,6 +351,7 @@ public class FirehoseService {
         // reached the bucket after DeleteDeliveryStream completed.
         buffers.remove(name);
         bufferSince.remove(name);
+        pendingSourceIterators.remove(name);
         sourceIteratorStore.delete(name);
         LOG.infov("Deleted Firehose delivery stream: {0}", name);
     }
@@ -380,12 +404,12 @@ public class FirehoseService {
         String region = arn.region() == null || arn.region().isBlank()
                 ? regionResolver.getDefaultRegion() : arn.region();
         KinesisStream sourceStream = kinesisService.describeStream(sourceName, region);
-        // Copied out and written back whole: the store may hand back its own instance,
-        // and a persistent backend only learns of a change through put().
-        Map<String, String> iterators =
-                new LinkedHashMap<>(sourceIteratorStore.get(deliveryStreamName).orElseGet(Map::of));
         for (KinesisShard shard : sourceStream.getShards()) {
-            String iterator = iterators.get(shard.getShardId());
+            // Where to read from: the pending position if a flush still owes these
+            // records to S3, otherwise the committed one. Reading pending is what stops
+            // a second poll re-reading what the first already buffered; committing only
+            // on flush is what stops the durable checkpoint outrunning delivery.
+            String iterator = sourceIteratorsInUse(deliveryStreamName).get(shard.getShardId());
             if (iterator == null) {
                 Instant start = source.getDeliveryStartTimestamp();
                 iterator = start == null
@@ -398,20 +422,53 @@ public class FirehoseService {
             @SuppressWarnings("unchecked")
             List<KinesisRecord> records = (List<KinesisRecord>) page.get("Records");
             String next = (String) page.get("NextShardIterator");
-            iterators.put(shard.getShardId(), next != null ? next : iterator);
+            String advanced = next != null ? next : iterator;
+            String shardId = shard.getShardId();
             if (records == null || records.isEmpty()) {
+                // Nothing was buffered, so this advance owes S3 nothing and is safe to
+                // park as pending on its own.
+                advanceSourceIterator(deliveryStreamName, shardId, advanced);
                 continue;
             }
             // Through putRecordBatch so source records buffer, and trigger a flush, on
-            // exactly the same terms as records handed to PutRecord directly.
+            // exactly the same terms as records handed to PutRecord directly. The
+            // advance runs under the buffer lock together with the records it covers, so
+            // no flush can ever see one without the other.
             putRecordBatch(deliveryStreamName, records.stream()
-                    .map(record -> new Record(record.getData()))
-                    .toList());
+                            .map(record -> new Record(record.getData()))
+                            .toList(),
+                    () -> advanceSourceIterator(deliveryStreamName, shardId, advanced));
         }
-        // After the records are buffered, so a crash between the two re-reads them
-        // rather than dropping them. A graceful shutdown cannot lose them at all:
-        // onPreShutdown drains the buffers to S3 before storage is flushed to disk.
-        sourceIteratorStore.put(deliveryStreamName, iterators);
+    }
+
+    /** The position the poller reads from: pending if a flush still owes it, else committed. */
+    private Map<String, String> sourceIteratorsInUse(String deliveryStreamName) {
+        Map<String, String> pending = pendingSourceIterators.get(deliveryStreamName);
+        return pending != null ? pending : sourceIteratorStore.get(deliveryStreamName).orElseGet(Map::of);
+    }
+
+    // Rebased on whatever is current rather than on a map carried across the shard loop,
+    // so that a flush which discarded pending (because its S3 write failed) rolls the
+    // other shards back to committed instead of having this poll re-assert them.
+    private void advanceSourceIterator(String deliveryStreamName, String shardId, String iterator) {
+        Map<String, String> advanced = new LinkedHashMap<>(sourceIteratorsInUse(deliveryStreamName));
+        advanced.put(shardId, iterator);
+        pendingSourceIterators.put(deliveryStreamName, Collections.unmodifiableMap(advanced));
+    }
+
+    // Merged rather than written whole: two flushes can complete out of order, and a
+    // whole-map write would then drop a shard's newer committed position. Merging can
+    // still move one shard backwards, which costs a duplicate and never a skip.
+    private void commitSourceIterators(String deliveryStreamName, Map<String, String> checkpoint) {
+        if (checkpoint == null || checkpoint.isEmpty()) {
+            return;
+        }
+        // Copied out and written back whole: the store may hand back its own instance,
+        // and a persistent backend only learns of a change through put().
+        Map<String, String> committed =
+                new LinkedHashMap<>(sourceIteratorStore.get(deliveryStreamName).orElseGet(Map::of));
+        committed.putAll(checkpoint);
+        sourceIteratorStore.put(deliveryStreamName, committed);
     }
 
     public void putRecord(String streamName, Record record) {
@@ -419,16 +476,27 @@ public class FirehoseService {
     }
 
     public void putRecordBatch(String streamName, List<Record> records) {
+        putRecordBatch(streamName, records, null);
+    }
+
+    /**
+     * @param checkpointAdvance run under the buffer lock once the records are buffered,
+     *                          or null for records that are not read from a source stream.
+     */
+    private void putRecordBatch(String streamName, List<Record> records, Runnable checkpointAdvance) {
         DeliveryStreamDescription stream = describeDeliveryStream(streamName);
         List<byte[]> buffer = buffers.computeIfAbsent(
                 streamName, k -> Collections.synchronizedList(new ArrayList<>()));
         long bufferedBytes = 0;
         int bufferedCount;
-        // Records and their buffering-start timestamp move together under the
-        // buffer lock so the flusher never sees one without the other.
+        // Records, their buffering-start timestamp and any source checkpoint advance move
+        // together under the buffer lock so the flusher never sees one without the other.
         synchronized (buffer) {
             for (Record r : records) {
                 buffer.add(r.getData());
+            }
+            if (checkpointAdvance != null) {
+                checkpointAdvance.run();
             }
             bufferSince.putIfAbsent(streamName, clock.instant());
             bufferedCount = buffer.size();
@@ -461,13 +529,20 @@ public class FirehoseService {
         }
 
         List<byte[]> toFlush;
+        // Taken with the records, under the same lock: this is the position the records
+        // about to be written cover, and committing it is this flush's job.
+        Map<String, String> checkpoint;
         synchronized (buffer) {
             toFlush = new ArrayList<>(buffer);
             buffer.clear();
             bufferSince.remove(streamName);
+            checkpoint = pendingSourceIterators.remove(streamName);
         }
         if (toFlush.isEmpty()) {
-            // Lost the race against a concurrent flush; nothing left to deliver.
+            // Lost the race against a concurrent flush; nothing left to deliver. Any
+            // checkpoint taken here covers no undelivered records -- it can only have
+            // come from a poll that read an empty page -- so it commits as it stands.
+            commitSourceIterators(streamName, checkpoint);
             return;
         }
 
@@ -500,8 +575,13 @@ public class FirehoseService {
                     new PutObjectOptions().withContentEncoding(compression.contentEncoding()));
             LOG.infov("Flushed {0} records from stream {1} to s3://{2}/{3} ({4})",
                     toFlush.size(), streamName, bucket, key, compression.wireValue());
+            // Only now: the records these iterators were read past are durable.
+            commitSourceIterators(streamName, checkpoint);
         } catch (Exception e) {
             LOG.errorv("Failed to flush Firehose stream {0}: {1}", streamName, e.getMessage());
+            // checkpoint is deliberately neither committed nor put back. The durable
+            // checkpoint stays where it was, so the next poll reads these records again
+            // and this failed delivery repairs itself.
         }
     }
 
