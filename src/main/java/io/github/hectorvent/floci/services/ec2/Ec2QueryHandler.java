@@ -4102,9 +4102,13 @@ public class Ec2QueryHandler {
         placement.setAffinity(affinity);
         placement.setGroupName(groupName);
         placement.setHostId(hostId);
-        if (tenancy != null) {
-            placement.setTenancy(tenancy);
-        }
+        // lex00/floci#126: Placement.tenancy defaults to "default" on the shared model class
+        // (legitimate for a running Instance's Placement, which always reports a tenancy) but a
+        // launch template is a stored document, not a running instance - AWS's Describe leaves an
+        // unset field absent rather than inventing a value. Always assign the parsed value here
+        // (null when the request never carried LaunchTemplateData.Placement.Tenancy) so it
+        // overrides the class field's "default" instead of leaving it in place unset.
+        placement.setTenancy(tenancy);
         placement.setSpreadDomain(spreadDomain);
         placement.setHostResourceGroupArn(hostResourceGroupArn);
         placement.setPartitionNumber(parseOptionalInt(partitionNumber, prefix + ".PartitionNumber"));
