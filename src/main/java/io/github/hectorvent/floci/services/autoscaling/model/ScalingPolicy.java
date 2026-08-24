@@ -100,15 +100,83 @@ public class ScalingPolicy {
     @JsonIgnoreProperties(ignoreUnknown = true)
     public static class TargetTrackingConfiguration {
         private PredefinedMetricSpecification predefinedMetricSpecification;
+        // lex00/floci#119's own disclaimed sub-gap: CustomizedMetricSpecification was accepted by
+        // PutScalingPolicy and then dropped entirely - not even @JsonIgnoreProperties, there was
+        // simply no field - so DescribePolicies could never echo back a customized (as opposed to
+        // predefined) target-tracking metric. Oracle: botocore's autoscaling/2011-01-01/
+        // service-2.json TargetTrackingConfiguration/CustomizedMetricSpecification shapes. Covers
+        // the classic bare-metric form (MetricName/Namespace/Dimensions/Statistic/Unit);
+        // deliberately does NOT cover the newer Metrics (metric-math / TargetTrackingMetricDataQuery)
+        // form, the same way PredictiveScalingConfiguration disclaims the Customized* metric
+        // specifications above.
+        private CustomizedMetricSpecification customizedMetricSpecification;
         private Double targetValue;
+        private Boolean disableScaleIn;
 
         public TargetTrackingConfiguration() {}
 
         public PredefinedMetricSpecification getPredefinedMetricSpecification() { return predefinedMetricSpecification; }
         public void setPredefinedMetricSpecification(PredefinedMetricSpecification v) { this.predefinedMetricSpecification = v; }
 
+        public CustomizedMetricSpecification getCustomizedMetricSpecification() { return customizedMetricSpecification; }
+        public void setCustomizedMetricSpecification(CustomizedMetricSpecification v) { this.customizedMetricSpecification = v; }
+
         public Double getTargetValue() { return targetValue; }
         public void setTargetValue(Double v) { this.targetValue = v; }
+
+        public Boolean getDisableScaleIn() { return disableScaleIn; }
+        public void setDisableScaleIn(Boolean v) { this.disableScaleIn = v; }
+    }
+
+    @RegisterForReflection
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public static class MetricDimension {
+        private String name;
+        private String value;
+
+        public MetricDimension() {}
+
+        public MetricDimension(String name, String value) {
+            this.name = name;
+            this.value = value;
+        }
+
+        public String getName() { return name; }
+        public void setName(String v) { this.name = v; }
+
+        public String getValue() { return value; }
+        public void setValue(String v) { this.value = v; }
+    }
+
+    @RegisterForReflection
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public static class CustomizedMetricSpecification {
+        private String metricName;
+        private String namespace;
+        private List<MetricDimension> dimensions = new ArrayList<>();
+        private String statistic;
+        private String unit;
+        private Integer period;
+
+        public CustomizedMetricSpecification() {}
+
+        public String getMetricName() { return metricName; }
+        public void setMetricName(String v) { this.metricName = v; }
+
+        public String getNamespace() { return namespace; }
+        public void setNamespace(String v) { this.namespace = v; }
+
+        public List<MetricDimension> getDimensions() { return dimensions; }
+        public void setDimensions(List<MetricDimension> v) { this.dimensions = v != null ? new ArrayList<>(v) : new ArrayList<>(); }
+
+        public String getStatistic() { return statistic; }
+        public void setStatistic(String v) { this.statistic = v; }
+
+        public String getUnit() { return unit; }
+        public void setUnit(String v) { this.unit = v; }
+
+        public Integer getPeriod() { return period; }
+        public void setPeriod(Integer v) { this.period = v; }
     }
 
     // PredefinedMetricSpecification is reused, unchanged in shape
