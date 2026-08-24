@@ -122,7 +122,7 @@ curl -s -H "x-aws-ec2-metadata-token: $TOKEN" \
 | `GET /latest/meta-data/ami-id` | Image ID |
 | `GET /latest/meta-data/instance-type` | Instance type |
 | `GET /latest/meta-data/local-ipv4` | Private IP |
-| `GET /latest/meta-data/public-ipv4` | Public IP (`127.0.0.1`) |
+| `GET /latest/meta-data/public-ipv4` | Public IP — the container IP where that is routable from the host, `127.0.0.1` otherwise |
 | `GET /latest/meta-data/public-hostname` | Public hostname |
 | `GET /latest/meta-data/local-hostname` | Private DNS name |
 | `GET /latest/meta-data/hostname` | Private DNS name |
@@ -444,6 +444,13 @@ Route table ids follow the live API's own inconsistency: an id that does not exi
 | DisassociateAddress | Removes an Elastic IP address association. |
 | ReleaseAddress | Releases an Elastic IP address record. |
 
+An allocated Elastic IP's `54.x.x.x` address is invented and routes nowhere, so associating
+it re-points it at the address the instance is actually reachable on — the same value
+DescribeInstances reports. This is a deliberate deviation from AWS, where an EIP's public IP
+is fixed from allocation: without it, `aws_eip.x.public_ip` hands every caller a dead address.
+The allocation ID, association ID and domain are unaffected, and disassociating restores the
+allocated address.
+
 ### Availability Zones & Regions
 
 | Action | Description |
@@ -558,6 +565,7 @@ State is reported settled rather than transitional, as elsewhere in this service
 | `FLOCI_SERVICES_EC2_SOCAT_IMAGE` | `alpine/socat` | Image used for the port-forwarding sidecar |
 | `FLOCI_SERVICES_EC2_MOCK` | `false` | Skip Docker; instances jump directly to final state (useful for tests) |
 | `FLOCI_SERVICES_EC2_AWS_FAITHFUL_PRIVATE_IP` | `false` | Report the CFN/subnet-allocated private IP instead of the container bridge IP; routing and IMDS are unaffected |
+| `FLOCI_SERVICES_EC2_CONTAINER_IPS_ROUTABLE` | auto-detect | Whether an instance's container IP is reachable from the machines consuming Floci's API (Terraform, Terratest, your shell). When it is, DescribeInstances and DescribeAddresses report the container IP, so port 22 really is port 22; when it is not, they report `127.0.0.1` and reachability goes through the published high host ports. Detected by a throwaway TCP connect; set explicitly when Floci itself runs as a container |
 
 ## Requirements
 
