@@ -251,9 +251,34 @@ class SecretsManagerServiceTest {
 
         assertNotNull(deleted.getDeletedDate());
 
-        // The secret still exists but marked deleted
-        assertThrows(AwsException.class, () ->
+        // The secret still exists but marked deleted: real AWS raises InvalidRequestException
+        // here, distinct from the ResourceNotFoundException a genuinely absent secret gets.
+        // A bare assertThrows(AwsException.class, ...) doesn't distinguish the two - regression
+        // test for the bug where every one of these sites except batchGetSecretValue threw the
+        // wrong (not-found) code.
+        AwsException ex = assertThrows(AwsException.class, () ->
                 service.getSecretValue("my-secret", null, null, REGION));
+        assertEquals("InvalidRequestException", ex.getErrorCode());
+    }
+
+    @Test
+    void operationsOnPendingDeletionSecretRaiseInvalidRequestNotResourceNotFound() {
+        service.createSecret("my-secret", "value", null, null, null, null, REGION);
+        service.deleteSecret("my-secret", 7, false, REGION);
+
+        assertEquals("InvalidRequestException", assertThrows(AwsException.class, () ->
+                service.getSecretValue("my-secret", null, null, REGION)).getErrorCode());
+        assertEquals("InvalidRequestException", assertThrows(AwsException.class, () ->
+                service.putSecretValue("my-secret", "v2", null, null, REGION, null)).getErrorCode());
+        assertEquals("InvalidRequestException", assertThrows(AwsException.class, () ->
+                service.updateSecret("my-secret", "new description", null, REGION)).getErrorCode());
+        assertEquals("InvalidRequestException", assertThrows(AwsException.class, () ->
+                service.claimTargetAttachment("my-secret", "owner-1", REGION)).getErrorCode());
+        assertEquals("InvalidRequestException", assertThrows(AwsException.class, () ->
+                service.rotateSecret("my-secret", null, "arn:aws:lambda:us-east-1:000000000000:function:rotator",
+                        null, false, REGION)).getErrorCode());
+        assertEquals("InvalidRequestException", assertThrows(AwsException.class, () ->
+                service.updateSecretVersionStage("my-secret", null, null, "AWSCURRENT", REGION)).getErrorCode());
     }
 
     @Test
