@@ -204,6 +204,8 @@ public final class LambdaArnUtils {
             if (functionPart.startsWith(functionPrefix)) {
                 return functionPart.substring(functionPrefix.length());
             }
+            // Fallback for malformed/non-standard resources: every real Lambda ARN resource
+            // starts with "function:" and is handled above, so this only fires on unexpected input.
             int colon = functionPart.lastIndexOf(':');
             return colon >= 0 ? functionPart.substring(colon + 1) : functionPart;
         } catch (IllegalArgumentException e) {
