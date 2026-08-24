@@ -11,6 +11,10 @@ import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescript
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.KinesisStreamSource;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.S3Destination;
 import io.github.hectorvent.floci.services.firehose.model.Record;
+import io.github.hectorvent.floci.services.kinesis.KinesisService;
+import io.github.hectorvent.floci.services.kinesis.model.KinesisRecord;
+import io.github.hectorvent.floci.services.kinesis.model.KinesisShard;
+import io.github.hectorvent.floci.services.kinesis.model.KinesisStream;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.PutObjectOptions;
 import io.quarkus.runtime.ShutdownDelayInitiatedEvent;
@@ -36,12 +40,20 @@ public class FirehoseService {
     private static final String DEFAULT_BUCKET = "floci-firehose-results";
     private static final int DEFAULT_BUFFERING_INTERVAL_SECONDS = 300;
     private static final int DEFAULT_BUFFERING_SIZE_MBS = 5;
+    // Per shard, per tick. GetRecords caps at 1000 anyway; a smaller page keeps one
+    // busy source stream from monopolising the single flusher thread.
+    private static final int SOURCE_POLL_LIMIT = 500;
 
     private final StorageBackend<String, DeliveryStreamDescription> streamStore;
     private final Map<String, List<byte[]>> buffers = new ConcurrentHashMap<>();
     private final Map<String, Instant> bufferSince = new ConcurrentHashMap<>();
     private final S3Service s3Service;
+    private final KinesisService kinesisService;
     private final RegionResolver regionResolver;
+    // Per delivery stream, the shard iterator each source shard has been consumed to.
+    // Iterators are the checkpoint: a delivery stream restarted mid-shard resumes from
+    // the tip it reached, and one that has never polled starts at DeliveryStartTimestamp.
+    private final Map<String, Map<String, String>> sourceIterators = new ConcurrentHashMap<>();
     private final Clock clock;
     private final long tickIntervalSeconds;
     private final int flushRecordCount;
@@ -49,11 +61,12 @@ public class FirehoseService {
     private final ScheduledExecutorService flushExecutor;
 
     @Inject
-    public FirehoseService(StorageFactory storageFactory, S3Service s3Service, RegionResolver regionResolver,
-                           Clock clock, EmulatorConfig config) {
+    public FirehoseService(StorageFactory storageFactory, S3Service s3Service, KinesisService kinesisService,
+                           RegionResolver regionResolver, Clock clock, EmulatorConfig config) {
         this.streamStore = storageFactory.create("firehose", "streams.json",
                 new TypeReference<Map<String, DeliveryStreamDescription>>() {});
         this.s3Service = s3Service;
+        this.kinesisService = kinesisService;
         this.regionResolver = regionResolver;
         this.clock = clock;
         this.tickIntervalSeconds = Math.max(1, config.services().firehose().tickIntervalSeconds());
@@ -85,6 +98,7 @@ public class FirehoseService {
 
     void tickSafely() {
         try {
+            pollKinesisSources();
             flushDueBuffers(clock.instant());
         } catch (Throwable t) {
             LOG.warnv("Firehose buffer flush tick failed: {0}", t.getMessage());
@@ -304,12 +318,84 @@ public class FirehoseService {
         // reached the bucket after DeleteDeliveryStream completed.
         buffers.remove(name);
         bufferSince.remove(name);
+        sourceIterators.remove(name);
         LOG.infov("Deleted Firehose delivery stream: {0}", name);
     }
 
     public List<String> listDeliveryStreams() {
         return streamStore.scan(k -> true).stream()
                 .map(DeliveryStreamDescription::getDeliveryStreamName).toList();
+    }
+
+    /**
+     * Ingests records written to a delivery stream's Kinesis source.
+     *
+     * <p>A {@code KinesisStreamAsSource} delivery stream has no PutRecord of its own on
+     * real AWS: everything it delivers arrives by Firehose reading the source stream.
+     * Without this the source configuration is recorded and then ignored, so a stream
+     * created with one accepts the Terraform apply, reports healthy, and silently never
+     * delivers -- which is how terraform-aws-messaging's TestKinesisFirehose fails
+     * ("no objects found in the bucket" after six retries) while every API call in it
+     * succeeds.
+     *
+     * <p>Consumption uses the ordinary shard-iterator API, so the records seen here are
+     * exactly the records a GetRecords consumer would see, and the iterator is the
+     * checkpoint. The first iterator starts at {@code DeliveryStartTimestamp} rather than
+     * TRIM_HORIZON, matching AWS: attaching Firehose to a stream that already holds
+     * records does not backfill them.
+     */
+    void pollKinesisSources() {
+        for (DeliveryStreamDescription stream : streamStore.scan(k -> true)) {
+            KinesisStreamSource source = stream.getSource() == null
+                    ? null : stream.getSource().getKinesisStreamSourceDescription();
+            if (source == null || source.getKinesisStreamArn() == null) {
+                continue;
+            }
+            try {
+                pollKinesisSource(stream.getDeliveryStreamName(), source);
+            } catch (Exception e) {
+                // A source stream that was deleted (or was never created) is the caller's
+                // business, not a reason to stop polling every other delivery stream.
+                LOG.debugv("Firehose source poll failed for stream {0}: {1}",
+                        stream.getDeliveryStreamName(), e.getMessage());
+            }
+        }
+    }
+
+    private void pollKinesisSource(String deliveryStreamName, KinesisStreamSource source) {
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(source.getKinesisStreamArn());
+        String sourceName = arn.resource().startsWith("stream/")
+                ? arn.resource().substring("stream/".length())
+                : arn.resource();
+        String region = arn.region() == null || arn.region().isBlank()
+                ? regionResolver.getDefaultRegion() : arn.region();
+        KinesisStream sourceStream = kinesisService.describeStream(sourceName, region);
+        Map<String, String> iterators =
+                sourceIterators.computeIfAbsent(deliveryStreamName, k -> new ConcurrentHashMap<>());
+        for (KinesisShard shard : sourceStream.getShards()) {
+            String iterator = iterators.get(shard.getShardId());
+            if (iterator == null) {
+                Instant start = source.getDeliveryStartTimestamp();
+                iterator = start == null
+                        ? kinesisService.getShardIterator(sourceName, shard.getShardId(),
+                                "TRIM_HORIZON", null, region)
+                        : kinesisService.getShardIterator(sourceName, shard.getShardId(),
+                                "AT_TIMESTAMP", null, start.toEpochMilli(), region);
+            }
+            Map<String, Object> page = kinesisService.getRecords(iterator, SOURCE_POLL_LIMIT, region);
+            @SuppressWarnings("unchecked")
+            List<KinesisRecord> records = (List<KinesisRecord>) page.get("Records");
+            String next = (String) page.get("NextShardIterator");
+            iterators.put(shard.getShardId(), next != null ? next : iterator);
+            if (records == null || records.isEmpty()) {
+                continue;
+            }
+            // Through putRecordBatch so source records buffer, and trigger a flush, on
+            // exactly the same terms as records handed to PutRecord directly.
+            putRecordBatch(deliveryStreamName, records.stream()
+                    .map(record -> new Record(record.getData()))
+                    .toList());
+        }
     }
 
     public void putRecord(String streamName, Record record) {
