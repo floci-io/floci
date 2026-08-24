@@ -999,6 +999,24 @@ class AutoScalingIntegrationTest {
                 .body(containsString("<MinSize>1</MinSize>"))
                 .body(containsString("<MaxGroupPreparedCapacity>2</MaxGroupPreparedCapacity>"))
                 .body(containsString("<ReuseOnScaleIn>true</ReuseOnScaleIn>"));
+
+        // lex00/floci#112's round-5 re-measure: botocore's own AutoScalingGroup shape documents
+        // WarmPoolConfiguration as a member of DescribeAutoScalingGroups' own response too, not
+        // just the separate DescribeWarmPool action - terraform-aws-autoscaling's own warm_pool
+        // example reads it this way.
+        given()
+                .formParam("Action", "DescribeAutoScalingGroups")
+                .formParam("AutoScalingGroupNames.member.1", "my-asg")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("<WarmPoolConfiguration>"))
+                .body(containsString("<PoolState>Stopped</PoolState>"))
+                .body(containsString("<MinSize>1</MinSize>"))
+                .body(containsString("<MaxGroupPreparedCapacity>2</MaxGroupPreparedCapacity>"))
+                .body(containsString("<ReuseOnScaleIn>true</ReuseOnScaleIn>"));
     }
 
     @Test

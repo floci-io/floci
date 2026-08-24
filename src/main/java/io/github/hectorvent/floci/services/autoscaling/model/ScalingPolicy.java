@@ -105,10 +105,11 @@ public class ScalingPolicy {
         // simply no field - so DescribePolicies could never echo back a customized (as opposed to
         // predefined) target-tracking metric. Oracle: botocore's autoscaling/2011-01-01/
         // service-2.json TargetTrackingConfiguration/CustomizedMetricSpecification shapes. Covers
-        // the classic bare-metric form (MetricName/Namespace/Dimensions/Statistic/Unit);
-        // deliberately does NOT cover the newer Metrics (metric-math / TargetTrackingMetricDataQuery)
-        // form, the same way PredictiveScalingConfiguration disclaims the Customized* metric
-        // specifications above.
+        // both the classic bare-metric form (MetricName/Namespace/Dimensions/Statistic/Unit) and,
+        // as of lex00/floci#122, the metric-math form (Metrics, a list of
+        // TargetTrackingMetricDataQuery) that terraform-aws-modules/terraform-aws-autoscaling's
+        // own flagship "complete" example actually sends - the shape #121's round left unmodeled,
+        // which is why that round's own test passed while the real crossing still lost the field.
         private CustomizedMetricSpecification customizedMetricSpecification;
         private Double targetValue;
         private Boolean disableScaleIn;
@@ -157,6 +158,19 @@ public class ScalingPolicy {
         private String statistic;
         private String unit;
         private Integer period;
+        // lex00/floci#122: the "classic" bare-metric fields above
+        // (MetricName/Namespace/Dimensions/Statistic/Unit/Period) are ONE of
+        // the two shapes CustomizedMetricSpecification supports; the other -
+        // Metrics, a list of TargetTrackingMetricDataQuery entries doing
+        // CloudWatch metric math - is what terraform-aws-modules/
+        // terraform-aws-autoscaling's own flagship "complete" example uses
+        // (its "metric_math" scaling policy), and PR #121's round only
+        // modeled the classic shape, leaving this one silently dropped the
+        // same way the whole field was dropped before #119. Oracle:
+        // botocore's autoscaling/2011-01-01/service-2.json
+        // CustomizedMetricSpecification/Metrics and
+        // TargetTrackingMetricDataQuery shapes.
+        private List<TargetTrackingMetricDataQuery> metrics = new ArrayList<>();
 
         public CustomizedMetricSpecification() {}
 
@@ -177,6 +191,91 @@ public class ScalingPolicy {
 
         public Integer getPeriod() { return period; }
         public void setPeriod(Integer v) { this.period = v; }
+
+        public List<TargetTrackingMetricDataQuery> getMetrics() { return metrics; }
+        public void setMetrics(List<TargetTrackingMetricDataQuery> v) {
+            this.metrics = v != null ? new ArrayList<>(v) : new ArrayList<>();
+        }
+    }
+
+    // TargetTrackingMetricDataQuery/TargetTrackingMetricStat/Metric: the
+    // metric-math form of CustomizedMetricSpecification - see its own doc
+    // comment on the `metrics` field above for why this exists. Field names
+    // and nesting are taken directly from botocore's own shapes rather than
+    // guessed: TargetTrackingMetricDataQuery{Id,Expression,MetricStat,Label,
+    // Period,ReturnData}, TargetTrackingMetricStat{Metric,Stat,Unit,Period},
+    // Metric{Namespace,MetricName,Dimensions}.
+    @RegisterForReflection
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public static class TargetTrackingMetricDataQuery {
+        private String id;
+        private String expression;
+        private TargetTrackingMetricStat metricStat;
+        private String label;
+        private Integer period;
+        private Boolean returnData;
+
+        public TargetTrackingMetricDataQuery() {}
+
+        public String getId() { return id; }
+        public void setId(String v) { this.id = v; }
+
+        public String getExpression() { return expression; }
+        public void setExpression(String v) { this.expression = v; }
+
+        public TargetTrackingMetricStat getMetricStat() { return metricStat; }
+        public void setMetricStat(TargetTrackingMetricStat v) { this.metricStat = v; }
+
+        public String getLabel() { return label; }
+        public void setLabel(String v) { this.label = v; }
+
+        public Integer getPeriod() { return period; }
+        public void setPeriod(Integer v) { this.period = v; }
+
+        public Boolean getReturnData() { return returnData; }
+        public void setReturnData(Boolean v) { this.returnData = v; }
+    }
+
+    @RegisterForReflection
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public static class TargetTrackingMetricStat {
+        private Metric metric;
+        private String stat;
+        private String unit;
+        private Integer period;
+
+        public TargetTrackingMetricStat() {}
+
+        public Metric getMetric() { return metric; }
+        public void setMetric(Metric v) { this.metric = v; }
+
+        public String getStat() { return stat; }
+        public void setStat(String v) { this.stat = v; }
+
+        public String getUnit() { return unit; }
+        public void setUnit(String v) { this.unit = v; }
+
+        public Integer getPeriod() { return period; }
+        public void setPeriod(Integer v) { this.period = v; }
+    }
+
+    @RegisterForReflection
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public static class Metric {
+        private String namespace;
+        private String metricName;
+        private List<MetricDimension> dimensions = new ArrayList<>();
+
+        public Metric() {}
+
+        public String getNamespace() { return namespace; }
+        public void setNamespace(String v) { this.namespace = v; }
+
+        public String getMetricName() { return metricName; }
+        public void setMetricName(String v) { this.metricName = v; }
+
+        public List<MetricDimension> getDimensions() { return dimensions; }
+        public void setDimensions(List<MetricDimension> v) { this.dimensions = v != null ? new ArrayList<>(v) : new ArrayList<>(); }
     }
 
     // PredefinedMetricSpecification is reused, unchanged in shape

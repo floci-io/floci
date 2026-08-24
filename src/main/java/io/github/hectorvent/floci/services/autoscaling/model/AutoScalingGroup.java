@@ -23,6 +23,15 @@ public class AutoScalingGroup {
     private int minSize;
     private int maxSize;
     private int desiredCapacity;
+    // lex00/floci#112's round-5 re-measure: CreateAutoScalingGroup's own DesiredCapacityType
+    // ("units" | "vcpu" | "memory-mib" - how DesiredCapacity/MinSize/MaxSize are measured when
+    // a mixed instances policy weights instance types) had no field at all, so
+    // DescribeAutoScalingGroups always echoed it back as absent regardless of what was
+    // requested. Same class of gap as #112's own named mixed_instances_policy override fields,
+    // not separately itemized in #112's own text but the identical root cause. Oracle:
+    // botocore's autoscaling/2011-01-01/service-2.json AutoScalingGroup/CreateAutoScalingGroup
+    // DesiredCapacityType shape.
+    private String desiredCapacityType;
     private int defaultCooldown = 300;
     private List<String> availabilityZones = new ArrayList<>();
     private List<String> subnetIds = new ArrayList<>();
@@ -88,6 +97,9 @@ public class AutoScalingGroup {
 
     public int getDesiredCapacity() { return desiredCapacity; }
     public void setDesiredCapacity(int v) { this.desiredCapacity = v; }
+
+    public String getDesiredCapacityType() { return desiredCapacityType; }
+    public void setDesiredCapacityType(String v) { this.desiredCapacityType = v; }
 
     public int getDefaultCooldown() { return defaultCooldown; }
     public void setDefaultCooldown(int v) { this.defaultCooldown = v; }
