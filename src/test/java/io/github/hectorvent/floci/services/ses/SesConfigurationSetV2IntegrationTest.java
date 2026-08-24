@@ -1268,6 +1268,21 @@ class SesConfigurationSetV2IntegrationTest {
         .then().statusCode(400).body("__type", equalTo("SerializationException"));
     }
 
+    @Test
+    @Order(64)
+    void createConfigurationSet_nonObjectTagElement_returnsSerializationException() {
+        // A tag list element that is not an object (scalar, array, or null) is a wire deserialization
+        // error. AWS returns SerializationException for scalar/array elements and a 500 InternalFailure
+        // for a null element (a server-side bug); Floci normalizes all of them to 400
+        // SerializationException. Probe-confirmed against real AWS.
+        for (String badElement : new String[] {"true", "123", "\"k\"", "[\"k\",\"v\"]", "null"}) {
+            given().contentType("application/json").header("Authorization", AUTH_HEADER)
+                .body("{\"ConfigurationSetName\": \"v2-cs-bad-el\", \"Tags\": [" + badElement + "]}")
+            .when().post("/v2/email/configuration-sets")
+            .then().statusCode(400).body("__type", equalTo("SerializationException"));
+        }
+    }
+
     private static void putConfigSet(String name) {
         given().contentType("application/json").header("Authorization", AUTH_HEADER)
             .body("{\"ConfigurationSetName\": \"" + name + "\"}")

@@ -2450,6 +2450,12 @@ public class SesController {
         }
         List<Tag> out = new ArrayList<>();
         for (JsonNode t : tagsNode) {
+            // Each element must be a JSON object. A scalar/array/null element is a wire deserialization
+            // error (AWS returns SerializationException for a scalar/array element; it returns a 500
+            // InternalFailure for a null element, a server-side bug we normalize to the same 400).
+            if (!t.isObject()) {
+                throw new AwsException("SerializationException", null, 400);
+            }
             JsonNode key = t.path("Key");
             JsonNode value = t.path("Value");
             // A present-but-non-string Key/Value (number, boolean, object, array) is a wire
