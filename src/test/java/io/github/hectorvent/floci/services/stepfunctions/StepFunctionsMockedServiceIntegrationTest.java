@@ -206,6 +206,22 @@ class StepFunctionsMockedServiceIntegrationTest {
     }
 
     @Test
+    @Order(9)
+    void syncExecutionDoesNotStripABareSuffix() {
+        // Verified against Step Functions Local 2.0.0. StartSyncExecution looks up the raw ARN,
+        // so a bare trailing '#' fails with StateMachineDoesNotExist instead of running unmocked.
+        var resp = given()
+                .header("X-Amz-Target", "AWSStepFunctions.StartSyncExecution")
+                .contentType(SFN_CONTENT_TYPE)
+                .body("""
+                        {"stateMachineArn": "%s#", "input": "{}"}
+                        """.formatted(expressSmArn))
+                .when().post("/");
+        resp.then().statusCode(400);
+        assertTrue(resp.body().asString().contains("does not exist"));
+    }
+
+    @Test
     @Order(6)
     void executionWithoutTestCaseSuffixStillCallsRealIntegration() {
         var execArn = startExecution(mockSmArn, "{}");

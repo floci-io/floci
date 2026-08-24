@@ -508,7 +508,9 @@ public class StepFunctionsService implements Resettable {
                     "Service integration mocking is not supported for the StartSyncExecution operation.",
                     400);
         }
-        var sm = describeStateMachine(selection.stateMachineArn());
+        // A bare trailing '#' is not stripped on this operation: Step Functions Local looks up
+        // the raw ARN and fails with StateMachineDoesNotExist, so Floci does the same.
+        var sm = describeStateMachine(stateMachineArn);
         if (!"EXPRESS".equals(sm.getType())) {
             throw new AwsException("StateMachineTypeNotSupported",
                     "StartSyncExecution is only supported for EXPRESS state machines", 400);
@@ -525,7 +527,7 @@ public class StepFunctionsService implements Resettable {
 
         var exec = new Execution();
         exec.setExecutionArn(arn);
-        exec.setStateMachineArn(selection.stateMachineArn());
+        exec.setStateMachineArn(stateMachineArn);
         exec.setName(execName);
         exec.setInput(input);
         exec.setStatus("RUNNING");

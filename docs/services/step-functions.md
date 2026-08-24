@@ -110,9 +110,9 @@ mocked and real service calls can be combined in one execution. The file is re-r
 when it changes, so it can be edited without restarting Floci.
 
 Behavior was verified against Step Functions Local 2.0.0. As there, `StartSyncExecution`
-rejects a test case suffix with `UnsupportedOperation`, a bare trailing `#` runs the
-execution unmocked, and a retry attempt with no mocked entry fails the execution with
-`States.Runtime`. One intentional deviation: Floci reports an unknown test case and any
+rejects a test case suffix with `UnsupportedOperation` and does not strip a bare trailing
+`#`, a bare trailing `#` on `StartExecution` runs the execution unmocked, and a retry
+attempt with no mocked entry fails the execution with `States.Runtime`. One intentional deviation: Floci reports an unknown test case and any
 invalid mock configuration (unparseable file, bad attempt key, missing `MockedResponses`
 entry, `Return` and `Throw` together, `Throw` without `Error`) as a structured 400 error
 at `StartExecution`. Step Functions Local instead returns a plain HTTP 500 for most of
