@@ -13,6 +13,7 @@ import jakarta.inject.Inject;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Predicate;
 
 /**
  * Wraps the storage backend for Lambda functions with region-aware key logic.
@@ -82,6 +83,22 @@ public class LambdaFunctionStore implements Resettable {
         indexFunction(fn);
     }
 
+    /**
+     * Saves into {@code accountId}'s partition rather than the ambient caller's. Async
+     * paths (CDI observers, pollers) run with no {@code RequestContext} and would
+     * otherwise write every account's function into the default account's partition.
+     */
+    public void saveForAccount(String accountId, String region, LambdaFunction fn) {
+        getForAccount(accountId, region, fn.getFunctionName(), fn.getVersion()).ifPresent(this::deindexFunction);
+
+        if (backend instanceof AccountAwareStorageBackend<LambdaFunction> aware) {
+            aware.putForAccount(accountId, regionKey(region, fn.getFunctionName(), fn.getVersion()), fn);
+        } else {
+            backend.put(regionKey(region, fn.getFunctionName(), fn.getVersion()), fn);
+        }
+        indexFunction(fn);
+    }
+
     public Optional<LambdaFunction> get(String region, String functionName) {
         return get(region, functionName, "$LATEST");
     }
@@ -126,8 +143,26 @@ public class LambdaFunctionStore implements Resettable {
         return backend.scan(key -> key.startsWith(prefix));
     }
 
+    /**
+     * Like {@link #list(String)}, but across every account's partition. For async callers
+     * that have no {@code RequestContext} and so would otherwise see only the default
+     * account's functions.
+     */
+    public List<LambdaFunction> listAllAccounts(String region) {
+        String prefix = "lambda::" + region + "::";
+        Predicate<String> filter = key -> key.startsWith(prefix) && key.endsWith("::$LATEST");
+        if (backend instanceof AccountAwareStorageBackend<LambdaFunction> aware) {
+            return aware.scanAllAccountEntries(filter).stream()
+                    .map(AccountAwareStorageBackend.AccountEntry::value)
+                    .toList();
+        }
+        return backend.scan(filter);
+    }
+
     public List<LambdaFunction> listAll() {
-        return backend.scan(key -> true);
+        return backend instanceof AccountAwareStorageBackend<LambdaFunction> aware
+                ? aware.scanAllAccounts()
+                : backend.scan(key -> true);
     }
 
     public void delete(String region, String functionName) {

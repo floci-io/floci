@@ -12,7 +12,10 @@ import java.util.Comparator;
 
 /**
  * Manages on-disk locations of extracted Lambda function code.
- * Each function gets its own directory under the configured code path.
+ * Each function gets its own directory under {@code <codePath>/<accountId>/}, mirroring
+ * the account-prefixed S3 key {@code LambdaService.codeObjectKey} uses for the same
+ * deployment package. Without the account segment two accounts' same-named functions in
+ * one region share a single extraction directory and overwrite each other's code.
  */
 @ApplicationScoped
 public class CodeStore {
@@ -30,12 +33,12 @@ public class CodeStore {
         this.baseDir = baseDir;
     }
 
-    public Path getCodePath(String functionName) {
-        return baseDir.resolve(sanitizeName(functionName));
+    public Path getCodePath(String accountId, String functionName) {
+        return baseDir.resolve(sanitizeName(accountId)).resolve(sanitizeName(functionName));
     }
 
-    public void delete(String functionName) {
-        Path codePath = getCodePath(functionName);
+    public void delete(String accountId, String functionName) {
+        Path codePath = getCodePath(accountId, functionName);
         if (!Files.exists(codePath)) {
             return;
         }
@@ -55,8 +58,8 @@ public class CodeStore {
         }
     }
 
-    public boolean exists(String functionName) {
-        Path codePath = getCodePath(functionName);
+    public boolean exists(String accountId, String functionName) {
+        Path codePath = getCodePath(accountId, functionName);
         try {
             return Files.exists(codePath) && Files.list(codePath).findAny().isPresent();
         } catch (IOException e) {

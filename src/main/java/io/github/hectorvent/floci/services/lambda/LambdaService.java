@@ -700,9 +700,9 @@ public class LambdaService implements ResourceProvider {
             if (concurrencyLimiter != null) {
                 concurrencyLimiter.reset(arn);
             }
-            codeStore.delete(functionName);
+            codeStore.delete(ownerAccount(fn), functionName);
             functionStore.delete(region, functionName);
-            versionCounters.remove(region + "::" + functionName);
+            versionCounters.remove(versionCounterKey(region, fn));
             if (aliasStore != null) {
                 for (LambdaAlias alias : aliasStore.list(region, functionName)) {
                     aliasStore.delete(region, functionName, alias.getName());
@@ -1141,10 +1141,18 @@ public class LambdaService implements ResourceProvider {
         }
     }
 
+    /**
+     * Version numbering belongs to the owning account, not to whichever account's
+     * partition the counter map happens to be reached through.
+     */
+    static String versionCounterKey(String region, LambdaFunction fn) {
+        return region + "::" + ownerAccount(fn) + "::" + fn.getFunctionName();
+    }
+
     public LambdaFunction publishVersion(String region, String functionName, String description) {
         LambdaFunction fn = getFunction(region, functionName);
         functionName = fn.getFunctionName();
-        int version = nextVersionNumber(region + "::" + functionName);
+        int version = nextVersionNumber(versionCounterKey(region, fn));
         LambdaFunction snapshot = new LambdaFunction();
         snapshot.setAccountId(fn.getAccountId());
         snapshot.setFunctionName(fn.getFunctionName());
@@ -1718,10 +1726,18 @@ public class LambdaService implements ResourceProvider {
         return "awslambda-" + r + "-tasks";
     }
 
+    /**
+     * The account that owns a function, for keying account-scoped state (its S3 code key,
+     * its on-disk extraction directory, its PublishVersion counter). All three must agree,
+     * so they all derive the account here.
+     */
+    static String ownerAccount(LambdaFunction fn) {
+        return fn.getAccountId() != null ? fn.getAccountId() : "000000000000";
+    }
+
     /** Stable, account-scoped S3 key for a function's current deployment package. */
     public static String codeObjectKey(LambdaFunction fn) {
-        String account = fn.getAccountId() != null ? fn.getAccountId() : "000000000000";
-        return "snapshots/" + account + "/" + fn.getFunctionName();
+        return "snapshots/" + ownerAccount(fn) + "/" + fn.getFunctionName();
     }
 
     /** Stable, account-scoped S3 key for a published layer version's archive. */
@@ -1748,7 +1764,7 @@ public class LambdaService implements ResourceProvider {
     }
 
     private void extractZipCodeBytes(LambdaFunction fn, byte[] zipBytes, String region) {
-        Path codePath = codeStore.getCodePath(fn.getFunctionName());
+        Path codePath = codeStore.getCodePath(ownerAccount(fn), fn.getFunctionName());
         try {
             zipExtractor.extractTo(zipBytes, codePath);
             fn.setCodeLocalPath(codePath.toAbsolutePath().normalize().toString());
@@ -2206,9 +2222,12 @@ public class LambdaService implements ResourceProvider {
     public void onS3ObjectUpdated(@Observes S3ObjectUpdatedEvent event) {
         LOG.debugv("Observing S3 update: {0}/{1}", event.bucketName(), event.key());
         // For simplicity, we scan all functions in the default region
-        // Most local dev setups use a single region
+        // Most local dev setups use a single region.
+        // This runs on the CDI event thread with no RequestContext, so an ambient scan
+        // would only ever see the default account's partition — a function owned by any
+        // other account would silently never hot-reload from S3.
         String region = regionResolver.getDefaultRegion();
-        List<LambdaFunction> functions = functionStore.list(region);
+        List<LambdaFunction> functions = functionStore.listAllAccounts(region);
         for (LambdaFunction fn : functions) {
             if (fn.isHotReload()) {
                 continue;
@@ -2221,7 +2240,7 @@ public class LambdaService implements ResourceProvider {
                     extractZipCodeBytes(fn, obj.getData(), region);
                     fn.setLastModified(Instant.now().toEpochMilli());
                     fn.setRevisionId(UUID.randomUUID().toString());
-                    functionStore.save(region, fn);
+                    functionStore.saveForAccount(ownerAccount(fn), region, fn);
 
                     // Push to warm workers
                     warmPool.pushCodeUpdate(fn);

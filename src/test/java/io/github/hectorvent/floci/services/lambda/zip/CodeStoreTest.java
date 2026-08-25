@@ -1,0 +1,56 @@
+package io.github.hectorvent.floci.services.lambda.zip;
+
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+class CodeStoreTest {
+
+    private static final String ACCOUNT_A = "111111111111";
+    private static final String ACCOUNT_B = "222222222222";
+
+    @Test
+    void sameFunctionNameInTwoAccountsResolvesToDistinctDirectories(@TempDir Path baseDir) {
+        CodeStore store = new CodeStore(baseDir);
+
+        Path a = store.getCodePath(ACCOUNT_A, "shared-name");
+        Path b = store.getCodePath(ACCOUNT_B, "shared-name");
+
+        assertNotEquals(a, b, "two accounts must not share one on-disk extraction directory");
+        assertTrue(a.startsWith(baseDir.resolve(ACCOUNT_A)));
+        assertTrue(b.startsWith(baseDir.resolve(ACCOUNT_B)));
+    }
+
+    @Test
+    void deleteRemovesOnlyTheOwningAccountsCode(@TempDir Path baseDir) throws IOException {
+        CodeStore store = new CodeStore(baseDir);
+        writeHandler(store.getCodePath(ACCOUNT_A, "shared-name"), "a");
+        writeHandler(store.getCodePath(ACCOUNT_B, "shared-name"), "b");
+
+        store.delete(ACCOUNT_B, "shared-name");
+
+        assertTrue(store.exists(ACCOUNT_A, "shared-name"), "deleting B's code must not touch A's");
+        assertFalse(store.exists(ACCOUNT_B, "shared-name"));
+        assertEquals("a", Files.readString(store.getCodePath(ACCOUNT_A, "shared-name").resolve("index.js")));
+    }
+
+    @Test
+    void accountSegmentIsSanitizedLikeTheFunctionName(@TempDir Path baseDir) {
+        CodeStore store = new CodeStore(baseDir);
+
+        Path traversal = store.getCodePath("../../etc", "fn");
+
+        assertTrue(traversal.normalize().startsWith(baseDir.normalize()),
+                "a hostile account segment must not escape the base directory");
+    }
+
+    private void writeHandler(Path codePath, String content) throws IOException {
+        Files.createDirectories(codePath);
+        Files.writeString(codePath.resolve("index.js"), content);
+    }
+}
