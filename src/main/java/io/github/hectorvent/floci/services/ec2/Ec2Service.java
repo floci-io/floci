@@ -1892,6 +1892,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         return applyRouteFilters(routes, filters);
     }
 
+    /** No real S3 write — returns a deterministic location string, matching the export naming AWS uses. */
+    public String exportTransitGatewayRoutes(String region, String routeTableId, String s3Bucket) {
+        getRequiredTransitGatewayRouteTable(region, routeTableId);
+        if (s3Bucket == null || s3Bucket.isBlank()) {
+            throw new AwsException("MissingParameter", "S3Bucket is required.", 400);
+        }
+        return "s3://" + s3Bucket + "/" + routeTableId + "-" + randomHex(8) + ".csv";
+    }
+
     /**
      * The route search filters, as the live API applies them. The three CIDR relationship filters
      * differ in the value they take, which is not something the reference spells out:

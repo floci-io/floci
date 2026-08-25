@@ -134,6 +134,7 @@ public class Ec2QueryHandler {
                 case "DeleteTransitGatewayRoute" -> handleDeleteTransitGatewayRoute(params, region);
                 case "ReplaceTransitGatewayRoute" -> handleReplaceTransitGatewayRoute(params, region);
                 case "SearchTransitGatewayRoutes" -> handleSearchTransitGatewayRoutes(params, region);
+                case "ExportTransitGatewayRoutes" -> handleExportTransitGatewayRoutes(params, region);
                 case "CreateDefaultVpc" -> handleCreateDefaultVpc(params, region);
                 case "AssociateVpcCidrBlock" -> handleAssociateVpcCidrBlock(params, region);
                 case "DisassociateVpcCidrBlock" -> handleDisassociateVpcCidrBlock(params, region);
@@ -2037,6 +2038,17 @@ public class Ec2QueryHandler {
         xml.end("routeSet")
                 .elem("additionalRoutesAvailable", "false")
                 .end("SearchTransitGatewayRoutesResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleExportTransitGatewayRoutes(MultivaluedMap<String, String> p, String region) {
+        String s3Location = service.exportTransitGatewayRoutes(
+                region, p.getFirst("TransitGatewayRouteTableId"), p.getFirst("S3Bucket"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("ExportTransitGatewayRoutesResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .elem("s3Location", s3Location)
+                .end("ExportTransitGatewayRoutesResponse");
         return xmlResponse(xml.build());
     }
 
