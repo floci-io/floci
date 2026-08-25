@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.lakeformation.model;
 
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 import com.fasterxml.jackson.databind.annotation.JsonNaming;
 @RegisterForReflection
@@ -11,8 +12,11 @@ public class Resource {
     private DatabaseResource database;
     private DataCellsFilterResource dataCellsFilter;
     private DataLocationResource dataLocation;
+    @JsonProperty("LFTag")
     private LFTagKeyResource lfTag;
+    @JsonProperty("LFTagExpression")
     private LFTagExpressionResource lfTagExpression;
+    @JsonProperty("LFTagPolicy")
     private LFTagPolicyResource lfTagPolicy;
     private TableResource table;
     private TableWithColumnsResource tableWithColumns;

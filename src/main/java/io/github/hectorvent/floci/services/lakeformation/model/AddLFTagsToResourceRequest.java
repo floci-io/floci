@@ -3,12 +3,14 @@ package io.github.hectorvent.floci.services.lakeformation.model;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 import java.util.List;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 import com.fasterxml.jackson.databind.annotation.JsonNaming;
 @RegisterForReflection
 @JsonNaming(PropertyNamingStrategies.UpperCamelCaseStrategy.class)
 public class AddLFTagsToResourceRequest {
     private String catalogId;
+    @JsonProperty("LFTags")
     private List<LFTagPair> lfTags;
     private Resource resource;
 
