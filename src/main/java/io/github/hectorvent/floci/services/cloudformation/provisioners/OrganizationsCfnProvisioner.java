@@ -159,6 +159,14 @@ public class OrganizationsCfnProvisioner implements CfnResourceProvisioner {
                 throw new AwsException("ConstraintViolationException",
                         "CreateAccount for " + accountName + " failed: " + status.getFailureReason(), 400);
             }
+            // The account exists from here on, so hand rollback the ownership marker before anything
+            // else can throw: CloudFormationService only deletes a CREATE_FAILED resource that is
+            // both marked owned and carries a physical id.
+            // The account exists from here on, so hand rollback the ownership marker before anything
+            // else can throw: CloudFormationService only deletes a CREATE_FAILED resource that is
+            // both marked owned and carries a physical id.
+            r.getAttributes().put(CfnRollback.ROLLBACK_OWNED_ATTR, "true");
+            r.setPhysicalId(status.getAccountId());
             account = organizationsService.describeAccount(ctx.accountId(), status.getAccountId());
         }
 
@@ -200,6 +208,9 @@ public class OrganizationsCfnProvisioner implements CfnResourceProvisioner {
             replaceTags(ctx.accountId(), policy.getId(), tags);
         } else {
             policy = organizationsService.createPolicy(ctx.accountId(), content, description, name, type, tags);
+            // As above: the policy is real once createPolicy returns, so mark it stack-owned before
+            // reconcileTargets gets a chance to throw.
+            r.getAttributes().put(CfnRollback.ROLLBACK_OWNED_ATTR, "true");
         }
         // Same ordering as provisionAccount: the policy already exists once createPolicy returns,
         // so claim the id before reconcileTargets, whose attach/detach calls can throw.
