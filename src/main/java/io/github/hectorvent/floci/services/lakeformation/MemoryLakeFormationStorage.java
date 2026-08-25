@@ -58,9 +58,21 @@ public class MemoryLakeFormationStorage implements LakeFormationStorage {
 
     @Override
     public List<ResourceInfo> listResources(String region, FilterCondition filterCondition, Integer maxResults, String nextToken) {
-        // Very basic pagination: returns all resources for now
-        // In a real implementation this would apply the filter and handle pagination tokens.
-        return new ArrayList<>(resourcesStorage.scan(k -> k.startsWith(region + ":")));
+        return resourcesStorage.scan(k -> k.startsWith(region + ":")).stream()
+                .filter(r -> {
+                    if (filterCondition != null && "RESOURCE_ARN".equals(filterCondition.getField())) {
+                        String arn = r.getResourceArn();
+                        List<String> values = filterCondition.getStringValueList();
+                        if (values != null && !values.isEmpty()) {
+                            String op = filterCondition.getComparisonOperator();
+                            if ("EQUALS".equals(op)) return values.contains(arn);
+                            if ("NOT_EQUALS".equals(op)) return !values.contains(arn);
+                            if ("BEGINS_WITH".equals(op)) return values.stream().anyMatch(arn::startsWith);
+                        }
+                    }
+                    return true;
+                })
+                .collect(Collectors.toList());
     }
 
     @Override
@@ -137,8 +149,22 @@ public class MemoryLakeFormationStorage implements LakeFormationStorage {
 
     @Override
     public List<PrincipalResourcePermissions> listPermissions(String region, String catalogId, DataLakePrincipal principal, Resource resource, String resourceType, boolean includeRelated, Integer maxResults, String nextToken) {
-        // Return all explicit grants for now to satisfy Terraform state syncing
-        return new ArrayList<>(permissionsStorage.scan(k -> k.startsWith(region + ":" + catalogId + ":")));
+        String filterResourceKey = resource != null ? getResourceKey(resource) : null;
+        return permissionsStorage.scan(k -> k.startsWith(region + ":" + catalogId + ":")).stream()
+                .filter(p -> {
+                    if (principal != null && principal.getDataLakePrincipalIdentifier() != null) {
+                        if (!principal.getDataLakePrincipalIdentifier().equals(p.getPrincipal().getDataLakePrincipalIdentifier())) {
+                            return false;
+                        }
+                    }
+                    if (filterResourceKey != null) {
+                        if (!filterResourceKey.equals(getResourceKey(p.getResource()))) {
+                            return false;
+                        }
+                    }
+                    return true;
+                })
+                .collect(Collectors.toList());
     }
 
     @Override
