@@ -11,8 +11,6 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Collections;
-import java.util.Objects;
 import java.util.UUID;
 import java.util.stream.Collectors;
 import java.util.concurrent.ConcurrentHashMap;
@@ -29,9 +27,6 @@ public class EfsService implements Resettable {
     private final StorageBackend<String, AccessPointDescription> accessPointStore;
     private final StorageBackend<String, String> fileSystemPolicyStore;
     private final StorageBackend<String, BackupPolicy> backupPolicyStore;
-    private final StorageBackend<String, Boolean> originalBackupStore;
-    private final StorageBackend<String, CreateFileSystemRequest> originalFileSystemRequestStore;
-    private final StorageBackend<String, CreateAccessPointRequest> originalAccessPointRequestStore;
     private final StorageBackend<String, List<LifecyclePolicy>> lifecycleConfigurationStore;
     private final ConcurrentHashMap<String, Object> syncLocks = new ConcurrentHashMap<>();
     private final RegionResolver regionResolver;
@@ -53,12 +48,6 @@ public class EfsService implements Resettable {
                 new com.fasterxml.jackson.core.type.TypeReference<java.util.Map<String, String>>() {});
         this.backupPolicyStore = storageFactory.create("efs", "efs-backuppolicies.json",
                 new com.fasterxml.jackson.core.type.TypeReference<java.util.Map<String, BackupPolicy>>() {});
-        this.originalBackupStore = storageFactory.create("efs", "efs-original-backups.json",
-                new com.fasterxml.jackson.core.type.TypeReference<java.util.Map<String, Boolean>>() {});
-        this.originalFileSystemRequestStore = storageFactory.create("efs", "efs-original-fs-requests.json",
-                new com.fasterxml.jackson.core.type.TypeReference<java.util.Map<String, CreateFileSystemRequest>>() {});
-        this.originalAccessPointRequestStore = storageFactory.create("efs", "efs-original-ap-requests.json",
-                new com.fasterxml.jackson.core.type.TypeReference<java.util.Map<String, CreateAccessPointRequest>>() {});
         this.lifecycleConfigurationStore = storageFactory.create("efs", "efs-lifecycle.json",
                 new com.fasterxml.jackson.core.type.TypeReference<java.util.Map<String, List<LifecyclePolicy>>>() {});
     }
@@ -70,9 +59,6 @@ public class EfsService implements Resettable {
         accessPointStore.clear();
         fileSystemPolicyStore.clear();
         backupPolicyStore.clear();
-        originalBackupStore.clear();
-        originalFileSystemRequestStore.clear();
-        originalAccessPointRequestStore.clear();
         lifecycleConfigurationStore.clear();
         syncLocks.clear();
     }
@@ -111,8 +97,6 @@ public class EfsService implements Resettable {
             fs.setAvailabilityZoneName(request.getAvailabilityZoneName());
             fs.setAvailabilityZoneId(request.getAvailabilityZoneName() + "-id");
         }
-        originalBackupStore.put(regionKey, request.getBackup() != null ? request.getBackup() : Boolean.TRUE);
-        originalFileSystemRequestStore.put(regionKey, request);
         
         if (request.getTags() != null) {
             fs.setTags(new ArrayList<>(request.getTags()));
@@ -198,8 +182,6 @@ public class EfsService implements Resettable {
         // Clean up policies
         fileSystemPolicyStore.delete(key);
         backupPolicyStore.delete(key);
-        originalBackupStore.delete(key);
-        originalFileSystemRequestStore.delete(key);
         lifecycleConfigurationStore.delete(key);
 
         fileSystemStore.delete(key);
@@ -432,7 +414,6 @@ public class EfsService implements Resettable {
         ap.setOwnerId(regionResolver.getAccountId());
         
         accessPointStore.put(regionKey(region, apId), ap);
-        originalAccessPointRequestStore.put(regionKey(region, apId), request);
         return ap;
             }
         }
@@ -452,7 +433,6 @@ public class EfsService implements Resettable {
             throw EfsException.accessPointNotFound(accessPointId);
         }
         accessPointStore.delete(key);
-        originalAccessPointRequestStore.delete(key);
     }
 
     // --- Policies ---
