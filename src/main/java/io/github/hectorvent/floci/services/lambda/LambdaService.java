@@ -703,6 +703,7 @@ public class LambdaService implements ResourceProvider {
             codeStore.delete(ownerAccount(fn), functionName);
             functionStore.delete(region, functionName);
             versionCounters.remove(versionCounterKey(region, fn));
+            versionCounters.remove(legacyVersionCounterKey(region, functionName));
             if (aliasStore != null) {
                 for (LambdaAlias alias : aliasStore.list(region, functionName)) {
                     aliasStore.delete(region, functionName, alias.getName());
@@ -1133,9 +1134,15 @@ public class LambdaService implements ResourceProvider {
      * {@code concurrencyOpLocks}) so publishes of unrelated functions do not
      * serialize on the instance monitor for the storage round-trip.
      */
-    private int nextVersionNumber(String counterKey) {
+    private int nextVersionNumber(String counterKey, String legacyCounterKey) {
         synchronized (versionCounterLocks.computeIfAbsent(counterKey, k -> new Object())) {
-            int next = versionCounters.getOrDefault(counterKey, 0) + 1;
+            Integer current = versionCounters.get(counterKey);
+            if (current == null && legacyCounterKey != null) {
+                // Counters persisted before the key carried the owning account. Starting over
+                // from 0 here would re-issue a version number that already names a snapshot.
+                current = versionCounters.remove(legacyCounterKey);
+            }
+            int next = (current != null ? current : 0) + 1;
             versionCounters.put(counterKey, next);
             return next;
         }
@@ -1149,10 +1156,21 @@ public class LambdaService implements ResourceProvider {
         return region + "::" + ownerAccount(fn) + "::" + fn.getFunctionName();
     }
 
+    /** The pre-account counter key, still present in persisted state from before this change. */
+    private static String legacyVersionCounterKey(String region, String functionName) {
+        return region + "::" + functionName;
+    }
+
+    /** Package-private accessor for tests that need to seed or inspect counter state. */
+    Map<String, Integer> versionCounters() {
+        return versionCounters;
+    }
+
     public LambdaFunction publishVersion(String region, String functionName, String description) {
         LambdaFunction fn = getFunction(region, functionName);
         functionName = fn.getFunctionName();
-        int version = nextVersionNumber(versionCounterKey(region, fn));
+        int version = nextVersionNumber(versionCounterKey(region, fn),
+                legacyVersionCounterKey(region, functionName));
         LambdaFunction snapshot = new LambdaFunction();
         snapshot.setAccountId(fn.getAccountId());
         snapshot.setFunctionName(fn.getFunctionName());

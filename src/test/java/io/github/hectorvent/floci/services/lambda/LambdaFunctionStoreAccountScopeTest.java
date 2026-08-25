@@ -56,6 +56,18 @@ class LambdaFunctionStoreAccountScopeTest {
                 "the ambient (default-account) partition must stay clean");
     }
 
+    @Test
+    void listAllSeesEveryAccountSoRestartRehydrationCountsThemAll() {
+        // The reserved-concurrency pool is per region and shared across accounts, so the
+        // startup rehydration that feeds it has to see every account's functions or a restart
+        // silently frees capacity that steady-state PutFunctionConcurrency had accounted for.
+        LambdaFunctionStore store = accountAwareStore();
+        store.saveForAccount(DEFAULT_ACCOUNT, REGION, function("default-fn", DEFAULT_ACCOUNT));
+        store.saveForAccount(OTHER_ACCOUNT, REGION, function("other-fn", OTHER_ACCOUNT));
+
+        assertEquals(2, store.listAll().size());
+    }
+
     private LambdaFunctionStore accountAwareStore() {
         return new LambdaFunctionStore(AccountAwareStorageBackend.<LambdaFunction>inMemory(DEFAULT_ACCOUNT));
     }

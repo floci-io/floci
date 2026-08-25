@@ -74,6 +74,22 @@ class LambdaAccountScopedCodeTest {
         assertTrue(LambdaService.versionCounterKey(REGION, a).contains(ACCOUNT_A));
     }
 
+    @Test
+    void publishVersionAdoptsACounterPersistedUnderThePreAccountKey(@TempDir Path baseDir) throws Exception {
+        // The counter map is persisted, and its whole point is that a restart must not re-issue
+        // an already-used version number. Re-keying it must therefore carry the old value
+        // forward rather than restart numbering from 1 over existing snapshots.
+        LambdaService svc = serviceFor(ACCOUNT_A, new CodeStore(baseDir));
+        svc.createFunction(REGION, zipRequest("legacy-fn", "A"));
+        svc.versionCounters().put(REGION + "::legacy-fn", 3);
+
+        LambdaFunction published = svc.publishVersion(REGION, "legacy-fn", null);
+
+        assertEquals("4", published.getVersion());
+        assertNull(svc.versionCounters().get(REGION + "::legacy-fn"),
+                "the migrated legacy entry must not linger and be adopted twice");
+    }
+
     private LambdaFunction functionOwnedBy(String accountId) {
         LambdaFunction fn = new LambdaFunction();
         fn.setAccountId(accountId);
