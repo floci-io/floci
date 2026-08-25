@@ -39,6 +39,9 @@ public class LakeFormationService {
         if (request.getResourceArn() == null) {
             throw new AwsException("InvalidInputException", "ResourceArn is required", 400);
         }
+        if (!request.getResourceArn().startsWith("arn:")) {
+            throw new AwsException("InvalidInputException", "ResourceArn must be a valid ARN", 400);
+        }
         if (storage.describeResource(region, request.getResourceArn()).isPresent()) {
             throw new AwsException("AlreadyExistsException", "Resource is already registered", 400);
         }
@@ -87,6 +90,15 @@ public class LakeFormationService {
 
     public GrantPermissionsResponse grantPermissions(String region, GrantPermissionsRequest request) {
         String catalogId = request.getCatalogId() != null ? request.getCatalogId() : regionResolver.getAccountId();
+        
+        if (request.getPermissionsWithGrantOption() != null) {
+            java.util.List<String> perms = request.getPermissions() != null ? request.getPermissions() : java.util.List.of();
+            for (String grantOption : request.getPermissionsWithGrantOption()) {
+                if (!perms.contains(grantOption)) {
+                    throw new AwsException("InvalidInputException", "PermissionsWithGrantOption must be a subset of Permissions", 400);
+                }
+            }
+        }
         
         PrincipalResourcePermissions p = new PrincipalResourcePermissions();
         p.setPrincipal(request.getPrincipal());
