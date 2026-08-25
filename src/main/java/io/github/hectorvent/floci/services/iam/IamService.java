@@ -1775,6 +1775,18 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         return users.get(userName);
     }
 
+    /**
+     * Looks up a user by name in a specific account's namespace, without throwing when absent.
+     * Mirrors {@link #findRole(String, String)} — users are account-namespaced the same way roles
+     * are, so a caller resolving a user from an ARN must use that ARN's account, not the ambient one.
+     */
+    public Optional<IamUser> findUser(String accountId, String userName) {
+        if (users instanceof AccountAwareStorageBackend<IamUser> aware) {
+            return aware.getForAccount(accountId, userName);
+        }
+        return users.get(userName);
+    }
+
     // =========================================================================
     // IAM Enforcement — session tracking and policy collection
     // =========================================================================
@@ -2048,11 +2060,11 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         }
         if (principalArn.contains(":user/")) {
             String userName = principalArn.substring(principalArn.lastIndexOf('/') + 1);
-            List<String> identityPolicies = collectUserPolicies(userName);
+            List<String> identityPolicies = collectUserPolicies(principalArn);
             if (identityPolicies == null) {
                 throw new AwsException("NoSuchEntity", "User " + userName + " cannot be found.", 404);
             }
-            return new CallerContext(identityPolicies, null, resolveUserBoundaryDocument(userName));
+            return new CallerContext(identityPolicies, null, resolveUserBoundaryDocument(principalArn));
         }
         if (principalArn.contains(":role/")) {
             String roleName = principalArn.substring(principalArn.lastIndexOf('/') + 1);
@@ -2065,8 +2077,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         throw new AwsException("InvalidInput", "PolicySourceArn must identify an IAM user or role.", 400);
     }
 
-    private String resolveUserBoundaryDocument(String userName) {
-        return users.get(userName)
+    private String resolveUserBoundaryDocument(String userArnOrName) {
+        return userFromArnOrName(userArnOrName)
                 .map(IamUser::getPermissionsBoundaryArn)
                 .flatMap(this::resolvePolicy)
                 .map(IamPolicy::getDefaultDocument)
@@ -2077,8 +2089,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         if (roleArn == null) {
             return null;
         }
-        String roleName = roleArn.contains("/") ? roleArn.substring(roleArn.lastIndexOf('/') + 1) : roleArn;
-        return roles.get(roleName)
+        return roleFromArnOrName(roleArn)
                 .map(IamRole::getPermissionsBoundaryArn)
                 .flatMap(this::resolvePolicy)
                 .map(IamPolicy::getDefaultDocument)
@@ -2129,8 +2140,37 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         LOG.infov("Deleted permissions boundary for role: {0}", roleName);
     }
 
-    private List<String> collectUserPolicies(String userName) {
-        Optional<IamUser> userOpt = users.get(userName);
+    /**
+     * Resolves a user for policy collection. Given an ARN, the lookup is scoped to the account the
+     * ARN itself names: two accounts can hold a same-named user, and evaluating account A's ARN
+     * against account B's policies is a cross-account authorization bypass. Given a bare name —
+     * the access-key path, where no ARN exists — the ambient request account still applies.
+     */
+    private Optional<IamUser> userFromArnOrName(String userArnOrName) {
+        if (userArnOrName == null) {
+            return Optional.empty();
+        }
+        if (!userArnOrName.contains("/")) {
+            return users.get(userArnOrName);
+        }
+        String userName = userArnOrName.substring(userArnOrName.lastIndexOf('/') + 1);
+        return findUser(AwsArnUtils.accountOrDefault(userArnOrName, regionResolver.getAccountId()), userName);
+    }
+
+    /** Role-side counterpart of {@link #userFromArnOrName(String)}. */
+    private Optional<IamRole> roleFromArnOrName(String roleArnOrName) {
+        if (roleArnOrName == null) {
+            return Optional.empty();
+        }
+        if (!roleArnOrName.contains("/")) {
+            return roles.get(roleArnOrName);
+        }
+        String roleName = roleArnOrName.substring(roleArnOrName.lastIndexOf('/') + 1);
+        return findRole(AwsArnUtils.accountOrDefault(roleArnOrName, regionResolver.getAccountId()), roleName);
+    }
+
+    private List<String> collectUserPolicies(String userArnOrName) {
+        Optional<IamUser> userOpt = userFromArnOrName(userArnOrName);
         if (userOpt.isEmpty()) {
             return null;
         }
@@ -2168,8 +2208,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         if (roleArn == null) {
             return null;
         }
-        String roleName = roleArn.contains("/") ? roleArn.substring(roleArn.lastIndexOf('/') + 1) : roleArn;
-        Optional<IamRole> roleOpt = roles.get(roleName);
+        Optional<IamRole> roleOpt = roleFromArnOrName(roleArn);
         if (roleOpt.isEmpty()) {
             return null;
         }
