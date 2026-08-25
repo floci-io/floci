@@ -191,7 +191,8 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
             if (fn.getHandler() != null && !fn.getHandler().isBlank()) {
                 env.add("_HANDLER=" + fn.getHandler());
             }
-            env.addAll(awsEnv.sdkBaselineEnv(region, Optional.empty(), addressResolver.flociBaseUrl()));
+            env.addAll(awsEnv.sdkBaselineEnv(region, Optional.empty(), addressResolver.flociBaseUrl(),
+                    Optional.empty(), AwsArnUtils.accountOrDefault(fn.getFunctionArn(), config.defaultAccountId())));
             env.addAll(ContainerLauncher.flociCaEnv(caCert));
             if (fn.getEnvironment() != null) {
                 fn.getEnvironment().forEach((k, v) -> env.add(k + "=" + v));
