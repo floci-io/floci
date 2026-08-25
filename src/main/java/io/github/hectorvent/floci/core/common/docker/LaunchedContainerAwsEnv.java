@@ -10,6 +10,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.UnaryOperator;
+import java.util.regex.Pattern;
 
 /**
  * Builds the baseline AWS SDK environment for a container Floci launches, so the workload
@@ -30,11 +32,21 @@ public class LaunchedContainerAwsEnv {
     /** Host-credential passthrough is a property of the process, so it is worth saying once. */
     private static final AtomicBoolean hostCredentialsWarned = new AtomicBoolean();
 
+    /** AccountResolver reads a 12-digit access-key ID as the caller's account directly. */
+    private static final Pattern ACCOUNT_ID_PATTERN = Pattern.compile("\\d{12}");
+
     private final ContainerReachableEndpoint reachableEndpoint;
+    private final UnaryOperator<String> hostEnv;
 
     @Inject
     public LaunchedContainerAwsEnv(ContainerReachableEndpoint reachableEndpoint) {
+        this(reachableEndpoint, System::getenv);
+    }
+
+    /** Lets tests supply a host environment; Java cannot mutate its own process env. */
+    LaunchedContainerAwsEnv(ContainerReachableEndpoint reachableEndpoint, UnaryOperator<String> hostEnv) {
         this.reachableEndpoint = reachableEndpoint;
+        this.hostEnv = hostEnv;
     }
 
     /**
@@ -68,11 +80,36 @@ public class LaunchedContainerAwsEnv {
     }
 
     /**
+     * Variant for a workload whose owning AWS account is known. When it falls through to
+     * placeholder credentials — no mounted config, no session credentials, which is every
+     * Lambda that never assumes an execution role — a 12-digit {@code ownerAccountId} is
+     * injected as {@code AWS_ACCESS_KEY_ID}, and it wins over Floci's own ambient
+     * {@code AWS_ACCESS_KEY_ID}. The server process's credentials describe the server, not the
+     * container it launches, so they must never override a known owning account: AccountResolver
+     * reads a 12-digit access-key ID as the caller's account directly, and the literal
+     * {@code "test"} it would otherwise see resolves every such container to the emulator's
+     * default (management) account. Account-partitioned reads and writes — EC2 security groups,
+     * IAM service-linked roles — then collide or miss whenever the real resource lives elsewhere.
+     */
+    public List<String> sdkBaselineEnv(String region, Optional<String> awsConfigMountDir,
+                                       Optional<SessionCreds> injectedCredentials, String ownerAccountId) {
+        return sdkBaselineEnv(region, awsConfigMountDir, reachableEndpoint.baseUrl(),
+                injectedCredentials, ownerAccountId);
+    }
+
+    /**
      * Full variant taking both the Floci endpoint the workload should target and optional
      * workload-specific session credentials.
      */
     public List<String> sdkBaselineEnv(String region, Optional<String> awsConfigMountDir,
                                        String flociEndpoint, Optional<SessionCreds> injectedCredentials) {
+        return sdkBaselineEnv(region, awsConfigMountDir, flociEndpoint, injectedCredentials, null);
+    }
+
+    /** Full variant, additionally taking the workload's owning account. */
+    public List<String> sdkBaselineEnv(String region, Optional<String> awsConfigMountDir,
+                                       String flociEndpoint, Optional<SessionCreds> injectedCredentials,
+                                       String ownerAccountId) {
         var env = new ArrayList<String>();
         env.add("AWS_DEFAULT_REGION=" + region);
         env.add("AWS_REGION=" + region);
@@ -88,10 +125,12 @@ public class LaunchedContainerAwsEnv {
             env.add("AWS_SECRET_ACCESS_KEY=" + credentials.secretAccessKey());
             env.add("AWS_SESSION_TOKEN=" + credentials.sessionToken());
         } else {
-            // Use Floci's own env vars, falling back to placeholder credentials.
-            var ak = System.getenv("AWS_ACCESS_KEY_ID");
-            var sk = System.getenv("AWS_SECRET_ACCESS_KEY");
-            var st = System.getenv("AWS_SESSION_TOKEN");
+            // The launched container is a distinct principal from the Floci server process, so
+            // its identity comes from the workload's owning account when we know it; Floci's own
+            // env vars are the fallback for launch paths that don't (ownerAccountId == null).
+            var ak = hostEnv.apply("AWS_ACCESS_KEY_ID");
+            var sk = hostEnv.apply("AWS_SECRET_ACCESS_KEY");
+            var st = hostEnv.apply("AWS_SESSION_TOKEN");
             if ((ak != null || sk != null || st != null) && hostCredentialsWarned.compareAndSet(false, true)) {
                 // The container runs workload code, so surface that it is being handed the
                 // credentials Floci itself was started with (an exported key pair, aws-vault, a
@@ -102,7 +141,8 @@ public class LaunchedContainerAwsEnv {
                 LOG.warnf("Forwarding Floci's own AWS credentials from the environment "
                         + "(AWS_ACCESS_KEY_ID=%s...) into launched containers", abbreviate(ak));
             }
-            env.add("AWS_ACCESS_KEY_ID=" + (ak != null ? ak : "test"));
+            boolean hasOwnerAccountId = ownerAccountId != null && ACCOUNT_ID_PATTERN.matcher(ownerAccountId).matches();
+            env.add("AWS_ACCESS_KEY_ID=" + (hasOwnerAccountId ? ownerAccountId : (ak != null ? ak : "test")));
             env.add("AWS_SECRET_ACCESS_KEY=" + (sk != null ? sk : "test"));
             env.add("AWS_SESSION_TOKEN=" + (st != null ? st : "test"));
         }

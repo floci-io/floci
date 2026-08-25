@@ -345,10 +345,12 @@ class ContainerLauncherTest {
     }
 
     @Test
-    void launchFunction_fallsBackToTestCredentialsWhenEnvUnset() throws Exception {
-        // When System.getenv returns null for AWS vars, credentials should be test/test/test.
-        // Since we can't control System.getenv in unit tests, we verify the values are either
-        // from the environment or the "test" fallback — both are valid.
+    void launchFunction_injectsOwningAccountAsAccessKeyAndFallsBackForTheRest() throws Exception {
+        // The access key identifies the container's owning account to AccountResolver, so it is
+        // the function's resolved account (here the configured default, since this function has
+        // no ARN to derive one from) rather than the literal "test" placeholder. The secret and
+        // session token carry no account identity, so they still come from the host env or fall
+        // back to "test"; System.getenv can't be controlled here, so both are accepted.
         Path codePath = Files.createDirectory(tempDir.resolve("creds-fallback"));
 
         LambdaFunction fn = new LambdaFunction();
@@ -364,12 +366,12 @@ class ContainerLauncherTest {
         String secretKey = env.stream().filter(e -> e.startsWith("AWS_SECRET_ACCESS_KEY=")).findFirst().orElse("");
         String sessionToken = env.stream().filter(e -> e.startsWith("AWS_SESSION_TOKEN=")).findFirst().orElse("");
 
-        // Value should be either the host env var or "test" fallback
-        String expectedAk = System.getenv("AWS_ACCESS_KEY_ID") != null ? System.getenv("AWS_ACCESS_KEY_ID") : "test";
+        // The owning account wins outright — including over a host env var, which describes the
+        // Floci server process and not the container it launched.
         String expectedSk = System.getenv("AWS_SECRET_ACCESS_KEY") != null ? System.getenv("AWS_SECRET_ACCESS_KEY") : "test";
         String expectedSt = System.getenv("AWS_SESSION_TOKEN") != null ? System.getenv("AWS_SESSION_TOKEN") : "test";
 
-        assertEquals("AWS_ACCESS_KEY_ID=" + expectedAk, accessKey);
+        assertEquals("AWS_ACCESS_KEY_ID=000000000000", accessKey);
         assertEquals("AWS_SECRET_ACCESS_KEY=" + expectedSk, secretKey);
         assertEquals("AWS_SESSION_TOKEN=" + expectedSt, sessionToken);
     }
