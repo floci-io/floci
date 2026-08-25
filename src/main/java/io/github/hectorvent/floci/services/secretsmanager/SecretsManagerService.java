@@ -104,7 +104,13 @@ public class SecretsManagerService implements ResourceProvider {
         String storageKey = regionKey(region, name);
         Secret existing = store.get(storageKey).orElse(null);
 
-        if (existing != null && existing.getDeletedDate() == null) {
+        if (existing != null) {
+            // A name inside its recovery window is still taken: the secret is recoverable via
+            // RestoreSecret, so reusing the name has to be refused rather than allowed to
+            // overwrite it. Without this the create would replace the stored secret at the same
+            // key AND clear its deletedDate, so the original value became unrecoverable and
+            // RestoreSecret then reported "was not deleted" - silent data loss.
+            throwIfPendingDeletion(existing);
             throw new AwsException("ResourceExistsException",
                     "A secret with the name " + name + " already exists.", 400);
         }
@@ -549,6 +555,13 @@ public class SecretsManagerService implements ResourceProvider {
             return secret;
         }
 
+        // Guard placed AFTER the force-delete branch on purpose: force-deleting a secret that is
+        // already inside its recovery window is a legitimate "skip the window, remove it now"
+        // escape hatch, so only the scheduling path is refused. Re-scheduling an already-scheduled
+        // secret silently moved its DeletionDate, which would quietly extend a window a caller
+        // believed was already counting down.
+        throwIfPendingDeletion(secret);
+
         int windowDays = (recoveryWindowInDays != null) ? recoveryWindowInDays : defaultRecoveryWindowDays;
         Instant deletedDate = Instant.now().plusSeconds((long) windowDays * 86400);
         secret.setDeletedDate(deletedDate);
@@ -739,6 +752,7 @@ public class SecretsManagerService implements ResourceProvider {
 
     public void tagResource(String secretId, List<Secret.Tag> tags, String region) {
         Secret secret = resolveSecret(secretId, region);
+        throwIfPendingDeletion(secret);
 
         List<Secret.Tag> existing = secret.getTags() != null ? new ArrayList<>(secret.getTags()) : new ArrayList<>();
         for (Secret.Tag newTag : tags) {
@@ -751,6 +765,7 @@ public class SecretsManagerService implements ResourceProvider {
 
     public void untagResource(String secretId, List<String> tagKeys, String region) {
         Secret secret = resolveSecret(secretId, region);
+        throwIfPendingDeletion(secret);
 
         List<Secret.Tag> existing = secret.getTags() != null ? new ArrayList<>(secret.getTags()) : new ArrayList<>();
         existing.removeIf(t -> tagKeys.contains(t.key()));
