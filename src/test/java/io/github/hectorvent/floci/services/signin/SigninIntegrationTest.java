@@ -17,6 +17,7 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasKey;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.not;
+import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -74,7 +75,7 @@ class SigninIntegrationTest {
     }
 
     @Test
-    void malformedTokenJsonUsesSigninErrorEnvelope() {
+    void malformedTokenJsonUsesOauthErrorEnvelope() {
         request()
                 .contentType("application/json")
                 .body("{")
@@ -82,9 +83,99 @@ class SigninIntegrationTest {
                 .post("/v1/token")
                 .then()
                 .statusCode(400)
-                .body("error", equalTo("invalid_request"))
-                .body("message", equalTo("Request body must be valid JSON"))
+                .header("Cache-Control", equalTo("no-store"))
+                .header("X-Amzn-ErrorType", nullValue())
+                .body("error", equalTo("unsupported_grant_type"))
+                .body("error_description", equalTo(
+                        "The authorization grant type is not supported by the authorization server."))
+                .body("$", not(hasKey("message")))
                 .body("$", not(hasKey("__type")));
+
+        String supportedGrantWithTrailingJson = """
+                {"clientId":"%s","grantType":"authorization_code","code":"bogus",
+                 "redirectUri":"%s","codeVerifier":"%s"}{}
+                """.formatted(CLIENT_ID, REDIRECT_URI, verifier());
+        request()
+                .contentType("application/json")
+                .body(supportedGrantWithTrailingJson)
+                .when()
+                .post("/v1/token")
+                .then()
+                .statusCode(400)
+                .header("Cache-Control", equalTo("no-store"))
+                .header("X-Amzn-ErrorType", nullValue())
+                .body("error", equalTo("unsupported_grant_type"))
+                .body("error_description", equalTo(
+                        "The authorization grant type is not supported by the authorization server."));
+    }
+
+    @Test
+    void invalidAuthorizationCodeUsesModeledValidationErrorForJsonAndForm() {
+        Map<String, String> invalidGrant = Map.of(
+                "clientId", CLIENT_ID,
+                "grantType", "authorization_code",
+                "code", "bogus",
+                "redirectUri", REDIRECT_URI,
+                "codeVerifier", verifier());
+
+        request()
+                .contentType("application/json")
+                .body(invalidGrant)
+                .when()
+                .post("/v1/token")
+                .then()
+                .statusCode(400)
+                .header("Cache-Control", equalTo("no-store"))
+                .header("X-Amzn-ErrorType", equalTo("ValidationException"))
+                .body("error", equalTo("INVALID_REQUEST"))
+                .body("message", equalTo(
+                        "The request is missing a required parameter, includes an invalid parameter value, "
+                                + "or is otherwise malformed."))
+                .body("$", not(hasKey("error_description")));
+
+        request()
+                .contentType("application/x-www-form-urlencoded")
+                .body("client_id=" + CLIENT_ID
+                        + "&grant_type=authorization_code"
+                        + "&code=bogus"
+                        + "&redirect_uri=" + java.net.URLEncoder.encode(REDIRECT_URI, StandardCharsets.UTF_8)
+                        + "&code_verifier=" + verifier())
+                .when()
+                .post("/v1/token")
+                .then()
+                .statusCode(400)
+                .header("Cache-Control", equalTo("no-store"))
+                .header("X-Amzn-ErrorType", equalTo("ValidationException"))
+                .body("error", equalTo("INVALID_REQUEST"));
+    }
+
+    @Test
+    void unsupportedGrantAndMalformedFormUseOauthErrorEnvelope() {
+        request()
+                .contentType("application/json")
+                .body(Map.of("clientId", CLIENT_ID, "grantType", "unsupported"))
+                .when()
+                .post("/v1/token")
+                .then()
+                .statusCode(400)
+                .header("Cache-Control", equalTo("no-store"))
+                .header("X-Amzn-ErrorType", nullValue())
+                .body("error", equalTo("unsupported_grant_type"))
+                .body("error_description", equalTo(
+                        "The authorization grant type is not supported by the authorization server."));
+
+        request()
+                .contentType("application/x-www-form-urlencoded")
+                .body("grant_type=%ZZ")
+                .when()
+                .post("/v1/token")
+                .then()
+                .statusCode(400)
+                .header("Cache-Control", equalTo("no-store"))
+                .header("X-Amzn-ErrorType", nullValue())
+                .body("error", equalTo("unsupported_grant_type"))
+                .body("error_description", equalTo(
+                        "The authorization grant type is not supported by the authorization server."));
     }
 
     @Test
@@ -131,7 +222,9 @@ class SigninIntegrationTest {
                 .post("/v1/token")
                 .then()
                 .statusCode(400)
-                .body("error", equalTo("invalid_grant"));
+                .header("Cache-Control", equalTo("no-store"))
+                .header("X-Amzn-ErrorType", equalTo("ValidationException"))
+                .body("error", equalTo("INVALID_REQUEST"));
     }
 
     @Test
@@ -209,7 +302,9 @@ class SigninIntegrationTest {
                 .post("/v1/token")
                 .then()
                 .statusCode(400)
-                .body("error", equalTo("invalid_grant"));
+                .header("Cache-Control", equalTo("no-store"))
+                .header("X-Amzn-ErrorType", equalTo("ValidationException"))
+                .body("error", equalTo("INVALID_REQUEST"));
     }
 
     private String authorize(String verifier, String state) throws Exception {

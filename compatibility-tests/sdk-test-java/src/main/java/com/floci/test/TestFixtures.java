@@ -38,6 +38,7 @@ import software.amazon.awssdk.services.secretsmanager.SecretsManagerClient;
 import software.amazon.awssdk.services.ses.SesClient;
 import software.amazon.awssdk.services.sesv2.SesV2Client;
 import software.amazon.awssdk.services.sfn.SfnClient;
+import software.amazon.awssdk.services.signin.SigninClient;
 import software.amazon.awssdk.services.swf.SwfClient;
 import software.amazon.awssdk.services.sns.SnsClient;
 import software.amazon.awssdk.services.sqs.SqsClient;
@@ -286,6 +287,14 @@ public final class TestFixtures {
 
     public static SnsClient snsClient() {
         return SnsClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static SigninClient signinClient() {
+        return SigninClient.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
                 .credentialsProvider(CREDENTIALS)
