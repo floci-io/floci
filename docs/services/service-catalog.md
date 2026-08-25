@@ -104,8 +104,11 @@ workflow.
 | `UpdateProvisioningArtifact` | Rename a provisioning artifact; only `Name` is applied and the artifact is always reported `Active`. |
 <!-- floci:actions:end -->
 
-Floci lazily exposes the managed **AWS Control Tower Account Factory Portfolio** and its
-Account Factory product the first time portfolios or products are listed or searched.
+Floci lazily creates the managed **AWS Control Tower Account Factory Portfolio** and its
+Account Factory product the first time `ListPortfolios`, `ListAcceptedPortfolioShares`,
+`SearchProducts` or `ProvisionProduct` is called. `SearchProductsAsAdmin` does not trigger
+this, so the Account Factory product is absent from the admin view until one of those
+operations has run.
 `ProvisionProduct` then creates a real Organizations member account through the
 Organizations service — reusing an existing account when `AccountEmail` already matches
 one — moves it under the OU named by the `ManagedOrganizationalUnit` provisioning
