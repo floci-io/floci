@@ -157,8 +157,13 @@ public class MskService {
     }
 
     public MskConfiguration describeConfiguration(String arn) {
+        // Real MSK reports an unknown configuration ARN as BadRequestException (400), not
+        // NotFoundException. The message prefix is a compatibility contract: terraform-provider-aws
+        // (and the Pulumi provider bridging it) substring-matches "Configuration ARN does not exist"
+        // to detect that a configuration is gone, so its post-delete waiter can complete.
         return configurationStorage.get(arn)
-                .orElseThrow(() -> new AwsException("NotFoundException", "Configuration not found: " + arn, 404));
+                .orElseThrow(() -> new AwsException("BadRequestException",
+                        "Configuration ARN does not exist: " + arn, 400));
     }
 
     public PaginatedResult<MskConfiguration> listConfigurations(Integer maxResults, String nextToken) {
