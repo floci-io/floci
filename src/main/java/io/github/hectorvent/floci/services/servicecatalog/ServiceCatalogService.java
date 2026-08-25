@@ -10,7 +10,7 @@ import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.organizations.OrganizationsService;
 import io.github.hectorvent.floci.services.organizations.model.CreateAccountStatus;
-import io.github.hectorvent.floci.services.organizations.model.OrgAccount;
+import io.github.hectorvent.floci.services.organizations.model.OrganizationAccount;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -200,12 +200,12 @@ public class ServiceCatalogService {
                 parameters.put(text(parameter, "Key"), text(parameter, "Value")));
         String email = parameters.get("AccountEmail");
         String accountName = parameters.getOrDefault("AccountName", name);
-        OrgAccount account = organizationsService.listAccounts(accountId).stream()
+        OrganizationAccount account = organizationsService.listAccounts(accountId).stream()
                 .filter(candidate -> email != null && email.equalsIgnoreCase(candidate.getEmail()))
                 .findFirst().orElse(null);
         if (account == null) {
             CreateAccountStatus status = organizationsService.createAccount(
-                    accountId, email, accountName, null, Map.of(), false);
+                    accountId, email, accountName, Map.of(), false);
             if (!"SUCCEEDED".equals(status.getState())) {
                 throw new AwsException("InvalidParametersException",
                         "Control Tower account creation failed: " + status.getFailureReason(), 400);
