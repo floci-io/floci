@@ -20,6 +20,7 @@ import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -293,11 +294,6 @@ class OrganizationsServiceTest {
                 .getAccountId();
         service.moveAccount(MANAGEMENT_ACCOUNT, member, rootId, ouId);
 
-        // The management account is exempt.
-        assertNull(service.effectiveScpLevels(MANAGEMENT_ACCOUNT));
-        // Unknown accounts have no levels.
-        assertNull(service.effectiveScpLevels("999999999999"));
-
         // FullAWSAccess sits on root, OU, and account: three levels.
         List<List<String>> levels = service.effectiveScpLevels(member);
         assertEquals(3, levels.size());
@@ -309,9 +305,34 @@ class OrganizationsServiceTest {
         service.attachPolicy(MANAGEMENT_ACCOUNT, policyId, ouId);
         levels = service.effectiveScpLevels(member);
         assertEquals(2, levels.get(1).size());
+    }
 
-        // Disabling the SCP policy type turns the levels off entirely.
-        service.disablePolicyType(MANAGEMENT_ACCOUNT, rootId, "SERVICE_CONTROL_POLICY");
+    @Test
+    void theManagementAccountIsExemptFromScps() {
+        service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+        String member = service.createAccount(MANAGEMENT_ACCOUNT, "member@example.com", "Member", null, false)
+                .getAccountId();
+
+        // The member is under the same root and does get a ceiling, so the exemption is what
+        // separates the two — not an organization-wide absence of SCPs.
+        assertNotNull(service.effectiveScpLevels(member));
+        assertNull(service.effectiveScpLevels(MANAGEMENT_ACCOUNT));
+    }
+
+    @Test
+    void anAccountOutsideAnyOrganizationHasNoScpCeiling() {
+        service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+        assertNull(service.effectiveScpLevels(OUTSIDER_ACCOUNT));
+    }
+
+    @Test
+    void disablingTheScpPolicyTypeOnTheRootRemovesTheCeiling() {
+        Organization organization = service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+        String member = service.createAccount(MANAGEMENT_ACCOUNT, "member@example.com", "Member", null, false)
+                .getAccountId();
+        assertNotNull(service.effectiveScpLevels(member));
+
+        service.disablePolicyType(MANAGEMENT_ACCOUNT, organization.getRoot().getId(), "SERVICE_CONTROL_POLICY");
         assertNull(service.effectiveScpLevels(member));
     }
 
