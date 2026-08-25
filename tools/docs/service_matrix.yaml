@@ -20,6 +20,7 @@ aliases:
   kafka: msk                            # MSK's SigV4 signing name is "kafka"
   mq: amazonmq                          # Amazon MQ's SigV4 signing name is "mq"
   signin: iam                           # AWS Sign-In facet, at iam.md#aws-sign-in-login-credentials
+  sso: iam                              # Identity Center ListInstances facet on the IAM page
   events: eventbridge
   servicediscovery: cloudmap            # Cloud Map's SigV4 signing name
   elasticmapreduce: emr                 # EMR's SigV4 signing name
