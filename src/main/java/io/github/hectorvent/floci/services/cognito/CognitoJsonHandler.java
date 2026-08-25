@@ -82,6 +82,7 @@ public class CognitoJsonHandler {
             case "ConfirmForgotPassword" -> handleConfirmForgotPassword(request);
             case "GetUser" -> handleGetUser(request);
             case "GetUserAttributeVerificationCode" -> handleGetUserAttributeVerificationCode(request);
+            case "VerifyUserAttribute" -> handleVerifyUserAttribute(request);
             case "UpdateUserAttributes" -> handleUpdateUserAttributes(request);
             case "DeleteUserAttributes" -> handleDeleteUserAttributes(request);
             case "GlobalSignOut" -> handleGlobalSignOut(request);
@@ -644,12 +645,22 @@ public class CognitoJsonHandler {
         return Response.ok(response).build();
     }
 
+    private Response handleVerifyUserAttribute(JsonNode request) {
+        service.verifyUserAttribute(
+                request.path("AccessToken").asText(),
+                request.path("AttributeName").asText(),
+                request.path("Code").asText()
+        );
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
     private Response handleUpdateUserAttributes(JsonNode request) {
         Map<String, String> attrs = new HashMap<>();
         request.path("UserAttributes").forEach(a -> attrs.put(a.path("Name").asText(), a.path("Value").asText()));
-        service.updateUserAttributes(request.path("AccessToken").asText(), attrs);
+        List<Map<String, Object>> deliveryDetails = service.updateUserAttributes(
+                request.path("AccessToken").asText(), attrs);
         ObjectNode response = objectMapper.createObjectNode();
-        response.putArray("CodeDeliveryDetailsList");
+        response.set("CodeDeliveryDetailsList", objectMapper.valueToTree(deliveryDetails));
         return Response.ok(response).build();
     }
 
@@ -727,6 +738,10 @@ public class CognitoJsonHandler {
         }
         node.set("UsernameConfiguration", objectMapper.valueToTree(p.getUsernameConfiguration() != null ? p.getUsernameConfiguration() : new HashMap<>()));
         node.set("AccountRecoverySetting", objectMapper.valueToTree(p.getAccountRecoverySetting() != null ? p.getAccountRecoverySetting() : new HashMap<>()));
+        node.set("UserAttributeUpdateSettings", objectMapper.valueToTree(
+                p.getUserAttributeUpdateSettings() != null
+                        ? p.getUserAttributeUpdateSettings()
+                        : new HashMap<>()));
         node.put("UserPoolTier", p.getUserPoolTier() != null ? p.getUserPoolTier() : "ESSENTIALS");
 
         return node;

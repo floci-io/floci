@@ -74,6 +74,7 @@ Standalone `TagResource` rejects reserved `floci:*` keys. `ListTagsForResource` 
 | ConfirmSignUp | Confirms a pending self-service signup. |
 | GetUser | Returns attributes for the authenticated access-token user. |
 | GetUserAttributeVerificationCode | Issues a verification code for the authenticated user's email or phone_number attribute. |
+| VerifyUserAttribute | Verifies an email or phone_number attribute with its issued verification code. |
 | UpdateUserAttributes | Updates attributes for the authenticated access-token user. |
 | ChangePassword | Changes the authenticated user's password. |
 | ForgotPassword | Starts the local forgot-password flow for a user. |
@@ -92,6 +93,27 @@ Standalone `TagResource` rejects reserved `floci:*` keys. `ListTagsForResource` 
 | Action | Description |
 |--------|-------------|
 | ListUsers | Lists users stored in a user pool. |
+
+## User Attribute Update Verification
+
+`CreateUserPool`, `UpdateUserPool`, and `DescribeUserPool` support
+`UserAttributeUpdateSettings.AttributesRequireVerificationBeforeUpdate` for
+`email` and `phone_number`.
+
+For attributes listed in this setting, `UpdateUserAttributes` keeps the existing
+verified value and sign-in alias active while the new value is pending. It sends
+a verification code to the pending destination and returns the corresponding
+entry in `CodeDeliveryDetailsList`. A successful `VerifyUserAttribute` promotes
+the pending value, switches the alias, and sets the matching `*_verified`
+attribute to `true`.
+
+Without the setting, `UpdateUserAttributes` replaces the value immediately and
+sets the matching `*_verified` attribute to `false` until verification succeeds.
+A verification code is still sent to the replacement value, but Cognito no
+longer retains or exposes the old value. For alias attributes, the old alias is
+removed immediately and the replacement becomes usable for sign-in only after
+successful verification. Incorrect or expired codes don't promote a pending
+value or change its verified state.
 
 ### Groups
 
