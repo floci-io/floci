@@ -170,6 +170,23 @@ class RdsServiceTest {
     }
 
     @Test
+    void createAndModifyDbInstancePersistPubliclyAccessible() {
+        DbInstance instance = rdsService.createDbInstance("pubdb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false, false, null,
+                Map.of(), List.of(), null, null, true, true);
+
+        assertTrue(instance.isPubliclyAccessible());
+        assertTrue(rdsService.getDbInstance("pubdb").isPubliclyAccessible());
+
+        DbInstance modified = rdsService.modifyDbInstance("pubdb", null, null, null,
+                null, null, null, null, false);
+
+        assertFalse(modified.isPubliclyAccessible());
+        assertFalse(rdsService.getDbInstance("pubdb").isPubliclyAccessible());
+    }
+
+    @Test
     void postgresImageUsesRequestedEngineVersionAndDefaultFlavor() {
         assertEquals("postgres:18.1-alpine",
                 RdsService.imageForRequestedVersion("postgres:16-alpine", "18.1"));

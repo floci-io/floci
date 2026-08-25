@@ -460,7 +460,28 @@ public class RdsService implements Resettable {
                                        List<String> vpcSecurityGroupIds,
                                        String optionGroupName,
                                        String region,
-                                       boolean autoMinorVersionUpgrade) {
+                                       boolean autoMinorVersionUpgrade){
+        return createDbInstance(id, engineParam, engineVersion, masterUsername, masterPassword,
+                dbName, dbInstanceClass, allocatedStorage, iamEnabled, paramGroupName,
+                dbSubnetGroupName, dbClusterIdentifier, availabilityZone, multiAz,
+                manageMasterUserPassword, masterUserSecretKmsKeyId, tags, vpcSecurityGroupIds,
+                optionGroupName, region, autoMinorVersionUpgrade, false);
+    }
+
+    public DbInstance createDbInstance(String id, String engineParam, String engineVersion,
+                                       String masterUsername, String masterPassword,
+                                       String dbName, String dbInstanceClass,
+                                       int allocatedStorage, boolean iamEnabled,
+                                       String paramGroupName, String dbSubnetGroupName,
+                                       String dbClusterIdentifier, String availabilityZone,
+                                       boolean multiAz, boolean manageMasterUserPassword,
+                                       String masterUserSecretKmsKeyId,
+                                       Map<String, String> tags,
+                                       List<String> vpcSecurityGroupIds,
+                                       String optionGroupName,
+                                       String region,
+                                       boolean autoMinorVersionUpgrade,
+                                       boolean publiclyAccessible) {
         String effectiveRegion = effectiveRegion(region);
         String dbiResourceId = "db-" + java.util.UUID.randomUUID().toString()
                 .replace("-", "").substring(0, 24).toUpperCase();
@@ -562,6 +583,7 @@ public class RdsService implements Resettable {
         instance.setMultiAz(placement.multiAz());
         instance.setSubnetAvailabilityZones(placement.subnetAvailabilityZones());
         instance.setAutoMinorVersionUpgrade(autoMinorVersionUpgrade);
+        instance.setPubliclyAccessible(publiclyAccessible);
 
         instance.setDbiResourceId(dbiResourceId);
         instance.setDbInstanceArn(dbInstanceArn);
@@ -918,6 +940,15 @@ public class RdsService implements Resettable {
             String id, String newPassword, Boolean iamEnabled,
             String dbSubnetGroupName, List<String> vpcSecurityGroupIds,
             String optionGroupName, String region, Boolean autoMinorVersionUpgrade) {
+        return modifyDbInstance(id, newPassword, iamEnabled, dbSubnetGroupName,
+                vpcSecurityGroupIds, optionGroupName, region, autoMinorVersionUpgrade, null);
+    }
+
+    public DbInstance modifyDbInstance(
+            String id, String newPassword, Boolean iamEnabled,
+            String dbSubnetGroupName, List<String> vpcSecurityGroupIds,
+            String optionGroupName, String region, Boolean autoMinorVersionUpgrade,
+            Boolean publiclyAccessible) {
         String effectiveRegion = effectiveRegion(region);
         DbInstance instance = getDbInstance(id, effectiveRegion);
         instance.setStatus(DbInstanceStatus.AVAILABLE);
@@ -942,6 +973,9 @@ public class RdsService implements Resettable {
         }
         if (autoMinorVersionUpgrade != null) {
             instance.setAutoMinorVersionUpgrade(autoMinorVersionUpgrade);
+        }
+        if (publiclyAccessible != null) {
+            instance.setPubliclyAccessible(publiclyAccessible);
         }
         putInstanceForScope(currentAccountId(), effectiveRegion, id, instance);
         LOG.infov("DB instance {0} modified", id);
