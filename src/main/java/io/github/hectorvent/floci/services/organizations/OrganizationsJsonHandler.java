@@ -81,6 +81,8 @@ public class OrganizationsJsonHandler {
                 case "DescribeAccount" -> describeAccount(request, callerAccountId);
                 case "ListAccounts" -> listAccounts(request, callerAccountId);
                 case "ListAccountsForParent" -> listAccountsForParent(request, callerAccountId);
+                case "ListAccountsWithInvalidEffectivePolicy" ->
+                        listAccountsWithInvalidEffectivePolicy(request, callerAccountId);
                 case "MoveAccount" -> moveAccount(request, callerAccountId);
                 case "RemoveAccountFromOrganization" -> removeAccountFromOrganization(request, callerAccountId);
                 case "LeaveOrganization" -> leaveOrganization(callerAccountId);
@@ -278,6 +280,16 @@ public class OrganizationsJsonHandler {
     private Response listAccountsForParent(JsonNode request, String caller) {
         List<OrganizationAccount> all = service.listAccountsForParent(caller, text(request, "ParentId"));
         return accountsResponse(page(all, OrganizationAccount::getId, request));
+    }
+
+    /**
+     * Effective-policy validation is not modeled in Floci; there is no way to evaluate
+     * which accounts have invalid effective policies. Return an explicit empty list to
+     * match the wire contract without fabricating data.
+     */
+    private Response listAccountsWithInvalidEffectivePolicy(JsonNode request, String caller) {
+        service.listAccounts(caller);
+        return accountsResponse(page(List.of(), OrganizationAccount::getId, request));
     }
 
     private Response accountsResponse(PaginatedResult<OrganizationAccount> page) {

@@ -74,6 +74,7 @@ call `LeaveOrganization`. An account in no organization gets
 | `DescribeAccount` | Returns information about the specified member account. |
 | `ListAccounts` | Lists every account in the organization. |
 | `ListAccountsForParent` | Lists the accounts directly under the specified root or OU. |
+| `ListAccountsWithInvalidEffectivePolicy` | Always returns an empty list; effective-policy validation is not modeled. |
 | `MoveAccount` | Moves an account from one root or OU to another. |
 | `RemoveAccountFromOrganization` | Removes a member account from the organization. |
 | `LeaveOrganization` | Removes the calling member account from its organization. |
