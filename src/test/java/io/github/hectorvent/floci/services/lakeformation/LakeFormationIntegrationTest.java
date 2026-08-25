@@ -175,4 +175,173 @@ class LakeFormationIntegrationTest {
             .statusCode(200)
             .body("PrincipalResourcePermissions[0].Permissions", contains("SELECT"));
     }
+
+    @Test
+    void grantAndListPermissionsTBAC() {
+        String grantBody = "{"
+            + "\"Principal\":{\"DataLakePrincipalIdentifier\":\"arn:aws:iam::111122223333:role/tbac\"},"
+            + "\"Resource\":{\"LFTag\":{\"CatalogId\":\"111122223333\",\"TagKey\":\"env\",\"TagValues\":[\"dev\"]}},"
+            + "\"Permissions\":[\"ASSOCIATE\"]"
+            + "}";
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("Authorization", AUTH_HEADER)
+            .body(grantBody)
+        .when()
+            .post("/GrantPermissions")
+        .then()
+            .statusCode(200);
+
+        String listBody = "{"
+            + "\"Principal\":{\"DataLakePrincipalIdentifier\":\"arn:aws:iam::111122223333:role/tbac\"}"
+            + "}";
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("Authorization", AUTH_HEADER)
+            .body(listBody)
+        .when()
+            .post("/ListPermissions")
+        .then()
+            .statusCode(200)
+            .body("PrincipalResourcePermissions[0].Resource.LFTag.TagKey", equalTo("env"))
+            .body("PrincipalResourcePermissions[0].Resource.LFTag.TagValues", contains("dev"))
+            .body("PrincipalResourcePermissions[0].Permissions", contains("ASSOCIATE"));
+    }
+
+    @Test
+    void resourceLifecycle() {
+        String arn = "arn:aws:s3:::my-lake-bucket";
+        // Register
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"ResourceArn\":\"" + arn + "\",\"RoleArn\":\"arn:aws:iam::111122223333:role/s3-role\",\"UseServiceLinkedRole\":true}")
+        .when()
+            .post("/RegisterResource")
+        .then()
+            .statusCode(200);
+
+        // Describe
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"ResourceArn\":\"" + arn + "\"}")
+        .when()
+            .post("/DescribeResource")
+        .then()
+            .statusCode(200)
+            .body("ResourceInfo.ResourceArn", equalTo(arn));
+
+        // List
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"FilterConditionList\":[{\"Field\":\"RESOURCE_ARN\",\"ComparisonOperator\":\"EQUALS\",\"StringValueList\":[\"" + arn + "\"]}]}")
+        .when()
+            .post("/ListResources")
+        .then()
+            .statusCode(200)
+            .body("ResourceInfoList[0].ResourceArn", equalTo(arn));
+
+        // Deregister
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"ResourceArn\":\"" + arn + "\"}")
+        .when()
+            .post("/DeregisterResource")
+        .then()
+            .statusCode(200);
+            
+        // Describe should fail now
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"ResourceArn\":\"" + arn + "\"}")
+        .when()
+            .post("/DescribeResource")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("EntityNotFoundException"));
+    }
+
+    @Test
+    void listAndDeleteLFTag() {
+        // Create tag
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"TagKey\":\"project\",\"TagValues\":[\"apollo\"]}")
+        .when()
+            .post("/CreateLFTag")
+        .then()
+            .statusCode(200);
+
+        // List
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("Authorization", AUTH_HEADER)
+            .body("{}")
+        .when()
+            .post("/ListLFTags")
+        .then()
+            .statusCode(200)
+            .body("LFTags.TagKey", hasItem("project"));
+
+        // Delete
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"TagKey\":\"project\"}")
+        .when()
+            .post("/DeleteLFTag")
+        .then()
+            .statusCode(200);
+            
+        // Get should fail
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"TagKey\":\"project\"}")
+        .when()
+            .post("/GetLFTag")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("EntityNotFoundException"));
+    }
+
+    @Test
+    void addAndRemoveLFTagsFromResource() {
+        String arn = "arn:aws:s3:::my-tagged-bucket";
+        // Create tag
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"TagKey\":\"classification\",\"TagValues\":[\"confidential\"]}")
+        .when()
+            .post("/CreateLFTag")
+        .then()
+            .statusCode(200);
+
+        // Add to resource
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"Resource\":{\"DataLocation\":{\"ResourceArn\":\"" + arn + "\"}},\"LFTags\":[{\"TagKey\":\"classification\",\"TagValues\":[\"confidential\"]}]}")
+        .when()
+            .post("/AddLFTagsToResource")
+        .then()
+            .statusCode(200);
+
+        // Remove from resource
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"Resource\":{\"DataLocation\":{\"ResourceArn\":\"" + arn + "\"}},\"LFTags\":[{\"TagKey\":\"classification\",\"TagValues\":[\"confidential\"]}]}")
+        .when()
+            .post("/RemoveLFTagsFromResource")
+        .then()
+            .statusCode(200);
+    }
 }
