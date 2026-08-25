@@ -306,6 +306,8 @@ class MskServiceTest {
                 mskService.updateConfiguration(
                         "arn:aws:kafka:us-east-1:000000000000:configuration/missing/id", "desc", "props"));
         assertEquals("BadRequestException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertTrue(ex.getMessage().contains("Configuration ARN does not exist"));
     }
 
     @Test

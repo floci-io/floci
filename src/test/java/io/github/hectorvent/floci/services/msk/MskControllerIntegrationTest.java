@@ -437,6 +437,7 @@ class MskControllerIntegrationTest {
             .put("/v1/configurations/{arn}", "arn:aws:kafka:us-east-1:000000000000:configuration/missing/id")
         .then()
             .statusCode(400)
+            .header("X-Amzn-Errortype", equalTo("BadRequestException"))
             .body("message", containsString("Configuration ARN does not exist"));
     }
 
