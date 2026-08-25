@@ -462,6 +462,11 @@
             <version>1.1.10.8</version>
             <scope>test</scope>
         </dependency>
+        <!-- EFS client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>efs</artifactId>
+        </dependency>
     </dependencies>
 
     <build>

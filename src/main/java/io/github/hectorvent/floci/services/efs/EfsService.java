@@ -10,6 +10,8 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.Date;
 import java.util.List;
 import java.util.UUID;
 import java.util.stream.Collectors;
@@ -88,14 +90,14 @@ public class EfsService implements Resettable {
         fs.setNumberOfMountTargets(0);
         fs.setPerformanceMode(request.getPerformanceMode() != null ? request.getPerformanceMode().name() : "generalPurpose");
         fs.setThroughputMode(request.getThroughputMode() != null ? request.getThroughputMode().name() : "bursting");
-        if (request.getProvisionedThroughputInMibps() != null) {
+        if ("PROVISIONED".equalsIgnoreCase(fs.getThroughputMode()) && request.getProvisionedThroughputInMibps() != null) {
             fs.setProvisionedThroughputInMibps(request.getProvisionedThroughputInMibps());
         }
         fs.setEncrypted(request.getEncrypted() != null ? request.getEncrypted() : false);
         fs.setKmsKeyId(request.getKmsKeyId());
         if (request.getAvailabilityZoneName() != null) {
             fs.setAvailabilityZoneName(request.getAvailabilityZoneName());
-            fs.setAvailabilityZoneId(request.getAvailabilityZoneName() + "-id");
+            fs.setAvailabilityZoneId(generateAzId(request.getAvailabilityZoneName()));
         }
         
         if (request.getTags() != null) {
@@ -120,8 +122,8 @@ public class EfsService implements Resettable {
         }
     }
 
-    public List<FileSystem> describeFileSystems(String region, DescribeFileSystemsRequest request) {
-        return fileSystemStore.scan(k -> k.startsWith(region + "::")).stream()
+    public DescribeFileSystemsResponse describeFileSystems(String region, DescribeFileSystemsRequest request) {
+        List<FileSystem> results = fileSystemStore.scan(k -> k.startsWith(region + "::")).stream()
             .filter(fs -> request.getFileSystemId() == null
                     || request.getFileSystemId().equals(fs.getFileSystemId()))
             .filter(fs -> request.getCreationToken() == null
@@ -134,7 +136,44 @@ public class EfsService implements Resettable {
                 }
                 return fs;
             })
+            .sorted(Comparator.comparing(FileSystem::getFileSystemId))
             .collect(Collectors.toList());
+
+        if (results.isEmpty()) {
+            if (request.getFileSystemId() != null) {
+                throw EfsException.fileSystemNotFound(request.getFileSystemId());
+            }
+            if (request.getCreationToken() != null) {
+                throw EfsException.fileSystemNotFound(request.getCreationToken());
+            }
+        }
+
+        int maxItems = request.getMaxItems() != null ? request.getMaxItems() : 100;
+        int startIndex = 0;
+        if (request.getMarker() != null && !request.getMarker().isEmpty()) {
+            for (int i = 0; i < results.size(); i++) {
+                if (results.get(i).getFileSystemId().equals(request.getMarker())) {
+                    startIndex = i + 1;
+                    break;
+                }
+            }
+        }
+        
+        List<FileSystem> paginated = new ArrayList<>();
+        String nextMarker = null;
+        for (int i = startIndex; i < results.size(); i++) {
+            if (paginated.size() >= maxItems) {
+                nextMarker = results.get(i - 1).getFileSystemId();
+                break;
+            }
+            paginated.add(results.get(i));
+        }
+
+        DescribeFileSystemsResponse response = new DescribeFileSystemsResponse();
+        response.setFileSystems(paginated);
+        response.setMarker(request.getMarker());
+        response.setNextMarker(nextMarker);
+        return response;
     }
 
     public FileSystem getFileSystem(String region, String fileSystemId) {
@@ -149,11 +188,18 @@ public class EfsService implements Resettable {
         synchronized (lockFor(regionKey(region, fileSystemId))) {
             FileSystem fs = getFileSystem(region, fileSystemId);
             if (request.getThroughputMode() != null) {
-            fs.setThroughputMode(request.getThroughputMode().name());
-        }
-        if (request.getProvisionedThroughputInMibps() != null) {
-            fs.setProvisionedThroughputInMibps(request.getProvisionedThroughputInMibps());
-        }
+                String mode = request.getThroughputMode().name();
+                fs.setThroughputMode(mode);
+                if (!"PROVISIONED".equalsIgnoreCase(mode)) {
+                    fs.setProvisionedThroughputInMibps(null);
+                }
+            }
+            if (request.getProvisionedThroughputInMibps() != null) {
+                if (!"PROVISIONED".equalsIgnoreCase(fs.getThroughputMode())) {
+                    throw EfsException.badRequest("ProvisionedThroughputInMibps is only valid with PROVISIONED throughput mode.");
+                }
+                fs.setProvisionedThroughputInMibps(request.getProvisionedThroughputInMibps());
+            }
         fileSystemStore.put(regionKey(region, fileSystemId), fs);
         return fs;
         }
@@ -168,7 +214,7 @@ public class EfsService implements Resettable {
 
         DescribeMountTargetsRequest descReq = new DescribeMountTargetsRequest();
         descReq.setFileSystemId(fileSystemId);
-        List<MountTarget> mountTargets = describeMountTargets(region, descReq);
+        List<MountTarget> mountTargets = describeMountTargets(region, descReq).getMountTargets();
         if (!mountTargets.isEmpty()) {
             throw EfsException.fileSystemInUse(fileSystemId);
         }
@@ -299,7 +345,7 @@ public class EfsService implements Resettable {
             mt.setLifeCycleState(LifeCycleState.available);
             mt.setVpcId("vpc-12345678");
             mt.setAvailabilityZoneName(region + "a");
-            mt.setAvailabilityZoneId(region.replace("-", "") + "-az1");
+            mt.setAvailabilityZoneId(generateAzId(region + "a"));
         mt.setNetworkInterfaceId("eni-" + UUID.randomUUID().toString().replace("-", "").substring(0, 17));
         if (request.getSecurityGroups() != null) {
             mt.setSecurityGroups(new ArrayList<>(request.getSecurityGroups()));
@@ -315,7 +361,7 @@ public class EfsService implements Resettable {
         }
     }
 
-    public List<MountTarget> describeMountTargets(String region, DescribeMountTargetsRequest request) {
+    public DescribeMountTargetsResponse describeMountTargets(String region, DescribeMountTargetsRequest request) {
         if (request.getFileSystemId() == null && request.getMountTargetId() == null && request.getAccessPointId() == null) {
             throw EfsException.badRequest("One of FileSystemId, MountTargetId, or AccessPointId must be specified.");
         }
@@ -323,19 +369,46 @@ public class EfsService implements Resettable {
         List<MountTarget> results = mountTargetStore.scan(k -> k.startsWith(region + "::")).stream()
                 .filter(mt -> request.getFileSystemId() == null || mt.getFileSystemId().equals(request.getFileSystemId()))
                 .filter(mt -> request.getMountTargetId() == null || mt.getMountTargetId().equals(request.getMountTargetId()))
+                .sorted(Comparator.comparing(MountTarget::getMountTargetId))
                 .collect(Collectors.toList());
                 
         // If accessPointId is specified, we would need to filter by access point file system ID, 
         // but EFS AccessPoints resolve to a FileSystemId first.
         if (request.getAccessPointId() != null) {
             AccessPointDescription ap = accessPointStore.get(regionKey(region, request.getAccessPointId())).orElse(null);
-            if (ap == null) {
-                return new ArrayList<>();
+            if (ap != null) {
+                results = results.stream().filter(mt -> mt.getFileSystemId().equals(ap.getFileSystemId())).collect(Collectors.toList());
+            } else {
+                results = new ArrayList<>();
             }
-            results = results.stream().filter(mt -> mt.getFileSystemId().equals(ap.getFileSystemId())).collect(Collectors.toList());
         }
         
-        return results;
+        int maxItems = request.getMaxItems() != null ? request.getMaxItems() : 1000;
+        int startIndex = 0;
+        if (request.getMarker() != null && !request.getMarker().isEmpty()) {
+            for (int i = 0; i < results.size(); i++) {
+                if (results.get(i).getMountTargetId().equals(request.getMarker())) {
+                    startIndex = i + 1;
+                    break;
+                }
+            }
+        }
+        
+        List<MountTarget> paginated = new ArrayList<>();
+        String nextMarker = null;
+        for (int i = startIndex; i < results.size(); i++) {
+            if (paginated.size() >= maxItems) {
+                nextMarker = results.get(i - 1).getMountTargetId();
+                break;
+            }
+            paginated.add(results.get(i));
+        }
+
+        DescribeMountTargetsResponse response = new DescribeMountTargetsResponse();
+        response.setMountTargets(paginated);
+        response.setMarker(request.getMarker());
+        response.setNextMarker(nextMarker);
+        return response;
     }
 
     public void deleteMountTarget(String region, String mountTargetId) {
@@ -409,6 +482,9 @@ public class EfsService implements Resettable {
         ap.setRootDirectory(request.getRootDirectory());
         if (request.getTags() != null) {
             ap.setTags(new ArrayList<>(request.getTags()));
+            ap.getTags().stream().filter(t -> "Name".equals(t.getKey())).findFirst().ifPresent(tag -> {
+                ap.setName(tag.getValue());
+            });
         }
         ap.setLifeCycleState(LifeCycleState.available);
         ap.setOwnerId(regionResolver.getAccountId());
@@ -423,6 +499,14 @@ public class EfsService implements Resettable {
         return accessPointStore.scan(k -> k.startsWith(region + "::")).stream()
                 .filter(ap -> fileSystemId == null || ap.getFileSystemId().equals(fileSystemId))
                 .filter(ap -> accessPointId == null || ap.getAccessPointId().equals(accessPointId))
+                .map(ap -> {
+                    if (ap.getTags() != null) {
+                        ap.getTags().stream().filter(t -> "Name".equals(t.getKey())).findFirst().ifPresent(tag -> {
+                            ap.setName(tag.getValue());
+                        });
+                    }
+                    return ap;
+                })
                 .collect(Collectors.toList());
     }
 
@@ -492,5 +576,22 @@ public class EfsService implements Resettable {
 
     private String regionKey(String region, String id) {
         return region + "::" + id;
+    }
+
+    private String generateAzId(String azName) {
+        if (azName == null || azName.length() < 2) return azName + "-id";
+        String region = azName.substring(0, azName.length() - 1);
+        char letter = azName.charAt(azName.length() - 1);
+        int num = (letter >= 'a' && letter <= 'z') ? (letter - 'a' + 1) : 1;
+        
+        String shortCode = region;
+        String[] parts = region.split("-");
+        if (parts.length == 3) {
+            String mid = parts[1].replace("north", "n").replace("south", "s")
+                                 .replace("east", "e").replace("west", "w")
+                                 .replace("central", "c");
+            shortCode = parts[0] + mid + parts[2];
+        }
+        return shortCode + "-az" + num;
     }
 }

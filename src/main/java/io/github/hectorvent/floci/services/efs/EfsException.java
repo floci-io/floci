@@ -48,8 +48,4 @@ public class EfsException extends AwsException {
     public static EfsException badRequest(String message) {
         return new EfsException(Status.BAD_REQUEST, "BadRequest", message);
     }
-    
-    public static EfsException idempotentParameterMismatch() {
-        return new EfsException(Status.BAD_REQUEST, "IdempotentParameterMismatch", "A resource with this token already exists with different parameters.");
-    }
 }

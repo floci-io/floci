@@ -10,7 +10,9 @@ import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 public class DescribeTagsRequest {
 
     private String fileSystemId;
+    @jakarta.ws.rs.QueryParam("Marker")
     private String marker;
+    @jakarta.ws.rs.QueryParam("MaxItems")
     private Integer maxItems;
 
     public String getFileSystemId() {

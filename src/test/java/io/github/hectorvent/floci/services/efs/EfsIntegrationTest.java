@@ -70,6 +70,7 @@ class EfsIntegrationTest {
             .contentType("application/json")
             .body("""
                 {
+                    "ThroughputMode": "provisioned",
                     "ProvisionedThroughputInMibps": 50.0
                 }
                 """)

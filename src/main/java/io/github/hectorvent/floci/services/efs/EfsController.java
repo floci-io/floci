@@ -44,8 +44,7 @@ public class EfsController {
     @Path("/file-systems")
     public Response describeFileSystems(@Context HttpHeaders headers, @jakarta.ws.rs.BeanParam DescribeFileSystemsRequest request) {
         String region = regionResolver.resolveRegion(headers);
-        DescribeFileSystemsResponse response = new DescribeFileSystemsResponse();
-        response.setFileSystems(efsService.describeFileSystems(region, request));
+        DescribeFileSystemsResponse response = efsService.describeFileSystems(region, request);
         return Response.ok(response).build();
     }
 
@@ -77,11 +76,36 @@ public class EfsController {
 
     @GET
     @Path("/tags/{FileSystemId}")
-    public Response describeTags(@Context HttpHeaders headers, @PathParam("FileSystemId") String fileSystemId) {
+    public Response describeTags(@Context HttpHeaders headers, @PathParam("FileSystemId") String fileSystemId, @jakarta.ws.rs.BeanParam DescribeTagsRequest request) {
         String region = regionResolver.resolveRegion(headers);
         FileSystem fs = efsService.getFileSystem(region, fileSystemId);
+        
+        java.util.List<Tag> tags = fs.getTags() != null ? fs.getTags() : new java.util.ArrayList<>();
+        int maxItems = request.getMaxItems() != null ? request.getMaxItems() : 100;
+        int startIndex = 0;
+        if (request.getMarker() != null && !request.getMarker().isEmpty()) {
+            for (int i = 0; i < tags.size(); i++) {
+                if (tags.get(i).getKey().equals(request.getMarker())) {
+                    startIndex = i + 1;
+                    break;
+                }
+            }
+        }
+        
+        java.util.List<Tag> paginated = new java.util.ArrayList<>();
+        String nextMarker = null;
+        for (int i = startIndex; i < tags.size(); i++) {
+            if (paginated.size() >= maxItems) {
+                nextMarker = tags.get(i - 1).getKey();
+                break;
+            }
+            paginated.add(tags.get(i));
+        }
+        
         DescribeTagsResponse res = new DescribeTagsResponse();
-        res.setTags(fs.getTags());
+        res.setTags(paginated);
+        res.setMarker(request.getMarker());
+        res.setNextMarker(nextMarker);
         return Response.ok(res).build();
     }
 
@@ -131,8 +155,7 @@ public class EfsController {
     @Path("/mount-targets")
     public Response describeMountTargets(@Context HttpHeaders headers, @jakarta.ws.rs.BeanParam DescribeMountTargetsRequest request) {
         String region = regionResolver.resolveRegion(headers);
-        DescribeMountTargetsResponse response = new DescribeMountTargetsResponse();
-        response.setMountTargets(efsService.describeMountTargets(region, request));
+        DescribeMountTargetsResponse response = efsService.describeMountTargets(region, request);
         return Response.ok(response).build();
     }
 
