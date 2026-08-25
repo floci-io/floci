@@ -919,9 +919,10 @@ public class OrganizationsService implements ScpProvider {
         if (!scpEnabled) {
             return null;
         }
+        List<OrganizationPolicy> organizationPolicies = policiesIn(organization);
         List<List<String>> levels = new ArrayList<>();
         for (String node : ancestryOf(organization, accountId)) {
-            List<String> documents = policiesIn(organization).stream()
+            List<String> documents = organizationPolicies.stream()
                     .filter(policy -> SERVICE_CONTROL_POLICY.equals(policy.getType())
                             && policy.getTargets().contains(node))
                     .map(OrganizationPolicy::getContent)

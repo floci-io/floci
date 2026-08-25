@@ -143,6 +143,11 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         // Service control policies from the caller's organization, when the Organizations
         // service is present and SCP enforcement is enabled. Resolved lazily via Instance
         // to avoid a hard IAM → Organizations dependency.
+        //
+        // Resolved before resolveCallerContext because the account-root branch below needs to
+        // know whether a ceiling exists in order to decide between enforcing and bypassing. That
+        // costs an organization lookup on requests that then bypass; both flags are opt-in, and
+        // effectiveScpLevels returns null immediately when SCP enforcement is off.
         List<List<String>> scpLevels = scpProvider.isResolvable()
                 ? scpProvider.get().effectiveScpLevels(accountId)
                 : null;
