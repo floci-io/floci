@@ -27,6 +27,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -253,6 +254,48 @@ class OrganizationsCfnProvisionerTest {
     }
 
     @Test
+    void anAccountThatFailsToMoveStillCarriesItsPhysicalIdForRollback() {
+        CreateAccountStatus status = new CreateAccountStatus();
+        status.setState("SUCCEEDED");
+        status.setAccountId("123456789012");
+        when(organizations.createAccount(eq(ACCOUNT), anyString(), anyString(), any(), eq(false)))
+                .thenReturn(status);
+        when(organizations.describeAccount(ACCOUNT, "123456789012")).thenReturn(account(ROOT_ID));
+        // A ParentIds entry pointing at an OU that isn't there — a broken Ref or a stale literal.
+        doThrow(new AwsException("DestinationParentNotFoundException", "no such parent", 400))
+                .when(organizations).moveAccount(anyString(), anyString(), anyString(), anyString());
+
+        StackResource r = resource("AWS::Organizations::Account", "Dev");
+        ObjectNode props = mapper.createObjectNode()
+                .put("AccountName", "Dev").put("Email", "dev@example.com");
+        props.putArray("ParentIds").add("ou-ab12-missing1");
+
+        assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx()));
+
+        // CreateAccount already succeeded, so the account is a real member of the organization.
+        // Without the physical id, CloudFormation's rollback has nothing to call delete() with and
+        // the account is stranded outside the stack.
+        assertEquals("123456789012", r.getPhysicalId());
+    }
+
+    @Test
+    void aPolicyThatFailsToAttachStillCarriesItsPhysicalIdForRollback() {
+        when(organizations.createPolicy(eq(ACCOUNT), anyString(), any(), anyString(), anyString(), any()))
+                .thenReturn(policy());
+        doThrow(new AwsException("TargetNotFoundException", "no such target", 400))
+                .when(organizations).attachPolicy(anyString(), anyString(), anyString());
+
+        StackResource r = resource("AWS::Organizations::Policy", "Scp");
+        ObjectNode props = mapper.createObjectNode()
+                .put("Name", "scp").put("Type", "SERVICE_CONTROL_POLICY").put("Content", "{}");
+        props.putArray("TargetIds").add("ou-ab12-missing1");
+
+        assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx()));
+
+        assertEquals("p-abcd1234", r.getPhysicalId());
+    }
+
+    @Test
     void aFailedCreateAccountFailsTheResource() {
         CreateAccountStatus status = new CreateAccountStatus();
         status.setState("FAILED");
@@ -357,6 +400,28 @@ class OrganizationsCfnProvisionerTest {
         assertEquals("rp-abcd1234", r.getAttributes().get("Id"));
         assertEquals("arn:aws:organizations::" + ACCOUNT + ":resourcepolicy/" + ORG_ID + "/rp-abcd1234",
                 r.getAttributes().get("Arn"));
+    }
+
+    @Test
+    void resourcePolicyUpdatePassesTheFullTagSetSoDroppedKeysAreRemoved() {
+        when(organizations.putResourcePolicy(eq(ACCOUNT), anyString(), any()))
+                .thenReturn(new OrganizationsService.ResourcePolicyView("rp-abcd1234",
+                        "arn:aws:organizations::" + ACCOUNT + ":resourcepolicy/" + ORG_ID + "/rp-abcd1234",
+                        "{}", Map.of()));
+
+        StackResource r = resource("AWS::Organizations::ResourcePolicy", "Rp");
+        r.setPhysicalId("rp-abcd1234");
+        ObjectNode props = mapper.createObjectNode();
+        props.putObject("Content").put("Version", "2012-10-17");
+        // The previous revision also carried "owner"; this one drops it.
+        props.putArray("Tags").addObject().put("Key", "env").put("Value", "prod");
+
+        provisioner.provision(r, props, ctx());
+
+        // putResourcePolicy replaces the tag map, so handing it exactly the template's set is what
+        // removes the dropped key. The other three types reach the same end via replaceTags, which
+        // cannot be used here because a resource policy is not a TagResource target.
+        verify(organizations).putResourcePolicy(eq(ACCOUNT), anyString(), eq(Map.of("env", "prod")));
     }
 
     // ──────────────────────────── Delete ────────────────────────────

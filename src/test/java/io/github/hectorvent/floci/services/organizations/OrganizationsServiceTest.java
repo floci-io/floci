@@ -196,6 +196,26 @@ class OrganizationsServiceTest {
     }
 
     @Test
+    void putResourcePolicyReplacesTagsRatherThanMergingThem() {
+        service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+        String content = "{\"Version\":\"2012-10-17\"}";
+
+        service.putResourcePolicy(MANAGEMENT_ACCOUNT, content, Map.of("env", "test", "owner", "platform"));
+        assertEquals(Map.of("env", "test", "owner", "platform"),
+                service.describeResourcePolicy(MANAGEMENT_ACCOUNT).tags());
+
+        // The resource policy is not addressable by TagResource/UntagResource, so Put is the only
+        // way a dropped key can be removed — CloudFormation relies on this to converge on update.
+        service.putResourcePolicy(MANAGEMENT_ACCOUNT, content, Map.of("env", "prod"));
+        assertEquals(Map.of("env", "prod"), service.describeResourcePolicy(MANAGEMENT_ACCOUNT).tags());
+
+        // Omitting Tags entirely is "don't touch", matching how the provisioner treats an absent
+        // Tags property on every other Organizations type.
+        service.putResourcePolicy(MANAGEMENT_ACCOUNT, content, null);
+        assertEquals(Map.of("env", "prod"), service.describeResourcePolicy(MANAGEMENT_ACCOUNT).tags());
+    }
+
+    @Test
     void anAccountOutsideAnyOrganizationGetsNotInUse() {
         AwsException error = assertThrows(AwsException.class,
                 () -> service.describeOrganization(OUTSIDER_ACCOUNT));

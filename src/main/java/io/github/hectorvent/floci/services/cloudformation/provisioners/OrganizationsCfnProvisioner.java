@@ -162,13 +162,18 @@ public class OrganizationsCfnProvisioner implements CfnResourceProvisioner {
             account = organizationsService.describeAccount(ctx.accountId(), status.getAccountId());
         }
 
+        // Claim the physical id before the move. CreateAccount has already made this a real member
+        // of the organization, so if moveAccount throws — a broken Ref or a stale literal in
+        // ParentIds raises DestinationParentNotFoundException — CloudFormation's rollback still has
+        // an id to call delete() with. Setting it afterwards would strand the account unmanaged.
+        r.setPhysicalId(account.getId());
+
         if (desiredParent != null && !desiredParent.equals(account.getParentId())) {
             organizationsService.moveAccount(
                     ctx.accountId(), account.getId(), account.getParentId(), desiredParent);
             account = organizationsService.describeAccount(ctx.accountId(), account.getId());
         }
 
-        r.setPhysicalId(account.getId());
         r.getAttributes().put("AccountId", account.getId());
         r.getAttributes().put("Arn", account.getArn());
         r.getAttributes().put("Status", account.getStatus());
@@ -196,9 +201,12 @@ public class OrganizationsCfnProvisioner implements CfnResourceProvisioner {
         } else {
             policy = organizationsService.createPolicy(ctx.accountId(), content, description, name, type, tags);
         }
+        // Same ordering as provisionAccount: the policy already exists once createPolicy returns,
+        // so claim the id before reconcileTargets, whose attach/detach calls can throw.
+        r.setPhysicalId(policy.getId());
+
         reconcileTargets(ctx.accountId(), policy, desiredTargets);
 
-        r.setPhysicalId(policy.getId());
         r.getAttributes().put("Id", policy.getId());
         r.getAttributes().put("Arn", policy.getArn());
         r.getAttributes().put("AwsManaged", String.valueOf(policy.isAwsManaged()));

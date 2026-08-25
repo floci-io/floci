@@ -898,6 +898,12 @@ public class OrganizationsService {
         }
         organization.setResourcePolicyContent(content);
         if (tags != null) {
+            // Put replaces rather than merges: a caller that supplies Tags is stating the full set,
+            // so a key it no longer lists is dropped. The resource policy is not addressable by
+            // TagResource/UntagResource the way accounts, OUs, roots and policies are, so this call
+            // is the only way CloudFormation can converge Tags on an update. Omitting Tags
+            // entirely (null) leaves the existing ones untouched.
+            organization.getResourcePolicyTags().clear();
             organization.getResourcePolicyTags().putAll(tags);
         }
         organizations.putForAccount(organization.getMasterAccountId(), organization.getId(), organization);
