@@ -467,6 +467,10 @@ Note that `aws:PrincipalArn` is populated only for principals whose ARN is known
 assumed-role sessions. It stays absent for the bare account-id key, so a principal-scoped guardrail
 keyed on `aws:PrincipalArn` does not fire against the account root.
 
+A level containing an SCP document that fails to parse denies every action at that level. The
+ceiling cannot tell what an unreadable guardrail would have said, and every target also carries
+`FullAWSAccess`, so dropping the bad document would leave the level allowing everything.
+
 The ceiling is attached by the request filter, which is the only producer of SCP levels. Two
 evaluation paths therefore run without one and are **not** SCP-bounded: `SimulatePrincipalPolicy`,
 and the field-level authorization check on the AppSync GraphQL IAM-auth path (the coarse AppSync
