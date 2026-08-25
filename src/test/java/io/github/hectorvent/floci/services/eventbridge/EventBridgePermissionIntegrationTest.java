@@ -184,7 +184,7 @@ class EventBridgePermissionIntegrationTest {
 
     @Test
     @Order(6)
-    void putPermissionOnNonExistentBusReturns404() {
+    void putPermissionOnNonExistentBusReturnsResourceNotFound() {
         given()
             .contentType(EVENT_BRIDGE_CONTENT_TYPE)
             .header("X-Amz-Target", "AWSEvents.PutPermission")
@@ -199,7 +199,8 @@ class EventBridgePermissionIntegrationTest {
         .when()
             .post("/")
         .then()
-            .statusCode(404);
+            .statusCode(400)
+            .body("__type", equalTo("ResourceNotFoundException"));
     }
 
     @Test
