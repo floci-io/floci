@@ -96,6 +96,10 @@ services:
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/rds/RdsQueryHandler.java, mode: switch }
     exclude_actions: [SubnetIds, VpcSecurityGroupIds, OptionsToRemove]
+  - service: route53resolver
+    doc: docs/services/route53resolver.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/route53resolver/Route53ResolverJsonHandler.java, mode: switch }
   - service: secretsmanager
     doc: docs/services/secrets-manager.md
     sources:

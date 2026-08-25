@@ -1,14 +1,29 @@
 # Route 53 Resolver
 
-## Supported operations
+## Supported Actions
 
-| Family | Operations |
-|---|---|
-| DNS Firewall domain lists (AWS-managed) | `ListFirewallDomainLists`, `GetFirewallDomainList` |
-| DNS Firewall domain lists (custom) | `CreateFirewallDomainList`, `DeleteFirewallDomainList` |
-| Resolver endpoints | `CreateResolverEndpoint`, `GetResolverEndpoint`, `ListResolverEndpoints`, `UpdateResolverEndpoint`, `DeleteResolverEndpoint` |
-| Resolver rules | `CreateResolverRule`, `GetResolverRule`, `ListResolverRules`, `UpdateResolverRule`, `DeleteResolverRule` |
-| Resolver rule associations | `AssociateResolverRule`, `DisassociateResolverRule`, `GetResolverRuleAssociation`, `ListResolverRuleAssociations` |
+<!-- floci:actions:start -->
+| Action | Description |
+| --- | --- |
+| `ListFirewallDomainLists` | Lists all DNS Firewall domain lists, including the four AWS-managed lists computed per region. |
+| `GetFirewallDomainList` | Returns a single DNS Firewall domain list by id, whether AWS-managed or custom. |
+| `CreateFirewallDomainList` | Creates a custom DNS Firewall domain list with a random-suffix `rslvr-fdl-` id. |
+| `DeleteFirewallDomainList` | Deletes a custom DNS Firewall domain list; AWS-managed lists cannot be deleted. |
+| `CreateResolverEndpoint` | Creates an inbound or outbound resolver endpoint, returned immediately as `OPERATIONAL`. |
+| `DeleteResolverEndpoint` | Deletes a resolver endpoint and returns its final description. |
+| `GetResolverEndpoint` | Returns a resolver endpoint by id. |
+| `ListResolverEndpoints` | Lists all resolver endpoints. |
+| `UpdateResolverEndpoint` | Updates a resolver endpoint's `Name` and `ResolverEndpointType`; `IpAddresses` changes are not modelled. |
+| `CreateResolverRule` | Creates a resolver rule, returned immediately as `COMPLETE`; `ResolverEndpointId` is not validated against an existing endpoint. |
+| `DeleteResolverRule` | Deletes a resolver rule and returns its final description. |
+| `GetResolverRule` | Returns a resolver rule by id. |
+| `ListResolverRules` | Lists all resolver rules. |
+| `UpdateResolverRule` | Updates a resolver rule's mutable configuration. |
+| `AssociateResolverRule` | Associates a resolver rule with a VPC, returned immediately as `COMPLETE`. |
+| `DisassociateResolverRule` | Removes the association between a resolver rule and a VPC. |
+| `GetResolverRuleAssociation` | Returns a resolver rule association by id. |
+| `ListResolverRuleAssociations` | Lists all resolver rule associations. |
+<!-- floci:actions:end -->
 
 ## Design notes
 
