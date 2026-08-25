@@ -789,9 +789,9 @@ public class IamService implements SessionAccountLookup {
      * keys; quota values are cross-checked against AWS's published IAM service quotas
      * (docs.aws.amazon.com/general/latest/gr/iam-service.html), though floci itself enforces
      * only the 5-versions-per-policy cap in {@link #createPolicyVersion}. Resources floci does
-     * not track at all (MFA devices, SAML/OIDC providers, server certificates, account password -
-     * all stub-empty elsewhere in this handler) are reported as zero rather than omitted, so
-     * callers indexing into the full AWS field set don't hit a missing-key error.
+     * not track at all (MFA devices, SAML providers, server certificates, account password - all
+     * stub-empty elsewhere in this handler) are reported as zero rather than omitted, so callers
+     * indexing into the full AWS field set don't hit a missing-key error.
      */
     public Map<String, Long> getAccountSummary() {
         long localPolicyCount = 0;
