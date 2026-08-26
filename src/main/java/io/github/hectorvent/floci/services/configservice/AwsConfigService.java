@@ -51,6 +51,16 @@ public class AwsConfigService {
     private static final String INVALID_NEXT_TOKEN_MESSAGE =
             "The specified next token is not valid. Specify the nextToken string that was returned "
                     + "in the previous response to get the next page of results.";
+    /** Enum shapes from the Config model (config/2014-11-12/service-2.json). */
+    private static final Set<String> VALID_RULE_OWNERS =
+            Set.of("CUSTOM_LAMBDA", "AWS", "CUSTOM_POLICY");
+    private static final Set<String> VALID_EXECUTION_FREQUENCIES =
+            Set.of("One_Hour", "Three_Hours", "Six_Hours", "Twelve_Hours", "TwentyFour_Hours");
+    private static final Set<String> VALID_RULE_STATES =
+            Set.of("ACTIVE", "DELETING", "DELETING_RESULTS", "EVALUATING");
+    private static final Set<String> VALID_EVALUATION_MODES = Set.of("DETECTIVE", "PROACTIVE");
+    /** {@code ComplianceTypes} is a list of ComplianceType with {@code max: 3}. */
+    private static final int MAX_COMPLIANCE_TYPE_FILTERS = 3;
     private static final int RULE_CONTRIBUTOR_CAP = 25;
     private static final int RESOURCE_CONTRIBUTOR_CAP = 100;
 
@@ -157,6 +167,18 @@ public class AwsConfigService {
         if (requested.source() == null || isBlank(requested.source().owner())) {
             throw new AwsException("InvalidParameterValueException",
                     "Source with Owner must be specified.", 400);
+        }
+        // The whole modeled ConfigRule is stored and echoed back, so every enum-typed member
+        // it keeps is checked here rather than accepted verbatim.
+        requireEnum(requested.source().owner(), VALID_RULE_OWNERS, "Source.Owner");
+        requireEnum(requested.maximumExecutionFrequency(), VALID_EXECUTION_FREQUENCIES,
+                "MaximumExecutionFrequency");
+        requireEnum(requested.configRuleState(), VALID_RULE_STATES, "ConfigRuleState");
+        if (requested.evaluationModes() != null) {
+            for (EvaluationModeConfiguration mode : requested.evaluationModes()) {
+                requireEnum(mode == null ? null : mode.mode(), VALID_EVALUATION_MODES,
+                        "EvaluationModes.Mode");
+            }
         }
         String ruleName = requested.configRuleName();
         Map<String, ConfigRule> store = rulesFor(region);
@@ -351,6 +373,7 @@ public class AwsConfigService {
 
     public Paged<ComplianceByConfigRule> describeComplianceByConfigRule(String region, List<String> ruleNames,
             List<String> complianceTypes, String nextToken) {
+        validateComplianceTypeFilter(complianceTypes);
         List<ComplianceByConfigRule> entries = new ArrayList<>();
         for (ConfigRule rule : describeConfigRules(region, ruleNames)) {
             Compliance compliance = complianceForRule(region, rule.configRuleName());
@@ -363,6 +386,7 @@ public class AwsConfigService {
 
     public Paged<ComplianceByResource> describeComplianceByResource(String region, String resourceType,
             String resourceId, List<String> complianceTypes, Integer limit, String nextToken) {
+        validateComplianceTypeFilter(complianceTypes);
         if (!isBlank(resourceId) && isBlank(resourceType)) {
             throw new AwsException("InvalidParameterValueException",
                     "ResourceType must be specified when ResourceId is provided.", 400);
@@ -384,6 +408,7 @@ public class AwsConfigService {
 
     public Paged<EvaluationResult> getComplianceDetailsByConfigRule(String region, String ruleName,
             List<String> complianceTypes, Integer limit, String nextToken) {
+        validateComplianceTypeFilter(complianceTypes);
         requireRule(region, ruleName);
         List<EvaluationResult> results = evaluationsFor(region)
                 .getOrDefault(ruleName, Map.of()).values().stream()
@@ -397,6 +422,7 @@ public class AwsConfigService {
 
     public Paged<EvaluationResult> getComplianceDetailsByResource(String region, String resourceType,
             String resourceId, List<String> complianceTypes, String nextToken) {
+        validateComplianceTypeFilter(complianceTypes);
         if (isBlank(resourceType) || isBlank(resourceId)) {
             throw new AwsException("InvalidParameterValueException",
                     "ResourceType and ResourceId must be specified.", 400);
@@ -515,6 +541,36 @@ public class AwsConfigService {
 
     private static boolean matchesComplianceFilter(List<String> complianceTypes, String complianceType) {
         return complianceTypes == null || complianceTypes.isEmpty() || complianceTypes.contains(complianceType);
+    }
+
+    /**
+     * A {@code ComplianceTypes} filter outside the modeled enum (or longer than the list's
+     * {@code max: 3}) would otherwise match nothing and read to the caller as "no results"
+     * instead of the rejection AWS answers.
+     */
+    private static void validateComplianceTypeFilter(List<String> complianceTypes) {
+        if (complianceTypes == null || complianceTypes.isEmpty()) {
+            return;
+        }
+        if (complianceTypes.size() > MAX_COMPLIANCE_TYPE_FILTERS) {
+            throw new AwsException("InvalidParameterValueException",
+                    "ComplianceTypes accepts at most " + MAX_COMPLIANCE_TYPE_FILTERS + " values.", 400);
+        }
+        for (String complianceType : complianceTypes) {
+            requireEnum(complianceType, VALID_COMPLIANCE_TYPES, "ComplianceTypes");
+        }
+    }
+
+    /** Rejects a non-blank value that is not a member of the shape's enum; a null/blank value is left alone. */
+    private static void requireEnum(String value, Set<String> allowed, String memberName) {
+        if (isBlank(value) || allowed.contains(value)) {
+            return;
+        }
+        throw new AwsException("InvalidParameterValueException",
+                "Value '" + value + "' at '" + memberName + "' failed to satisfy constraint: "
+                        + "Member must satisfy enum value set: ["
+                        + allowed.stream().sorted().collect(Collectors.joining(", ")) + "]",
+                400);
     }
 
     private ComplianceContributorCount contributorCount(long count, int cap) {

@@ -266,4 +266,95 @@ class ConfigRuleIntegrationTest {
             .statusCode(400)
             .body("__type", equalTo("NoSuchConfigRuleException"));
     }
+
+    /**
+     * PutConfigRule now deserializes the whole modeled ConfigRule and stores it, so every
+     * enum-typed member it keeps has to be checked: {@code Source/Owner},
+     * {@code MaximumExecutionFrequency}, {@code ConfigRuleState} and
+     * {@code EvaluationModes[].Mode}. A rule stored with a value outside its enum is echoed
+     * straight back by DescribeConfigRules as a rule AWS would never have accepted.
+     */
+    @Test
+    @Order(11)
+    void putConfigRuleRejectsValuesOutsideTheModeledEnums() {
+        record Case(String name, String body) { }
+        Case[] cases = {
+            new Case("Owner", """
+                {"ConfigRule": {"ConfigRuleName": "rule-enum-owner",
+                 "Source": {"Owner": "CUSTOM", "SourceIdentifier": "X"}}}"""),
+            new Case("MaximumExecutionFrequency", """
+                {"ConfigRule": {"ConfigRuleName": "rule-enum-freq",
+                 "Source": {"Owner": "AWS", "SourceIdentifier": "X"},
+                 "MaximumExecutionFrequency": "Two_Hours"}}"""),
+            new Case("ConfigRuleState", """
+                {"ConfigRule": {"ConfigRuleName": "rule-enum-state",
+                 "Source": {"Owner": "AWS", "SourceIdentifier": "X"},
+                 "ConfigRuleState": "PAUSED"}}"""),
+            new Case("EvaluationMode", """
+                {"ConfigRule": {"ConfigRuleName": "rule-enum-mode",
+                 "Source": {"Owner": "AWS", "SourceIdentifier": "X"},
+                 "EvaluationModes": [{"Mode": "REACTIVE"}]}}"""),
+        };
+        for (Case c : cases) {
+            given()
+                .header("X-Amz-Target", TARGET_PREFIX + "PutConfigRule")
+                .contentType(CONTENT_TYPE)
+                .body(c.body())
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidParameterValueException"));
+        }
+
+        // Nothing was stored under any of the rejected names.
+        given()
+            .header("X-Amz-Target", TARGET_PREFIX + "DescribeConfigRules")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {"ConfigRuleNames": ["rule-enum-owner"]}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("NoSuchConfigRuleException"));
+    }
+
+    /**
+     * {@code ComplianceTypes} is a list of the ComplianceType enum with {@code max: 3}. It is
+     * read as a filter, so an unmodeled value silently narrows the result to nothing — the
+     * caller reads that as "no rules match" rather than as the rejection AWS sends.
+     */
+    @Test
+    @Order(12)
+    void describeComplianceByConfigRuleRejectsAnUnmodeledComplianceTypeFilter() {
+        given()
+            .header("X-Amz-Target", TARGET_PREFIX + "DescribeComplianceByConfigRule")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {"ComplianceTypes": ["PARTIALLY_COMPLIANT"]}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameterValueException"));
+    }
+
+    @Test
+    @Order(12)
+    void describeComplianceByConfigRuleRejectsMoreThanThreeComplianceTypes() {
+        given()
+            .header("X-Amz-Target", TARGET_PREFIX + "DescribeComplianceByConfigRule")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {"ComplianceTypes": ["COMPLIANT", "NON_COMPLIANT", "NOT_APPLICABLE", "INSUFFICIENT_DATA"]}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameterValueException"));
+    }
 }
