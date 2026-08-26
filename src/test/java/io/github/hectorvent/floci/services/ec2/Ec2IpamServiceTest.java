@@ -67,8 +67,8 @@ class Ec2IpamServiceTest {
 
     @Test
     @SuppressWarnings("unchecked")
-    void theDelegatedAdminIsVisibleAndConflictingFromEveryAccount() {
-        AtomicReference<String> caller = new AtomicReference<>("111111111111");
+    void theDelegatedAdminIsVisibleFromEveryAccountButOnlyManagementCanEnableOrConflict() {
+        AtomicReference<String> caller = new AtomicReference<>("222222222222");
         RequestContext requestContext = mock(RequestContext.class);
         when(requestContext.getAccountId()).thenAnswer(invocation -> caller.get());
         Instance<RequestContext> contextInstance = mock(Instance.class);
@@ -83,12 +83,47 @@ class Ec2IpamServiceTest {
 
         orgService.enableIpamOrganizationAdminAccount("333333333333");
 
-        caller.set("222222222222");
+        caller.set("111111111111");
         assertEquals("333333333333", orgService.getIpamOrganizationAdminAccount().orElseThrow(),
                 "the delegated admin is an organization-wide setting, readable from any account");
+        AwsException conflict = assertThrows(AwsException.class,
+                () -> orgService.enableIpamOrganizationAdminAccount("444444444444"),
+                "a non-management member account must not be able to change the org-wide delegation");
+        assertEquals("AccessDeniedException", conflict.getErrorCode());
+
+        caller.set("222222222222");
         AwsException error = assertThrows(AwsException.class,
                 () -> orgService.enableIpamOrganizationAdminAccount("444444444444"));
         assertEquals("InvalidParameterValue", error.getErrorCode());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void onlyManagementAccountCanDisableTheDelegatedAdmin() {
+        AtomicReference<String> caller = new AtomicReference<>("222222222222");
+        RequestContext requestContext = mock(RequestContext.class);
+        when(requestContext.getAccountId()).thenAnswer(invocation -> caller.get());
+        Instance<RequestContext> contextInstance = mock(Instance.class);
+        when(contextInstance.get()).thenReturn(requestContext);
+
+        AccountAwareStorageBackend<String> settings = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), contextInstance, "000000000000");
+        EmulatorConfig config = mock(EmulatorConfig.class);
+        when(config.defaultAccountId()).thenReturn("222222222222");
+        Ec2IpamService orgService = new Ec2IpamService(config, new InMemoryStorage<>(),
+                new InMemoryStorage<>(), settings, new InMemoryStorage<>(), contextInstance);
+
+        orgService.enableIpamOrganizationAdminAccount("333333333333");
+
+        caller.set("111111111111");
+        AwsException error = assertThrows(AwsException.class,
+                () -> orgService.disableIpamOrganizationAdminAccount("333333333333"),
+                "a non-management member account must not be able to remove the org-wide delegation");
+        assertEquals("AccessDeniedException", error.getErrorCode());
+        assertEquals("333333333333", orgService.getIpamOrganizationAdminAccount().orElseThrow());
+
+        caller.set("222222222222");
+        assertTrue(orgService.disableIpamOrganizationAdminAccount("333333333333"));
     }
 
     // --- IPAM + scopes ---

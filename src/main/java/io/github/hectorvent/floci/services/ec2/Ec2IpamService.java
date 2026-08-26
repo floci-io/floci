@@ -123,9 +123,27 @@ public class Ec2IpamService {
         return config.defaultAccountId();
     }
 
+    /**
+     * Only the organization's management account may enable/disable the IPAM delegated
+     * administrator (real AWS: a non-management member calling either op is denied). This
+     * emulator has no cross-service organization membership to resolve the true management
+     * account from, so the configured default account stands in for it — the same account
+     * launched Lambdas resolve to when they call without an assumed role, which is how LZA's
+     * Organization-stage custom resource invokes these operations.
+     */
+    private void requireManagementAccount() {
+        String caller = callerAccountId();
+        if (!caller.equals(config.defaultAccountId())) {
+            throw new AwsException("AccessDeniedException",
+                    "Account " + caller + " is not authorized to modify the IPAM organization "
+                            + "delegated administrator; only the organization's management account may.", 403);
+        }
+    }
+
     // ─── Organization admin delegation ──────────────────────────────────────
 
     public boolean enableIpamOrganizationAdminAccount(String delegatedAdminAccountId) {
+        requireManagementAccount();
         if (delegatedAdminAccountId == null || delegatedAdminAccountId.isBlank()) {
             throw new AwsException("MissingParameter", "DelegatedAdminAccountId is required.", 400);
         }
@@ -144,6 +162,7 @@ public class Ec2IpamService {
     }
 
     public boolean disableIpamOrganizationAdminAccount(String delegatedAdminAccountId) {
+        requireManagementAccount();
         Optional<String> existing = organizationAdmin();
         if (existing.isEmpty() || !existing.get().equals(delegatedAdminAccountId)) {
             throw new AwsException("InvalidParameterValue",
