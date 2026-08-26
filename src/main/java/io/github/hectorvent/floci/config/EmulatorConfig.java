@@ -289,6 +289,7 @@ public interface EmulatorConfig {
 
         ControlTowerStorageConfig controltower();
 
+        LakeFormationStorageConfig lakeformation();
         EfsStorageConfig efs();
     }
 
@@ -547,13 +548,19 @@ public interface EmulatorConfig {
         long flushIntervalMs();
     }
 
+    interface LakeFormationStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
     interface EfsStorageConfig {
         Optional<String> mode();
 
         @WithDefault("5000")
         long flushIntervalMs();
     }
-
+  
     interface CodeDeployStorageConfig {
         Optional<String> mode();
 
@@ -668,6 +675,7 @@ public interface EmulatorConfig {
 
         ControlTowerServiceConfig controltower();
 
+        LakeFormationServiceConfig lakeformation();
         EfsServiceConfig efs();
     }
 
@@ -717,6 +725,11 @@ public interface EmulatorConfig {
         boolean enabled();
     }
 
+    interface LakeFormationServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+  
     interface EfsServiceConfig {
         @WithDefault("true")
         boolean enabled();

@@ -82,6 +82,8 @@ floci:
         flush-interval-ms: 60000
       emrserverless:
         flush-interval-ms: 60000
+      lakeformation:
+        flush-interval-ms: 60000
 
   auth:
     validate-signatures: false
@@ -340,6 +342,8 @@ floci:
     emrserverless:
       enabled: true
     controltower:
+      enabled: true
+    lakeformation:
       enabled: true
     tagging:
       enabled: true

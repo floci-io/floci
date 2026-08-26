@@ -38,7 +38,8 @@ public class ResourceExplorer2PathRewriteFilter implements ContainerRequestFilte
             "/CreateIndex",
             "/GetIndex",
             "/ListIndexes",
-            "/DeleteIndex"
+            "/DeleteIndex",
+            "/ListResources"
     );
 
     private final ResolvedServiceCatalog catalog;

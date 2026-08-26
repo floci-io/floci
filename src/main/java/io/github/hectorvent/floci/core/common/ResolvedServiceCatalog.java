@@ -508,6 +508,13 @@ public class ResolvedServiceCatalog {
                         config.storage().services().controltower().flushIntervalMs(), null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
                         Set.of(), Set.of("controltower"), Set.of(), Set.of(ControlTowerController.class)),
+
+                descriptor("lakeformation", "lakeformation", config.services().lakeformation().enabled(), true,
+                        "lakeformation",
+                        storageMode(config.storage().services().lakeformation().mode(), config.storage().mode()),
+                        config.storage().services().lakeformation().flushIntervalMs(), null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON),
+                        Set.of(), Set.of("lakeformation"), Set.of(), Set.of(io.github.hectorvent.floci.services.lakeformation.LakeFormationController.class)),
                 descriptor("efs", "efs", config.services().efs().enabled(), true,
                         "efs",
                         storageMode(config.storage().services().efs().mode(), config.storage().mode()),
