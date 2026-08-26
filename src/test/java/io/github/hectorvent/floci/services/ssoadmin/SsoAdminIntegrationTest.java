@@ -51,7 +51,7 @@ class SsoAdminIntegrationTest {
     }
 
     @Test
-    void unknownAction_returnsUnsupportedOperation() {
+    void unknownAction_returnsUnknownOperationException() {
         given()
             .contentType("application/x-amz-json-1.1")
             .header("Authorization", AUTH_HEADER)
@@ -61,7 +61,7 @@ class SsoAdminIntegrationTest {
             .post("/")
         .then()
             .statusCode(400)
-            .body("__type", org.hamcrest.Matchers.containsString("UnsupportedOperation"));
+            .body("__type", org.hamcrest.Matchers.containsString("UnknownOperationException"));
     }
 
     @Test

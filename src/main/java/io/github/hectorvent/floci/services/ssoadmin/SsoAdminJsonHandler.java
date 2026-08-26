@@ -23,7 +23,7 @@ public class SsoAdminJsonHandler {
     public Response handle(String action, JsonNode request, String callerAccountId) {
         return switch (action) {
             case "ListInstances" -> listInstances(callerAccountId);
-            default -> throw new AwsException("UnsupportedOperation",
+            default -> throw new AwsException("UnknownOperationException",
                     "Operation " + action + " is not supported.", 400);
         };
     }
