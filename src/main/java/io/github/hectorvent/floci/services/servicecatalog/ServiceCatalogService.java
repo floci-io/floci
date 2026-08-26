@@ -417,14 +417,7 @@ public class ServiceCatalogService {
     public ObjectNode updatePortfolioShare(JsonNode request) {
         String portfolioId = requireText(request, "PortfolioId");
         require(portfolioStore, portfolioId, "portfolio");
-        JsonNode orgNode = request.path("OrganizationNode");
-        String target = request.hasNonNull("AccountId")
-                ? "ACCOUNT:" + request.get("AccountId").asText()
-                : orgNode.path("Type").asText() + ":" + orgNode.path("Value").asText();
-        if (target.equals(":")) {
-            throw new AwsException("InvalidParametersException",
-                    "AccountId or OrganizationNode is required", 400);
-        }
+        String target = shareTarget(request);
         String token = id("share");
         ObjectNode share = copy(request);
         share.put("PortfolioShareToken", token);
@@ -479,6 +472,55 @@ public class ServiceCatalogService {
         if (id == null || id.isBlank()) {
             throw new AwsException("InvalidParametersException", parameter + " is required", 400);
         }
+    }
+
+    /** botocore {@code OrganizationNodeType}. */
+    static final List<String> ORGANIZATION_NODE_TYPES =
+            List.of("ORGANIZATION", "ORGANIZATIONAL_UNIT", "ACCOUNT");
+
+    /** botocore {@code DescribePortfolioShareType} — a superset of the node types above. */
+    static final List<String> DESCRIBE_PORTFOLIO_SHARE_TYPES =
+            List.of("ACCOUNT", "ORGANIZATION", "ORGANIZATIONAL_UNIT", "ORGANIZATION_MEMBER_ACCOUNT");
+
+    private static final java.util.regex.Pattern ACCOUNT_ID_PATTERN =
+            java.util.regex.Pattern.compile("[0-9]{12}");
+
+    /**
+     * Rejects a value botocore does not list in the member's enum. Accepting one leaves the
+     * emulator holding state AWS would never have created — a portfolio share keyed by an
+     * unmodelled node type is reported back by DescribePortfolioShares as though real.
+     */
+    static void requireEnum(String value, String field, List<String> allowed) {
+        if (!allowed.contains(value)) {
+            throw new AwsException("InvalidParametersException",
+                    field + " must be one of " + String.join(", ", allowed) + ": " + value, 400);
+        }
+    }
+
+    /**
+     * Resolves the {@code AccountId} / {@code OrganizationNode} pair the portfolio-share
+     * operations key their store on, enforcing the constraints botocore pins on each:
+     * {@code AccountId} matches {@code ^[0-9]{12}$} and {@code OrganizationNode.Type} is an
+     * {@code OrganizationNodeType}. Both used to be concatenated into the key unchecked.
+     */
+    private String shareTarget(JsonNode request) {
+        if (request.hasNonNull("AccountId")) {
+            String accountId = request.get("AccountId").asText();
+            if (!ACCOUNT_ID_PATTERN.matcher(accountId).matches()) {
+                throw new AwsException("InvalidParametersException",
+                        "AccountId must be a 12-digit AWS account id: " + accountId, 400);
+            }
+            return "ACCOUNT:" + accountId;
+        }
+        JsonNode orgNode = request.path("OrganizationNode");
+        String type = orgNode.path("Type").asText();
+        String value = orgNode.path("Value").asText();
+        if (type.isEmpty() && value.isEmpty()) {
+            throw new AwsException("InvalidParametersException",
+                    "AccountId or OrganizationNode is required", 400);
+        }
+        requireEnum(type, "OrganizationNode.Type", ORGANIZATION_NODE_TYPES);
+        return type + ":" + value;
     }
 
     private AwsException notFound(String type, String id) {
@@ -597,15 +639,7 @@ public class ServiceCatalogService {
     public String deletePortfolioShare(JsonNode request) {
         String portfolioId = requireText(request, "PortfolioId");
         require(portfolioStore, portfolioId, "portfolio");
-        JsonNode orgNode = request.path("OrganizationNode");
-        String target = request.hasNonNull("AccountId")
-                ? "ACCOUNT:" + request.get("AccountId").asText()
-                : orgNode.path("Type").asText() + ":" + orgNode.path("Value").asText();
-        if (target.equals(":")) {
-            throw new AwsException("InvalidParametersException",
-                    "AccountId or OrganizationNode is required", 400);
-        }
-        String key = portfolioId + "|" + target;
+        String key = portfolioId + "|" + shareTarget(request);
         String token = shareStore.get(key).map(share -> text(share, "PortfolioShareToken")).orElse(null);
         shareStore.delete(key);
         return token;
@@ -801,7 +835,9 @@ public class ServiceCatalogService {
 
     public ObjectNode createProvisionedProductPlan(JsonNode request, String region, String accountId) {
         requireText(request, "PlanName");
-        requireText(request, "PlanType");
+        // ProvisionedProductPlanType has exactly one member; the plan is always described
+        // as CLOUDFORMATION, so accepting another value would report a type never asked for.
+        requireEnum(requireText(request, "PlanType"), "PlanType", List.of("CLOUDFORMATION"));
         String productId = requireText(request, "ProductId");
         requireText(request, "ProvisionedProductName");
         String artifactId = requireText(request, "ProvisioningArtifactId");
@@ -837,7 +873,8 @@ public class ServiceCatalogService {
 
     public ObjectNode createServiceAction(JsonNode request) {
         requireText(request, "Name");
-        requireText(request, "DefinitionType");
+        // ServiceActionDefinitionType has exactly one member.
+        requireEnum(requireText(request, "DefinitionType"), "DefinitionType", List.of("SSM_AUTOMATION"));
         requireText(request, "IdempotencyToken");
         JsonNode definition = request.get("Definition");
         if (definition == null || definition.isNull() || !definition.isObject()) {

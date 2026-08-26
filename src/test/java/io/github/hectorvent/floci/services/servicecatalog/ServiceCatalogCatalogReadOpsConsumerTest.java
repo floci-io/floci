@@ -148,6 +148,51 @@ class ServiceCatalogCatalogReadOpsConsumerTest {
             .body("message", equalTo("PortfolioId is required"));
     }
 
+    /**
+     * {@code Type} selects which share flavour to report and botocore pins it to
+     * {@code DescribePortfolioShareType}. An unmodelled value used to match nothing and
+     * return an empty list — a client filtering on a typo saw "no shares", not an error.
+     */
+    @Test
+    void describePortfolioShares_unknownType_returnsInvalidParameters() {
+        String portfolioId = createPortfolio("ab-shares-badtype");
+        call("DescribePortfolioShares", "{\"PortfolioId\":\"" + portfolioId
+                + "\",\"Type\":\"ACCOUNTS\"}")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParametersException"))
+            .body("message", startsWith("Type must be one of"));
+    }
+
+    // ---------- CreatePortfolioShare ----------
+
+    /**
+     * The share's store key is built from {@code OrganizationNode.Type}, so an unmodelled
+     * type used to create a share DescribePortfolioShares then reported back verbatim.
+     */
+    @Test
+    void createPortfolioShare_unknownOrganizationNodeType_returnsInvalidParameters() {
+        String portfolioId = createPortfolio("ab-share-badnode");
+        call("CreatePortfolioShare", "{\"PortfolioId\":\"" + portfolioId
+                + "\",\"OrganizationNode\":{\"Type\":\"TEAM\",\"Value\":\"o-abcdefghij\"}}")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParametersException"))
+            .body("message", startsWith("OrganizationNode.Type must be one of"));
+    }
+
+    /** botocore pins AccountId to ^[0-9]{12}$; a short id used to become a share key. */
+    @Test
+    void createPortfolioShare_malformedAccountId_returnsInvalidParameters() {
+        String portfolioId = createPortfolio("ab-share-badaccount");
+        call("CreatePortfolioShare", "{\"PortfolioId\":\"" + portfolioId
+                + "\",\"AccountId\":\"2222\"}")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParametersException"))
+            .body("message", startsWith("AccountId must be a 12-digit"));
+    }
+
     // ---------- ListPortfoliosForProduct ----------
 
     @Test

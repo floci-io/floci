@@ -142,6 +142,22 @@ class ServiceCatalogPrincipalAccessConsumerTest {
             .body("OrganizationNodes.size()", equalTo(0));
     }
 
+    /**
+     * botocore pins OrganizationNodeType to ORGANIZATION / ORGANIZATIONAL_UNIT / ACCOUNT.
+     * An unmodelled value used to filter to nothing and report an empty node list, so a
+     * caller with a typo could not tell "no access" from "wrong parameter".
+     */
+    @Test
+    void listOrganizationPortfolioAccess_unknownNodeType_returnsInvalidParameters() {
+        String portfolioId = createPortfolio("ab-org-access-badtype");
+        call("ListOrganizationPortfolioAccess", "{\"PortfolioId\":\"" + portfolioId
+                + "\",\"OrganizationNodeType\":\"ORG_UNIT\"}")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParametersException"))
+            .body("message", org.hamcrest.Matchers.startsWith("OrganizationNodeType must be one of"));
+    }
+
     @Test
     void listOrganizationPortfolioAccess_missingNodeType_returnsInvalidParameters() {
         String portfolioId = createPortfolio("ab-org-access-missing-type");

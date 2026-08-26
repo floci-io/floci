@@ -71,6 +71,21 @@ class ServiceCatalogServiceActionConsumerTest {
             .body("ServiceActionDetail.ServiceActionSummary.Id", org.hamcrest.Matchers.notNullValue());
     }
 
+    /**
+     * ServiceActionDefinitionType has exactly one member, SSM_AUTOMATION. Any other value
+     * was stored verbatim and handed back by DescribeServiceAction as a real action type.
+     */
+    @Test
+    void createServiceAction_unknownDefinitionType_returnsInvalidParameters() {
+        call("CreateServiceAction", "{\"Name\":\"ab-action-badtype\",\"DefinitionType\":\""
+                + "LAMBDA\",\"Definition\":{\"Name\":\"AWS-RestartEC2Instance\"},"
+                + "\"IdempotencyToken\":\"tok-badtype\"}")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParametersException"))
+            .body("message", org.hamcrest.Matchers.startsWith("DefinitionType must be one of"));
+    }
+
     // ---------- DeleteServiceAction ----------
 
     @Test

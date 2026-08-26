@@ -281,7 +281,16 @@ public class ServiceCatalogJsonHandler {
     private Response describePortfolioShares(JsonNode request) {
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode details = response.putArray("PortfolioShareDetails");
-        service.describePortfolioShares(text(request, "PortfolioId"), text(request, "Type")).forEach(details::add);
+        String type = text(request, "Type");
+        // Validated only when supplied: botocore marks Type required, but this emulator has
+        // always treated it as an optional filter and tests pin that leniency (lesson 3's
+        // territory). What matters here is that a supplied value is a real share type
+        // rather than silently filtering everything out.
+        if (type != null) {
+            ServiceCatalogService.requireEnum(type, "Type",
+                    ServiceCatalogService.DESCRIBE_PORTFOLIO_SHARE_TYPES);
+        }
+        service.describePortfolioShares(text(request, "PortfolioId"), type).forEach(details::add);
         return Response.ok(response).build();
     }
 
@@ -586,6 +595,8 @@ public class ServiceCatalogJsonHandler {
         if (nodeType == null || nodeType.isBlank()) {
             throw new AwsException("InvalidParametersException", "OrganizationNodeType is required", 400);
         }
+        ServiceCatalogService.requireEnum(nodeType, "OrganizationNodeType",
+                ServiceCatalogService.ORGANIZATION_NODE_TYPES);
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode nodes = response.putArray("OrganizationNodes");
         service.describePortfolioShares(text(request, "PortfolioId"), nodeType).forEach(share -> {

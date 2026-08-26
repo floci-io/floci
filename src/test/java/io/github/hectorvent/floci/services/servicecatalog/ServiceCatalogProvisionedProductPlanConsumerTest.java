@@ -77,6 +77,27 @@ class ServiceCatalogProvisionedProductPlanConsumerTest {
 
     // ---------- CreateProvisionedProductPlan ----------
 
+    /**
+     * ProvisionedProductPlanType has exactly one member, CLOUDFORMATION. The plan was
+     * created for any PlanType string and then described as CLOUDFORMATION regardless,
+     * so a caller asking for a plan type AWS does not offer got a fake success.
+     */
+    @Test
+    void createProvisionedProductPlan_unknownPlanType_returnsInvalidParameters() {
+        String productId = createProduct("ab-plan-badtype");
+        String artifactId = firstArtifactId(productId);
+
+        call("CreateProvisionedProductPlan", "{\"ProductId\":\"" + productId
+                + "\",\"ProvisioningArtifactId\":\"" + artifactId
+                + "\",\"PlanName\":\"ab-plan-badtype\",\"PlanType\":\"TERRAFORM\","
+                + "\"ProvisionedProductName\":\"ab-plan-badtype-pp\","
+                + "\"IdempotencyToken\":\"tok-ab-plan-badtype\"}")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParametersException"))
+            .body("message", org.hamcrest.Matchers.startsWith("PlanType must be one of"));
+    }
+
     @Test
     void createProvisionedProductPlan_returnsPlanMatchingRequest() {
         String productId = createProduct("ab-plan-create-product");
