@@ -61,6 +61,7 @@ public class LambdaService implements ResourceProvider {
                     + "(?:(?:-gov)|(?:-iso(?:b)?))?-[a-z]+-\\d:"
                     + "\\d{12}:access-point/fsap-[a-f0-9]{17}$");
     private static final Pattern FILE_SYSTEM_LOCAL_MOUNT_PATH = Pattern.compile("^/mnt/[A-Za-z0-9._-]+$");
+    private static final Pattern LOG_GROUP_PATTERN = Pattern.compile("[.\\-_/#A-Za-z0-9]+");
 
     private final LambdaFunctionStore functionStore;
     private final LambdaExecutorService executorService;
@@ -1307,6 +1308,7 @@ public class LambdaService implements ResourceProvider {
                 List.of("TRACE", "DEBUG", "INFO", "WARN", "ERROR", "FATAL"));
         validateEnum(logging.get("SystemLogLevel"), "loggingConfig.systemLogLevel",
                 List.of("DEBUG", "INFO", "WARN"));
+        validateLogGroup(logging.get("LogGroup"));
     }
 
     private static void validateEnum(Object value, String field, List<String> allowed) {
@@ -1320,20 +1322,43 @@ public class LambdaService implements ResourceProvider {
     }
 
     /**
+     * LogGroup is the one LoggingConfig member with a documented length and character
+     * constraint rather than an enum: 1-512 characters, {@code [.\-_/#A-Za-z0-9]+}.
+     */
+    private static void validateLogGroup(Object value) {
+        if (!(value instanceof String group) || group.isBlank()) {
+            return;
+        }
+        if (group.length() > 512 || !LOG_GROUP_PATTERN.matcher(group).matches()) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value '" + group + "' at 'loggingConfig.logGroup' failed to "
+                            + "satisfy constraint: Member must satisfy regular expression pattern: "
+                            + "[.\\-_/#A-Za-z0-9]+ or member must have length less than or equal to 512", 400);
+        }
+    }
+
+    /**
      * LoggingConfig is replaced wholesale, not merged: AWS resets any member the request omits
      * back to its default, so an update that names only LogFormat drops a previously set LogGroup.
+     *
+     * <p>ApplicationLogLevel and SystemLogLevel are JSON-format-only: {@link #putLoggingConfig}
+     * never surfaces them for a Text-format function. Storing them anyway would leave state
+     * that is accepted, persisted and then never observable through any read path — the same
+     * accepted-then-forgotten shape this fix removes elsewhere — so they are only kept when the
+     * resolved format is JSON.
      */
     private static void applyLoggingConfig(LambdaFunction fn, Object value) {
         if (!(value instanceof Map<?, ?> logging)) {
             return;
         }
         validateLoggingConfig(value);
-        fn.setLogFormat(logging.get("LogFormat") instanceof String format && !format.isBlank()
-                ? format : "Text");
-        fn.setApplicationLogLevel(logging.get("ApplicationLogLevel") instanceof String level && !level.isBlank()
-                ? level : null);
-        fn.setSystemLogLevel(logging.get("SystemLogLevel") instanceof String level && !level.isBlank()
-                ? level : null);
+        String format = logging.get("LogFormat") instanceof String f && !f.isBlank() ? f : "Text";
+        boolean json = "JSON".equals(format);
+        fn.setLogFormat(format);
+        fn.setApplicationLogLevel(json && logging.get("ApplicationLogLevel") instanceof String level
+                && !level.isBlank() ? level : null);
+        fn.setSystemLogLevel(json && logging.get("SystemLogLevel") instanceof String level
+                && !level.isBlank() ? level : null);
         fn.setLogGroup(logging.get("LogGroup") instanceof String group && !group.isBlank()
                 ? group : null);
     }

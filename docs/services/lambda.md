@@ -470,6 +470,12 @@ is a permanent diff rather than a cosmetic omission.
 `LoggingConfig` is replaced wholesale on update, not merged — an update naming only
 `LogFormat` resets `LogGroup` to the default.
 
+`LogGroup` is validated against AWS's documented constraint: 1-512 characters matching
+`[.\-_/#A-Za-z0-9]+`. `ApplicationLogLevel` and `SystemLogLevel` are accepted with any
+`LogFormat` but are only ever stored — and therefore only ever returned — when the
+resolved format is `JSON`; supplying them with `LogFormat=Text` is not an error, it is
+simply a no-op, matching the fact that the response never surfaces them for Text.
+
 `VpcConfig` is omitted entirely while the function is not attached to a VPC.
 Subnets that EC2 does not know about are still accepted and returned; only `VpcId`
 is left off in that case.

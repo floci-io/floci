@@ -47,16 +47,25 @@ class LambdaVpcSnapStartLoggingIntegrationTest {
     }
 
     private void createFunction(String name, String extraJson) {
+        createFunction(name, "nodejs20.x", extraJson);
+    }
+
+    /**
+     * SnapStart is only available on a subset of managed runtimes (Java 11+, Python 3.12+,
+     * .NET 8+); {@code nodejs20.x} is not among them. Tests that exercise SnapStart use this
+     * overload with a supported runtime so they don't lock in a create AWS would reject.
+     */
+    private void createFunction(String name, String runtime, String extraJson) {
         given()
             .contentType("application/json")
             .body("""
                 {
                     "FunctionName": "%s",
-                    "Runtime": "nodejs20.x",
+                    "Runtime": "%s",
                     "Role": "arn:aws:iam::000000000000:role/lambda-role",
                     "Handler": "index.handler"%s
                 }
-                """.formatted(name, extraJson))
+                """.formatted(name, runtime, extraJson))
         .when()
             .post(BASE_PATH + "/functions")
         .then()
@@ -202,7 +211,7 @@ class LambdaVpcSnapStartLoggingIntegrationTest {
 
     @Test
     void snapStartRoundTripsAndOptimizationStatusIsResponseOnly() {
-        createFunction("snapstart-fn", """
+        createFunction("snapstart-fn", "java21", """
             ,
                 "SnapStart": {"ApplyOn": "PublishedVersions"}""");
 
@@ -227,7 +236,7 @@ class LambdaVpcSnapStartLoggingIntegrationTest {
 
     @Test
     void updateFunctionConfigurationRoundTripsSnapStart() {
-        createFunction("snapstart-update-fn", "");
+        createFunction("snapstart-update-fn", "java21", "");
 
         given()
             .contentType("application/json")
@@ -262,7 +271,11 @@ class LambdaVpcSnapStartLoggingIntegrationTest {
         .when()
             .post(BASE_PATH + "/functions")
         .then()
-            .statusCode(400);
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("1 validation error detected: Value 'Always' at 'snapStart.applyOn' "
+                    + "failed to satisfy constraint: Member must satisfy enum value set: "
+                    + "[PublishedVersions, None]"));
     }
 
     @Test
@@ -350,7 +363,153 @@ class LambdaVpcSnapStartLoggingIntegrationTest {
         .when()
             .post(BASE_PATH + "/functions")
         .then()
-            .statusCode(400);
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("1 validation error detected: Value 'YAML' at 'loggingConfig.logFormat' "
+                    + "failed to satisfy constraint: Member must satisfy enum value set: [JSON, Text]"));
+    }
+
+    @Test
+    void loggingConfigRejectsApplicationLogLevelOutsideTheEnum() {
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "FunctionName": "logging-invalid-app-level-fn",
+                    "Runtime": "nodejs20.x",
+                    "Role": "arn:aws:iam::000000000000:role/lambda-role",
+                    "Handler": "index.handler",
+                    "LoggingConfig": {"LogFormat": "JSON", "ApplicationLogLevel": "VERBOSE"}
+                }
+                """)
+        .when()
+            .post(BASE_PATH + "/functions")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("1 validation error detected: Value 'VERBOSE' at "
+                    + "'loggingConfig.applicationLogLevel' failed to satisfy constraint: Member must satisfy "
+                    + "enum value set: [TRACE, DEBUG, INFO, WARN, ERROR, FATAL]"));
+    }
+
+    @Test
+    void loggingConfigRejectsSystemLogLevelOutsideTheEnum() {
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "FunctionName": "logging-invalid-system-level-fn",
+                    "Runtime": "nodejs20.x",
+                    "Role": "arn:aws:iam::000000000000:role/lambda-role",
+                    "Handler": "index.handler",
+                    "LoggingConfig": {"LogFormat": "JSON", "SystemLogLevel": "TRACE"}
+                }
+                """)
+        .when()
+            .post(BASE_PATH + "/functions")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("1 validation error detected: Value 'TRACE' at "
+                    + "'loggingConfig.systemLogLevel' failed to satisfy constraint: Member must satisfy "
+                    + "enum value set: [DEBUG, INFO, WARN]"));
+    }
+
+    @Test
+    void loggingConfigRejectsLogGroupOutsideTheDocumentedPattern() {
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "FunctionName": "logging-invalid-group-fn",
+                    "Runtime": "nodejs20.x",
+                    "Role": "arn:aws:iam::000000000000:role/lambda-role",
+                    "Handler": "index.handler",
+                    "LoggingConfig": {"LogGroup": "my log group"}
+                }
+                """)
+        .when()
+            .post(BASE_PATH + "/functions")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
+    }
+
+    @Test
+    void loggingConfigRejectsLogGroupLongerThanFiveHundredTwelveCharacters() {
+        String tooLong = "a".repeat(513);
+
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "FunctionName": "logging-invalid-long-group-fn",
+                    "Runtime": "nodejs20.x",
+                    "Role": "arn:aws:iam::000000000000:role/lambda-role",
+                    "Handler": "index.handler",
+                    "LoggingConfig": {"LogGroup": "%s"}
+                }
+                """.formatted(tooLong))
+        .when()
+            .post(BASE_PATH + "/functions")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
+    }
+
+    @Test
+    void textFormatLogLevelsAreAcceptedButNeverStoredOrReturned() {
+        createFunction("logging-text-levels-fn", """
+            ,
+                "LoggingConfig": {
+                    "LogFormat": "Text",
+                    "ApplicationLogLevel": "DEBUG",
+                    "SystemLogLevel": "WARN"
+                }""");
+
+        given()
+        .when()
+            .get(BASE_PATH + "/functions/logging-text-levels-fn/configuration")
+        .then()
+            .statusCode(200)
+            .body("LoggingConfig.LogFormat", equalTo("Text"))
+            .body("LoggingConfig.ApplicationLogLevel", nullValue())
+            .body("LoggingConfig.SystemLogLevel", nullValue());
+    }
+
+    @Test
+    void updateFunctionConfigurationDetachesVpcConfigAndClearsVpcId() {
+        createFunction("vpc-detach-fn", vpcConfigJson());
+
+        given()
+        .when()
+            .get(BASE_PATH + "/functions/vpc-detach-fn/configuration")
+        .then()
+            .statusCode(200)
+            .body("VpcConfig.VpcId", equalTo(expectedVpcId));
+
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "VpcConfig": {
+                        "SubnetIds": [],
+                        "SecurityGroupIds": []
+                    }
+                }
+                """)
+        .when()
+            .put(BASE_PATH + "/functions/vpc-detach-fn/configuration")
+        .then()
+            .statusCode(200)
+            .body("VpcConfig", nullValue());
+
+        given()
+        .when()
+            .get(BASE_PATH + "/functions/vpc-detach-fn/configuration")
+        .then()
+            .statusCode(200)
+            .body("VpcConfig", nullValue());
     }
 
     @Test
