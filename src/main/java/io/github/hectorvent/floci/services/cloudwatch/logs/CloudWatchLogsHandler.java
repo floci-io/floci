@@ -214,6 +214,7 @@ public class CloudWatchLogsHandler {
         String streamName = request.path("logStreamName").asText();
 
         List<Map<String, Object>> events = new ArrayList<>();
+        requireListSize(request.path("logEvents"), "logEvents", 1, 10000);
         request.path("logEvents").forEach(evt -> {
             Map<String, Object> event = new HashMap<>();
             event.put("timestamp", evt.path("timestamp").asLong());
@@ -255,6 +256,9 @@ public class CloudWatchLogsHandler {
         String nextToken = request.has("nextToken") ? request.path("nextToken").asText(null) : null;
 
         List<String> streamNames = new ArrayList<>();
+        if (request.has("logStreamNames")) {
+            requireListSize(request.path("logStreamNames"), "logStreamNames", 1, 100);
+        }
         request.path("logStreamNames").forEach(n -> streamNames.add(resolveLogStreamName(n.asText(null))));
 
         CloudWatchLogsService.FilteredLogEventsResult result =
@@ -461,6 +465,10 @@ public class CloudWatchLogsHandler {
         String filterPattern = request.path("filterPattern").asText();
         String destinationArn = request.path("destinationArn").asText();
         String distribution = request.has("distribution") ? request.path("distribution").asText(null) : null;
+        if (distribution != null && !"Random".equals(distribution) && !"ByLogStream".equals(distribution)) {
+            throw new AwsException("InvalidParameterException",
+                    "distribution must be Random or ByLogStream.", 400);
+        }
 
         logsService.putSubscriptionFilter(logGroupName, filterName, filterPattern, destinationArn, distribution, region);
         return Response.ok(objectMapper.createObjectNode()).build();
@@ -586,4 +594,14 @@ public class CloudWatchLogsHandler {
         return tags;
     }
 
+
+    /** Enforces a modeled list min/max with the InvalidParameterException these operations model. */
+    private static void requireListSize(com.fasterxml.jackson.databind.JsonNode list,
+                                        String member, int min, int max) {
+        int size = list == null || list.isNull() || !list.isArray() ? 0 : list.size();
+        if (size < min || size > max) {
+            throw new AwsException("InvalidParameterException",
+                    member + " must contain between " + min + " and " + max + " entries.", 400);
+        }
+    }
 }
