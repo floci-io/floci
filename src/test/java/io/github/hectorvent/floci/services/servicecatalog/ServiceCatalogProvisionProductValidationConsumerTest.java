@@ -98,6 +98,20 @@ class ServiceCatalogProvisionProductValidationConsumerTest {
     }
 
     @Test
+    void provisionProduct_artifactIdAsProductId_returnsResourceNotFoundAndCreatesNoAccount() {
+        ensureOrganization();
+        String email = "ab-artifact-as-product@floci.test";
+
+        call("ProvisionProduct", "{\"ProductId\":\"" + ServiceCatalogService.CONTROL_TOWER_ARTIFACT_ID + "\","
+                + accountFactoryParameters("ab-provision-artifact-as-product", email) + "}")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ResourceNotFoundException"));
+
+        assertNoAccountWithEmail(email);
+    }
+
+    @Test
     void provisionProduct_withoutProductIdentifier_returnsInvalidParametersAndCreatesNoAccount() {
         ensureOrganization();
         String email = "ab-no-product-identifier@floci.test";

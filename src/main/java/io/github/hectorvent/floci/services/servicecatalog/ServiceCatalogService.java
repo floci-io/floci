@@ -251,7 +251,10 @@ public class ServiceCatalogService {
     private ObjectNode resolveProduct(JsonNode request) {
         String productId = text(request, "ProductId");
         if (productId != null && !productId.isBlank()) {
-            return requireProduct(productId, "ProductId");
+            // Strict id-only lookup: requireProduct also matches provisioning-artifact ids,
+            // which would let an artifact id in ProductId resolve its owning product.
+            return productStore.get(productId)
+                    .orElseThrow(() -> notFound("product", productId));
         }
         String productName = text(request, "ProductName");
         if (productName != null && !productName.isBlank()) {
