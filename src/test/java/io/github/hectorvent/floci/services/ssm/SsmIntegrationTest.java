@@ -767,4 +767,165 @@ class SsmIntegrationTest {
             .statusCode(200)
             .body("AccountIds", not(hasItem("444444444444")));
     }
+
+    // ── DocumentType (botocore: enum, 17 values) ──
+
+    @Test
+    void createDocument_rejectsAnUnmodelledDocumentType() {
+        given()
+            .header("X-Amz-Target", "AmazonSSM.CreateDocument")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                {
+                    "Name": "Bad-Document-Type",
+                    "DocumentType": "NotADocumentType",
+                    "Content": "{\\"schemaVersion\\":\\"1.0\\"}"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
+
+        // The rejected document must not have been stored.
+        given()
+            .header("X-Amz-Target", "AmazonSSM.GetDocument")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                { "Name": "Bad-Document-Type" }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidDocument"));
+    }
+
+    @Test
+    void createDocument_acceptsEveryModelledDocumentType() {
+        String[] documentTypes = {
+                "Command", "Policy", "Automation", "Session", "Package",
+                "ApplicationConfiguration", "ApplicationConfigurationSchema", "DeploymentStrategy",
+                "ChangeCalendar", "Automation.ChangeTemplate", "ProblemAnalysis",
+                "ProblemAnalysisTemplate", "CloudFormation", "ConformancePackTemplate",
+                "QuickSetup", "ManualApprovalPolicy", "AutoApprovalPolicy"};
+        for (int i = 0; i < documentTypes.length; i++) {
+            given()
+                .header("X-Amz-Target", "AmazonSSM.CreateDocument")
+                .contentType(SSM_CONTENT_TYPE)
+                .body("""
+                    {
+                        "Name": "Modelled-Type-%d",
+                        "DocumentType": "%s",
+                        "Content": "{\\"schemaVersion\\":\\"1.0\\",\\"n\\":%d}"
+                    }
+                    """.formatted(i, documentTypes[i], i))
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body("DocumentDescription.DocumentType", equalTo(documentTypes[i]));
+        }
+    }
+
+    // ── AccountIdsToAdd/Remove (botocore: list max 20, member (?i)all|[0-9]{12}) ──
+
+    @Test
+    void modifyDocumentPermission_rejectsAnAccountIdThatIsNotAnAccountId() {
+        createSharableDocument("Bad-Account-Id-Document");
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.ModifyDocumentPermission")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                {
+                    "Name": "Bad-Account-Id-Document",
+                    "PermissionType": "Share",
+                    "AccountIdsToAdd": ["not-an-account"]
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
+
+        // Nothing may have been shared.
+        given()
+            .header("X-Amz-Target", "AmazonSSM.DescribeDocumentPermission")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                { "Name": "Bad-Account-Id-Document", "PermissionType": "Share" }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("AccountIds", not(hasItem("not-an-account")));
+    }
+
+    /** The model spells the wildcard {@code (?i)all}, so "all" and "All" are both account ids. */
+    @Test
+    void modifyDocumentPermission_acceptsTheAllWildcard() {
+        createSharableDocument("All-Wildcard-Document");
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.ModifyDocumentPermission")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                {
+                    "Name": "All-Wildcard-Document",
+                    "PermissionType": "Share",
+                    "AccountIdsToAdd": ["All"]
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    void modifyDocumentPermission_rejectsMoreThanTwentyAccountIds() {
+        createSharableDocument("Too-Many-Accounts-Document");
+
+        StringBuilder ids = new StringBuilder();
+        for (int i = 0; i < 21; i++) {
+            ids.append(i == 0 ? "" : ",").append("\"%012d\"".formatted(100000000000L + i));
+        }
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.ModifyDocumentPermission")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                {
+                    "Name": "Too-Many-Accounts-Document",
+                    "PermissionType": "Share",
+                    "AccountIdsToAdd": [%s]
+                }
+                """.formatted(ids))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
+    }
+
+    private static void createSharableDocument(String name) {
+        given()
+            .header("X-Amz-Target", "AmazonSSM.CreateDocument")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                {
+                    "Name": "%s",
+                    "DocumentType": "Session",
+                    "Content": "{\\"schemaVersion\\":\\"1.0\\",\\"doc\\":\\"%s\\"}"
+                }
+                """.formatted(name, name))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
 }

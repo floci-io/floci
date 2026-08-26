@@ -26,6 +26,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class SsmJsonHandler {
@@ -322,6 +323,70 @@ public class SsmJsonHandler {
         }
     }
 
+    /**
+     * The {@code DocumentType} enum, verbatim from the model. The value is stored on the document
+     * and echoed back by GetDocument, DescribeDocument and the create/update responses, so an
+     * unmodelled one is not merely accepted — it becomes the document's type for good.
+     */
+    private static final Set<String> DOCUMENT_TYPES = Set.of(
+            "Command", "Policy", "Automation", "Session", "Package",
+            "ApplicationConfiguration", "ApplicationConfigurationSchema", "DeploymentStrategy",
+            "ChangeCalendar", "Automation.ChangeTemplate", "ProblemAnalysis",
+            "ProblemAnalysisTemplate", "CloudFormation", "ConformancePackTemplate",
+            "QuickSetup", "ManualApprovalPolicy", "AutoApprovalPolicy");
+
+    /** {@code AccountIds} members are twelve digits or the case-insensitive wildcard {@code all}. */
+    private static final Pattern ACCOUNT_ID = Pattern.compile("(?i)all|[0-9]{12}");
+
+    /** {@code AccountIdsToAdd} and {@code AccountIdsToRemove} are both capped at 20 members. */
+    private static final int MAX_ACCOUNT_IDS = 20;
+
+    /**
+     * Reads the optional {@code DocumentType}, defaulting to AWS's own {@code Command}. Anything
+     * outside the enum is a ValidationException rather than a stored document type nothing else
+     * in the emulator — or in AWS — will ever recognise.
+     */
+    private String requireDocumentType(JsonNode request) {
+        String documentType = request.path("DocumentType").asText("Command");
+        if (!DOCUMENT_TYPES.contains(documentType)) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value '" + documentType + "' at 'documentType' failed to "
+                            + "satisfy constraint: Member must satisfy enum value set: " + DOCUMENT_TYPES,
+                    400);
+        }
+        return documentType;
+    }
+
+    /**
+     * Reads one of the two {@code AccountIds} lists on ModifyDocumentPermission. The members are
+     * written straight into the document's share list, so an id that is not an account id would
+     * be reported back by DescribeDocumentPermission as though the share had happened.
+     */
+    private List<String> accountIds(JsonNode request, String field) {
+        List<String> accountIds = new ArrayList<>();
+        request.path(field).forEach(node -> accountIds.add(node.asText()));
+        if (accountIds.size() > MAX_ACCOUNT_IDS) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value at '" + decapitalize(field) + "' failed to satisfy "
+                            + "constraint: Member must have length less than or equal to " + MAX_ACCOUNT_IDS,
+                    400);
+        }
+        for (String accountId : accountIds) {
+            if (!ACCOUNT_ID.matcher(accountId).matches()) {
+                throw new AwsException("ValidationException",
+                        "1 validation error detected: Value '" + accountId + "' at '" + decapitalize(field)
+                                + "' failed to satisfy constraint: Member must satisfy regular expression "
+                                + "pattern: (?i)all|[0-9]{12}",
+                        400);
+            }
+        }
+        return accountIds;
+    }
+
+    private static String decapitalize(String field) {
+        return Character.toLowerCase(field.charAt(0)) + field.substring(1);
+    }
+
     private Response handleGetDocument(JsonNode request, String region) {
         String name = requireDocumentName(request);
         SsmDocument document = ssmService.getDocument(name, region);
@@ -338,7 +403,7 @@ public class SsmJsonHandler {
     private Response handleCreateDocument(JsonNode request, String region) {
         String name = requireDocumentName(request);
         String content = request.path("Content").asText();
-        String documentType = request.path("DocumentType").asText("Command");
+        String documentType = requireDocumentType(request);
 
         SsmDocument document = ssmService.createDocument(name, content, documentType, region);
         return Response.ok(documentDescriptionResponse(document)).build();
@@ -368,10 +433,8 @@ public class SsmJsonHandler {
     private Response handleModifyDocumentPermission(JsonNode request, String region) {
         String name = requireDocumentName(request);
         requireSharePermissionType(request);
-        List<String> accountIdsToAdd = new ArrayList<>();
-        request.path("AccountIdsToAdd").forEach(n -> accountIdsToAdd.add(n.asText()));
-        List<String> accountIdsToRemove = new ArrayList<>();
-        request.path("AccountIdsToRemove").forEach(n -> accountIdsToRemove.add(n.asText()));
+        List<String> accountIdsToAdd = accountIds(request, "AccountIdsToAdd");
+        List<String> accountIdsToRemove = accountIds(request, "AccountIdsToRemove");
 
         ssmService.modifyDocumentPermission(name, accountIdsToAdd, accountIdsToRemove, region);
         return Response.ok(objectMapper.createObjectNode()).build();
