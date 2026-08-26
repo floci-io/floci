@@ -189,12 +189,41 @@ public class ServiceCatalogService {
     public ObjectNode provisionProduct(JsonNode request, String region, String accountId) {
         ensureControlTowerCatalog(region, accountId);
         String name = requireText(request, "ProvisionedProductName");
+        ObjectNode product = resolveProduct(request);
+        String productId = text(product, "Id");
+        String artifactId = resolveArtifactId(product, request);
         ObjectNode existing = provisionedProductStore.scan(key -> true).stream()
-                .filter(product -> name.equals(text(product, "Name")))
+                .filter(candidate -> name.equals(text(candidate, "Name")))
                 .findFirst().orElse(null);
         if (existing != null) {
             return existing.deepCopy();
         }
+        String provisionedId = id("pp");
+        ObjectNode provisioned = objectMapper.createObjectNode();
+        provisioned.put("Id", provisionedId);
+        provisioned.put("Arn", "arn:aws:servicecatalog:" + region + ":" + accountId
+                + ":provisionedproduct/" + provisionedId);
+        provisioned.put("Name", name);
+        if (CONTROL_TOWER_PRODUCT_ID.equals(productId)) {
+            provisioned.put("Type", "CONTROL_TOWER_ACCOUNT");
+            provisioned.put("PhysicalId", accountFactoryAccountId(request, name, accountId));
+        } else {
+            provisioned.put("Type", "CFN_STACK");
+        }
+        provisioned.put("Status", "AVAILABLE");
+        provisioned.put("ProductId", productId);
+        provisioned.put("ProvisioningArtifactId", artifactId);
+        provisioned.put("CreatedTime", Instant.now().toEpochMilli() / 1000.0);
+        provisionedProductStore.put(provisionedId, provisioned);
+        return provisioned.deepCopy();
+    }
+
+    /**
+     * Runs the Control Tower Account Factory side of a provision: finds or creates the
+     * Organizations member account the provisioning parameters describe, moves it to the
+     * requested OU, and returns its account id.
+     */
+    private String accountFactoryAccountId(JsonNode request, String name, String accountId) {
         Map<String, String> parameters = new java.util.HashMap<>();
         request.path("ProvisioningParameters").forEach(parameter ->
                 parameters.put(text(parameter, "Key"), text(parameter, "Value")));
@@ -216,20 +245,51 @@ public class ServiceCatalogService {
         if (destinationParent != null && !destinationParent.equals(account.getParentId())) {
             organizationsService.moveAccount(accountId, account.getId(), account.getParentId(), destinationParent);
         }
-        String provisionedId = id("pp");
-        ObjectNode product = objectMapper.createObjectNode();
-        product.put("Id", provisionedId);
-        product.put("Arn", "arn:aws:servicecatalog:" + region + ":" + accountId
-                + ":provisionedproduct/" + provisionedId);
-        product.put("Name", name);
-        product.put("Type", "CONTROL_TOWER_ACCOUNT");
-        product.put("Status", "AVAILABLE");
-        product.put("PhysicalId", account.getId());
-        product.put("ProductId", CONTROL_TOWER_PRODUCT_ID);
-        product.put("ProvisioningArtifactId", CONTROL_TOWER_ARTIFACT_ID);
-        product.put("CreatedTime", Instant.now().toEpochMilli() / 1000.0);
-        provisionedProductStore.put(provisionedId, product);
-        return product.deepCopy();
+        return account.getId();
+    }
+
+    private ObjectNode resolveProduct(JsonNode request) {
+        String productId = text(request, "ProductId");
+        if (productId != null && !productId.isBlank()) {
+            return requireProduct(productId, "ProductId");
+        }
+        String productName = text(request, "ProductName");
+        if (productName != null && !productName.isBlank()) {
+            return productStore.scan(key -> true).stream()
+                    .filter(product -> productName.equals(text(product, "Name")))
+                    .findFirst().orElseThrow(() -> notFound("product", productName));
+        }
+        throw new AwsException("InvalidParametersException", "ProductId or ProductName is required", 400);
+    }
+
+    /**
+     * Resolves the provisioning artifact a request targets, rejecting one the product does
+     * not own. Neither identifier supplied means the product's first artifact.
+     */
+    private String resolveArtifactId(ObjectNode product, JsonNode request) {
+        JsonNode ids = product.path("ProvisioningArtifactIds");
+        JsonNode names = product.path("ProvisioningArtifactNames");
+        String artifactId = text(request, "ProvisioningArtifactId");
+        String artifactName = text(request, "ProvisioningArtifactName");
+        if (artifactId != null && !artifactId.isBlank()) {
+            for (JsonNode candidate : ids) {
+                if (artifactId.equals(candidate.asText())) {
+                    return artifactId;
+                }
+            }
+            throw new AwsException("ResourceNotFoundException",
+                    "Unknown provisioning artifact: " + artifactId, 400);
+        }
+        if (artifactName != null && !artifactName.isBlank()) {
+            for (int i = 0; i < names.size(); i++) {
+                if (artifactName.equals(names.get(i).asText())) {
+                    return i < ids.size() ? ids.get(i).asText() : null;
+                }
+            }
+            throw new AwsException("ResourceNotFoundException",
+                    "Unknown provisioning artifact: " + artifactName, 400);
+        }
+        return ids.isEmpty() ? null : ids.get(0).asText();
     }
 
     private String organizationalUnitId(String value) {
@@ -872,36 +932,8 @@ public class ServiceCatalogService {
     }
 
     public ObjectNode describeProvisioningParameters(JsonNode request) {
-        String productId = text(request, "ProductId");
-        String productName = text(request, "ProductName");
-        ObjectNode product;
-        if (productId != null && !productId.isBlank()) {
-            product = requireProduct(productId);
-        } else if (productName != null && !productName.isBlank()) {
-            product = productStore.scan(key -> true).stream()
-                    .filter(p -> productName.equals(text(p, "Name")))
-                    .findFirst().orElseThrow(() -> notFound("product", productName));
-        } else {
-            throw new AwsException("InvalidParametersException", "ProductId or ProductName is required", 400);
-        }
-        String artifactId = text(request, "ProvisioningArtifactId");
-        String artifactName = text(request, "ProvisioningArtifactName");
-        if (artifactId != null || artifactName != null) {
-            JsonNode ids = product.path("ProvisioningArtifactIds");
-            JsonNode names = product.path("ProvisioningArtifactNames");
-            boolean found;
-            if (artifactId != null) {
-                found = java.util.stream.StreamSupport.stream(ids.spliterator(), false)
-                        .anyMatch(id -> artifactId.equals(id.asText()));
-            } else {
-                found = java.util.stream.StreamSupport.stream(names.spliterator(), false)
-                        .anyMatch(name -> artifactName.equals(name.asText()));
-            }
-            if (!found) {
-                throw new AwsException("ResourceNotFoundException",
-                        "Unknown provisioning artifact: " + (artifactId != null ? artifactId : artifactName), 400);
-            }
-        }
+        ObjectNode product = resolveProduct(request);
+        resolveArtifactId(product, request);
         return product.deepCopy();
     }
 
