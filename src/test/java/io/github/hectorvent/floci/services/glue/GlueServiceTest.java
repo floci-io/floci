@@ -70,6 +70,8 @@ class GlueServiceTest {
                 partitionStore,
                 new InMemoryStorage<String, Map<String, Object>>(),
                 new InMemoryStorage<String, UserDefinedFunction>(),
+                new InMemoryStorage<String, io.github.hectorvent.floci.services.glue.model.Job>(),
+                new InMemoryStorage<String, io.github.hectorvent.floci.services.glue.model.Crawler>(),
                 schemaRegistryService, regionResolver, new ResourceGroupsTaggingService(null));
         glueService.createDatabase(new Database("db1"));
     }

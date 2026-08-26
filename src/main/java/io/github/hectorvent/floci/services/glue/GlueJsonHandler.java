@@ -4,7 +4,10 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.services.glue.model.Crawler;
 import io.github.hectorvent.floci.services.glue.model.Database;
+import io.github.hectorvent.floci.services.glue.model.Job;
+import io.github.hectorvent.floci.services.glue.model.JobUpdate;
 import io.github.hectorvent.floci.services.glue.model.Partition;
 import io.github.hectorvent.floci.services.glue.model.Table;
 import io.github.hectorvent.floci.services.glue.model.UserDefinedFunction;
@@ -167,11 +170,56 @@ public class GlueJsonHandler {
             case "TagResource" -> handleTagResource(request);
             case "UntagResource" -> handleUntagResource(request);
             case "GetTags" -> handleGetTags(request);
+            case "CreateJob" -> {
+                Job job = mapper.treeToValue(request, Job.class);
+                Map<String, String> tags = request.has("Tags") ? mapper.convertValue(request.get("Tags"), new TypeReference<>() {}) : null;
+                glueService.createJob(job, tags, region);
+                yield Response.ok(Map.of("Name", job.getName())).build();
+            }
+            case "GetJob" -> {
+                String name = request.get("JobName").asText();
+                yield Response.ok(Map.of("Job", glueService.getJob(name))).build();
+            }
+            case "GetJobs" -> {
+                yield Response.ok(Map.of("Jobs", glueService.getJobs())).build();
+            }
+            case "UpdateJob" -> {
+                String name = request.get("JobName").asText();
+                JobUpdate update = mapper.treeToValue(request.get("JobUpdate"), JobUpdate.class);
+                glueService.updateJob(name, update);
+                yield Response.ok(Map.of("JobName", name)).build();
+            }
+            case "DeleteJob" -> {
+                String name = request.get("JobName").asText();
+                glueService.deleteJob(name, region);
+                yield Response.ok(Map.of("JobName", name)).build();
+            }
+            case "CreateCrawler" -> {
+                Crawler crawler = mapper.treeToValue(request, Crawler.class);
+                Map<String, String> tags = request.has("Tags") ? mapper.convertValue(request.get("Tags"), new TypeReference<>() {}) : null;
+                glueService.createCrawler(crawler, tags, region);
+                yield Response.ok().build();
+            }
+            case "GetCrawler" -> {
+                String name = request.get("Name").asText();
+                yield Response.ok(Map.of("Crawler", glueService.getCrawler(name))).build();
+            }
+            case "GetCrawlers" -> {
+                yield Response.ok(Map.of("Crawlers", glueService.getCrawlers())).build();
+            }
+            case "UpdateCrawler" -> {
+                Crawler update = mapper.treeToValue(request, Crawler.class);
+                glueService.updateCrawler(update);
+                yield Response.ok().build();
+            }
+            case "DeleteCrawler" -> {
+                String name = request.get("Name").asText();
+                glueService.deleteCrawler(name, region);
+                yield Response.ok().build();
+            }
             // Read-only Glue actions for resources the emulator does not model. The AWS SDK
             // expects each to return a 200 with its result key present (empty), so we emit the
             // documented empty shape rather than an InvalidAction 400 that callers can't read.
-            case "GetJobs" -> Response.ok(Map.of("Jobs", List.of())).build();
-            case "GetCrawlers" -> Response.ok(Map.of("Crawlers", List.of())).build();
             case "ListDataQualityRulesets" -> Response.ok(Map.of("Rulesets", List.of())).build();
             case "GetSecurityConfigurations" -> Response.ok(Map.of("SecurityConfigurations", List.of())).build();
             default -> throw new AwsException("InvalidAction", "Action " + action + " is not supported", 400);

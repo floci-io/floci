@@ -7,7 +7,10 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.glue.model.Column;
+import io.github.hectorvent.floci.services.glue.model.Crawler;
 import io.github.hectorvent.floci.services.glue.model.Database;
+import io.github.hectorvent.floci.services.glue.model.Job;
+import io.github.hectorvent.floci.services.glue.model.JobUpdate;
 import io.github.hectorvent.floci.services.glue.model.Partition;
 import io.github.hectorvent.floci.services.glue.model.SchemaReference;
 import io.github.hectorvent.floci.services.glue.model.StorageDescriptor;
@@ -62,6 +65,8 @@ public class GlueService {
     private final StorageBackend<String, Partition> partitionStore;
     private final StorageBackend<String, Map<String, Object>> partitionColumnStatisticsStore;
     private final StorageBackend<String, UserDefinedFunction> functionStore;
+    private final StorageBackend<String, Job> jobStore;
+    private final StorageBackend<String, Crawler> crawlerStore;
     private final GlueSchemaRegistryService schemaRegistryService;
     private final RegionResolver regionResolver;
     private final ResourceGroupsTaggingService resourceGroupsTaggingService;
@@ -79,6 +84,8 @@ public class GlueService {
         this.partitionColumnStatisticsStore = storageFactory.create(
                 "glue", "partition_column_statistics.json", new TypeReference<>() {});
         this.functionStore = storageFactory.create("glue", "functions.json", new TypeReference<>() {});
+        this.jobStore = storageFactory.create("glue", "jobs.json", new TypeReference<>() {});
+        this.crawlerStore = storageFactory.create("glue", "crawlers.json", new TypeReference<>() {});
         this.schemaRegistryService = schemaRegistryService;
         this.regionResolver = regionResolver;
         this.resourceGroupsTaggingService = resourceGroupsTaggingService;
@@ -91,6 +98,8 @@ public class GlueService {
                 StorageBackend<String, Partition> partitionStore,
                 StorageBackend<String, Map<String, Object>> partitionColumnStatisticsStore,
                 StorageBackend<String, UserDefinedFunction> functionStore,
+                StorageBackend<String, Job> jobStore,
+                StorageBackend<String, Crawler> crawlerStore,
                 GlueSchemaRegistryService schemaRegistryService,
                 RegionResolver regionResolver,
                 ResourceGroupsTaggingService resourceGroupsTaggingService) {
@@ -101,6 +110,8 @@ public class GlueService {
         this.partitionStore = partitionStore;
         this.partitionColumnStatisticsStore = partitionColumnStatisticsStore;
         this.functionStore = functionStore;
+        this.jobStore = jobStore;
+        this.crawlerStore = crawlerStore;
         this.schemaRegistryService = schemaRegistryService;
         this.regionResolver = regionResolver;
         this.resourceGroupsTaggingService = resourceGroupsTaggingService;
@@ -840,6 +851,14 @@ public class GlueService {
         return regionResolver.buildArn("glue", region, "database/" + databaseName);
     }
 
+    private String jobArn(String region, String jobName) {
+        return regionResolver.buildArn("glue", region, "job/" + jobName);
+    }
+
+    private String crawlerArn(String region, String crawlerName) {
+        return regionResolver.buildArn("glue", region, "crawler/" + crawlerName);
+    }
+
     private static Pattern compileFunctionPattern(String pattern) {
         if (pattern == null) {
             return Pattern.compile(".*");
@@ -1004,4 +1023,138 @@ public class GlueService {
         return source != null ? new LinkedHashMap<>(source) : null;
     }
 
+    public void createJob(Job job) {
+        createJob(job, null, regionResolver.getDefaultRegion());
+    }
+
+    public void createJob(Job job, Map<String, String> tags, String region) {
+        String name = normalizeName(job.getName());
+        if (jobStore.get(name).isPresent()) {
+            throw new AwsException("AlreadyExistsException", "Job " + name + " already exists.", 400);
+        }
+        Instant now = Instant.now();
+        job.setCreatedOn(now);
+        job.setLastModifiedOn(now);
+        jobStore.put(name, job);
+        if (tags != null && !tags.isEmpty()) {
+            resourceGroupsTaggingService.tagResources(List.of(jobArn(region, name)), tags, region);
+        }
+        LOG.infov("Created Glue Job: {0}", name);
+    }
+
+    public Job getJob(String name) {
+        return jobStore.get(normalizeName(name))
+                .orElseThrow(() -> new AwsException("EntityNotFoundException", "Job " + name + " not found.", 400));
+    }
+
+    public List<Job> getJobs() {
+        return jobStore.scan(k -> true);
+    }
+
+    public void updateJob(String name, JobUpdate update) {
+        String normalizedName = normalizeName(name);
+        Job existing = jobStore.get(normalizedName)
+                .orElseThrow(() -> new AwsException("EntityNotFoundException", "Job " + name + " not found.", 400));
+
+        Job updated = new Job();
+        updated.setName(existing.getName());
+        updated.setCreatedOn(existing.getCreatedOn());
+        updated.setLastModifiedOn(Instant.now());
+
+        updated.setAllocatedCapacity(update.getAllocatedCapacity());
+        updated.setCodeGenConfigurationNodes(update.getCodeGenConfigurationNodes());
+        updated.setCommand(update.getCommand());
+        updated.setConnections(update.getConnections());
+        updated.setDefaultArguments(update.getDefaultArguments());
+        updated.setDescription(update.getDescription());
+        updated.setExecutionClass(update.getExecutionClass());
+        updated.setExecutionProperty(update.getExecutionProperty());
+        updated.setGlueVersion(update.getGlueVersion());
+        updated.setJobMode(update.getJobMode());
+        updated.setJobRunQueuingEnabled(update.getJobRunQueuingEnabled());
+        updated.setLogUri(update.getLogUri());
+        updated.setMaintenanceWindow(update.getMaintenanceWindow());
+        updated.setMaxCapacity(update.getMaxCapacity());
+        updated.setMaxRetries(update.getMaxRetries());
+        updated.setNonOverridableArguments(update.getNonOverridableArguments());
+        updated.setNotificationProperty(update.getNotificationProperty());
+        updated.setNumberOfWorkers(update.getNumberOfWorkers());
+        updated.setRole(update.getRole());
+        updated.setSecurityConfiguration(update.getSecurityConfiguration());
+        updated.setTimeout(update.getTimeout());
+        updated.setWorkerType(update.getWorkerType());
+
+        jobStore.put(normalizedName, updated);
+        LOG.infov("Updated Glue Job: {0}", normalizedName);
+    }
+
+    public void deleteJob(String name, String region) {
+        String normalizedName = normalizeName(name);
+        jobStore.delete(normalizedName);
+        resourceGroupsTaggingService.deleteResources(List.of(jobArn(region, normalizedName)), region);
+        LOG.infov("Deleted Glue Job: {0}", name);
+    }
+
+    public void createCrawler(Crawler crawler) {
+        createCrawler(crawler, null, regionResolver.getDefaultRegion());
+    }
+
+    public void createCrawler(Crawler crawler, Map<String, String> tags, String region) {
+        String name = normalizeName(crawler.getName());
+        if (crawlerStore.get(name).isPresent()) {
+            throw new AwsException("AlreadyExistsException", "Crawler " + name + " already exists.", 400);
+        }
+        Instant now = Instant.now();
+        crawler.setCreationTime(now);
+        crawler.setLastUpdated(now);
+        crawlerStore.put(name, crawler);
+        if (tags != null && !tags.isEmpty()) {
+            resourceGroupsTaggingService.tagResources(List.of(crawlerArn(region, name)), tags, region);
+        }
+        LOG.infov("Created Glue Crawler: {0}", name);
+    }
+
+    public Crawler getCrawler(String name) {
+        return crawlerStore.get(normalizeName(name))
+                .orElseThrow(() -> new AwsException("EntityNotFoundException", "Crawler " + name + " not found.", 400));
+    }
+
+    public List<Crawler> getCrawlers() {
+        return crawlerStore.scan(k -> true);
+    }
+
+    public void updateCrawler(Crawler update) {
+        String name = normalizeName(update.getName());
+        Crawler existing = crawlerStore.get(name)
+                .orElseThrow(() -> new AwsException("EntityNotFoundException", "Crawler " + update.getName() + " not found.", 400));
+
+        Crawler updated = new Crawler();
+        updated.setName(existing.getName());
+        updated.setCreationTime(existing.getCreationTime());
+        updated.setLastUpdated(Instant.now());
+
+        updated.setClassifiers(update.getClassifiers());
+        updated.setConfiguration(update.getConfiguration());
+        updated.setCrawlerSecurityConfiguration(update.getCrawlerSecurityConfiguration());
+        updated.setDatabaseName(update.getDatabaseName());
+        updated.setDescription(update.getDescription());
+        updated.setLakeFormationConfiguration(update.getLakeFormationConfiguration());
+        updated.setLineageConfiguration(update.getLineageConfiguration());
+        updated.setRecrawlPolicy(update.getRecrawlPolicy());
+        updated.setRole(update.getRole());
+        updated.setSchedule(update.getSchedule());
+        updated.setSchemaChangePolicy(update.getSchemaChangePolicy());
+        updated.setTablePrefix(update.getTablePrefix());
+        updated.setTargets(update.getTargets());
+
+        crawlerStore.put(name, updated);
+        LOG.infov("Updated Glue Crawler: {0}", name);
+    }
+
+    public void deleteCrawler(String name, String region) {
+        String normalizedName = normalizeName(name);
+        crawlerStore.delete(normalizedName);
+        resourceGroupsTaggingService.deleteResources(List.of(crawlerArn(region, normalizedName)), region);
+        LOG.infov("Deleted Glue Crawler: {0}", name);
+    }
 }
