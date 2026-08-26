@@ -1892,7 +1892,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         return applyRouteFilters(routes, filters);
     }
 
-    /** No real S3 write — returns a deterministic location string, matching the export naming AWS uses. */
+    /** No real S3 write — returns a location string (unique random suffix) matching the export naming AWS uses. */
     public String exportTransitGatewayRoutes(String region, String routeTableId, String s3Bucket) {
         getRequiredTransitGatewayRouteTable(region, routeTableId);
         if (s3Bucket == null || s3Bucket.isBlank()) {

@@ -9,8 +9,8 @@ import static org.hamcrest.Matchers.startsWith;
 
 /**
  * Wire-level tests for {@code ExportTransitGatewayRoutes}: no real S3 write happens — the
- * operation returns a deterministic {@code s3://} location string matching the real
- * operation's naming convention.
+ * operation returns an {@code s3://} location string (with a unique random suffix) matching
+ * the real operation's naming convention.
  */
 @QuarkusTest
 class Ec2ExportTransitGatewayRoutesConsumerTest {

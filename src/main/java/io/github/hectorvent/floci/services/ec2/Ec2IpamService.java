@@ -112,8 +112,12 @@ public class Ec2IpamService {
                 if (accountId != null) {
                     return accountId;
                 }
-            } catch (ContextNotActiveException ignored) {
-                // outside request scope — fall through to default
+            } catch (ContextNotActiveException e) {
+                // Tolerated: callers outside a request scope (startup, internal provisioning)
+                // legitimately fall through to the default account. Logged so an unexpected
+                // context loss inside a request doesn't produce silent wrong-owner decisions.
+                LOG.debugv("No active request context — resolving caller as default account {0}",
+                        config.defaultAccountId());
             }
         }
         return config.defaultAccountId();
@@ -218,8 +222,11 @@ public class Ec2IpamService {
     }
 
     public Ipam createIpam(String region, String description, List<String> operatingRegions,
-                           String ownerId, Boolean enablePrivateGua, String meteredAccount,
+                           String requestedOwnerId, Boolean enablePrivateGua, String meteredAccount,
                            String tier, String clientToken, List<Tag> tags) {
+        // A null owner means "whoever is calling": resolve it the same way account-aware
+        // storage picks its partition, so the recorded owner and the partition always agree.
+        String ownerId = requestedOwnerId != null ? requestedOwnerId : callerAccountId();
         requireEnum(tier, TIERS, "Tier");
         requireEnum(meteredAccount, METERED_ACCOUNTS, "MeteredAccount");
         if (clientToken != null && !clientToken.isBlank()) {
@@ -408,7 +415,9 @@ public class Ec2IpamService {
      */
     public IpamPool createIpamPool(String region, String ipamScopeId, String locale,
                                    String sourceIpamPoolId, String addressFamily, String description,
-                                   String ownerId, String clientToken) {
+                                   String requestedOwnerId, String clientToken) {
+        // Same null-means-caller resolution as createIpam.
+        String ownerId = requestedOwnerId != null ? requestedOwnerId : callerAccountId();
         if (ipamScopeId == null || ipamScopeId.isBlank()) {
             throw new AwsException("MissingParameter", "IpamScopeId is required.", 400);
         }
@@ -633,8 +642,11 @@ public class Ec2IpamService {
                 (ipamPoolAllocationId != null && ipamPoolAllocationId.equals(a.getIpamPoolAllocationId()))
                         || (ipamPoolAllocationId == null && cidr != null && cidr.equals(a.getCidr())));
         if (!removed) {
+            String identifier = ipamPoolAllocationId != null
+                    ? ipamPoolAllocationId
+                    : "for CIDR " + cidr;
             throw new AwsException("InvalidIpamPoolAllocationId.NotFound",
-                    "Allocation " + ipamPoolAllocationId + " not found in pool " + ipamPoolId + ".", 400);
+                    "Allocation " + identifier + " not found in pool " + ipamPoolId + ".", 400);
         }
         savePool(ownedPool);
         return true;

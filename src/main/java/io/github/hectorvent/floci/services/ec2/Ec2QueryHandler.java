@@ -1208,7 +1208,7 @@ public class Ec2QueryHandler {
         }
         checkDryRun(p);
         Ipam ipam = ipamService.createIpam(region, p.getFirst("Description"), operatingRegions,
-                config.defaultAccountId(),
+                null,
                 p.getFirst("EnablePrivateGua") == null ? false : Boolean.parseBoolean(p.getFirst("EnablePrivateGua")),
                 p.getFirst("MeteredAccount"), p.getFirst("Tier"), p.getFirst("ClientToken"),
                 parseTagsForResource(p, "ipam"));
@@ -1340,7 +1340,7 @@ public class Ec2QueryHandler {
                 p.getFirst("SourceIpamPoolId"),
                 p.getFirst("AddressFamily"),
                 p.getFirst("Description"),
-                config.defaultAccountId(),
+                null,
                 p.getFirst("ClientToken"));
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateIpamPoolResponse", AwsNamespaces.EC2)
@@ -1385,12 +1385,9 @@ public class Ec2QueryHandler {
                 p.getFirst("IpamPoolId"),
                 p.getFirst("Description"),
                 p.getFirst("AutoImport") == null ? null : Boolean.parseBoolean(p.getFirst("AutoImport")),
-                p.getFirst("AllocationMinNetmaskLength") == null
-                        ? null : Integer.parseInt(p.getFirst("AllocationMinNetmaskLength")),
-                p.getFirst("AllocationMaxNetmaskLength") == null
-                        ? null : Integer.parseInt(p.getFirst("AllocationMaxNetmaskLength")),
-                p.getFirst("AllocationDefaultNetmaskLength") == null
-                        ? null : Integer.parseInt(p.getFirst("AllocationDefaultNetmaskLength")),
+                parseOptionalInt(p.getFirst("AllocationMinNetmaskLength"), "AllocationMinNetmaskLength"),
+                parseOptionalInt(p.getFirst("AllocationMaxNetmaskLength"), "AllocationMaxNetmaskLength"),
+                parseOptionalInt(p.getFirst("AllocationDefaultNetmaskLength"), "AllocationDefaultNetmaskLength"),
                 Boolean.parseBoolean(p.getFirst("ClearAllocationDefaultNetmaskLength")));
         XmlBuilder xml = new XmlBuilder()
                 .start("ModifyIpamPoolResponse", AwsNamespaces.EC2)
@@ -1430,10 +1427,9 @@ public class Ec2QueryHandler {
     }
 
     private Response handleAllocateIpamPoolCidr(MultivaluedMap<String, String> p, String region) {
-        String netmask = p.getFirst("NetmaskLength");
         IpamPoolAllocation allocation = ipamService.allocateIpamPoolCidr(region,
                 p.getFirst("IpamPoolId"),
-                netmask != null ? Integer.valueOf(netmask) : null,
+                parseOptionalInt(p.getFirst("NetmaskLength"), "NetmaskLength"),
                 p.getFirst("Cidr"),
                 p.getFirst("Description"),
                 p.getFirst("ClientToken"));
