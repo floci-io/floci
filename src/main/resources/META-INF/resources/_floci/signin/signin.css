@@ -1,0 +1,247 @@
+:root {
+  color-scheme: light;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --floci-ink: #262425;
+  --floci-brand: #5559a7;
+  --floci-orange: #ff9900;
+  --floci-orange-dark: #995c00;
+  --floci-surface: #ffffff;
+  --floci-muted: #5f6772;
+  --floci-border: #e4e7ec;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 32px 16px;
+  color: var(--floci-ink);
+  background:
+    radial-gradient(circle at 15% 10%, #ff99001f 0, transparent 34%),
+    radial-gradient(circle at 85% 90%, #5559a71f 0, transparent 34%),
+    #f5f6f8;
+}
+
+.shell {
+  width: min(500px, 100%);
+  overflow: hidden;
+  border: 1px solid var(--floci-border);
+  border-radius: 22px;
+  background: var(--floci-surface);
+  box-shadow: 0 24px 64px #2624251f;
+}
+
+.brand {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  min-height: 122px;
+  padding: 28px 36px;
+  overflow: hidden;
+  background: var(--floci-brand);
+}
+
+.brand::after {
+  position: absolute;
+  right: -58px;
+  bottom: -78px;
+  width: 190px;
+  height: 190px;
+  border: 28px solid #ff990026;
+  border-radius: 50%;
+  content: "";
+}
+
+.brand img {
+  position: relative;
+  z-index: 1;
+  width: 190px;
+  max-width: 62%;
+  height: auto;
+}
+
+.local-badge {
+  position: relative;
+  z-index: 1;
+  padding: 7px 10px;
+  border: 1px solid #ffffff38;
+  border-radius: 999px;
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.content {
+  padding: 36px;
+}
+
+.eyebrow {
+  display: block;
+  margin-bottom: 8px;
+  color: var(--floci-orange-dark);
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: .11em;
+  text-transform: uppercase;
+}
+
+h1 {
+  margin: 0 0 14px;
+  font-size: clamp(28px, 7vw, 36px);
+  line-height: 1.12;
+  letter-spacing: -.025em;
+}
+
+p {
+  margin: 0;
+  color: var(--floci-muted);
+  line-height: 1.65;
+}
+
+p + p {
+  margin-top: 14px;
+}
+
+.account {
+  display: inline-block;
+  margin-top: 6px;
+  padding: 4px 8px;
+  border: 1px solid #ff990052;
+  border-radius: 6px;
+  color: var(--floci-ink);
+  background: #fff7e8;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: .9em;
+  font-weight: 700;
+}
+
+.notice {
+  display: flex;
+  gap: 12px;
+  margin-top: 24px;
+  padding: 14px 16px;
+  border: 1px solid var(--floci-border);
+  border-radius: 12px;
+  background: #fafafa;
+  color: #464b53;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.notice-dot {
+  flex: 0 0 auto;
+  width: 10px;
+  height: 10px;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: var(--floci-orange);
+  box-shadow: 0 0 0 4px #ff990024;
+}
+
+form {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-top: 28px;
+}
+
+button,
+.home-link {
+  min-height: 46px;
+  padding: 11px 18px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  font: inherit;
+  font-weight: 750;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:focus-visible,
+.home-link:focus-visible {
+  outline: 3px solid #92400e;
+  outline-offset: 2px;
+}
+
+.continue {
+  color: #1c1917;
+  background: var(--floci-orange);
+  box-shadow: 0 8px 18px #ff99002e;
+}
+
+.continue:hover {
+  background: #ffad2f;
+}
+
+.cancel {
+  border-color: #667085;
+  color: var(--floci-ink);
+  background: #f4f5f7;
+}
+
+.cancel:hover {
+  background: #e9ebef;
+}
+
+.home-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 28px;
+  color: #1c1917;
+  background: var(--floci-orange);
+  text-decoration: none;
+}
+
+@media (max-width: 480px) {
+  body {
+    align-items: start;
+    padding-top: 18px;
+  }
+
+  .brand {
+    min-height: 104px;
+    padding: 24px;
+  }
+
+  .brand::after {
+    right: -120px;
+    bottom: -105px;
+  }
+
+  .brand img {
+    width: 166px;
+  }
+
+  .local-badge {
+    display: none;
+  }
+
+  .content {
+    padding: 28px 24px;
+  }
+
+  form {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+  }
+}

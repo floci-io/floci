@@ -10,6 +10,9 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.CurrentContainerNetworkResolver;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
@@ -33,6 +36,7 @@ import io.github.hectorvent.floci.services.rds.model.DbSubnetGroup;
 import io.github.hectorvent.floci.services.rds.model.OptionGroup;
 import io.github.hectorvent.floci.services.rds.model.OptionGroupOption;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyManager;
+import io.github.hectorvent.floci.services.resourcegroupstagging.ResourceGroupsTaggingService;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
 import io.github.hectorvent.floci.core.common.Resettable;
@@ -61,7 +65,7 @@ import java.util.regex.Pattern;
  * Starts DB containers and auth proxies on creation.
  */
 @ApplicationScoped
-public class RdsService implements Resettable {
+public class RdsService implements Resettable, ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(RdsService.class);
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -126,12 +130,20 @@ public class RdsService implements Resettable {
     private final StorageBackend<String, DbProxyTargetGroup> proxyTargetGroups;
     private final RdsContainerManager containerManager;
     private final RdsProxyManager proxyManager;
+    // CreateDBCluster/CreateDBInstance register the new resource only after the
+    // backing container is provisioned, and an image pull can hold that window
+    // open long enough for a client-side retry to pass the exists-check again
+    // and provision a second container for the same identifier. The sentinel
+    // serializes creates per identifier so the duplicate fails fast with the
+    // same fault a completed create produces.
+    private final Set<String> provisioningIds = ConcurrentHashMap.newKeySet();
     private final Ec2Service ec2Service;
     private final RegionResolver regionResolver;
     private final EmulatorConfig config;
     private final SecretsManagerService secretsManagerService;
     private final DockerHostResolver dockerHostResolver;
     private final CurrentContainerNetworkResolver currentContainerNetworkResolver;
+    private final ResourceGroupsTaggingService taggingService;
     private final Set<Integer> usedPorts = ConcurrentHashMap.newKeySet();
     private static final Pattern IMAGE_TAG_VERSION_PATTERN = Pattern.compile("^(\\d+(?:\\.\\d+)*)(.*)$");
     private static final Pattern SAFE_IMAGE_TAG_PATTERN = Pattern.compile("[A-Za-z0-9._-]+");
@@ -163,7 +175,8 @@ public class RdsService implements Resettable {
                       StorageFactory storageFactory,
                       SecretsManagerService secretsManagerService,
                       DockerHostResolver dockerHostResolver,
-                      CurrentContainerNetworkResolver currentContainerNetworkResolver) {
+                      CurrentContainerNetworkResolver currentContainerNetworkResolver,
+                      ResourceGroupsTaggingService taggingService) {
         this.containerManager = containerManager;
         this.proxyManager = proxyManager;
         this.ec2Service = ec2Service;
@@ -172,6 +185,7 @@ public class RdsService implements Resettable {
         this.secretsManagerService = secretsManagerService;
         this.dockerHostResolver = dockerHostResolver;
         this.currentContainerNetworkResolver = currentContainerNetworkResolver;
+        this.taggingService = taggingService;
         this.instances = storageFactory.create("rds", "rds-instances.json",
                 new TypeReference<Map<String, DbInstance>>() {});
         this.clusters = storageFactory.create("rds", "rds-clusters.json",
@@ -280,7 +294,7 @@ public class RdsService implements Resettable {
         this(containerManager, proxyManager, ec2Service, regionResolver, config,
                 instances, clusters, parameterGroups, clusterParameterGroups, subnetGroups,
                 secretsManagerService, dockerHostResolver, currentContainerNetworkResolver,
-                proxies, proxyTargetGroups, new InMemoryStorage<>());
+                proxies, proxyTargetGroups, new InMemoryStorage<>(), null);
     }
 
     RdsService(RdsContainerManager containerManager,
@@ -298,7 +312,8 @@ public class RdsService implements Resettable {
                CurrentContainerNetworkResolver currentContainerNetworkResolver,
                StorageBackend<String, DbProxy> proxies,
                StorageBackend<String, DbProxyTargetGroup> proxyTargetGroups,
-               StorageBackend<String, OptionGroup> optionGroups) {
+               StorageBackend<String, OptionGroup> optionGroups,
+               ResourceGroupsTaggingService taggingService) {
         this.containerManager = containerManager;
         this.proxyManager = proxyManager;
         this.ec2Service = ec2Service;
@@ -315,6 +330,7 @@ public class RdsService implements Resettable {
         this.subnetGroups = subnetGroups;
         this.proxies = proxies;
         this.proxyTargetGroups = proxyTargetGroups;
+        this.taggingService = taggingService;
     }
 
     public void restorePersistedRuntime() {
@@ -461,6 +477,36 @@ public class RdsService implements Resettable {
                                        String optionGroupName,
                                        String region,
                                        boolean autoMinorVersionUpgrade) {
+        String provisioningKey = "instance:" + currentAccountId() + ":"
+                + dbResourceKey(effectiveRegion(region), id);
+        if (!provisioningIds.add(provisioningKey)) {
+            throw new AwsException("DBInstanceAlreadyExists",
+                    "DB instance " + id + " already exists.", 400);
+        }
+        try {
+            return doCreateDbInstance(id, engineParam, engineVersion, masterUsername,
+                    masterPassword, dbName, dbInstanceClass, allocatedStorage, iamEnabled,
+                    paramGroupName, dbSubnetGroupName, dbClusterIdentifier, availabilityZone,
+                    multiAz, manageMasterUserPassword, masterUserSecretKmsKeyId, tags,
+                    vpcSecurityGroupIds, optionGroupName, region, autoMinorVersionUpgrade);
+        } finally {
+            provisioningIds.remove(provisioningKey);
+        }
+    }
+
+    private DbInstance doCreateDbInstance(String id, String engineParam, String engineVersion,
+                                          String masterUsername, String masterPassword,
+                                          String dbName, String dbInstanceClass,
+                                          int allocatedStorage, boolean iamEnabled,
+                                          String paramGroupName, String dbSubnetGroupName,
+                                          String dbClusterIdentifier, String availabilityZone,
+                                          boolean multiAz, boolean manageMasterUserPassword,
+                                          String masterUserSecretKmsKeyId,
+                                          Map<String, String> tags,
+                                          List<String> vpcSecurityGroupIds,
+                                          String optionGroupName,
+                                          String region,
+                                          boolean autoMinorVersionUpgrade) {
         String effectiveRegion = effectiveRegion(region);
         String dbiResourceId = "db-" + java.util.UUID.randomUUID().toString()
                 .replace("-", "").substring(0, 24).toUpperCase();
@@ -1140,6 +1186,29 @@ public class RdsService implements Resettable {
                                      String availabilityZone, boolean multiAz, String region,
                                      Double serverlessV2MinCapacity, Double serverlessV2MaxCapacity,
                                      Integer serverlessV2SecondsUntilAutoPause) {
+        String provisioningKey = "cluster:" + currentAccountId() + ":"
+                + dbResourceKey(effectiveRegion(region), id);
+        if (!provisioningIds.add(provisioningKey)) {
+            throw new AwsException("DBClusterAlreadyExistsFault",
+                    "DB cluster " + id + " already exists.", 400);
+        }
+        try {
+            return doCreateDbCluster(id, engineParam, engineVersion, masterUsername, masterPassword,
+                    databaseName, iamEnabled, paramGroupName, dbSubnetGroupName, availabilityZone,
+                    multiAz, region, serverlessV2MinCapacity, serverlessV2MaxCapacity,
+                    serverlessV2SecondsUntilAutoPause);
+        } finally {
+            provisioningIds.remove(provisioningKey);
+        }
+    }
+
+    private DbCluster doCreateDbCluster(String id, String engineParam, String engineVersion,
+                                        String masterUsername, String masterPassword,
+                                        String databaseName, boolean iamEnabled,
+                                        String paramGroupName, String dbSubnetGroupName,
+                                        String availabilityZone, boolean multiAz, String region,
+                                        Double serverlessV2MinCapacity, Double serverlessV2MaxCapacity,
+                                        Integer serverlessV2SecondsUntilAutoPause) {
         String effectiveRegion = effectiveRegion(region);
         String clusterResourceId = "cluster-" + java.util.UUID.randomUUID().toString()
                 .replace("-", "").substring(0, 24).toUpperCase();
@@ -5038,5 +5107,49 @@ public class RdsService implements Resettable {
                     cluster.isMultiAz(),
                     cluster.getSubnetAvailabilityZones());
         }
+    }
+
+    @Override
+    public List<ExplorerResource> getResources() {
+        List<ExplorerResource> resources = new ArrayList<>();
+        for (DbInstance instance : listDbInstances(null)) {
+            String arn = instance.getDbInstanceArn();
+            if (arn == null) {
+                continue;
+            }
+            AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+            resources.add(new ExplorerResource(arn, "rds:db", "rds",
+                    parsed.region(), parsed.accountId(),
+                    instance.getCreatedAt() != null ? instance.getCreatedAt() : Instant.now(),
+                    tagsFor(parsed.region(), arn)));
+        }
+        for (DbCluster cluster : listDbClusters(null)) {
+            String arn = cluster.getDbClusterArn();
+            if (arn == null) {
+                continue;
+            }
+            AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+            resources.add(new ExplorerResource(arn, "rds:cluster", "rds",
+                    parsed.region(), parsed.accountId(),
+                    cluster.getCreatedAt() != null ? cluster.getCreatedAt() : Instant.now(),
+                    tagsFor(parsed.region(), arn)));
+        }
+        return resources;
+    }
+
+    /**
+     * Resolves tags for a resource, tolerating a null taggingService. The CDI constructor always
+     * supplies one; the storage-backed test constructors pass null, and unit tests that exercise
+     * getResources() would otherwise NPE.
+     */
+    private Map<String, String> tagsFor(String region, String arn) {
+        return taggingService != null ? taggingService.getTagsForResource(region, arn) : Map.of();
+    }
+
+    @Override
+    public Set<SupportedResourceType> getSupportedResourceTypes() {
+        return Set.of(
+                new SupportedResourceType("rds:db", "rds", true),
+                new SupportedResourceType("rds:cluster", "rds", true));
     }
 }

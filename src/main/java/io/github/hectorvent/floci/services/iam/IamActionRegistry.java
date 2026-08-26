@@ -170,6 +170,12 @@ public class IamActionRegistry {
             "uploads", "notification", "versioning", "versions", "location", "object-lock",
             "website", "logging", "policy", "cors", "lifecycle", "encryption",
             "publicAccessBlock", "ownershipControls", "requestPayment");
+    // S3Controller's DELETE chain dispatches these ahead of replication (tagging is
+    // resolved above). Accelerate is NOT here: on DELETE it is dispatched after
+    // replication. Mirrors the controller's dispatch order — extend together.
+    private static final List<String> DELETE_SUBRESOURCES_BEFORE_REPLICATION = List.of(
+            "website", "policy", "cors", "lifecycle", "encryption",
+            "publicAccessBlock", "ownershipControls");
 
     /**
      * Resolves S3 sub-resource ops (ACL, tagging, retention, etc.) that
@@ -182,7 +188,8 @@ public class IamActionRegistry {
         boolean acl = params.containsKey("acl");
         boolean tagging = params.containsKey("tagging");
         boolean accelerate = params.containsKey("accelerate");
-        if (!acl && !tagging && !accelerate) {
+        boolean replication = params.containsKey("replication");
+        if (!acl && !tagging && !accelerate && !replication) {
             return null;
         }
         // /{bucket}?acl → bucket-level; /{bucket}/{key}?acl → object-level
@@ -223,24 +230,49 @@ public class IamActionRegistry {
                 default -> null;
             };
         }
-        // Accelerate is a bucket-only subresource, and ?accelerate on an object path is
-        // inert — the object routes ignore it — so only a bucket-level request maps here;
-        // everything else falls through to the standard rule table.
+        // Accelerate and replication are bucket-only subresources; on an object path
+        // both are inert — the object routes ignore them — so only a bucket-level
+        // request maps here; everything else falls through to the standard rule table.
         if (!isBucketLevel) {
             return null;
         }
-        List<String> dispatchedFirst = "PUT".equals(method)
-                ? PUT_SUBRESOURCES_BEFORE_ACCELERATE
-                : GET_SUBRESOURCES_BEFORE_ACCELERATE;
+        // S3Controller's PUT and GET chains dispatch accelerate ahead of replication,
+        // so accelerate resolves when both ride along. Its DELETE chain routes
+        // replication and never routes accelerate to an operation, so on DELETE
+        // replication resolves even when accelerate is also present.
+        if (accelerate && !(replication && "DELETE".equals(method))) {
+            List<String> dispatchedFirst = "PUT".equals(method)
+                    ? PUT_SUBRESOURCES_BEFORE_ACCELERATE
+                    : GET_SUBRESOURCES_BEFORE_ACCELERATE;
+            for (String subresource : dispatchedFirst) {
+                if (params.containsKey(subresource)) {
+                    return null;
+                }
+            }
+            return switch (method) {
+                case "GET" -> "s3:GetAccelerateConfiguration";
+                case "PUT" -> "s3:PutAccelerateConfiguration";
+                // AWS defines no DELETE for the subresource.
+                default -> null;
+            };
+        }
+        // Replication. On PUT and GET this is only reached without ?accelerate, so the
+        // accelerate before-lists cover everything dispatched ahead of replication too.
+        List<String> dispatchedFirst = switch (method) {
+            case "PUT" -> PUT_SUBRESOURCES_BEFORE_ACCELERATE;
+            case "GET" -> GET_SUBRESOURCES_BEFORE_ACCELERATE;
+            default -> DELETE_SUBRESOURCES_BEFORE_REPLICATION;
+        };
         for (String subresource : dispatchedFirst) {
             if (params.containsKey(subresource)) {
                 return null;
             }
         }
         return switch (method) {
-            case "GET" -> "s3:GetAccelerateConfiguration";
-            case "PUT" -> "s3:PutAccelerateConfiguration";
-            // AWS defines no DELETE for the subresource.
+            case "GET" -> "s3:GetReplicationConfiguration";
+            case "PUT" -> "s3:PutReplicationConfiguration";
+            // AWS authorizes DeleteBucketReplication with the put action.
+            case "DELETE" -> "s3:PutReplicationConfiguration";
             default -> null;
         };
     }

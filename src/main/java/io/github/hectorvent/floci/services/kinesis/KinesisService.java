@@ -18,9 +18,15 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicLong;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import java.util.ArrayList;
+import java.util.Set;
 
 @ApplicationScoped
-public class KinesisService {
+public class KinesisService implements ResourceProvider {
     private static final Logger LOG = Logger.getLogger(KinesisService.class);
     private static final Set<String> VALID_SHARD_LEVEL_METRICS = Set.of(
             "IncomingBytes", "IncomingRecords", "OutgoingBytes", "OutgoingRecords",
@@ -778,5 +784,31 @@ public class KinesisService {
 
     private String regionKey(String region, String name) {
         return region + "::" + name;
+    }
+
+    // ─── Resource Explorer 2 ───────────────────────────────────────────────────
+
+    @Override
+    public List<ExplorerResource> getResources() {
+        List<ExplorerResource> resources = new ArrayList<>();
+        for (KinesisStream stream : store.scan(k -> true)) {
+            String arn = stream.getStreamArn();
+            if (arn == null) {
+                continue;
+            }
+            AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+            resources.add(new ExplorerResource(
+                    arn, "kinesis:stream", "kinesis",
+                    parsed.region(), parsed.accountId(),
+                    stream.getStreamCreationTimestamp() != null
+                            ? stream.getStreamCreationTimestamp() : Instant.now(),
+                    stream.getTags() != null ? stream.getTags() : Map.of()));
+        }
+        return resources;
+    }
+
+    @Override
+    public Set<SupportedResourceType> getSupportedResourceTypes() {
+        return Set.of(new SupportedResourceType("kinesis:stream", "kinesis", true));
     }
 }
