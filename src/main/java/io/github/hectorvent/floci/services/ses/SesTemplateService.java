@@ -5,7 +5,6 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ses.model.EmailTemplate;
-import io.github.hectorvent.floci.services.ses.model.Tag;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -47,11 +46,7 @@ public class SesTemplateService {
 
     public EmailTemplate createTemplate(EmailTemplate template, String region) {
         validateTemplate(template);
-        if (template.getTags() != null) {
-            for (Tag tag : template.getTags()) {
-                SesTags.validate(tag);
-            }
-        }
+        SesTags.validate(template.getTags());
         String key = templateKey(region, template.getTemplateName());
         if (templateStore.get(key).isPresent()) {
             throw new AwsException("AlreadyExists",

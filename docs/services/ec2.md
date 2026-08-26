@@ -179,8 +179,9 @@ Floci seeds the following resources on first use in each region so Terraform, th
 | ModifyVpcAttribute | Updates supported VPC attributes. |
 | DescribeVpcAttribute | Returns a supported VPC attribute. |
 | DescribeVpcEndpointServices | Returns an empty local VPC endpoint service catalog. |
-| CreateVpcEndpoint | Creates a VPC endpoint record. |
+| CreateVpcEndpoint | Creates a VPC endpoint record, including its `PolicyDocument`. |
 | DescribeVpcEndpoints | Lists or returns stored VPC endpoints. |
+| ModifyVpcEndpoint | Associates or disassociates route tables, subnets and security groups, and sets or resets the endpoint policy. `DnsOptions`, `IpAddressType` and `SubnetConfiguration.N` are accepted and ignored. |
 | DeleteVpcEndpoints | Deletes VPC endpoint records. |
 | CreateDefaultVpc | Creates or returns the default VPC for the region. |
 | AssociateVpcCidrBlock | Adds a secondary CIDR block association to a VPC. |
