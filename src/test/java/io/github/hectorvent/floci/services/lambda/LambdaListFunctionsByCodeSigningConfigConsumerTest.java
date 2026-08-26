@@ -11,22 +11,87 @@ import static org.hamcrest.Matchers.equalTo;
  *
  * <p>New class, not appended to {@code LambdaCodeSigningIntegrationTest} (which
  * uses ordered setUp/tearDown fixtures this operation doesn't need), so
- * falsifiability isolates per operation (CS-001). No code signing config
- * management exists in this codebase (no Create/PutFunctionCodeSigningConfig), so
- * no function can ever actually have one attached — an always-empty result is the
- * honest answer, not a stub to fill in later.
+ * falsifiability isolates per operation (CS-001).</p>
+ *
+ * <p>The identifier is validated even though Floci models no code-signing
+ * configs: botocore models both {@code InvalidParameterValueException} and
+ * {@code ResourceNotFoundException} for this operation, and the only resource
+ * the ARN can name is a code-signing config. Since there is no
+ * CreateCodeSigningConfig / PutFunctionCodeSigningConfig in this codebase, every
+ * well-formed ARN necessarily names a config that does not exist, so the modeled
+ * 404 — not a silent empty list — is the honest answer.</p>
  */
 @QuarkusTest
 class LambdaListFunctionsByCodeSigningConfigConsumerTest {
 
+    /** Matches botocore's CodeSigningConfigArn pattern: csc- plus 17 lowercase alphanumerics. */
+    private static final String WELL_FORMED_ARN =
+            "arn:aws:lambda:us-east-1:000000000000:code-signing-config:csc-0f6c334ab1234567c";
+
+    private static String path(String arn) {
+        return "/2020-04-22/code-signing-configs/" + arn + "/functions";
+    }
+
     @Test
-    void listFunctionsByCodeSigningConfig_returnsEmptyList() {
+    void wellFormedButUnknownConfig_returnsResourceNotFound() {
         given()
         .when()
-            .get("/2020-04-22/code-signing-configs/"
-                    + "arn:aws:lambda:us-east-1:000000000000:code-signing-config:csc-0f6c334ab/functions")
+            .get(path(WELL_FORMED_ARN))
         .then()
-            .statusCode(200)
-            .body("FunctionArns.size()", equalTo(0));
+            .statusCode(404)
+            .body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    void malformedArn_returnsInvalidParameterValue() {
+        given()
+        .when()
+            .get(path("not-an-arn"))
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameterValueException"));
+    }
+
+    @Test
+    void shortSuffixArn_returnsInvalidParameterValue() {
+        given()
+        .when()
+            .get(path("arn:aws:lambda:us-east-1:000000000000:code-signing-config:csc-0f6c334ab"))
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameterValueException"));
+    }
+
+    @Test
+    void maxItemsBelowRange_returnsInvalidParameterValue() {
+        given()
+            .queryParam("MaxItems", 0)
+        .when()
+            .get(path(WELL_FORMED_ARN))
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameterValueException"));
+    }
+
+    @Test
+    void maxItemsAboveRange_returnsInvalidParameterValue() {
+        given()
+            .queryParam("MaxItems", 10001)
+        .when()
+            .get(path(WELL_FORMED_ARN))
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameterValueException"));
+    }
+
+    @Test
+    void nonNumericMaxItems_returnsInvalidParameterValue() {
+        given()
+            .queryParam("MaxItems", "many")
+        .when()
+            .get(path(WELL_FORMED_ARN))
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameterValueException"));
     }
 }

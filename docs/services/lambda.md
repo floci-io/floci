@@ -33,7 +33,7 @@ Floci Lambda runs your function code locally inside real Docker containers - clo
 | `GetPolicy` | Get the function resource policy |
 | `RemovePermission` | Remove a resource-policy statement |
 | `GetFunctionCodeSigningConfig` | Return code-signing config (always empty) |
-| `ListFunctionsByCodeSigningConfig` | List functions using a code-signing config (always empty) |
+| `ListFunctionsByCodeSigningConfig` | Validates the ARN; no code-signing config can exist, so every well-formed ARN returns `ResourceNotFoundException` |
 | `CreateFunctionUrlConfig` | Provision a function URL |
 | `GetFunctionUrlConfig` | Read function URL config |
 | `UpdateFunctionUrlConfig` | Update function URL config |
@@ -184,7 +184,7 @@ These AWS Lambda operations have no handler in Floci. Calls will return `404` or
 - Provisioned concurrency (`PutProvisionedConcurrencyConfig`, `GetProvisionedConcurrencyConfig`, `ListProvisionedConcurrencyConfigs`, `DeleteProvisionedConcurrencyConfig`)
 - Dead-letter, async invoke config, and event invoke config operations
 - `InvokeWithResponseStream`
-- Code signing management (only `GetFunctionCodeSigningConfig` and `ListFunctionsByCodeSigningConfig` are wired; there is no `PutFunctionCodeSigningConfig` or `CreateCodeSigningConfig`, so the function list is always empty)
+- Code signing management (only `GetFunctionCodeSigningConfig` and `ListFunctionsByCodeSigningConfig` are wired; there is no `PutFunctionCodeSigningConfig` or `CreateCodeSigningConfig`, so no code-signing config can exist and `ListFunctionsByCodeSigningConfig` reports every well-formed ARN as `ResourceNotFoundException` — a malformed ARN or an out-of-range `MaxItems` is rejected with `InvalidParameterValueException` first)
 
 ## Configuration
 
