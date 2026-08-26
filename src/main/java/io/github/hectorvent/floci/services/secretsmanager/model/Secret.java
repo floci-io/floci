@@ -31,6 +31,8 @@ public class Secret {
     private String targetAttachmentOwner;
     /** The AWS service that owns this secret and rotates it itself, such as {@code rds}. */
     private String owningService;
+    /** Resource-based policy JSON attached via PutResourcePolicy, or null when none is attached. */
+    private String resourcePolicy;
 
     @RegisterForReflection
     public record RotationRules(
@@ -190,5 +192,13 @@ public class Secret {
 
     public void setOwningService(String owningService) {
         this.owningService = owningService;
+    }
+
+    public String getResourcePolicy() {
+        return resourcePolicy;
+    }
+
+    public void setResourcePolicy(String resourcePolicy) {
+        this.resourcePolicy = resourcePolicy;
     }
 }

@@ -84,6 +84,50 @@ class AwsJsonCborKinesisAtTimestampIntegrationTest {
     }
 
     /**
+     * A real CBOR-default SDK client encodes {@code Data} as a CBOR byte string (major
+     * type 2), which Jackson decodes to a binary node — not the base64 text string
+     * Floci's own encoder writes. The request is hand-built for the same reason as the
+     * timestamp one: posting Floci-encoded bytes would only prove the emulator agrees
+     * with itself. This pins that the floci-io/floci#2516 gate accepts the byte-string
+     * shape a real client sends rather than rejecting it as non-blob {@code Data}.
+     */
+    @Test
+    void putRecordOverCborCarriesDataAsAByteString() throws Exception {
+        String streamName = "cbor-binary-data-" + System.nanoTime();
+
+        cborCall("Kinesis_20131202.CreateStream",
+                AwsJsonCborController.nodeToSmithyCbor(
+                        JSON.createObjectNode().put("StreamName", streamName).put("ShardCount", 1)));
+
+        byte[] payload = "hello-cbor".getBytes();
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        CBORFactory factory = (CBORFactory) CBOR.getFactory();
+        try (CBORGenerator gen = factory.createGenerator(out)) {
+            gen.writeStartObject();
+            gen.writeStringField("StreamName", streamName);
+            gen.writeBinaryField("Data", payload);
+            gen.writeStringField("PartitionKey", "pk");
+            gen.writeEndObject();
+        }
+        JsonNode putResponse = cborCall("Kinesis_20131202.PutRecord", out.toByteArray());
+        assertFalse(putResponse.path("SequenceNumber").asText().isEmpty(),
+                "PutRecord with a CBOR byte-string Data must succeed");
+
+        JsonNode iteratorResponse = cborCall("Kinesis_20131202.GetShardIterator",
+                AwsJsonCborController.nodeToSmithyCbor(JSON.createObjectNode()
+                        .put("StreamName", streamName)
+                        .put("ShardId", "shardId-000000000000")
+                        .put("ShardIteratorType", "TRIM_HORIZON")));
+        JsonNode records = cborCall("Kinesis_20131202.GetRecords", AwsJsonCborController.nodeToSmithyCbor(
+                JSON.createObjectNode().put("ShardIterator", iteratorResponse.path("ShardIterator").asText())));
+
+        assertEquals(1, records.path("Records").size());
+        assertEquals(Base64.getEncoder().encodeToString(payload),
+                records.path("Records").get(0).path("Data").asText(),
+                "the byte-string payload must land byte-exact");
+    }
+
+    /**
      * Hand-builds a {@code GetShardIterator} CBOR request body with {@code Timestamp}
      * encoded exactly as a real AWS SDK for Java v2 client sends it: CBOR tag(1)
      * immediately followed by an integer epoch-<em>millisecond</em> value - see this

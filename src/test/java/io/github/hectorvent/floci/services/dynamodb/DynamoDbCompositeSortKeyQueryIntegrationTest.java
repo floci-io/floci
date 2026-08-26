@@ -280,4 +280,89 @@ class DynamoDbCompositeSortKeyQueryIntegrationTest {
                 "2026-07-14T00:00:03Z"), collected,
                 "Expected all rows once, in full composite order");
     }
+
+    @Test
+    @Order(7)
+    void queryRejectsSkippedCompositeSortKey() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.Query")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "IndexName": "%s",
+                    "KeyConditionExpression": "memberName = :pk AND createdAt >= :from",
+                    "ExpressionAttributeValues": {
+                        ":pk": {"S": "alice"},
+                        ":from": {"S": "2026-01-01T00:00:00Z"}
+                    }
+                }
+                """.formatted(TABLE, INDEX))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("RANGE key attributes state must have equality conditions specified "
+                    + "in the query because a condition is present on key attribute createdAt"));
+    }
+
+    @Test
+    @Order(8)
+    void queryRejectsCompositeSortKeyConditionAfterInequality() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.Query")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "IndexName": "%s",
+                    "KeyConditionExpression": "memberName = :pk AND #st > :st AND createdAt = :createdAt",
+                    "ExpressionAttributeNames": {"#st": "state"},
+                    "ExpressionAttributeValues": {
+                        ":pk": {"S": "alice"},
+                        ":st": {"S": "ACTIVE"},
+                        ":createdAt": {"S": "2026-07-14T00:00:01Z"}
+                    }
+                }
+                """.formatted(TABLE, INDEX))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("RANGE key attributes state must have equality conditions specified "
+                    + "in the query because a condition is present on key attribute createdAt"));
+    }
+
+    @Test
+    @Order(9)
+    void legacyQueryRejectsInvalidCompositeSortKeyConditions() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.Query")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "IndexName": "%s",
+                    "KeyConditions": {
+                        "memberName": {
+                            "ComparisonOperator": "EQ",
+                            "AttributeValueList": [{"S": "alice"}]
+                        },
+                        "createdAt": {
+                            "ComparisonOperator": "GE",
+                            "AttributeValueList": [{"S": "2026-01-01T00:00:00Z"}]
+                        }
+                    }
+                }
+                """.formatted(TABLE, INDEX))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("RANGE key attributes state must have equality conditions specified "
+                    + "in the query because a condition is present on key attribute createdAt"));
+    }
 }

@@ -120,6 +120,7 @@ nav:
     - ECS: services/ecs.md
     - ECR: services/ecr.md
     - Resource Groups Tagging API: services/resource-groups-tagging.md
+    - Resource Explorer 2: services/resource-explorer.md
     - EKS: services/eks.md
     - MWAA: services/mwaa.md
     - OpenSearch: services/opensearch.md

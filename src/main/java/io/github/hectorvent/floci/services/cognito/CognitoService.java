@@ -10,6 +10,9 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ReservedTags;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.cognito.model.CognitoGroup;
@@ -48,6 +51,7 @@ import java.security.spec.PKCS8EncodedKeySpec;
 import java.security.spec.X509EncodedKeySpec;
 import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
@@ -66,7 +70,7 @@ import java.util.UUID;
 import static io.github.hectorvent.floci.core.common.ReservedTags.rejectUnknownReservedTags;
 
 @ApplicationScoped
-public class CognitoService {
+public class CognitoService implements ResourceProvider {
     private static final int DEFAULT_REFRESH_TOKEN_VALIDITY_DAYS = 30;
 
     private static final Logger LOG = Logger.getLogger(CognitoService.class);
@@ -311,6 +315,29 @@ public class CognitoService {
 
     public List<UserPool> listUserPools() {
         return poolStore.scan(k -> true);
+    }
+
+    @Override
+    public List<ExplorerResource> getResources() {
+        List<ExplorerResource> resources = new ArrayList<>();
+        for (UserPool pool : poolStore.scan(k -> true)) {
+            String arn = pool.getArn();
+            if (arn == null) {
+                continue;
+            }
+            AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+            resources.add(new ExplorerResource(
+                    arn, "cognito-idp:userpool", "cognito-idp",
+                    parsed.region(), parsed.accountId(),
+                    pool.getCreationDate() > 0 ? Instant.ofEpochSecond(pool.getCreationDate()) : Instant.now(),
+                    pool.getUserPoolTags() != null ? pool.getUserPoolTags() : Map.of()));
+        }
+        return resources;
+    }
+
+    @Override
+    public Set<SupportedResourceType> getSupportedResourceTypes() {
+        return Set.of(new SupportedResourceType("cognito-idp:userpool", "cognito-idp", true));
     }
 
     private UserPool describeUserPoolByArn(String resourceArn) {
@@ -1707,7 +1734,17 @@ public class CognitoService {
         validateOriginJtiNotRevoked(accessToken, poolId);
         Long iat = extractIatFromToken(accessToken);
         validateUserNotGloballySignedOut(username, poolId, "access", iat != null ? iat : 0L);
-        
+
+        String verificationStatusAttribute = attributes.containsKey("email_verified")
+                ? "email_verified"
+                : attributes.containsKey("phone_number_verified") ? "phone_number_verified" : null;
+        if (verificationStatusAttribute != null) {
+            throw new AwsException("InvalidParameterException",
+                    "Invalid user attributes: " + verificationStatusAttribute
+                            + ": Attribute cannot be updated.",
+                    400);
+        }
+
         adminUpdateUserAttributes(poolId, username, attributes);
     }
 

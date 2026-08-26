@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.core.common;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.appconfig.AppConfigController;
 import io.github.hectorvent.floci.services.backup.BackupController;
+import io.github.hectorvent.floci.services.resourceexplorer2.ResourceExplorer2Controller;
 import io.github.hectorvent.floci.services.appconfig.AppConfigDataController;
 import io.github.hectorvent.floci.services.batch.BatchController;
 import io.github.hectorvent.floci.services.bedrockruntime.BedrockRuntimeController;
@@ -33,6 +34,7 @@ import io.github.hectorvent.floci.services.guardduty.GuardDutyController;
 import io.github.hectorvent.floci.services.rum.RumController;
 import io.github.hectorvent.floci.services.s3vectors.S3VectorsController;
 import io.github.hectorvent.floci.services.s3tables.S3TablesController;
+import io.github.hectorvent.floci.services.efs.EfsController;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -405,6 +407,15 @@ public class ResolvedServiceCatalog {
                         config.storage().services().backup().flushIntervalMs(), null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
                         Set.of(), Set.of("backup"), Set.of(), Set.of(BackupController.class)),
+                descriptor("resource-explorer-2", "resourceexplorer2",
+                        config.services().resourceexplorer2().enabled(), true,
+                        "resourceexplorer2",
+                        storageMode(config.storage().services().resourceexplorer2().mode(), config.storage().mode()),
+                        config.storage().services().resourceexplorer2().flushIntervalMs(),
+                        null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON),
+                        Set.of(), Set.of("resource-explorer-2"), Set.of(),
+                        Set.of(ResourceExplorer2Controller.class)),
                 descriptor("fis", "fis", config.services().fis().enabled(), true,
                         "fis", storageMode(config.storage().services().fis().mode(), config.storage().mode()),
                         config.storage().services().fis().flushIntervalMs(), null, ServiceProtocol.REST_JSON,
@@ -499,7 +510,19 @@ public class ResolvedServiceCatalog {
                         storageMode(config.storage().services().guardduty().mode(), config.storage().mode()),
                         config.storage().services().guardduty().flushIntervalMs(), null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
-                        Set.of(), Set.of("guardduty"), Set.of(), Set.of(GuardDutyController.class))
+                        Set.of(), Set.of("guardduty"), Set.of(), Set.of(GuardDutyController.class)),
+                descriptor("lakeformation", "lakeformation", config.services().lakeformation().enabled(), true,
+                        "lakeformation",
+                        storageMode(config.storage().services().lakeformation().mode(), config.storage().mode()),
+                        config.storage().services().lakeformation().flushIntervalMs(), null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON),
+                        Set.of(), Set.of("lakeformation"), Set.of(), Set.of(io.github.hectorvent.floci.services.lakeformation.LakeFormationController.class)),
+                descriptor("efs", "efs", config.services().efs().enabled(), true,
+                        "efs",
+                        storageMode(config.storage().services().efs().mode(), config.storage().mode()),
+                        config.storage().services().efs().flushIntervalMs(), null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON),
+                        Set.of(), Set.of("elasticfilesystem"), Set.of(), Set.of(EfsController.class))
         ));
     }
 

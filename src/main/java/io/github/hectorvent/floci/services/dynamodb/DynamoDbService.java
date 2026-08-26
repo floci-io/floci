@@ -49,9 +49,12 @@ import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Supplier;
 import java.util.zip.GZIPOutputStream;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 
 @ApplicationScoped
-public class DynamoDbService {
+public class DynamoDbService implements ResourceProvider {
 
     private static final String LOCAL_REPLICA_UPDATE_ERROR =
             "Cannot add, delete, or update the local region through ReplicaUpdates. "
@@ -1763,7 +1766,7 @@ public class DynamoDbService {
                     throw new AwsException("ValidationException",
                             "The parameter cannot be converted to a numeric value", 400);
                 }
-            } else if (valuePart.startsWith("if_not_exists(")) {
+            } else if (startsWithFunctionCall(valuePart, "if_not_exists")) {
                 // if_not_exists(attrRef, fallbackExpr) evaluates to:
                 //   attrRef's current value  — when attrRef exists in the item
                 //   fallbackExpr             — otherwise
@@ -1786,7 +1789,7 @@ public class DynamoDbService {
                         setValueAtPath(item, attrPath, resolved, exprAttrNames);
                     }
                 }
-            } else if (valuePart.toLowerCase().startsWith("list_append(")) {
+            } else if (startsWithFunctionCall(valuePart.toLowerCase(), "list_append")) {
                 int open = valuePart.indexOf('(');
                 int close = valuePart.lastIndexOf(')');
                 if (open >= 0 && close > open) {
@@ -1864,7 +1867,7 @@ public class DynamoDbService {
 
     private JsonNode evaluateSetExpr(ObjectNode item, String expr,
                                      JsonNode exprAttrNames, JsonNode exprAttrValues) {
-        if (expr.toLowerCase().startsWith("if_not_exists(")) {
+        if (startsWithFunctionCall(expr.toLowerCase(), "if_not_exists")) {
             String[] args = extractFunctionArgs(expr);
             if (args.length == 2) {
                 String checkAttr = resolveAttributeName(args[0].trim(), exprAttrNames);
@@ -2464,6 +2467,18 @@ public class DynamoDbService {
         return -1;
     }
 
+    /**
+     * Whether {@code value} opens with a call to {@code functionName}, tolerating optional
+     * whitespace between the function name and the opening parenthesis. DynamoDB's
+     * UpdateExpression grammar is whitespace-insensitive there, but SDKs commonly emit the
+     * spaced form (e.g. PynamoDB always generates {@code "list_append (x, y)"}), which a plain
+     * {@code startsWith(functionName + "(")} rejects.
+     */
+    private static boolean startsWithFunctionCall(String value, String functionName) {
+        return value.startsWith(functionName)
+                && value.substring(functionName.length()).stripLeading().startsWith("(");
+    }
+
     private String[] extractFunctionArgs(String funcCall) {
         int open = funcCall.indexOf('(');
         int close = funcCall.lastIndexOf(')');
@@ -3013,5 +3028,27 @@ public class DynamoDbService {
                 .toList();
 
         return new ListExportsResult(summaries, newNextToken);
+    }
+
+    @Override
+    public List<ExplorerResource> getResources() {
+        List<ExplorerResource> resources = new ArrayList<>();
+        for (TableDefinition table : tableStore.scan(k -> true)) {
+            if (table.getTableArn() == null) {
+                continue;
+            }
+            AwsArnUtils.Arn parsed = AwsArnUtils.parse(table.getTableArn());
+            resources.add(new ExplorerResource(
+                    table.getTableArn(), "dynamodb:table", "dynamodb",
+                    parsed.region(), parsed.accountId(),
+                    table.getCreationDateTime() != null ? table.getCreationDateTime() : Instant.now(),
+                    table.getTags() != null ? table.getTags() : Map.of()));
+        }
+        return resources;
+    }
+
+    @Override
+    public Set<SupportedResourceType> getSupportedResourceTypes() {
+        return Set.of(new SupportedResourceType("dynamodb:table", "dynamodb", true));
     }
 }
