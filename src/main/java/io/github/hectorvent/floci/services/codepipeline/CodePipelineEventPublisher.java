@@ -81,7 +81,15 @@ public class CodePipelineEventPublisher {
         publish(execution, "CodePipeline Action Execution State Change", detail);
     }
 
-    /** The SNS notification a Manual approval action sends when it starts waiting. */
+    /**
+     * The SNS notification a Manual approval action sends when it starts waiting.
+     *
+     * <p>Known limitation: {@link SnsService#publish} resolves the topic through the
+     * caller's request context, and this runs on a worker thread with none — so the topic
+     * lookup falls back to the default account. Every async SNS publisher in the tree
+     * (EventBridge, S3, Scheduler, Pipes) shares this shape; an account-explicit publish
+     * overload is a cross-service follow-up rather than something to fork here.</p>
+     */
     public void approvalNeeded(CodePipelineExecution execution, ActionExecution action,
                                String notificationArn, String customData, double expires) {
         try {
@@ -134,7 +142,12 @@ public class CodePipelineEventPublisher {
             resources.add("arn:aws:codepipeline:" + execution.getRegion() + ":"
                     + execution.getAccountId() + ":" + execution.getPipelineName());
             entry.put("Resources", resources);
-            eventBridgeService.putEvents(List.of(entry), execution.getRegion());
+            // This runs on a pipeline-execution worker thread with no request context, so the
+            // two-argument overload would fall back to the default (management) account and a
+            // member account's EventBridge rules would never see the event. Name the bus's
+            // account explicitly.
+            eventBridgeService.putEvents(List.of(entry), execution.getRegion(),
+                    execution.getAccountId());
         } catch (Exception e) {
             LOG.warnf("CodePipeline event %s not published: %s", detailType, e.getMessage());
         }

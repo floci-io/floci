@@ -528,7 +528,10 @@ class CodePipelineServiceTest {
         List<Map<String, Object>> events = List.of();
         while (System.currentTimeMillis() < deadline) {
             ArgumentCaptor<List<Map<String, Object>>> entries = ArgumentCaptor.forClass(List.class);
-            verify(eventBridgeService, atLeast(0)).putEvents(entries.capture(), eq(REGION));
+            // Events must name the bus's owning account explicitly: publishing runs on a
+            // worker thread with no request context, so the two-argument overload would
+            // resolve to the default account instead of the pipeline's.
+            verify(eventBridgeService, atLeast(0)).putEvents(entries.capture(), eq(REGION), eq(ACCOUNT));
             events = entries.getAllValues().stream().flatMap(List::stream).toList();
             if (events.stream().anyMatch(awaited)) {
                 return events;
