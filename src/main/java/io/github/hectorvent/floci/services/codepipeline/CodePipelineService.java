@@ -532,9 +532,19 @@ public class CodePipelineService {
         return mapper.createObjectNode().put("approvedAt", now());
     }
 
+    /** The StageRetryMode enum from the CodePipeline model. */
+    private static final Set<String> RETRY_MODES = Set.of("FAILED_ACTIONS", "ALL_ACTIONS");
+
     private ObjectNode retryStageExecution(JsonNode request, String region, String account) {
         String pipelineName = text(request, "pipelineName");
         String stageName = text(request, "stageName");
+        // StageRetryMode is an enum; without this an unrecognised value would fall through the
+        // ALL_ACTIONS test below and silently perform the narrower FAILED_ACTIONS retry.
+        String retryMode = request.path("retryMode").asText("FAILED_ACTIONS");
+        if (!RETRY_MODES.contains(retryMode)) {
+            throw new AwsException("ValidationException",
+                    "retryMode must be one of " + RETRY_MODES, 400);
+        }
         CodePipelinePipeline pipeline = requirePipeline(account, region, pipelineName);
         CodePipelineExecution execution = requireExecution(
                 account, region, pipelineName, text(request, "pipelineExecutionId"));
@@ -543,7 +553,7 @@ public class CodePipelineService {
             throw new AwsException("StageNotRetryableException",
                     "Only a failed pipeline execution can be retried.", 400);
         }
-        boolean allActions = "ALL_ACTIONS".equals(request.path("retryMode").asText("FAILED_ACTIONS"));
+        boolean allActions = "ALL_ACTIONS".equals(retryMode);
         synchronized (execution) {
             execution.getActionExecutions().removeIf(a -> stageName.equals(a.getStageName())
                     && (allActions || !"Succeeded".equals(a.getStatus())));

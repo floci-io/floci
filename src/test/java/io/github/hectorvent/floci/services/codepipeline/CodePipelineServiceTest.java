@@ -431,6 +431,35 @@ class CodePipelineServiceTest {
         assertEquals("StageNotRetryableException", notRetryable.getErrorCode());
     }
 
+    /**
+     * {@code retryMode} is the StageRetryMode enum (FAILED_ACTIONS | ALL_ACTIONS). Anything else
+     * used to fall through the {@code "ALL_ACTIONS".equals(..)} test and retry only the failed
+     * actions, so a caller asking for something the service does not understand got a narrower
+     * retry reported as a success rather than the modeled rejection.
+     */
+    @Test
+    void retryStageExecutionRejectsARetryModeOutsideTheEnum() {
+        createPipeline("retry-mode-enum", sourceStage(), lambdaStage("Deploy"));
+        lambdaFails();
+        String executionId = startExecution("retry-mode-enum");
+        awaitStatus(executionId, "Failed");
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.handle("RetryStageExecution", mapper.createObjectNode()
+                                .put("pipelineName", "retry-mode-enum")
+                                .put("pipelineExecutionId", executionId)
+                                .put("stageName", "Deploy")
+                                .put("retryMode", "ALL_STAGES"),
+                        REGION, ACCOUNT));
+        assertEquals("ValidationException", ex.getErrorCode());
+
+        // The rejected call left the execution untouched.
+        assertEquals("Failed", service.handle("GetPipelineExecution", mapper.createObjectNode()
+                        .put("pipelineName", "retry-mode-enum")
+                        .put("pipelineExecutionId", executionId),
+                REGION, ACCOUNT).path("pipelineExecution").path("status").asText());
+    }
+
     @Test
     void rollbackStageRunsOnlySourceAndTargetStage() {
         createPipeline("rollable", sourceStage(), lambdaStage("Build"), lambdaStage("Deploy"));
