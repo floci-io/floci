@@ -39,7 +39,7 @@ public class NetworkFirewallJsonHandler {
                     region,
                     accountId)).build();
             case "DeleteFirewall" -> ok(service.deleteFirewall(
-                    textOrNull(request, "FirewallArn"), textOrNull(request, "FirewallName")));
+                    textOrNull(request, "FirewallArn"), textOrNull(request, "FirewallName"), region));
             case "ListFirewalls" -> ok(service.listFirewalls(request));
             case "UpdateFirewallDeleteProtection", "UpdateFirewallPolicyChangeProtection",
                  "UpdateSubnetChangeProtection", "UpdateAvailabilityZoneChangeProtection",

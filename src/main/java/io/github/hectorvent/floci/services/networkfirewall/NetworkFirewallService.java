@@ -146,17 +146,17 @@ public class NetworkFirewallService {
         return firewallResponse(existing, region);
     }
 
-    public ObjectNode deleteFirewall(String arn, String name) {
+    public ObjectNode deleteFirewall(String arn, String name, String region) {
         ObjectNode existing = require(firewalls, arn, name, "Firewall", "FirewallArn", "FirewallName");
         String firewallArn = existing.path("FirewallArn").asText();
         if (existing.path("DeleteProtection").asBoolean(false)) {
             throw new AwsException("InvalidOperationException",
                     "Firewall has delete protection enabled: " + firewallArn, 400);
         }
+        ObjectNode response = firewallResponse(existing, region);
         firewalls.delete(firewallArn);
         loggingConfigurations.delete(firewallArn);
-        return objectMapper.createObjectNode().put("FirewallArn", firewallArn)
-                .put("FirewallName", existing.path("FirewallName").asText());
+        return response;
     }
 
     public ObjectNode associateSubnets(JsonNode request) {

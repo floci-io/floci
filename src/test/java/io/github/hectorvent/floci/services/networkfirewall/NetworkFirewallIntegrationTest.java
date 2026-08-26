@@ -377,6 +377,22 @@ class NetworkFirewallIntegrationTest {
     }
 
     @Test
+    void deleteFirewall_returnsTheDeletedFirewallAndItsStatus() {
+        String name = "DeletableFirewall";
+        createFirewall(name, "", "subnet-11111111111111112");
+
+        call("DeleteFirewall", "{\"FirewallArn\":\"" + firewallArn(name) + "\"}")
+            .statusCode(200)
+            .body("Firewall.FirewallArn", equalTo(firewallArn(name)))
+            .body("Firewall.FirewallName", equalTo(name))
+            .body("FirewallStatus.Status", equalTo("READY"));
+
+        call("DescribeFirewall", "{\"FirewallArn\":\"" + firewallArn(name) + "\"}")
+            .statusCode(400)
+            .body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
     void describeRuleGroup_whenMissing_namesTheResourceKindInTheError() {
         call("DescribeRuleGroup", "{\"RuleGroupName\":\"no-such-rule-group\"}")
             .statusCode(400)
