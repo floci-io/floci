@@ -64,28 +64,35 @@ class InstanceProfileTagsIntegrationTest {
         .then().statusCode(200);
     }
 
-    /**
-     * {@code tagListType} is {@code max: 50}, and AWS caps an instance profile at 50 tags.
-     * Without the check the extra tags land in the profile's stored tag map and
-     * GetInstanceProfile reports a resource AWS could never have produced.
-     */
-    @Test
-    void tagInstanceProfileBeyondFiftyTagsReturnsLimitExceeded() {
-        String profile = "tag-limit-" + UUID.randomUUID().toString().substring(0, 8);
-        createProfile(profile);
-
+    private static io.restassured.specification.RequestSpecification tagRequest(String profile,
+                                                                                int from, int to) {
         var request = given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "TagInstanceProfile")
             .formParam("InstanceProfileName", profile)
             .header("Authorization", auth(ACCOUNT, "iam"));
-        for (int i = 1; i <= 51; i++) {
-            request.formParam("Tags.member." + i + ".Key", "key" + i)
-                   .formParam("Tags.member." + i + ".Value", "value" + i);
+        for (int i = from; i <= to; i++) {
+            request.formParam("Tags.member." + (i - from + 1) + ".Key", "key" + i)
+                   .formParam("Tags.member." + (i - from + 1) + ".Value", "value" + i);
         }
-        request.when().post("/")
-            .then().statusCode(409)
-            .body(containsString("LimitExceeded"));
+        return request;
+    }
+
+    /**
+     * {@code tagListType} is {@code max: 50}, so a request carrying more than 50 tags is a
+     * request-shape failure, checked before the profile is even resolved. Without it the extra
+     * tags landed in the profile's stored tag map and GetInstanceProfile reported a resource
+     * AWS could never have produced.
+     */
+    @Test
+    void tagInstanceProfileBeyondFiftyTagsInOneRequestReturnsValidationError() {
+        String profile = "tag-limit-" + UUID.randomUUID().toString().substring(0, 8);
+        createProfile(profile);
+
+        tagRequest(profile, 1, 51)
+            .when().post("/")
+            .then().statusCode(400)
+            .body(containsString("ValidationError"));
 
         // Nothing was stored: the profile still reports no tags.
         given()
@@ -96,6 +103,32 @@ class InstanceProfileTagsIntegrationTest {
         .when().post("/")
         .then().statusCode(200)
             .body(org.hamcrest.Matchers.not(containsString("key1")));
+    }
+
+    /**
+     * The 50-tag cap is a per-resource quota, so two in-shape requests that together exceed it
+     * are rejected as LimitExceeded rather than silently over-filling the stored tag map.
+     */
+    @Test
+    void tagInstanceProfileBeyondFiftyTagsAcrossRequestsReturnsLimitExceeded() {
+        String profile = "tag-quota-" + UUID.randomUUID().toString().substring(0, 8);
+        createProfile(profile);
+
+        tagRequest(profile, 1, 30).when().post("/").then().statusCode(200);
+        tagRequest(profile, 31, 60)
+            .when().post("/")
+            .then().statusCode(409)
+            .body(containsString("LimitExceeded"));
+
+        // The second request was rejected whole: none of its keys landed.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "GetInstanceProfile")
+            .formParam("InstanceProfileName", profile)
+            .header("Authorization", auth(ACCOUNT, "iam"))
+        .when().post("/")
+        .then().statusCode(200)
+            .body(org.hamcrest.Matchers.not(containsString("key60")));
     }
 
     /** {@code tagKeyListType} is {@code max: 50} on the request itself. */

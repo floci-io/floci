@@ -2261,11 +2261,13 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public void tagInstanceProfile(String instanceProfileName, Map<String, String> newTags) {
-        InstanceProfile profile = getInstanceProfile(instanceProfileName);
+        // Request shape before resource lookup, matching untagInstanceProfile and AWS's order.
         if (newTags != null && newTags.size() > MAX_TAGS_PER_INSTANCE_PROFILE) {
-            throw new AwsException("LimitExceeded",
-                    "Cannot exceed quota for TagsPerInstanceProfile: " + MAX_TAGS_PER_INSTANCE_PROFILE, 409);
+            throw new AwsException("ValidationError",
+                    "Value at 'tags' failed to satisfy constraint: Member must have length "
+                            + "less than or equal to " + MAX_TAGS_PER_INSTANCE_PROFILE, 400);
         }
+        InstanceProfile profile = getInstanceProfile(instanceProfileName);
         Map<String, String> merged = new LinkedHashMap<>(profile.getTags());
         merged.putAll(newTags == null ? Map.of() : newTags);
         if (merged.size() > MAX_TAGS_PER_INSTANCE_PROFILE) {
