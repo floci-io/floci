@@ -547,6 +547,8 @@ floci:
       enabled: true
     emrserverless:
       enabled: true
+    controltower:
+      enabled: true
     lakeformation:
       enabled: true
     tagging:

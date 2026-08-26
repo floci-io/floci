@@ -60,6 +60,7 @@ cross-resource references.
 | DynamoDB | `Table`, `GlobalTable` |
 | Lambda | `Function` (Zip via S3/inline `ZipFile`, and Image), `LayerVersion`, `EventSourceMapping` (SQS, Kinesis, DynamoDB Streams), `Version`, `Alias` (also what SAM's `AutoPublishAlias` expands into) |
 | IAM | `Role`, `User`, `AccessKey`, `Policy`, `ManagedPolicy`, `InstanceProfile` |
+| Organizations | `Organization`, `OrganizationalUnit`, `Account`, `Policy`, `ResourcePolicy` |
 | SSM | `Parameter` |
 | KMS | `Key`, `Alias` |
 | Secrets Manager | `Secret`, `SecretTargetAttachment` |
@@ -121,6 +122,34 @@ Redshift clusters, Redshift Serverless namespaces, and DocumentDB Elastic cluste
 because their backing services are not implemented. A `SecretId` change is applied in place rather
 than reproducing CloudFormation's replacement event sequence; failed changes restore affected secret
 data and attachment ownership.
+
+## Organizations
+
+`AWS::Organizations::Organization` uses the stack's calling account as the management account, so
+the rest of the stack's Organizations resources are provisioned into that account's organization.
+`Fn::GetAtt Org.RootId` is the usual way to root the OU tree in the same template. `Organization` is
+the one type in this section where bare `Ref` does not return the resource's own id: per AWS, `Ref`
+returns the management account id, while `Fn::GetAtt Org.Id` returns the organization id.
+
+- `OrganizationalUnit` — `ParentId` is create-only per the registry schema, so an update only
+  renames the OU in place; the physical id survives, keeping every `Ref` to it valid.
+- `Account` — `ParentIds` accepts a single entry and the account is moved there after creation
+  (accounts are always created under the root). Because Floci resolves a 12-digit access key id
+  straight to an account, `Ref`/`Fn::GetAtt AccountId` yields an id you can immediately use as a
+  caller identity against other services. `State` mirrors `Status`, the parameter AWS is retiring
+  it in favour of; Floci does not model the `PENDING_ACTIVATION` or `CLOSED` phases that only
+  `State` can express.
+- `Policy` — `TargetIds` is reconciled on update: targets the template adds are attached and ones
+  it drops are detached. Deleting the resource detaches its remaining targets first, since
+  `DeletePolicy` refuses while a policy is still attached.
+- `ResourcePolicy` — backed by `PutResourcePolicy`, which is already create-or-update.
+
+`Fn::GetAtt OrganizationalUnit.Path` and `Fn::GetAtt Account.Paths` return the organization path —
+`o-<org>/r-<root>/[ou-<ou>/…]<id>/`. An account has one parent and therefore one path, so the
+list-typed `Paths` holds a single entry; read it with `Fn::Select` as you would on AWS.
+
+Deleting the stack removes the resources in dependency order and finally the organization itself.
+Deleting a resource that is already gone is tolerated.
 
 ## Auto Scaling Launch Template Resolution
 
