@@ -33,7 +33,9 @@ import java.util.UUID;
  *
  * <p>Principals are stored but not enforced for visibility: floci's org is the only org, and
  * launched containers call in with placeholder credentials that resolve to the default account,
- * so OTHER-ACCOUNTS simply means "every share the caller does not own".
+ * so OTHER-ACCOUNTS simply means "every share the caller does not own". Mutations are the
+ * opposite: they are owner-only, and a non-owner gets the same UnknownResourceException a
+ * never-created ARN gets.
  */
 @ApplicationScoped
 public class RamService {
@@ -114,15 +116,15 @@ public class RamService {
         return result;
     }
 
-    public ResourceShare deleteResourceShare(String resourceShareArn) {
-        ResourceShare deleted = requireShare(resourceShareArn).withStatus("DELETED");
+    public ResourceShare deleteResourceShare(String resourceShareArn, String callerAccountId) {
+        ResourceShare deleted = requireOwnedShare(resourceShareArn, callerAccountId).withStatus("DELETED");
         putForOwner(deleted);
         return deleted;
     }
 
     public ResourceShare updateResourceShare(String resourceShareArn, String name,
-                                             Boolean allowExternalPrincipals) {
-        ResourceShare share = requireShare(resourceShareArn);
+                                             Boolean allowExternalPrincipals, String callerAccountId) {
+        ResourceShare share = requireOwnedShare(resourceShareArn, callerAccountId);
         if (name != null) {
             share = share.withName(name);
         }
@@ -133,9 +135,9 @@ public class RamService {
         return share;
     }
 
-    public ResourceShare associateResourceShare(String resourceShareArn,
-                                                List<String> resourceArns, List<String> principals) {
-        ResourceShare share = requireShare(resourceShareArn);
+    public ResourceShare associateResourceShare(String resourceShareArn, List<String> resourceArns,
+                                                List<String> principals, String callerAccountId) {
+        ResourceShare share = requireOwnedShare(resourceShareArn, callerAccountId);
         ResourceShare updated = share.withPrincipalsAndResources(
                 mergeDistinct(share.getPrincipals(), principals),
                 mergeDistinct(share.getResourceArns(), resourceArns));
@@ -143,9 +145,9 @@ public class RamService {
         return updated;
     }
 
-    public ResourceShare disassociateResourceShare(String resourceShareArn,
-                                                    List<String> resourceArns, List<String> principals) {
-        ResourceShare share = requireShare(resourceShareArn);
+    public ResourceShare disassociateResourceShare(String resourceShareArn, List<String> resourceArns,
+                                                    List<String> principals, String callerAccountId) {
+        ResourceShare share = requireOwnedShare(resourceShareArn, callerAccountId);
         ResourceShare updated = share.withPrincipalsAndResources(
                 withoutAll(share.getPrincipals(), principals),
                 withoutAll(share.getResourceArns(), resourceArns));
@@ -175,29 +177,36 @@ public class RamService {
         return result;
     }
 
-    public void tagResource(String resourceShareArn, Map<String, String> newTags) {
-        ResourceShare share = requireShare(resourceShareArn);
+    public void tagResource(String resourceShareArn, Map<String, String> newTags, String callerAccountId) {
+        ResourceShare share = requireOwnedShare(resourceShareArn, callerAccountId);
         Map<String, String> merged = new LinkedHashMap<>(share.getTags());
         merged.putAll(newTags);
         putForOwner(share.withTags(merged));
     }
 
-    public void untagResource(String resourceShareArn, List<String> tagKeys) {
-        ResourceShare share = requireShare(resourceShareArn);
+    public void untagResource(String resourceShareArn, List<String> tagKeys, String callerAccountId) {
+        ResourceShare share = requireOwnedShare(resourceShareArn, callerAccountId);
         Map<String, String> remaining = new LinkedHashMap<>(share.getTags());
         tagKeys.forEach(remaining::remove);
         putForOwner(share.withTags(remaining));
     }
 
-    private ResourceShare requireShare(String resourceShareArn) {
-        return findShare(resourceShareArn)
+    /**
+     * Resolves a share the caller may mutate. A share owned by another account gets the same
+     * UnknownResourceException as one that was never created: AWS resolves a share ARN within
+     * the caller's own account, so a non-owner must not learn that the ARN exists — let alone
+     * be able to rename, retag, or delete it.
+     */
+    private ResourceShare requireOwnedShare(String resourceShareArn, String callerAccountId) {
+        return findOwnedShare(resourceShareArn, callerAccountId)
                 .orElseThrow(() -> new AwsException("UnknownResourceException",
                         "ResourceShare " + resourceShareArn + " does not exist.", 400));
     }
 
-    private Optional<ResourceShare> findShare(String resourceShareArn) {
+    private Optional<ResourceShare> findOwnedShare(String resourceShareArn, String callerAccountId) {
         return allShares().stream()
                 .filter(share -> share.getResourceShareArn().equals(resourceShareArn))
+                .filter(share -> share.getOwningAccountId().equals(callerAccountId))
                 .findFirst();
     }
 

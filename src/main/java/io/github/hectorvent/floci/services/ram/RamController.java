@@ -100,7 +100,7 @@ public class RamController {
     @Path("/deleteresourceshare")
     @Consumes(MediaType.WILDCARD)
     public Response deleteResourceShare(@QueryParam("resourceShareArn") String resourceShareArn) {
-        service.deleteResourceShare(resourceShareArn);
+        service.deleteResourceShare(resourceShareArn, regionResolver.getAccountId());
 
         ObjectNode response = objectMapper.createObjectNode();
         response.put("returnValue", true);
@@ -116,7 +116,8 @@ public class RamController {
                 request.path("resourceShareArn").asText(),
                 request.hasNonNull("name") ? request.path("name").asText() : null,
                 request.hasNonNull("allowExternalPrincipals")
-                        ? request.path("allowExternalPrincipals").asBoolean() : null);
+                        ? request.path("allowExternalPrincipals").asBoolean() : null,
+                regionResolver.getAccountId());
 
         ObjectNode response = objectMapper.createObjectNode();
         response.set("resourceShare", shareNode(updated));
@@ -131,7 +132,8 @@ public class RamController {
         String resourceShareArn = request.path("resourceShareArn").asText();
         List<String> resourceArns = stringList(request.path("resourceArns"));
         List<String> principals = stringList(request.path("principals"));
-        ResourceShare updated = service.associateResourceShare(resourceShareArn, resourceArns, principals);
+        ResourceShare updated = service.associateResourceShare(
+                resourceShareArn, resourceArns, principals, regionResolver.getAccountId());
 
         ObjectNode response = objectMapper.createObjectNode();
         response.set("resourceShareAssociations",
@@ -147,7 +149,8 @@ public class RamController {
         String resourceShareArn = request.path("resourceShareArn").asText();
         List<String> resourceArns = stringList(request.path("resourceArns"));
         List<String> principals = stringList(request.path("principals"));
-        ResourceShare updated = service.disassociateResourceShare(resourceShareArn, resourceArns, principals);
+        ResourceShare updated = service.disassociateResourceShare(
+                resourceShareArn, resourceArns, principals, regionResolver.getAccountId());
 
         ObjectNode response = objectMapper.createObjectNode();
         response.set("resourceShareAssociations",
@@ -186,7 +189,8 @@ public class RamController {
         JsonNode request = readTree(body);
         Map<String, String> tags = new LinkedHashMap<>();
         request.path("tags").forEach(tag -> tags.put(tag.path("key").asText(), tag.path("value").asText()));
-        service.tagResource(request.path("resourceShareArn").asText(), tags);
+        service.tagResource(request.path("resourceShareArn").asText(), tags,
+                regionResolver.getAccountId());
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
@@ -195,7 +199,8 @@ public class RamController {
     @Consumes(MediaType.WILDCARD)
     public Response untagResource(String body) {
         JsonNode request = readTree(body);
-        service.untagResource(request.path("resourceShareArn").asText(), stringList(request.path("tagKeys")));
+        service.untagResource(request.path("resourceShareArn").asText(),
+                stringList(request.path("tagKeys")), regionResolver.getAccountId());
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 

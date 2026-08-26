@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ram;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -8,6 +9,7 @@ import io.github.hectorvent.floci.services.ram.model.ResourceShare;
 import io.github.hectorvent.floci.services.ram.model.SharedResource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.function.Executable;
 
 import java.util.List;
 import java.util.HashMap;
@@ -124,6 +126,47 @@ class RamServiceTest {
                 service.listResources(ACCEPTER, "OTHER-ACCOUNTS", List.of(other.getResourceShareArn()));
         assertEquals(1, resources.size());
         assertEquals("ec2:Subnet", resources.get(0).type());
+    }
+
+    @Test
+    void nonOwnerCannotMutateAnotherAccountsShare() {
+        // A share is visible to every other account under OTHER-ACCOUNTS, but visibility is not
+        // a licence to mutate: AWS resolves a share ARN within the caller's account, so to a
+        // non-owner the share does not exist as a mutable target.
+        ResourceShare share = service.createResourceShare(
+                "us-east-1-tgw-share", List.of(OU_ARN), List.of(TGW_ARN), false, "us-east-1", OWNER);
+        String arn = share.getResourceShareArn();
+
+        assertUnknownResource(() -> service.deleteResourceShare(arn, ACCEPTER));
+        assertUnknownResource(() -> service.updateResourceShare(arn, "hijacked", null, ACCEPTER));
+        assertUnknownResource(() -> service.associateResourceShare(arn, List.of(TGW_ARN), List.of(), ACCEPTER));
+        assertUnknownResource(() -> service.disassociateResourceShare(arn, List.of(TGW_ARN), List.of(), ACCEPTER));
+        assertUnknownResource(() -> service.tagResource(arn, Map.of("Owner", "attacker"), ACCEPTER));
+        assertUnknownResource(() -> service.untagResource(arn, List.of("Owner"), ACCEPTER));
+
+        ResourceShare untouched = service.getResourceShares(OWNER, "SELF").get(0);
+        assertEquals("us-east-1-tgw-share", untouched.getName());
+        assertEquals("ACTIVE", untouched.getStatus());
+        assertEquals(List.of(TGW_ARN), untouched.getResourceArns());
+        assertTrue(untouched.getTags().isEmpty());
+    }
+
+    @Test
+    void ownerCanMutateOwnShare() {
+        ResourceShare share = service.createResourceShare(
+                "us-east-1-tgw-share", List.of(OU_ARN), List.of(TGW_ARN), false, "us-east-1", OWNER);
+        String arn = share.getResourceShareArn();
+
+        assertEquals("renamed", service.updateResourceShare(arn, "renamed", null, OWNER).getName());
+        service.tagResource(arn, Map.of("Owner", "network"), OWNER);
+        assertEquals("network", service.getResourceShares(OWNER, "SELF").get(0).getTags().get("Owner"));
+        assertEquals("DELETED", service.deleteResourceShare(arn, OWNER).getStatus());
+    }
+
+    private static void assertUnknownResource(Executable mutation) {
+        AwsException error = assertThrows(AwsException.class, mutation);
+        assertEquals("UnknownResourceException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
     }
 
     private static final class SharedStorageFactory extends StorageFactory {
