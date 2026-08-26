@@ -62,7 +62,7 @@ public class NetworkFirewallService {
     }
 
     public ObjectNode describeRuleGroup(String arn, String name) {
-        return describeNamed(ruleGroups, arn, name, "RuleGroup", "RuleGroupResponse");
+        return describeNamed(ruleGroups, arn, name, "RuleGroup");
     }
 
     public ObjectNode updateRuleGroup(JsonNode request, String region, String accountId) {
@@ -87,7 +87,7 @@ public class NetworkFirewallService {
     }
 
     public ObjectNode describeFirewallPolicy(String arn, String name) {
-        return describeNamed(firewallPolicies, arn, name, "FirewallPolicy", "FirewallPolicyResponse");
+        return describeNamed(firewallPolicies, arn, name, "FirewallPolicy");
     }
 
     public ObjectNode updateFirewallPolicy(JsonNode request, String region, String accountId) {
@@ -324,8 +324,8 @@ public class NetworkFirewallService {
     }
 
     private ObjectNode describeNamed(StorageBackend<String, ObjectNode> store, String arn, String name,
-                                     String bodyField, String responseField) {
-        ObjectNode stored = require(store, arn, name, responseField, "ResourceArn", "ResourceName");
+                                     String bodyField) {
+        ObjectNode stored = require(store, arn, name, bodyField, "ResourceArn", "ResourceName");
         return stored.deepCopy();
     }
 

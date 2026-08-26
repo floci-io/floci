@@ -376,6 +376,14 @@ class NetworkFirewallIntegrationTest {
             .body("message", equalTo("RuleGroup already exists: duplicate-rule-group"));
     }
 
+    @Test
+    void describeRuleGroup_whenMissing_namesTheResourceKindInTheError() {
+        call("DescribeRuleGroup", "{\"RuleGroupName\":\"no-such-rule-group\"}")
+            .statusCode(400)
+            .body("__type", equalTo("ResourceNotFoundException"))
+            .body("message", equalTo("RuleGroup not found: no-such-rule-group"));
+    }
+
     private static String firewallArn(String name) {
         return "arn:aws:network-firewall:us-east-1:723679240095:firewall/" + name;
     }
