@@ -256,7 +256,9 @@ class SesTagsV2IntegrationTest {
 
     @Test
     @Order(7)
-    void tagResource_emptyTags_returns400() {
+    void tagResource_emptyTags_isNoOp() {
+        // An empty Tags list is not an error (probe-confirmed): the existence check still runs,
+        // then the empty merge no-ops. tag-cs-1 was left with a single "owner" tag by @Order(1).
         String arn = "arn:aws:ses:us-east-1:000000000000:configuration-set/tag-cs-1";
         given()
             .contentType("application/json")
@@ -267,12 +269,36 @@ class SesTagsV2IntegrationTest {
         .when()
             .post("/v2/email/tags")
         .then()
-            .statusCode(400);
+            .statusCode(200);
+
+        given()
+            .header("Authorization", AUTH_HEADER)
+            .queryParam("ResourceArn", arn)
+        .when()
+            .get("/v2/email/tags")
+        .then()
+            .statusCode(200)
+            .body("Tags", hasSize(1))
+            .body("Tags[0].Key", equalTo("owner"));
+
+        // The no-op still checks existence: an unknown resource stays NotFound.
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {"ResourceArn": "arn:aws:ses:us-east-1:000000000000:configuration-set/nowhere", "Tags": []}
+                """)
+        .when()
+            .post("/v2/email/tags")
+        .then()
+            .statusCode(404);
     }
 
     @Test
     @Order(8)
-    void untagResource_missingTagKeys_returns400() {
+    void untagResource_missingTagKeys_returnsBareValidationException() {
+        // A missing/empty TagKeys member is a bare ValidationException: only the error-type
+        // header, no message (probe-confirmed).
         String arn = "arn:aws:ses:us-east-1:000000000000:configuration-set/tag-cs-1";
         given()
             .header("Authorization", AUTH_HEADER)
@@ -280,7 +306,8 @@ class SesTagsV2IntegrationTest {
         .when()
             .delete("/v2/email/tags")
         .then()
-            .statusCode(400);
+            .statusCode(400)
+            .header("X-Amzn-Errortype", containsString("ValidationException"));
     }
 
     @Test

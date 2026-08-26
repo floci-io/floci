@@ -2068,19 +2068,17 @@ public class SesService {
         if (!ref.region().equals(region)) {
             throw new AwsException("BadRequestException", "Failed to tag resource", 400);
         }
-        if (newTags == null || newTags.isEmpty()) {
-            throw new AwsException("BadRequestException",
-                    "1 validation error detected: Value at 'tags' failed to satisfy constraint: "
-                            + "Member must have length greater than or equal to 1", 400);
-        }
-        SesTags.validate(newTags);
+        // An empty Tags list is not an error: AWS still runs the account, region, and existence
+        // checks and then applies the empty merge as a no-op (probe-confirmed).
+        List<Tag> tags = newTags == null ? List.of() : newTags;
+        SesTags.validate(tags);
         switch (ref.type()) {
-            case "configuration-set" -> tagConfigurationSet(ref.name(), ref.region(), newTags);
-            case "template" -> tagEmailTemplate(ref.name(), ref.region(), newTags);
-            case "identity" -> tagIdentity(ref.name(), ref.region(), newTags);
-            case "contact-list" -> contactService.tag(ref.name(), ref.region(), newTags);
-            case "custom-verification-email-template" -> cvetService.tag(ref.name(), ref.region(), newTags);
-            case "dedicated-ip-pool" -> dedicatedIpService.tag(ref.name(), ref.region(), newTags);
+            case "configuration-set" -> tagConfigurationSet(ref.name(), region, tags);
+            case "template" -> tagEmailTemplate(ref.name(), region, tags);
+            case "identity" -> tagIdentity(ref.name(), region, tags);
+            case "contact-list" -> contactService.tag(ref.name(), region, tags);
+            case "custom-verification-email-template" -> cvetService.tag(ref.name(), region, tags);
+            case "dedicated-ip-pool" -> dedicatedIpService.tag(ref.name(), region, tags);
             default -> throw new AwsException("NotFoundException",
                     "Resource " + arn + " was not found.", 404);
         }
@@ -2090,9 +2088,10 @@ public class SesService {
         ResourceRef ref = parseSesArn(arn);
         requireCallerAccount(ref);
         if (tagKeys == null || tagKeys.isEmpty()) {
-            throw new AwsException("BadRequestException",
-                    "1 validation error detected: Value at 'tagKeys' failed to satisfy constraint: "
-                            + "Member must have length greater than or equal to 1", 400);
+            // AWS rejects a missing/empty TagKeys member with a bare ValidationException — empty
+            // response body, only the error-type header — after the account guard and before the
+            // region guard (probe-confirmed).
+            throw new AwsException("ValidationException", null, 400);
         }
         if (!ref.region().equals(region)) {
             throw new AwsException("BadRequestException", "Failed to untag resource", 400);

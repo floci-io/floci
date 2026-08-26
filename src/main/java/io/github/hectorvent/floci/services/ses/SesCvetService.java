@@ -87,8 +87,9 @@ public class SesCvetService {
         synchronized (cvetMutationLock) {
             CustomVerificationEmailTemplate existing = cvetStore.get(key)
                     .orElseThrow(() -> cvetNotFound(template.getTemplateName()));
-            // Tags are managed exclusively via Tag/UntagResource — preserve them on update.
-            template.setTags(existing.getTags());
+            // The update request has no Tags member — preserve the stored ones (copied, so the
+            // two objects never share a list instance).
+            template.setTags(new ArrayList<>(existing.getTags()));
             cvetStore.put(key, template);
         }
         LOG.infov("Updated custom verification email template {0} in region {1}",
