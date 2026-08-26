@@ -88,6 +88,36 @@ class ControlTowerControllerIntegrationTest {
     }
 
     @Test
+    void updateLandingZoneRejectsInvalidRemediationTypes() {
+        String authorization = auth("000000000203", EAST);
+        String arn = listLandingZonesArn(authorization);
+
+        // The model pins remediationTypes to exactly one element with the single
+        // valid value INHERITANCE_DRIFT (list min 1 / max 1, enum of one).
+        String[] invalidArrays = {
+                "[\"FOO\"]",
+                "[]",
+                "[\"INHERITANCE_DRIFT\", \"INHERITANCE_DRIFT\"]"
+        };
+        for (String invalid : invalidArrays) {
+            given()
+                    .contentType("application/json")
+                    .header("Authorization", authorization)
+                    .body("""
+                            {"version":"4.0","landingZoneIdentifier":"%s","remediationTypes":%s,
+                             "manifest":{"governedRegions":["us-east-1"],
+                               "securityRoles":{"enabled":true,"accountId":"000000000203"},
+                               "accessManagement":{"enabled":true}}}
+                            """.formatted(arn, invalid))
+                    .when()
+                    .post("/update-landingzone")
+                    .then()
+                    .statusCode(400)
+                    .body("__type", containsString("ValidationException"));
+        }
+    }
+
+    @Test
     void updateLandingZoneReconcilesManifestAndOperationSucceeds() {
         String authorization = auth("000000000203", EAST);
         String arn = listLandingZonesArn(authorization);

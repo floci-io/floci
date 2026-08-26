@@ -639,6 +639,11 @@ public class ControlTowerService {
         if (!array.isArray()) {
             throw validation("remediationTypes must be an array.");
         }
+        // The model pins the list to exactly one element (min 1 / max 1) whose only
+        // valid value is INHERITANCE_DRIFT.
+        if (array.size() != 1 || !"INHERITANCE_DRIFT".equals(array.get(0).asText())) {
+            throw validation("remediationTypes must contain exactly one value: INHERITANCE_DRIFT.");
+        }
         List<String> values = new ArrayList<>(array.size());
         for (JsonNode value : array) {
             values.add(value.asText());
