@@ -207,6 +207,7 @@ Floci seeds the following resources on first use in each region so Terraform, th
 | AuthorizeSecurityGroupEgress | Adds outbound permissions, with the same source types as the inbound call. |
 | RevokeSecurityGroupIngress | Removes inbound permissions. Matches on protocol and port range only, so it removes every permission on that port regardless of source. |
 | RevokeSecurityGroupEgress | Removes outbound permissions, matched the same way as the inbound call. |
+| GetSecurityGroupsForVpc | Lists the security groups belonging to one VPC, with the same filters as the describe call. |
 | DescribeSecurityGroupRules | Lists stored security group rules. |
 | ModifySecurityGroupRules | Updates supported fields on security group rules. |
 | UpdateSecurityGroupRuleDescriptionsIngress | Updates descriptions on matching inbound security group rules. |
@@ -390,6 +391,7 @@ real AWS rejects; Floci does not model subnet IPv6 allocation.
 | DeleteTransitGatewayRoute | Removes a static route. |
 | ReplaceTransitGatewayRoute | Points an existing route at a different target, or writes it if absent. |
 | SearchTransitGatewayRoutes | Returns a route table's routes, static and propagated, filtered. |
+| ExportTransitGatewayRoutes | Reports the S3 object a route-table export would be written to. |
 
 A route table asked for by name is never a default one; only the table a gateway mints for itself
 carries `defaultAssociationRouteTable` or `defaultPropagationRouteTable`. Deleting a route table is
@@ -420,6 +422,8 @@ route table's own listings drop the route table id that the mutating calls inclu
 
 Route table ids follow the live API's own inconsistency: an id that does not exist is
 `InvalidRouteTableID.NotFound`, while one of the wrong shape is `InvalidRouteTableId.Malformed`.
+
+`ExportTransitGatewayRoutes` validates the route table and requires `S3Bucket`, then returns the `s3://` object key the export would occupy. No object is written and nothing is uploaded — the value is a caller that needs the call to succeed and the key to look right, not a readable export.
 
 ### NAT Gateways
 
@@ -487,6 +491,21 @@ Launch templates store versioned launch data. New template versions can be creat
 | CreateVolume | Creates an EBS volume record. |
 | DescribeVolumes | Lists or returns stored EBS volume records. |
 | DeleteVolume | Deletes an EBS volume record. |
+
+### EBS Encryption Defaults
+
+| Action | Description |
+|--------|-------------|
+| EnableEbsEncryptionByDefault | Turns on default encryption for new volumes in the region. |
+| DisableEbsEncryptionByDefault | Turns default encryption back off. |
+| GetEbsEncryptionByDefault | Reports whether default encryption is on. |
+| ModifyEbsDefaultKmsKeyId | Sets the KMS key used when a volume names none. |
+| GetEbsDefaultKmsKeyId | Reports the current default KMS key. |
+| ResetEbsDefaultKmsKeyId | Restores the AWS-managed default key. |
+
+These are account-level settings scoped per region, not per volume, and nothing here encrypts anything — no volume's stored bytes change. LZA's SecurityStack drives them through its `Custom::EnableEbsEncryptionByDefault` Lambda, which calls enable plus `ModifyEbsDefaultKmsKeyId` on create and disable on delete, then reads the state back with the two `Get` calls.
+
+An account that has never set a key reports `alias/aws/ebs`, the AWS-managed EBS key every account starts with, rather than an empty value — the module runner fails hard on a missing `KmsKeyId`, so the fallback is what keeps it running. `ResetEbsDefaultKmsKeyId` returns to that same alias. `ModifyEbsDefaultKmsKeyId` requires `KmsKeyId` and rejects a blank one with `MissingParameter`; the key is stored as given and is not checked against KMS.
 
 ### IPAM
 
