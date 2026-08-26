@@ -88,6 +88,15 @@ public class LakeFormationService {
     }
 
     public GrantPermissionsResponse grantPermissions(String region, GrantPermissionsRequest request) {
+        if (request.getPrincipal() == null) {
+            throw new AwsException("InvalidInputException", "Principal is required", 400);
+        }
+        if (request.getResource() == null) {
+            throw new AwsException("InvalidInputException", "Resource is required", 400);
+        }
+        if (request.getPermissions() == null || request.getPermissions().isEmpty()) {
+            throw new AwsException("InvalidInputException", "Permissions is required", 400);
+        }
         String catalogId = request.getCatalogId() != null ? request.getCatalogId() : regionResolver.getAccountId();
         
         if (request.getPermissionsWithGrantOption() != null) {
@@ -110,6 +119,15 @@ public class LakeFormationService {
     }
 
     public RevokePermissionsResponse revokePermissions(String region, RevokePermissionsRequest request) {
+        if (request.getPrincipal() == null) {
+            throw new AwsException("InvalidInputException", "Principal is required", 400);
+        }
+        if (request.getResource() == null) {
+            throw new AwsException("InvalidInputException", "Resource is required", 400);
+        }
+        if (request.getPermissions() == null || request.getPermissions().isEmpty()) {
+            throw new AwsException("InvalidInputException", "Permissions is required", 400);
+        }
         String catalogId = request.getCatalogId() != null ? request.getCatalogId() : regionResolver.getAccountId();
         
         PrincipalResourcePermissions p = new PrincipalResourcePermissions();

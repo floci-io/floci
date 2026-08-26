@@ -163,12 +163,12 @@ public class MemoryLakeFormationStorage implements LakeFormationStorage {
         return permissionsStorage.scan(k -> k.startsWith(region + ":" + catalogId + ":")).stream()
                 .filter(p -> {
                     if (principal != null && principal.getDataLakePrincipalIdentifier() != null) {
-                        if (!principal.getDataLakePrincipalIdentifier().equals(p.getPrincipal().getDataLakePrincipalIdentifier())) {
+                        if (p.getPrincipal() == null || !principal.getDataLakePrincipalIdentifier().equals(p.getPrincipal().getDataLakePrincipalIdentifier())) {
                             return false;
                         }
                     }
                     if (filterResourceKey != null) {
-                        if (!filterResourceKey.equals(getResourceKey(p.getResource()))) {
+                        if (p.getResource() == null || !filterResourceKey.equals(getResourceKey(p.getResource()))) {
                             return false;
                         }
                     }
