@@ -25,6 +25,7 @@ import io.github.hectorvent.floci.services.configservice.model.EvaluationResult;
 import io.github.hectorvent.floci.services.configservice.model.EvaluationResultIdentifier;
 import io.github.hectorvent.floci.services.configservice.model.EvaluationResultQualifier;
 import io.github.hectorvent.floci.services.configservice.model.RetentionConfiguration;
+import io.github.hectorvent.floci.services.configservice.model.SourceDetail;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -59,8 +60,14 @@ public class AwsConfigService {
     private static final Set<String> VALID_RULE_STATES =
             Set.of("ACTIVE", "DELETING", "DELETING_RESULTS", "EVALUATING");
     private static final Set<String> VALID_EVALUATION_MODES = Set.of("DETECTIVE", "PROACTIVE");
+    private static final Set<String> VALID_EVENT_SOURCES = Set.of("aws.config");
+    private static final Set<String> VALID_MESSAGE_TYPES = Set.of(
+            "ConfigurationItemChangeNotification", "ConfigurationSnapshotDeliveryCompleted",
+            "ScheduledNotification", "OversizedConfigurationItemChangeNotification");
     /** {@code ComplianceTypes} is a list of ComplianceType with {@code max: 3}. */
     private static final int MAX_COMPLIANCE_TYPE_FILTERS = 3;
+    /** {@code Scope.ComplianceResourceTypes} is {@code max: 100}. */
+    private static final int MAX_COMPLIANCE_RESOURCE_TYPES = 100;
     private static final int RULE_CONTRIBUTOR_CAP = 25;
     private static final int RESOURCE_CONTRIBUTOR_CAP = 100;
 
@@ -174,6 +181,23 @@ public class AwsConfigService {
         requireEnum(requested.maximumExecutionFrequency(), VALID_EXECUTION_FREQUENCIES,
                 "MaximumExecutionFrequency");
         requireEnum(requested.configRuleState(), VALID_RULE_STATES, "ConfigRuleState");
+        if (requested.source().sourceDetails() != null) {
+            for (SourceDetail detail : requested.source().sourceDetails()) {
+                if (detail == null) {
+                    continue;
+                }
+                requireEnum(detail.eventSource(), VALID_EVENT_SOURCES, "SourceDetails.EventSource");
+                requireEnum(detail.messageType(), VALID_MESSAGE_TYPES, "SourceDetails.MessageType");
+                requireEnum(detail.maximumExecutionFrequency(), VALID_EXECUTION_FREQUENCIES,
+                        "SourceDetails.MaximumExecutionFrequency");
+            }
+        }
+        if (requested.scope() != null && requested.scope().complianceResourceTypes() != null
+                && requested.scope().complianceResourceTypes().size() > MAX_COMPLIANCE_RESOURCE_TYPES) {
+            throw new AwsException("InvalidParameterValueException",
+                    "Scope.ComplianceResourceTypes accepts at most "
+                            + MAX_COMPLIANCE_RESOURCE_TYPES + " values.", 400);
+        }
         if (requested.evaluationModes() != null) {
             for (EvaluationModeConfiguration mode : requested.evaluationModes()) {
                 requireEnum(mode == null ? null : mode.mode(), VALID_EVALUATION_MODES,

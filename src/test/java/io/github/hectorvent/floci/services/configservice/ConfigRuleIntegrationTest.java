@@ -322,6 +322,70 @@ class ConfigRuleIntegrationTest {
     }
 
     /**
+     * The nested members are stored and echoed back too: {@code SourceDetails[]} carries the
+     * EventSource ({@code aws.config} only), MessageType and MaximumExecutionFrequency enums,
+     * and {@code Scope.ComplianceResourceTypes} is a list with {@code max: 100}.
+     */
+    @Test
+    @Order(11)
+    void putConfigRuleRejectsNestedValuesOutsideTheModeledShapes() {
+        String[] bodies = {
+            """
+            {"ConfigRule": {"ConfigRuleName": "rule-enum-eventsource",
+             "Source": {"Owner": "AWS", "SourceIdentifier": "X",
+              "SourceDetails": [{"EventSource": "aws.cloudtrail", "MessageType": "ScheduledNotification"}]}}}""",
+            """
+            {"ConfigRule": {"ConfigRuleName": "rule-enum-messagetype",
+             "Source": {"Owner": "AWS", "SourceIdentifier": "X",
+              "SourceDetails": [{"EventSource": "aws.config", "MessageType": "PeriodicNotification"}]}}}""",
+            """
+            {"ConfigRule": {"ConfigRuleName": "rule-enum-detail-freq",
+             "Source": {"Owner": "AWS", "SourceIdentifier": "X",
+              "SourceDetails": [{"EventSource": "aws.config", "MessageType": "ScheduledNotification",
+                                 "MaximumExecutionFrequency": "Two_Hours"}]}}}""",
+        };
+        for (String body : bodies) {
+            given()
+                .header("X-Amz-Target", TARGET_PREFIX + "PutConfigRule")
+                .contentType(CONTENT_TYPE)
+                .body(body)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidParameterValueException"));
+        }
+
+        StringBuilder tooManyTypes = new StringBuilder();
+        for (int i = 0; i < 101; i++) {
+            tooManyTypes.append(i == 0 ? "" : ", ").append("\"AWS::S3::Bucket").append(i).append('"');
+        }
+        given()
+            .header("X-Amz-Target", TARGET_PREFIX + "PutConfigRule")
+            .contentType(CONTENT_TYPE)
+            .body("{\"ConfigRule\": {\"ConfigRuleName\": \"rule-scope-cardinality\","
+                    + " \"Source\": {\"Owner\": \"AWS\", \"SourceIdentifier\": \"X\"},"
+                    + " \"Scope\": {\"ComplianceResourceTypes\": [" + tooManyTypes + "]}}}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameterValueException"));
+
+        given()
+            .header("X-Amz-Target", TARGET_PREFIX + "DescribeConfigRules")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {"ConfigRuleNames": ["rule-enum-eventsource"]}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("NoSuchConfigRuleException"));
+    }
+
+    /**
      * {@code ComplianceTypes} is a list of the ComplianceType enum with {@code max: 3}. It is
      * read as a filter, so an unmodeled value silently narrows the result to nothing — the
      * caller reads that as "no rules match" rather than as the rejection AWS sends.
