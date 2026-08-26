@@ -81,7 +81,7 @@ class IamServiceTest {
         assertEquals(1000L, empty.get("InstanceProfilesQuota"));
         assertEquals(10L, empty.get("AttachedPoliciesPerUserQuota"));
         assertEquals(10L, empty.get("AttachedPoliciesPerGroupQuota"));
-        assertEquals(10L, empty.get("AttachedPoliciesPerRoleQuota"));
+        assertEquals(20L, empty.get("AttachedPoliciesPerRoleQuota"));
         assertEquals(6144L, empty.get("PolicySizeQuota"));
         assertEquals(0L, empty.get("Providers"));
         assertEquals(0L, empty.get("AccountAccessKeysPresent"));

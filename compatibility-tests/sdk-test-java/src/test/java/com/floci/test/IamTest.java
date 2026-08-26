@@ -422,6 +422,7 @@ class IamTest {
         assertThat(response.summaryMap().get(SummaryKeyType.ROLES_QUOTA)).isEqualTo(1000);
         assertThat(response.summaryMap().get(SummaryKeyType.POLICIES_QUOTA)).isEqualTo(1500);
         assertThat(response.summaryMap().get(SummaryKeyType.INSTANCE_PROFILES_QUOTA)).isEqualTo(1000);
+        assertThat(response.summaryMap().get(SummaryKeyType.ATTACHED_POLICIES_PER_ROLE_QUOTA)).isEqualTo(20);
         assertThat(response.summaryMap().get(SummaryKeyType.POLICY_SIZE_QUOTA)).isEqualTo(6144);
     }
 

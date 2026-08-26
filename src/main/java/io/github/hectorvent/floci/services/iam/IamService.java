@@ -823,7 +823,7 @@ public class IamService implements SessionAccountLookup {
         summary.put("InstanceProfilesQuota", 1000L);
         summary.put("AttachedPoliciesPerUserQuota", 10L);
         summary.put("AttachedPoliciesPerGroupQuota", 10L);
-        summary.put("AttachedPoliciesPerRoleQuota", 10L);
+        summary.put("AttachedPoliciesPerRoleQuota", 20L);
         summary.put("GroupPolicySizeQuota", 5120L);
         summary.put("UserPolicySizeQuota", 2048L);
         summary.put("RolePolicySizeQuota", 10240L);

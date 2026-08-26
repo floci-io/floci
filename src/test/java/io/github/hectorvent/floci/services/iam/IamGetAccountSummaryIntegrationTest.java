@@ -122,7 +122,7 @@ class IamGetAccountSummaryIntegrationTest {
             .body("GetAccountSummaryResponse.GetAccountSummaryResult.SummaryMap.entry"
                     + ".find { it.key == 'AttachedPoliciesPerGroupQuota' }.value", equalTo("10"))
             .body("GetAccountSummaryResponse.GetAccountSummaryResult.SummaryMap.entry"
-                    + ".find { it.key == 'AttachedPoliciesPerRoleQuota' }.value", equalTo("10"))
+                    + ".find { it.key == 'AttachedPoliciesPerRoleQuota' }.value", equalTo("20"))
             .body("GetAccountSummaryResponse.GetAccountSummaryResult.SummaryMap.entry"
                     + ".find { it.key == 'PolicySizeQuota' }.value", equalTo("6144"))
             .body("GetAccountSummaryResponse.GetAccountSummaryResult.SummaryMap.entry"
