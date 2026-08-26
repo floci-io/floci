@@ -16,6 +16,7 @@ import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -127,6 +128,35 @@ class OrganizationsServiceTest {
     }
 
     @Test
+    void organizationPathsRunFromTheOrganizationDownToTheResourceItself() {
+        Organization organization = service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+        String rootId = organization.getRoot().getId();
+        OrganizationalUnit parent =
+                service.createOrganizationalUnit(MANAGEMENT_ACCOUNT, rootId, "Parent", null);
+        OrganizationalUnit child =
+                service.createOrganizationalUnit(MANAGEMENT_ACCOUNT, parent.getId(), "Child", null);
+        String accountId =
+                service.createAccount(MANAGEMENT_ACCOUNT, "dev@example.com", "Dev", null, false).getAccountId();
+        service.moveAccount(MANAGEMENT_ACCOUNT, accountId, rootId, child.getId());
+
+        String root = organization.getId() + "/" + rootId + "/";
+        assertEquals(root, service.organizationPath(MANAGEMENT_ACCOUNT, rootId));
+        assertEquals(root + parent.getId() + "/",
+                service.organizationPath(MANAGEMENT_ACCOUNT, parent.getId()));
+        assertEquals(root + parent.getId() + "/" + child.getId() + "/",
+                service.organizationPath(MANAGEMENT_ACCOUNT, child.getId()));
+
+        // An account's path names every OU above it and ends with the account, the way ListAccounts
+        // reports Paths — and it tracks the move rather than the parent the account was created in.
+        String accountPath = root + parent.getId() + "/" + child.getId() + "/" + accountId + "/";
+        assertEquals(accountPath, service.organizationPath(MANAGEMENT_ACCOUNT, accountId));
+        // The Path shape AWS publishes for the Organizations API and the registry schemas.
+        assertTrue(accountPath.matches(
+                        "^(o-[a-z0-9]{10,32}/r-[0-9a-z]{4,32}(/ou-[0-9a-z]{4,32}-[a-z0-9]{8,32})*(/\\d{12})*)/"),
+                accountPath);
+    }
+
+    @Test
     void effectivePolicyRejectsAccessControlPolicyTypes() {
         Organization organization = service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
 
@@ -196,9 +226,53 @@ class OrganizationsServiceTest {
     }
 
     @Test
+    void putResourcePolicyReplacesTagsRatherThanMergingThem() {
+        service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+        String content = "{\"Version\":\"2012-10-17\"}";
+
+        service.putResourcePolicy(MANAGEMENT_ACCOUNT, content, Map.of("env", "test", "owner", "platform"));
+        assertEquals(Map.of("env", "test", "owner", "platform"),
+                service.describeResourcePolicy(MANAGEMENT_ACCOUNT).tags());
+
+        // The resource policy is not addressable by TagResource/UntagResource, so Put is the only
+        // way a dropped key can be removed — CloudFormation relies on this to converge on update.
+        service.putResourcePolicy(MANAGEMENT_ACCOUNT, content, Map.of("env", "prod"));
+        assertEquals(Map.of("env", "prod"), service.describeResourcePolicy(MANAGEMENT_ACCOUNT).tags());
+
+        // Omitting Tags entirely is "don't touch", matching how the provisioner treats an absent
+        // Tags property on every other Organizations type.
+        service.putResourcePolicy(MANAGEMENT_ACCOUNT, content, null);
+        assertEquals(Map.of("env", "prod"), service.describeResourcePolicy(MANAGEMENT_ACCOUNT).tags());
+    }
+
+    @Test
     void anAccountOutsideAnyOrganizationGetsNotInUse() {
         AwsException error = assertThrows(AwsException.class,
                 () -> service.describeOrganization(OUTSIDER_ACCOUNT));
         assertEquals("AWSOrganizationsNotInUseException", error.getErrorCode());
+    }
+    @Test
+    void controlTowerGuardrailsReconcileRegisteredAndSecurityOusIdempotently() {
+        Organization organization = service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+        String rootId = organization.getRoot().getId();
+        String registered = service.createOrganizationalUnit(MANAGEMENT_ACCOUNT, rootId, "Infrastructure", null).getId();
+        String security = service.createOrganizationalUnit(MANAGEMENT_ACCOUNT, rootId, "Security", null).getId();
+        String unrelated = service.createOrganizationalUnit(MANAGEMENT_ACCOUNT, rootId, "Suspended", null).getId();
+
+        service.ensureControlTowerGuardrails(MANAGEMENT_ACCOUNT, Set.of(registered));
+        service.ensureControlTowerGuardrails(MANAGEMENT_ACCOUNT, Set.of(registered));
+
+        OrganizationPolicy guardrail =
+                service.describePolicy(MANAGEMENT_ACCOUNT, OrganizationsService.CONTROL_TOWER_GUARDRAIL_ID);
+        assertEquals(OrganizationsService.CONTROL_TOWER_GUARDRAIL_NAME, guardrail.getName());
+        assertFalse(guardrail.isAwsManaged());
+        assertTrue(guardrail.getTargets().containsAll(Set.of(registered, security)));
+        assertFalse(guardrail.getTargets().contains(unrelated));
+        assertTrue(service.listPoliciesForTarget(MANAGEMENT_ACCOUNT, registered, "SERVICE_CONTROL_POLICY")
+                .stream().anyMatch(policy -> policy.getName().startsWith("aws-guardrails-")));
+        assertTrue(service.listPoliciesForTarget(MANAGEMENT_ACCOUNT, security, "SERVICE_CONTROL_POLICY")
+                .stream().anyMatch(policy -> policy.getName().startsWith("aws-guardrails-")));
+        assertFalse(service.listPoliciesForTarget(MANAGEMENT_ACCOUNT, unrelated, "SERVICE_CONTROL_POLICY")
+                .stream().anyMatch(policy -> policy.getName().startsWith("aws-guardrails-")));
     }
 }
