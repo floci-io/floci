@@ -44,7 +44,7 @@ public class NetworkFirewallJsonHandler {
             case "UpdateFirewallDeleteProtection", "UpdateFirewallPolicyChangeProtection",
                  "UpdateSubnetChangeProtection", "UpdateAvailabilityZoneChangeProtection",
                  "UpdateFirewallDescription", "UpdateFirewallAnalysisSettings"
-                    -> ok(service.updateFirewall(request, region, accountId));
+                    -> ok(service.updateFirewall(action, request, region, accountId));
             case "AssociateSubnets" -> ok(service.associateSubnets(request));
             case "DisassociateSubnets" -> ok(service.disassociateSubnets(request));
             case "AssociateAvailabilityZones" -> ok(service.associateAvailabilityZones(request));

@@ -271,6 +271,28 @@ class NetworkFirewallIntegrationTest {
     }
 
     @Test
+    void updateFirewallDescription_cannotSmuggleAnotherOperationsProtectionField() {
+        // Each UpdateFirewall* operation models exactly one mutable field (botocore
+        // 2020-11-12). A raw UpdateFirewallDescription request that also carries
+        // DeleteProtection (only modeled on UpdateFirewallDeleteProtection) must not
+        // persist it — otherwise DeleteProtection can be flipped without ever calling
+        // UpdateFirewallDeleteProtection, and DescribeFirewall reports a change that op
+        // never made.
+        String name = "SmuggledDeleteProtectionFirewall";
+        createFirewall(name, "", "subnet-11122233344455566");
+
+        call("UpdateFirewallDescription", "{\"FirewallArn\":\"" + firewallArn(name) + "\","
+                + "\"Description\":\"updated\","
+                + "\"DeleteProtection\":true}")
+            .statusCode(200);
+
+        call("DescribeFirewall", "{\"FirewallArn\":\"" + firewallArn(name) + "\"}")
+            .statusCode(200)
+            .body("Firewall.Description", equalTo("updated"))
+            .body("Firewall.DeleteProtection", equalTo(false));
+    }
+
+    @Test
     void disassociateSubnets_removesOnlyTheNamedSubnets() {
         String name = "DisassociateSubnetsFirewall";
         createFirewall(name, "", "subnet-88888888888888888", "subnet-99999999999999999");

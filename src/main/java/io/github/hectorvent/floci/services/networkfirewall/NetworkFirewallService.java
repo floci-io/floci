@@ -140,25 +140,28 @@ public class NetworkFirewallService {
     }
 
     /**
-     * The union of the mutable fields modeled on the UpdateFirewall* operations sharing this
-     * path. Anything else in the raw request (notably SubnetMappings / AvailabilityZoneMappings,
-     * which only change via the Associate/Disassociate ops and their change-protection checks)
-     * is dropped, matching AWS ignoring unmodeled request members.
+     * Each UpdateFirewall* operation models exactly one mutable field (botocore
+     * 2020-11-12). Anything else in the raw request — including another operation's
+     * field, or unmodeled members like SubnetMappings — must not be persisted, matching
+     * AWS ignoring unmodeled request members and scoping each op to its own field.
      */
-    private static final Set<String> UPDATABLE_FIREWALL_FIELDS = Set.of(
-            "Description", "DeleteProtection", "SubnetChangeProtection",
-            "FirewallPolicyChangeProtection", "AvailabilityZoneChangeProtection",
-            "EnabledAnalysisTypes");
+    private static final Map<String, String> UPDATE_ACTION_FIELDS = Map.of(
+            "UpdateFirewallDescription", "Description",
+            "UpdateFirewallDeleteProtection", "DeleteProtection",
+            "UpdateSubnetChangeProtection", "SubnetChangeProtection",
+            "UpdateFirewallPolicyChangeProtection", "FirewallPolicyChangeProtection",
+            "UpdateAvailabilityZoneChangeProtection", "AvailabilityZoneChangeProtection",
+            "UpdateFirewallAnalysisSettings", "EnabledAnalysisTypes");
 
-    public ObjectNode updateFirewall(JsonNode request, String region, String accountId) {
+    public ObjectNode updateFirewall(String action, JsonNode request, String region, String accountId) {
         String arn = textOrNull(request, "FirewallArn");
         String name = textOrNull(request, "FirewallName");
         ObjectNode existing = require(firewalls, arn, name, "Firewall", "FirewallArn", "FirewallName");
-        request.fields().forEachRemaining(entry -> {
-            if (UPDATABLE_FIREWALL_FIELDS.contains(entry.getKey())) {
-                existing.set(entry.getKey(), entry.getValue().deepCopy());
-            }
-        });
+        String field = UPDATE_ACTION_FIELDS.get(action);
+        JsonNode value = request.get(field);
+        if (value != null) {
+            existing.set(field, value.deepCopy());
+        }
         firewalls.put(existing.path("FirewallArn").asText(), existing);
         return firewallResponse(existing, region);
     }
