@@ -2524,6 +2524,11 @@ public class S3Service implements Resettable, ResourceProvider {
      */
     public void putBucketReplication(String bucketName, String replicationXml) {
         mutateBucket(bucketName, bucket -> {
+            if (!"ReplicationConfiguration".equals(XmlParser.rootElementName(replicationXml))) {
+                throw new AwsException("MalformedXML",
+                        "The XML you provided was not well-formed or did not validate against our published schema.",
+                        400);
+            }
             String role = XmlParser.extractFirst(replicationXml, "Role", null);
             String destinationBucket = XmlParser.extractFirst(replicationXml, "Bucket", null);
             if (role == null || role.isBlank()
@@ -2623,42 +2628,6 @@ public class S3Service implements Resettable, ResourceProvider {
                 .elem("Status", bucket.getAccelerateStatus())
                 .end("AccelerateConfiguration")
                 .build();
-    }
-
-    /**
-     * Stores the bucket replication configuration verbatim. Floci does not model
-     * replication behavior — the configuration is only stored and echoed back,
-     * which is what the SDK and the Terraform provider need. The
-     * ReplicationConfiguration root is required, so a body that does not parse
-     * to one is rejected with {@code MalformedXML}.
-     */
-    public void putBucketReplication(String bucketName, String replicationXml) {
-        Bucket bucket = bucketStore.get(bucketName)
-                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
-        if (!"ReplicationConfiguration".equals(XmlParser.rootElementName(replicationXml))) {
-            throw new AwsException("MalformedXML",
-                    "The XML you provided was not well-formed or did not validate against our published schema.",
-                    400);
-        }
-        bucket.setReplicationConfiguration(replicationXml);
-        bucketStore.put(bucketName, bucket);
-    }
-
-    public String getBucketReplication(String bucketName) {
-        Bucket bucket = bucketStore.get(bucketName)
-                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
-        if (bucket.getReplicationConfiguration() == null) {
-            throw new AwsException("ReplicationConfigurationNotFoundError",
-                    "The replication configuration was not found", 404);
-        }
-        return bucket.getReplicationConfiguration();
-    }
-
-    public void deleteBucketReplication(String bucketName) {
-        Bucket bucket = bucketStore.get(bucketName)
-                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
-        bucket.setReplicationConfiguration(null);
-        bucketStore.put(bucketName, bucket);
     }
 
     public void restoreObject(String bucketName, String key, String versionId, String restoreXml) {
