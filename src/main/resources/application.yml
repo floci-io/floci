@@ -157,11 +157,16 @@ floci:
         flush-interval-ms: 5000
       rum:
         flush-interval-ms: 5000
+      resourceexplorer2:
+        mode: hybrid
+        flush-interval-ms: 5000
       fis:
         flush-interval-ms: 5000
       guardduty:
         flush-interval-ms: 5000
       emrserverless:
+        flush-interval-ms: 5000
+      lakeformation:
         flush-interval-ms: 5000
 
   dns:
@@ -508,6 +513,8 @@ floci:
       enabled: true
     cloudcontrol:
       enabled: true
+    resourceexplorer2:
+      enabled: true
     cloudfront:
       enabled: true
       allowed-private-origin-hosts: []
@@ -530,6 +537,8 @@ floci:
       enabled: true
     cloudhsmv2:
       enabled: true
+    efs:
+      enabled: true
     organizations:
       enabled: true
     rum:
@@ -539,6 +548,8 @@ floci:
     emrserverless:
       enabled: true
     ssoadmin:
+      enabled: true
+    lakeformation:
       enabled: true
     tagging:
       enabled: true

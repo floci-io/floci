@@ -281,6 +281,70 @@ class SecretsManagerServiceTest {
                 service.updateSecretVersionStage("my-secret", null, null, "AWSCURRENT", REGION)).getErrorCode());
     }
 
+    /**
+     * The data-loss case from #2549: CreateSecret against a name inside its recovery window used
+     * to fall through the "already exists" guard (which only fired when {@code deletedDate} was
+     * null), overwrite the recoverable secret at the same storage key, and clear its
+     * {@code deletedDate} as a side effect. The original value became unrecoverable and
+     * RestoreSecret then reported "was not deleted", so nothing surfaced the loss.
+     */
+    @Test
+    void createSecretOnPendingDeletionNameIsRefusedAndLeavesOriginalRecoverable() {
+        service.createSecret("my-secret", "ORIGINAL-VALUE", null, null, null, null, REGION);
+        service.deleteSecret("my-secret", 7, false, REGION);
+
+        assertEquals("InvalidRequestException", assertThrows(AwsException.class, () ->
+                service.createSecret("my-secret", "NEW-VALUE", null, null, null, null, REGION)).getErrorCode());
+
+        // The recovery window still means what it says: restore works and returns the original.
+        service.restoreSecret("my-secret", REGION);
+        assertEquals("ORIGINAL-VALUE",
+                service.getSecretValue("my-secret", null, null, REGION).getSecretString());
+    }
+
+    @Test
+    void tagUntagAndRescheduleOnPendingDeletionSecretRaiseInvalidRequest() {
+        service.createSecret("my-secret", "value", null, null, null, null, REGION);
+        service.deleteSecret("my-secret", 7, false, REGION);
+
+        assertEquals("InvalidRequestException", assertThrows(AwsException.class, () ->
+                service.tagResource("my-secret", List.of(new Secret.Tag("k", "v")), REGION)).getErrorCode());
+        assertEquals("InvalidRequestException", assertThrows(AwsException.class, () ->
+                service.untagResource("my-secret", List.of("k"), REGION)).getErrorCode());
+        // A second non-force DeleteSecret used to silently move DeletionDate forward.
+        assertEquals("InvalidRequestException", assertThrows(AwsException.class, () ->
+                service.deleteSecret("my-secret", 7, false, REGION)).getErrorCode());
+    }
+
+    /**
+     * Force delete stays available as the documented "skip the recovery window" escape hatch, so
+     * the guard added above must not block it. Pins the guard's placement after the force branch.
+     */
+    @Test
+    void forceDeleteStillWorksOnAPendingDeletionSecret() {
+        service.createSecret("my-secret", "value", null, null, null, null, REGION);
+        service.deleteSecret("my-secret", 7, false, REGION);
+
+        service.deleteSecret("my-secret", null, true, REGION);
+
+        assertEquals("ResourceNotFoundException", assertThrows(AwsException.class, () ->
+                service.describeSecret("my-secret", REGION)).getErrorCode());
+    }
+
+    /**
+     * DescribeSecret is how a caller reads a scheduled secret's DeletedDate, and AWS does not
+     * declare InvalidRequestException for it. Pins that the guard was not over-applied.
+     */
+    @Test
+    void describeSecretRemainsAllowedOnPendingDeletionSecret() {
+        service.createSecret("my-secret", "value", null, null, null, null, REGION);
+        service.deleteSecret("my-secret", 7, false, REGION);
+
+        Secret described = service.describeSecret("my-secret", REGION);
+        assertEquals("my-secret", described.getName());
+        assertNotNull(described.getDeletedDate());
+    }
+
     @Test
     void forceDeleteSecret() {
         service.createSecret("my-secret", "value", null, null, null, null, REGION);

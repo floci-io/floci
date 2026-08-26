@@ -42,9 +42,13 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
+import java.util.Set;
 
 @ApplicationScoped
-public class EksService implements TagHandler {
+public class EksService implements TagHandler, ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(EksService.class);
 
@@ -570,5 +574,30 @@ public class EksService implements TagHandler {
         } else {
             storage.put(cluster.getName(), cluster);
         }
+    }
+
+    // ─── Resource Explorer 2 ───────────────────────────────────────────────────
+
+    @Override
+    public List<ExplorerResource> getResources() {
+        List<ExplorerResource> resources = new ArrayList<>();
+        for (Cluster cluster : storage.scan(k -> true)) {
+            String arn = cluster.getArn();
+            if (arn == null) {
+                continue;
+            }
+            AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+            resources.add(new ExplorerResource(
+                    arn, "eks:cluster", "eks",
+                    parsed.region(), parsed.accountId(),
+                    cluster.getCreatedAt() != null ? cluster.getCreatedAt() : Instant.now(),
+                    cluster.getTags() != null ? cluster.getTags() : Map.of()));
+        }
+        return resources;
+    }
+
+    @Override
+    public Set<SupportedResourceType> getSupportedResourceTypes() {
+        return Set.of(new SupportedResourceType("eks:cluster", "eks", true));
     }
 }

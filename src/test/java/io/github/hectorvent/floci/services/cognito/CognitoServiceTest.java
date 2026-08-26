@@ -1291,6 +1291,37 @@ class CognitoServiceTest {
         assertEquals(400, ex.getHttpStatus());
     }
 
+    @ParameterizedTest
+    @CsvSource({"email_verified", "phone_number_verified"})
+    @SuppressWarnings("unchecked")
+    void updateUserAttributesRejectsSelfManagedVerificationStatusWithoutPartialPersistence(
+            String verificationStatusAttribute) {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = service.createUserPoolClient(
+                pool.getId(), "verification-status-client", false, false, List.of(), List.of());
+        Map<String, Object> authResult = service.initiateAuth(
+                client.getClientId(), "USER_PASSWORD_AUTH",
+                Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!"));
+        String accessToken = (String) ((Map<String, Object>) authResult.get("AuthenticationResult"))
+                .get("AccessToken");
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.updateUserAttributes(accessToken, Map.of(
+                        verificationStatusAttribute, "true",
+                        "name", "must-not-be-persisted")));
+
+        assertEquals("InvalidParameterException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        CognitoUser unchanged = service.adminGetUser(pool.getId(), "alice");
+        assertFalse(unchanged.getAttributes().containsKey(verificationStatusAttribute));
+        assertFalse(unchanged.getAttributes().containsKey("name"));
+
+        service.adminUpdateUserAttributes(
+                pool.getId(), "alice", Map.of(verificationStatusAttribute, "true"));
+        assertEquals("true", service.adminGetUser(pool.getId(), "alice")
+                .getAttributes().get(verificationStatusAttribute));
+    }
+
     @Test
     @SuppressWarnings("unchecked")
     void jwtSubMatchesStoredSubAttribute() {

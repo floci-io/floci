@@ -460,5 +460,6 @@ These services spawn Docker containers. They require access to the Docker socket
 | `FLOCI_SERVICES_BACKUP_ENABLED` | `true` | Enable the AWS Backup service |
 | `FLOCI_SERVICES_BACKUP_JOB_COMPLETION_DELAY_SECONDS` | `3` | Simulated delay before backup jobs transition to `COMPLETED` |
 | `FLOCI_SERVICES_FIS_ENABLED` | `true` | Enable the AWS Fault Injection Service management API |
+| `FLOCI_SERVICES_RESOURCEEXPLORER2_ENABLED` | `true` | Enable the Resource Explorer 2 service |
 | `FLOCI_SERVICES_APPCONFIG_ENABLED` | `true` | Enable the AppConfig service |
 | `FLOCI_SERVICES_APPCONFIGDATA_ENABLED` | `true` | Enable the AppConfig Data service |
