@@ -9,7 +9,7 @@
 | `GetFirewallDomainList` | Returns a single DNS Firewall domain list by id, whether AWS-managed or custom. |
 | `CreateFirewallDomainList` | Creates a custom DNS Firewall domain list with a random-suffix `rslvr-fdl-` id. |
 | `DeleteFirewallDomainList` | Deletes a custom DNS Firewall domain list; AWS-managed lists cannot be deleted. |
-| `CreateResolverEndpoint` | Creates an inbound or outbound resolver endpoint, returned immediately as `OPERATIONAL`. |
+| `CreateResolverEndpoint` | Creates an inbound (`rslvr-in-`) or outbound (`rslvr-out-`) resolver endpoint, returned immediately as `OPERATIONAL`. |
 | `DeleteResolverEndpoint` | Deletes a resolver endpoint and returns its final description. |
 | `GetResolverEndpoint` | Returns a resolver endpoint by id. |
 | `ListResolverEndpoints` | Lists all resolver endpoints. |
@@ -36,8 +36,11 @@ this service and is untouched.
 
 Everything else (custom firewall domain lists, resolver endpoints, resolver rules,
 rule associations) is backed by real per-service storage, added this session. Ids use
-the project's standard random-suffix convention (`rslvr-fdl-...`, `rslvr-in-...`,
-`rslvr-rr-...`, `rslvr-rrassoc-...`), distinct from the deterministic managed-list ids.
+the project's standard random-suffix convention (`rslvr-fdl-...`, `rslvr-in-...` /
+`rslvr-out-...`, `rslvr-rr-...`, `rslvr-rrassoc-...`), distinct from the deterministic
+managed-list ids. Resolver endpoint ids are direction-aware as in AWS: `rslvr-in-` for
+`INBOUND` (and `INBOUND_DELEGATION`), `rslvr-out-` for `OUTBOUND`. Any other `Direction`
+is rejected with `InvalidParametersException`.
 
 `CreateFirewallDomainList`, `CreateResolverEndpoint` and `CreateResolverRule` are
 idempotent on `CreatorRequestId`, as they are in real AWS: replaying a token returns the

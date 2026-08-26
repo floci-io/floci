@@ -9,6 +9,7 @@ import org.junit.jupiter.api.Test;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
+import static org.hamcrest.Matchers.startsWith;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 
@@ -217,6 +218,38 @@ class Route53ResolverCustomResourcesConsumerTest {
             .body("ResolverEndpoint.Direction", equalTo("INBOUND"))
             .body("ResolverEndpoint.Status", equalTo("OPERATIONAL"))
             .body("ResolverEndpoint.IpAddressCount", equalTo(1));
+    }
+
+    @Test
+    void createResolverEndpoint_inboundGetsInboundIdPrefix() {
+        call("CreateResolverEndpoint", "{\"Name\":\"ab-endpoint-inbound\",\"Direction\":\"INBOUND\","
+                + "\"SecurityGroupIds\":[\"sg-abc123\"],\"IpAddressRequests\":[{\"SubnetId\":\"subnet-abc\","
+                + "\"Ip\":\"10.0.0.5\"}],\"CreatorRequestId\":\"tok-endpoint-inbound\"}")
+        .then()
+            .statusCode(200)
+            .body("ResolverEndpoint.Direction", equalTo("INBOUND"))
+            .body("ResolverEndpoint.Id", startsWith("rslvr-in-"));
+    }
+
+    @Test
+    void createResolverEndpoint_outboundGetsOutboundIdPrefix() {
+        call("CreateResolverEndpoint", "{\"Name\":\"ab-endpoint-outbound\",\"Direction\":\"OUTBOUND\","
+                + "\"SecurityGroupIds\":[\"sg-abc123\"],\"IpAddressRequests\":[{\"SubnetId\":\"subnet-abc\","
+                + "\"Ip\":\"10.0.0.6\"}],\"CreatorRequestId\":\"tok-endpoint-outbound\"}")
+        .then()
+            .statusCode(200)
+            .body("ResolverEndpoint.Direction", equalTo("OUTBOUND"))
+            .body("ResolverEndpoint.Id", startsWith("rslvr-out-"));
+    }
+
+    @Test
+    void createResolverEndpoint_unknownDirection_returnsInvalidParameters() {
+        call("CreateResolverEndpoint", "{\"Name\":\"ab-endpoint-sideways\",\"Direction\":\"SIDEWAYS\","
+                + "\"SecurityGroupIds\":[\"sg-abc123\"],\"IpAddressRequests\":[{\"SubnetId\":\"subnet-abc\","
+                + "\"Ip\":\"10.0.0.7\"}],\"CreatorRequestId\":\"tok-endpoint-sideways\"}")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParametersException"));
     }
 
     @Test

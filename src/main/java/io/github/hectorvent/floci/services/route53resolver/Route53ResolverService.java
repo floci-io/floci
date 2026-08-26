@@ -126,7 +126,7 @@ public class Route53ResolverService {
 
     public ObjectNode createResolverEndpoint(JsonNode request, String region, String accountId) {
         requireText(request, "Name");
-        requireText(request, "Direction");
+        String direction = requireText(request, "Direction");
         JsonNode ipAddresses = request.path("IpAddressRequests");
         if (!ipAddresses.isArray() || ipAddresses.isEmpty()) {
             throw new AwsException("InvalidParametersException", "IpAddressRequests is required", 400);
@@ -135,12 +135,12 @@ public class Route53ResolverService {
         if (replay.isPresent()) {
             return replay.get();
         }
-        String id = id("rslvr-in");
+        String id = id(endpointIdPrefix(direction));
         ObjectNode endpoint = objectMapper.createObjectNode();
         endpoint.put("Id", id);
         endpoint.put("Arn", "arn:aws:route53resolver:" + region + ":" + accountId + ":resolver-endpoint/" + id);
         endpoint.put("Name", text(request, "Name"));
-        endpoint.put("Direction", text(request, "Direction"));
+        endpoint.put("Direction", direction);
         endpoint.set("SecurityGroupIds", request.path("SecurityGroupIds").deepCopy());
         endpoint.put("IpAddressCount", ipAddresses.size());
         endpoint.put("HostVPCId", "vpc-" + deterministicHex(id, 8));
@@ -265,6 +265,21 @@ public class Route53ResolverService {
 
     public List<ObjectNode> listResolverRuleAssociations() {
         return ruleAssociationStore.scan(key -> true).stream().map(ObjectNode::deepCopy).toList();
+    }
+
+    /**
+     * AWS gives a resolver endpoint a direction-specific id prefix: {@code rslvr-in-} for
+     * inbound endpoints, {@code rslvr-out-} for outbound. {@code INBOUND_DELEGATION} is an
+     * inbound variant and shares the inbound prefix. Anything outside
+     * {@code ResolverEndpointDirection} is rejected rather than defaulted.
+     */
+    private static String endpointIdPrefix(String direction) {
+        return switch (direction) {
+            case "INBOUND", "INBOUND_DELEGATION" -> "rslvr-in";
+            case "OUTBOUND" -> "rslvr-out";
+            default -> throw new AwsException("InvalidParametersException",
+                    "Direction must be one of INBOUND, OUTBOUND, INBOUND_DELEGATION: " + direction, 400);
+        };
     }
 
     // ---------- Shared helpers ----------
