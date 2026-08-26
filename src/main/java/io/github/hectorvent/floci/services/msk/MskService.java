@@ -6,6 +6,9 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -24,15 +27,17 @@ import org.jboss.logging.Logger;
 
 import java.security.SecureRandom;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 @ApplicationScoped
-public class MskService {
+public class MskService implements ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(MskService.class);
     private static final String DEFAULT_KAFKA_VERSION = "3.6.0";
@@ -157,8 +162,13 @@ public class MskService {
     }
 
     public MskConfiguration describeConfiguration(String arn) {
+        // Real MSK reports an unknown configuration ARN as BadRequestException (400), not
+        // NotFoundException. The message prefix is a compatibility contract: terraform-provider-aws
+        // (and the Pulumi provider bridging it) substring-matches "Configuration ARN does not exist"
+        // to detect that a configuration is gone, so its post-delete waiter can complete.
         return configurationStorage.get(arn)
-                .orElseThrow(() -> new AwsException("NotFoundException", "Configuration not found: " + arn, 404));
+                .orElseThrow(() -> new AwsException("BadRequestException",
+                        "Configuration ARN does not exist: " + arn, 400));
     }
 
     public PaginatedResult<MskConfiguration> listConfigurations(Integer maxResults, String nextToken) {
@@ -278,5 +288,28 @@ public class MskService {
         } else {
             storage.put(cluster.getClusterArn(), cluster);
         }
+    }
+
+    @Override
+    public List<ExplorerResource> getResources() {
+        List<ExplorerResource> resources = new ArrayList<>();
+        for (MskCluster cluster : storage.scan(k -> true)) {
+            String arn = cluster.getClusterArn();
+            if (arn == null) {
+                continue;
+            }
+            AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+            resources.add(new ExplorerResource(
+                    arn, "kafka:cluster", "kafka",
+                    parsed.region(), parsed.accountId(),
+                    cluster.getCreationTime() != null ? cluster.getCreationTime() : Instant.now(),
+                    cluster.getTags() != null ? cluster.getTags() : Map.of()));
+        }
+        return resources;
+    }
+
+    @Override
+    public Set<SupportedResourceType> getSupportedResourceTypes() {
+        return Set.of(new SupportedResourceType("kafka:cluster", "kafka", true));
     }
 }

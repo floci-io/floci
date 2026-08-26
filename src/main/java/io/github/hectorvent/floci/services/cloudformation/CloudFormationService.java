@@ -38,12 +38,19 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 /**
  * CloudFormation stack lifecycle management — Create, Update, Delete stacks via ChangeSets.
  */
 @ApplicationScoped
-public class CloudFormationService {
+public class CloudFormationService implements ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(CloudFormationService.class);
 
@@ -2062,5 +2069,30 @@ public class CloudFormationService {
 
     private static String key(String stackName, String region) {
         return region + ":" + stackName;
+    }
+
+    // ─── Resource Explorer 2 ───────────────────────────────────────────────────
+
+    @Override
+    public List<ExplorerResource> getResources() {
+        List<ExplorerResource> resources = new ArrayList<>();
+        for (Stack stack : stacks.values()) {
+            String arn = stack.getStackId();
+            if (arn == null) {
+                continue;
+            }
+            AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+            resources.add(new ExplorerResource(
+                    arn, "cloudformation:stack", "cloudformation",
+                    parsed.region(), parsed.accountId(),
+                    stack.getCreationTime() != null ? stack.getCreationTime() : Instant.now(),
+                    stack.getTags() != null ? stack.getTags() : Map.of()));
+        }
+        return resources;
+    }
+
+    @Override
+    public Set<SupportedResourceType> getSupportedResourceTypes() {
+        return Set.of(new SupportedResourceType("cloudformation:stack", "cloudformation", true));
     }
 }

@@ -41,7 +41,7 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | `DescribeOptionGroups` | List option groups, including the implicit `default:` groups |
 | `ModifyOptionGroup` | Add, update, or remove options in an option group |
 | `DeleteOptionGroup` | Delete an option group |
-| `DescribeDBSnapshots` | - |
+| `DescribeDBSnapshots` | Return an empty snapshot list (snapshots are not modeled) |
 | `DescribeDBProxies` | List DB proxies |
 | `CreateDBProxy` | Create a DB proxy |
 | `ModifyDBProxy` | Update mutable DB proxy authentication, logging, timeout, TLS, role, and security-group settings |
@@ -51,7 +51,7 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | `DescribeDBProxyTargetGroups` | List a proxy's target groups |
 | `ModifyDBProxyTargetGroup` | Update target-group connection-pool configuration |
 | `DescribeDBProxyTargets` | List a proxy target group's registered targets |
-| `DescribeDBClusterSnapshots` | - |
+| `DescribeDBClusterSnapshots` | Return an empty cluster-snapshot list (snapshots are not modeled) |
 | `DescribeGlobalClusters` | List global clusters — always empty, as none are modeled |
 | `AddTagsToResource` | Add tags to a DB resource |
 | `ListTagsForResource` | List tags for a DB resource |

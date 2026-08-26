@@ -28,9 +28,17 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
+import java.util.LinkedHashMap;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 @ApplicationScoped
-public class FirehoseService {
+public class FirehoseService implements ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(FirehoseService.class);
     private static final String DEFAULT_BUCKET = "floci-firehose-results";
@@ -415,5 +423,36 @@ public class FirehoseService {
         try {
             s3Service.createBucket(bucket, regionResolver.getDefaultRegion());
         } catch (Exception ignored) {}
+    }
+
+    // ─── Resource Explorer 2 ───────────────────────────────────────────────────
+
+    @Override
+    public List<ExplorerResource> getResources() {
+        List<ExplorerResource> resources = new ArrayList<>();
+        for (DeliveryStreamDescription stream : streamStore.scan(k -> true)) {
+            String arn = stream.getDeliveryStreamARN();
+            if (arn == null) {
+                continue;
+            }
+            AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+            Map<String, String> tags = new LinkedHashMap<>();
+            if (stream.getTags() != null) {
+                for (DeliveryStreamDescription.Tag tag : stream.getTags()) {
+                    tags.put(tag.getKey(), tag.getValue() != null ? tag.getValue() : "");
+                }
+            }
+            resources.add(new ExplorerResource(
+                    arn, "firehose:deliverystream", "firehose",
+                    parsed.region(), parsed.accountId(),
+                    stream.getCreateTimestamp() != null ? stream.getCreateTimestamp() : Instant.now(),
+                    tags));
+        }
+        return resources;
+    }
+
+    @Override
+    public Set<SupportedResourceType> getSupportedResourceTypes() {
+        return Set.of(new SupportedResourceType("firehose:deliverystream", "firehose", true));
     }
 }
