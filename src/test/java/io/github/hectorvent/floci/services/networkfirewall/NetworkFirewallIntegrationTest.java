@@ -7,6 +7,7 @@ import static org.hamcrest.Matchers.matchesPattern;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -171,5 +172,51 @@ class NetworkFirewallIntegrationTest {
         .then()
             .statusCode(200)
             .body("Firewall.FirewallPolicyArn", equalTo(newPolicyArn));
+    }
+
+    @Test
+    void deleteFirewall_withDeleteProtection_isRejectedAndLeavesTheFirewall() {
+        String name = "DeleteProtectedFirewall";
+        createFirewall(name, "\"DeleteProtection\":true,", "subnet-33333333333333333");
+
+        call("DeleteFirewall", "{\"FirewallArn\":\"" + firewallArn(name) + "\"}")
+            .statusCode(400)
+            .body("__type", equalTo("InvalidOperationException"));
+
+        call("DescribeFirewall", "{\"FirewallArn\":\"" + firewallArn(name) + "\"}")
+            .statusCode(200)
+            .body("Firewall.FirewallArn", equalTo(firewallArn(name)));
+    }
+
+    private static String firewallArn(String name) {
+        return "arn:aws:network-firewall:us-east-1:723679240095:firewall/" + name;
+    }
+
+    private static ValidatableResponse call(String action, String body) {
+        return given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET_PREFIX + action)
+            .header("Authorization", AUTH_HEADER)
+            .body(body)
+        .when()
+            .post("/")
+        .then();
+    }
+
+    private static void createFirewall(String name, String extraFields, String... subnetIds) {
+        StringBuilder mappings = new StringBuilder();
+        for (String subnetId : subnetIds) {
+            if (!mappings.isEmpty()) {
+                mappings.append(',');
+            }
+            mappings.append("{\"SubnetId\":\"").append(subnetId).append("\"}");
+        }
+        call("CreateFirewall", "{\"FirewallName\":\"" + name + "\","
+                + "\"FirewallPolicyArn\":\"arn:aws:network-firewall:us-east-1:723679240095:"
+                + "firewall-policy/" + name + "-policy\","
+                + "\"VpcId\":\"vpc-0123456789abcdef0\","
+                + extraFields
+                + "\"SubnetMappings\":[" + mappings + "]}")
+            .statusCode(200);
     }
 }

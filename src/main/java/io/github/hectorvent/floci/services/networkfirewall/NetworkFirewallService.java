@@ -149,6 +149,10 @@ public class NetworkFirewallService {
     public ObjectNode deleteFirewall(String arn, String name) {
         ObjectNode existing = require(firewalls, arn, name, "Firewall", "FirewallArn", "FirewallName");
         String firewallArn = existing.path("FirewallArn").asText();
+        if (existing.path("DeleteProtection").asBoolean(false)) {
+            throw new AwsException("InvalidOperationException",
+                    "Firewall has delete protection enabled: " + firewallArn, 400);
+        }
         firewalls.delete(firewallArn);
         loggingConfigurations.delete(firewallArn);
         return objectMapper.createObjectNode().put("FirewallArn", firewallArn)
