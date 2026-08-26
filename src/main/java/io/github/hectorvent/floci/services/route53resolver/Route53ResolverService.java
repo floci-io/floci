@@ -91,7 +91,7 @@ public class Route53ResolverService {
 
     // ---------- Custom firewall domain lists ----------
 
-    public ObjectNode createFirewallDomainList(JsonNode request, String region, String accountId) {
+    public synchronized ObjectNode createFirewallDomainList(JsonNode request, String region, String accountId) {
         String name = requireText(request, "Name");
         java.util.Optional<ObjectNode> replay = replayOf(domainListStore, request);
         if (replay.isPresent()) {
@@ -130,7 +130,7 @@ public class Route53ResolverService {
 
     // ---------- Resolver endpoints ----------
 
-    public ObjectNode createResolverEndpoint(JsonNode request, String region, String accountId) {
+    public synchronized ObjectNode createResolverEndpoint(JsonNode request, String region, String accountId) {
         requireText(request, "Name");
         String direction = requireText(request, "Direction");
         String idPrefix = endpointIdPrefix(direction);
@@ -189,7 +189,7 @@ public class Route53ResolverService {
 
     // ---------- Resolver rules ----------
 
-    public ObjectNode createResolverRule(JsonNode request, String region, String accountId) {
+    public synchronized ObjectNode createResolverRule(JsonNode request, String region, String accountId) {
         requireEnum(requireText(request, "RuleType"), "RuleType", RULE_TYPES);
         // TargetIps is modeled list min 1: present-but-empty is invalid, absent is
         // allowed (SYSTEM rules carry no targets).
@@ -307,6 +307,11 @@ public class Route53ResolverService {
      * token returns the resource it originally created rather than allocating a second
      * one. Called after the request's own validation so a replayed token never excuses a
      * malformed body. A blank/absent token opts out — those creates always allocate.
+     */
+    /**
+     * The CreatorRequestId scan-then-put pair is only atomic because every create
+     * method is {@code synchronized} — two overlapping retries with the same token
+     * would otherwise both miss the scan and persist twice.
      */
     private java.util.Optional<ObjectNode> replayOf(StorageBackend<String, ObjectNode> store, JsonNode request) {
         String creatorRequestId = text(request, "CreatorRequestId");
