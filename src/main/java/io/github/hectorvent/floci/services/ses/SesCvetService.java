@@ -51,6 +51,7 @@ public class SesCvetService {
     }
 
     public void createCustomVerificationEmailTemplate(CustomVerificationEmailTemplate template, String region) {
+        SesTags.validate(template.getTags());
         String key = cvetKey(region, template.getTemplateName());
         // Lock only the check-then-put so concurrent creates for the same name can't both observe
         // the key as absent; the facade's validation and this logging stay outside the lock.

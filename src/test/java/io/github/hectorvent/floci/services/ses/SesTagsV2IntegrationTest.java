@@ -1098,6 +1098,90 @@ class SesTagsV2IntegrationTest {
             .body(containsString("Operations on a resource created in a different account is not allowed"));
     }
 
+    @Test
+    @Order(37)
+    void createCustomVerificationEmailTemplate_inlineTags_storedAndAtomic() {
+        // v2 CreateCustomVerificationEmailTemplate accepts Tags (probe-confirmed); the From
+        // identity tag-cvet-sender@floci.test was verified by the lifecycle case at @Order(25).
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {
+                  "TemplateName": "tag-cvet-inline",
+                  "FromEmailAddress": "tag-cvet-sender@floci.test",
+                  "TemplateSubject": "Verify",
+                  "TemplateContent": "<html><body>verify</body></html>",
+                  "SuccessRedirectionURL": "https://example.com/ok",
+                  "FailureRedirectionURL": "https://example.com/no",
+                  "Tags": [{"Key": "env", "Value": "dev"}]
+                }
+                """)
+        .when()
+            .post("/v2/email/custom-verification-email-templates")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("Authorization", AUTH_HEADER)
+            .queryParam("ResourceArn",
+                    "arn:aws:ses:us-east-1:000000000000:custom-verification-email-template/tag-cvet-inline")
+        .when()
+            .get("/v2/email/tags")
+        .then()
+            .statusCode(200)
+            .body("Tags", hasSize(1))
+            .body("Tags[0].Key", equalTo("env"));
+
+        // A semantic tag error fails the create before anything is persisted, so a corrected
+        // retry does not hit AlreadyExistsException (probe-confirmed message and atomicity).
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {
+                  "TemplateName": "tag-cvet-atomic",
+                  "FromEmailAddress": "tag-cvet-sender@floci.test",
+                  "TemplateSubject": "Verify",
+                  "TemplateContent": "<html><body>verify</body></html>",
+                  "SuccessRedirectionURL": "https://example.com/ok",
+                  "FailureRedirectionURL": "https://example.com/no",
+                  "Tags": [{"Key": "dup", "Value": "1"}, {"Key": "dup", "Value": "2"}]
+                }
+                """)
+        .when()
+            .post("/v2/email/custom-verification-email-templates")
+        .then()
+            .statusCode(400)
+            .body(containsString("Cannot provide multiple tags with the same key"));
+
+        given()
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .get("/v2/email/custom-verification-email-templates/tag-cvet-atomic")
+        .then()
+            .statusCode(404);
+
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {
+                  "TemplateName": "tag-cvet-atomic",
+                  "FromEmailAddress": "tag-cvet-sender@floci.test",
+                  "TemplateSubject": "Verify",
+                  "TemplateContent": "<html><body>verify</body></html>",
+                  "SuccessRedirectionURL": "https://example.com/ok",
+                  "FailureRedirectionURL": "https://example.com/no",
+                  "Tags": [{"Key": "env", "Value": "dev"}]
+                }
+                """)
+        .when()
+            .post("/v2/email/custom-verification-email-templates")
+        .then()
+            .statusCode(200);
+    }
+
     private static String tagArray(int from, int to) {
         StringBuilder sb = new StringBuilder("[");
         for (int i = from; i < to; i++) {

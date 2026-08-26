@@ -70,6 +70,15 @@ class SesCvetServiceTest {
     }
 
     @Test
+    void create_invalidTags_isAtomic_templateNotPersisted() {
+        CustomVerificationEmailTemplate t = template("t1");
+        t.setTags(List.of(new Tag("dup", "1"), new Tag("dup", "2")));
+        assertThrows(AwsException.class,
+                () -> service.createCustomVerificationEmailTemplate(t, REGION));
+        assertTrue(service.find("t1", REGION).isEmpty());
+    }
+
+    @Test
     void update_preservesTags() {
         service.createCustomVerificationEmailTemplate(template("t1"), REGION);
         service.tag("t1", REGION, List.of(new Tag("env", "dev")));

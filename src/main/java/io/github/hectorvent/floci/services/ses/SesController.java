@@ -722,7 +722,11 @@ public class SesController {
     public Response createCustomVerificationEmailTemplate(@Context HttpHeaders headers, String body) {
         String region = regionResolver.resolveRegion(headers);
         try {
-            CustomVerificationEmailTemplate t = parseCvet(objectMapper.readTree(body));
+            JsonNode request = objectMapper.readTree(body);
+            CustomVerificationEmailTemplate t = parseCvet(request);
+            // Tags exist only on the create request; UpdateCustomVerificationEmailTemplate has no
+            // Tags member and preserves the stored ones.
+            t.setTags(parseTagsArray(request.path("Tags")));
             sesService.createCustomVerificationEmailTemplate(t, region);
             return Response.ok(objectMapper.createObjectNode()).build();
         } catch (AwsException e) {

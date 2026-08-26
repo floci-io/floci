@@ -340,9 +340,9 @@ class SesTagResourceTest {
 
     @Test
     @Order(40)
-    void customVerificationEmailTemplate_tagAndUntag_lifecycle() {
-        // CVET creation requires the From address to be a verified identity; the v2 create API has
-        // no Tags parameter, so tags only ever arrive via TagResource.
+    void customVerificationEmailTemplate_createWithTags_tagAndUntag_lifecycle() {
+        // CVET creation requires the From address to be a verified identity. The v2 create API
+        // accepts inline Tags; the update API has no Tags member.
         sesV2.createEmailIdentity(CreateEmailIdentityRequest.builder().emailIdentity(cvetFrom).build());
         sesV2.createCustomVerificationEmailTemplate(CreateCustomVerificationEmailTemplateRequest.builder()
                 .templateName(cvetName)
@@ -351,17 +351,17 @@ class SesTagResourceTest {
                 .templateContent("<html><body>verify</body></html>")
                 .successRedirectionURL("https://example.com/ok")
                 .failureRedirectionURL("https://example.com/no")
+                .tags(Tag.builder().key("env").value("dev").build())
                 .build());
 
         ListTagsForResourceResponse initial = sesV2.listTagsForResource(ListTagsForResourceRequest.builder()
                 .resourceArn(cvetArn).build());
-        assertThat(initial.tags()).isEmpty();
+        assertThat(initial.tags()).hasSize(1);
+        assertThat(initial.tags().get(0).key()).isEqualTo("env");
 
         sesV2.tagResource(TagResourceRequest.builder()
                 .resourceArn(cvetArn)
-                .tags(
-                        Tag.builder().key("env").value("dev").build(),
-                        Tag.builder().key("owner").value("alice").build())
+                .tags(Tag.builder().key("owner").value("alice").build())
                 .build());
 
         sesV2.untagResource(UntagResourceRequest.builder()
