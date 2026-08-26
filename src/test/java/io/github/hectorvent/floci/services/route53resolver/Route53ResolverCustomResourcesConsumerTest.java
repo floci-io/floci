@@ -162,6 +162,14 @@ class Route53ResolverCustomResourcesConsumerTest {
         .then()
             .statusCode(400)
             .body("__type", equalTo("InvalidParametersException"));
+
+        // ... including an unrecognised Direction.
+        call("CreateResolverEndpoint", "{\"Name\":\"ab-idem-validate\",\"Direction\":\"SIDEWAYS\","
+                + "\"SecurityGroupIds\":[\"sg-abc123\"],\"IpAddressRequests\":[{\"SubnetId\":\"subnet-abc\","
+                + "\"Ip\":\"10.0.0.5\"}],\"CreatorRequestId\":\"tok-idem-validate\"}")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParametersException"));
     }
 
     @Test

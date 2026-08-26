@@ -127,6 +127,7 @@ public class Route53ResolverService {
     public ObjectNode createResolverEndpoint(JsonNode request, String region, String accountId) {
         requireText(request, "Name");
         String direction = requireText(request, "Direction");
+        String idPrefix = endpointIdPrefix(direction);
         JsonNode ipAddresses = request.path("IpAddressRequests");
         if (!ipAddresses.isArray() || ipAddresses.isEmpty()) {
             throw new AwsException("InvalidParametersException", "IpAddressRequests is required", 400);
@@ -135,7 +136,7 @@ public class Route53ResolverService {
         if (replay.isPresent()) {
             return replay.get();
         }
-        String id = id(endpointIdPrefix(direction));
+        String id = id(idPrefix);
         ObjectNode endpoint = objectMapper.createObjectNode();
         endpoint.put("Id", id);
         endpoint.put("Arn", "arn:aws:route53resolver:" + region + ":" + accountId + ":resolver-endpoint/" + id);
