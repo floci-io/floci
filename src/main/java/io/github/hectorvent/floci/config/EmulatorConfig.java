@@ -923,6 +923,28 @@ public interface EmulatorConfig {
          * modelling AWS's globally-unique bucket namespace (a bucket owned by one account is
          * reachable cross-account). Listing (ListBuckets/ListObjects) stays owner-scoped.
          * Default false preserves per-account bucket isolation.
+         *
+         * <p><strong>Why this widening is deliberate, and what it costs.</strong> Floci's default
+         * is to partition every resource by the caller's account, which is the right model for
+         * services whose names are account-scoped in AWS. S3 bucket names are not: they are unique
+         * across all accounts and partitions, a bucket lives in exactly one owning account, and
+         * whether another account may touch it is decided by policy, not by the name being
+         * unreachable. Emulating that with a hard per-account partition makes two accounts able to
+         * hold different buckets under one name — a state AWS cannot reach — and makes a legitimate
+         * cross-account call (LZA's central logging bucket, a custom-resource Lambda calling back
+         * under the management account) fail with {@code NoSuchBucket} instead of being authorized
+         * or denied on its merits. This flag opts into the AWS-faithful namespace instead.
+         *
+         * <p>The trade-off is that account partitioning stops being a second, implicit line of
+         * defence for S3: with the flag on, a caller that names another account's bucket resolves
+         * it, and only IAM/bucket-policy evaluation stands between the caller and the object —
+         * exactly as in AWS, but stricter than Floci's default elsewhere. Mutations are written
+         * back to the bucket's <em>owning</em> account rather than forked into the caller's, and
+         * listing stays owner-scoped, so the flag never reassigns ownership or leaks a bucket
+         * inventory. It is off by default: turn it on when emulating a multi-account estate whose
+         * real behaviour depends on the global namespace, and leave it off when the per-account
+         * partition is the isolation you are relying on. Account-scoped S3 state — notably the
+         * account-level Block Public Access configuration — is never widened by this flag.
          */
         @WithDefault("false")
         boolean globalBucketNamespace();
