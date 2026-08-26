@@ -139,12 +139,23 @@ public class NetworkFirewallService {
         return firewallResponse(firewall, region);
     }
 
+    /**
+     * The union of the mutable fields modeled on the UpdateFirewall* operations sharing this
+     * path. Anything else in the raw request (notably SubnetMappings / AvailabilityZoneMappings,
+     * which only change via the Associate/Disassociate ops and their change-protection checks)
+     * is dropped, matching AWS ignoring unmodeled request members.
+     */
+    private static final Set<String> UPDATABLE_FIREWALL_FIELDS = Set.of(
+            "Description", "DeleteProtection", "SubnetChangeProtection",
+            "FirewallPolicyChangeProtection", "AvailabilityZoneChangeProtection",
+            "EnabledAnalysisTypes");
+
     public ObjectNode updateFirewall(JsonNode request, String region, String accountId) {
         String arn = textOrNull(request, "FirewallArn");
         String name = textOrNull(request, "FirewallName");
         ObjectNode existing = require(firewalls, arn, name, "Firewall", "FirewallArn", "FirewallName");
         request.fields().forEachRemaining(entry -> {
-            if (!"FirewallArn".equals(entry.getKey()) && !"FirewallName".equals(entry.getKey())) {
+            if (UPDATABLE_FIREWALL_FIELDS.contains(entry.getKey())) {
                 existing.set(entry.getKey(), entry.getValue().deepCopy());
             }
         });

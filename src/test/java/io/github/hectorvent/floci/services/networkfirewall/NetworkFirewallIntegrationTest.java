@@ -251,6 +251,26 @@ class NetworkFirewallIntegrationTest {
     }
 
     @Test
+    void updateFirewallDescription_cannotSmuggleProtectedMappingsPastChangeProtection() {
+        // The UpdateFirewall* ops each model a specific mutable field. Extra fields in the
+        // raw request (SubnetMappings here) must not be persisted — otherwise a plain
+        // UpdateFirewallDescription bypasses SubnetChangeProtection entirely.
+        String name = "SmuggledMappingsFirewall";
+        createFirewall(name, "\"SubnetChangeProtection\":true,", "subnet-88888888888888888");
+
+        call("UpdateFirewallDescription", "{\"FirewallArn\":\"" + firewallArn(name) + "\","
+                + "\"Description\":\"updated\","
+                + "\"SubnetMappings\":[{\"SubnetId\":\"subnet-99999999999999999\"}]}")
+            .statusCode(200);
+
+        call("DescribeFirewall", "{\"FirewallArn\":\"" + firewallArn(name) + "\"}")
+            .statusCode(200)
+            .body("Firewall.Description", equalTo("updated"))
+            .body("Firewall.SubnetMappings.SubnetId", not(hasItem("subnet-99999999999999999")))
+            .body("Firewall.SubnetMappings", hasSize(1));
+    }
+
+    @Test
     void disassociateSubnets_removesOnlyTheNamedSubnets() {
         String name = "DisassociateSubnetsFirewall";
         createFirewall(name, "", "subnet-88888888888888888", "subnet-99999999999999999");
