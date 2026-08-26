@@ -58,6 +58,7 @@ public class MemoryLakeFormationStorage implements LakeFormationStorage {
 
     @Override
     public List<ResourceInfo> listResources(String region, List<FilterCondition> filterConditions, Integer maxResults, String nextToken) {
+        // Deliberate omission: MaxResults and NextToken are ignored. All results fit on a single page.
         return resourcesStorage.scan(k -> k.startsWith(region + ":")).stream()
                 .filter(r -> {
                     if (filterConditions != null) {
@@ -159,6 +160,8 @@ public class MemoryLakeFormationStorage implements LakeFormationStorage {
 
     @Override
     public List<PrincipalResourcePermissions> listPermissions(String region, String catalogId, DataLakePrincipal principal, Resource resource, String resourceType, boolean includeRelated, Integer maxResults, String nextToken) {
+        // Deliberate omission: MaxResults, NextToken, ResourceType, and IncludeRelated are ignored.
+        // All results fit on a single page, and SDKs tolerate unset optional filters.
         String filterResourceKey = resource != null ? getResourceKey(resource) : null;
         return permissionsStorage.scan(k -> k.startsWith(region + ":" + catalogId + ":")).stream()
                 .filter(p -> {
@@ -216,6 +219,7 @@ public class MemoryLakeFormationStorage implements LakeFormationStorage {
 
     @Override
     public List<LFTagPair> listLFTags(String region, String catalogId, String resourceShareType, Integer maxResults, String nextToken) {
+        // Deliberate omission: MaxResults and NextToken are ignored. All results fit on a single page.
         return lfTagsStorage.scan(k -> k.startsWith(region + ":" + catalogId + ":")).stream()
                 .map(tag -> {
                     LFTagPair pair = new LFTagPair();

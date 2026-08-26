@@ -212,7 +212,9 @@ class LakeFormationIntegrationTest {
     @Test
     void resourceLifecycle() {
         String arn = "arn:aws:s3:::my-lake-bucket";
-        // Register
+        String arn2 = "arn:aws:s3:::my-other-lake-bucket";
+        
+        // Register first
         given()
             .contentType(CONTENT_TYPE)
             .header("Authorization", AUTH_HEADER)
@@ -222,7 +224,17 @@ class LakeFormationIntegrationTest {
         .then()
             .statusCode(200);
 
-        // Describe
+        // Register second
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"ResourceArn\":\"" + arn2 + "\",\"RoleArn\":\"arn:aws:iam::111122223333:role/s3-role\",\"UseServiceLinkedRole\":true}")
+        .when()
+            .post("/RegisterResource")
+        .then()
+            .statusCode(200);
+
+        // Describe first
         given()
             .contentType(CONTENT_TYPE)
             .header("Authorization", AUTH_HEADER)
@@ -233,7 +245,7 @@ class LakeFormationIntegrationTest {
             .statusCode(200)
             .body("ResourceInfo.ResourceArn", equalTo(arn));
 
-        // List
+        // List with filter (should only return the first resource)
         given()
             .contentType(CONTENT_TYPE)
             .header("Authorization", AUTH_HEADER)
@@ -242,6 +254,7 @@ class LakeFormationIntegrationTest {
             .post("/ListResources")
         .then()
             .statusCode(200)
+            .body("ResourceInfoList", hasSize(1))
             .body("ResourceInfoList[0].ResourceArn", equalTo(arn));
 
         // Deregister
