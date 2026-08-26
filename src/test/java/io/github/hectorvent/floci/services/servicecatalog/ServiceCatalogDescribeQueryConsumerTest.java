@@ -168,4 +168,30 @@ class ServiceCatalogDescribeQueryConsumerTest {
             .statusCode(400)
             .body("__type", equalTo("InvalidParametersException"));
     }
+
+    // ---------- missing identifier parameters ----------
+
+    @Test
+    void describeProductAsAdmin_missingId_returnsInvalidParameters() {
+        call("DescribeProductAsAdmin", "{}")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParametersException"));
+    }
+
+    @Test
+    void describePortfolio_missingId_returnsInvalidParameters() {
+        call("DescribePortfolio", "{}")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParametersException"));
+    }
+
+    @Test
+    void describeTagOption_missingId_returnsInvalidParameters() {
+        call("DescribeTagOption", "{}")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParametersException"));
+    }
 }

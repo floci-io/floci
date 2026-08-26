@@ -323,8 +323,8 @@ public class ServiceCatalogService {
     }
 
     public String associateProduct(String portfolioId, String productId) {
-        require(portfolioStore, portfolioId, "portfolio");
-        requireProduct(productId);
+        require(portfolioStore, portfolioId, "portfolio", "PortfolioId");
+        requireProduct(productId, "ProductId");
         String id = associationId("product", portfolioId, productId);
         associationStore.put(id, objectMapper.createObjectNode()
                 .put("Type", "PRODUCT").put("PortfolioId", portfolioId).put("ProductId", productId));
@@ -336,9 +336,10 @@ public class ServiceCatalogService {
     }
 
     public String associateTagOption(String resourceId, String tagOptionId) {
-        require(tagOptionStore, tagOptionId, "TagOption");
+        require(tagOptionStore, tagOptionId, "TagOption", "TagOptionId");
+        requireIdentifier(resourceId, "ResourceId");
         if (portfolioStore.get(resourceId).isEmpty()) {
-            requireProduct(resourceId);
+            requireProduct(resourceId, "ResourceId");
         }
         String id = associationId("tag", resourceId, tagOptionId);
         associationStore.put(id, objectMapper.createObjectNode()
@@ -370,6 +371,7 @@ public class ServiceCatalogService {
     }
 
     public ObjectNode describePortfolioShareStatus(String token) {
+        requireIdentifier(token, "PortfolioShareToken");
         return shareStore.scan(key -> true).stream()
                 .filter(share -> token.equals(text(share, "PortfolioShareToken")))
                 .findFirst().map(ObjectNode::deepCopy)
@@ -377,6 +379,11 @@ public class ServiceCatalogService {
     }
 
     private ObjectNode requireProduct(String identifier) {
+        return requireProduct(identifier, "Id");
+    }
+
+    private ObjectNode requireProduct(String identifier, String parameter) {
+        requireIdentifier(identifier, parameter);
         ObjectNode direct = productStore.get(identifier).orElse(null);
         if (direct != null) {
             return direct;
@@ -396,7 +403,19 @@ public class ServiceCatalogService {
     }
 
     private ObjectNode require(StorageBackend<String, ObjectNode> store, String id, String type) {
+        return require(store, id, type, "Id");
+    }
+
+    private ObjectNode require(StorageBackend<String, ObjectNode> store, String id, String type,
+                               String parameter) {
+        requireIdentifier(id, parameter);
         return store.get(id).orElseThrow(() -> notFound(type, id));
+    }
+
+    private void requireIdentifier(String id, String parameter) {
+        if (id == null || id.isBlank()) {
+            throw new AwsException("InvalidParametersException", parameter + " is required", 400);
+        }
     }
 
     private AwsException notFound(String type, String id) {
@@ -469,7 +488,7 @@ public class ServiceCatalogService {
     }
 
     public List<ObjectNode> listPortfoliosForProduct(String productId) {
-        requireProduct(productId);
+        requireProduct(productId, "ProductId");
         return associationStore.scan(key -> true).stream()
                 .filter(assoc -> "PRODUCT".equals(text(assoc, "Type"))
                         && productId.equals(text(assoc, "ProductId")))
