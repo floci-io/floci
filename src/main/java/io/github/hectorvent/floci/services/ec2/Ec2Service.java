@@ -2880,39 +2880,6 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 .collect(Collectors.toList());
     }
 
-    public VpcEndpoint modifyVpcEndpoint(String region, String endpointId, String policyDocument,
-                                         boolean resetPolicy, List<String> addRouteTableIds,
-                                         List<String> removeRouteTableIds, List<String> addSubnetIds,
-                                         List<String> removeSubnetIds, List<String> addSecurityGroupIds,
-                                         List<String> removeSecurityGroupIds, Boolean privateDnsEnabled) {
-        ensureDefaultResources(region);
-        VpcEndpoint endpoint = getRequiredVpcEndpoint(region, endpointId);
-        if (resetPolicy) {
-            endpoint.setPolicyDocument(null);
-        } else if (policyDocument != null) {
-            endpoint.setPolicyDocument(policyDocument);
-        }
-        if (privateDnsEnabled != null) {
-            endpoint.setPrivateDnsEnabled(privateDnsEnabled);
-        }
-        List<String> routeTableIds = new ArrayList<>(endpoint.getRouteTableIds());
-        routeTableIds.addAll(addRouteTableIds);
-        routeTableIds.removeAll(removeRouteTableIds);
-        endpoint.setRouteTableIds(routeTableIds);
-
-        List<String> subnetIds = new ArrayList<>(endpoint.getSubnetIds());
-        subnetIds.addAll(addSubnetIds);
-        subnetIds.removeAll(removeSubnetIds);
-        endpoint.setSubnetIds(subnetIds);
-
-        List<String> securityGroupIds = new ArrayList<>(endpoint.getSecurityGroupIds());
-        securityGroupIds.addAll(addSecurityGroupIds);
-        securityGroupIds.removeAll(removeSecurityGroupIds);
-        endpoint.setSecurityGroupIds(securityGroupIds);
-
-        vpcEndpoints.put(key(region, endpointId), endpoint);
-        return endpoint;
-    }
 
     public List<VpcEndpoint> deleteVpcEndpoints(String region, List<String> endpointIds) {
         ensureDefaultResources(region);

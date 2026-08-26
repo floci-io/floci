@@ -87,7 +87,6 @@ public class Ec2QueryHandler {
                 case "DescribeVpcEndpoints" -> handleDescribeVpcEndpoints(params, region);
                 case "ModifyVpcEndpoint" -> handleModifyVpcEndpoint(params, region);
                 case "DeleteVpcEndpoints" -> handleDeleteVpcEndpoints(params, region);
-                case "ModifyVpcEndpoint" -> handleModifyVpcEndpoint(params, region);
                 // Flow Logs
                 case "CreateFlowLogs" -> handleCreateFlowLogs(params, region);
                 case "DescribeFlowLogs" -> handleDescribeFlowLogs(params, region);
@@ -2248,26 +2247,6 @@ public class Ec2QueryHandler {
         return xmlResponse(xml.build());
     }
 
-    private Response handleModifyVpcEndpoint(MultivaluedMap<String, String> p, String region) {
-        service.modifyVpcEndpoint(
-                region,
-                p.getFirst("VpcEndpointId"),
-                p.getFirst("PolicyDocument"),
-                Boolean.parseBoolean(p.getFirst("ResetPolicy")),
-                getList(p, "AddRouteTableId"),
-                getList(p, "RemoveRouteTableId"),
-                getList(p, "AddSubnetId"),
-                getList(p, "RemoveSubnetId"),
-                getList(p, "AddSecurityGroupId"),
-                getList(p, "RemoveSecurityGroupId"),
-                p.getFirst("PrivateDnsEnabled") == null ? null : Boolean.parseBoolean(p.getFirst("PrivateDnsEnabled")));
-        XmlBuilder xml = new XmlBuilder()
-                .start("ModifyVpcEndpointResponse", AwsNamespaces.EC2)
-                .elem("requestId", UUID.randomUUID().toString())
-                .elem("return", "true")
-                .end("ModifyVpcEndpointResponse");
-        return xmlResponse(xml.build());
-    }
 
     private Response handleCreateDefaultVpc(MultivaluedMap<String, String> p, String region) {
         Vpc vpc = service.createDefaultVpc(region);
@@ -3941,9 +3920,6 @@ public class Ec2QueryHandler {
             xml.start("item").elem("groupId", securityGroupId).end("item");
         }
         xml.end("groupSet");
-        if (endpoint.getPolicyDocument() != null) {
-            xml.elem("policyDocument", endpoint.getPolicyDocument());
-        }
         xml.raw(tagSetXml(endpoint.getTags()));
         return xml.build();
     }
