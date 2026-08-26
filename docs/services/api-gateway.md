@@ -241,6 +241,7 @@ this default hostname with `404 Not Found`, matching AWS HTTP API behavior.
 | **Models** | CreateModel, GetModel, GetModels, UpdateModel, DeleteModel |
 | **Domain Names** | CreateDomainName, GetDomainName, GetDomainNames, DeleteDomainName |
 | **API Mappings** | CreateApiMapping, GetApiMapping, GetApiMappings, DeleteApiMapping |
+| **VPC Links** | CreateVpcLink, GetVpcLink, GetVpcLinks, DeleteVpcLink |
 | **Tags** | TagResource, UntagResource, GetTags |
 
 ### WebSocket Data-Plane {#websocket-data-plane}
@@ -303,7 +304,7 @@ DELETE /execute-api/{apiId}/{stageName}/@connections/{connectionId}  — Disconn
 ### Not Implemented
 
 - `ReimportApi`, `ExportApi`, `UpdateDomainName`, `UpdateApiMapping`
-- `CreateVpcLink`, `GetVpcLink`, `GetVpcLinks`, `UpdateVpcLink`, `DeleteVpcLink`
+- `UpdateVpcLink` — the other four VPC Link operations are implemented; see the table above
 
 ### Examples
 
