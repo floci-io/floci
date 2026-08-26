@@ -681,6 +681,7 @@ public class ServiceCatalogService {
         if (principalType == null || principalType.isBlank()) {
             throw new AwsException("InvalidParametersException", "PrincipalType is required", 400);
         }
+        requireEnum(principalType, "PrincipalType", List.of("IAM", "IAM_PATTERN"));
         require(portfolioStore, portfolioId, "portfolio");
         String id = associationId("principal", portfolioId, principalArn);
         associationStore.put(id, objectMapper.createObjectNode()

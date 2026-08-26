@@ -50,6 +50,17 @@ class ServiceCatalogPrincipalAccessConsumerTest {
     // ---------- AssociatePrincipalWithPortfolio ----------
 
     @Test
+    void associatePrincipalWithPortfolio_rejectsUnknownPrincipalType() {
+        String portfolioId = createPortfolio("ab-principal-badtype");
+        call("AssociatePrincipalWithPortfolio", "{\"PortfolioId\":\"" + portfolioId
+                + "\",\"PrincipalARN\":\"arn:aws:iam::000000000000:role/my-role\","
+                + "\"PrincipalType\":\"FEDERATED\"}")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParametersException"));
+    }
+
+    @Test
     void associatePrincipalWithPortfolio_returnsEmptyBody() {
         String portfolioId = createPortfolio("ab-principal-associate");
         call("AssociatePrincipalWithPortfolio", "{\"PortfolioId\":\"" + portfolioId
