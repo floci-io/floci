@@ -101,6 +101,102 @@ class FirehoseFlushIntegrationTest {
                 .body(equalTo("{\"n\":42}\n")));
     }
 
+    /**
+     * Wire-level coverage of the gap in {@code kinesisSourceDoesNotBackfillRecordsFromBeforeDeliveryStart}
+     * (FirehoseServiceTest): that test calls {@code FirehoseService.createDeliveryStream}
+     * directly and hand-sets {@code DeliveryStartTimestamp} on the source, stepping around
+     * the actual API path. CreateDeliveryStream's wire request
+     * (KinesisStreamSourceConfiguration) never carries that field -- AWS fills it in on the
+     * Description shape at creation -- so this drives creation through the real
+     * X-Amz-Target: Firehose_20150804.CreateDeliveryStream call against a Kinesis stream
+     * that already holds a record, and asserts that record is never delivered while one
+     * added afterward is.
+     */
+    @Test
+    void kinesisSourceCreatedThroughTheApiDoesNotBackfillPreExistingRecords() throws InterruptedException {
+        String sourceStream = "flush-kinesis-source-stream";
+        String deliveryStream = "flush-kinesis-source-delivery";
+        String bucket = "flush-kinesis-source-archive";
+        String sourceArn = "arn:aws:kinesis:us-east-1:000000000000:stream/" + sourceStream;
+
+        createKinesisStream(sourceStream);
+        putKinesisRecord(sourceStream, "old");
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET_PREFIX + "CreateDeliveryStream")
+            .body("""
+                    {
+                      "DeliveryStreamName": "%s",
+                      "DeliveryStreamType": "KinesisStreamAsSource",
+                      "KinesisStreamSourceConfiguration": {
+                        "KinesisStreamARN": "%s",
+                        "RoleARN": "arn:aws:iam::000000000000:role/firehose-source-role"
+                      },
+                      "ExtendedS3DestinationConfiguration": {
+                        "RoleARN": "arn:aws:iam::000000000000:role/firehose-delivery-role",
+                        "BucketARN": "arn:aws:s3:::%s",
+                        "BufferingHints": {"SizeInMBs": 5, "IntervalInSeconds": 60}
+                      }
+                    }
+                    """.formatted(deliveryStream, sourceArn, bucket))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DeliveryStreamARN", notNullValue());
+
+        // Give the 1s poller a couple of real ticks to run against the pre-loaded stream
+        // before adding a record it is meant to pick up. A backfill bug would buffer
+        // "old" here already; the buffering interval below (60s of the frozen test clock)
+        // is what lets this test tell "polled and buffered" apart from "never polled".
+        Thread.sleep(2500);
+
+        putKinesisRecord(sourceStream, "new");
+
+        // Let a poll tick actually buffer "new" before the clock moves: bufferSince is
+        // stamped from this same frozen Clock, so advancing first would stamp it already
+        // in the future and the interval trigger below would never fire.
+        Thread.sleep(2500);
+
+        // The frozen test-scope Clock only elapses when advanced; the real 1s tick then
+        // finds the buffer due, same as intervalTriggerDeliversAfterIntervalInSecondsElapses.
+        clock.advance(Duration.ofSeconds(61));
+
+        await().atMost(Duration.ofSeconds(15)).untilAsserted(() ->
+            given()
+                .when()
+                .get("/" + bucket + "/" + firstDeliveredKey(bucket))
+                .then()
+                .statusCode(200)
+                .body(equalTo("new\n")));
+    }
+
+    private void createKinesisStream(String streamName) {
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.CreateStream")
+            .contentType(CONTENT_TYPE)
+            .body("{\"StreamName\": \"" + streamName + "\", \"ShardCount\": 1}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    private void putKinesisRecord(String streamName, String data) {
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.PutRecord")
+            .contentType(CONTENT_TYPE)
+            .body("{\"StreamName\": \"" + streamName + "\", \"Data\": \""
+                    + Base64.getEncoder().encodeToString(data.getBytes(StandardCharsets.UTF_8))
+                    + "\", \"PartitionKey\": \"pk\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("SequenceNumber", notNullValue());
+    }
+
     private void createDeliveryStream(String streamName, String bucket, int sizeInMBs, int intervalInSeconds) {
         given()
             .contentType(CONTENT_TYPE)

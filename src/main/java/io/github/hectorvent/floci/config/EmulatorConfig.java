@@ -286,6 +286,9 @@ public interface EmulatorConfig {
         RumStorageConfig rum();
         GuardDutyStorageConfig guardduty();
         EmrServerlessStorageConfig emrserverless();
+
+        ControlTowerStorageConfig controltower();
+
         LakeFormationStorageConfig lakeformation();
         EfsStorageConfig efs();
     }
@@ -524,6 +527,13 @@ public interface EmulatorConfig {
         long flushIntervalMs();
     }
 
+    interface ControlTowerStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+
     interface GuardDutyStorageConfig {
         Optional<String> mode();
 
@@ -663,6 +673,7 @@ public interface EmulatorConfig {
         GuardDutyServiceConfig guardduty();
         EmrServerlessServiceConfig emrserverless();
         SsoAdminServiceConfig ssoadmin();
+        ControlTowerServiceConfig controltower();
         LakeFormationServiceConfig lakeformation();
         EfsServiceConfig efs();
     }
@@ -699,6 +710,11 @@ public interface EmulatorConfig {
     }
 
     interface RumServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface ControlTowerServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }
