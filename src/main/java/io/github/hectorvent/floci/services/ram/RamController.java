@@ -87,7 +87,13 @@ public class RamController {
     public Response getResourceShares(String body) {
         JsonNode request = readTree(body);
         String resourceOwner = request.path("resourceOwner").asText("SELF");
-        List<ResourceShare> shares = service.getResourceShares(regionResolver.getAccountId(), resourceOwner);
+        List<ResourceShare> shares = service.getResourceShares(
+                regionResolver.getAccountId(),
+                resourceOwner,
+                request.hasNonNull("name") ? request.path("name").asText() : null,
+                stringList(request.path("resourceShareArns")),
+                request.hasNonNull("resourceShareStatus")
+                        ? request.path("resourceShareStatus").asText() : null);
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode array = objectMapper.createArrayNode();
@@ -99,11 +105,17 @@ public class RamController {
     @DELETE
     @Path("/deleteresourceshare")
     @Consumes(MediaType.WILDCARD)
-    public Response deleteResourceShare(@QueryParam("resourceShareArn") String resourceShareArn) {
+    public Response deleteResourceShare(@QueryParam("resourceShareArn") String resourceShareArn,
+                                        @QueryParam("clientToken") String clientToken) {
         service.deleteResourceShare(resourceShareArn, regionResolver.getAccountId());
 
         ObjectNode response = objectMapper.createObjectNode();
         response.put("returnValue", true);
+        // The response models clientToken; AWS echoes what the caller sent so a retry can be
+        // correlated with the original request.
+        if (clientToken != null) {
+            response.put("clientToken", clientToken);
+        }
         return Response.ok(response).build();
     }
 
@@ -246,8 +258,11 @@ public class RamController {
         node.put("owningAccountId", share.getOwningAccountId());
         node.put("allowExternalPrincipals", share.isAllowExternalPrincipals());
         node.put("status", share.getStatus());
+        // Shares created through the API are STANDARD; CREATED_FROM_POLICY covers shares RAM
+        // derives from a resource policy, which floci has no path to produce.
+        node.put("featureSet", "STANDARD");
         node.put("creationTime", share.getCreationTime().toEpochMilli() / 1000.0);
-        node.put("lastUpdatedTime", share.getCreationTime().toEpochMilli() / 1000.0);
+        node.put("lastUpdatedTime", share.getLastUpdatedTime().toEpochMilli() / 1000.0);
         ArrayNode tags = objectMapper.createArrayNode();
         share.getTags().forEach((key, value) -> {
             ObjectNode tag = objectMapper.createObjectNode();
@@ -263,7 +278,7 @@ public class RamController {
     private ArrayNode associationArray(ResourceShare share, List<String> resourceArns,
                                        List<String> principals, String status) {
         ArrayNode array = objectMapper.createArrayNode();
-        double now = share.getCreationTime().toEpochMilli() / 1000.0;
+        double now = share.getLastUpdatedTime().toEpochMilli() / 1000.0;
         for (String resourceArn : resourceArns) {
             array.add(associationNode(share, resourceArn, "RESOURCE", status, now));
         }

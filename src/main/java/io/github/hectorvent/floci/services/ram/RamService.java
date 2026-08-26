@@ -12,6 +12,7 @@ import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -41,6 +42,9 @@ import java.util.UUID;
 public class RamService {
 
     private static final String ORGANIZATION_SHARING_KEY = "sharing-with-organization-enabled";
+    /** The modeled ResourceShareStatus enum. */
+    private static final List<String> SHARE_STATUSES =
+            List.of("PENDING", "ACTIVE", "FAILED", "DELETING", "DELETED");
 
     private final StorageFactory storageFactory;
     private StorageBackend<String, ResourceShare> shares;
@@ -75,21 +79,41 @@ public class RamService {
                 + ":resource-share/" + UUID.randomUUID();
         ResourceShare share = new ResourceShare(
                 arn, name, owningAccountId, principals, resourceArns, allowExternalPrincipals);
-        putForOwner(share);
-        return share;
+        return putForOwner(share);
+    }
+
+    /** The unfiltered read: every share visible to the caller under {@code resourceOwner}. */
+    public List<ResourceShare> getResourceShares(String callerAccountId, String resourceOwner) {
+        return getResourceShares(callerAccountId, resourceOwner, null, List.of(), null);
     }
 
     /**
      * @param resourceOwner {@code SELF} (shares the caller owns) or {@code OTHER-ACCOUNTS}
      *                      (shares other accounts made visible to the caller)
+     * @param name exact share name to match, or null for any
+     * @param resourceShareArns share ARNs to restrict the result to, or empty for any
+     * @param resourceShareStatus one {@code ResourceShareStatus} value to match, or null for any
      */
-    public List<ResourceShare> getResourceShares(String callerAccountId, String resourceOwner) {
+    public List<ResourceShare> getResourceShares(String callerAccountId, String resourceOwner,
+                                                 String name, List<String> resourceShareArns,
+                                                 String resourceShareStatus) {
         requireResourceOwner(resourceOwner);
+        requireResourceShareStatus(resourceShareStatus);
         List<ResourceShare> result = new ArrayList<>();
         for (ResourceShare share : allShares()) {
-            if (isVisible(share, callerAccountId, resourceOwner)) {
-                result.add(share);
+            if (!isVisible(share, callerAccountId, resourceOwner)) {
+                continue;
             }
+            if (name != null && !name.equals(share.getName())) {
+                continue;
+            }
+            if (!resourceShareArns.isEmpty() && !resourceShareArns.contains(share.getResourceShareArn())) {
+                continue;
+            }
+            if (resourceShareStatus != null && !resourceShareStatus.equals(share.getStatus())) {
+                continue;
+            }
+            result.add(share);
         }
         return result;
     }
@@ -124,9 +148,8 @@ public class RamService {
     }
 
     public ResourceShare deleteResourceShare(String resourceShareArn, String callerAccountId) {
-        ResourceShare deleted = requireOwnedShare(resourceShareArn, callerAccountId).withStatus("DELETED");
-        putForOwner(deleted);
-        return deleted;
+        return putForOwner(
+                requireOwnedShare(resourceShareArn, callerAccountId).withStatus("DELETED"));
     }
 
     public ResourceShare updateResourceShare(String resourceShareArn, String name,
@@ -138,8 +161,7 @@ public class RamService {
         if (allowExternalPrincipals != null) {
             share = share.withAllowExternalPrincipals(allowExternalPrincipals);
         }
-        putForOwner(share);
-        return share;
+        return putForOwner(share);
     }
 
     public ResourceShare associateResourceShare(String resourceShareArn, List<String> resourceArns,
@@ -148,8 +170,7 @@ public class RamService {
         ResourceShare updated = share.withPrincipalsAndResources(
                 mergeDistinct(share.getPrincipals(), principals),
                 mergeDistinct(share.getResourceArns(), resourceArns));
-        putForOwner(updated);
-        return updated;
+        return putForOwner(updated);
     }
 
     public ResourceShare disassociateResourceShare(String resourceShareArn, List<String> resourceArns,
@@ -158,8 +179,7 @@ public class RamService {
         ResourceShare updated = share.withPrincipalsAndResources(
                 withoutAll(share.getPrincipals(), principals),
                 withoutAll(share.getResourceArns(), resourceArns));
-        putForOwner(updated);
-        return updated;
+        return putForOwner(updated);
     }
 
     /**
@@ -184,7 +204,7 @@ public class RamService {
             }
             for (String principal : share.getPrincipals()) {
                 result.add(new PrincipalAssociation(principal, share.getResourceShareArn(),
-                        share.getCreationTime(), share.getCreationTime(), false));
+                        share.getCreationTime(), share.getLastUpdatedTime(), false));
             }
         }
         return result;
@@ -238,13 +258,20 @@ public class RamService {
         return List.copyOf(remaining);
     }
 
-    private void putForOwner(ResourceShare share) {
+    /**
+     * The single write seam: every create and every mutation lands here, so stamping
+     * lastUpdatedTime once at this point keeps it advancing without six call sites having to
+     * remember to do it. Returns the stamped share so callers respond with what was stored.
+     */
+    private ResourceShare putForOwner(ResourceShare share) {
+        ResourceShare stamped = share.withLastUpdatedTime(Instant.now());
         if (shares instanceof AccountAwareStorageBackend<ResourceShare> accountAware) {
             accountAware.putForAccount(
-                    share.getOwningAccountId(), share.getResourceShareArn(), share);
-            return;
+                    stamped.getOwningAccountId(), stamped.getResourceShareArn(), stamped);
+            return stamped;
         }
-        shares.put(share.getResourceShareArn(), share);
+        shares.put(stamped.getResourceShareArn(), stamped);
+        return stamped;
     }
 
     private List<ResourceShare> allShares() {
@@ -260,6 +287,14 @@ public class RamService {
      * value silently means OTHER-ACCOUNTS — a caller who sent {@code "self"} would be handed every
      * share they do NOT own. AWS answers InvalidParameterException, which all three operations list.
      */
+    /** {@code ResourceShareStatus} is optional on GetResourceShares, but enumerated when sent. */
+    private static void requireResourceShareStatus(String resourceShareStatus) {
+        if (resourceShareStatus != null && !SHARE_STATUSES.contains(resourceShareStatus)) {
+            throw new AwsException("InvalidParameterException",
+                    "resourceShareStatus must be one of " + SHARE_STATUSES + ".", 400);
+        }
+    }
+
     private static void requireResourceOwner(String resourceOwner) {
         if (!"SELF".equals(resourceOwner) && !"OTHER-ACCOUNTS".equals(resourceOwner)) {
             throw new AwsException("InvalidParameterException",

@@ -222,6 +222,75 @@ class RamServiceTest {
         assertEquals("DELETED", service.getResourceShares(OWNER, "SELF").get(0).getStatus());
     }
 
+    @Test
+    void getResourceSharesAppliesTheNameFilter() {
+        service.createResourceShare("tgw-share", List.of(OU_ARN), List.of(TGW_ARN), false, "us-east-1", OWNER);
+        service.createResourceShare("ipam-share", List.of(OU_ARN), List.of(TGW_ARN), false, "us-east-1", OWNER);
+
+        List<ResourceShare> matched =
+                service.getResourceShares(OWNER, "SELF", "ipam-share", List.of(), null);
+        assertEquals(1, matched.size());
+        assertEquals("ipam-share", matched.get(0).getName());
+
+        assertTrue(service.getResourceShares(OWNER, "SELF", "no-such-share", List.of(), null).isEmpty());
+    }
+
+    @Test
+    void getResourceSharesAppliesTheResourceShareArnsFilter() {
+        ResourceShare wanted = service.createResourceShare(
+                "tgw-share", List.of(OU_ARN), List.of(TGW_ARN), false, "us-east-1", OWNER);
+        service.createResourceShare("ipam-share", List.of(OU_ARN), List.of(TGW_ARN), false, "us-east-1", OWNER);
+
+        List<ResourceShare> matched = service.getResourceShares(
+                OWNER, "SELF", null, List.of(wanted.getResourceShareArn()), null);
+        assertEquals(1, matched.size());
+        assertEquals(wanted.getResourceShareArn(), matched.get(0).getResourceShareArn());
+    }
+
+    @Test
+    void getResourceSharesAppliesTheStatusFilter() {
+        // LZA polls for ACTIVE shares; a share left in the DELETED retention window must not
+        // come back from that poll, but must still be findable by an explicit DELETED filter.
+        service.createResourceShare("live", List.of(OU_ARN), List.of(TGW_ARN), false, "us-east-1", OWNER);
+        ResourceShare doomed = service.createResourceShare(
+                "gone", List.of(OU_ARN), List.of(TGW_ARN), false, "us-east-1", OWNER);
+        service.deleteResourceShare(doomed.getResourceShareArn(), OWNER);
+
+        List<ResourceShare> active = service.getResourceShares(OWNER, "SELF", null, List.of(), "ACTIVE");
+        assertEquals(1, active.size());
+        assertEquals("live", active.get(0).getName());
+
+        List<ResourceShare> deleted = service.getResourceShares(OWNER, "SELF", null, List.of(), "DELETED");
+        assertEquals(1, deleted.size());
+        assertEquals("gone", deleted.get(0).getName());
+
+        // No status filter still returns both, as it does today.
+        assertEquals(2, service.getResourceShares(OWNER, "SELF").size());
+    }
+
+    @Test
+    void unmodelledResourceShareStatusIsRejected() {
+        assertInvalidParameter(() -> service.getResourceShares(OWNER, "SELF", null, List.of(), "active"));
+        assertInvalidParameter(() -> service.getResourceShares(OWNER, "SELF", null, List.of(), "GONE"));
+    }
+
+    @Test
+    void lastUpdatedTimeAdvancesOnMutationButCreationTimeDoesNot() {
+        ResourceShare created = service.createResourceShare(
+                "tgw-share", List.of(OU_ARN), List.of(TGW_ARN), false, "us-east-1", OWNER);
+        String arn = created.getResourceShareArn();
+        assertFalse(created.getLastUpdatedTime().isBefore(created.getCreationTime()));
+
+        ResourceShare renamed = service.updateResourceShare(arn, "renamed", null, OWNER);
+        assertTrue(renamed.getLastUpdatedTime().isAfter(created.getLastUpdatedTime()));
+        assertEquals(created.getCreationTime(), renamed.getCreationTime());
+
+        service.tagResource(arn, Map.of("Owner", "network"), OWNER);
+        ResourceShare tagged = service.getResourceShares(OWNER, "SELF").get(0);
+        assertTrue(tagged.getLastUpdatedTime().isAfter(renamed.getLastUpdatedTime()));
+        assertEquals(created.getCreationTime(), tagged.getCreationTime());
+    }
+
     private static void assertInvalidParameter(Executable read) {
         AwsException error = assertThrows(AwsException.class, read);
         assertEquals("InvalidParameterException", error.getErrorCode());

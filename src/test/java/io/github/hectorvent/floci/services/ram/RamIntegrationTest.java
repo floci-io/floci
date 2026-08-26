@@ -108,6 +108,69 @@ class RamIntegrationTest {
     }
 
     @Test
+    void getResourceSharesHonoursTheNameFilterOverHttp() {
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {
+                    "name": "http-filtered-share",
+                    "resourceArns": ["arn:aws:ec2:us-east-1:000000000000:transit-gateway/tgw-0flt"]
+                }
+                """)
+        .when()
+            .post("/createresourceshare")
+        .then()
+            .statusCode(200);
+
+        // The filter has to be read off the body, not ignored: without it this returns every
+        // share the other tests in this class created.
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                { "resourceOwner": "SELF", "name": "http-filtered-share" }
+                """)
+        .when()
+            .post("/getresourceshares")
+        .then()
+            .statusCode(200)
+            .body("resourceShares.size()", equalTo(1))
+            .body("resourceShares[0].name", equalTo("http-filtered-share"));
+    }
+
+    @Test
+    void deleteEchoesTheClientTokenAndSharesReportFeatureSet() {
+        String shareArn =
+            given()
+                .contentType("application/json")
+                .header("Authorization", AUTH_HEADER)
+                .body("""
+                    {
+                        "name": "token-echo-share",
+                        "resourceArns": ["arn:aws:ec2:us-east-1:000000000000:transit-gateway/tgw-0tok"]
+                    }
+                    """)
+            .when()
+                .post("/createresourceshare")
+            .then()
+                .statusCode(200)
+                // Shares created through the API are STANDARD, not policy-derived.
+                .body("resourceShare.featureSet", equalTo("STANDARD"))
+            .extract().path("resourceShare.resourceShareArn");
+
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .delete("/deleteresourceshare?resourceShareArn=" + shareArn + "&clientToken=idem-1")
+        .then()
+            .statusCode(200)
+            .body("returnValue", equalTo(true))
+            .body("clientToken", equalTo("idem-1"));
+    }
+
+    @Test
     void malformedBodyIsRejectedAsSerializationException() {
         // A body that is not JSON is a client error; without an explicit rejection the parse
         // failure escapes as UncheckedIOException and the SDK sees a 500 InternalFailure.

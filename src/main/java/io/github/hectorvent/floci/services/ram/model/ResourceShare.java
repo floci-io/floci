@@ -19,13 +19,14 @@ public class ResourceShare {
     private final boolean allowExternalPrincipals;
     private final String status;
     private final Instant creationTime;
+    private final Instant lastUpdatedTime;
     private final Map<String, String> tags;
 
     public ResourceShare(String resourceShareArn, String name, String owningAccountId,
                          List<String> principals, List<String> resourceArns,
                          boolean allowExternalPrincipals) {
         this(resourceShareArn, name, owningAccountId, principals, resourceArns,
-                allowExternalPrincipals, "ACTIVE", Instant.now(), Map.of());
+                allowExternalPrincipals, "ACTIVE", Instant.now(), null, Map.of());
     }
 
     @JsonCreator
@@ -38,6 +39,7 @@ public class ResourceShare {
             @JsonProperty("allowExternalPrincipals") boolean allowExternalPrincipals,
             @JsonProperty("status") String status,
             @JsonProperty("creationTime") Instant creationTime,
+            @JsonProperty("lastUpdatedTime") Instant lastUpdatedTime,
             @JsonProperty("tags") Map<String, String> tags) {
         this.resourceShareArn = resourceShareArn;
         this.name = name;
@@ -47,6 +49,9 @@ public class ResourceShare {
         this.allowExternalPrincipals = allowExternalPrincipals;
         this.status = status;
         this.creationTime = creationTime;
+        // State persisted before lastUpdatedTime existed has never been mutated since it was
+        // written, so creation time is its correct last-updated value.
+        this.lastUpdatedTime = lastUpdatedTime == null ? creationTime : lastUpdatedTime;
         this.tags = tags == null ? Map.of() : Map.copyOf(tags);
     }
 
@@ -58,30 +63,36 @@ public class ResourceShare {
     public boolean isAllowExternalPrincipals() { return allowExternalPrincipals; }
     public String getStatus() { return status; }
     public Instant getCreationTime() { return creationTime; }
+    public Instant getLastUpdatedTime() { return lastUpdatedTime; }
     public Map<String, String> getTags() { return tags; }
 
     public ResourceShare withName(String newName) {
         return new ResourceShare(resourceShareArn, newName, owningAccountId, principals, resourceArns,
-                allowExternalPrincipals, status, creationTime, tags);
+                allowExternalPrincipals, status, creationTime, lastUpdatedTime, tags);
     }
 
     public ResourceShare withAllowExternalPrincipals(boolean value) {
         return new ResourceShare(resourceShareArn, name, owningAccountId, principals, resourceArns,
-                value, status, creationTime, tags);
+                value, status, creationTime, lastUpdatedTime, tags);
     }
 
     public ResourceShare withStatus(String newStatus) {
         return new ResourceShare(resourceShareArn, name, owningAccountId, principals, resourceArns,
-                allowExternalPrincipals, newStatus, creationTime, tags);
+                allowExternalPrincipals, newStatus, creationTime, lastUpdatedTime, tags);
     }
 
     public ResourceShare withPrincipalsAndResources(List<String> newPrincipals, List<String> newResourceArns) {
         return new ResourceShare(resourceShareArn, name, owningAccountId, newPrincipals, newResourceArns,
-                allowExternalPrincipals, status, creationTime, tags);
+                allowExternalPrincipals, status, creationTime, lastUpdatedTime, tags);
+    }
+
+    public ResourceShare withLastUpdatedTime(Instant stamp) {
+        return new ResourceShare(resourceShareArn, name, owningAccountId, principals, resourceArns,
+                allowExternalPrincipals, status, creationTime, stamp, tags);
     }
 
     public ResourceShare withTags(Map<String, String> newTags) {
         return new ResourceShare(resourceShareArn, name, owningAccountId, principals, resourceArns,
-                allowExternalPrincipals, status, creationTime, newTags);
+                allowExternalPrincipals, status, creationTime, lastUpdatedTime, newTags);
     }
 }
