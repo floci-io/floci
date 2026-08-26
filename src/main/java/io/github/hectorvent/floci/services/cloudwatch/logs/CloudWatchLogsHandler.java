@@ -322,15 +322,34 @@ public class CloudWatchLogsHandler {
     }
 
     private Response handleAssociateKmsKey(JsonNode request, String region) {
-        String groupName = resolveLogGroupName(request);
+        String groupName = resolveKmsTargetLogGroupName(request);
         String kmsKeyId = request.path("kmsKeyId").asText(null);
         logsService.associateKmsKey(groupName, kmsKeyId, region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
     private Response handleDisassociateKmsKey(JsonNode request, String region) {
-        logsService.disassociateKmsKey(resolveLogGroupName(request), region);
+        logsService.disassociateKmsKey(resolveKmsTargetLogGroupName(request), region);
         return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    /**
+     * Associate/DisassociateKmsKey are the odd ones out in the Logs API: their ARN
+     * alternative is {@code resourceIdentifier}, not the {@code logGroupIdentifier}
+     * the query operations take. AWS requires exactly one of logGroupName or
+     * resourceIdentifier; a request with neither is an InvalidParameterException.
+     */
+    private String resolveKmsTargetLogGroupName(JsonNode request) {
+        String name = request.path("logGroupName").asText(null);
+        if (name == null || name.isBlank()) {
+            name = request.path("resourceIdentifier").asText(null);
+        }
+        String resolved = extractLogGroupNameFromArn(name);
+        if (resolved == null || resolved.isBlank()) {
+            throw new AwsException("InvalidParameterException",
+                    "Either logGroupName or resourceIdentifier is required.", 400);
+        }
+        return resolved;
     }
 
     private Response handlePutRetentionPolicy(JsonNode request, String region) {

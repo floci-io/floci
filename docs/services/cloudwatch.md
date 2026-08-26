@@ -25,6 +25,8 @@ Floci supports both CloudWatch Logs and CloudWatch Metrics.
 | `FilterLogEvents` | Search log events with a filter pattern |
 | `PutRetentionPolicy` | Set log retention (days) |
 | `DeleteRetentionPolicy` | Remove log retention policy |
+| `AssociateKmsKey` | Associate a KMS key with a log group (`logGroupName` or `resourceIdentifier`) |
+| `DisassociateKmsKey` | Remove a log group's KMS key association |
 | `TagLogGroup` | Tag a log group |
 | `UntagLogGroup` | Remove tags |
 | `ListTagsLogGroup` | List tags |

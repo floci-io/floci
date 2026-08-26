@@ -548,13 +548,25 @@ class CloudWatchLogsHandlerTest {
     }
 
     @Test
-    void associateKmsKeyResolvesAnArnLogGroupIdentifier() {
+    void associateKmsKeyResolvesAnArnResourceIdentifier() {
+        // The wire field for the ARN alternative on Associate/DisassociateKmsKey is
+        // resourceIdentifier (not the logGroupIdentifier the query operations use).
         ObjectNode associate = MAPPER.createObjectNode();
-        associate.put("logGroupIdentifier", GROUP_ARN);
+        associate.put("resourceIdentifier", GROUP_ARN);
         associate.put("kmsKeyId", KEY_ARN);
 
         assertEquals(200, handler.handle("AssociateKmsKey", associate, REGION).getStatus());
         assertEquals(KEY_ARN, describeGroup().path("kmsKeyId").asText());
+    }
+
+    @Test
+    void associateKmsKeyWithoutAnyIdentifierThrowsInvalidParameter() {
+        ObjectNode associate = MAPPER.createObjectNode();
+        associate.put("kmsKeyId", KEY_ARN);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("AssociateKmsKey", associate, REGION));
+        assertEquals("InvalidParameterException", ex.getErrorCode());
     }
 
     @Test
