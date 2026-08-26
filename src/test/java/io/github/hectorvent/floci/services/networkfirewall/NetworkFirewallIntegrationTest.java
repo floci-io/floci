@@ -344,6 +344,18 @@ class NetworkFirewallIntegrationTest {
             .body("__type", equalTo("InvalidOperationException"));
     }
 
+    @Test
+    void createRuleGroup_whenAlreadyPresent_namesTheResourceKindInTheError() {
+        String body = "{\"RuleGroupName\":\"duplicate-rule-group\",\"Type\":\"STATEFUL\","
+                + "\"Capacity\":100,\"RuleGroup\":{\"RulesSource\":{\"RulesString\":\"pass ip any any\"}}}";
+        call("CreateRuleGroup", body).statusCode(200);
+
+        call("CreateRuleGroup", body)
+            .statusCode(400)
+            .body("__type", equalTo("ResourceAlreadyExistsException"))
+            .body("message", equalTo("RuleGroup already exists: duplicate-rule-group"));
+    }
+
     private static String firewallArn(String name) {
         return "arn:aws:network-firewall:us-east-1:723679240095:firewall/" + name;
     }

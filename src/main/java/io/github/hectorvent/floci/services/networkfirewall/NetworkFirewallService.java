@@ -300,7 +300,7 @@ public class NetworkFirewallService {
                                    String responseField, String arnField, String idField,
                                    String resourceArn, StorageBackend<String, ObjectNode> store) {
         String name = requiredText(request, nameField);
-        ensureUnique(store, resourceArn, name, responseField);
+        ensureUnique(store, resourceArn, name, requestBodyField);
         ObjectNode responseInfo = copyObject(request);
         JsonNode body = responseInfo.remove(requestBodyField);
         responseInfo.remove("UpdateToken");
