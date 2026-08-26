@@ -25,7 +25,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * persist increase requests. {@code GetRequestedServiceQuotaChange} and
  * {@code ListRequestedServiceQuotaChangeHistory} are unsupported, so a request is
  * observable only in the response that creates it. {@code Status} is therefore always
- * {@code PENDING} and never advances. Documented in {@code docs/services/service-quotas.md}
+ * {@code PENDING} and never advances. Documented in {@code docs/services/servicequotas.md}
  * per CS-021.
  */
 @QuarkusTest
