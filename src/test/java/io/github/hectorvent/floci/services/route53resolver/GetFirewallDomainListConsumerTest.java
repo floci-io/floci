@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.route53resolver;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.hasItems;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.startsWith;
@@ -34,7 +35,9 @@ class GetFirewallDomainListConsumerTest {
 
     @Test
     void getFirewallDomainList_success() {
-        // 1. List to obtain a real, seeded FirewallDomainList Id.
+        // 1. List to obtain a real, seeded FirewallDomainList Id. Other tests create
+        //    custom lists into the same store, so assert the managed lists are present
+        //    by name rather than pinning the total or an index.
         String firewallDomainListId = given()
             .contentType(CONTENT_TYPE)
             .header("X-Amz-Target", "Route53Resolver.ListFirewallDomainLists")
@@ -45,8 +48,13 @@ class GetFirewallDomainListConsumerTest {
         .then()
             .statusCode(200)
             .body("FirewallDomainLists", notNullValue())
-            .body("FirewallDomainLists.size()", equalTo(4))
-            .extract().path("FirewallDomainLists[0].Id");
+            .body("FirewallDomainLists.Name", hasItems(
+                    "AWSManagedDomainsAggregateThreatList",
+                    "AWSManagedDomainsAmazonGuardDutyThreatList",
+                    "AWSManagedDomainsBotnetCommandandControl",
+                    "AWSManagedDomainsMalwareDomainList"))
+            .extract().path(
+                    "FirewallDomainLists.find { it.Name == 'AWSManagedDomainsAggregateThreatList' }.Id");
 
         // 2. Get the individual list and assert the response shape.
         given()
@@ -74,11 +82,10 @@ class GetFirewallDomainListConsumerTest {
         .when()
             .post("/")
         .then()
-            // 404, matching Floci's dominant convention for ResourceNotFoundException
-            // (62 call sites use 404 vs 21 using 400). The Botocore packet does not pin
-            // an httpStatusCode for this shape and no AWS doc quote was obtained, so the
-            // real AWS status is UNVERIFIED — recorded as a known ambiguity rather than
-            // asserted as parity.
+            // 404, matching Floci's dominant convention for ResourceNotFoundException.
+            // The Botocore packet does not pin an httpStatusCode for this shape and no
+            // AWS doc quote was obtained, so the real AWS status is UNVERIFIED —
+            // recorded as a known ambiguity rather than asserted as parity.
             .statusCode(404)
             .body("__type", equalTo("ResourceNotFoundException"));
     }
