@@ -165,6 +165,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     private final StorageBackend<String, TransitGatewayRoute> transitGatewayRoutes;
     // Keyed by id alone, not region::id — see VpcPeeringConnection's class Javadoc.
     private final StorageBackend<String, VpcPeeringConnection> vpcPeeringConnections;
+    // Standalone (non-primary) ENIs created via CreateNetworkInterface — see #floci-kt9.
+    // Primary/implicit per-instance ENIs remain embedded in Instance#networkInterfaces.
+    private final StorageBackend<String, NetworkInterface> networkInterfaces;
     // resourceId → List<Tag>
     private final StorageBackend<String, List<Tag>> tags;
     private final Set<String> seededRegions = ConcurrentHashMap.newKeySet();
@@ -218,6 +221,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                         new TypeReference<Map<String, TransitGatewayRoute>>() {}),
                 storageFactory.create("ec2", "ec2-vpc-peering-connections.json",
                         new TypeReference<Map<String, VpcPeeringConnection>>() {}),
+                storageFactory.create("ec2", "ec2-network-interfaces.json",
+                        new TypeReference<Map<String, NetworkInterface>>() {}),
                 requestContextInstance);
     }
 
@@ -250,7 +255,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 addresses, instances, volumes, registeredImages, snapshots, launchTemplates, vpcEndpoints,
                 natGateways, spotInstanceRequests, networkAcls, managedPrefixLists, tags,
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), null);
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), null);
     }
 
     // Package-private for hermetic tests, transit-gateway-aware. The shorter overload above keeps its
@@ -289,7 +295,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 addresses, instances, volumes, registeredImages, snapshots, launchTemplates, vpcEndpoints,
                 natGateways, spotInstanceRequests, networkAcls, managedPrefixLists, tags,
                 transitGateways, transitGatewayRouteTables, transitGatewayVpcAttachments,
-                transitGatewayPropagations, transitGatewayRoutes, vpcPeeringConnections, null);
+                transitGatewayPropagations, transitGatewayRoutes, vpcPeeringConnections,
+                new InMemoryStorage<>(), null);
     }
 
     // Package-private for hermetic tests that also need to control which account a caller resolves
@@ -323,6 +330,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                StorageBackend<String, TransitGatewayRouteTablePropagation> transitGatewayPropagations,
                StorageBackend<String, TransitGatewayRoute> transitGatewayRoutes,
                StorageBackend<String, VpcPeeringConnection> vpcPeeringConnections,
+               StorageBackend<String, NetworkInterface> networkInterfaces,
                jakarta.enterprise.inject.Instance<RequestContext> requestContextInstance) {
         this.accountId = config.defaultAccountId();
         this.requestContextInstance = requestContextInstance;
@@ -357,6 +365,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         this.transitGatewayPropagations = transitGatewayPropagations;
         this.transitGatewayRoutes = transitGatewayRoutes;
         this.vpcPeeringConnections = vpcPeeringConnections;
+        this.networkInterfaces = networkInterfaces;
     }
 
     @PostConstruct
@@ -1030,6 +1039,16 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         Random rand = new Random();
         for (int i = 0; i < len; i++) {
             sb.append(Integer.toHexString(rand.nextInt(16)));
+        }
+        return sb.toString();
+    }
+
+    /** Synthesizes a locally-administered unicast MAC (AWS never discloses how it derives its own). */
+    private String randomMac() {
+        Random rand = new Random();
+        StringBuilder sb = new StringBuilder("02");
+        for (int i = 0; i < 5; i++) {
+            sb.append(':').append(String.format("%02x", rand.nextInt(256)));
         }
         return sb.toString();
     }
@@ -2179,10 +2198,40 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                                     String clientToken, List<Tag> instanceTags,
                                     String userData, String iamInstanceProfileArn,
                                     Boolean associatePublicIp) {
+        return runInstances(region, imageId, instanceType, minCount, maxCount, keyName,
+                securityGroupIds, subnetId, clientToken, instanceTags, userData,
+                iamInstanceProfileArn, associatePublicIp, null, 0);
+    }
+
+    /**
+     * @param networkInterfaceId a pre-existing standalone ENI (from {@link #createNetworkInterface})
+     *                            to use as the instance's primary interface instead of creating a
+     *                            new implicit one — the override-default-eni pattern (floci-kt9).
+     *                            AWS requires {@code subnetId} be omitted when this is set; the
+     *                            interface's own subnet/VPC/security-groups govern the launch.
+     */
+    public Reservation runInstances(String region, String imageId, String instanceType,
+                                    int minCount, int maxCount, String keyName,
+                                    List<String> securityGroupIds, String subnetId,
+                                    String clientToken, List<Tag> instanceTags,
+                                    String userData, String iamInstanceProfileArn,
+                                    Boolean associatePublicIp, String networkInterfaceId, int networkInterfaceDeviceIndex) {
         if (imageId == null || imageId.isBlank()) {
             throw new AwsException("MissingParameter", "The request must contain the parameter ImageId", 400);
         }
         ensureDefaultResources(region);
+
+        // floci-kt9: a caller-supplied primary ENI (override-default-eni) governs its own
+        // subnet/VPC/security-groups and can only ever back a single instance.
+        NetworkInterface suppliedEni = null;
+        if (networkInterfaceId != null && !networkInterfaceId.isBlank()) {
+            if (Math.max(minCount, 1) > 1) {
+                throw new AwsException("InvalidParameterCombination",
+                        "Network interfaces may only be specified for a single instance.", 400);
+            }
+            suppliedEni = takeNetworkInterfaceForLaunch(region, networkInterfaceId);
+            subnetId = suppliedEni.getSubnetId();
+        }
 
         // Resolve subnet
         Subnet subnet = null;
@@ -2202,7 +2251,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
 
         // Resolve security groups
         List<GroupIdentifier> sgIdentifiers = new ArrayList<>();
-        if (securityGroupIds != null && !securityGroupIds.isEmpty()) {
+        if (suppliedEni != null) {
+            // AWS ignores instance-level SecurityGroupId when a network interface is supplied;
+            // the interface's own groups win (module main.tf sets vpc_security_group_ids = null
+            // in this case, so there is nothing to conflict with in practice).
+            sgIdentifiers.addAll(suppliedEni.getGroups());
+        } else if (securityGroupIds != null && !securityGroupIds.isEmpty()) {
             for (String sgId : securityGroupIds) {
                 SecurityGroup sg = getRequiredSecurityGroup(region, sgId);
                 sgIdentifiers.add(new GroupIdentifier(sg.getGroupId(), sg.getGroupName()));
@@ -2226,7 +2280,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         String architecture = architectureFor(imageId, effectiveInstanceType);
         for (int i = 0; i < count; i++) {
             String instanceId = "i-" + randomHex(17);
-            String privateIp = assignPrivateIp(region, finalSubnetId);
+            String privateIp = suppliedEni != null
+                    ? suppliedEni.getPrivateIpAddress()
+                    : assignPrivateIp(region, finalSubnetId);
 
             Instance inst = new Instance();
             inst.setInstanceId(instanceId);
@@ -2258,21 +2314,29 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 tags.put(instanceId, new ArrayList<>(instanceTags));
             }
 
-            // Network interface
+            // Network interface — either the caller-supplied standalone ENI (override-default-eni,
+            // floci-kt9) or a freshly-minted implicit primary interface.
             InstanceNetworkInterface eni = new InstanceNetworkInterface();
-            eni.setNetworkInterfaceId("eni-" + randomHex(17));
+            eni.setNetworkInterfaceId(suppliedEni != null ? suppliedEni.getNetworkInterfaceId() : "eni-" + randomHex(17));
             eni.setSubnetId(finalSubnetId);
             eni.setVpcId(vpcId);
             eni.setOwnerId(accountId);
+            eni.setDescription(suppliedEni != null ? suppliedEni.getDescription() : null);
+            eni.setMacAddress(suppliedEni != null ? suppliedEni.getMacAddress() : null);
             eni.setPrivateIpAddress(privateIp);
             eni.setPrivateDnsName(inst.getPrivateDnsName());
             eni.setGroups(new ArrayList<>(sgIdentifiers));
             eni.setAttachmentId("eni-attach-" + randomHex(17));
-            eni.setDeviceIndex(0);
+            eni.setDeviceIndex(suppliedEni != null ? networkInterfaceDeviceIndex : 0);
             if (inst.getLaunchTime() != null) {
                 eni.setAttachTime(ISO_FMT.format(inst.getLaunchTime()));
             }
             inst.getNetworkInterfaces().add(eni);
+            if (suppliedEni != null) {
+                // Its authoritative representation now lives on the instance; drop the
+                // standalone record so DescribeNetworkInterfaces doesn't see it twice.
+                networkInterfaces.delete(key(region, suppliedEni.getNetworkInterfaceId()));
+            }
 
             // Root EBS volume
             String rootVolId = "vol-" + randomHex(17);
@@ -6061,6 +6125,24 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             }
         }
 
+        // floci-kt9: standalone ENIs created via CreateNetworkInterface. Only added when not
+        // already surfaced above — an ENI used as an instance's launch-time interface (e.g. via
+        // RunInstances' NetworkInterface.1.NetworkInterfaceId, the override-default-eni pattern)
+        // is represented on the instance and would otherwise be double-counted here.
+        for (NetworkInterface ni : networkInterfaces.scan(k -> k.startsWith(region + "::"))) {
+            if (foundIds.contains(ni.getNetworkInterfaceId())) {
+                continue;
+            }
+            if (!networkInterfaceIds.isEmpty() && !networkInterfaceIds.contains(ni.getNetworkInterfaceId())) {
+                continue;
+            }
+            foundIds.add(ni.getNetworkInterfaceId());
+            if (!matchesFilters(ni, filters, region)) {
+                continue;
+            }
+            result.add(ni);
+        }
+
         // Phase 6: validate requested IDs exist
         for (String id : networkInterfaceIds) {
             if (!foundIds.contains(id)) {
@@ -6083,6 +6165,166 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         }
 
         return new NetworkInterfaceListResult(result, null);
+    }
+
+    /**
+     * Creates a standalone (not-yet-attached) elastic network interface — floci-kt9. Covers the
+     * {@code aws_network_interface} resource: an ENI created independently of an instance and
+     * either attached later (the attach-eni pattern) or handed to an instance at launch time as
+     * its primary interface (the override-default-eni pattern, see {@link #runInstances}).
+     */
+    public NetworkInterface createNetworkInterface(String region, String subnetId, String description,
+                                                    String privateIpAddress, List<String> privateIpAddresses,
+                                                    List<String> securityGroupIds, List<Tag> tagList) {
+        if (subnetId == null || subnetId.isBlank()) {
+            throw new AwsException("MissingParameter",
+                    "The request must contain the parameter SubnetId", 400);
+        }
+        ensureDefaultResources(region);
+        Subnet subnet = requireSubnet(region, subnetId);
+
+        List<GroupIdentifier> sgIdentifiers = new ArrayList<>();
+        if (securityGroupIds != null && !securityGroupIds.isEmpty()) {
+            for (String sgId : securityGroupIds) {
+                SecurityGroup sg = getRequiredSecurityGroup(region, sgId);
+                sgIdentifiers.add(new GroupIdentifier(sg.getGroupId(), sg.getGroupName()));
+            }
+        } else {
+            SecurityGroup defaultSg = securityGroups.get(key(region, resolveDefaultSecurityGroupId(region))).orElse(null);
+            if (defaultSg != null) {
+                sgIdentifiers.add(new GroupIdentifier(defaultSg.getGroupId(), defaultSg.getGroupName()));
+            }
+        }
+
+        String eniId = "eni-" + randomHex(17);
+        String primaryIp = (privateIpAddress != null && !privateIpAddress.isBlank())
+                ? privateIpAddress : assignPrivateIp(region, subnetId);
+        String primaryDns = "ip-" + primaryIp.replace('.', '-') + ".ec2.internal";
+
+        NetworkInterface ni = new NetworkInterface();
+        ni.setNetworkInterfaceId(eniId);
+        ni.setSubnetId(subnetId);
+        ni.setVpcId(subnet.getVpcId());
+        ni.setAvailabilityZone(subnet.getAvailabilityZone());
+        ni.setDescription(description);
+        ni.setOwnerId(accountId);
+        ni.setStatus("available");
+        ni.setMacAddress(randomMac());
+        ni.setPrivateIpAddress(primaryIp);
+        ni.setPrivateDnsName(primaryDns);
+        ni.setGroups(sgIdentifiers);
+        if (tagList != null) {
+            ni.getTagSet().addAll(tagList);
+        }
+
+        List<NetworkInterfacePrivateIpAddress> ipList = new ArrayList<>();
+        NetworkInterfacePrivateIpAddress primary = new NetworkInterfacePrivateIpAddress();
+        primary.setPrivateIpAddress(primaryIp);
+        primary.setPrivateDnsName(primaryDns);
+        primary.setPrimary(true);
+        ipList.add(primary);
+        if (privateIpAddresses != null) {
+            for (String extra : privateIpAddresses) {
+                if (extra == null || extra.isBlank() || extra.equals(primaryIp)) {
+                    continue;
+                }
+                NetworkInterfacePrivateIpAddress secondary = new NetworkInterfacePrivateIpAddress();
+                secondary.setPrivateIpAddress(extra);
+                secondary.setPrivateDnsName("ip-" + extra.replace('.', '-') + ".ec2.internal");
+                secondary.setPrimary(false);
+                ipList.add(secondary);
+            }
+        }
+        ni.setPrivateIpAddresses(ipList);
+
+        networkInterfaces.put(key(region, eniId), ni);
+        return ni;
+    }
+
+    /** Deletes a standalone ENI. AWS refuses while it is still attached — floci-kt9. */
+    public void deleteNetworkInterface(String region, String networkInterfaceId) {
+        NetworkInterface ni = requireStandaloneNetworkInterface(region, networkInterfaceId);
+        if (ni.getAttachment() != null) {
+            throw new AwsException("InvalidParameterValue",
+                    "Network interface '" + networkInterfaceId + "' is currently in use", 400);
+        }
+        networkInterfaces.delete(key(region, networkInterfaceId));
+    }
+
+    /**
+     * Attaches a standalone ENI to a running/stopped instance at the given device index —
+     * the attach-eni example's runtime pattern (its user-data script calls this via the AWS CLI
+     * after boot, rather than through the Terraform provider itself). floci-kt9.
+     */
+    public NetworkInterfaceAttachment attachNetworkInterface(String region, String networkInterfaceId,
+                                                              String instanceId, int deviceIndex) {
+        NetworkInterface ni = requireStandaloneNetworkInterface(region, networkInterfaceId);
+        if (ni.getAttachment() != null) {
+            throw new AwsException("InvalidNetworkInterface.InUse",
+                    "Interface: '" + networkInterfaceId + "' is currently in use.", 400);
+        }
+        Instance inst = getRequiredInstance(region, instanceId);
+        if (!List.of("running", "stopped").contains(inst.getState().getName())) {
+            throw new AwsException("IncorrectInstanceState",
+                    "The instance '" + instanceId + "' is not in a state from which an interface can be attached", 400);
+        }
+        boolean indexTaken = inst.getNetworkInterfaces().stream()
+                .anyMatch(eni -> eni.getDeviceIndex() == deviceIndex);
+        if (indexTaken) {
+            throw new AwsException("InvalidParameterValue",
+                    "Device index " + deviceIndex + " is already in use on instance '" + instanceId + "'", 400);
+        }
+
+        NetworkInterfaceAttachment attachment = new NetworkInterfaceAttachment();
+        attachment.setAttachmentId("eni-attach-" + randomHex(17));
+        attachment.setDeviceIndex(deviceIndex);
+        attachment.setStatus("attached");
+        attachment.setInstanceId(instanceId);
+        attachment.setInstanceOwnerId(accountId);
+        attachment.setAttachTime(ISO_FMT.format(Instant.now()));
+        attachment.setDeleteOnTermination(false);
+
+        ni.setAttachment(attachment);
+        ni.setStatus("in-use");
+        networkInterfaces.put(key(region, networkInterfaceId), ni);
+        return attachment;
+    }
+
+    /** Detaches a standalone ENI by attachment id — floci-kt9. */
+    public NetworkInterfaceAttachment detachNetworkInterface(String region, String attachmentId, boolean force) {
+        if (attachmentId == null || attachmentId.isBlank()) {
+            throw new AwsException("MissingParameter", "The request must contain the parameter AttachmentId", 400);
+        }
+        NetworkInterface ni = networkInterfaces.scan(k -> k.startsWith(region + "::")).stream()
+                .filter(n -> n.getAttachment() != null && attachmentId.equals(n.getAttachment().getAttachmentId()))
+                .findFirst()
+                .orElseThrow(() -> new AwsException("InvalidAttachmentID.NotFound",
+                        "The attachment ID '" + attachmentId + "' does not exist", 400));
+        NetworkInterfaceAttachment detached = ni.getAttachment();
+        ni.setAttachment(null);
+        ni.setStatus("available");
+        networkInterfaces.put(key(region, ni.getNetworkInterfaceId()), ni);
+        return detached;
+    }
+
+    private NetworkInterface requireStandaloneNetworkInterface(String region, String networkInterfaceId) {
+        return networkInterfaces.get(key(region, networkInterfaceId)).orElseThrow(() ->
+                new AwsException("InvalidNetworkInterfaceID.NotFound",
+                        "The network interface ID '" + networkInterfaceId + "' does not exist", 400));
+    }
+
+    /**
+     * Looks up a standalone ENI for use as an instance's launch-time primary interface (the
+     * override-default-eni pattern — RunInstances' {@code NetworkInterface.1.NetworkInterfaceId}).
+     * Package-private: called from {@link #runInstances} only.
+     */
+    NetworkInterface takeNetworkInterfaceForLaunch(String region, String networkInterfaceId) {
+        NetworkInterface ni = requireStandaloneNetworkInterface(region, networkInterfaceId);
+        if (ni.getAttachment() != null) {
+            throw new AwsException("InvalidNetworkInterface.InUse",
+                    "Interface: '" + networkInterfaceId + "' is currently in use.", 400);
+        }
+        return ni;
     }
 
     // ─── Pagination token encoding / decoding ──────────────────────────────────

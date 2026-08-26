@@ -232,6 +232,10 @@ public class Ec2QueryHandler {
                 case "DeleteLaunchTemplate" -> handleDeleteLaunchTemplate(params, region);
                 // Network Interfaces
                 case "DescribeNetworkInterfaces" -> handleDescribeNetworkInterfaces(params, region);
+                case "CreateNetworkInterface" -> handleCreateNetworkInterface(params, region);
+                case "DeleteNetworkInterface" -> handleDeleteNetworkInterface(params, region);
+                case "AttachNetworkInterface" -> handleAttachNetworkInterface(params, region);
+                case "DetachNetworkInterface" -> handleDetachNetworkInterface(params, region);
                 // Volumes
                 case "CreateVolume" -> handleCreateVolume(params, region);
                 case "DescribeVolumes" -> handleDescribeVolumes(params, region);
@@ -609,6 +613,10 @@ public class Ec2QueryHandler {
         if (subnetId == null) {
             subnetId = p.getFirst("NetworkInterface.1.SubnetId");
         }
+        // floci-kt9: override-default-eni hands RunInstances a pre-existing standalone ENI as
+        // the instance's primary interface (network_interface { network_interface_id = ... }).
+        String networkInterfaceId = p.getFirst("NetworkInterface.1.NetworkInterfaceId");
+        int networkInterfaceDeviceIndex = parseIntParam(p, "NetworkInterface.1.DeviceIndex", 0);
         String clientToken = p.getFirst("ClientToken");
         List<String> sgIds = getList(p, "SecurityGroupId");
 
@@ -665,7 +673,7 @@ public class Ec2QueryHandler {
 
         Reservation res = service.runInstances(region, imageId, instanceType, minCount, maxCount,
                 keyName, sgIds, subnetId, clientToken, instanceTags, userData, iamInstanceProfileArn,
-                associatePublicIp);
+                associatePublicIp, networkInterfaceId, networkInterfaceDeviceIndex);
 
         if (!networkInterfaceTags.isEmpty()) {
             List<String> eniIds = new ArrayList<>();
@@ -3475,61 +3483,7 @@ public class Ec2QueryHandler {
                 .elem("requestId", UUID.randomUUID().toString())
                 .start("networkInterfaceSet");
         for (NetworkInterface ni : nis) {
-            xml.start("item")
-                    .elem("networkInterfaceId", ni.getNetworkInterfaceId())
-                    .elem("subnetId", ni.getSubnetId())
-                    .elem("vpcId", ni.getVpcId())
-                    .elem("availabilityZone", ni.getAvailabilityZone())
-                    .elem("description", ni.getDescription())
-                    .elem("ownerId", ni.getOwnerId())
-                    .elem("status", ni.getStatus())
-                    .elem("interfaceType", ni.getInterfaceType())
-                    .elem("macAddress", ni.getMacAddress())
-                    .elem("privateIpAddress", ni.getPrivateIpAddress())
-                    .elem("privateDnsName", ni.getPrivateDnsName())
-                    .elem("sourceDestCheck", String.valueOf(ni.isSourceDestCheck()))
-                    .start("groupSet");
-            for (GroupIdentifier gi : ni.getGroups()) {
-                xml.start("item")
-                        .elem("groupId", gi.getGroupId())
-                        .elem("groupName", gi.getGroupName())
-                        .end("item");
-            }
-            xml.end("groupSet");
-            // Phase 3: tagSet from instance tags
-            xml.raw(tagSetXml(ni.getTagSet()));
-            if (ni.getAttachment() != null) {
-                xml.start("attachment")
-                        .elem("attachmentId", ni.getAttachment().getAttachmentId())
-                        .elem("deviceIndex", String.valueOf(ni.getAttachment().getDeviceIndex()))
-                        .elem("status", ni.getAttachment().getStatus())
-                        .elem("attachTime", ni.getAttachment().getAttachTime())
-                        .elem("deleteOnTermination", String.valueOf(ni.getAttachment().isDeleteOnTermination()))
-                        .elem("instanceId", ni.getAttachment().getInstanceId())
-                        .elem("instanceOwnerId", ni.getAttachment().getInstanceOwnerId())
-                        .end("attachment");
-            }
-            // Phase 3: privateIpAddressesSet with association
-            if (!ni.getPrivateIpAddresses().isEmpty()) {
-                xml.start("privateIpAddressesSet");
-                for (NetworkInterfacePrivateIpAddress ip : ni.getPrivateIpAddresses()) {
-                    xml.start("item")
-                            .elem("privateIpAddress", ip.getPrivateIpAddress())
-                            .elem("privateDnsName", ip.getPrivateDnsName())
-                            .elem("primary", String.valueOf(ip.isPrimary()));
-                    if (ip.getAssociation() != null) {
-                        xml.start("association")
-                                .elem("publicIp", ip.getAssociation().getPublicIp())
-                                .elem("allocationId", ip.getAssociation().getAllocationId())
-                                .elem("associationId", ip.getAssociation().getAssociationId())
-                                .elem("ipOwnerId", ip.getAssociation().getIpOwnerId())
-                                .end("association");
-                    }
-                    xml.end("item");
-                }
-                xml.end("privateIpAddressesSet");
-            }
-            xml.end("item");
+            xml.start("item").raw(networkInterfaceXml(ni)).end("item");
         }
         xml.end("networkInterfaceSet");
         if (result.nextToken() != null) {
@@ -3537,6 +3491,116 @@ public class Ec2QueryHandler {
         }
         xml.end("DescribeNetworkInterfacesResponse");
         return xmlResponse(xml.build());
+    }
+
+    /** Shared field emission for a {@code networkInterface} item — used by Describe and Create. */
+    private String networkInterfaceXml(NetworkInterface ni) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("networkInterfaceId", ni.getNetworkInterfaceId())
+                .elem("subnetId", ni.getSubnetId())
+                .elem("vpcId", ni.getVpcId())
+                .elem("availabilityZone", ni.getAvailabilityZone())
+                .elem("description", ni.getDescription())
+                .elem("ownerId", ni.getOwnerId())
+                .elem("status", ni.getStatus())
+                .elem("interfaceType", ni.getInterfaceType())
+                .elem("macAddress", ni.getMacAddress())
+                .elem("privateIpAddress", ni.getPrivateIpAddress())
+                .elem("privateDnsName", ni.getPrivateDnsName())
+                .elem("sourceDestCheck", String.valueOf(ni.isSourceDestCheck()))
+                .start("groupSet");
+        for (GroupIdentifier gi : ni.getGroups()) {
+            xml.start("item")
+                    .elem("groupId", gi.getGroupId())
+                    .elem("groupName", gi.getGroupName())
+                    .end("item");
+        }
+        xml.end("groupSet");
+        xml.raw(tagSetXml(ni.getTagSet()));
+        if (ni.getAttachment() != null) {
+            xml.start("attachment")
+                    .elem("attachmentId", ni.getAttachment().getAttachmentId())
+                    .elem("deviceIndex", String.valueOf(ni.getAttachment().getDeviceIndex()))
+                    .elem("status", ni.getAttachment().getStatus())
+                    .elem("attachTime", ni.getAttachment().getAttachTime())
+                    .elem("deleteOnTermination", String.valueOf(ni.getAttachment().isDeleteOnTermination()))
+                    .elem("instanceId", ni.getAttachment().getInstanceId())
+                    .elem("instanceOwnerId", ni.getAttachment().getInstanceOwnerId())
+                    .end("attachment");
+        }
+        if (!ni.getPrivateIpAddresses().isEmpty()) {
+            xml.start("privateIpAddressesSet");
+            for (NetworkInterfacePrivateIpAddress ip : ni.getPrivateIpAddresses()) {
+                xml.start("item")
+                        .elem("privateIpAddress", ip.getPrivateIpAddress())
+                        .elem("privateDnsName", ip.getPrivateDnsName())
+                        .elem("primary", String.valueOf(ip.isPrimary()));
+                if (ip.getAssociation() != null) {
+                    xml.start("association")
+                            .elem("publicIp", ip.getAssociation().getPublicIp())
+                            .elem("allocationId", ip.getAssociation().getAllocationId())
+                            .elem("associationId", ip.getAssociation().getAssociationId())
+                            .elem("ipOwnerId", ip.getAssociation().getIpOwnerId())
+                            .end("association");
+                }
+                xml.end("item");
+            }
+            xml.end("privateIpAddressesSet");
+        }
+        return xml.build();
+    }
+
+    private Response handleCreateNetworkInterface(MultivaluedMap<String, String> p, String region) {
+        String subnetId = p.getFirst("SubnetId");
+        String description = p.getFirst("Description");
+        String privateIpAddress = p.getFirst("PrivateIpAddress");
+        List<String> privateIpAddresses = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String addr = p.getFirst("PrivateIpAddresses." + i + ".PrivateIpAddress");
+            if (addr == null) break;
+            privateIpAddresses.add(addr);
+        }
+        List<String> securityGroupIds = getList(p, "SecurityGroupId");
+        if (securityGroupIds.isEmpty()) {
+            securityGroupIds = getList(p, "Groups.SecurityGroupId");
+        }
+        List<Tag> tagList = parseTagsForResource(p, "network-interface");
+
+        NetworkInterface ni = service.createNetworkInterface(region, subnetId, description,
+                privateIpAddress, privateIpAddresses, securityGroupIds, tagList);
+
+        XmlBuilder xml = new XmlBuilder()
+                .start("CreateNetworkInterfaceResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("networkInterface").raw(networkInterfaceXml(ni)).end("networkInterface")
+                .end("CreateNetworkInterfaceResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDeleteNetworkInterface(MultivaluedMap<String, String> p, String region) {
+        service.deleteNetworkInterface(region, p.getFirst("NetworkInterfaceId"));
+        return booleanResponse("DeleteNetworkInterface");
+    }
+
+    private Response handleAttachNetworkInterface(MultivaluedMap<String, String> p, String region) {
+        String networkInterfaceId = p.getFirst("NetworkInterfaceId");
+        String instanceId = p.getFirst("InstanceId");
+        int deviceIndex = parseIntParam(p, "DeviceIndex", 0);
+        NetworkInterfaceAttachment attachment =
+                service.attachNetworkInterface(region, networkInterfaceId, instanceId, deviceIndex);
+        XmlBuilder xml = new XmlBuilder()
+                .start("AttachNetworkInterfaceResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .elem("attachmentId", attachment.getAttachmentId())
+                .end("AttachNetworkInterfaceResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDetachNetworkInterface(MultivaluedMap<String, String> p, String region) {
+        String attachmentId = p.getFirst("AttachmentId");
+        boolean force = "true".equalsIgnoreCase(p.getFirst("Force"));
+        service.detachNetworkInterface(region, attachmentId, force);
+        return booleanResponse("DetachNetworkInterface");
     }
 
     // ─── XML fragment builders ────────────────────────────────────────────────

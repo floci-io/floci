@@ -569,7 +569,15 @@ prefix lists, `EnaSrdSpecification`, `ConnectionTrackingSpecification`, `Primary
 
 | Action | Description |
 |--------|-------------|
-| DescribeNetworkInterfaces | Lists network interfaces known to the local EC2 service. |
+| CreateNetworkInterface | Creates a standalone elastic network interface (ENI) in a subnet, unattached. |
+| DescribeNetworkInterfaces | Lists network interfaces known to the local EC2 service — both an instance's implicit primary interface and standalone ENIs created via `CreateNetworkInterface`. |
+| AttachNetworkInterface | Attaches an available standalone ENI to a running or stopped instance at a device index. |
+| DetachNetworkInterface | Detaches a standalone ENI by attachment ID, returning it to `available`. |
+| DeleteNetworkInterface | Deletes a standalone ENI. Fails while the ENI is still attached, matching AWS. |
+
+A standalone ENI created via `CreateNetworkInterface` can also be handed to `RunInstances` as an instance's primary interface (`NetworkInterface.1.NetworkInterfaceId` / `NetworkInterface.1.DeviceIndex`) instead of letting the instance create its own implicit one — the pattern Terraform's `aws_instance` resource uses for `network_interface { network_interface_id = ... }`. AWS only allows this for a single instance per launch call; `RunInstances` rejects it otherwise with `InvalidParameterCombination`.
+
+`ModifyNetworkInterfaceAttribute` is not implemented — no example in the corpus that needed `CreateNetworkInterface` was found to need it. A route table's `CreateRoute` with a `NetworkInterfaceId` target is accepted but not recorded, since `Route` does not yet model an ENI target; a subsequent `plan` against such a route may show drift.
 
 ### Volumes
 
