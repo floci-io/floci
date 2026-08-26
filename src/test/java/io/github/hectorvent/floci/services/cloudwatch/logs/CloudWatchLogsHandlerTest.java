@@ -560,6 +560,19 @@ class CloudWatchLogsHandlerTest {
     }
 
     @Test
+    void associateKmsKeyWithBothIdentifiersThrowsInvalidParameter() {
+        // AWS models the two identifiers as mutually exclusive: exactly one is required.
+        ObjectNode associate = MAPPER.createObjectNode();
+        associate.put("logGroupName", GROUP);
+        associate.put("resourceIdentifier", GROUP_ARN);
+        associate.put("kmsKeyId", KEY_ARN);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("AssociateKmsKey", associate, REGION));
+        assertEquals("InvalidParameterException", ex.getErrorCode());
+    }
+
+    @Test
     void associateKmsKeyWithoutAnyIdentifierThrowsInvalidParameter() {
         ObjectNode associate = MAPPER.createObjectNode();
         associate.put("kmsKeyId", KEY_ARN);
