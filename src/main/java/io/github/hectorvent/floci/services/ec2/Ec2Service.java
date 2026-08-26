@@ -93,6 +93,9 @@ import io.github.hectorvent.floci.services.ec2.model.VolumeAttachment;
 import io.github.hectorvent.floci.services.ec2.model.Vpc;
 import io.github.hectorvent.floci.services.ec2.model.VpcCidrBlockAssociation;
 import io.github.hectorvent.floci.services.ec2.model.VpcEndpoint;
+import io.github.hectorvent.floci.services.ec2.model.VpcPeeringConnection;
+import io.github.hectorvent.floci.services.ec2.model.VpcPeeringConnectionStateReason;
+import io.github.hectorvent.floci.services.ec2.model.VpcPeeringConnectionVpcInfo;
 import jakarta.annotation.PostConstruct;
 import io.github.hectorvent.floci.services.ec2.model.LaunchSpecification;
 import io.github.hectorvent.floci.services.ec2.model.SpotInstanceRequest;
@@ -156,6 +159,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     private final StorageBackend<String, TransitGatewayVpcAttachment> transitGatewayVpcAttachments;
     private final StorageBackend<String, TransitGatewayRouteTablePropagation> transitGatewayPropagations;
     private final StorageBackend<String, TransitGatewayRoute> transitGatewayRoutes;
+    // Keyed by id alone, not region::id — see VpcPeeringConnection's class Javadoc.
+    private final StorageBackend<String, VpcPeeringConnection> vpcPeeringConnections;
     // resourceId → List<Tag>
     private final StorageBackend<String, List<Tag>> tags;
     private final Set<String> seededRegions = ConcurrentHashMap.newKeySet();
@@ -195,7 +200,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 storageFactory.create("ec2", "ec2-transit-gateway-propagations.json",
                         new TypeReference<Map<String, TransitGatewayRouteTablePropagation>>() {}),
                 storageFactory.create("ec2", "ec2-transit-gateway-routes.json",
-                        new TypeReference<Map<String, TransitGatewayRoute>>() {}));
+                        new TypeReference<Map<String, TransitGatewayRoute>>() {}),
+                storageFactory.create("ec2", "ec2-vpc-peering-connections.json",
+                        new TypeReference<Map<String, VpcPeeringConnection>>() {}));
     }
 
     // Package-private for hermetic tests (pass in-memory or temp-dir-backed StorageBackends directly).
@@ -227,7 +234,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 addresses, instances, volumes, registeredImages, snapshots, launchTemplates, vpcEndpoints,
                 natGateways, spotInstanceRequests, networkAcls, managedPrefixLists, tags,
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), new InMemoryStorage<>());
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
     }
 
     // Package-private for hermetic tests, transit-gateway-aware. The shorter overload above keeps its
@@ -259,7 +266,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                StorageBackend<String, TransitGatewayRouteTable> transitGatewayRouteTables,
                StorageBackend<String, TransitGatewayVpcAttachment> transitGatewayVpcAttachments,
                StorageBackend<String, TransitGatewayRouteTablePropagation> transitGatewayPropagations,
-               StorageBackend<String, TransitGatewayRoute> transitGatewayRoutes) {
+               StorageBackend<String, TransitGatewayRoute> transitGatewayRoutes,
+               StorageBackend<String, VpcPeeringConnection> vpcPeeringConnections) {
         this.accountId = config.defaultAccountId();
         this.config = config;
         this.containerManager = containerManager;
@@ -291,6 +299,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         this.transitGatewayVpcAttachments = transitGatewayVpcAttachments;
         this.transitGatewayPropagations = transitGatewayPropagations;
         this.transitGatewayRoutes = transitGatewayRoutes;
+        this.vpcPeeringConnections = vpcPeeringConnections;
     }
 
     @PostConstruct
@@ -4717,7 +4726,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     public void createRoute(String region, String routeTableId, String destinationCidrBlock,
                             String destinationIpv6CidrBlock, String destinationPrefixListId,
                             String gatewayId, String natGatewayId,
-                            String egressOnlyInternetGatewayId) {
+                            String egressOnlyInternetGatewayId, String vpcPeeringConnectionId) {
         requireExactlyOneDestination("CreateRoute", destinationCidrBlock, destinationIpv6CidrBlock,
                 destinationPrefixListId);
         requireEgressOnlyGatewayIsTheOnlyTarget(gatewayId, natGatewayId, egressOnlyInternetGatewayId);
@@ -4743,6 +4752,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             route.setDestinationPrefixListId(destinationPrefixListId);
             route.setNatGatewayId(natGatewayId);
             route.setEgressOnlyInternetGatewayId(egressOnlyInternetGatewayId);
+            route.setVpcPeeringConnectionId(vpcPeeringConnectionId);
             next.add(route);
             current.setRoutes(next);
             routeTables.put(key(region, routeTableId), current);
@@ -4813,6 +4823,107 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             throw new AwsException("InvalidRouteTableID.NotFound", "The route table '" + routeTableId + "' does not exist", 400);
 
         return rt;
+    }
+
+    // ─── VPC Peering Connections ─────────────────────────────────────────────────
+    //
+    // Real AWS never auto-accepts a connection, same-account or not (#floci-k41): every
+    // CreateVpcPeeringConnection starts "pending-acceptance" and stays there until an explicit
+    // AcceptVpcPeeringConnection. Terraform's own `auto_accept` convenience (on
+    // aws_vpc_peering_connection and aws_vpc_peering_connection_accepter) is implemented by the
+    // *provider*, which simply issues that second call itself — so the emulator does not need to
+    // special-case same-account peers to satisfy it.
+
+    public VpcPeeringConnection createVpcPeeringConnection(String region, String vpcId, String peerVpcId,
+                                                            String peerOwnerId, String peerRegion,
+                                                            List<Tag> peeringTags) {
+        ensureDefaultResources(region);
+        Vpc vpc = getRequiredVpc(region, vpcId);
+
+        String pcxId = "pcx-" + randomHex(17);
+        VpcPeeringConnection pcx = new VpcPeeringConnection();
+        pcx.setVpcPeeringConnectionId(pcxId);
+        pcx.setRegion(region);
+
+        VpcPeeringConnectionVpcInfo requester = new VpcPeeringConnectionVpcInfo();
+        requester.setVpcId(vpcId);
+        requester.setOwnerId(accountId);
+        requester.setRegion(region);
+        requester.setCidrBlock(vpc.getCidrBlock());
+        pcx.setRequesterVpcInfo(requester);
+
+        String accepterOwnerId = isSet(peerOwnerId) ? peerOwnerId : accountId;
+        String accepterRegion = isSet(peerRegion) ? peerRegion : region;
+        VpcPeeringConnectionVpcInfo accepter = new VpcPeeringConnectionVpcInfo();
+        accepter.setVpcId(peerVpcId);
+        accepter.setOwnerId(accepterOwnerId);
+        accepter.setRegion(accepterRegion);
+        // The accepter VPC may be a cross-account or "external" peer that this store never seeded
+        // (vpc-peering-cross-accounts, vpc-peering-external); report its CIDR only when we
+        // actually have it on file, rather than failing the request or fabricating one.
+        Vpc accepterVpc = vpcs.get(key(accepterRegion, peerVpcId)).orElse(null);
+        accepter.setCidrBlock(accepterVpc != null ? accepterVpc.getCidrBlock() : null);
+        pcx.setAccepterVpcInfo(accepter);
+
+        pcx.setStatus(new VpcPeeringConnectionStateReason("pending-acceptance",
+                "Pending Acceptance by " + accepterOwnerId));
+        if (peeringTags != null) {
+            pcx.setTags(new ArrayList<>(peeringTags));
+        }
+
+        vpcPeeringConnections.put(pcxId, pcx);
+        return pcx;
+    }
+
+    public List<VpcPeeringConnection> describeVpcPeeringConnections(String region, List<String> ids,
+                                                                     Map<String, List<String>> filters) {
+        ensureDefaultResources(region);
+        return vpcPeeringConnections.scan(k -> true).stream()
+                .filter(pcx -> ids.isEmpty() || ids.contains(pcx.getVpcPeeringConnectionId()))
+                .filter(pcx -> matchesFilters(pcx, filters, region))
+                .collect(Collectors.toList());
+    }
+
+    public VpcPeeringConnection acceptVpcPeeringConnection(String region, String vpcPeeringConnectionId) {
+        synchronized (lockFor(vpcPeeringConnectionId)) {
+            VpcPeeringConnection current = getRequiredVpcPeeringConnection(vpcPeeringConnectionId);
+            String code = current.getStatus() != null ? current.getStatus().getCode() : null;
+            if (!"pending-acceptance".equals(code)) {
+                throw new AwsException("InvalidStateTransition",
+                        "VPC Peering Connection " + vpcPeeringConnectionId
+                                + " is not eligible for acceptance (state: " + code + ")", 400);
+            }
+            current.setStatus(new VpcPeeringConnectionStateReason("active", "Active"));
+            vpcPeeringConnections.put(vpcPeeringConnectionId, current);
+            return current;
+        }
+    }
+
+    public VpcPeeringConnection modifyVpcPeeringConnectionOptions(String region, String vpcPeeringConnectionId,
+                                                                   Boolean accepterAllowRemoteVpcDnsResolution,
+                                                                   Boolean requesterAllowRemoteVpcDnsResolution) {
+        synchronized (lockFor(vpcPeeringConnectionId)) {
+            VpcPeeringConnection current = getRequiredVpcPeeringConnection(vpcPeeringConnectionId);
+            if (accepterAllowRemoteVpcDnsResolution != null) {
+                current.setAccepterAllowRemoteVpcDnsResolution(accepterAllowRemoteVpcDnsResolution);
+            }
+            if (requesterAllowRemoteVpcDnsResolution != null) {
+                current.setRequesterAllowRemoteVpcDnsResolution(requesterAllowRemoteVpcDnsResolution);
+            }
+            vpcPeeringConnections.put(vpcPeeringConnectionId, current);
+            return current;
+        }
+    }
+
+    public void deleteVpcPeeringConnection(String region, String vpcPeeringConnectionId) {
+        getRequiredVpcPeeringConnection(vpcPeeringConnectionId);
+        vpcPeeringConnections.delete(vpcPeeringConnectionId);
+    }
+
+    private VpcPeeringConnection getRequiredVpcPeeringConnection(String vpcPeeringConnectionId) {
+        return vpcPeeringConnections.get(vpcPeeringConnectionId).orElseThrow(() -> new AwsException(
+                "InvalidVpcPeeringConnectionID.NotFound",
+                "The VPC peering connection ID '" + vpcPeeringConnectionId + "' does not exist", 400));
     }
 
     // ─── NAT Gateways ─────────────────────────────────────────────────────────
@@ -5156,6 +5267,25 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 default -> true;
             };
         }
+        if (resource instanceof VpcPeeringConnection pcx) {
+            return switch (filterName) {
+                case "vpc-peering-connection-id" -> matchesValue(values, pcx.getVpcPeeringConnectionId());
+                case "status-code" -> pcx.getStatus() != null && matchesValue(values, pcx.getStatus().getCode());
+                case "requester-vpc-info.vpc-id" -> pcx.getRequesterVpcInfo() != null
+                        && matchesValue(values, pcx.getRequesterVpcInfo().getVpcId());
+                case "requester-vpc-info.owner-id" -> pcx.getRequesterVpcInfo() != null
+                        && matchesValue(values, pcx.getRequesterVpcInfo().getOwnerId());
+                case "requester-vpc-info.region" -> pcx.getRequesterVpcInfo() != null
+                        && matchesValue(values, pcx.getRequesterVpcInfo().getRegion());
+                case "accepter-vpc-info.vpc-id" -> pcx.getAccepterVpcInfo() != null
+                        && matchesValue(values, pcx.getAccepterVpcInfo().getVpcId());
+                case "accepter-vpc-info.owner-id" -> pcx.getAccepterVpcInfo() != null
+                        && matchesValue(values, pcx.getAccepterVpcInfo().getOwnerId());
+                case "accepter-vpc-info.region" -> pcx.getAccepterVpcInfo() != null
+                        && matchesValue(values, pcx.getAccepterVpcInfo().getRegion());
+                default -> true;
+            };
+        }
         if (resource instanceof Instance inst) {
             return switch (filterName) {
                 case "instance-id" -> matchesValue(values, inst.getInstanceId());
@@ -5289,6 +5419,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         if (resource instanceof TransitGateway gateway) return gateway.getTags();
         if (resource instanceof TransitGatewayRouteTable routeTable) return routeTable.getTags();
         if (resource instanceof TransitGatewayVpcAttachment attachment) return attachment.getTags();
+        if (resource instanceof VpcPeeringConnection pcx) return pcx.getTags();
         return Collections.emptyList();
     }
 

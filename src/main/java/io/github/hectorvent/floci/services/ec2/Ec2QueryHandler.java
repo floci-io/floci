@@ -188,6 +188,12 @@ public class Ec2QueryHandler {
                 case "DeleteRouteTable" -> handleDeleteRouteTable(params, region);
                 case "AssociateRouteTable" -> handleAssociateRouteTable(params, region);
                 case "DisassociateRouteTable" -> handleDisassociateRouteTable(params, region);
+                case "CreateVpcPeeringConnection" -> handleCreateVpcPeeringConnection(params, region);
+                case "AcceptVpcPeeringConnection" -> handleAcceptVpcPeeringConnection(params, region);
+                case "DescribeVpcPeeringConnections" -> handleDescribeVpcPeeringConnections(params, region);
+                case "ModifyVpcPeeringConnectionOptions" -> handleModifyVpcPeeringConnectionOptions(params, region);
+                case "DeleteVpcPeeringConnection" -> handleDeleteVpcPeeringConnection(params, region);
+
                 case "CreateRoute" -> handleCreateRoute(params, region);
                 case "ReplaceRoute" -> handleReplaceRoute(params, region);
                 case "DeleteRoute" -> handleDeleteRoute(params, region);
@@ -2913,7 +2919,8 @@ public class Ec2QueryHandler {
         // unimplemented), but the id the caller sent is stored and reported back so an IPv6
         // egress route is not silently rewritten into a targetless one.
         String eigwId = p.getFirst("EgressOnlyInternetGatewayId");
-        service.createRoute(region, rtId, dest, destIpv6, destPrefixList, gwId, natGwId, eigwId);
+        String pcxId = p.getFirst("VpcPeeringConnectionId");
+        service.createRoute(region, rtId, dest, destIpv6, destPrefixList, gwId, natGwId, eigwId, pcxId);
         return booleanResponse("CreateRoute");
     }
 
@@ -2953,6 +2960,107 @@ public class Ec2QueryHandler {
         String destPrefixList = p.getFirst("DestinationPrefixListId");
         service.deleteRoute(region, rtId, dest, destIpv6, destPrefixList);
         return booleanResponse("DeleteRoute");
+    }
+
+    // ─── VPC Peering Connection handlers ────────────────────────────────────────
+
+    private Response handleCreateVpcPeeringConnection(MultivaluedMap<String, String> p, String region) {
+        String vpcId = p.getFirst("VpcId");
+        String peerVpcId = p.getFirst("PeerVpcId");
+        String peerOwnerId = p.getFirst("PeerOwnerId");
+        String peerRegion = p.getFirst("PeerRegion");
+        List<Tag> pcxTags = parseTagsForResource(p, "vpc-peering-connection");
+        VpcPeeringConnection pcx = service.createVpcPeeringConnection(region, vpcId, peerVpcId, peerOwnerId,
+                peerRegion, pcxTags);
+        XmlBuilder xml = new XmlBuilder()
+                .start("CreateVpcPeeringConnectionResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("vpcPeeringConnection").raw(vpcPeeringConnectionXml(pcx)).end("vpcPeeringConnection")
+                .end("CreateVpcPeeringConnectionResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleAcceptVpcPeeringConnection(MultivaluedMap<String, String> p, String region) {
+        VpcPeeringConnection pcx = service.acceptVpcPeeringConnection(region, p.getFirst("VpcPeeringConnectionId"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("AcceptVpcPeeringConnectionResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("vpcPeeringConnection").raw(vpcPeeringConnectionXml(pcx)).end("vpcPeeringConnection")
+                .end("AcceptVpcPeeringConnectionResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDescribeVpcPeeringConnections(MultivaluedMap<String, String> p, String region) {
+        List<String> ids = getList(p, "VpcPeeringConnectionId");
+        Map<String, List<String>> filters = getFilters(p);
+        List<VpcPeeringConnection> connections = service.describeVpcPeeringConnections(region, ids, filters);
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeVpcPeeringConnectionsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("vpcPeeringConnectionSet");
+        for (VpcPeeringConnection pcx : connections) {
+            xml.start("item").raw(vpcPeeringConnectionXml(pcx)).end("item");
+        }
+        xml.end("vpcPeeringConnectionSet").end("DescribeVpcPeeringConnectionsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleModifyVpcPeeringConnectionOptions(MultivaluedMap<String, String> p, String region) {
+        String pcxId = p.getFirst("VpcPeeringConnectionId");
+        Boolean accepterDns = parseOptionalBoolean(
+                p.getFirst("AccepterPeeringConnectionOptions.AllowDnsResolutionFromRemoteVpc"),
+                "AccepterPeeringConnectionOptions.AllowDnsResolutionFromRemoteVpc");
+        Boolean requesterDns = parseOptionalBoolean(
+                p.getFirst("RequesterPeeringConnectionOptions.AllowDnsResolutionFromRemoteVpc"),
+                "RequesterPeeringConnectionOptions.AllowDnsResolutionFromRemoteVpc");
+        VpcPeeringConnection pcx = service.modifyVpcPeeringConnectionOptions(region, pcxId, accepterDns, requesterDns);
+        XmlBuilder xml = new XmlBuilder()
+                .start("ModifyVpcPeeringConnectionOptionsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("accepterPeeringConnectionOptions")
+                .elem("allowDnsResolutionFromRemoteVpc", String.valueOf(pcx.isAccepterAllowRemoteVpcDnsResolution()))
+                .end("accepterPeeringConnectionOptions")
+                .start("requesterPeeringConnectionOptions")
+                .elem("allowDnsResolutionFromRemoteVpc", String.valueOf(pcx.isRequesterAllowRemoteVpcDnsResolution()))
+                .end("requesterPeeringConnectionOptions")
+                .end("ModifyVpcPeeringConnectionOptionsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDeleteVpcPeeringConnection(MultivaluedMap<String, String> p, String region) {
+        service.deleteVpcPeeringConnection(region, p.getFirst("VpcPeeringConnectionId"));
+        return booleanResponse("DeleteVpcPeeringConnection");
+    }
+
+    private String vpcPeeringConnectionXml(VpcPeeringConnection pcx) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("vpcPeeringConnectionId", pcx.getVpcPeeringConnectionId());
+        xml.raw(vpcPeeringConnectionVpcInfoXml("requesterVpcInfo", pcx.getRequesterVpcInfo()));
+        xml.raw(vpcPeeringConnectionVpcInfoXml("accepterVpcInfo", pcx.getAccepterVpcInfo()));
+        if (pcx.getStatus() != null) {
+            xml.start("status")
+                    .elem("code", pcx.getStatus().getCode())
+                    .elem("message", pcx.getStatus().getMessage())
+                    .end("status");
+        }
+        xml.raw(tagSetXml(pcx.getTags()));
+        return xml.build();
+    }
+
+    private String vpcPeeringConnectionVpcInfoXml(String elementName, VpcPeeringConnectionVpcInfo info) {
+        if (info == null) {
+            return "";
+        }
+        XmlBuilder xml = new XmlBuilder()
+                .start(elementName)
+                .elem("vpcId", info.getVpcId())
+                .elem("ownerId", info.getOwnerId())
+                .elem("region", info.getRegion());
+        if (info.getCidrBlock() != null) {
+            xml.elem("cidrBlock", info.getCidrBlock());
+        }
+        xml.end(elementName);
+        return xml.build();
     }
 
     // ─── Network ACL handlers ─────────────────────────────────────────────────
@@ -3712,6 +3820,7 @@ public class Ec2QueryHandler {
                     .elem("gatewayId", r.getGatewayId())
                     .elem("natGatewayId", r.getNatGatewayId())
                     .elem("egressOnlyInternetGatewayId", r.getEgressOnlyInternetGatewayId())
+                    .elem("vpcPeeringConnectionId", r.getVpcPeeringConnectionId())
                     .elem("state", r.getState())
                     .elem("origin", r.getOrigin())
                     .end("item");

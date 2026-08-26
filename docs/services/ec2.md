@@ -257,9 +257,36 @@ Floci seeds the following resources on first use in each region so Terraform, th
 | DeleteRouteTable | Deletes a route table from the local EC2 store. |
 | AssociateRouteTable | Associates a route table with a subnet. |
 | DisassociateRouteTable | Removes a route table association. |
-| CreateRoute | Adds a route to a route table. |
+| CreateRoute | Adds a route to a route table. Accepts `VpcPeeringConnectionId` as a target (alongside `GatewayId`/`NatGatewayId`/`EgressOnlyInternetGatewayId`) and reports it back on `DescribeRouteTables`. |
 | ReplaceRoute | Replaces the target of an existing route. |
 | DeleteRoute | Removes a route from a route table. |
+
+### VPC Peering Connections
+
+| Action | Description |
+|--------|-------------|
+| CreateVpcPeeringConnection | Creates a peering connection between the local VPC and a peer VPC, in status `pending-acceptance`. |
+| AcceptVpcPeeringConnection | Transitions a `pending-acceptance` connection to `active`. |
+| DescribeVpcPeeringConnections | Lists or returns stored peering connections. |
+| ModifyVpcPeeringConnectionOptions | Sets `allow_remote_vpc_dns_resolution` independently per side. |
+| DeleteVpcPeeringConnection | Deletes a peering connection from the local EC2 store. |
+
+Real AWS never auto-accepts a connection, same-account or not: every `CreateVpcPeeringConnection`
+starts `pending-acceptance` and stays there until an explicit `AcceptVpcPeeringConnection`. The
+`auto_accept` convenience on Terraform's `aws_vpc_peering_connection` and
+`aws_vpc_peering_connection_accepter` resources is implemented by the *provider*, which simply
+issues that second call itself — so this emulator does not special-case same-account peers.
+
+A connection is stored keyed by its id alone, not `region::id` like every other EC2 resource here.
+It is meaningfully addressable from both the requester's and the accepter's side, which can be a
+different region (`peer_region`/`accepter_region`); region-scoped storage would leave the accepter's
+`AcceptVpcPeeringConnection`/`DescribeVpcPeeringConnections` calls unable to find a connection
+created under the requester's region key. `RejectVpcPeeringConnection` is not implemented — no
+Gruntwork VPC-peering example exercises it (they use `auto_accept`, not manual rejection).
+
+The accepter VPC named by `PeerVpcId` may belong to another account or region and not be modelled
+in this store at all (a cross-account or "external" peer). Its `cidrBlock` is reported only when
+that VPC happens to exist locally; the request still succeeds either way, and no CIDR is fabricated.
 
 ### Network ACLs
 

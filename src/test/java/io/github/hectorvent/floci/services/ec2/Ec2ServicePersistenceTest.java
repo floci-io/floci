@@ -224,7 +224,7 @@ class Ec2ServicePersistenceTest {
         // (b) CreateRoute with an equivalent-but-differently-spelled destination is a duplicate,
         // not a new route, of the legacy one.
         AwsException duplicate = assertThrows(AwsException.class, () -> restarted.createRoute(
-                REGION, routeTableId, "100.68.63.255/18", null, null, "igw-other00000000000", null, null));
+                REGION, routeTableId, "100.68.63.255/18", null, null, "igw-other00000000000", null, null, null));
         assertEquals("RouteAlreadyExists", duplicate.getErrorCode());
 
         // (c) ReplaceRoute against the legacy route's original, non-canonical spelling finds the

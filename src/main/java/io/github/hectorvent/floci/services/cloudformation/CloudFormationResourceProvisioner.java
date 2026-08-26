@@ -825,8 +825,10 @@ public class CloudFormationResourceProvisioner {
         String gatewayId = resolveOptional(props, "GatewayId", engine);
         String natGatewayId = resolveOptional(props, "NatGatewayId", engine);
         String egressOnlyInternetGatewayId = resolveOptional(props, "EgressOnlyInternetGatewayId", engine);
+        String vpcPeeringConnectionId = resolveOptional(props, "VpcPeeringConnectionId", engine);
         ec2Service.createRoute(region, routeTableId, destinationCidr, destinationIpv6Cidr,
-                destinationPrefixListId, gatewayId, natGatewayId, egressOnlyInternetGatewayId);
+                destinationPrefixListId, gatewayId, natGatewayId, egressOnlyInternetGatewayId,
+                vpcPeeringConnectionId);
         r.setPhysicalId(r.getLogicalId() + "-" + UUID.randomUUID().toString().substring(0, 8));
     }
 
