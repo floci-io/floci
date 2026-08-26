@@ -87,6 +87,10 @@ public class Route53ResolverService {
 
     public ObjectNode createFirewallDomainList(JsonNode request, String region, String accountId) {
         String name = requireText(request, "Name");
+        java.util.Optional<ObjectNode> replay = replayOf(domainListStore, request);
+        if (replay.isPresent()) {
+            return replay.get();
+        }
         String id = id("rslvr-fdl");
         ObjectNode list = objectMapper.createObjectNode();
         list.put("Id", id);
@@ -126,6 +130,10 @@ public class Route53ResolverService {
         JsonNode ipAddresses = request.path("IpAddressRequests");
         if (!ipAddresses.isArray() || ipAddresses.isEmpty()) {
             throw new AwsException("InvalidParametersException", "IpAddressRequests is required", 400);
+        }
+        java.util.Optional<ObjectNode> replay = replayOf(endpointStore, request);
+        if (replay.isPresent()) {
+            return replay.get();
         }
         String id = id("rslvr-in");
         ObjectNode endpoint = objectMapper.createObjectNode();
@@ -173,6 +181,10 @@ public class Route53ResolverService {
     public ObjectNode createResolverRule(JsonNode request, String region, String accountId) {
         requireText(request, "RuleType");
         String domainName = text(request, "DomainName");
+        java.util.Optional<ObjectNode> replay = replayOf(ruleStore, request);
+        if (replay.isPresent()) {
+            return replay.get();
+        }
         String id = id("rslvr-rr");
         ObjectNode rule = objectMapper.createObjectNode();
         rule.put("Id", id);
@@ -256,6 +268,23 @@ public class Route53ResolverService {
     }
 
     // ---------- Shared helpers ----------
+
+    /**
+     * Route 53 Resolver creates are idempotent on {@code CreatorRequestId}: replaying a
+     * token returns the resource it originally created rather than allocating a second
+     * one. Called after the request's own validation so a replayed token never excuses a
+     * malformed body. A blank/absent token opts out — those creates always allocate.
+     */
+    private java.util.Optional<ObjectNode> replayOf(StorageBackend<String, ObjectNode> store, JsonNode request) {
+        String creatorRequestId = text(request, "CreatorRequestId");
+        if (creatorRequestId == null || creatorRequestId.isBlank()) {
+            return java.util.Optional.empty();
+        }
+        return store.scan(key -> true).stream()
+                .filter(existing -> creatorRequestId.equals(text(existing, "CreatorRequestId")))
+                .findFirst()
+                .map(ObjectNode::deepCopy);
+    }
 
     private ObjectNode require(StorageBackend<String, ObjectNode> store, String id, String type) {
         return store.get(id).orElseThrow(() -> new AwsException("ResourceNotFoundException",

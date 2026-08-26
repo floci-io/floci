@@ -9,6 +9,8 @@ import org.junit.jupiter.api.Test;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 
 /**
  * Wire-level tests for the custom (non-managed) Route 53 Resolver operations
@@ -80,6 +82,118 @@ class Route53ResolverCustomResourcesConsumerTest {
         call("GetFirewallDomainList", "{\"FirewallDomainListId\":\"" + id + "\"}")
         .then()
             .statusCode(404);
+    }
+
+    // ---------- CreatorRequestId idempotency ----------
+
+    @Test
+    void createFirewallDomainList_replayedCreatorRequestId_returnsOriginalList() {
+        String body = "{\"Name\":\"ab-idem-fdl\",\"CreatorRequestId\":\"tok-idem-fdl\"}";
+
+        String first = call("CreateFirewallDomainList", body)
+                .then().statusCode(200).extract().path("FirewallDomainList.Id");
+        String second = call("CreateFirewallDomainList", body)
+                .then().statusCode(200).extract().path("FirewallDomainList.Id");
+
+        assertEquals(first, second);
+        call("ListFirewallDomainLists", "{}")
+        .then()
+            .statusCode(200)
+            .body("FirewallDomainLists.findAll { it.CreatorRequestId == 'tok-idem-fdl' }.size()",
+                    equalTo(1));
+    }
+
+    @Test
+    void createFirewallDomainList_withoutCreatorRequestId_createsDistinctLists() {
+        String body = "{\"Name\":\"ab-noidem-fdl\"}";
+
+        String first = call("CreateFirewallDomainList", body)
+                .then().statusCode(200).extract().path("FirewallDomainList.Id");
+        String second = call("CreateFirewallDomainList", body)
+                .then().statusCode(200).extract().path("FirewallDomainList.Id");
+
+        assertNotEquals(first, second);
+    }
+
+    @Test
+    void createResolverEndpoint_replayedCreatorRequestId_returnsOriginalEndpoint() {
+        String body = "{\"Name\":\"ab-idem-endpoint\",\"Direction\":\"INBOUND\","
+                + "\"SecurityGroupIds\":[\"sg-abc123\"],\"IpAddressRequests\":[{\"SubnetId\":\"subnet-abc\","
+                + "\"Ip\":\"10.0.0.5\"}],\"CreatorRequestId\":\"tok-idem-endpoint\"}";
+
+        String first = call("CreateResolverEndpoint", body)
+                .then().statusCode(200).extract().path("ResolverEndpoint.Id");
+        String second = call("CreateResolverEndpoint", body)
+                .then().statusCode(200).extract().path("ResolverEndpoint.Id");
+
+        assertEquals(first, second);
+        call("ListResolverEndpoints", "{}")
+        .then()
+            .statusCode(200)
+            .body("ResolverEndpoints.findAll { it.CreatorRequestId == 'tok-idem-endpoint' }.size()",
+                    equalTo(1));
+    }
+
+    @Test
+    void createResolverEndpoint_withoutCreatorRequestId_createsDistinctEndpoints() {
+        String body = "{\"Name\":\"ab-noidem-endpoint\",\"Direction\":\"INBOUND\","
+                + "\"SecurityGroupIds\":[\"sg-abc123\"],\"IpAddressRequests\":[{\"SubnetId\":\"subnet-abc\","
+                + "\"Ip\":\"10.0.0.5\"}]}";
+
+        String first = call("CreateResolverEndpoint", body)
+                .then().statusCode(200).extract().path("ResolverEndpoint.Id");
+        String second = call("CreateResolverEndpoint", body)
+                .then().statusCode(200).extract().path("ResolverEndpoint.Id");
+
+        assertNotEquals(first, second);
+    }
+
+    @Test
+    void createResolverEndpoint_replayedCreatorRequestIdWithInvalidBody_stillValidates() {
+        String valid = "{\"Name\":\"ab-idem-validate\",\"Direction\":\"INBOUND\","
+                + "\"SecurityGroupIds\":[\"sg-abc123\"],\"IpAddressRequests\":[{\"SubnetId\":\"subnet-abc\","
+                + "\"Ip\":\"10.0.0.5\"}],\"CreatorRequestId\":\"tok-idem-validate\"}";
+        call("CreateResolverEndpoint", valid).then().statusCode(200);
+
+        // Replaying the token does not excuse a malformed request body.
+        call("CreateResolverEndpoint", "{\"Name\":\"ab-idem-validate\",\"Direction\":\"INBOUND\","
+                + "\"CreatorRequestId\":\"tok-idem-validate\"}")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParametersException"));
+    }
+
+    @Test
+    void createResolverRule_replayedCreatorRequestId_returnsOriginalRule() {
+        String body = "{\"Name\":\"ab-idem-rule\",\"RuleType\":\"FORWARD\","
+                + "\"DomainName\":\"ab-idem-rule.example.com.\","
+                + "\"TargetIps\":[{\"Ip\":\"10.0.0.1\",\"Port\":53}],"
+                + "\"CreatorRequestId\":\"tok-idem-rule\"}";
+
+        String first = call("CreateResolverRule", body)
+                .then().statusCode(200).extract().path("ResolverRule.Id");
+        String second = call("CreateResolverRule", body)
+                .then().statusCode(200).extract().path("ResolverRule.Id");
+
+        assertEquals(first, second);
+        call("ListResolverRules", "{}")
+        .then()
+            .statusCode(200)
+            .body("ResolverRules.findAll { it.CreatorRequestId == 'tok-idem-rule' }.size()", equalTo(1));
+    }
+
+    @Test
+    void createResolverRule_withoutCreatorRequestId_createsDistinctRules() {
+        String body = "{\"Name\":\"ab-noidem-rule\",\"RuleType\":\"FORWARD\","
+                + "\"DomainName\":\"ab-noidem-rule.example.com.\","
+                + "\"TargetIps\":[{\"Ip\":\"10.0.0.1\",\"Port\":53}]}";
+
+        String first = call("CreateResolverRule", body)
+                .then().statusCode(200).extract().path("ResolverRule.Id");
+        String second = call("CreateResolverRule", body)
+                .then().statusCode(200).extract().path("ResolverRule.Id");
+
+        assertNotEquals(first, second);
     }
 
     // ---------- Resolver endpoints ----------

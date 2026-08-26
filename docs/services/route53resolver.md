@@ -39,6 +39,12 @@ rule associations) is backed by real per-service storage, added this session. Id
 the project's standard random-suffix convention (`rslvr-fdl-...`, `rslvr-in-...`,
 `rslvr-rr-...`, `rslvr-rrassoc-...`), distinct from the deterministic managed-list ids.
 
+`CreateFirewallDomainList`, `CreateResolverEndpoint` and `CreateResolverRule` are
+idempotent on `CreatorRequestId`, as they are in real AWS: replaying a token returns the
+resource it originally created instead of allocating a second one. The check runs after
+the request's own validation, so a replayed token never excuses a malformed body. A
+request without a `CreatorRequestId` opts out and always allocates a new resource.
+
 ## Limitations
 
 - **All create/update operations complete synchronously.** Real AWS transitions a
