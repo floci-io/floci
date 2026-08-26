@@ -9,6 +9,8 @@ public class IpamPoolCidr {
 
     private String cidr;
     private String state;
+    /** Idempotency token of the ProvisionIpamPoolCidr call that created this CIDR. */
+    private String clientToken;
 
     public IpamPoolCidr() {}
 
@@ -22,4 +24,7 @@ public class IpamPoolCidr {
 
     public String getState() { return state; }
     public void setState(String state) { this.state = state; }
+
+    public String getClientToken() { return clientToken; }
+    public void setClientToken(String clientToken) { this.clientToken = clientToken; }
 }

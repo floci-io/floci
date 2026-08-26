@@ -1340,7 +1340,9 @@ public class Ec2QueryHandler {
                 p.getFirst("Locale"),
                 p.getFirst("SourceIpamPoolId"),
                 p.getFirst("AddressFamily"),
-                p.getFirst("Description"));
+                p.getFirst("Description"),
+                config.defaultAccountId(),
+                p.getFirst("ClientToken"));
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateIpamPoolResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString());
@@ -1401,7 +1403,7 @@ public class Ec2QueryHandler {
 
     private Response handleProvisionIpamPoolCidr(MultivaluedMap<String, String> p, String region) {
         IpamPoolCidr cidr = ipamService.provisionIpamPoolCidr(region,
-                p.getFirst("IpamPoolId"), p.getFirst("Cidr"));
+                p.getFirst("IpamPoolId"), p.getFirst("Cidr"), p.getFirst("ClientToken"));
         XmlBuilder xml = new XmlBuilder()
                 .start("ProvisionIpamPoolCidrResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -1434,7 +1436,8 @@ public class Ec2QueryHandler {
                 p.getFirst("IpamPoolId"),
                 netmask != null ? Integer.valueOf(netmask) : null,
                 p.getFirst("Cidr"),
-                p.getFirst("Description"));
+                p.getFirst("Description"),
+                p.getFirst("ClientToken"));
         XmlBuilder xml = new XmlBuilder()
                 .start("AllocateIpamPoolCidrResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString());

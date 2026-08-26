@@ -268,6 +268,58 @@ class Ec2IpamServiceTest {
         assertEquals(2, service.getIpamPoolAllocations(REGION, pool.getIpamPoolId()).size());
     }
 
+    // --- ClientToken idempotency (LZA's get-ipam-subnet-cidr custom resource retries
+    // AllocateIpamPoolCidr; a replay must not burn a second CIDR out of the pool) ---
+
+    @Test
+    void replayingAnAllocationClientTokenReturnsTheOriginalAllocation() {
+        IpamPool pool = poolWith("10.0.0.0/16");
+        IpamPoolAllocation first = service.allocateIpamPoolCidr(
+                REGION, pool.getIpamPoolId(), 24, null, "subnet-a", "alloc-token");
+        IpamPoolAllocation replay = service.allocateIpamPoolCidr(
+                REGION, pool.getIpamPoolId(), 24, null, "subnet-a", "alloc-token");
+
+        assertEquals(first.getIpamPoolAllocationId(), replay.getIpamPoolAllocationId());
+        assertEquals(first.getCidr(), replay.getCidr());
+        assertEquals(1, service.getIpamPoolAllocations(REGION, pool.getIpamPoolId()).size(),
+                "a replayed ClientToken must not consume a second CIDR");
+    }
+
+    @Test
+    void distinctAllocationClientTokensStillConsumeDistinctCidrs() {
+        IpamPool pool = poolWith("10.0.0.0/16");
+        IpamPoolAllocation first = service.allocateIpamPoolCidr(
+                REGION, pool.getIpamPoolId(), 24, null, null, "token-a");
+        IpamPoolAllocation second = service.allocateIpamPoolCidr(
+                REGION, pool.getIpamPoolId(), 24, null, null, "token-b");
+        assertEquals("10.0.0.0/24", first.getCidr());
+        assertEquals("10.0.1.0/24", second.getCidr());
+    }
+
+    @Test
+    void replayingAProvisionClientTokenReturnsTheOriginalCidr() {
+        Ipam ipam = service.createIpam(REGION, null, List.of(REGION));
+        IpamPool pool = service.createIpamPool(REGION, ipam.getPrivateDefaultScopeId(),
+                REGION, null, "ipv4", null);
+        service.provisionIpamPoolCidr(REGION, pool.getIpamPoolId(), "10.0.0.0/8", "provision-token");
+        service.provisionIpamPoolCidr(REGION, pool.getIpamPoolId(), "10.0.0.0/8", "provision-token");
+
+        assertEquals(1, service.getIpamPoolCidrs(REGION, pool.getIpamPoolId()).size(),
+                "a replayed ClientToken must not provision the CIDR twice");
+    }
+
+    @Test
+    void replayingAPoolCreateClientTokenReturnsTheOriginalPool() {
+        Ipam ipam = service.createIpam(REGION, null, List.of(REGION));
+        IpamPool first = service.createIpamPool(REGION, ipam.getPrivateDefaultScopeId(),
+                REGION, null, "ipv4", "first", "000000000000", "pool-token");
+        IpamPool replay = service.createIpamPool(REGION, ipam.getPrivateDefaultScopeId(),
+                REGION, null, "ipv4", "second", "000000000000", "pool-token");
+
+        assertEquals(first.getIpamPoolId(), replay.getIpamPoolId());
+        assertEquals(1, service.describeIpamPools(REGION, List.of()).size());
+    }
+
     @Test
     void allocatingFromAnUnknownPoolThrows() {
         assertThrows(AwsException.class,

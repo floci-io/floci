@@ -13,6 +13,8 @@ public class IpamPoolAllocation {
     private String resourceType;
     private String resourceId;
     private String resourceOwner;
+    /** Idempotency token of the AllocateIpamPoolCidr call that created this allocation. */
+    private String clientToken;
 
     public IpamPoolAllocation() {}
 
@@ -33,4 +35,7 @@ public class IpamPoolAllocation {
 
     public String getResourceOwner() { return resourceOwner; }
     public void setResourceOwner(String resourceOwner) { this.resourceOwner = resourceOwner; }
+
+    public String getClientToken() { return clientToken; }
+    public void setClientToken(String clientToken) { this.clientToken = clientToken; }
 }

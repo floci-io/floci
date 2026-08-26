@@ -294,6 +294,27 @@ public class Ec2IpamService {
     public IpamPool createIpamPool(String region, String ipamScopeId, String locale,
                                    String sourceIpamPoolId, String addressFamily, String description,
                                    String ownerId) {
+        return createIpamPool(region, ipamScopeId, locale, sourceIpamPoolId, addressFamily,
+                description, ownerId, null);
+    }
+
+    /**
+     * Creates a pool, honouring {@code ClientToken}: a replay returns the pool the first call
+     * created rather than minting a second one. Parameter differences on a replay are ignored,
+     * as {@link #createIpam} already does.
+     */
+    public IpamPool createIpamPool(String region, String ipamScopeId, String locale,
+                                   String sourceIpamPoolId, String addressFamily, String description,
+                                   String ownerId, String clientToken) {
+        if (clientToken != null && !clientToken.isBlank()) {
+            // Caller-partition scan: an idempotency token is scoped to the account that used it.
+            for (IpamPool existing : pools.scan(k -> true)) {
+                if (region.equals(existing.getRegion())
+                        && clientToken.equals(existing.getClientToken())) {
+                    return existing;
+                }
+            }
+        }
         if (sourceIpamPoolId != null) {
             requirePool(region, sourceIpamPoolId);
         }
@@ -309,6 +330,7 @@ public class Ec2IpamService {
         pool.setAddressFamily(addressFamily != null ? addressFamily : "ipv4");
         pool.setDescription(description);
         pool.setState("create-complete");
+        pool.setClientToken(clientToken != null && !clientToken.isBlank() ? clientToken : null);
         pools.put(key(region, pool.getIpamPoolId()), pool);
         LOG.infov("Created IPAM pool {0} (scope {1}, source {2})",
                 pool.getIpamPoolId(), ipamScopeId, sourceIpamPoolId);
@@ -383,8 +405,24 @@ public class Ec2IpamService {
     }
 
     public IpamPoolCidr provisionIpamPoolCidr(String region, String ipamPoolId, String cidr) {
+        return provisionIpamPoolCidr(region, ipamPoolId, cidr, null);
+    }
+
+    /**
+     * Provisions a CIDR onto a pool, honouring {@code ClientToken}: a replay returns the CIDR the
+     * first call provisioned instead of adding a duplicate entry.
+     */
+    public IpamPoolCidr provisionIpamPoolCidr(String region, String ipamPoolId, String cidr,
+                                              String clientToken) {
         OwnedPool ownedPool = requireOwnedPool(region, ipamPoolId);
         IpamPool pool = ownedPool.pool();
+        if (clientToken != null && !clientToken.isBlank()) {
+            for (IpamPoolCidr existing : pool.getProvisionedCidrs()) {
+                if (clientToken.equals(existing.getClientToken())) {
+                    return existing;
+                }
+            }
+        }
         if (cidr == null || cidr.isBlank()) {
             throw new AwsException("MissingParameter", "Cidr is required.", 400);
         }
@@ -401,6 +439,7 @@ public class Ec2IpamService {
             Ipv4Cidrs.contains(cidr, cidr); // validate syntax for top-level pools
         }
         IpamPoolCidr poolCidr = new IpamPoolCidr(cidr, "provisioned");
+        poolCidr.setClientToken(clientToken != null && !clientToken.isBlank() ? clientToken : null);
         pool.getProvisionedCidrs().add(poolCidr);
         savePool(ownedPool);
         return poolCidr;
@@ -415,8 +454,26 @@ public class Ec2IpamService {
     public IpamPoolAllocation allocateIpamPoolCidr(String region, String ipamPoolId,
                                                    Integer netmaskLength, String cidr,
                                                    String description) {
+        return allocateIpamPoolCidr(region, ipamPoolId, netmaskLength, cidr, description, null);
+    }
+
+    /**
+     * Allocates a CIDR from a pool, honouring {@code ClientToken}. LZA's
+     * {@code get-ipam-subnet-cidr} custom resource retries this call, and without the replay
+     * check each retry would burn another distinct CIDR out of the pool.
+     */
+    public IpamPoolAllocation allocateIpamPoolCidr(String region, String ipamPoolId,
+                                                   Integer netmaskLength, String cidr,
+                                                   String description, String clientToken) {
         OwnedPool ownedPool = requireOwnedPool(region, ipamPoolId);
         IpamPool pool = ownedPool.pool();
+        if (clientToken != null && !clientToken.isBlank()) {
+            for (IpamPoolAllocation existing : pool.getAllocations()) {
+                if (clientToken.equals(existing.getClientToken())) {
+                    return existing;
+                }
+            }
+        }
         List<String> provisioned = pool.getProvisionedCidrs().stream()
                 .map(IpamPoolCidr::getCidr).toList();
         List<String> occupied = occupiedSpace(pool);
@@ -451,6 +508,7 @@ public class Ec2IpamService {
         allocation.setDescription(description);
         allocation.setResourceType("custom");
         allocation.setResourceOwner(config.defaultAccountId());
+        allocation.setClientToken(clientToken != null && !clientToken.isBlank() ? clientToken : null);
         pool.getAllocations().add(allocation);
         savePool(ownedPool);
         LOG.infov("Allocated {0} from IPAM pool {1}", chosen, ipamPoolId);
