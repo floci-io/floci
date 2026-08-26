@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.ec2;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -15,6 +16,8 @@ import io.github.hectorvent.floci.services.ec2.model.AsnAssociation;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.context.ContextNotActiveException;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
@@ -51,15 +54,17 @@ public class Ec2IpamService {
     // org-wide settings, e.g. the delegated admin account
     private final StorageBackend<String, String> settings;
     private final StorageBackend<String, AsnAssociation> asnAssociations;
-
+    private final Instance<RequestContext> requestContextInstance;
 
     @Inject
-    public Ec2IpamService(EmulatorConfig config, StorageFactory storageFactory) {
+    public Ec2IpamService(EmulatorConfig config, StorageFactory storageFactory,
+                          Instance<RequestContext> requestContextInstance) {
         this(config,
                 storageFactory.create("ec2", "ec2-ipams.json", new TypeReference<Map<String, Ipam>>() {}),
                 storageFactory.create("ec2", "ec2-ipam-pools.json", new TypeReference<Map<String, IpamPool>>() {}),
                 storageFactory.create("ec2", "ec2-ipam-settings.json", new TypeReference<Map<String, String>>() {}),
-                storageFactory.create("ec2", "ec2-ipam-asn-associations.json", new TypeReference<Map<String, AsnAssociation>>() {}));
+                storageFactory.create("ec2", "ec2-ipam-asn-associations.json", new TypeReference<Map<String, AsnAssociation>>() {}),
+                requestContextInstance);
     }
 
     // Package-private for hermetic tests (pass in-memory StorageBackends directly).
@@ -68,11 +73,40 @@ public class Ec2IpamService {
                    StorageBackend<String, IpamPool> pools,
                    StorageBackend<String, String> settings,
                    StorageBackend<String, AsnAssociation> asnAssociations) {
+        this(config, ipams, pools, settings, asnAssociations, null);
+    }
+
+    Ec2IpamService(EmulatorConfig config,
+                   StorageBackend<String, Ipam> ipams,
+                   StorageBackend<String, IpamPool> pools,
+                   StorageBackend<String, String> settings,
+                   StorageBackend<String, AsnAssociation> asnAssociations,
+                   Instance<RequestContext> requestContextInstance) {
         this.config = config;
         this.ipams = ipams;
         this.pools = pools;
         this.settings = settings;
         this.asnAssociations = asnAssociations;
+        this.requestContextInstance = requestContextInstance;
+    }
+
+    /**
+     * The account making the current request, resolved the same way
+     * {@code AccountAwareStorageBackend} derives its key prefix, so an ownership comparison
+     * against a resolved entry's partition is meaningful both in and out of a request scope.
+     */
+    private String callerAccountId() {
+        if (requestContextInstance != null) {
+            try {
+                String accountId = requestContextInstance.get().getAccountId();
+                if (accountId != null) {
+                    return accountId;
+                }
+            } catch (ContextNotActiveException ignored) {
+                // outside request scope — fall through to default
+            }
+        }
+        return config.defaultAccountId();
     }
 
     // ─── Organization admin delegation ──────────────────────────────────────
@@ -231,8 +265,9 @@ public class Ec2IpamService {
     }
 
     public Ipam deleteIpam(String region, String ipamId) {
-        Ipam ipam = requireIpam(region, ipamId);
-        ipams.delete(key(ipam.getRegion(), ipam.getIpamId()));
+        OwnedIpam ownedIpam = requireOwnedIpamForMutation(region, ipamId);
+        Ipam ipam = ownedIpam.ipam();
+        deleteIpamEntry(ownedIpam);
         // Lenient cascade (AWS requires --cascade): drop the IPAM's pools too.
         for (IpamPool pool : pools.scan(k -> true)) {
             if (ipamId.equals(pool.getIpamId())) {
@@ -252,7 +287,8 @@ public class Ec2IpamService {
     public Ipam modifyIpam(String region, String ipamId, String description,
                            List<String> addOperatingRegions, List<String> removeOperatingRegions,
                            Boolean enablePrivateGua, String meteredAccount, String tier) {
-        Ipam ipam = requireIpam(region, ipamId);
+        OwnedIpam ownedIpam = requireOwnedIpamForMutation(region, ipamId);
+        Ipam ipam = ownedIpam.ipam();
         if (description != null) {
             ipam.setDescription(description);
         }
@@ -277,7 +313,7 @@ public class Ec2IpamService {
         if (removeOperatingRegions != null) {
             ipam.getOperatingRegions().removeIf(removeOperatingRegions::contains);
         }
-        ipams.put(key(ipam.getRegion(), ipam.getIpamId()), ipam);
+        saveIpam(ownedIpam);
         return ipam;
     }
 
@@ -341,7 +377,7 @@ public class Ec2IpamService {
                                    Boolean autoImport, Integer allocationMinNetmaskLength,
                                    Integer allocationMaxNetmaskLength, Integer allocationDefaultNetmaskLength,
                                    boolean clearAllocationDefaultNetmaskLength) {
-        OwnedPool ownedPool = requireOwnedPool(region, ipamPoolId);
+        OwnedPool ownedPool = requireOwnedPoolForMutation(region, ipamPoolId);
         IpamPool pool = ownedPool.pool();
         if (description != null) {
             pool.setDescription(description);
@@ -397,7 +433,7 @@ public class Ec2IpamService {
     }
 
     public IpamPool deleteIpamPool(String region, String ipamPoolId) {
-        OwnedPool ownedPool = requireOwnedPool(region, ipamPoolId);
+        OwnedPool ownedPool = requireOwnedPoolForMutation(region, ipamPoolId);
         IpamPool pool = ownedPool.pool();
         deletePool(ownedPool);
         pool.setState("delete-complete");
@@ -414,7 +450,7 @@ public class Ec2IpamService {
      */
     public IpamPoolCidr provisionIpamPoolCidr(String region, String ipamPoolId, String cidr,
                                               String clientToken) {
-        OwnedPool ownedPool = requireOwnedPool(region, ipamPoolId);
+        OwnedPool ownedPool = requireOwnedPoolForMutation(region, ipamPoolId);
         IpamPool pool = ownedPool.pool();
         if (clientToken != null && !clientToken.isBlank()) {
             for (IpamPoolCidr existing : pool.getProvisionedCidrs()) {
@@ -555,21 +591,99 @@ public class Ec2IpamService {
 
     // ─── Lookup helpers ─────────────────────────────────────────────────────
 
-    private Ipam requireIpam(String region, String ipamId) {
+    /**
+     * Resolves an IPAM the way pools resolve — across every account's partition — and then rejects
+     * a caller that does not own it. Modifying or deleting another account's IPAM is not an AWS
+     * operation, and AWS reports an IPAM you cannot see as absent.
+     */
+    private OwnedIpam requireOwnedIpamForMutation(String region, String ipamId) {
+        OwnedIpam ownedIpam = requireOwnedIpam(region, ipamId);
+        if (ownedIpam.accountId() != null && !ownedIpam.accountId().equals(callerAccountId())) {
+            throw ipamNotFound(ipamId);
+        }
+        return ownedIpam;
+    }
+
+    private OwnedIpam requireOwnedIpam(String region, String ipamId) {
+        if (ipams instanceof AccountAwareStorageBackend<?> rawAccountAware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<Ipam> accountAware =
+                    (AccountAwareStorageBackend<Ipam>) rawAccountAware;
+            Optional<AccountAwareStorageBackend.OwnedEntry<Ipam>> exact =
+                    accountAware.findAnyAccountEntry(key(region, ipamId));
+            if (exact.isPresent()) {
+                var entry = exact.get();
+                return new OwnedIpam(entry.account(), entry.value());
+            }
+            for (Ipam ipam : accountAware.scanAllAccounts()) {
+                if (ipam.getIpamId().equals(ipamId)) {
+                    var entry = accountAware.findAnyAccountEntry(
+                            key(ipam.getRegion(), ipam.getIpamId())).orElseThrow();
+                    return new OwnedIpam(entry.account(), entry.value());
+                }
+            }
+            throw ipamNotFound(ipamId);
+        }
+
         Optional<Ipam> direct = ipams.get(key(region, ipamId));
         if (direct.isPresent()) {
-            return direct.get();
+            return new OwnedIpam(null, direct.get());
         }
         for (Ipam ipam : ipams.scan(k -> true)) {
             if (ipam.getIpamId().equals(ipamId)) {
-                return ipam;
+                return new OwnedIpam(null, ipam);
             }
         }
-        throw new AwsException("InvalidIpamId.NotFound", "IPAM " + ipamId + " does not exist.", 400);
+        throw ipamNotFound(ipamId);
+    }
+
+    private void saveIpam(OwnedIpam ownedIpam) {
+        Ipam ipam = ownedIpam.ipam();
+        String ipamKey = key(ipam.getRegion(), ipam.getIpamId());
+        if (ownedIpam.accountId() != null
+                && ipams instanceof AccountAwareStorageBackend<?> rawAccountAware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<Ipam> accountAware =
+                    (AccountAwareStorageBackend<Ipam>) rawAccountAware;
+            accountAware.putForAccount(ownedIpam.accountId(), ipamKey, ipam);
+            return;
+        }
+        ipams.put(ipamKey, ipam);
+    }
+
+    private void deleteIpamEntry(OwnedIpam ownedIpam) {
+        Ipam ipam = ownedIpam.ipam();
+        String ipamKey = key(ipam.getRegion(), ipam.getIpamId());
+        if (ownedIpam.accountId() != null
+                && ipams instanceof AccountAwareStorageBackend<?> rawAccountAware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<Ipam> accountAware =
+                    (AccountAwareStorageBackend<Ipam>) rawAccountAware;
+            accountAware.deleteForAccount(ownedIpam.accountId(), ipamKey);
+            return;
+        }
+        ipams.delete(ipamKey);
+    }
+
+    private static AwsException ipamNotFound(String ipamId) {
+        return new AwsException("InvalidIpamId.NotFound", "IPAM " + ipamId + " does not exist.", 400);
     }
 
     private IpamPool requirePool(String region, String ipamPoolId) {
         return requireOwnedPool(region, ipamPoolId).pool();
+    }
+
+    /**
+     * Resolves a pool for an operation on the pool itself. A RAM-shared pool permits cross-account
+     * <em>allocation</em>, but Modify/Delete/Provision are owner-only in AWS, which reports a pool
+     * you cannot act on as simply absent.
+     */
+    private OwnedPool requireOwnedPoolForMutation(String region, String ipamPoolId) {
+        OwnedPool ownedPool = requireOwnedPool(region, ipamPoolId);
+        if (ownedPool.accountId() != null && !ownedPool.accountId().equals(callerAccountId())) {
+            throw poolNotFound(ipamPoolId);
+        }
+        return ownedPool;
     }
 
     private OwnedPool requireOwnedPool(String region, String ipamPoolId) {
@@ -650,6 +764,8 @@ public class Ec2IpamService {
     }
 
     private record OwnedPool(String accountId, IpamPool pool) {}
+
+    private record OwnedIpam(String accountId, Ipam ipam) {}
 
     private static String key(String region, String id) {
         return region + "|" + id;

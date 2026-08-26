@@ -344,7 +344,8 @@ class Ec2IpamServiceTest {
         EmulatorConfig config = mock(EmulatorConfig.class);
         when(config.defaultAccountId()).thenReturn(workloadAccount);
         Ec2IpamService accountAwareService = new Ec2IpamService(
-                config, ipams, pools, new InMemoryStorage<>(), new InMemoryStorage<>());
+                config, ipams, pools, new InMemoryStorage<>(), new InMemoryStorage<>(),
+                contextInstance);
 
         Ipam ipam = accountAwareService.createIpam(REGION, null, List.of(REGION), ownerAccount);
         IpamPool pool = accountAwareService.createIpamPool(REGION, ipam.getPrivateDefaultScopeId(),
@@ -361,5 +362,108 @@ class Ec2IpamServiceTest {
                 .getAllocations().size());
         assertTrue(pools.getForAccount(workloadAccount, poolKey).isEmpty(),
                 "cross-account allocation must not fork the pool into the caller account");
+    }
+
+    /**
+     * A RAM-shared pool lets a workload account allocate from it, but Modify/Delete/Provision of
+     * the pool itself stay owner-only in AWS. The fixture puts the pool in {@code ownerAccount}
+     * and leaves the caller set to {@code workloadAccount}.
+     */
+    @SuppressWarnings("unchecked")
+    private record SharedPoolFixture(Ec2IpamService service, AccountAwareStorageBackend<IpamPool> pools,
+                                     AccountAwareStorageBackend<Ipam> ipams, AtomicReference<String> caller,
+                                     Ipam ipam, IpamPool pool) {}
+
+    @SuppressWarnings("unchecked")
+    private SharedPoolFixture sharedPoolOwnedByAnotherAccount() {
+        String ownerAccount = "111111111111";
+        String workloadAccount = "222222222222";
+        AtomicReference<String> caller = new AtomicReference<>(ownerAccount);
+        RequestContext requestContext = mock(RequestContext.class);
+        when(requestContext.getAccountId()).thenAnswer(invocation -> caller.get());
+        Instance<RequestContext> contextInstance = mock(Instance.class);
+        when(contextInstance.get()).thenReturn(requestContext);
+
+        AccountAwareStorageBackend<Ipam> ipams = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), contextInstance, "000000000000");
+        AccountAwareStorageBackend<IpamPool> pools = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), contextInstance, "000000000000");
+        EmulatorConfig config = mock(EmulatorConfig.class);
+        when(config.defaultAccountId()).thenReturn(workloadAccount);
+        Ec2IpamService service = new Ec2IpamService(
+                config, ipams, pools, new InMemoryStorage<>(), new InMemoryStorage<>(),
+                contextInstance);
+
+        Ipam ipam = service.createIpam(REGION, null, List.of(REGION), ownerAccount);
+        IpamPool pool = service.createIpamPool(REGION, ipam.getPrivateDefaultScopeId(),
+                REGION, null, "ipv4", "shared pool", ownerAccount);
+        service.provisionIpamPoolCidr(REGION, pool.getIpamPoolId(), "10.0.0.0/16");
+
+        caller.set(workloadAccount);
+        return new SharedPoolFixture(service, pools, ipams, caller, ipam, pool);
+    }
+
+    @Test
+    void modifyingAnotherAccountsPoolIsRejected() {
+        SharedPoolFixture fixture = sharedPoolOwnedByAnotherAccount();
+        AwsException error = assertThrows(AwsException.class,
+                () -> fixture.service().modifyIpamPool(REGION, fixture.pool().getIpamPoolId(),
+                        "hijacked", null, null, null, null, false));
+        assertEquals("InvalidIpamPoolId.NotFound", error.getErrorCode());
+        assertEquals("shared pool",
+                fixture.pools().getForAccount("111111111111", REGION + "|" + fixture.pool().getIpamPoolId())
+                        .orElseThrow().getDescription());
+    }
+
+    @Test
+    void deletingAnotherAccountsPoolIsRejected() {
+        SharedPoolFixture fixture = sharedPoolOwnedByAnotherAccount();
+        AwsException error = assertThrows(AwsException.class,
+                () -> fixture.service().deleteIpamPool(REGION, fixture.pool().getIpamPoolId()));
+        assertEquals("InvalidIpamPoolId.NotFound", error.getErrorCode());
+        assertTrue(fixture.pools()
+                .getForAccount("111111111111", REGION + "|" + fixture.pool().getIpamPoolId()).isPresent());
+    }
+
+    @Test
+    void provisioningIntoAnotherAccountsPoolIsRejected() {
+        SharedPoolFixture fixture = sharedPoolOwnedByAnotherAccount();
+        AwsException error = assertThrows(AwsException.class,
+                () -> fixture.service().provisionIpamPoolCidr(
+                        REGION, fixture.pool().getIpamPoolId(), "192.168.0.0/16"));
+        assertEquals("InvalidIpamPoolId.NotFound", error.getErrorCode());
+        assertEquals(1, fixture.pools()
+                .getForAccount("111111111111", REGION + "|" + fixture.pool().getIpamPoolId())
+                .orElseThrow().getProvisionedCidrs().size());
+    }
+
+    @Test
+    void allocatingFromAnotherAccountsSharedPoolIsStillAllowed() {
+        SharedPoolFixture fixture = sharedPoolOwnedByAnotherAccount();
+        IpamPoolAllocation allocation = fixture.service().allocateIpamPoolCidr(
+                REGION, fixture.pool().getIpamPoolId(), 24, null, "workload subnet");
+        assertEquals("10.0.0.0/24", allocation.getCidr());
+    }
+
+    @Test
+    void deletingAnotherAccountsIpamIsRejectedAndLeavesItIntact() {
+        SharedPoolFixture fixture = sharedPoolOwnedByAnotherAccount();
+        AwsException error = assertThrows(AwsException.class,
+                () -> fixture.service().deleteIpam(REGION, fixture.ipam().getIpamId()));
+        assertEquals("InvalidIpamId.NotFound", error.getErrorCode());
+        assertTrue(fixture.ipams()
+                .getForAccount("111111111111", REGION + "|" + fixture.ipam().getIpamId()).isPresent());
+    }
+
+    @Test
+    void modifyingAnotherAccountsIpamIsRejectedAndForksNoCopy() {
+        SharedPoolFixture fixture = sharedPoolOwnedByAnotherAccount();
+        AwsException error = assertThrows(AwsException.class,
+                () -> fixture.service().modifyIpam(REGION, fixture.ipam().getIpamId(),
+                        "hijacked", List.of(), List.of()));
+        assertEquals("InvalidIpamId.NotFound", error.getErrorCode());
+        assertTrue(fixture.ipams()
+                        .getForAccount("222222222222", REGION + "|" + fixture.ipam().getIpamId()).isEmpty(),
+                "a rejected cross-account modify must not fork the IPAM into the caller account");
     }
 }
