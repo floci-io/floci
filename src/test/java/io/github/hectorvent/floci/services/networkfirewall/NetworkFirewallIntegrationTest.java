@@ -81,6 +81,28 @@ class NetworkFirewallIntegrationTest {
     }
 
     @Test
+    void createFirewall_withoutProtectionFlags_defaultsToProtected() {
+        // botocore 2020-11-12: CreateFirewall initializes DeleteProtection,
+        // SubnetChangeProtection and FirewallPolicyChangeProtection to TRUE when the
+        // caller omits them. AvailabilityZoneChangeProtection is the lone exception,
+        // documented as defaulting to FALSE.
+        String name = "DefaultProtectionFirewall";
+        call("CreateFirewall", "{\"FirewallName\":\"" + name + "\","
+                + "\"FirewallPolicyArn\":\"arn:aws:network-firewall:us-east-1:723679240095:"
+                + "firewall-policy/" + name + "-policy\","
+                + "\"VpcId\":\"vpc-0123456789abcdef0\","
+                + "\"SubnetMappings\":[{\"SubnetId\":\"subnet-def00000000000001\"}]}")
+            .statusCode(200);
+
+        call("DescribeFirewall", "{\"FirewallArn\":\"" + firewallArn(name) + "\"}")
+            .statusCode(200)
+            .body("Firewall.DeleteProtection", equalTo(true))
+            .body("Firewall.SubnetChangeProtection", equalTo(true))
+            .body("Firewall.FirewallPolicyChangeProtection", equalTo(true))
+            .body("Firewall.AvailabilityZoneChangeProtection", equalTo(false));
+    }
+
+    @Test
     void describeFirewall_withoutIdentifier_returnsAwsError() {
         given()
             .contentType(CONTENT_TYPE)
@@ -412,7 +434,8 @@ class NetworkFirewallIntegrationTest {
         call("CreateFirewall", "{\"FirewallName\":\"" + name + "\","
                 + "\"FirewallPolicyArn\":\"arn:aws:network-firewall:us-east-1:723679240095:"
                 + "firewall-policy/" + name + "-policy\","
-                + "\"VpcId\":\"vpc-0123456789abcdef0\"}")
+                + "\"VpcId\":\"vpc-0123456789abcdef0\","
+                + "\"SubnetChangeProtection\":false}")
             .statusCode(200);
 
         call("DisassociateSubnets", "{\"FirewallArn\":\"" + firewallArn(name) + "\"}")
@@ -554,6 +577,8 @@ class NetworkFirewallIntegrationTest {
                 + "\"FirewallPolicyArn\":\"arn:aws:network-firewall:us-east-1:723679240095:"
                 + "firewall-policy/" + name + "-policy\","
                 + "\"VpcId\":\"vpc-0123456789abcdef0\","
+                + "\"DeleteProtection\":false,\"SubnetChangeProtection\":false,"
+                + "\"FirewallPolicyChangeProtection\":false,"
                 + extraFields
                 + "\"SubnetMappings\":[" + mappings + "]}")
             .statusCode(200);

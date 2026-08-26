@@ -121,9 +121,9 @@ public class NetworkFirewallService {
         firewall.put("FirewallArn", firewallArn);
         firewall.put("FirewallId", deterministicHex(firewallArn, 32));
         firewall.put("FirewallName", name);
-        firewall.put("FirewallPolicyChangeProtection", request.path("FirewallPolicyChangeProtection").asBoolean(false));
-        firewall.put("SubnetChangeProtection", request.path("SubnetChangeProtection").asBoolean(false));
-        firewall.put("DeleteProtection", request.path("DeleteProtection").asBoolean(false));
+        firewall.put("FirewallPolicyChangeProtection", request.path("FirewallPolicyChangeProtection").asBoolean(true));
+        firewall.put("SubnetChangeProtection", request.path("SubnetChangeProtection").asBoolean(true));
+        firewall.put("DeleteProtection", request.path("DeleteProtection").asBoolean(true));
         firewall.put("AvailabilityZoneChangeProtection",
                 request.path("AvailabilityZoneChangeProtection").asBoolean(false));
         firewalls.put(firewallArn, firewall);
