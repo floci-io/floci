@@ -161,8 +161,9 @@ public class NetworkFirewallService {
 
     public ObjectNode associateSubnets(JsonNode request) {
         ObjectNode firewall = firewallForChange(request, "SubnetChangeProtection", "subnet");
+        ArrayNode requestedMappings = requiredArray(request, "SubnetMappings");
         ArrayNode mappings = mappingsOf(firewall, "SubnetMappings");
-        for (JsonNode requested : requiredArray(request, "SubnetMappings")) {
+        for (JsonNode requested : requestedMappings) {
             addMapping(mappings, "SubnetId", requiredText(requested, "SubnetId"), requested);
         }
         return storeAndRespond(firewall, "SubnetMappings", mappings);
@@ -170,8 +171,9 @@ public class NetworkFirewallService {
 
     public ObjectNode disassociateSubnets(JsonNode request) {
         ObjectNode firewall = firewallForChange(request, "SubnetChangeProtection", "subnet");
+        ArrayNode requestedIds = requiredArray(request, "SubnetIds");
         ArrayNode mappings = mappingsOf(firewall, "SubnetMappings");
-        for (JsonNode subnetId : requiredArray(request, "SubnetIds")) {
+        for (JsonNode subnetId : requestedIds) {
             removeMapping(mappings, "SubnetId", subnetId.asText());
         }
         return storeAndRespond(firewall, "SubnetMappings", mappings);
@@ -180,8 +182,9 @@ public class NetworkFirewallService {
     public ObjectNode associateAvailabilityZones(JsonNode request) {
         ObjectNode firewall =
                 firewallForChange(request, "AvailabilityZoneChangeProtection", "Availability Zone");
+        ArrayNode requestedMappings = requiredArray(request, "AvailabilityZoneMappings");
         ArrayNode mappings = mappingsOf(firewall, "AvailabilityZoneMappings");
-        for (JsonNode requested : requiredArray(request, "AvailabilityZoneMappings")) {
+        for (JsonNode requested : requestedMappings) {
             addMapping(mappings, "AvailabilityZone", requiredText(requested, "AvailabilityZone"), requested);
         }
         return storeAndRespond(firewall, "AvailabilityZoneMappings", mappings);
@@ -190,8 +193,9 @@ public class NetworkFirewallService {
     public ObjectNode disassociateAvailabilityZones(JsonNode request) {
         ObjectNode firewall =
                 firewallForChange(request, "AvailabilityZoneChangeProtection", "Availability Zone");
+        ArrayNode requestedMappings = requiredArray(request, "AvailabilityZoneMappings");
         ArrayNode mappings = mappingsOf(firewall, "AvailabilityZoneMappings");
-        for (JsonNode requested : requiredArray(request, "AvailabilityZoneMappings")) {
+        for (JsonNode requested : requestedMappings) {
             removeMapping(mappings, "AvailabilityZone", requiredText(requested, "AvailabilityZone"));
         }
         return storeAndRespond(firewall, "AvailabilityZoneMappings", mappings);

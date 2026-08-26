@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.networkfirewall;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.aMapWithSize;
 import static org.hamcrest.Matchers.anEmptyMap;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.empty;
@@ -342,6 +343,25 @@ class NetworkFirewallIntegrationTest {
                 + "\"AvailabilityZoneMappings\":[{\"AvailabilityZone\":\"us-east-1a\"}]}")
             .statusCode(400)
             .body("__type", equalTo("InvalidOperationException"));
+    }
+
+    @Test
+    void disassociateSubnets_withoutSubnetIds_leavesTheFirewallUntouched() {
+        String name = "FallbackSubnetsFirewall";
+        call("CreateFirewall", "{\"FirewallName\":\"" + name + "\","
+                + "\"FirewallPolicyArn\":\"arn:aws:network-firewall:us-east-1:723679240095:"
+                + "firewall-policy/" + name + "-policy\","
+                + "\"VpcId\":\"vpc-0123456789abcdef0\"}")
+            .statusCode(200);
+
+        call("DisassociateSubnets", "{\"FirewallArn\":\"" + firewallArn(name) + "\"}")
+            .statusCode(400)
+            .body("__type", equalTo("InvalidRequestException"));
+
+        call("DescribeFirewall", "{\"FirewallArn\":\"" + firewallArn(name) + "\"}")
+            .statusCode(200)
+            .body("Firewall.SubnetMappings", nullValue())
+            .body("FirewallStatus.SyncStates", aMapWithSize(6));
     }
 
     @Test
