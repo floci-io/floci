@@ -1,15 +1,43 @@
 package io.github.hectorvent.floci.services.apigateway;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.RestAssured;
 import org.junit.jupiter.api.Test;
+
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.not;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
 class ApiGatewayImportApiKeysIntegrationTest {
+
+    /**
+     * Botocore sends ImportApiKeys with no Content-Type header at all — only {@code Accept:
+     * application/json} — so the handler has to be reachable without one. RestAssured stamps a
+     * default Content-Type on any request carrying a body, so this case uses a raw client.
+     */
+    @Test
+    void testImportApiKeysWithoutContentTypeHeader() throws Exception {
+        HttpResponse<String> response = HttpClient.newHttpClient().send(
+                HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:" + RestAssured.port
+                                + "/apikeys?mode=import&format=csv&failonwarnings=false"))
+                        .header("Accept", "application/json")
+                        .POST(HttpRequest.BodyPublishers.ofString("Name,Key\nno-content-type-key,no-content-type-secret\n"))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+
+        assertEquals(201, response.statusCode(), "ImportApiKeys must dispatch without a Content-Type: " + response.body());
+        assertTrue(response.body().contains("\"ids\""), response.body());
+    }
 
     @Test
     void testImportApiKeys() {

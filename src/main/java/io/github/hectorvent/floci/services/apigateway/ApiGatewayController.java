@@ -680,9 +680,26 @@ public class ApiGatewayController {
         return Response.accepted().build();
     }
 
+    /**
+     * CreateApiKey and ImportApiKeys share {@code POST /apikeys} and are told apart by the
+     * {@code mode} query parameter, never by media type: botocore sends ImportApiKeys with no
+     * Content-Type at all, so a media-type-keyed handler is unreachable from a real client.
+     */
     @POST
     @Path("/apikeys")
-    public Response createApiKey(@Context HttpHeaders headers, String body) {
+    @Consumes(MediaType.WILDCARD)
+    public Response postApiKeys(@Context HttpHeaders headers,
+                                @QueryParam("mode") String mode,
+                                @QueryParam("format") String format,
+                                @QueryParam("failonwarnings") boolean failOnWarnings,
+                                String body) {
+        if (mode == null && format == null) {
+            return createApiKey(headers, body);
+        }
+        return importApiKeys(headers, mode, format, failOnWarnings, body);
+    }
+
+    private Response createApiKey(HttpHeaders headers, String body) {
         String region = regionResolver.resolveRegion(headers);
         try {
             @SuppressWarnings("unchecked")
@@ -694,14 +711,7 @@ public class ApiGatewayController {
         }
     }
 
-    @POST
-    @Path("/apikeys")
-    @Consumes("text/csv")
-    public Response importApiKeys(@Context HttpHeaders headers,
-                                  @QueryParam("mode") String mode,
-                                  @QueryParam("format") String format,
-                                  @QueryParam("failonwarnings") boolean failOnWarnings,
-                                  String body) {
+    private Response importApiKeys(HttpHeaders headers, String mode, String format, boolean failOnWarnings, String body) {
         if (!"import".equals(mode) || !"csv".equals(format)) {
             throw new AwsException("BadRequestException", "mode=import and format=csv are required", 400);
         }
