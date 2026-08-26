@@ -12,7 +12,7 @@ Floci is a fast, free, and open-source local AWS service emulator built for deve
 
 ## Supported Services
 
-Floci emulates 75 AWS services. See the [Services Overview](services/index.md) for per-service operation counts, endpoints, and full protocol details.
+Floci emulates 78 AWS services. See the [Services Overview](services/index.md) for per-service operation counts, endpoints, and full protocol details.
 
 | Service | Protocol |
 |---|---|
@@ -80,7 +80,7 @@ Floci emulates 75 AWS services. See the [Services Overview](services/index.md) f
 | Cost and Usage Reports | JSON 1.1 |
 | BCM Data Exports | JSON 1.1 |
 | Transfer Family | JSON 1.1 |
-| AWS RAM | JSON 1.1 |
+| AWS RAM | REST JSON |
 | Service Quotas | JSON 1.1 |
 
 ## Why Floci?
@@ -117,7 +117,7 @@ docker compose up -d
 aws --endpoint-url http://localhost:4566 s3 mb s3://my-bucket
 ```
 
-All 75 AWS services are immediately available at `http://localhost:4566`.
+All 78 AWS services are immediately available at `http://localhost:4566`.
 
 [Get started →](getting-started/quick-start.md){ .md-button .md-button--primary }
 [View services →](services/index.md){ .md-button }
