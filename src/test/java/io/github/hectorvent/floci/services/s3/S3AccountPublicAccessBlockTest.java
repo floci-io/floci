@@ -77,10 +77,12 @@ class S3AccountPublicAccessBlockTest {
     }
 
     @Test
-    void clearRemovesAccountPublicAccessBlock() {
+    void clearLeavesAccountPublicAccessBlockToItsStorageBackend() {
+        // clear() resets only the in-process object/multipart maps. The account-level config now
+        // lives in a StorageFactory-backed store, whose lifecycle StorageFactory.clearAll() owns —
+        // same as the bucket and object stores, which clear() also deliberately leaves alone.
         s3Service.putAccountPublicAccessBlock("000000000000", "<x/>");
         s3Service.clear();
-        assertThrows(AwsException.class,
-                () -> s3Service.getAccountPublicAccessBlock("000000000000"));
+        assertEquals("<x/>", s3Service.getAccountPublicAccessBlock("000000000000"));
     }
 }

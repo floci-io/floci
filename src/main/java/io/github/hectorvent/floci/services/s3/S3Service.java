@@ -94,9 +94,15 @@ public class S3Service implements Resettable, ResourceProvider {
     }
     private final ConcurrentHashMap<String, Map<Integer, byte[]>> memoryMultipartStore = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, MultipartUpload> multipartUploads = new ConcurrentHashMap<>();
-    // Account-level (S3 Control) Block Public Access config, keyed by AWS account id.
-    // Distinct from the bucket-level configuration held on each Bucket.
-    private final ConcurrentHashMap<String, String> accountPublicAccessBlock = new ConcurrentHashMap<>();
+    // Account-level (S3 Control) Block Public Access config, one entry per AWS account.
+    // Distinct from the bucket-level configuration held on each Bucket. Block Public Access is a
+    // security control that LZA applies once per governed account, so it is StorageFactory-backed
+    // like every other piece of S3 state rather than held in memory: a restart must not silently
+    // drop it. Always addressed through the explicit *ForAccount overloads — the account comes
+    // from the validated x-amz-account-id header, and the account namespace here is never global
+    // (globalBucketNamespace widens bucket resolution only, never this).
+    private final AccountAwareStorageBackend<String> accountPublicAccessBlockStore;
+    private static final String ACCOUNT_PUBLIC_ACCESS_BLOCK_KEY = "publicAccessBlock";
 
     private final SqsService sqsService;
     private final SnsService snsService;
@@ -128,6 +134,9 @@ public class S3Service implements Resettable, ResourceProvider {
                 storageFactory.create("s3", "s3-objects.json",
                         new TypeReference<Map<String, S3Object>>() {
                         }),
+                storageFactory.create("s3", "s3-account-public-access-block.json",
+                        new TypeReference<Map<String, String>>() {
+                        }),
                 Path.of(config.storage().persistentPath()).resolve("s3"),
                 "memory".equals(config.storage().services().s3().mode().orElse(config.storage().mode())),
                 sqsService, snsService, null, lambdaServiceProvider, null,
@@ -145,7 +154,18 @@ public class S3Service implements Resettable, ResourceProvider {
     S3Service(StorageBackend<String, Bucket> bucketStore,
               StorageBackend<String, S3Object> objectStore,
               Path dataRoot, boolean inMemory) {
-        this(bucketStore, objectStore, dataRoot, inMemory, null, null, null, null, null, null, null,
+        this(bucketStore, objectStore, defaultAccountPublicAccessBlockStore(),
+                dataRoot, inMemory, null, null, null, null, null, null, null,
+                null, "http://localhost:4566", new ObjectMapper(), false, null, false);
+    }
+
+    /** Package-private constructor for testing account-level Block Public Access persistence. */
+    S3Service(StorageBackend<String, Bucket> bucketStore,
+              StorageBackend<String, S3Object> objectStore,
+              AccountAwareStorageBackend<String> accountPublicAccessBlockStore,
+              Path dataRoot, boolean inMemory) {
+        this(bucketStore, objectStore, accountPublicAccessBlockStore,
+                dataRoot, inMemory, null, null, null, null, null, null, null,
                 null, "http://localhost:4566", new ObjectMapper(), false, null, false);
     }
 
@@ -153,7 +173,8 @@ public class S3Service implements Resettable, ResourceProvider {
     S3Service(StorageBackend<String, Bucket> bucketStore,
               StorageBackend<String, S3Object> objectStore,
               Path dataRoot, boolean inMemory, boolean globalBucketNamespace) {
-        this(bucketStore, objectStore, dataRoot, inMemory, null, null, null, null, null, null, null,
+        this(bucketStore, objectStore, defaultAccountPublicAccessBlockStore(),
+                dataRoot, inMemory, null, null, null, null, null, null, null,
                 null, "http://localhost:4566", new ObjectMapper(), false, null, globalBucketNamespace);
     }
 
@@ -162,7 +183,8 @@ public class S3Service implements Resettable, ResourceProvider {
               Path dataRoot, boolean inMemory,
               LambdaService lambdaService,
               RegionResolver regionResolver) {
-        this(bucketStore, objectStore, dataRoot, inMemory, null, null, lambdaService, null, null, null, null,
+        this(bucketStore, objectStore, defaultAccountPublicAccessBlockStore(),
+                dataRoot, inMemory, null, null, lambdaService, null, null, null, null,
                 regionResolver, "http://localhost:4566", new ObjectMapper(), false, null, false);
     }
 
@@ -171,12 +193,19 @@ public class S3Service implements Resettable, ResourceProvider {
               Path dataRoot, boolean inMemory,
               LambdaInvoker lambdaInvoker,
               RegionResolver regionResolver) {
-        this(bucketStore, objectStore, dataRoot, inMemory, null, null, null, null, lambdaInvoker, null, null,
+        this(bucketStore, objectStore, defaultAccountPublicAccessBlockStore(),
+                dataRoot, inMemory, null, null, null, null, lambdaInvoker, null, null,
                 regionResolver, "http://localhost:4566", new ObjectMapper(), false, null, false);
+    }
+
+    /** In-memory account-level Block Public Access store for the package-private test constructors. */
+    private static AccountAwareStorageBackend<String> defaultAccountPublicAccessBlockStore() {
+        return AccountAwareStorageBackend.inMemory("000000000000");
     }
 
     private S3Service(StorageBackend<String, Bucket> bucketStore,
                       StorageBackend<String, S3Object> objectStore,
+                      AccountAwareStorageBackend<String> accountPublicAccessBlockStore,
                       Path dataRoot, boolean inMemory, SqsService sqsService, SnsService snsService,
                       LambdaService lambdaService,
                       Instance<LambdaService> lambdaServiceProvider,
@@ -187,6 +216,7 @@ public class S3Service implements Resettable, ResourceProvider {
                       boolean enforceAuth, IamService iamService, boolean globalBucketNamespace) {
         this.bucketStore = bucketStore;
         this.objectStore = objectStore;
+        this.accountPublicAccessBlockStore = accountPublicAccessBlockStore;
         this.dataRoot = dataRoot;
         this.inMemory = inMemory;
         this.sqsService = sqsService;
@@ -215,7 +245,6 @@ public class S3Service implements Resettable, ResourceProvider {
         memoryDataStore.clear();
         memoryMultipartStore.clear();
         multipartUploads.clear();
-        accountPublicAccessBlock.clear();
     }
 
     public Bucket createBucket(String bucketName, String region) {
@@ -2427,22 +2456,23 @@ public class S3Service implements Resettable, ResourceProvider {
     // AWS s3control PutPublicAccessBlock / GetPublicAccessBlock / DeletePublicAccessBlock,
     // keyed by AccountId (from the x-amz-account-id header). AWS LZA's
     // Custom::PutPublicAccessBlock custom resource drives these during the LoggingStack deploy.
+    // S3ControlController checks the header against the caller before any of these run.
 
     public void putAccountPublicAccessBlock(String accountId, String configXml) {
-        accountPublicAccessBlock.put(requireAccountId(accountId), configXml);
+        accountPublicAccessBlockStore.putForAccount(
+                requireAccountId(accountId), ACCOUNT_PUBLIC_ACCESS_BLOCK_KEY, configXml);
     }
 
     public String getAccountPublicAccessBlock(String accountId) {
-        String xml = accountPublicAccessBlock.get(requireAccountId(accountId));
-        if (xml == null) {
-            throw new AwsException("NoSuchPublicAccessBlockConfiguration",
-                    "The public access block configuration was not found", 404);
-        }
-        return xml;
+        return accountPublicAccessBlockStore
+                .getForAccount(requireAccountId(accountId), ACCOUNT_PUBLIC_ACCESS_BLOCK_KEY)
+                .orElseThrow(() -> new AwsException("NoSuchPublicAccessBlockConfiguration",
+                        "The public access block configuration was not found", 404));
     }
 
     public void deleteAccountPublicAccessBlock(String accountId) {
-        accountPublicAccessBlock.remove(requireAccountId(accountId));
+        accountPublicAccessBlockStore.deleteForAccount(
+                requireAccountId(accountId), ACCOUNT_PUBLIC_ACCESS_BLOCK_KEY);
     }
 
     private static String requireAccountId(String accountId) {
