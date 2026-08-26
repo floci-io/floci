@@ -91,6 +91,10 @@ services:
     doc: docs/services/neptune.md
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/neptune/NeptuneQueryHandler.java, mode: switch }
+  - service: ram
+    doc: docs/services/ram.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/ram/RamController.java, mode: rest }
   - service: rds
     doc: docs/services/rds.md
     sources:
@@ -151,7 +155,6 @@ deferred_handlers:
   - { path: src/main/java/io/github/hectorvent/floci/services/iam/StsQueryHandler.java }  # sts (lives in iam package); single-table, registerable next
   - { path: src/main/java/io/github/hectorvent/floci/services/lightsail/LightsailJsonHandler.java }  # non-tabular doc (grouped/inline); standalone action table to be added
   - { path: src/main/java/io/github/hectorvent/floci/services/pricing/PricingJsonHandler.java }  # no standalone action table yet
-  - { path: src/main/java/io/github/hectorvent/floci/services/ram/RamController.java }  # REST controller, hand-written table (doc carries a method-and-path column the generator does not emit)
   - { path: src/main/java/io/github/hectorvent/floci/services/resourcegroupstagging/ResourceGroupsTaggingJsonHandler.java }  # non-tabular doc (grouped/inline)
   - { path: src/main/java/io/github/hectorvent/floci/services/ses/SesQueryHandler.java }  # mixed-mode (Query + REST surface)
   - { path: src/main/java/io/github/hectorvent/floci/services/sns/SnsJsonHandler.java }  # multi-table doc

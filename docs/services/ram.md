@@ -10,22 +10,24 @@ the organization-sharing opt-in, resource-share CRUD, association management, pr
 listing, and tagging. Sharing is modeled as a flat in-memory store, not full RAM semantics —
 see Current Scope below for what's simplified.
 
-## Supported Operations
+## Supported Actions
 
-| Operation | Method and path | Description |
-|---|---|---|
-| `EnableSharingWithAwsOrganization` | `POST /enablesharingwithawsorganization` | Enable resource sharing within the organization; returns `{"returnValue": true}`. Idempotent, no disable counterpart, matching real AWS. |
-| `CreateResourceShare` | `POST /createresourceshare` | Creates a resource share with the given name, principals, and resource ARNs. |
-| `GetResourceShares` | `POST /getresourceshares` | Lists resource shares visible to the caller (`SELF` owned, or `OTHER-ACCOUNTS` shared in). |
-| `UpdateResourceShare` | `POST /updateresourceshare` | Renames a share and/or toggles `allowExternalPrincipals`. |
-| `DeleteResourceShare` | `DELETE /deleteresourceshare` | Marks a share `DELETED` (soft delete, matching real AWS's async-then-terminal status). |
-| `AssociateResourceShare` | `POST /associateresourceshare` | Adds resource ARNs and/or principals to an existing share. |
-| `DisassociateResourceShare` | `POST /disassociateresourceshare` | Removes resource ARNs and/or principals from a share. |
-| `ListPrincipals` | `POST /listprincipals` | Lists principals associated with visible shares. |
-| `ListResources` | `POST /listresources` | Lists shared resource ARNs, with the RAM resource type derived from the ARN (`ec2:TransitGateway`, etc). |
-| `TagResource` | `POST /tagresource` | Adds/overwrites tags on a resource share. |
-| `UntagResource` | `POST /untagresource` | Removes tags by key from a resource share. |
-| `GetResourceShareInvitations` | `POST /getresourceshareinvitations` | Always returns an empty list — organization sharing auto-accepts, so invitations never exist here. |
+<!-- floci:actions:start -->
+| Action | Description |
+| --- | --- |
+| `EnableSharingWithAwsOrganization` | Enables resource sharing within the organization; returns `{"returnValue": true}`. Idempotent, no disable counterpart, matching real AWS (`POST /enablesharingwithawsorganization`) |
+| `CreateResourceShare` | Creates a resource share with the given name, principals, and resource ARNs (`POST /createresourceshare`) |
+| `GetResourceShares` | Lists resource shares visible to the caller, `SELF` owned or `OTHER-ACCOUNTS` shared in (`POST /getresourceshares`) |
+| `DeleteResourceShare` | Marks a share `DELETED`, a soft delete matching real AWS's async-then-terminal status (`DELETE /deleteresourceshare`) |
+| `UpdateResourceShare` | Renames a share and/or toggles `allowExternalPrincipals` (`POST /updateresourceshare`) |
+| `AssociateResourceShare` | Adds resource ARNs and/or principals to an existing share (`POST /associateresourceshare`) |
+| `DisassociateResourceShare` | Removes resource ARNs and/or principals from a share (`POST /disassociateresourceshare`) |
+| `ListPrincipals` | Lists principals associated with visible shares (`POST /listprincipals`) |
+| `TagResource` | Adds/overwrites tags on a resource share (`POST /tagresource`) |
+| `UntagResource` | Removes tags by key from a resource share (`POST /untagresource`) |
+| `GetResourceShareInvitations` | Always returns an empty list — organization sharing auto-accepts, so invitations never exist here (`POST /getresourceshareinvitations`) |
+| `ListResources` | Lists shared resource ARNs, with the RAM resource type derived from the ARN, e.g. `ec2:TransitGateway` (`POST /listresources`) |
+<!-- floci:actions:end -->
 
 ## Configuration
 
@@ -54,6 +56,9 @@ aws --endpoint-url http://localhost:4566 ram delete-resource-share \
   account and a principal-based check would hide shares from consumers that should see them.
   LZA's `Custom::GetResourceShare` Lambda filters client-side by `owningAccountId` + `name`
   anyway, so this doesn't affect that flow.
+- Mutations are owner-only: a caller that is not the share's owning account gets
+  `UnknownResourceException`, the same error an unknown ARN gets, since AWS resolves a share
+  ARN within the caller's own account. Visibility above is unaffected.
 - `AssociateResourceShare`/`DisassociateResourceShare` responses synthesize one
   `resourceShareAssociation` row per requested ARN/principal rather than tracking real
   per-association status transitions (e.g. no `ASSOCIATING`/`DISASSOCIATING` intermediate
