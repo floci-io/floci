@@ -25,6 +25,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
+import java.util.TreeSet;
 import java.util.concurrent.ThreadLocalRandom;
 
 /**
@@ -182,6 +184,27 @@ public class Ec2IpamService {
 
     // ─── IPAMs + default scopes ─────────────────────────────────────────────
 
+    /** {@code IpamTier}. Stored on the IPAM and echoed back by DescribeIpams. */
+    private static final Set<String> TIERS = Set.of("free", "advanced");
+
+    /** {@code IpamMeteredAccount}. Stored on the IPAM and echoed back by DescribeIpams. */
+    private static final Set<String> METERED_ACCOUNTS = Set.of("ipam-owner", "resource-owner");
+
+    /** {@code AddressFamily}. Decides how a pool's CIDRs are parsed, so a wrong one is not cosmetic. */
+    private static final Set<String> ADDRESS_FAMILIES = Set.of("ipv4", "ipv6");
+
+    /**
+     * Rejects a value outside a modelled enum. An absent value is left to the caller's default:
+     * every one of these members is optional, and the defaults applied below are AWS's own.
+     */
+    private static void requireEnum(String value, Set<String> allowed, String parameter) {
+        if (value != null && !allowed.contains(value)) {
+            throw new AwsException("InvalidParameterValue",
+                    "Value (" + value + ") for parameter " + parameter + " is invalid. "
+                            + "Valid values are: " + String.join(", ", new TreeSet<>(allowed)) + ".", 400);
+        }
+    }
+
     public Ipam createIpam(String region, String description, List<String> operatingRegions) {
         return createIpam(region, description, operatingRegions, config.defaultAccountId());
     }
@@ -197,6 +220,8 @@ public class Ec2IpamService {
     public Ipam createIpam(String region, String description, List<String> operatingRegions,
                            String ownerId, Boolean enablePrivateGua, String meteredAccount,
                            String tier, String clientToken, List<Tag> tags) {
+        requireEnum(tier, TIERS, "Tier");
+        requireEnum(meteredAccount, METERED_ACCOUNTS, "MeteredAccount");
         if (clientToken != null && !clientToken.isBlank()) {
             for (Ipam existing : ipams.scan(k -> true)) {
                 if (region.equals(existing.getRegion())
@@ -327,6 +352,8 @@ public class Ec2IpamService {
     public Ipam modifyIpam(String region, String ipamId, String description,
                            List<String> addOperatingRegions, List<String> removeOperatingRegions,
                            Boolean enablePrivateGua, String meteredAccount, String tier) {
+        requireEnum(tier, TIERS, "Tier");
+        requireEnum(meteredAccount, METERED_ACCOUNTS, "MeteredAccount");
         OwnedIpam ownedIpam = requireOwnedIpamForMutation(region, ipamId);
         Ipam ipam = ownedIpam.ipam();
         if (description != null) {
@@ -385,6 +412,7 @@ public class Ec2IpamService {
         if (ipamScopeId == null || ipamScopeId.isBlank()) {
             throw new AwsException("MissingParameter", "IpamScopeId is required.", 400);
         }
+        requireEnum(addressFamily, ADDRESS_FAMILIES, "AddressFamily");
         if (sourceIpamPoolId != null && sourceIpamPoolId.isBlank()) {
             throw new AwsException("MissingParameter", "SourceIpamPoolId is required.", 400);
         }

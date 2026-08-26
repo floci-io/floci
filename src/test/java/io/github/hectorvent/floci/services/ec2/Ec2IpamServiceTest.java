@@ -530,4 +530,62 @@ class Ec2IpamServiceTest {
                         .getForAccount("222222222222", REGION + "|" + fixture.ipam().getIpamId()).isEmpty(),
                 "a rejected cross-account modify must not fork the IPAM into the caller account");
     }
+
+    // --- modelled enums (Tier, MeteredAccount, AddressFamily) ---
+
+    @Test
+    void createIpamRejectsAnUnmodelledTier() {
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.createIpam(REGION, "bad tier", List.of(REGION), "000000000000",
+                        false, "ipam-owner", "platinum", null, List.of()));
+        assertEquals("InvalidParameterValue", error.getErrorCode());
+        assertTrue(service.describeIpams(REGION, List.of()).isEmpty(),
+                "a rejected CreateIpam must not have stored an IPAM");
+    }
+
+    @Test
+    void createIpamRejectsAnUnmodelledMeteredAccount() {
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.createIpam(REGION, "bad metered account", List.of(REGION), "000000000000",
+                        false, "someone-else", "free", null, List.of()));
+        assertEquals("InvalidParameterValue", error.getErrorCode());
+    }
+
+    @Test
+    void createIpamAcceptsBothModelledTiers() {
+        assertEquals("free", service.createIpam(REGION, "free tier", List.of(REGION), "000000000000",
+                false, "ipam-owner", "free", null, List.of()).getTier());
+        assertEquals("advanced", service.createIpam(REGION, "advanced tier", List.of(REGION), "000000000000",
+                false, "resource-owner", "advanced", null, List.of()).getTier());
+    }
+
+    @Test
+    void modifyIpamRejectsAnUnmodelledTierAndLeavesTheStoredOneIntact() {
+        Ipam ipam = service.createIpam(REGION, "initial", List.of(REGION));
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.modifyIpam(REGION, ipam.getIpamId(), null, List.of(), List.of(),
+                        null, null, "platinum"));
+        assertEquals("InvalidParameterValue", error.getErrorCode());
+        assertEquals("free", service.describeIpams(REGION, List.of(ipam.getIpamId())).getFirst().getTier());
+    }
+
+    @Test
+    void createIpamPoolRejectsAnUnmodelledAddressFamily() {
+        Ipam ipam = service.createIpam(REGION, null, List.of(REGION));
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.createIpamPool(REGION, ipam.getPrivateDefaultScopeId(), REGION,
+                        null, "ipv5", "bad address family"));
+        assertEquals("InvalidParameterValue", error.getErrorCode());
+        assertTrue(service.describeIpamPools(REGION, List.of()).isEmpty(),
+                "a rejected CreateIpamPool must not have stored a pool");
+    }
+
+    @Test
+    void createIpamPoolAcceptsBothModelledAddressFamilies() {
+        Ipam ipam = service.createIpam(REGION, null, List.of(REGION));
+        assertEquals("ipv4", service.createIpamPool(REGION, ipam.getPrivateDefaultScopeId(), REGION,
+                null, "ipv4", "v4 pool").getAddressFamily());
+        assertEquals("ipv6", service.createIpamPool(REGION, ipam.getPrivateDefaultScopeId(), REGION,
+                null, "ipv6", "v6 pool").getAddressFamily());
+    }
 }
