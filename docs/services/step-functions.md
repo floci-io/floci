@@ -98,6 +98,22 @@ One deviation. AWS bounds the memory an expression may use and fails a `$range` 
 million elements with `Expression evaluation memory limit exceeded`; Floci has no such bound and
 builds the array.
 
+## Nested workflows
+
+A parent workflow calls a child workflow through one of two integrations, and they differ in
+more than syntax:
+
+| Resource | Child type | A child that fails | Result |
+| --- | --- | --- | --- |
+| `arn:aws:states:::states:startExecution` | Standard | not awaited | `{executionArn, startDate}` |
+| `arn:aws:states:::states:startExecution.sync` | Standard | fails the calling task | execution envelope, `output` as a JSON string |
+| `arn:aws:states:::states:startExecution.sync:2` | Standard | fails the calling task | the child output, parsed |
+| `arn:aws:states:::aws-sdk:sfn:startSyncExecution` | Express | reported through `Status` | PascalCase envelope, `Output` as a JSON string |
+
+The AWS SDK integration is the only one that does not fail the calling task when the child
+fails: the SDK call itself succeeded, so the task result carries `Status`, `Error` and `Cause`
+and the parent decides what to do next.
+
 ## Mocked service integrations
 
 Floci supports the Step Functions Local mock configuration format

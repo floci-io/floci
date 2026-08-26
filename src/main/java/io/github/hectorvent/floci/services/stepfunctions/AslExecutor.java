@@ -798,6 +798,12 @@ public class AslExecutor {
             return invokeEcsRunTask(mode, input, region);
         }
 
+        // AWS SDK service integration: Step Functions StartSyncExecution
+        if (resource.equals("arn:aws:states:::aws-sdk:sfn:startSyncExecution")) {
+            String region = extractRegionFromArn(sm.getStateMachineArn());
+            return invokeAwsSdkSfnStartSyncExecution(input, region);
+        }
+
         // Nested state machine integration
         if (resource.startsWith("arn:aws:states:::states:startExecution")) {
             String mode = resource.substring("arn:aws:states:::states:startExecution".length());
@@ -920,6 +926,61 @@ public class AslExecutor {
 
     private static String capitalizeFirst(String s) {
         return s.isEmpty() ? s : Character.toUpperCase(s.charAt(0)) + s.substring(1);
+    }
+
+    /**
+     * AWS SDK integration for {@code sfn:startSyncExecution}, the way an EXPRESS child workflow is
+     * called. It differs from the optimized {@code states:startExecution.sync} integration in three
+     * ways: the child must be EXPRESS, the response envelope uses PascalCase field names with
+     * {@code Output} as a JSON string, and a child execution that fails is reported through
+     * {@code Status} rather than failing the calling task.
+     */
+    private JsonNode invokeAwsSdkSfnStartSyncExecution(JsonNode input, String region) throws Exception {
+        String smArn = input.path("StateMachineArn").asText(null);
+        if (smArn == null || smArn.isBlank()) {
+            throw new FailStateException("Sfn.InvalidArnException",
+                    "StateMachineArn is required for StartSyncExecution");
+        }
+        JsonNode inputNode = input.path("Input");
+        String childInput;
+        if (inputNode.isMissingNode()) {
+            childInput = "{}";
+        } else if (inputNode.isTextual()) {
+            childInput = inputNode.asText();
+        } else {
+            childInput = objectMapper.writeValueAsString(inputNode);
+        }
+
+        io.github.hectorvent.floci.services.stepfunctions.model.Execution exec;
+        try {
+            exec = sfnService.get().startSyncExecution(smArn, input.path("Name").asText(null),
+                    childInput, region);
+        } catch (AwsException e) {
+            throw new FailStateException("Sfn." + e.getErrorCode(), e.getMessage());
+        }
+
+        ObjectNode envelope = objectMapper.createObjectNode();
+        envelope.put("ExecutionArn", exec.getExecutionArn());
+        envelope.put("StateMachineArn", exec.getStateMachineArn());
+        envelope.put("Name", exec.getName());
+        envelope.put("Status", exec.getStatus());
+        envelope.put("StartDate", exec.getStartDate());
+        if (exec.getStopDate() != null) {
+            envelope.put("StopDate", exec.getStopDate());
+        }
+        if (exec.getInput() != null) {
+            envelope.put("Input", exec.getInput());
+        }
+        if (exec.getOutput() != null) {
+            envelope.put("Output", exec.getOutput());
+        }
+        if (exec.getError() != null) {
+            envelope.put("Error", exec.getError());
+        }
+        if (exec.getCause() != null) {
+            envelope.put("Cause", exec.getCause());
+        }
+        return envelope;
     }
 
     private JsonNode invokeNestedStateMachine(String mode, JsonNode input, String region) throws Exception {
