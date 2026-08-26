@@ -297,8 +297,9 @@ class SesTagsV2IntegrationTest {
     @Test
     @Order(8)
     void untagResource_missingTagKeys_returnsBareValidationException() {
-        // A missing/empty TagKeys member is a bare ValidationException: only the error-type
-        // header, no message (probe-confirmed).
+        // A missing/empty TagKeys member is a message-less ValidationException (probe-confirmed:
+        // AWS sends only the error-type header with an empty body; Floci's standard error body
+        // carries "message":null, which restJson1 SDKs parse identically).
         String arn = "arn:aws:ses:us-east-1:000000000000:configuration-set/tag-cs-1";
         given()
             .header("Authorization", AUTH_HEADER)
@@ -307,7 +308,9 @@ class SesTagsV2IntegrationTest {
             .delete("/v2/email/tags")
         .then()
             .statusCode(400)
-            .header("X-Amzn-Errortype", containsString("ValidationException"));
+            .header("X-Amzn-Errortype", containsString("ValidationException"))
+            .body("__type", equalTo("ValidationException"))
+            .body("message", nullValue());
     }
 
     @Test

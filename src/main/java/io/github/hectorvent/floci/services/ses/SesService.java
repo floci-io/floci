@@ -2088,9 +2088,11 @@ public class SesService {
         ResourceRef ref = parseSesArn(arn);
         requireCallerAccount(ref);
         if (tagKeys == null || tagKeys.isEmpty()) {
-            // AWS rejects a missing/empty TagKeys member with a bare ValidationException — empty
-            // response body, only the error-type header — after the account guard and before the
-            // region guard (probe-confirmed).
+            // AWS rejects a missing/empty TagKeys member with a message-less ValidationException
+            // (probe-confirmed: only the error-type header, empty body), after the account guard
+            // and before the region guard. The null message is deliberate — it surfaces through
+            // Floci's standard error body as "message":null, which restJson1 SDKs parse the same
+            // way as AWS's empty body since they read x-amzn-errortype first.
             throw new AwsException("ValidationException", null, 400);
         }
         if (!ref.region().equals(region)) {
