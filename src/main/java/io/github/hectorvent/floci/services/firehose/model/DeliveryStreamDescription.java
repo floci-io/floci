@@ -40,8 +40,12 @@ public class DeliveryStreamDescription {
     @JsonProperty("Tags")
     private List<Tag> tags = new ArrayList<>();
 
+    // Field-level default so streams persisted before this field existed deserialize to
+    // the AWS-shaped DISABLED configuration instead of null (Jackson only overwrites it
+    // when the stored JSON actually carries the property).
     @JsonProperty("DeliveryStreamEncryptionConfiguration")
-    private DeliveryStreamEncryptionConfiguration deliveryStreamEncryptionConfiguration;
+    private DeliveryStreamEncryptionConfiguration deliveryStreamEncryptionConfiguration =
+            DeliveryStreamEncryptionConfiguration.disabled();
 
     public DeliveryStreamDescription() {}
     public DeliveryStreamDescription(String name, String arn, S3Destination s3) {

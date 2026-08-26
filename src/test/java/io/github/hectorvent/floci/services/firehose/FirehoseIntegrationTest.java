@@ -185,7 +185,46 @@ class FirehoseIntegrationTest {
         .then()
             .statusCode(200)
             .body("DeliveryStreamDescription.DeliveryStreamEncryptionConfiguration.Status",
-                    equalTo("DISABLED"));
+                    equalTo("DISABLED"))
+            // Disabling must not erase the key identity: real AWS keeps reporting the
+            // stopped stream's KeyType and customer KeyARN.
+            .body("DeliveryStreamDescription.DeliveryStreamEncryptionConfiguration.KeyType",
+                    equalTo("CUSTOMER_MANAGED_CMK"))
+            .body("DeliveryStreamDescription.DeliveryStreamEncryptionConfiguration.KeyARN",
+                    equalTo("arn:aws:kms:us-east-1:123456789012:key/test-key"));
+
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "Firehose_20150804.DeleteDeliveryStream")
+            .body("{ \"DeliveryStreamName\": \"" + encryptionStream + "\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    @Order(8)
+    void startDeliveryStreamEncryptionWithoutInputReturnsInvalidArgument() {
+        String encryptionStream = "encryption-noinput-" + System.currentTimeMillis();
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "Firehose_20150804.CreateDeliveryStream")
+            .body("{ \"DeliveryStreamName\": \"" + encryptionStream + "\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "Firehose_20150804.StartDeliveryStreamEncryption")
+            .body("{ \"DeliveryStreamName\": \"" + encryptionStream + "\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidArgumentException"));
 
         given()
             .contentType("application/x-amz-json-1.1")

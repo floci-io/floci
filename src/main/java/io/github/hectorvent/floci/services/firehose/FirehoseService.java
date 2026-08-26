@@ -217,9 +217,13 @@ public class FirehoseService {
         DeliveryStreamDescription.DeliveryStreamEncryptionConfiguration current =
                 stream.getDeliveryStreamEncryptionConfiguration();
         String keyType = current == null ? "AWS_OWNED_CMK" : current.getKeyType();
+        // Keep the customer key identity on disable: real AWS still reports the KeyARN
+        // of a stopped CUSTOMER_MANAGED_CMK stream, and dropping it here would make a
+        // later DescribeDeliveryStream forget which key the stream was encrypted with.
+        String keyArn = current == null ? null : current.getKeyArn();
         stream.setDeliveryStreamEncryptionConfiguration(
                 new DeliveryStreamDescription.DeliveryStreamEncryptionConfiguration(
-                        keyType, null, "DISABLED"));
+                        keyType, keyArn, "DISABLED"));
         streamStore.put(name, stream);
     }
 
