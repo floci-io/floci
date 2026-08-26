@@ -14,10 +14,11 @@ aws login --endpoint-url http://localhost:4566 --region us-east-1
 aws sts get-caller-identity --endpoint-url http://localhost:4566
 ```
 
-The browser callback is still handled by the AWS CLI; Floci does not contact AWS or require a real
-AWS account. This follows the AWS Sign-In `AuthorizeOAuth2Access` and `CreateOAuth2Token` wire
-shapes, including one-time codes, PKCE verification, refresh-token expiry, and the `aws_sigv4`
-temporary credential type.
+The authorize endpoint first presents a local consent page, then redirects back to the callback
+listener owned by the AWS CLI. Floci does not contact AWS or require a real AWS account. This
+follows the AWS Sign-In `AuthorizeOAuth2Access` and `CreateOAuth2Token` wire shapes, including
+one-time codes, PKCE verification, refresh-token expiry, and the `aws_sigv4` temporary credential
+type.
 
 ## Supported Actions
 
