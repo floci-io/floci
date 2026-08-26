@@ -88,6 +88,10 @@ public class OrganizationsService {
      * {@code DescribeEffectivePolicy} is defined only for the inheritable policy types. AWS
      * rejects the two access-control types outright — they are evaluated as a deny-by-intersection
      * chain rather than merged into a single effective document, so there is nothing to return.
+     *
+     * <p>This is floci's rendering of the model's {@code EffectivePolicyType} shape; the last five
+     * entries were added to the shape after it was first written here. Ordered for the same reason
+     * as {@link #POLICY_TYPES}.
      */
     private static final List<String> EFFECTIVE_POLICY_TYPES = List.of(
             "TAG_POLICY",
@@ -95,7 +99,12 @@ public class OrganizationsService {
             "AISERVICES_OPT_OUT_POLICY",
             "CHATBOT_POLICY",
             "DECLARATIVE_POLICY_EC2",
-            "SECURITYHUB_POLICY");
+            "SECURITYHUB_POLICY",
+            "INSPECTOR_POLICY",
+            "UPGRADE_ROLLOUT_POLICY",
+            "BEDROCK_POLICY",
+            "S3_POLICY",
+            "NETWORK_SECURITY_DIRECTOR_POLICY");
 
     private static final Set<String> EFFECTIVE_POLICY_TYPE_SET = Set.copyOf(EFFECTIVE_POLICY_TYPES);
 
@@ -749,14 +758,36 @@ public class OrganizationsService {
     }
 
     /**
+     * Rejects anything outside the {@code EffectivePolicyType} enum, which both
+     * DescribeEffectivePolicy and ListAccountsWithInvalidEffectivePolicy draw their required
+     * PolicyType from. Without it the latter answers 200 with an empty account list for a
+     * policy type that does not exist, which reads as "nothing is broken".
+     */
+    private void validateEffectivePolicyType(String policyType) {
+        if (policyType == null || !EFFECTIVE_POLICY_TYPE_SET.contains(policyType)) {
+            throw invalidInput("PolicyType must be one of " + String.join(", ", EFFECTIVE_POLICY_TYPES) + ".");
+        }
+    }
+
+    /**
+     * Floci does not evaluate effective policies, so no account can be reported as carrying an
+     * invalid one. The operation still has to validate its required PolicyType before it can
+     * honestly answer "none".
+     */
+    public List<OrganizationAccount> listAccountsWithInvalidEffectivePolicy(String callerAccountId,
+                                                                           String policyType) {
+        requireOrganizationForCaller(callerAccountId);
+        validateEffectivePolicyType(policyType);
+        return List.of();
+    }
+
+    /**
      * Merges every policy of {@code policyType} down the inheritance chain root → OU(s) → target,
      * with the closest ancestor taking precedence on conflicting keys.
      */
     public EffectivePolicy describeEffectivePolicy(String callerAccountId, String policyType, String targetId) {
         Organization organization = requireOrganizationForCaller(callerAccountId);
-        if (policyType == null || !EFFECTIVE_POLICY_TYPE_SET.contains(policyType)) {
-            throw invalidInput("PolicyType must be one of " + String.join(", ", EFFECTIVE_POLICY_TYPES) + ".");
-        }
+        validateEffectivePolicyType(policyType);
         String effectiveTarget = targetId == null || targetId.isEmpty() ? callerAccountId : targetId;
         requireTarget(organization, effectiveTarget);
 

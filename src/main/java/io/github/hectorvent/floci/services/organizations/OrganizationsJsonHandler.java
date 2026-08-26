@@ -285,11 +285,14 @@ public class OrganizationsJsonHandler {
     /**
      * Effective-policy validation is not modeled in Floci; there is no way to evaluate
      * which accounts have invalid effective policies. Return an explicit empty list to
-     * match the wire contract without fabricating data.
+     * match the wire contract without fabricating data — but only once the required
+     * PolicyType has been checked against the enum, so a bogus type is not answered with
+     * a reassuring "no invalid accounts".
      */
     private Response listAccountsWithInvalidEffectivePolicy(JsonNode request, String caller) {
-        service.listAccounts(caller);
-        return accountsResponse(page(List.of(), OrganizationAccount::getId, request));
+        List<OrganizationAccount> accounts =
+                service.listAccountsWithInvalidEffectivePolicy(caller, text(request, "PolicyType"));
+        return accountsResponse(page(accounts, OrganizationAccount::getId, request));
     }
 
     private Response accountsResponse(PaginatedResult<OrganizationAccount> page) {
