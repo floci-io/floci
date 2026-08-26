@@ -530,4 +530,115 @@ class SesTagsV2IntegrationTest {
             .body("Tags[0].Key", equalTo("owner"))
             .body("Tags[0].Value", equalTo("alice"));
     }
+
+    @Test
+    @Order(20)
+    void tagResource_mergeExceedingFifty_returns400() {
+        // AWS enforces the 50-tag ceiling on the MERGED (existing + incoming) set, and updating an
+        // existing key (net count unchanged) is allowed. Probe-confirmed against real AWS.
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {"ConfigurationSetName": "tag-cs-merge"}
+                """)
+        .when()
+            .post("/v2/email/configuration-sets")
+        .then()
+            .statusCode(200);
+
+        String arn = "arn:aws:ses:us-east-1:000000000000:configuration-set/tag-cs-merge";
+
+        // Seed with the full 50 tags.
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"ResourceArn\": \"" + arn + "\", \"Tags\": " + tagArray(0, 50) + "}")
+        .when()
+            .post("/v2/email/tags")
+        .then()
+            .statusCode(200);
+
+        // Updating an existing key keeps the count at 50 and is accepted.
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"ResourceArn\": \"" + arn + "\", \"Tags\": [{\"Key\": \"k0\", \"Value\": \"updated\"}]}")
+        .when()
+            .post("/v2/email/tags")
+        .then()
+            .statusCode(200);
+
+        // Adding one new key would make 51 — rejected with the merge-specific message.
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"ResourceArn\": \"" + arn + "\", \"Tags\": [{\"Key\": \"extra\", \"Value\": \"v\"}]}")
+        .when()
+            .post("/v2/email/tags")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", equalTo("Maximum of 50 user tags are allowed per resource, consider "
+                + "reducing the number of tags in the request or delete existing tags and retry"));
+    }
+
+    @Test
+    @Order(21)
+    void tagResource_reservedAwsPrefixKey_returns400() {
+        String arn = "arn:aws:ses:us-east-1:000000000000:configuration-set/tag-cs-1";
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"ResourceArn\": \"" + arn + "\", \"Tags\": [{\"Key\": \"aws:foo\", \"Value\": \"v\"}]}")
+        .when()
+            .post("/v2/email/tags")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", equalTo("Caller is an end user and not allowed to mutate system tags"));
+    }
+
+    @Test
+    @Order(22)
+    void createEmailIdentity_invalidInlineTags_isAtomic_identityNotPersisted() {
+        // A semantic tag error must fail CreateEmailIdentity before the identity is persisted, so a
+        // corrected retry does not hit AlreadyExistsException. Validation is now applied to the parsed
+        // tag list up front, before verifyEmailIdentity/verifyDomainIdentity.
+        String id = "atomic-tag-id@example.com";
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {"EmailIdentity": "%s", "Tags": [
+                  {"Key": "dup", "Value": "1"},
+                  {"Key": "dup", "Value": "2"}
+                ]}
+                """.formatted(id))
+        .when()
+            .post("/v2/email/identities")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", equalTo("Cannot provide multiple tags with the same key"));
+
+        // The failed create must leave no identity behind.
+        given()
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .get("/v2/email/identities/" + id)
+        .then()
+            .statusCode(404);
+    }
+
+    private static String tagArray(int from, int to) {
+        StringBuilder sb = new StringBuilder("[");
+        for (int i = from; i < to; i++) {
+            if (i > from) {
+                sb.append(",");
+            }
+            sb.append("{\"Key\": \"k").append(i).append("\", \"Value\": \"v\"}");
+        }
+        return sb.append("]").toString();
+    }
 }

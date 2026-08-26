@@ -30,7 +30,7 @@ class ElastiCacheQueryHandlerTest {
 
     @Test
     void describeCacheSubnetGroups_returnsEmptyWrapperWithoutMarker() {
-        Response response = handler.handle("DescribeCacheSubnetGroups", params());
+        Response response = handler.handle("DescribeCacheSubnetGroups", params(), "us-east-1");
 
         assertEquals(200, response.getStatus());
         String body = (String) response.getEntity();
@@ -41,7 +41,7 @@ class ElastiCacheQueryHandlerTest {
 
     @Test
     void describeCacheParameterGroups_returnsEmptyWrapperWithoutMarker() {
-        Response response = handler.handle("DescribeCacheParameterGroups", params());
+        Response response = handler.handle("DescribeCacheParameterGroups", params(), "us-east-1");
 
         assertEquals(200, response.getStatus());
         String body = (String) response.getEntity();
@@ -52,7 +52,7 @@ class ElastiCacheQueryHandlerTest {
 
     @Test
     void unsupportedOperationStillReturnsQueryError() {
-        Response response = handler.handle("NoSuchAction", params());
+        Response response = handler.handle("NoSuchAction", params(), "us-east-1");
 
         assertEquals(400, response.getStatus());
         assertTrue(((String) response.getEntity()).contains("UnsupportedOperation"));

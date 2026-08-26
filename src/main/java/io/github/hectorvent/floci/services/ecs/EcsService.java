@@ -50,9 +50,14 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import java.util.Set;
 
 @ApplicationScoped
-public class EcsService implements ContainerTeardown {
+public class EcsService implements ContainerTeardown, ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(EcsService.class);
     private static final String DEFAULT_CLUSTER = "default";
@@ -1775,5 +1780,39 @@ public class EcsService implements ContainerTeardown {
         String after = key.substring(key.indexOf("::") + 2);
         int slash = after.indexOf('/');
         return slash >= 0 ? after.substring(0, slash) : after;
+    }
+
+    // ─── Resource Explorer 2 ───────────────────────────────────────────────────
+
+    @Override
+    public List<ExplorerResource> getResources() {
+        List<ExplorerResource> resources = new ArrayList<>();
+        for (EcsCluster cluster : clusters.values()) {
+            addExplorerResource(resources, cluster.getClusterArn(), "ecs:cluster", null, cluster.getTags());
+        }
+        for (EcsServiceModel service : services.values()) {
+            addExplorerResource(resources, service.getServiceArn(), "ecs:service",
+                    service.getCreatedAt(), service.getTags());
+        }
+        return resources;
+    }
+
+    @Override
+    public Set<SupportedResourceType> getSupportedResourceTypes() {
+        return Set.of(
+                new SupportedResourceType("ecs:cluster", "ecs", true),
+                new SupportedResourceType("ecs:service", "ecs", true));
+    }
+
+    private static void addExplorerResource(List<ExplorerResource> out, String arn, String resourceType,
+                                            Instant createdAt, Map<String, String> tags) {
+        if (arn == null) {
+            return;
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        out.add(new ExplorerResource(arn, resourceType, "ecs",
+                parsed.region(), parsed.accountId(),
+                createdAt != null ? createdAt : Instant.now(),
+                tags != null ? tags : Map.of()));
     }
 }

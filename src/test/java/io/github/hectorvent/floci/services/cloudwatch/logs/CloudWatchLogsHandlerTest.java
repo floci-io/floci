@@ -146,6 +146,28 @@ class CloudWatchLogsHandlerTest {
     }
 
     @Test
+    void putResourcePolicyIsReturnedByDescribeResourcePolicies() {
+        String document = "{\"Version\":\"2012-10-17\",\"Statement\":[]}";
+        ObjectNode put = MAPPER.createObjectNode();
+        put.put("policyName", "delivery-policy");
+        put.put("policyDocument", document);
+
+        JsonNode created = (JsonNode) handler.handle("PutResourcePolicy", put, REGION).getEntity();
+
+        assertEquals("delivery-policy", created.path("resourcePolicy").path("policyName").asText());
+        assertEquals(document, created.path("resourcePolicy").path("policyDocument").asText());
+        assertTrue(created.path("resourcePolicy").path("lastUpdatedTime").asLong() > 0);
+
+        JsonNode described = (JsonNode) handler.handle(
+                "DescribeResourcePolicies", MAPPER.createObjectNode(), REGION).getEntity();
+        assertEquals(1, described.path("resourcePolicies").size());
+        assertEquals("delivery-policy",
+                described.path("resourcePolicies").get(0).path("policyName").asText());
+        assertEquals(document,
+                described.path("resourcePolicies").get(0).path("policyDocument").asText());
+    }
+
+    @Test
     void putLogGroupDeletionProtectionPersistsByName() {
         ObjectNode request = MAPPER.createObjectNode();
         request.put("logGroupIdentifier", GROUP);

@@ -429,6 +429,17 @@ class SesContactListV2IntegrationTest {
                         + "Member must satisfy enum value set: [OPT_OUT, OPT_IN]"));
     }
 
+    @Test
+    @Order(25)
+    void createContactList_duplicateTagKeys_returns400() {
+        post("{\"ContactListName\":\"tagged-list\",\"Topics\":[],"
+                + "\"Tags\":[{\"Key\":\"dup\",\"Value\":\"1\"},{\"Key\":\"dup\",\"Value\":\"2\"}]}")
+        .then()
+                .statusCode(400)
+                .body("__type", equalTo("BadRequestException"))
+                .body("message", equalTo("Cannot provide multiple tags with the same key"));
+    }
+
     private static io.restassured.response.Response post(String body) {
         return given()
                 .contentType("application/json")

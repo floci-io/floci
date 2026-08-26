@@ -73,6 +73,7 @@ public class Ec2QueryHandler {
                 case "DescribeVpcEndpointServices" -> handleDescribeVpcEndpointServices(params, region);
                 case "CreateVpcEndpoint" -> handleCreateVpcEndpoint(params, region);
                 case "DescribeVpcEndpoints" -> handleDescribeVpcEndpoints(params, region);
+                case "ModifyVpcEndpoint" -> handleModifyVpcEndpoint(params, region);
                 case "DeleteVpcEndpoints" -> handleDeleteVpcEndpoints(params, region);
                 // Flow Logs
                 case "CreateFlowLogs" -> handleCreateFlowLogs(params, region);
@@ -1102,12 +1103,36 @@ public class Ec2QueryHandler {
                 getList(p, "SubnetId"),
                 getList(p, "SecurityGroupId"),
                 p.getFirst("PrivateDnsEnabled") != null ? Boolean.valueOf(p.getFirst("PrivateDnsEnabled")) : null,
+                p.getFirst("PolicyDocument"),
                 parseTagsForResource(p, "vpc-endpoint"));
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateVpcEndpointResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
                 .start("vpcEndpoint").raw(vpcEndpointXml(endpoint)).end("vpcEndpoint")
                 .end("CreateVpcEndpointResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleModifyVpcEndpoint(MultivaluedMap<String, String> p, String region) {
+        service.modifyVpcEndpoint(
+                region,
+                p.getFirst("VpcEndpointId"),
+                getList(p, "AddRouteTableId"),
+                getList(p, "RemoveRouteTableId"),
+                getList(p, "AddSubnetId"),
+                getList(p, "RemoveSubnetId"),
+                getList(p, "AddSecurityGroupId"),
+                getList(p, "RemoveSecurityGroupId"),
+                p.getFirst("PolicyDocument"),
+                p.getFirst("ResetPolicy") != null ? Boolean.valueOf(p.getFirst("ResetPolicy")) : null,
+                p.getFirst("PrivateDnsEnabled") != null ? Boolean.valueOf(p.getFirst("PrivateDnsEnabled")) : null);
+        // ModifyVpcEndpoint returns only a boolean; the caller re-reads the endpoint
+        // through DescribeVpcEndpoints to see the result.
+        XmlBuilder xml = new XmlBuilder()
+                .start("ModifyVpcEndpointResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .elem("return", true)
+                .end("ModifyVpcEndpointResponse");
         return xmlResponse(xml.build());
     }
 
@@ -3415,8 +3440,11 @@ public class Ec2QueryHandler {
         for (String securityGroupId : endpoint.getSecurityGroupIds()) {
             xml.start("item").elem("groupId", securityGroupId).end("item");
         }
-        xml.end("groupSet")
-                .raw(tagSetXml(endpoint.getTags()));
+        xml.end("groupSet");
+        if (endpoint.getPolicyDocument() != null) {
+            xml.elem("policyDocument", endpoint.getPolicyDocument());
+        }
+        xml.raw(tagSetXml(endpoint.getTags()));
         return xml.build();
     }
 

@@ -37,6 +37,7 @@ aliases:
   elasticbeanstalk: elastic-beanstalk
   ec2messages: ssm                      # SSM Messages facet, documented alongside ssm.md
   iotdata: iot                          # IoT Data row shares iot.md with IoT Core
+  resource-explorer-2: resource-explorer # API version suffix; the page is resource-explorer.md
 
 # A NEW switch/REST descriptor not listed here and not resolvable via an alias fails
 # `--strict`. Every entry MUST carry a `by:` expiry date (ISO, YYYY-MM-DD): once that

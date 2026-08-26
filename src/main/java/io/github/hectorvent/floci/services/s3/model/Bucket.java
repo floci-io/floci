@@ -27,6 +27,7 @@ public class Bucket {
     private String encryptionConfiguration; // XML string
     private String publicAccessBlockConfiguration; // XML string
     private String ownershipControlsConfiguration; // XML string
+    private String replicationConfiguration; // XML string; null until first PUT
     private String requestPaymentPayer; // "BucketOwner" (default) or "Requester"; null until first PUT
     private String accelerateStatus; // "Enabled" or "Suspended"; null until first PUT
     private String region;
@@ -106,6 +107,11 @@ public class Bucket {
     public String getOwnershipControlsConfiguration() { return ownershipControlsConfiguration; }
     public void setOwnershipControlsConfiguration(String ownershipControlsConfiguration) {
         this.ownershipControlsConfiguration = ownershipControlsConfiguration;
+    }
+
+    public String getReplicationConfiguration() { return replicationConfiguration; }
+    public void setReplicationConfiguration(String replicationConfiguration) {
+        this.replicationConfiguration = replicationConfiguration;
     }
 
     public String getRequestPaymentPayer() { return requestPaymentPayer; }

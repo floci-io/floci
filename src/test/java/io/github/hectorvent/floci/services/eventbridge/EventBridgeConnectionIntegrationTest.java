@@ -182,7 +182,7 @@ class EventBridgeConnectionIntegrationTest {
                 .header("X-Amz-Target", "AWSEvents.DescribeConnection")
                 .body("{\"Name\":\"no-such-connection\"}")
                 .when().post("/")
-                .then().statusCode(404)
+                .then().statusCode(400)
                 .body("__type", equalTo("ResourceNotFoundException"));
     }
 
@@ -223,7 +223,7 @@ class EventBridgeConnectionIntegrationTest {
                 .header("X-Amz-Target", "AWSEvents.DescribeConnection")
                 .body("{\"Name\":\"test-http-ingress-connection\"}")
                 .when().post("/")
-                .then().statusCode(404)
+                .then().statusCode(400)
                 .body("__type", equalTo("ResourceNotFoundException"));
     }
 
