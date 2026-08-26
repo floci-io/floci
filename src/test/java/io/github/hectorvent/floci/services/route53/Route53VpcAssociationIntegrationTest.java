@@ -192,6 +192,70 @@ class Route53VpcAssociationIntegrationTest {
                 .body(containsString("VPCRegion is required"));
     }
 
+    @Test
+    void associateWithAnUnmodelledVpcRegionIsRejected() {
+        String zoneId = createPrivateZone("badregion.internal.", "vpc-assoc-bad-region", "vpc-badregion-primary");
+
+        String body = """
+                <AssociateVPCWithHostedZoneRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
+                  <VPC><VPCRegion>us-east-99</VPCRegion><VPCId>vpc-badregion-secondary</VPCId></VPC>
+                </AssociateVPCWithHostedZoneRequest>
+                """;
+        given().contentType(XML).body(body)
+                .post("/2013-04-01/hostedzone/" + zoneId + "/associatevpc")
+                .then().statusCode(400)
+                .body(containsString("<Code>InvalidInput</Code>"))
+                .body(containsString("VPCRegion"));
+
+        // The rejected association must not have been stored.
+        given().get("/2013-04-01/hostedzone/" + zoneId)
+                .then().statusCode(200)
+                .body(not(containsString("<VPCId>vpc-badregion-secondary</VPCId>")));
+    }
+
+    @Test
+    void authorizeVpcAssociationWithAnUnmodelledVpcRegionIsRejected() {
+        String zoneId = createPrivateZone("authzregion.internal.", "vpc-assoc-authz-region", "vpc-authzregion-primary");
+
+        String body = """
+                <CreateVPCAssociationAuthorizationRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
+                  <VPC><VPCRegion>not-a-region</VPCRegion><VPCId>vpc-authzregion-guest</VPCId></VPC>
+                </CreateVPCAssociationAuthorizationRequest>
+                """;
+        given().contentType(XML).body(body)
+                .post("/2013-04-01/hostedzone/" + zoneId + "/authorizevpcassociation")
+                .then().statusCode(400)
+                .body(containsString("<Code>InvalidInput</Code>"))
+                .body(containsString("VPCRegion"));
+    }
+
+    @Test
+    void listHostedZonesByVpcRejectsAnUnmodelledVpcRegion() {
+        given().get("/2013-04-01/hostedzonesbyvpc?vpcid=vpc-anything&vpcregion=us-east-99")
+                .then().statusCode(400)
+                .body(containsString("<Code>InvalidInput</Code>"))
+                .body(containsString("VPCRegion"));
+    }
+
+    /**
+     * The VPCRegion enum covers partitions this emulator does not advertise, so the check
+     * must follow the model rather than the DescribeRegions catalog.
+     */
+    @Test
+    void associateAcceptsAModelledNonCommercialVpcRegion() {
+        String zoneId = createPrivateZone("isoregion.internal.", "vpc-assoc-iso-region", "vpc-isoregion-primary");
+
+        String body = """
+                <AssociateVPCWithHostedZoneRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
+                  <VPC><VPCRegion>us-iso-east-1</VPCRegion><VPCId>vpc-isoregion-secondary</VPCId></VPC>
+                </AssociateVPCWithHostedZoneRequest>
+                """;
+        given().contentType(XML).body(body)
+                .post("/2013-04-01/hostedzone/" + zoneId + "/associatevpc")
+                .then().statusCode(200)
+                .body(containsString("<AssociateVPCWithHostedZoneResponse"));
+    }
+
     private static String createPrivateZone(String name, String callerReference, String vpcId) {
         String create = """
                 <CreateHostedZoneRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
