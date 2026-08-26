@@ -380,15 +380,21 @@ public class CloudWatchLogsHandler {
      * resourceIdentifier — neither, or both, is an InvalidParameterException.
      */
     private String resolveKmsTargetLogGroupName(JsonNode request) {
-        String name = request.path("logGroupName").asText(null);
-        String resourceIdentifier = request.path("resourceIdentifier").asText(null);
-        boolean hasName = name != null && !name.isBlank();
-        boolean hasResourceIdentifier = resourceIdentifier != null && !resourceIdentifier.isBlank();
+        // A present-but-blank member counts as PRESENT: the model pins both fields to
+        // min length 1, so blank never silently degrades to "absent" and hands the
+        // mutation to the other identifier.
+        boolean hasName = request.hasNonNull("logGroupName");
+        boolean hasResourceIdentifier = request.hasNonNull("resourceIdentifier");
         if (hasName == hasResourceIdentifier) {
             throw new AwsException("InvalidParameterException",
                     "Exactly one of logGroupName or resourceIdentifier is required.", 400);
         }
-        return extractLogGroupNameFromArn(hasName ? name : resourceIdentifier);
+        String value = request.path(hasName ? "logGroupName" : "resourceIdentifier").asText();
+        if (value.isBlank()) {
+            throw new AwsException("InvalidParameterException",
+                    (hasName ? "logGroupName" : "resourceIdentifier") + " must not be blank.", 400);
+        }
+        return extractLogGroupNameFromArn(value);
     }
 
     private Response handlePutRetentionPolicy(JsonNode request, String region) {

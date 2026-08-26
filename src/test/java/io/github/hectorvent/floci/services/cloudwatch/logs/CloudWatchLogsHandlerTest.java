@@ -595,6 +595,32 @@ class CloudWatchLogsHandlerTest {
     }
 
     @Test
+    void associateKmsKeyWithBlankNameBesideValidArnThrowsInvalidParameter() {
+        // A present-but-blank identifier is not "absent": the model pins logGroupName
+        // to min length 1, so blank + a valid counterpart must reject, not silently
+        // proceed on the valid one.
+        ObjectNode associate = MAPPER.createObjectNode();
+        associate.put("logGroupName", "");
+        associate.put("resourceIdentifier", GROUP_ARN);
+        associate.put("kmsKeyId", KEY_ARN);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("AssociateKmsKey", associate, REGION));
+        assertEquals("InvalidParameterException", ex.getErrorCode());
+    }
+
+    @Test
+    void associateKmsKeyWithOnlyABlankIdentifierThrowsInvalidParameter() {
+        ObjectNode associate = MAPPER.createObjectNode();
+        associate.put("logGroupName", "");
+        associate.put("kmsKeyId", KEY_ARN);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("AssociateKmsKey", associate, REGION));
+        assertEquals("InvalidParameterException", ex.getErrorCode());
+    }
+
+    @Test
     void associateKmsKeyWithoutAnyIdentifierThrowsInvalidParameter() {
         ObjectNode associate = MAPPER.createObjectNode();
         associate.put("kmsKeyId", KEY_ARN);
