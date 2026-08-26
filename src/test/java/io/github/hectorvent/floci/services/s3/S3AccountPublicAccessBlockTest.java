@@ -76,6 +76,30 @@ class S3AccountPublicAccessBlockTest {
         assertEquals("InvalidRequest", ex.getErrorCode());
     }
 
+    /**
+     * The s3control {@code AccountId} shape is {@code pattern ^\d{12}$}. The header alone picks
+     * the storage partition every one of these operations reads, overwrites or deletes, so an
+     * unchecked value writes a configuration under a partition no account can ever address again.
+     */
+    @Test
+    void accountPublicAccessBlockRejectsAMalformedAccountId() {
+        for (String bad : new String[] {"12345678901", "1234567890123", "00000000000a",
+                                        "arn:aws:iam::000000000000:root", "000000000000 "}) {
+            AwsException ex = assertThrows(AwsException.class,
+                    () -> s3Service.putAccountPublicAccessBlock(bad, "<x/>"),
+                    "expected rejection for account id: " + bad);
+            assertEquals("InvalidRequest", ex.getErrorCode());
+        }
+    }
+
+    @Test
+    void getAndDeleteAccountPublicAccessBlockAlsoRejectAMalformedAccountId() {
+        assertEquals("InvalidRequest", assertThrows(AwsException.class,
+                () -> s3Service.getAccountPublicAccessBlock("not-an-account")).getErrorCode());
+        assertEquals("InvalidRequest", assertThrows(AwsException.class,
+                () -> s3Service.deleteAccountPublicAccessBlock("not-an-account")).getErrorCode());
+    }
+
     @Test
     void clearLeavesAccountPublicAccessBlockToItsStorageBackend() {
         // clear() resets only the in-process object/multipart maps. The account-level config now

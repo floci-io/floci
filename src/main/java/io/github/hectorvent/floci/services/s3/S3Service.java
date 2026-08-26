@@ -2475,10 +2475,22 @@ public class S3Service implements Resettable, ResourceProvider {
                 requireAccountId(accountId), ACCOUNT_PUBLIC_ACCESS_BLOCK_KEY);
     }
 
+    /** The s3control {@code AccountId} shape: {@code pattern ^\d{12}$}. */
+    private static final Pattern ACCOUNT_ID_PATTERN = Pattern.compile("\\d{12}");
+
+    /**
+     * The account id is the storage partition key for every account-level Block Public Access
+     * operation, so a value outside the modelled shape would file a security configuration under
+     * a partition no account can address again. Reject it before it reaches the store.
+     */
     private static String requireAccountId(String accountId) {
         if (accountId == null || accountId.isBlank()) {
             throw new AwsException("InvalidRequest",
                     "The x-amz-account-id header is required.", 400);
+        }
+        if (!ACCOUNT_ID_PATTERN.matcher(accountId).matches()) {
+            throw new AwsException("InvalidRequest",
+                    "The x-amz-account-id header must be a 12-digit AWS account ID.", 400);
         }
         return accountId;
     }
@@ -2531,16 +2543,31 @@ public class S3Service implements Resettable, ResourceProvider {
             }
             String role = XmlParser.extractFirst(replicationXml, "Role", null);
             String destinationBucket = XmlParser.extractFirst(replicationXml, "Bucket", null);
+            List<Map<String, List<String>>> rules = XmlParser.extractGroupsMulti(replicationXml, "Rule");
             if (role == null || role.isBlank()
                     || destinationBucket == null || destinationBucket.isBlank()
-                    || XmlParser.extractGroupsMulti(replicationXml, "Rule").isEmpty()) {
+                    || rules.isEmpty()) {
                 throw new AwsException("MalformedXML",
                         "The XML you provided was not well-formed or did not validate against our published schema.",
                         400);
             }
+            // ReplicationRule/Status is Required: Yes with enum Enabled|Disabled. Storing an
+            // out-of-enum status would have GetBucketReplication echo back a document AWS
+            // would never have accepted.
+            for (Map<String, List<String>> rule : rules) {
+                List<String> statuses = rule.getOrDefault("Status", List.of());
+                if (statuses.size() != 1 || !REPLICATION_RULE_STATUSES.contains(statuses.get(0))) {
+                    throw new AwsException("MalformedXML",
+                            "The XML you provided was not well-formed or did not validate against "
+                                    + "our published schema.", 400);
+                }
+            }
             bucket.setReplicationConfiguration(replicationXml);
         });
     }
+
+    /** The {@code ReplicationRuleStatus} enum from the S3 model. */
+    private static final Set<String> REPLICATION_RULE_STATUSES = Set.of("Enabled", "Disabled");
 
     public void deleteBucketReplication(String bucketName) {
         mutateBucket(bucketName, bucket -> bucket.setReplicationConfiguration(null));

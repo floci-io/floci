@@ -172,6 +172,68 @@ class S3ReplicationConfigurationIntegrationTest {
             .body(containsString("<ID>rule2</ID>"));
     }
 
+    /**
+     * {@code ReplicationRule/Status} is Required: Yes with enum {@code Enabled|Disabled}.
+     * Storing a rule with any other status — or with none — makes the emulator answer a
+     * later GetBucketReplication with a document AWS would never have accepted.
+     */
+    @Test
+    @Order(7)
+    void putReplicationRejectsARuleStatusOutsideTheEnum() {
+        given()
+            .body("""
+                    <ReplicationConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+                        <Role>arn:aws:iam::000000000000:role/replication-role</Role>
+                        <Rule>
+                            <ID>bad-status</ID>
+                            <Status>enabled</Status>
+                            <Destination>
+                                <Bucket>arn:aws:s3:::replication-config-int-test-target</Bucket>
+                            </Destination>
+                        </Rule>
+                    </ReplicationConfiguration>
+                    """)
+        .when()
+            .put("/" + BUCKET + "?replication")
+        .then()
+            .statusCode(400)
+            .body(containsString("MalformedXML"));
+        given()
+        .when()
+            .get("/" + BUCKET + "?replication")
+        .then()
+            .statusCode(200)
+            .body(not(containsString("bad-status")));
+    }
+
+    @Test
+    @Order(7)
+    void putReplicationRejectsARuleWithNoStatus() {
+        given()
+            .body("""
+                    <ReplicationConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+                        <Role>arn:aws:iam::000000000000:role/replication-role</Role>
+                        <Rule>
+                            <ID>no-status</ID>
+                            <Destination>
+                                <Bucket>arn:aws:s3:::replication-config-int-test-target</Bucket>
+                            </Destination>
+                        </Rule>
+                    </ReplicationConfiguration>
+                    """)
+        .when()
+            .put("/" + BUCKET + "?replication")
+        .then()
+            .statusCode(400)
+            .body(containsString("MalformedXML"));
+        given()
+        .when()
+            .get("/" + BUCKET + "?replication")
+        .then()
+            .statusCode(200)
+            .body(not(containsString("no-status")));
+    }
+
     @Test
     @Order(8)
     void putReplicationOnMissingBucketReturns404() {
