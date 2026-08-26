@@ -758,6 +758,33 @@ public class SecretsManagerService implements ResourceProvider {
         store.put(regionKey(region, secret.getName()), secret);
     }
 
+    public Secret putResourcePolicy(String secretId, String resourcePolicy, String region) {
+        Secret secret = resolveSecret(secretId, region);
+        throwIfPendingDeletion(secret);
+        secret.setResourcePolicy(resourcePolicy);
+        store.put(regionKey(region, secret.getName()), secret);
+        LOG.infov("Put resource policy on secret: {0}", secret.getName());
+        return secret;
+    }
+
+    // Real AWS rejects GetResourcePolicy on a secret in its recovery window the same way it
+    // rejects the mutating ops; the terraform provider matches that InvalidRequestException's
+    // "marked for deletion" message to treat the policy as gone, so the guard applies here too.
+    public Secret getResourcePolicy(String secretId, String region) {
+        Secret secret = resolveSecret(secretId, region);
+        throwIfPendingDeletion(secret);
+        return secret;
+    }
+
+    public Secret deleteResourcePolicy(String secretId, String region) {
+        Secret secret = resolveSecret(secretId, region);
+        throwIfPendingDeletion(secret);
+        secret.setResourcePolicy(null);
+        store.put(regionKey(region, secret.getName()), secret);
+        LOG.infov("Deleted resource policy on secret: {0}", secret.getName());
+        return secret;
+    }
+
     public Map<String, List<String>> listSecretVersionIds(String secretId, String region) {
         Secret secret = resolveSecret(secretId, region);
 
