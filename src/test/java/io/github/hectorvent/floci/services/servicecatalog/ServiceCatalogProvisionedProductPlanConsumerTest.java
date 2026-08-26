@@ -106,6 +106,9 @@ class ServiceCatalogProvisionedProductPlanConsumerTest {
         .then()
             .statusCode(200)
             .body("ProvisionedProductPlanDetails.PlanId", equalTo(planId))
+            .body("ProvisionedProductPlanDetails.PlanName", equalTo("ab-describe-plan"))
+            .body("ProvisionedProductPlanDetails.ProvisionProductId", equalTo(productId))
+            .body("ProvisionedProductPlanDetails.ProvisionProductName", equalTo("ab-describe-plan-pp"))
             .body("ProvisionedProductPlanDetails.ProductId", equalTo(productId))
             .body("ProvisionedProductPlanDetails.ProvisioningArtifactId", equalTo(artifactId));
     }
@@ -184,6 +187,9 @@ class ServiceCatalogProvisionedProductPlanConsumerTest {
         .then()
             .statusCode(200)
             .body("ProvisionedProductPlans.PlanId", hasItem(planA))
+            .body("ProvisionedProductPlans[0].PlanName", equalTo("ab-list-plan-a"))
+            .body("ProvisionedProductPlans[0].ProvisionProductId", equalTo(productA))
+            .body("ProvisionedProductPlans[0].ProvisionProductName", equalTo("ab-list-plan-a-pp"))
             .body("ProvisionedProductPlans.size()", equalTo(1));
     }
 }

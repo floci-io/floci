@@ -439,12 +439,17 @@ public class ServiceCatalogJsonHandler {
         ObjectNode plan = service.describeProvisionedProductPlan(text(request, "PlanId"));
         ObjectNode details = objectMapper.createObjectNode();
         details.put("PlanId", plan.path("Id").asText());
+        if (plan.has("PlanName")) {
+            details.put("PlanName", plan.get("PlanName").asText());
+        }
         if (plan.has("ProductId")) {
             details.put("ProductId", plan.get("ProductId").asText());
         }
-        details.put("ProvisionProductId", plan.path("Id").asText());
-        if (plan.has("Name")) {
-            details.put("ProvisionProductName", plan.get("Name").asText());
+        if (plan.has("ProvisionProductId")) {
+            details.put("ProvisionProductId", plan.get("ProvisionProductId").asText());
+        }
+        if (plan.has("ProvisionedProductName")) {
+            details.put("ProvisionProductName", plan.get("ProvisionedProductName").asText());
         }
         if (plan.has("ProvisioningArtifactId")) {
             details.put("ProvisioningArtifactId", plan.get("ProvisioningArtifactId").asText());
@@ -632,10 +637,10 @@ public class ServiceCatalogJsonHandler {
         for (ObjectNode product : page) {
             ObjectNode plan = objectMapper.createObjectNode();
             plan.put("PlanId", text(product, "Id"));
-            plan.put("PlanName", text(product, "Name"));
+            plan.put("PlanName", text(product, "PlanName"));
             plan.put("PlanType", "CLOUDFORMATION");
-            plan.put("ProvisionProductId", text(product, "Id"));
-            plan.put("ProvisionProductName", text(product, "Name"));
+            plan.put("ProvisionProductId", text(product, "ProvisionProductId"));
+            plan.put("ProvisionProductName", text(product, "ProvisionedProductName"));
             plan.put("ProvisioningArtifactId", text(product, "ProvisioningArtifactId"));
             plans.add(plan);
         }
