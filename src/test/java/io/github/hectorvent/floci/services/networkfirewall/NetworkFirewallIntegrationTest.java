@@ -400,6 +400,72 @@ class NetworkFirewallIntegrationTest {
             .body("message", equalTo("RuleGroup not found: no-such-rule-group"));
     }
 
+    @Test
+    void createRuleGroup_withUnmodelledType_isRejectedAndStoresNothing() {
+        call("CreateRuleGroup", "{\"RuleGroupName\":\"bogus-type-rule-group\",\"Type\":\"FOO\","
+                + "\"Capacity\":100,\"RuleGroup\":{\"RulesSource\":{\"RulesString\":\"pass ip any any\"}}}")
+            .statusCode(400)
+            .body("__type", equalTo("InvalidRequestException"));
+
+        call("DescribeRuleGroup", "{\"RuleGroupName\":\"bogus-type-rule-group\"}")
+            .statusCode(400)
+            .body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    void updateRuleGroup_withUnmodelledType_isRejected() {
+        call("UpdateRuleGroup", "{\"RuleGroupName\":\"bogus-update-rule-group\",\"Type\":\"stateful\","
+                + "\"Capacity\":100,\"RuleGroup\":{\"RulesSource\":{\"RulesString\":\"pass ip any any\"}}}")
+            .statusCode(400)
+            .body("__type", equalTo("InvalidRequestException"));
+    }
+
+    @Test
+    void createRuleGroup_withStatefulDomainType_usesTheStatefulArnPrefix() {
+        call("CreateRuleGroup", "{\"RuleGroupName\":\"domain-list-rule-group\",\"Type\":\"STATEFUL_DOMAIN\","
+                + "\"Capacity\":100,\"RuleGroup\":{\"RulesSource\":{\"RulesString\":\"pass ip any any\"}}}")
+            .statusCode(200)
+            .body("RuleGroupResponse.RuleGroupArn", equalTo(
+                    "arn:aws:network-firewall:us-east-1:723679240095:"
+                            + "stateful-rulegroup/domain-list-rule-group"));
+    }
+
+    @Test
+    void updateLoggingConfiguration_withUnmodelledLogTypeOrDestinationType_isRejected() {
+        String name = "LoggingEnumFirewall";
+        createFirewall(name, "", "subnet-11111111111111113");
+
+        call("UpdateLoggingConfiguration", "{\"FirewallArn\":\"" + firewallArn(name) + "\","
+                + "\"LoggingConfiguration\":{\"LogDestinationConfigs\":[{\"LogType\":\"AUDIT\","
+                + "\"LogDestinationType\":\"S3\",\"LogDestination\":{\"bucketName\":\"b\"}}]}}")
+            .statusCode(400)
+            .body("__type", equalTo("InvalidRequestException"));
+
+        call("UpdateLoggingConfiguration", "{\"FirewallArn\":\"" + firewallArn(name) + "\","
+                + "\"LoggingConfiguration\":{\"LogDestinationConfigs\":[{\"LogType\":\"ALERT\","
+                + "\"LogDestinationType\":\"s3\",\"LogDestination\":{\"bucketName\":\"b\"}}]}}")
+            .statusCode(400)
+            .body("__type", equalTo("InvalidRequestException"));
+
+        call("DescribeLoggingConfiguration", "{\"FirewallArn\":\"" + firewallArn(name) + "\"}")
+            .statusCode(200)
+            .body("LoggingConfiguration.LogDestinationConfigs", empty());
+    }
+
+    @Test
+    void updateLoggingConfiguration_withModelledEnumValues_isStored() {
+        String name = "LoggingValidFirewall";
+        createFirewall(name, "", "subnet-11111111111111114");
+
+        call("UpdateLoggingConfiguration", "{\"FirewallArn\":\"" + firewallArn(name) + "\","
+                + "\"LoggingConfiguration\":{\"LogDestinationConfigs\":[{\"LogType\":\"FLOW\","
+                + "\"LogDestinationType\":\"CloudWatchLogs\","
+                + "\"LogDestination\":{\"logGroup\":\"/aws/nfw\"}}]}}")
+            .statusCode(200)
+            .body("LoggingConfiguration.LogDestinationConfigs[0].LogDestinationType",
+                    equalTo("CloudWatchLogs"));
+    }
+
     private static String firewallArn(String name) {
         return "arn:aws:network-firewall:us-east-1:723679240095:firewall/" + name;
     }

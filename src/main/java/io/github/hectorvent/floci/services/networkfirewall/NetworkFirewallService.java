@@ -18,12 +18,18 @@ import java.util.Comparator;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 @ApplicationScoped
 public class NetworkFirewallService {
 
     private static final int AVAILABILITY_ZONES_PER_REGION = 6;
+    private static final Set<String> RULE_GROUP_TYPES =
+            Set.of("STATELESS", "STATEFUL", "STATEFUL_DOMAIN");
+    private static final Set<String> LOG_TYPES = Set.of("ALERT", "FLOW", "TLS");
+    private static final Set<String> LOG_DESTINATION_TYPES =
+            Set.of("S3", "CloudWatchLogs", "KinesisDataFirehose");
 
     private final ObjectMapper objectMapper;
     private final StorageBackend<String, ObjectNode> ruleGroups;
@@ -265,6 +271,7 @@ public class NetworkFirewallService {
         String arn = resolveFirewallArn(request);
         ObjectNode existing = require(firewalls, arn, textOrNull(request, "FirewallName"),
                 "Firewall", "FirewallArn", "FirewallName");
+        validateLoggingConfiguration(request.path("LoggingConfiguration"));
         ObjectNode stored = objectMapper.createObjectNode();
         stored.put("FirewallArn", existing.path("FirewallArn").asText());
         stored.put("FirewallName", existing.path("FirewallName").asText());
@@ -274,6 +281,22 @@ public class NetworkFirewallService {
         }
         loggingConfigurations.put(existing.path("FirewallArn").asText(), stored);
         return stored.deepCopy();
+    }
+
+    /**
+     * The whole LoggingConfiguration is stored verbatim, so the two enums inside each
+     * LogDestinationConfig have to be checked here: LogType (ALERT/FLOW/TLS) and LogDestinationType
+     * (S3/CloudWatchLogs/KinesisDataFirehose, case-sensitive as the model spells them).
+     */
+    private void validateLoggingConfiguration(JsonNode loggingConfiguration) {
+        if (loggingConfiguration == null || !loggingConfiguration.isObject()) {
+            return;
+        }
+        for (JsonNode config : loggingConfiguration.path("LogDestinationConfigs")) {
+            requireEnum(textOrNull(config, "LogType"), LOG_TYPES, "LogType");
+            requireEnum(textOrNull(config, "LogDestinationType"), LOG_DESTINATION_TYPES,
+                    "LogDestinationType");
+        }
     }
 
     public ObjectNode describeLoggingConfiguration(String arn, String name) {
@@ -457,10 +480,25 @@ public class NetworkFirewallService {
         throw new IllegalStateException("Stored Network Firewall resource has no ARN");
     }
 
+    /**
+     * The model enumerates {@code Type} as STATELESS, STATEFUL or STATEFUL_DOMAIN, and the value is
+     * both persisted and folded into the ARN. Only STATELESS gets the stateless ARN prefix; the two
+     * stateful variants share {@code stateful-rulegroup}, as AWS does. Left unchecked, any unmodelled
+     * value silently fell through to the stateful prefix and was stored as a rule group AWS would
+     * have rejected.
+     */
     private String ruleGroupArn(JsonNode request, String region, String accountId) {
         String type = requiredText(request, "Type");
+        requireEnum(type, RULE_GROUP_TYPES, "Type");
         String prefix = "STATELESS".equals(type) ? "stateless-rulegroup" : "stateful-rulegroup";
         return arn(region, accountId, prefix, requiredText(request, "RuleGroupName"));
+    }
+
+    private static void requireEnum(String value, Set<String> allowed, String field) {
+        if (!allowed.contains(value)) {
+            throw new AwsException("InvalidRequestException",
+                    field + " must be one of " + allowed + ".", 400);
+        }
     }
 
     private String resolveFirewallArn(JsonNode request) {
