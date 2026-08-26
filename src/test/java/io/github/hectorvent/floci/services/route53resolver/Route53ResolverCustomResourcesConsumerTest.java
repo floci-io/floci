@@ -9,6 +9,7 @@ import org.junit.jupiter.api.Test;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
+import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.startsWith;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -310,6 +311,24 @@ class Route53ResolverCustomResourcesConsumerTest {
     }
 
     @Test
+    void updateResolverEndpoint_unknownEndpointType_returnsInvalidParameters() {
+        String id = createEndpoint("ab-endpoint-badtype");
+
+        // ResolverEndpointType is an enum of IPV6 / IPV4 / DUALSTACK: storing anything
+        // else would have GetResolverEndpoint report an endpoint type AWS never allows.
+        call("UpdateResolverEndpoint", "{\"ResolverEndpointId\":\"" + id
+                + "\",\"ResolverEndpointType\":\"IPV5\"}")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParametersException"));
+
+        call("GetResolverEndpoint", "{\"ResolverEndpointId\":\"" + id + "\"}")
+        .then()
+            .statusCode(200)
+            .body("ResolverEndpoint.ResolverEndpointType", equalTo(null));
+    }
+
+    @Test
     void deleteResolverEndpoint_removesEndpoint() {
         String id = createEndpoint("ab-endpoint-delete");
 
@@ -345,6 +364,24 @@ class Route53ResolverCustomResourcesConsumerTest {
             .body("ResolverRule.DomainName", equalTo("example.com."))
             .body("ResolverRule.RuleType", equalTo("FORWARD"))
             .body("ResolverRule.Status", equalTo("COMPLETE"));
+    }
+
+    @Test
+    void createResolverRule_unknownRuleType_returnsInvalidParameters() {
+        // RuleTypeOption is FORWARD / SYSTEM / RECURSIVE / DELEGATE. An unmodelled value
+        // was stored verbatim and echoed back by Get/ListResolverRules as a real rule.
+        call("CreateResolverRule", "{\"Name\":\"ab-rule-badtype\",\"RuleType\":\"SIDEWAYS\","
+                + "\"DomainName\":\"ab-rule-badtype.example.com.\","
+                + "\"TargetIps\":[{\"Ip\":\"10.0.0.1\",\"Port\":53}],"
+                + "\"CreatorRequestId\":\"tok-rule-badtype\"}")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParametersException"));
+
+        call("ListResolverRules", "{}")
+        .then()
+            .statusCode(200)
+            .body("ResolverRules.Name", not(hasItem("ab-rule-badtype")));
     }
 
     @Test

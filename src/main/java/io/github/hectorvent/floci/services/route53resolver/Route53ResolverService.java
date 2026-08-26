@@ -46,6 +46,12 @@ public class Route53ResolverService {
             "AWSManagedDomainsBotnetCommandandControl",
             "AWSManagedDomainsMalwareDomainList");
 
+    /** botocore {@code RuleTypeOption}. */
+    private static final List<String> RULE_TYPES = List.of("FORWARD", "SYSTEM", "RECURSIVE", "DELEGATE");
+
+    /** botocore {@code ResolverEndpointType}. */
+    private static final List<String> ENDPOINT_TYPES = List.of("IPV6", "IPV4", "DUALSTACK");
+
     public record FirewallDomainList(String id, String arn, String name, String managedOwnerName) {
     }
 
@@ -171,6 +177,10 @@ public class Route53ResolverService {
 
     public ObjectNode updateResolverEndpoint(String id, JsonNode request) {
         ObjectNode endpoint = require(endpointStore, id, "resolver endpoint");
+        String endpointType = text(request, "ResolverEndpointType");
+        if (endpointType != null) {
+            requireEnum(endpointType, "ResolverEndpointType", ENDPOINT_TYPES);
+        }
         copyIfPresent(request, endpoint, "Name", "ResolverEndpointType");
         endpoint.put("ModificationTime", Instant.now().toString());
         endpointStore.put(id, endpoint);
@@ -180,7 +190,7 @@ public class Route53ResolverService {
     // ---------- Resolver rules ----------
 
     public ObjectNode createResolverRule(JsonNode request, String region, String accountId) {
-        requireText(request, "RuleType");
+        requireEnum(requireText(request, "RuleType"), "RuleType", RULE_TYPES);
         String domainName = text(request, "DomainName");
         java.util.Optional<ObjectNode> replay = replayOf(ruleStore, request);
         if (replay.isPresent()) {
@@ -305,6 +315,24 @@ public class Route53ResolverService {
     private ObjectNode require(StorageBackend<String, ObjectNode> store, String id, String type) {
         return store.get(id).orElseThrow(() -> new AwsException("ResourceNotFoundException",
                 "Unknown " + type + ": " + id, 400));
+    }
+
+    /**
+     * Rejects a value the botocore model does not list in the member's enum. Accepting one
+     * stores a resource AWS would never have created — a rule whose {@code RuleType} is not
+     * a {@code RuleTypeOption} is then handed back by Get/List as though it were real.
+     *
+     * <p>Uses the same {@code InvalidParametersException} the {@code Direction} check above
+     * already returns, so every enum rejection in this service reports one error code. The
+     * botocore model actually names the singular {@code InvalidParameterException}; that
+     * divergence is service-wide here and pinned by tests, so it is left for one sweep
+     * rather than split across two error codes.</p>
+     */
+    private static void requireEnum(String value, String field, List<String> allowed) {
+        if (!allowed.contains(value)) {
+            throw new AwsException("InvalidParametersException",
+                    field + " must be one of " + String.join(", ", allowed) + ": " + value, 400);
+        }
     }
 
     private String requireText(JsonNode node, String field) {
