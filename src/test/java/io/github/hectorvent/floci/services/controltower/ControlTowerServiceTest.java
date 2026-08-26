@@ -140,6 +140,59 @@ class ControlTowerServiceTest {
     }
 
     @Test
+    void getLandingZoneRequiresLandingZoneIdentifier() {
+        AwsException missing = assertThrows(AwsException.class,
+                () -> service.getLandingZone(ACCOUNT, REGION, objectMapper.createObjectNode()));
+        assertEquals("ValidationException", missing.getErrorCode());
+        assertEquals(400, missing.getHttpStatus());
+    }
+
+    @Test
+    void getLandingZoneRejectsUnknownIdentifier() throws Exception {
+        AwsException unknown = assertThrows(AwsException.class,
+                () -> service.getLandingZone(ACCOUNT, REGION, objectMapper.readTree(
+                        "{\"landingZoneIdentifier\":\"arn:aws:controltower:us-east-1:000000000101:landingzone/other\"}")));
+        assertEquals("ResourceNotFoundException", unknown.getErrorCode());
+        assertEquals(404, unknown.getHttpStatus());
+    }
+
+    @Test
+    void getLandingZoneReturnsSeededLandingZoneForMatchingIdentifier() throws Exception {
+        LandingZone landingZone = service.getLandingZone(ACCOUNT, REGION,
+                objectMapper.readTree("{\"landingZoneIdentifier\":\"" + SEEDED_ARN + "\"}"));
+
+        assertEquals(SEEDED_ARN, landingZone.getArn());
+        assertEquals("ACTIVE", landingZone.getStatus());
+    }
+
+    @Test
+    void updateLandingZoneRequiresLandingZoneIdentifier() throws Exception {
+        JsonNode request = objectMapper.readTree("""
+                {"version":"4.0",
+                 "manifest":{"securityRoles":{"enabled":true},"accessManagement":{"enabled":true}}}
+                """);
+
+        AwsException missing = assertThrows(AwsException.class,
+                () -> service.updateLandingZone(ACCOUNT, REGION, request));
+        assertEquals("ValidationException", missing.getErrorCode());
+        assertEquals(400, missing.getHttpStatus());
+    }
+
+    @Test
+    void updateLandingZoneRejectsUnknownIdentifier() throws Exception {
+        JsonNode request = objectMapper.readTree("""
+                {"version":"4.0",
+                 "landingZoneIdentifier":"arn:aws:controltower:us-east-1:000000000101:landingzone/other",
+                 "manifest":{"securityRoles":{"enabled":true},"accessManagement":{"enabled":true}}}
+                """);
+
+        AwsException unknown = assertThrows(AwsException.class,
+                () -> service.updateLandingZone(ACCOUNT, REGION, request));
+        assertEquals("ResourceNotFoundException", unknown.getErrorCode());
+        assertEquals(404, unknown.getHttpStatus());
+    }
+
+    @Test
     void deleteLandingZoneRemovesStoredLandingZoneAndReturnsDeleteOperation() throws Exception {
         service.getOrSeedLandingZone(ACCOUNT, REGION);
 

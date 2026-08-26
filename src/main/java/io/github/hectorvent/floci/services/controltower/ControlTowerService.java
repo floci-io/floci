@@ -122,6 +122,21 @@ public class ControlTowerService {
         return List.of(getOrSeedLandingZone(accountId, region));
     }
 
+    /**
+     * Resolves the landing zone a read/reconcile request names, seeding first so a fresh
+     * account+region still answers with its deterministic ARN. Delete and reset deliberately do
+     * NOT go through here: they must report a missing landing zone rather than re-seeding one.
+     */
+    private LandingZone requireSeededLandingZone(
+            String accountId, String region, String landingZoneIdentifier) {
+        LandingZone landingZone = getOrSeedLandingZone(accountId, region);
+        if (!landingZone.getArn().equals(landingZoneIdentifier)) {
+            throw new AwsException("ResourceNotFoundException",
+                    "Landing zone not found: " + landingZoneIdentifier, 404);
+        }
+        return landingZone;
+    }
+
     public synchronized CreateLandingZoneResult createLandingZone(
             String accountId, String region, JsonNode request) {
         requireObject(request, "Request body");
@@ -148,8 +163,14 @@ public class ControlTowerService {
         return new CreateLandingZoneResult(arn, operationIdentifier);
     }
 
+    public synchronized LandingZone getLandingZone(String accountId, String region, JsonNode request) {
+        requireObject(request, "Request body");
+        return requireSeededLandingZone(accountId, region, requireText(request, "landingZoneIdentifier"));
+    }
+
     public synchronized String updateLandingZone(String accountId, String region, JsonNode request) {
         requireObject(request, "Request body");
+        String landingZoneIdentifier = requireText(request, "landingZoneIdentifier");
         String version = requireText(request, "version");
         JsonNode manifest = request.get("manifest");
         if (manifest == null || !manifest.isObject()) {
@@ -157,7 +178,7 @@ public class ControlTowerService {
         }
         List<String> remediationTypes = readRemediationTypes(request);
 
-        LandingZone lz = getOrSeedLandingZone(accountId, region);
+        LandingZone lz = requireSeededLandingZone(accountId, region, landingZoneIdentifier);
         lz.setVersion(version);
         lz.setManifest(manifest);
         lz.setRemediationTypes(remediationTypes);

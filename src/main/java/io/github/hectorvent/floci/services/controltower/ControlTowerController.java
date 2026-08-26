@@ -94,9 +94,8 @@ public class ControlTowerController {
     @POST
     @Path("/get-landingzone")
     public Response getLandingZone(@Context HttpHeaders headers, String body) {
-        parse(body);
-        LandingZone lz = service.getOrSeedLandingZone(
-                requestContext.getAccountId(), regionResolver.resolveRegion(headers));
+        LandingZone lz = service.getLandingZone(
+                requestContext.getAccountId(), regionResolver.resolveRegion(headers), parse(body));
         ObjectNode response = objectMapper.createObjectNode();
         response.set("landingZone", landingZoneNode(lz));
         return Response.ok(response).build();
