@@ -315,6 +315,27 @@ class NetworkFirewallIntegrationTest {
     }
 
     @Test
+    void updateFirewallDeleteProtection_returnsTheFlatModelledShape() {
+        // botocore 2020-11-12: UpdateFirewallDeleteProtectionResponse is
+        // {FirewallArn, FirewallName, DeleteProtection, UpdateToken} at the top
+        // level -- NOT nested under Firewall/FirewallStatus. Every UpdateFirewall*
+        // op shares this flat shape with its own field substituted for
+        // DeleteProtection, so a typed SDK client can read it back.
+        String name = "UpdateShapeFirewall";
+        createFirewall(name, "", "subnet-ee000000000000001");
+
+        call("UpdateFirewallDeleteProtection", "{\"FirewallArn\":\"" + firewallArn(name) + "\","
+                + "\"DeleteProtection\":true}")
+            .statusCode(200)
+            .body("FirewallArn", equalTo(firewallArn(name)))
+            .body("FirewallName", equalTo(name))
+            .body("DeleteProtection", equalTo(true))
+            .body("UpdateToken", not(nullValue()))
+            .body("Firewall", nullValue())
+            .body("FirewallStatus", nullValue());
+    }
+
+    @Test
     void disassociateSubnets_removesOnlyTheNamedSubnets() {
         String name = "DisassociateSubnetsFirewall";
         createFirewall(name, "", "subnet-88888888888888888", "subnet-99999999999999999");

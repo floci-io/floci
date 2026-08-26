@@ -163,7 +163,17 @@ public class NetworkFirewallService {
             existing.set(field, value.deepCopy());
         }
         firewalls.put(existing.path("FirewallArn").asText(), existing);
-        return firewallResponse(existing, region);
+
+        // Each UpdateFirewall* response is a flat {FirewallArn, FirewallName,
+        // <field>, UpdateToken} shape (botocore 2020-11-12) -- distinct from
+        // CreateFirewall/DescribeFirewall's nested {Firewall, FirewallStatus}
+        // envelope that firewallResponse() builds.
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("FirewallArn", existing.path("FirewallArn").asText());
+        response.put("FirewallName", existing.path("FirewallName").asText());
+        response.set(field, existing.path(field).deepCopy());
+        response.put("UpdateToken", UUID.randomUUID().toString());
+        return response;
     }
 
     public ObjectNode deleteFirewall(String arn, String name, String region) {
