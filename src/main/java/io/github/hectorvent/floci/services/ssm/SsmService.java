@@ -293,11 +293,14 @@ public class SsmService implements ResourceProvider {
         LOG.debugv("Removed tags from parameter: {0}", resourceId);
     }
 
-    // ──────────────────────── Document Share Permissions ─────────────────────
-    // SSM documents themselves are not modeled (ListDocuments returns empty), but
-    // document *share* state is tracked against any document name so that callers
-    // like LZA's Custom::SSMShareDocument handler can round-trip
-    // ModifyDocumentPermission -> DescribeDocumentPermission.
+    // ──────────────────────── Documents and Share Permissions ────────────────
+    // Documents live in documentStore; share state is kept alongside it in
+    // documentPermissionStore so callers like LZA's Custom::SSMShareDocument handler
+    // can round-trip ModifyDocumentPermission -> DescribeDocumentPermission.
+    // Both permission operations resolve the document first, so an unknown document
+    // raises InvalidDocument instead of silently minting or reporting share state for
+    // a document that does not exist. (ListDocuments still returns an empty list; it
+    // is not wired to documentStore.)
 
     public SsmDocument getDocument(String name, String region) {
         return documentStore.get(regionKey(region, name))
@@ -332,14 +335,33 @@ public class SsmService implements ResourceProvider {
         return document;
     }
 
+    /**
+     * Lists the accounts a document is shared with. AWS raises InvalidDocument for a
+     * document that does not exist rather than returning an empty list, so the document
+     * is resolved first.
+     */
     public List<String> describeDocumentPermission(String name, String region) {
+        getDocument(name, region);
         return documentPermissionStore.get(regionKey(region, name))
                 .map(List::copyOf)
                 .orElse(List.of());
     }
 
+    /**
+     * Shares (or un-shares) a document with other accounts.
+     *
+     * <p>Only the document's owner may share it. Ownership here <em>is</em> the storage
+     * partition: {@code documentStore} is an {@code AccountAwareStorageBackend}, whose key
+     * prefix is the caller's account from {@code RequestContext} — the same resolution
+     * {@code RegionResolver.getAccountId()} performs — so {@link #getDocument} can only
+     * resolve a document in the caller's own partition. A caller that does not own the
+     * document therefore gets InvalidDocument, which is AWS's answer for a document the
+     * caller cannot see. Deriving the check from the partition rather than a second stored
+     * owner field keeps the guard and the storage scope from ever disagreeing.
+     */
     public void modifyDocumentPermission(String name, List<String> accountIdsToAdd,
                                          List<String> accountIdsToRemove, String region) {
+        getDocument(name, region);
         String storageKey = regionKey(region, name);
         List<String> accountIds = new ArrayList<>(
                 documentPermissionStore.get(storageKey).orElse(List.of()));

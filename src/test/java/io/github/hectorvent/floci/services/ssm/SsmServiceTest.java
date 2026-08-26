@@ -30,13 +30,30 @@ class SsmServiceTest {
 
     @Test
     void describeDocumentPermissionEmptyByDefault() {
+        ssmService.createDocument("MyDoc", "{}", "Command", "us-east-1");
         List<String> accountIds = ssmService.describeDocumentPermission("MyDoc", "us-east-1");
         assertTrue(accountIds.isEmpty());
     }
 
     @Test
+    void describeDocumentPermissionUnknownDocumentThrowsInvalidDocument() {
+        AwsException ex = assertThrows(AwsException.class, () ->
+                ssmService.describeDocumentPermission("NoSuchDoc", "us-east-1"));
+        assertEquals("InvalidDocument", ex.getErrorCode());
+    }
+
+    @Test
+    void modifyDocumentPermissionUnknownDocumentThrowsInvalidDocument() {
+        AwsException ex = assertThrows(AwsException.class, () ->
+                ssmService.modifyDocumentPermission("NoSuchDoc",
+                        List.of("111111111111"), List.of(), "us-east-1"));
+        assertEquals("InvalidDocument", ex.getErrorCode());
+    }
+
+    @Test
     void modifyDocumentPermissionAddsAndRemovesAccounts() {
         String region = "us-east-1";
+        ssmService.createDocument("ShareDoc", "{}", "Command", region);
         ssmService.modifyDocumentPermission("ShareDoc",
                 List.of("111111111111", "222222222222"), List.of(), region);
         assertEquals(List.of("111111111111", "222222222222"),
@@ -51,10 +68,14 @@ class SsmServiceTest {
     @Test
     void modifyDocumentPermissionIsIdempotentAndRegionScoped() {
         String region = "us-east-1";
+        ssmService.createDocument("Doc", "{}", "Command", region);
         ssmService.modifyDocumentPermission("Doc", List.of("333333333333"), List.of(), region);
         ssmService.modifyDocumentPermission("Doc", List.of("333333333333"), List.of(), region);
         assertEquals(List.of("333333333333"), ssmService.describeDocumentPermission("Doc", region));
-        assertTrue(ssmService.describeDocumentPermission("Doc", "eu-west-1").isEmpty());
+        // The document itself is region-scoped, so the other region has no document to describe.
+        AwsException ex = assertThrows(AwsException.class, () ->
+                ssmService.describeDocumentPermission("Doc", "eu-west-1"));
+        assertEquals("InvalidDocument", ex.getErrorCode());
     }
 
     @Test
