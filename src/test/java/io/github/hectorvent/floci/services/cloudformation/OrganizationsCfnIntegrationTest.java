@@ -102,6 +102,7 @@ class OrganizationsCfnIntegrationTest {
             "MgmtAccountArn": { "Value": { "Fn::GetAtt": ["Org", "ManagementAccountArn"] } },
             "MgmtEmail":      { "Value": { "Fn::GetAtt": ["Org", "ManagementAccountEmail"] } },
             "RootId":         { "Value": { "Fn::GetAtt": ["Org", "RootId"] } },
+            "OrgRef":         { "Value": { "Ref": "Org" } },
             "OuId":           { "Value": { "Fn::GetAtt": ["Workloads", "Id"] } },
             "OuArn":          { "Value": { "Fn::GetAtt": ["Workloads", "Arn"] } },
             "OuPath":         { "Value": { "Fn::GetAtt": ["Workloads", "Path"] } },
@@ -201,6 +202,9 @@ class OrganizationsCfnIntegrationTest {
         assertEquals("arn:aws:organizations::" + MANAGEMENT_ACCOUNT + ":account/" + organizationId
                 + "/" + MANAGEMENT_ACCOUNT, output(stacks, "MgmtAccountArn"));
         assertThat(output(stacks, "MgmtEmail"), startsWith("master@"));
+        // Organization is the one AWS type where Ref returns the management account id rather than
+        // the resource's own id; Fn::GetAtt Org.Id above is what returns the organization id.
+        assertEquals(MANAGEMENT_ACCOUNT, output(stacks, "OrgRef"));
     }
 
     @Test

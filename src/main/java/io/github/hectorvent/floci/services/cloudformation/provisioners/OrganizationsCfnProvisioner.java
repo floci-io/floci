@@ -108,7 +108,9 @@ public class OrganizationsCfnProvisioner implements CfnResourceProvisioner {
             organization = organizationsService.createOrganization(ctx.accountId(), featureSet);
         }
 
-        r.setPhysicalId(organization.getId());
+        // AWS documents Organization as a special case: Ref returns the management account id,
+        // not the organization id. Fn::GetAtt Org.Id below still returns the organization id.
+        r.setPhysicalId(organization.getMasterAccountId());
         r.getAttributes().put("Id", organization.getId());
         r.getAttributes().put("Arn", organization.getArn());
         r.getAttributes().put("ManagementAccountArn", organization.getMasterAccountArn());

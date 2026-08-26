@@ -101,7 +101,7 @@ class OrganizationsCfnProvisionerTest {
 
         provisioner.provision(r, mapper.createObjectNode().put("FeatureSet", "ALL"), ctx());
 
-        assertEquals(ORG_ID, r.getPhysicalId());
+        assertEquals(ACCOUNT, r.getPhysicalId());
         assertEquals(ORG_ID, r.getAttributes().get("Id"));
         assertEquals("arn:aws:organizations::" + ACCOUNT + ":organization/" + ORG_ID,
                 r.getAttributes().get("Arn"));
@@ -117,20 +117,20 @@ class OrganizationsCfnProvisionerTest {
         when(organizations.describeOrganization(ACCOUNT))
                 .thenReturn(organization("CONSOLIDATED_BILLING"), organization("ALL"));
         StackResource r = resource("AWS::Organizations::Organization", "Org");
-        r.setPhysicalId(ORG_ID);
+        r.setPhysicalId(ACCOUNT);
 
         provisioner.provision(r, mapper.createObjectNode().put("FeatureSet", "ALL"), ctx());
 
         verify(organizations).enableAllFeatures(ACCOUNT);
         verify(organizations, never()).createOrganization(anyString(), anyString());
-        assertEquals(ORG_ID, r.getPhysicalId());
+        assertEquals(ACCOUNT, r.getPhysicalId());
     }
 
     @Test
     void organizationUpdateLeavesAnAlreadyUpgradedOrganizationAlone() {
         when(organizations.describeOrganization(ACCOUNT)).thenReturn(organization("ALL"));
         StackResource r = resource("AWS::Organizations::Organization", "Org");
-        r.setPhysicalId(ORG_ID);
+        r.setPhysicalId(ACCOUNT);
 
         provisioner.provision(r, mapper.createObjectNode().put("FeatureSet", "ALL"), ctx());
 

@@ -127,7 +127,9 @@ data and attachment ownership.
 
 `AWS::Organizations::Organization` uses the stack's calling account as the management account, so
 the rest of the stack's Organizations resources are provisioned into that account's organization.
-`Fn::GetAtt Org.RootId` is the usual way to root the OU tree in the same template.
+`Fn::GetAtt Org.RootId` is the usual way to root the OU tree in the same template. `Organization` is
+the one type in this section where bare `Ref` does not return the resource's own id: per AWS, `Ref`
+returns the management account id, while `Fn::GetAtt Org.Id` returns the organization id.
 
 - `OrganizationalUnit` — `ParentId` is create-only per the registry schema, so an update only
   renames the OU in place; the physical id survives, keeping every `Ref` to it valid.
