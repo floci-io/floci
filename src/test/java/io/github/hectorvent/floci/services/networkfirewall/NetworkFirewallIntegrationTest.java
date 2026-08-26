@@ -1,9 +1,16 @@
 package io.github.hectorvent.floci.services.networkfirewall;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.anEmptyMap;
+import static org.hamcrest.Matchers.contains;
+import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
+import static org.hamcrest.Matchers.hasItems;
+import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.matchesPattern;
+import static org.hamcrest.Matchers.not;
+import static org.hamcrest.Matchers.nullValue;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
@@ -186,6 +193,155 @@ class NetworkFirewallIntegrationTest {
         call("DescribeFirewall", "{\"FirewallArn\":\"" + firewallArn(name) + "\"}")
             .statusCode(200)
             .body("Firewall.FirewallArn", equalTo(firewallArn(name)));
+    }
+
+    @Test
+    void associateSubnets_addsToTheExistingMappingsWithoutDuplicating() {
+        String name = "AssociateSubnetsFirewall";
+        createFirewall(name, "", "subnet-44444444444444444");
+
+        call("AssociateSubnets", "{\"FirewallArn\":\"" + firewallArn(name) + "\","
+                + "\"SubnetMappings\":[{\"SubnetId\":\"subnet-55555555555555555\"},"
+                + "{\"SubnetId\":\"subnet-44444444444444444\"}]}")
+            .statusCode(200)
+            .body("SubnetMappings.SubnetId", hasItems(
+                    "subnet-44444444444444444", "subnet-55555555555555555"))
+            .body("SubnetMappings", hasSize(2));
+
+        call("DescribeFirewall", "{\"FirewallArn\":\"" + firewallArn(name) + "\"}")
+            .statusCode(200)
+            .body("Firewall.SubnetMappings.SubnetId", hasItems(
+                    "subnet-44444444444444444", "subnet-55555555555555555"))
+            .body("Firewall.SubnetMappings", hasSize(2));
+    }
+
+    @Test
+    void associateSubnets_withSubnetChangeProtection_isRejected() {
+        String name = "SubnetProtectedAssociateFirewall";
+        createFirewall(name, "\"SubnetChangeProtection\":true,", "subnet-66666666666666666");
+
+        call("AssociateSubnets", "{\"FirewallArn\":\"" + firewallArn(name) + "\","
+                + "\"SubnetMappings\":[{\"SubnetId\":\"subnet-77777777777777777\"}]}")
+            .statusCode(400)
+            .body("__type", equalTo("InvalidOperationException"));
+
+        call("DescribeFirewall", "{\"FirewallArn\":\"" + firewallArn(name) + "\"}")
+            .statusCode(200)
+            .body("Firewall.SubnetMappings.SubnetId", not(hasItem("subnet-77777777777777777")));
+    }
+
+    @Test
+    void disassociateSubnets_removesOnlyTheNamedSubnets() {
+        String name = "DisassociateSubnetsFirewall";
+        createFirewall(name, "", "subnet-88888888888888888", "subnet-99999999999999999");
+
+        call("DisassociateSubnets", "{\"FirewallArn\":\"" + firewallArn(name) + "\","
+                + "\"SubnetIds\":[\"subnet-88888888888888888\"]}")
+            .statusCode(200)
+            .body("SubnetMappings.SubnetId", contains("subnet-99999999999999999"));
+
+        call("DescribeFirewall", "{\"FirewallArn\":\"" + firewallArn(name) + "\"}")
+            .statusCode(200)
+            .body("Firewall.SubnetMappings.SubnetId", contains("subnet-99999999999999999"));
+    }
+
+    @Test
+    void disassociateSubnets_removingTheLastSubnet_leavesNoSyncStates() {
+        String name = "DrainedSubnetsFirewall";
+        createFirewall(name, "", "subnet-aaaaaaaaaaaaaaaaa");
+
+        call("DisassociateSubnets", "{\"FirewallArn\":\"" + firewallArn(name) + "\","
+                + "\"SubnetIds\":[\"subnet-aaaaaaaaaaaaaaaaa\"]}")
+            .statusCode(200)
+            .body("SubnetMappings", empty());
+
+        call("DescribeFirewall", "{\"FirewallArn\":\"" + firewallArn(name) + "\"}")
+            .statusCode(200)
+            .body("Firewall.SubnetMappings", empty())
+            .body("FirewallStatus.SyncStates", anEmptyMap());
+    }
+
+    @Test
+    void disassociateSubnets_withSubnetChangeProtection_isRejected() {
+        String name = "SubnetProtectedDisassociateFirewall";
+        createFirewall(name, "\"SubnetChangeProtection\":true,", "subnet-bbbbbbbbbbbbbbbbb");
+
+        call("DisassociateSubnets", "{\"FirewallArn\":\"" + firewallArn(name) + "\","
+                + "\"SubnetIds\":[\"subnet-bbbbbbbbbbbbbbbbb\"]}")
+            .statusCode(400)
+            .body("__type", equalTo("InvalidOperationException"));
+
+        call("DescribeFirewall", "{\"FirewallArn\":\"" + firewallArn(name) + "\"}")
+            .statusCode(200)
+            .body("Firewall.SubnetMappings.SubnetId", hasItem("subnet-bbbbbbbbbbbbbbbbb"));
+    }
+
+    @Test
+    void associateAvailabilityZones_addsToTheExistingMappingsWithoutDuplicating() {
+        String name = "AssociateZonesFirewall";
+        createFirewall(name, "", "subnet-ccccccccccccccccc");
+
+        call("AssociateAvailabilityZones", "{\"FirewallArn\":\"" + firewallArn(name) + "\","
+                + "\"AvailabilityZoneMappings\":[{\"AvailabilityZone\":\"us-east-1a\"}]}")
+            .statusCode(200)
+            .body("AvailabilityZoneMappings.AvailabilityZone", contains("us-east-1a"));
+
+        call("AssociateAvailabilityZones", "{\"FirewallArn\":\"" + firewallArn(name) + "\","
+                + "\"AvailabilityZoneMappings\":[{\"AvailabilityZone\":\"us-east-1a\"},"
+                + "{\"AvailabilityZone\":\"us-east-1b\"}]}")
+            .statusCode(200)
+            .body("AvailabilityZoneMappings.AvailabilityZone", contains("us-east-1a", "us-east-1b"));
+
+        call("DescribeFirewall", "{\"FirewallArn\":\"" + firewallArn(name) + "\"}")
+            .statusCode(200)
+            .body("Firewall.AvailabilityZoneMappings.AvailabilityZone",
+                    contains("us-east-1a", "us-east-1b"));
+    }
+
+    @Test
+    void associateAvailabilityZones_withAvailabilityZoneChangeProtection_isRejected() {
+        String name = "ZoneProtectedAssociateFirewall";
+        createFirewall(name, "\"AvailabilityZoneChangeProtection\":true,", "subnet-ddddddddddddddddd");
+
+        call("AssociateAvailabilityZones", "{\"FirewallArn\":\"" + firewallArn(name) + "\","
+                + "\"AvailabilityZoneMappings\":[{\"AvailabilityZone\":\"us-east-1c\"}]}")
+            .statusCode(400)
+            .body("__type", equalTo("InvalidOperationException"));
+
+        call("DescribeFirewall", "{\"FirewallArn\":\"" + firewallArn(name) + "\"}")
+            .statusCode(200)
+            .body("Firewall.AvailabilityZoneMappings", nullValue());
+    }
+
+    @Test
+    void disassociateAvailabilityZones_removesOnlyTheNamedZones() {
+        String name = "DisassociateZonesFirewall";
+        createFirewall(name, "", "subnet-eeeeeeeeeeeeeeeee");
+
+        call("AssociateAvailabilityZones", "{\"FirewallArn\":\"" + firewallArn(name) + "\","
+                + "\"AvailabilityZoneMappings\":[{\"AvailabilityZone\":\"us-east-1a\"},"
+                + "{\"AvailabilityZone\":\"us-east-1b\"}]}")
+            .statusCode(200);
+
+        call("DisassociateAvailabilityZones", "{\"FirewallArn\":\"" + firewallArn(name) + "\","
+                + "\"AvailabilityZoneMappings\":[{\"AvailabilityZone\":\"us-east-1a\"}]}")
+            .statusCode(200)
+            .body("AvailabilityZoneMappings.AvailabilityZone", contains("us-east-1b"));
+
+        call("DescribeFirewall", "{\"FirewallArn\":\"" + firewallArn(name) + "\"}")
+            .statusCode(200)
+            .body("Firewall.AvailabilityZoneMappings.AvailabilityZone", contains("us-east-1b"));
+    }
+
+    @Test
+    void disassociateAvailabilityZones_withAvailabilityZoneChangeProtection_isRejected() {
+        String name = "ZoneProtectedDisassociateFirewall";
+        createFirewall(name, "\"AvailabilityZoneChangeProtection\":true,", "subnet-fffffffffffffffff");
+
+        call("DisassociateAvailabilityZones", "{\"FirewallArn\":\"" + firewallArn(name) + "\","
+                + "\"AvailabilityZoneMappings\":[{\"AvailabilityZone\":\"us-east-1a\"}]}")
+            .statusCode(400)
+            .body("__type", equalTo("InvalidOperationException"));
     }
 
     private static String firewallArn(String name) {

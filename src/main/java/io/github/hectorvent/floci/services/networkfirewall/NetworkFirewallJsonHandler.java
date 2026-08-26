@@ -43,9 +43,12 @@ public class NetworkFirewallJsonHandler {
             case "ListFirewalls" -> ok(service.listFirewalls(request));
             case "UpdateFirewallDeleteProtection", "UpdateFirewallPolicyChangeProtection",
                  "UpdateSubnetChangeProtection", "UpdateAvailabilityZoneChangeProtection",
-                 "UpdateFirewallDescription", "UpdateFirewallAnalysisSettings",
-                 "AssociateSubnets", "DisassociateSubnets", "AssociateAvailabilityZones",
-                 "DisassociateAvailabilityZones" -> ok(service.updateFirewall(request, region, accountId));
+                 "UpdateFirewallDescription", "UpdateFirewallAnalysisSettings"
+                    -> ok(service.updateFirewall(request, region, accountId));
+            case "AssociateSubnets" -> ok(service.associateSubnets(request));
+            case "DisassociateSubnets" -> ok(service.disassociateSubnets(request));
+            case "AssociateAvailabilityZones" -> ok(service.associateAvailabilityZones(request));
+            case "DisassociateAvailabilityZones" -> ok(service.disassociateAvailabilityZones(request));
             case "UpdateLoggingConfiguration" -> ok(service.putLoggingConfiguration(request));
             case "DescribeLoggingConfiguration" -> ok(service.describeLoggingConfiguration(
                     textOrNull(request, "FirewallArn"), textOrNull(request, "FirewallName")));

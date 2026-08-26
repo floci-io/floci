@@ -159,6 +159,88 @@ public class NetworkFirewallService {
                 .put("FirewallName", existing.path("FirewallName").asText());
     }
 
+    public ObjectNode associateSubnets(JsonNode request) {
+        ObjectNode firewall = firewallForChange(request, "SubnetChangeProtection", "subnet");
+        ArrayNode mappings = mappingsOf(firewall, "SubnetMappings");
+        for (JsonNode requested : requiredArray(request, "SubnetMappings")) {
+            addMapping(mappings, "SubnetId", requiredText(requested, "SubnetId"), requested);
+        }
+        return storeAndRespond(firewall, "SubnetMappings", mappings);
+    }
+
+    public ObjectNode disassociateSubnets(JsonNode request) {
+        ObjectNode firewall = firewallForChange(request, "SubnetChangeProtection", "subnet");
+        ArrayNode mappings = mappingsOf(firewall, "SubnetMappings");
+        for (JsonNode subnetId : requiredArray(request, "SubnetIds")) {
+            removeMapping(mappings, "SubnetId", subnetId.asText());
+        }
+        return storeAndRespond(firewall, "SubnetMappings", mappings);
+    }
+
+    public ObjectNode associateAvailabilityZones(JsonNode request) {
+        ObjectNode firewall =
+                firewallForChange(request, "AvailabilityZoneChangeProtection", "Availability Zone");
+        ArrayNode mappings = mappingsOf(firewall, "AvailabilityZoneMappings");
+        for (JsonNode requested : requiredArray(request, "AvailabilityZoneMappings")) {
+            addMapping(mappings, "AvailabilityZone", requiredText(requested, "AvailabilityZone"), requested);
+        }
+        return storeAndRespond(firewall, "AvailabilityZoneMappings", mappings);
+    }
+
+    public ObjectNode disassociateAvailabilityZones(JsonNode request) {
+        ObjectNode firewall =
+                firewallForChange(request, "AvailabilityZoneChangeProtection", "Availability Zone");
+        ArrayNode mappings = mappingsOf(firewall, "AvailabilityZoneMappings");
+        for (JsonNode requested : requiredArray(request, "AvailabilityZoneMappings")) {
+            removeMapping(mappings, "AvailabilityZone", requiredText(requested, "AvailabilityZone"));
+        }
+        return storeAndRespond(firewall, "AvailabilityZoneMappings", mappings);
+    }
+
+    private ObjectNode firewallForChange(JsonNode request, String protectionField, String protectedResource) {
+        ObjectNode firewall = require(firewalls, textOrNull(request, "FirewallArn"),
+                textOrNull(request, "FirewallName"), "Firewall", "FirewallArn", "FirewallName");
+        if (firewall.path(protectionField).asBoolean(false)) {
+            throw new AwsException("InvalidOperationException",
+                    "Firewall has " + protectedResource + " change protection enabled: "
+                            + firewall.path("FirewallArn").asText(), 400);
+        }
+        return firewall;
+    }
+
+    private ArrayNode mappingsOf(ObjectNode firewall, String field) {
+        JsonNode existing = firewall.path(field);
+        return existing.isArray() ? (ArrayNode) existing : firewall.putArray(field);
+    }
+
+    private void addMapping(ArrayNode mappings, String memberField, String member, JsonNode mapping) {
+        for (JsonNode existing : mappings) {
+            if (member.equals(existing.path(memberField).asText(null))) {
+                return;
+            }
+        }
+        mappings.add(mapping.deepCopy());
+    }
+
+    private void removeMapping(ArrayNode mappings, String memberField, String member) {
+        for (int index = mappings.size() - 1; index >= 0; index--) {
+            if (member.equals(mappings.get(index).path(memberField).asText(null))) {
+                mappings.remove(index);
+            }
+        }
+    }
+
+    private ObjectNode storeAndRespond(ObjectNode firewall, String field, ArrayNode mappings) {
+        String firewallArn = firewall.path("FirewallArn").asText();
+        firewalls.put(firewallArn, firewall);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("FirewallArn", firewallArn);
+        response.put("FirewallName", firewall.path("FirewallName").asText());
+        response.set(field, mappings.deepCopy());
+        response.put("UpdateToken", UUID.randomUUID().toString());
+        return response;
+    }
+
     public ObjectNode listFirewalls(JsonNode request) {
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode result = response.putArray("Firewalls");
@@ -277,7 +359,9 @@ public class NetworkFirewallService {
         status.put("Status", "READY");
         ObjectNode syncStates = status.putObject("SyncStates");
         JsonNode mappings = firewall.path("SubnetMappings");
-        if (mappings.isArray() && !mappings.isEmpty()) {
+        // Only a firewall created without any SubnetMappings gets synthetic endpoints; once the
+        // field exists, disassociating every subnet must leave the sync states empty.
+        if (mappings.isArray()) {
             int index = 0;
             for (JsonNode mapping : mappings) {
                 addAttachment(syncStates, region + (char) ('a' + index++),
@@ -398,6 +482,14 @@ public class NetworkFirewallService {
             throw new AwsException("InvalidRequestException", field + " is required.", 400);
         }
         return value;
+    }
+
+    private static ArrayNode requiredArray(JsonNode request, String field) {
+        JsonNode value = request == null ? null : request.get(field);
+        if (value == null || !value.isArray() || value.isEmpty()) {
+            throw new AwsException("InvalidRequestException", field + " is required.", 400);
+        }
+        return (ArrayNode) value;
     }
 
     private static void requireIdentifier(String arn, String name) {
