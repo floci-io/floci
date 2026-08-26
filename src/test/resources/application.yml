@@ -341,6 +341,7 @@ floci:
       enabled: true
     emrserverless:
       enabled: true
+    controltower:
     route53resolver:
       enabled: true
     lakeformation:

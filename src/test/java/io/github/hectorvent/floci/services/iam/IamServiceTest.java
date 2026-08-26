@@ -72,6 +72,30 @@ class IamServiceTest {
     }
 
     @Test
+    void accountSummaryUsesAwsDefaultQuotasAndTracksProviders() {
+        Map<String, Long> empty = iamService.getAccountSummary();
+
+        assertEquals(300L, empty.get("GroupsQuota"));
+        assertEquals(1000L, empty.get("RolesQuota"));
+        assertEquals(1500L, empty.get("PoliciesQuota"));
+        assertEquals(1000L, empty.get("InstanceProfilesQuota"));
+        assertEquals(10L, empty.get("AttachedPoliciesPerUserQuota"));
+        assertEquals(10L, empty.get("AttachedPoliciesPerGroupQuota"));
+        assertEquals(20L, empty.get("AttachedPoliciesPerRoleQuota"));
+        assertEquals(6144L, empty.get("PolicySizeQuota"));
+        assertEquals(0L, empty.get("Providers"));
+        assertEquals(0L, empty.get("AccountAccessKeysPresent"));
+
+        iamService.createUser("summary-user", "/");
+        iamService.createAccessKey("summary-user");
+        iamService.createOpenIDConnectProvider(
+                "https://oidc.example.com/id/SUMMARY", List.of(), List.of("thumbprint"), Map.of());
+
+        assertEquals(1L, iamService.getAccountSummary().get("Providers"));
+        assertEquals(0L, iamService.getAccountSummary().get("AccountAccessKeysPresent"));
+    }
+
+    @Test
     void createUserDuplicateFails() {
         iamService.createUser("alice", "/");
         assertThrows(AwsException.class, () -> iamService.createUser("alice", "/"));

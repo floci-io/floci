@@ -793,9 +793,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * keys; quota values are cross-checked against AWS's published IAM service quotas
      * (docs.aws.amazon.com/general/latest/gr/iam-service.html), though floci itself enforces
      * only the 5-versions-per-policy cap in {@link #createPolicyVersion}. Resources floci does
-     * not track at all (MFA devices, SAML/OIDC providers, server certificates, account password -
-     * all stub-empty elsewhere in this handler) are reported as zero rather than omitted, so
-     * callers indexing into the full AWS field set don't hit a missing-key error.
+     * not track at all (MFA devices, SAML providers, server certificates, account password - all
+     * stub-empty elsewhere in this handler) are reported as zero rather than omitted, so callers
+     * indexing into the full AWS field set don't hit a missing-key error.
      */
     public Map<String, Long> getAccountSummary() {
         long localPolicyCount = 0;
@@ -827,7 +827,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         summary.put("InstanceProfilesQuota", 1000L);
         summary.put("AttachedPoliciesPerUserQuota", 10L);
         summary.put("AttachedPoliciesPerGroupQuota", 10L);
-        summary.put("AttachedPoliciesPerRoleQuota", 10L);
+        summary.put("AttachedPoliciesPerRoleQuota", 20L);
         summary.put("GroupPolicySizeQuota", 5120L);
         summary.put("UserPolicySizeQuota", 2048L);
         summary.put("RolePolicySizeQuota", 10240L);
@@ -835,10 +835,12 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         summary.put("SigningCertificatesPerUserQuota", 2L);
         summary.put("ServerCertificates", 0L);
         summary.put("ServerCertificatesQuota", 20L);
-        summary.put("Providers", 0L);
+        summary.put("Providers", (long) oidcProviders.scan(k -> true).size());
         summary.put("MFADevices", 0L);
         summary.put("MFADevicesInUse", 0L);
         summary.put("AccountMFAEnabled", 0L);
+        // AWS reports whether the root account has access keys, not whether IAM users do.
+        // Floci does not model root access keys, so this remains false even when user keys exist.
         summary.put("AccountAccessKeysPresent", 0L);
         summary.put("AccountSigningCertificatesPresent", 0L);
         summary.put("AccountPasswordPresent", 0L);
