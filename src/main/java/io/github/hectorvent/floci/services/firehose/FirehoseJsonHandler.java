@@ -53,12 +53,17 @@ public class FirehoseJsonHandler {
                 }
                 List<io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.Tag> tags = new ArrayList<>();
                 if (request.has("Tags")) {
+                    requireListSize(request.get("Tags"), "Tags", 1, 50);
                     for (JsonNode tNode : request.get("Tags")) {
                         tags.add(mapper.treeToValue(tNode, io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.Tag.class));
                     }
                 }
                 String deliveryStreamType = request.has("DeliveryStreamType")
                         ? request.get("DeliveryStreamType").asText() : null;
+                if (deliveryStreamType != null && !DELIVERY_STREAM_TYPES.contains(deliveryStreamType)) {
+                    throw new AwsException("InvalidArgumentException",
+                            "DeliveryStreamType must be one of " + DELIVERY_STREAM_TYPES + ".", 400);
+                }
                 KinesisStreamSource source = request.has("KinesisStreamSourceConfiguration")
                         ? mapper.treeToValue(request.get("KinesisStreamSourceConfiguration"), KinesisStreamSource.class)
                         : null;
@@ -127,6 +132,7 @@ public class FirehoseJsonHandler {
             case "PutRecordBatch" -> {
                 String name = getDeliveryStreamName(request);
                 List<Record> records = new ArrayList<>();
+                requireListSize(request.get("Records"), "Records", 1, 500);
                 for (JsonNode recordNode : request.get("Records")) {
                     records.add(mapper.treeToValue(recordNode, Record.class));
                 }
@@ -139,10 +145,9 @@ public class FirehoseJsonHandler {
             case "TagDeliveryStream" -> {
                 String name = getDeliveryStreamName(request);
                 List<io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.Tag> tags = new ArrayList<>();
-                if (request.has("Tags")) {
-                    for (JsonNode tNode : request.get("Tags")) {
-                        tags.add(mapper.treeToValue(tNode, io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.Tag.class));
-                    }
+                requireListSize(request.get("Tags"), "Tags", 1, 50);
+                for (JsonNode tNode : request.get("Tags")) {
+                    tags.add(mapper.treeToValue(tNode, io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.Tag.class));
                 }
                 firehoseService.tagDeliveryStream(name, tags);
                 yield Response.ok(Map.of()).build();
@@ -150,10 +155,9 @@ public class FirehoseJsonHandler {
             case "UntagDeliveryStream" -> {
                 String name = getDeliveryStreamName(request);
                 List<String> keys = new ArrayList<>();
-                if (request.has("TagKeys")) {
-                    for (JsonNode kNode : request.get("TagKeys")) {
-                        keys.add(kNode.asText());
-                    }
+                requireListSize(request.get("TagKeys"), "TagKeys", 1, 50);
+                for (JsonNode kNode : request.get("TagKeys")) {
+                    keys.add(kNode.asText());
                 }
                 firehoseService.untagDeliveryStream(name, keys);
                 yield Response.ok(Map.of()).build();
@@ -186,5 +190,22 @@ public class FirehoseJsonHandler {
             }
             default -> throw new AwsException("InvalidAction", "Action " + action + " is not supported", 400);
         };
+    }
+
+    /** DeliveryStreamType values the 2015-08-04 model enumerates. */
+    private static final java.util.Set<String> DELIVERY_STREAM_TYPES = java.util.Set.of(
+            "DirectPut", "KinesisStreamAsSource", "MSKAsSource", "DatabaseAsSource");
+
+    /**
+     * Enforces a modeled list min/max. A missing member on the tag operations is
+     * treated as the modeled min-1 violation, matching real Firehose, which
+     * requires the list on TagDeliveryStream/UntagDeliveryStream/PutRecordBatch.
+     */
+    private static void requireListSize(JsonNode list, String member, int min, int max) {
+        int size = list == null || list.isNull() || !list.isArray() ? 0 : list.size();
+        if (size < min || size > max) {
+            throw new AwsException("InvalidArgumentException",
+                    member + " must contain between " + min + " and " + max + " entries.", 400);
+        }
     }
 }
