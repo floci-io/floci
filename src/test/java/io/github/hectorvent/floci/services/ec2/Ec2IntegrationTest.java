@@ -4117,4 +4117,23 @@ class Ec2IntegrationTest {
             .body("DisassociateIpamByoasnResponse.asnAssociation.state", equalTo("disassociated"));
     }
 
+    @Test
+    @Order(328)
+    void enableIpamOrganizationAdminAccountSucceedsForTheDefaultAccountCredential() {
+        // LZA's Organization-stage custom resource calls this over the query protocol with the
+        // same style of credential every other test in this suite uses (a non-12-digit access
+        // key, which AccountContextFilter/AccountResolver resolve to the configured default
+        // account). The management-account gate added alongside this test must not deny that
+        // path — only a caller whose credential resolves to a DIFFERENT 12-digit account should
+        // be denied.
+        given().formParam("Action", "EnableIpamOrganizationAdminAccount")
+            .formParam("DelegatedAdminAccountId", "111111111111")
+            .header("Authorization", AUTH_HEADER)
+            .when().post("/").then().statusCode(200);
+        given().formParam("Action", "DisableIpamOrganizationAdminAccount")
+            .formParam("DelegatedAdminAccountId", "111111111111")
+            .header("Authorization", AUTH_HEADER)
+            .when().post("/").then().statusCode(200);
+    }
+
 }
