@@ -456,6 +456,48 @@ class ControlTowerServiceTest {
     }
 
     @Test
+    void enableBaselineRejectsNonArnTargetIdentifier() throws Exception {
+        JsonNode request = objectMapper.readTree("""
+                {"baselineIdentifier":"arn:aws:controltower:us-east-1::baseline/17BSJV3IGJ2QSGA2",
+                 "baselineVersion":"5.0","targetIdentifier":"ou-abcd-11111111"}
+                """);
+
+        AwsException error = assertThrows(
+                AwsException.class, () -> service.enableBaseline(ACCOUNT, REGION, request));
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        assertTrue(service.listEnabledBaselines(ACCOUNT, REGION).stream()
+                .noneMatch(e -> "ou-abcd-11111111".equals(e.getTargetIdentifier())));
+    }
+
+    @Test
+    void enableBaselineRejectsNonArnBaselineIdentifier() throws Exception {
+        JsonNode request = objectMapper.readTree("""
+                {"baselineIdentifier":"17BSJV3IGJ2QSGA2","baselineVersion":"5.0",
+                 "targetIdentifier":"arn:aws:organizations::000000000101:ou/o-floci0001/ou-abcd-33333333"}
+                """);
+
+        AwsException error = assertThrows(
+                AwsException.class, () -> service.enableBaseline(ACCOUNT, REGION, request));
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+    }
+
+    @Test
+    void enableBaselineRejectsMalformedBaselineVersion() throws Exception {
+        JsonNode request = objectMapper.readTree("""
+                {"baselineIdentifier":"arn:aws:controltower:us-east-1::baseline/17BSJV3IGJ2QSGA2",
+                 "baselineVersion":"five-point-oh",
+                 "targetIdentifier":"arn:aws:organizations::000000000101:ou/o-floci0001/ou-abcd-44444444"}
+                """);
+
+        AwsException error = assertThrows(
+                AwsException.class, () -> service.enableBaseline(ACCOUNT, REGION, request));
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+    }
+
+    @Test
     void getEnabledBaselineFindsSyntheticIdentityCenterAndReportsMissingResource() {
         String identityCenterArn = service.listBaselines(REGION).stream()
                 .filter(b -> "IdentityCenterBaseline".equals(b.get("name").asText()))

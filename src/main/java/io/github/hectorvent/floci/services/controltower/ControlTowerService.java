@@ -354,8 +354,15 @@ public class ControlTowerService {
     public synchronized EnableBaselineResult enableBaseline(String accountId, String region, JsonNode request) {
         requireObject(request, "Request body");
         String baselineIdentifier = requireText(request, "baselineIdentifier");
+        if (!isArn(baselineIdentifier)) {
+            throw validation("baselineIdentifier must be a valid ARN.");
+        }
         String baselineVersion = requireText(request, "baselineVersion");
+        requireBaselineVersion(baselineVersion);
         String targetIdentifier = requireText(request, "targetIdentifier");
+        if (!isArn(targetIdentifier)) {
+            throw validation("targetIdentifier must be a valid ARN.");
+        }
         JsonNode parameters = request.get("parameters");
 
         if (isControlTowerOuBaseline(baselineIdentifier)) {
@@ -396,9 +403,7 @@ public class ControlTowerService {
             throw validation("enabledBaselineIdentifier must be a valid ARN.");
         }
         String baselineVersion = requireText(request, "baselineVersion");
-        if (!baselineVersion.matches("^\\d+(?:\\.\\d+){0,2}$") || baselineVersion.length() > 10) {
-            throw validation("baselineVersion must be a valid version.");
-        }
+        requireBaselineVersion(baselineVersion);
 
         EnabledBaseline baseline = getEnabledBaseline(accountId, region, enabledBaselineIdentifier);
         JsonNode parameters = request.get("parameters");
@@ -621,6 +626,17 @@ public class ControlTowerService {
             return Integer.parseInt(value.textValue());
         } catch (NumberFormatException e) {
             throw validation("nextToken is invalid.");
+        }
+    }
+
+    /**
+     * The model pins {@code baselineVersion} to {@code \d+(?:\.\d+){0,2}} with a maximum length of
+     * 10, on both EnableBaseline and UpdateEnabledBaseline — the value is stored verbatim, so an
+     * unchecked one would persist a version AWS never accepts.
+     */
+    private static void requireBaselineVersion(String baselineVersion) {
+        if (!baselineVersion.matches("^\\d+(?:\\.\\d+){0,2}$") || baselineVersion.length() > 10) {
+            throw validation("baselineVersion must be a valid version.");
         }
     }
 
