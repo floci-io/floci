@@ -181,6 +181,38 @@ class SesTagsTest {
     }
 
     @Test
+    void merge_overwritesExistingKeys_appendsNewOnes_preservingInsertionOrder() {
+        List<Tag> merged = SesTags.merge(
+                List.of(tag("env", "dev"), tag("owner", "alice")),
+                List.of(tag("env", "prod"), tag("team", "mail")));
+        assertEquals(List.of(tag("env", "prod"), tag("owner", "alice"), tag("team", "mail")), merged);
+    }
+
+    @Test
+    void merge_updatingExistingKeyAtFifty_ok() {
+        List<Tag> existing = new ArrayList<>();
+        for (int i = 0; i < 50; i++) {
+            existing.add(tag("k" + i, "v"));
+        }
+        List<Tag> merged = assertDoesNotThrow(() -> SesTags.merge(existing, List.of(tag("k0", "v2"))));
+        assertEquals(50, merged.size());
+        assertEquals(tag("k0", "v2"), merged.get(0));
+    }
+
+    @Test
+    void merge_overFiftyUniqueKeys_rejectedWithMergeMessage() {
+        List<Tag> existing = new ArrayList<>();
+        for (int i = 0; i < 50; i++) {
+            existing.add(tag("k" + i, "v"));
+        }
+        AwsException e = assertThrows(AwsException.class,
+                () -> SesTags.merge(existing, List.of(tag("k50", "v"))));
+        assertEquals("BadRequestException", e.getErrorCode());
+        assertEquals("Maximum of 50 user tags are allowed per resource, consider reducing the number "
+                + "of tags in the request or delete existing tags and retry", e.getMessage());
+    }
+
+    @Test
     void unicodeWhitespace_isAllowed() {
         // U+00A0 (no-break space) is a Unicode separator (\p{Z}), not the ASCII space. AWS accepts it
         // in both key and value (probe-confirmed), so the charset rule must allow it.

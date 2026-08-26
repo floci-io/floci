@@ -5,14 +5,18 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ses.model.CustomVerificationEmailTemplate;
+import io.github.hectorvent.floci.services.ses.model.Tag;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * Storage for custom verification email templates (the {@code cvetStore}), extracted from
@@ -80,9 +84,10 @@ public class SesCvetService {
         // Guard the existence check and the put together so a concurrent delete can't slip between
         // them and have the update resurrect the just-deleted template.
         synchronized (cvetMutationLock) {
-            if (cvetStore.get(key).isEmpty()) {
-                throw cvetNotFound(template.getTemplateName());
-            }
+            CustomVerificationEmailTemplate existing = cvetStore.get(key)
+                    .orElseThrow(() -> cvetNotFound(template.getTemplateName()));
+            // Tags are managed exclusively via Tag/UntagResource — preserve them on update.
+            template.setTags(existing.getTags());
             cvetStore.put(key, template);
         }
         LOG.infov("Updated custom verification email template {0} in region {1}",
@@ -108,6 +113,52 @@ public class SesCvetService {
      */
     public Optional<CustomVerificationEmailTemplate> find(String templateName, String region) {
         return cvetStore.get(cvetKey(region, templateName));
+    }
+
+    public List<Tag> listTags(String templateName, String region) {
+        CustomVerificationEmailTemplate template = cvetStore.get(cvetKey(region, templateName))
+                .orElseThrow(() -> tagTargetNotFound(templateName));
+        return new ArrayList<>(template.getTags());
+    }
+
+    /**
+     * Merges the incoming tags into the stored template. The lookup and write share the mutation
+     * lock so a concurrent update can't be overwritten with a stale object and a concurrent delete
+     * can't be resurrected.
+     */
+    public void tag(String templateName, String region, List<Tag> newTags) {
+        String key = cvetKey(region, templateName);
+        synchronized (cvetMutationLock) {
+            CustomVerificationEmailTemplate template = cvetStore.get(key)
+                    .orElseThrow(() -> tagTargetNotFound(templateName));
+            template.setTags(SesTags.merge(template.getTags(), newTags));
+            cvetStore.put(key, template);
+        }
+        LOG.infov("Tagged custom verification email template {0} in region {1} (+{2} tags)",
+                templateName, region, newTags.size());
+    }
+
+    public void untag(String templateName, String region, List<String> tagKeys) {
+        String key = cvetKey(region, templateName);
+        synchronized (cvetMutationLock) {
+            CustomVerificationEmailTemplate template = cvetStore.get(key)
+                    .orElseThrow(() -> tagTargetNotFound(templateName));
+            Set<String> toRemove = new HashSet<>(tagKeys);
+            // Copy-on-write: the stored list may be immutable, and unlocked readers iterate it.
+            List<Tag> remaining = new ArrayList<>(template.getTags());
+            remaining.removeIf(t -> toRemove.contains(t.key()));
+            template.setTags(remaining);
+            cvetStore.put(key, template);
+        }
+        LOG.infov("Untagged custom verification email template {0} in region {1} (-{2} keys)",
+                templateName, region, tagKeys.size());
+    }
+
+    private static AwsException tagTargetNotFound(String templateName) {
+        // The v2 tag endpoints use AWS's "No CustomVerificationEmailTemplate present with name"
+        // wording (probe-confirmed), not the v1-native CRUD message above.
+        return new AwsException("NotFoundException",
+                "No CustomVerificationEmailTemplate present with name: " + templateName, 404);
     }
 
     private static AwsException cvetNotFound(String templateName) {

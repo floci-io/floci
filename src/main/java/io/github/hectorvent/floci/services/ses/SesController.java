@@ -1468,7 +1468,8 @@ public class SesController {
             } else {
                 scalingMode = scalingNode.asText();
             }
-            sesService.createDedicatedIpPool(poolName, scalingMode, region);
+            List<Tag> tags = parseTagsArray(request.path("Tags"));
+            sesService.createDedicatedIpPool(poolName, scalingMode, tags, region);
             LOG.infov("SES V2 CreateDedicatedIpPool: {0}", poolName);
             return Response.ok(objectMapper.createObjectNode()).build();
         } catch (AwsException e) {
@@ -1495,7 +1496,11 @@ public class SesController {
         String region = regionResolver.resolveRegion(headers);
         DedicatedIpPool pool = sesService.getDedicatedIpPool(poolName, region);
         ObjectNode result = objectMapper.createObjectNode();
-        result.set("DedicatedIpPool", objectMapper.valueToTree(pool));
+        // Built explicitly: the AWS DedicatedIpPool shape carries only PoolName and ScalingMode;
+        // the model's tags are exposed via ListTagsForResource, not here.
+        ObjectNode poolNode = result.putObject("DedicatedIpPool");
+        poolNode.put("PoolName", pool.getPoolName());
+        poolNode.put("ScalingMode", pool.getScalingMode());
         return Response.ok(result).build();
     }
 
