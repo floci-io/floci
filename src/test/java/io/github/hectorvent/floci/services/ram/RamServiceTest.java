@@ -163,6 +163,31 @@ class RamServiceTest {
         assertEquals("DELETED", service.deleteResourceShare(arn, OWNER).getStatus());
     }
 
+    /**
+     * The model enumerates resourceOwner as SELF or OTHER-ACCOUNTS on GetResourceShares,
+     * ListPrincipals and ListResources. Anything else used to fall through the "not SELF" branch
+     * and silently return other accounts' shares — the opposite of what a caller who typo'd
+     * "self" expected.
+     */
+    @Test
+    void unmodelledResourceOwnerIsRejectedOnEveryReadPath() {
+        service.createResourceShare(
+                "us-east-1-tgw-share", List.of(OU_ARN), List.of(TGW_ARN), false, "us-east-1", OWNER);
+
+        assertInvalidParameter(() -> service.getResourceShares(ACCEPTER, "self"));
+        assertInvalidParameter(() -> service.listPrincipals(ACCEPTER, "EVERYTHING", List.of()));
+        assertInvalidParameter(() -> service.listResources(ACCEPTER, "OTHER_ACCOUNTS", List.of()));
+
+        assertEquals(1, service.getResourceShares(ACCEPTER, "OTHER-ACCOUNTS").size());
+        assertEquals(0, service.getResourceShares(ACCEPTER, "SELF").size());
+    }
+
+    private static void assertInvalidParameter(Executable read) {
+        AwsException error = assertThrows(AwsException.class, read);
+        assertEquals("InvalidParameterException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+    }
+
     private static void assertUnknownResource(Executable mutation) {
         AwsException error = assertThrows(AwsException.class, mutation);
         assertEquals("UnknownResourceException", error.getErrorCode());

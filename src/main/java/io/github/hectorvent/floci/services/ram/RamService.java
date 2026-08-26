@@ -84,6 +84,7 @@ public class RamService {
      *                      (shares other accounts made visible to the caller)
      */
     public List<ResourceShare> getResourceShares(String callerAccountId, String resourceOwner) {
+        requireResourceOwner(resourceOwner);
         List<ResourceShare> result = new ArrayList<>();
         for (ResourceShare share : allShares()) {
             if (isVisible(share, callerAccountId, resourceOwner)) {
@@ -100,6 +101,7 @@ public class RamService {
 
     public List<SharedResource> listResources(String callerAccountId, String resourceOwner,
                                               List<String> resourceShareArns) {
+        requireResourceOwner(resourceOwner);
         List<SharedResource> result = new ArrayList<>();
         for (ResourceShare share : allShares()) {
             if (!isVisible(share, callerAccountId, resourceOwner)) {
@@ -161,6 +163,7 @@ public class RamService {
      */
     public List<PrincipalAssociation> listPrincipals(String callerAccountId, String resourceOwner,
                                                       List<String> resourceShareArns) {
+        requireResourceOwner(resourceOwner);
         List<PrincipalAssociation> result = new ArrayList<>();
         for (ResourceShare share : allShares()) {
             if (!isVisible(share, callerAccountId, resourceOwner)) {
@@ -236,6 +239,19 @@ public class RamService {
             return accountAware.scanAllAccounts();
         }
         return shares.scan(key -> true);
+    }
+
+    /**
+     * The model enumerates {@code resourceOwner} as {@code SELF} or {@code OTHER-ACCOUNTS} on every
+     * read operation that takes it. The visibility fork below is a two-way branch, so an unmodelled
+     * value silently means OTHER-ACCOUNTS — a caller who sent {@code "self"} would be handed every
+     * share they do NOT own. AWS answers InvalidParameterException, which all three operations list.
+     */
+    private static void requireResourceOwner(String resourceOwner) {
+        if (!"SELF".equals(resourceOwner) && !"OTHER-ACCOUNTS".equals(resourceOwner)) {
+            throw new AwsException("InvalidParameterException",
+                    "resourceOwner must be one of [SELF, OTHER-ACCOUNTS].", 400);
+        }
     }
 
     private boolean isVisible(ResourceShare share, String callerAccountId, String resourceOwner) {
