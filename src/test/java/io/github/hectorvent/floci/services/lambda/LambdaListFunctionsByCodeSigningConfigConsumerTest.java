@@ -42,6 +42,23 @@ class LambdaListFunctionsByCodeSigningConfigConsumerTest {
             .body("__type", equalTo("ResourceNotFoundException"));
     }
 
+    /**
+     * The model's region alternation is {@code (eusc-)?[a-z]{2}((-gov)|(-iso([a-z]?)))?-[a-z]+-\d},
+     * which admits the newer isolated partitions (iso-e/iso-f) and the European sovereign
+     * cloud. A well-formed ARN in one of those must reach the modeled 404, not be rejected
+     * as malformed.
+     */
+    @Test
+    void wellFormedIsolatedPartitionArn_returnsResourceNotFound() {
+        given()
+        .when()
+            .get(path("arn:aws-iso-e:lambda:us-isoe-east-1:000000000000:"
+                    + "code-signing-config:csc-0f6c334ab1234567c"))
+        .then()
+            .statusCode(404)
+            .body("__type", equalTo("ResourceNotFoundException"));
+    }
+
     @Test
     void malformedArn_returnsInvalidParameterValue() {
         given()

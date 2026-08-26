@@ -44,7 +44,7 @@ public class LambdaCodeSigningConfigFunctionsController {
      * because the pattern itself does not bound the partition suffix.
      */
     private static final Pattern CODE_SIGNING_CONFIG_ARN = Pattern.compile(
-            "arn:(aws[a-zA-Z-]*)?:lambda:[a-z]{2}((-gov)|(-iso(b?)))?-[a-z]+-\\d{1}"
+            "arn:(aws[a-zA-Z-]*)?:lambda:(eusc-)?[a-z]{2}((-gov)|(-iso([a-z]?)))?-[a-z]+-\\d{1}"
                     + ":\\d{12}:code-signing-config:csc-[a-z0-9]{17}");
 
     private static final int ARN_MAX_LENGTH = 200;
