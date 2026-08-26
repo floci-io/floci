@@ -148,7 +148,8 @@ public class ControlTowerController {
     public Response getLandingZoneOperation(@Context HttpHeaders headers, String body) {
         JsonNode request = parse(body);
         String opId = requireText(request, "operationIdentifier");
-        String operationType = service.getOperationType(opId);
+        String operationType = service.getOperationType(
+                requestContext.getAccountId(), regionResolver.resolveRegion(headers), opId);
         ObjectNode response = objectMapper.createObjectNode();
         response.set("operationDetails", operationDetailsNode(opId, operationType));
         return Response.ok(response).build();
@@ -156,9 +157,9 @@ public class ControlTowerController {
 
     @POST
     @Path("/list-landingzone-operations")
-    public Response listLandingZoneOperations(String body) {
-        ControlTowerService.ListLandingZoneOperationsResult result =
-                service.listLandingZoneOperations(parse(body));
+    public Response listLandingZoneOperations(@Context HttpHeaders headers, String body) {
+        ControlTowerService.ListLandingZoneOperationsResult result = service.listLandingZoneOperations(
+                requestContext.getAccountId(), regionResolver.resolveRegion(headers), parse(body));
         ObjectNode response = objectMapper.createObjectNode();
         var array = response.putArray("landingZoneOperations");
         for (ControlTowerService.LandingZoneOperationSummary operation : result.landingZoneOperations()) {
@@ -253,7 +254,8 @@ public class ControlTowerController {
     public Response getBaselineOperation(@Context HttpHeaders headers, String body) {
         JsonNode request = parse(body);
         String opId = requireText(request, "operationIdentifier");
-        String operationType = service.getBaselineOperationType(opId);
+        String operationType = service.getBaselineOperationType(
+                requestContext.getAccountId(), regionResolver.resolveRegion(headers), opId);
         ObjectNode response = objectMapper.createObjectNode();
         response.set("baselineOperation", operationDetailsNode(opId, operationType));
         return Response.ok(response).build();

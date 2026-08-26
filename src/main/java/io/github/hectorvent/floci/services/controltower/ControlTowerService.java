@@ -14,6 +14,9 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.HashSet;
@@ -23,7 +26,6 @@ import java.util.Comparator;
 import java.util.stream.Collectors;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
  * Control Tower landing-zone and baseline emulation, backed by the configured Floci storage mode.
@@ -43,6 +45,8 @@ public class ControlTowerService {
     static final String STATUS_ACTIVE = "ACTIVE";
     static final String DRIFT_IN_SYNC = "IN_SYNC";
     static final String OP_SUCCEEDED = "SUCCEEDED";
+    /** Per account+region ledger cap. LZA polls only recent operations, so older ones are evicted. */
+    private static final int MAX_OPERATIONS_PER_SCOPE = 250;
     private static final String OP_TYPE_UPDATE = "UPDATE";
     private static final String OP_TYPE_CREATE = "CREATE";
     private static final String OP_TYPE_DELETE = "DELETE";
@@ -72,10 +76,11 @@ public class ControlTowerService {
     private final StorageBackend<String, LandingZone> landingZoneStore;
     private final StorageBackend<String, EnabledBaseline> enabledBaselineStore;
     private final OrganizationsService organizationsService;
-    // Operation ledger: opId -> operationType. In-memory on purpose: pollers within one pipeline
-    // run are the only consumers, and unknown ids still answer SUCCEEDED (restart-safe for LZA).
-    private final Map<String, String> operations = new ConcurrentHashMap<>();
-    private final List<String> operationOrder = new CopyOnWriteArrayList<>();
+    // Operation ledgers keyed by "accountId::region": opId -> operationType. In-memory on purpose:
+    // pollers within one pipeline run are the only consumers, and unknown ids still answer
+    // SUCCEEDED (restart-safe for LZA). Scoped so one account cannot enumerate another's
+    // operations, and capped so a long-lived emulator cannot grow the ledger without bound.
+    private final Map<String, OperationLedger> operationLedgers = new ConcurrentHashMap<>();
 
     @Inject
     public ControlTowerService(StorageFactory storageFactory, OrganizationsService organizationsService) {
@@ -159,7 +164,7 @@ public class ControlTowerService {
                 arn, version, version, STATUS_ACTIVE, DRIFT_IN_SYNC, manifest, null);
         landingZoneStore.put(region, landingZone);
         String operationIdentifier = UUID.randomUUID().toString();
-        recordOperation(operationIdentifier, OP_TYPE_CREATE);
+        recordOperation(accountId, region, operationIdentifier, OP_TYPE_CREATE);
         return new CreateLandingZoneResult(arn, operationIdentifier);
     }
 
@@ -188,7 +193,7 @@ public class ControlTowerService {
         landingZoneStore.put(region, lz);
 
         String opId = UUID.randomUUID().toString();
-        recordOperation(opId, OP_TYPE_UPDATE);
+        recordOperation(accountId, region, opId, OP_TYPE_UPDATE);
         return opId;
     }
 
@@ -205,7 +210,7 @@ public class ControlTowerService {
         landingZoneStore.delete(region);
 
         String opId = UUID.randomUUID().toString();
-        recordOperation(opId, OP_TYPE_DELETE);
+        recordOperation(accountId, region, opId, OP_TYPE_DELETE);
         return opId;
     }
 
@@ -221,15 +226,17 @@ public class ControlTowerService {
         }
 
         String opId = UUID.randomUUID().toString();
-        recordOperation(opId, OP_TYPE_RESET);
+        recordOperation(accountId, region, opId, OP_TYPE_RESET);
         return opId;
     }
 
-    public String getOperationType(String operationIdentifier) {
-        return operations.getOrDefault(operationIdentifier, OP_TYPE_UPDATE);
+    public String getOperationType(String accountId, String region, String operationIdentifier) {
+        String recorded = recordedOperationType(accountId, region, operationIdentifier);
+        return recorded == null ? OP_TYPE_UPDATE : recorded;
     }
 
-    public ListLandingZoneOperationsResult listLandingZoneOperations(JsonNode request) {
+    public ListLandingZoneOperationsResult listLandingZoneOperations(
+            String accountId, String region, JsonNode request) {
         requireObject(request, "Request body");
         int maxResults = readLandingZoneOperationsMaxResults(request);
         int start = readNextToken(request);
@@ -244,18 +251,19 @@ public class ControlTowerService {
                     Set.of("SUCCEEDED", "FAILED", "IN_PROGRESS"));
         }
 
+        OperationLedger ledger = operationLedgers.get(ledgerKey(accountId, region));
         List<LandingZoneOperationSummary> matching = new ArrayList<>();
-        for (int i = operationOrder.size() - 1; i >= 0; i--) {
-            String operationIdentifier = operationOrder.get(i);
-            String operationType = operations.get(operationIdentifier);
-            if (operationType == null || !Set.of("DELETE", "CREATE", "UPDATE", "RESET").contains(operationType)
+        for (Map.Entry<String, String> operation : ledger == null ? List.<Map.Entry<String, String>>of()
+                : ledger.newestFirst()) {
+            String operationType = operation.getValue();
+            if (!Set.of("DELETE", "CREATE", "UPDATE", "RESET").contains(operationType)
                     || (!types.isEmpty() && !types.contains(operationType))) {
                 continue;
             }
             if (!statuses.isEmpty() && !statuses.contains(OP_SUCCEEDED)) {
                 continue;
             }
-            matching.add(new LandingZoneOperationSummary(operationIdentifier, operationType, OP_SUCCEEDED));
+            matching.add(new LandingZoneOperationSummary(operation.getKey(), operationType, OP_SUCCEEDED));
         }
         if (start > matching.size()) {
             throw validation("nextToken is invalid.");
@@ -363,7 +371,7 @@ public class ControlTowerService {
         value.setLastOperationIdentifier(opId);
         enabledBaselineStore.put(key, value);
 
-        recordOperation(opId, OP_TYPE_BASELINE_ENABLED);
+        recordOperation(accountId, region, opId, OP_TYPE_BASELINE_ENABLED);
         return new EnableBaselineResult(opId, arn);
     }
 
@@ -376,7 +384,7 @@ public class ControlTowerService {
         baseline.setLastOperationIdentifier(opId);
         String key = region + "::" + baseline.getTargetIdentifier();
         enabledBaselineStore.put(key, baseline);
-        recordOperation(opId, OP_TYPE_BASELINE_RESET);
+        recordOperation(accountId, region, opId, OP_TYPE_BASELINE_RESET);
         return opId;
     }
 
@@ -404,12 +412,13 @@ public class ControlTowerService {
         baseline.setLastOperationIdentifier(opId);
         String key = region + "::" + baseline.getTargetIdentifier();
         enabledBaselineStore.put(key, baseline);
-        recordOperation(opId, OP_TYPE_BASELINE_UPDATE);
+        recordOperation(accountId, region, opId, OP_TYPE_BASELINE_UPDATE);
         return opId;
     }
 
-    public String getBaselineOperationType(String operationIdentifier) {
-        return operations.getOrDefault(operationIdentifier, OP_TYPE_BASELINE_ENABLED);
+    public String getBaselineOperationType(String accountId, String region, String operationIdentifier) {
+        String recorded = recordedOperationType(accountId, region, operationIdentifier);
+        return recorded == null ? OP_TYPE_BASELINE_ENABLED : recorded;
     }
 
     private void reconcileControlTowerGuardrails(String accountId, List<EnabledBaseline> baselines) {
@@ -550,9 +559,54 @@ public class ControlTowerService {
         return Set.of(value.get(0).textValue());
     }
 
-    private void recordOperation(String operationIdentifier, String operationType) {
-        operations.put(operationIdentifier, operationType);
-        operationOrder.add(operationIdentifier);
+    private void recordOperation(
+            String accountId, String region, String operationIdentifier, String operationType) {
+        operationLedgers
+                .computeIfAbsent(ledgerKey(accountId, region), key -> new OperationLedger())
+                .record(operationIdentifier, operationType);
+    }
+
+    /**
+     * Looks up an operation type without creating a ledger — read paths must never materialize a
+     * scope, or an unauthenticated caller could grow the map one bogus account at a time.
+     */
+    private String recordedOperationType(String accountId, String region, String operationIdentifier) {
+        OperationLedger ledger = operationLedgers.get(ledgerKey(accountId, region));
+        return ledger == null ? null : ledger.type(operationIdentifier);
+    }
+
+    private static String ledgerKey(String accountId, String region) {
+        return accountId + "::" + region;
+    }
+
+    /**
+     * Insertion-ordered operation ledger for one account+region, holding at most
+     * {@value #MAX_OPERATIONS_PER_SCOPE} entries and evicting the oldest first.
+     */
+    private static final class OperationLedger {
+
+        private final LinkedHashMap<String, String> operations = new LinkedHashMap<>();
+
+        synchronized void record(String operationIdentifier, String operationType) {
+            operations.put(operationIdentifier, operationType);
+            Iterator<String> oldest = operations.keySet().iterator();
+            while (operations.size() > MAX_OPERATIONS_PER_SCOPE && oldest.hasNext()) {
+                oldest.next();
+                oldest.remove();
+            }
+        }
+
+        synchronized String type(String operationIdentifier) {
+            return operations.get(operationIdentifier);
+        }
+
+        /** Snapshot in newest-first order so callers iterate outside the lock. */
+        synchronized List<Map.Entry<String, String>> newestFirst() {
+            List<Map.Entry<String, String>> snapshot = new ArrayList<>(operations.size());
+            operations.forEach((identifier, type) -> snapshot.add(Map.entry(identifier, type)));
+            Collections.reverse(snapshot);
+            return snapshot;
+        }
     }
 
     private static int readNextToken(JsonNode request) {

@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.controltower.model.EnabledBaseline;
 import io.github.hectorvent.floci.services.controltower.model.LandingZone;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -52,7 +53,7 @@ class ControlTowerServiceTest {
 
         assertTrue(result.arn().startsWith("arn:aws:controltower:" + REGION + ":" + ACCOUNT + ":landingzone/"));
         assertTrue(result.operationIdentifier().matches("^[a-f0-9-]{36}$"));
-        assertEquals("CREATE", service.getOperationType(result.operationIdentifier()));
+        assertEquals("CREATE", service.getOperationType(ACCOUNT, REGION, result.operationIdentifier()));
         assertEquals(request.get("manifest"), service.getOrSeedLandingZone(ACCOUNT, REGION).getManifest());
     }
 
@@ -193,6 +194,59 @@ class ControlTowerServiceTest {
     }
 
     @Test
+    void operationLedgerIsScopedPerAccountAndRegion() throws Exception {
+        JsonNode createRequest = objectMapper.readTree("""
+                {"version":"4.0","manifest":{"accessManagement":{"enabled":true}}}
+                """);
+        String opId = service.createLandingZone(ACCOUNT, REGION, createRequest).operationIdentifier();
+
+        assertEquals(List.of(opId), operationIdentifiers(ACCOUNT, REGION));
+        assertEquals("CREATE", service.getOperationType(ACCOUNT, REGION, opId));
+
+        // Another account, and another region of the same account, must not see it at all.
+        assertTrue(operationIdentifiers("000000000102", REGION).isEmpty());
+        assertTrue(operationIdentifiers(ACCOUNT, "us-west-2").isEmpty());
+        assertEquals("UPDATE", service.getOperationType("000000000102", REGION, opId));
+    }
+
+    @Test
+    void operationLedgerEvictsOldestBeyondCap() throws Exception {
+        JsonNode createRequest = objectMapper.readTree("""
+                {"version":"4.0","manifest":{"securityRoles":{"enabled":true},"accessManagement":{"enabled":true}}}
+                """);
+        String eldest = service.createLandingZone(ACCOUNT, REGION, createRequest).operationIdentifier();
+        JsonNode updateRequest = objectMapper.readTree("""
+                {"version":"4.0","landingZoneIdentifier":"%s",
+                 "manifest":{"securityRoles":{"enabled":true},"accessManagement":{"enabled":true}}}
+                """.formatted(service.getOrSeedLandingZone(ACCOUNT, REGION).getArn()));
+        for (int i = 0; i < 250; i++) {
+            service.updateLandingZone(ACCOUNT, REGION, updateRequest);
+        }
+
+        List<String> retained = operationIdentifiers(ACCOUNT, REGION);
+        assertEquals(250, retained.size());
+        assertFalse(retained.contains(eldest));
+    }
+
+    /** Pages {@code ListLandingZoneOperations} to completion for one account+region scope. */
+    private List<String> operationIdentifiers(String accountId, String region) throws Exception {
+        List<String> identifiers = new ArrayList<>();
+        String nextToken = null;
+        do {
+            String body = nextToken == null
+                    ? "{\"maxResults\":100}"
+                    : "{\"maxResults\":100,\"nextToken\":\"" + nextToken + "\"}";
+            ControlTowerService.ListLandingZoneOperationsResult page =
+                    service.listLandingZoneOperations(accountId, region, objectMapper.readTree(body));
+            page.landingZoneOperations().stream()
+                    .map(ControlTowerService.LandingZoneOperationSummary::operationIdentifier)
+                    .forEach(identifiers::add);
+            nextToken = page.nextToken();
+        } while (nextToken != null);
+        return identifiers;
+    }
+
+    @Test
     void deleteLandingZoneRemovesStoredLandingZoneAndReturnsDeleteOperation() throws Exception {
         service.getOrSeedLandingZone(ACCOUNT, REGION);
 
@@ -200,7 +254,7 @@ class ControlTowerServiceTest {
                 objectMapper.readTree("{\"landingZoneIdentifier\":\"" + SEEDED_ARN + "\"}"));
 
         assertTrue(opId.matches("^[a-f0-9-]{36}$"));
-        assertEquals("DELETE", service.getOperationType(opId));
+        assertEquals("DELETE", service.getOperationType(ACCOUNT, REGION, opId));
         assertEquals(SEEDED_ARN, service.getOrSeedLandingZone(ACCOUNT, REGION).getArn());
     }
 
@@ -239,7 +293,7 @@ class ControlTowerServiceTest {
                 objectMapper.readTree("{\"landingZoneIdentifier\":\"" + SEEDED_ARN + "\"}"));
 
         assertTrue(opId.matches("^[a-f0-9-]{36}$"));
-        assertEquals("RESET", service.getOperationType(opId));
+        assertEquals("RESET", service.getOperationType(ACCOUNT, REGION, opId));
         assertEquals(SEEDED_ARN, service.getOrSeedLandingZone(ACCOUNT, REGION).getArn());
     }
 
@@ -265,8 +319,8 @@ class ControlTowerServiceTest {
                 """.formatted(SEEDED_ARN));
         String opId = service.updateLandingZone(ACCOUNT, REGION, request);
 
-        assertEquals("UPDATE", service.getOperationType(opId));
-        assertNotNull(service.getOperationType("never-issued"));
+        assertEquals("UPDATE", service.getOperationType(ACCOUNT, REGION, opId));
+        assertNotNull(service.getOperationType(ACCOUNT, REGION, "never-issued"));
     }
 
     @Test
@@ -279,6 +333,7 @@ class ControlTowerServiceTest {
         String secondId = service.updateLandingZone(ACCOUNT, REGION, request);
 
         ControlTowerService.ListLandingZoneOperationsResult first = service.listLandingZoneOperations(
+                ACCOUNT, REGION,
                 objectMapper.readTree("{\"maxResults\":1,\"filter\":{\"statuses\":[\"SUCCEEDED\"]}}"));
         assertEquals(1, first.landingZoneOperations().size());
         assertEquals(secondId, first.landingZoneOperations().get(0).operationIdentifier());
@@ -287,6 +342,7 @@ class ControlTowerServiceTest {
         assertNotNull(first.nextToken());
 
         ControlTowerService.ListLandingZoneOperationsResult second = service.listLandingZoneOperations(
+                ACCOUNT, REGION,
                 objectMapper.readTree("{\"maxResults\":1,\"nextToken\":\"%s\",\"filter\":{\"types\":[\"UPDATE\"]}}"
                         .formatted(first.nextToken())));
         assertEquals(List.of(firstId), second.landingZoneOperations().stream()
@@ -365,7 +421,7 @@ class ControlTowerServiceTest {
         assertEquals("5.0", stored.getBaselineVersion());
         assertEquals("SUCCEEDED", stored.getStatus());
 
-        assertEquals("BASELINE_ENABLED", service.getBaselineOperationType(result.operationIdentifier()));
+        assertEquals("BASELINE_ENABLED", service.getBaselineOperationType(ACCOUNT, REGION, result.operationIdentifier()));
     }
 
     @Test
@@ -464,7 +520,7 @@ class ControlTowerServiceTest {
         String opId = service.resetEnabledBaseline(ACCOUNT, REGION, enabled.getArn());
         assertNotNull(opId);
         assertFalse(opId.isBlank());
-        assertEquals("BASELINE_RESET", service.getBaselineOperationType(opId));
+        assertEquals("BASELINE_RESET", service.getBaselineOperationType(ACCOUNT, REGION, opId));
     }
 
     @Test
@@ -518,7 +574,7 @@ class ControlTowerServiceTest {
         EnabledBaseline updated = service.getEnabledBaseline(ACCOUNT, REGION, enabled.getArn());
         assertEquals("6.0", updated.getBaselineVersion());
         assertEquals(true, updated.getParameters().path(0).path("value").path("enabled").asBoolean());
-        assertEquals("UPDATE_ENABLED_BASELINE", service.getBaselineOperationType(opId));
+        assertEquals("UPDATE_ENABLED_BASELINE", service.getBaselineOperationType(ACCOUNT, REGION, opId));
     }
 
     @Test
