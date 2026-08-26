@@ -57,17 +57,27 @@ public class MemoryLakeFormationStorage implements LakeFormationStorage {
     }
 
     @Override
-    public List<ResourceInfo> listResources(String region, FilterCondition filterCondition, Integer maxResults, String nextToken) {
+    public List<ResourceInfo> listResources(String region, List<FilterCondition> filterConditions, Integer maxResults, String nextToken) {
         return resourcesStorage.scan(k -> k.startsWith(region + ":")).stream()
                 .filter(r -> {
-                    if (filterCondition != null && "RESOURCE_ARN".equals(filterCondition.getField())) {
-                        String arn = r.getResourceArn();
-                        List<String> values = filterCondition.getStringValueList();
-                        if (values != null && !values.isEmpty()) {
-                            String op = filterCondition.getComparisonOperator();
-                            if ("EQUALS".equals(op)) return values.contains(arn);
-                            if ("NOT_EQUALS".equals(op)) return !values.contains(arn);
-                            if ("BEGINS_WITH".equals(op)) return values.stream().anyMatch(arn::startsWith);
+                    if (filterConditions != null) {
+                        for (FilterCondition filterCondition : filterConditions) {
+                            if ("RESOURCE_ARN".equals(filterCondition.getField())) {
+                                String arn = r.getResourceArn();
+                                List<String> values = filterCondition.getStringValueList();
+                                if (values != null && !values.isEmpty()) {
+                                    String op = filterCondition.getComparisonOperator();
+                                    if ("EQ".equals(op)) {
+                                        if (!values.contains(arn)) return false;
+                                    } else if ("NE".equals(op)) {
+                                        if (values.contains(arn)) return false;
+                                    } else if ("BEGINS_WITH".equals(op)) {
+                                        if (values.stream().noneMatch(arn::startsWith)) return false;
+                                    } else {
+                                        throw new io.github.hectorvent.floci.core.common.AwsException("InvalidInputException", "Unsupported ComparisonOperator: " + op, 400);
+                                    }
+                                }
+                            }
                         }
                     }
                     return true;

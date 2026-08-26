@@ -11,7 +11,7 @@ public interface LakeFormationStorage {
 
     void registerResource(String region, String resourceArn, String roleArn, boolean useServiceLinkedRole, Boolean withFederation);
     void deregisterResource(String region, String resourceArn);
-    List<ResourceInfo> listResources(String region, FilterCondition filterCondition, Integer maxResults, String nextToken);
+    List<ResourceInfo> listResources(String region, List<FilterCondition> filterConditions, Integer maxResults, String nextToken);
     Optional<ResourceInfo> describeResource(String region, String resourceArn);
 
     void grantPermissions(String region, String catalogId, PrincipalResourcePermissions permissions);

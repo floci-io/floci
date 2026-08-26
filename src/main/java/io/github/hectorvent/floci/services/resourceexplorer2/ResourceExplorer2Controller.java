@@ -47,7 +47,7 @@ public class ResourceExplorer2Controller {
     }
 
     @POST
-    @Path("/ListResources")
+    @Path("/re2/ListResources")
     public Response listResources(@Context HttpHeaders headers, String body) throws IOException {
         JsonNode req = parseBody(body);
         String region = regionResolver.resolveRegion(headers);

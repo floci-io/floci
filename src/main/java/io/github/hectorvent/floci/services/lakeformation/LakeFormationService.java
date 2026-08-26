@@ -69,8 +69,7 @@ public class LakeFormationService {
     public ListResourcesResponse listResources(String region, ListResourcesRequest request) {
         List<ResourceInfo> resources = storage.listResources(
                 region,
-                request.getFilterConditionList() != null && !request.getFilterConditionList().isEmpty()
-                        ? request.getFilterConditionList().get(0) : null,
+                request.getFilterConditionList(),
                 request.getMaxResults(),
                 request.getNextToken()
         );

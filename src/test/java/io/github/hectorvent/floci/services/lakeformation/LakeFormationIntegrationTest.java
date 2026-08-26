@@ -237,7 +237,7 @@ class LakeFormationIntegrationTest {
         given()
             .contentType(CONTENT_TYPE)
             .header("Authorization", AUTH_HEADER)
-            .body("{\"FilterConditionList\":[{\"Field\":\"RESOURCE_ARN\",\"ComparisonOperator\":\"EQUALS\",\"StringValueList\":[\"" + arn + "\"]}]}")
+            .body("{\"FilterConditionList\":[{\"Field\":\"RESOURCE_ARN\",\"ComparisonOperator\":\"EQ\",\"StringValueList\":[\"" + arn + "\"]}]}")
         .when()
             .post("/ListResources")
         .then()
