@@ -423,6 +423,21 @@ class SsmIntegrationTest {
     @Test
     void documentPermission_modifyAndDescribeRoundTrip() {
         given()
+            .header("X-Amz-Target", "AmazonSSM.CreateDocument")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                {
+                    "Name": "AwsAccelerator-SessionManagerLogging",
+                    "DocumentType": "Session",
+                    "Content": "{\\"schemaVersion\\":\\"1.0\\"}"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
             .header("X-Amz-Target", "AmazonSSM.ModifyDocumentPermission")
             .contentType(SSM_CONTENT_TYPE)
             .body("""
@@ -585,5 +600,171 @@ class SsmIntegrationTest {
         .then()
             .statusCode(400)
             .body("__type", equalTo("DuplicateDocumentContent"));
+    }
+
+    // ── Document parameter validation (botocore: DocumentName ^[a-zA-Z0-9_\-.]{3,128}$) ──
+
+    @Test
+    void documentOperations_blankNameReturnsValidationException() {
+        for (String target : new String[]{
+                "GetDocument", "DescribeDocument", "DeleteDocument",
+                "CreateDocument", "UpdateDocument"}) {
+            given()
+                .header("X-Amz-Target", "AmazonSSM." + target)
+                .contentType(SSM_CONTENT_TYPE)
+                .body("{}")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"));
+        }
+    }
+
+    @Test
+    void documentPermissionOperations_blankNameReturnsValidationException() {
+        for (String target : new String[]{
+                "ModifyDocumentPermission", "DescribeDocumentPermission"}) {
+            given()
+                .header("X-Amz-Target", "AmazonSSM." + target)
+                .contentType(SSM_CONTENT_TYPE)
+                .body("""
+                    { "PermissionType": "Share" }
+                    """)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"));
+        }
+    }
+
+    // ── PermissionType (botocore: required, enum with the single value "Share") ──
+
+    @Test
+    void documentPermissionOperations_rejectUnsupportedPermissionType() {
+        for (String target : new String[]{
+                "ModifyDocumentPermission", "DescribeDocumentPermission"}) {
+            given()
+                .header("X-Amz-Target", "AmazonSSM." + target)
+                .contentType(SSM_CONTENT_TYPE)
+                .body("""
+                    {
+                        "Name": "Doc-That-Was-Never-Created",
+                        "PermissionType": "Own"
+                    }
+                    """)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidPermissionType"));
+        }
+    }
+
+    @Test
+    void documentPermissionOperations_missingPermissionTypeIsRejected() {
+        for (String target : new String[]{
+                "ModifyDocumentPermission", "DescribeDocumentPermission"}) {
+            given()
+                .header("X-Amz-Target", "AmazonSSM." + target)
+                .contentType(SSM_CONTENT_TYPE)
+                .body("""
+                    { "Name": "Doc-That-Was-Never-Created" }
+                    """)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"));
+        }
+    }
+
+    // ── Permission ops agree with the document store (botocore models InvalidDocument) ──
+
+    @Test
+    void documentPermissionOperations_unknownDocumentReturnsInvalidDocument() {
+        for (String target : new String[]{
+                "ModifyDocumentPermission", "DescribeDocumentPermission"}) {
+            given()
+                .header("X-Amz-Target", "AmazonSSM." + target)
+                .contentType(SSM_CONTENT_TYPE)
+                .body("""
+                    {
+                        "Name": "Doc-That-Was-Never-Created",
+                        "PermissionType": "Share",
+                        "AccountIdsToAdd": ["444444444444"]
+                    }
+                    """)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidDocument"));
+        }
+    }
+
+    /**
+     * Only the document's owner may share it. Ownership is the storage partition:
+     * the document store is account-aware, so another account's ModifyDocumentPermission
+     * cannot resolve the document and gets InvalidDocument — AWS's own answer for a
+     * document the caller cannot see.
+     */
+    @Test
+    void modifyDocumentPermission_otherAccountCannotShareOwnersDocument() {
+        String ownerAuth = "AWS4-HMAC-SHA256 Credential=000000000001/20260215/us-east-1/ssm/aws4_request,"
+                + " SignedHeaders=host, Signature=abc";
+        String otherAuth = "AWS4-HMAC-SHA256 Credential=000000000002/20260215/us-east-1/ssm/aws4_request,"
+                + " SignedHeaders=host, Signature=abc";
+
+        given()
+            .header("Authorization", ownerAuth)
+            .header("X-Amz-Target", "AmazonSSM.CreateDocument")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                {
+                    "Name": "Owner-Only-Document",
+                    "DocumentType": "Session",
+                    "Content": "{\\"schemaVersion\\":\\"1.0\\"}"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("Authorization", otherAuth)
+            .header("X-Amz-Target", "AmazonSSM.ModifyDocumentPermission")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                {
+                    "Name": "Owner-Only-Document",
+                    "PermissionType": "Share",
+                    "AccountIdsToAdd": ["444444444444"]
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidDocument"));
+
+        // …and the owner's own share state is untouched.
+        given()
+            .header("Authorization", ownerAuth)
+            .header("X-Amz-Target", "AmazonSSM.DescribeDocumentPermission")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                {
+                    "Name": "Owner-Only-Document",
+                    "PermissionType": "Share"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("AccountIds", not(hasItem("444444444444")));
     }
 }

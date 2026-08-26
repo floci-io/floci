@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ssm;
 
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.ssm.model.Command;
 import io.github.hectorvent.floci.services.ssm.model.CommandInvocation;
 import io.github.hectorvent.floci.services.ssm.model.InstanceInformation;
@@ -276,8 +277,53 @@ public class SsmJsonHandler {
         return Response.ok(response).build();
     }
 
-    private Response handleGetDocument(JsonNode request, String region) {
+    /**
+     * Reads the required {@code Name} member of a document operation.
+     *
+     * <p>{@code JsonNode.path(...).asText()} yields {@code ""} — not null — for an absent
+     * field, so without this guard a request with {@code Name} omitted builds the storage
+     * key {@code "<region>|"} and surfaces a not-found error for a blank document name.
+     * Botocore constrains {@code DocumentName} to {@code ^[a-zA-Z0-9_\-.]{3,128}$}, so a
+     * blank name is a constraint violation, which AWS reports as {@code ValidationException}
+     * rather than any per-operation error (none of these operations model one that fits:
+     * {@code InvalidDocument} means "does not exist", and {@code CreateDocument} does not
+     * model it at all).
+     */
+    private String requireDocumentName(JsonNode request) {
         String name = request.path("Name").asText();
+        if (name == null || name.isBlank()) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value '' at 'name' failed to satisfy constraint: "
+                            + "Member must satisfy regular expression pattern: ^[a-zA-Z0-9_\\-.]{3,128}$",
+                    400);
+        }
+        return name;
+    }
+
+    /**
+     * Reads the required {@code PermissionType} member of the two document-permission
+     * operations. Botocore models {@code DocumentPermissionType} as an enum with the single
+     * value {@code Share} and models {@code InvalidPermissionType} on both operations for
+     * anything else. An absent value is a missing required member, which AWS reports as
+     * {@code ValidationException} — the same treatment as an absent {@code Name}.
+     */
+    private void requireSharePermissionType(JsonNode request) {
+        String permissionType = request.path("PermissionType").asText();
+        if (permissionType == null || permissionType.isBlank()) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value null at 'permissionType' failed to satisfy "
+                            + "constraint: Member must not be null",
+                    400);
+        }
+        if (!"Share".equals(permissionType)) {
+            throw new AwsException("InvalidPermissionType",
+                    "The permission type isn't supported. Share is the only supported permission type.",
+                    400);
+        }
+    }
+
+    private Response handleGetDocument(JsonNode request, String region) {
+        String name = requireDocumentName(request);
         SsmDocument document = ssmService.getDocument(name, region);
 
         ObjectNode response = objectMapper.createObjectNode();
@@ -290,7 +336,7 @@ public class SsmJsonHandler {
     }
 
     private Response handleCreateDocument(JsonNode request, String region) {
-        String name = request.path("Name").asText();
+        String name = requireDocumentName(request);
         String content = request.path("Content").asText();
         String documentType = request.path("DocumentType").asText("Command");
 
@@ -299,7 +345,7 @@ public class SsmJsonHandler {
     }
 
     private Response handleUpdateDocument(JsonNode request, String region) {
-        String name = request.path("Name").asText();
+        String name = requireDocumentName(request);
         String content = request.path("Content").asText();
 
         SsmDocument document = ssmService.updateDocument(name, content, region);
@@ -320,7 +366,8 @@ public class SsmJsonHandler {
     }
 
     private Response handleModifyDocumentPermission(JsonNode request, String region) {
-        String name = request.path("Name").asText();
+        String name = requireDocumentName(request);
+        requireSharePermissionType(request);
         List<String> accountIdsToAdd = new ArrayList<>();
         request.path("AccountIdsToAdd").forEach(n -> accountIdsToAdd.add(n.asText()));
         List<String> accountIdsToRemove = new ArrayList<>();
@@ -331,7 +378,8 @@ public class SsmJsonHandler {
     }
 
     private Response handleDescribeDocumentPermission(JsonNode request, String region) {
-        String name = request.path("Name").asText();
+        String name = requireDocumentName(request);
+        requireSharePermissionType(request);
         List<String> accountIds = ssmService.describeDocumentPermission(name, region);
 
         ObjectNode response = objectMapper.createObjectNode();
@@ -627,7 +675,7 @@ public class SsmJsonHandler {
     }
 
     private Response handleDescribeDocument(JsonNode request, String region) {
-        String name = request.path("Name").asText();
+        String name = requireDocumentName(request);
         SsmDocument document = ssmService.getDocument(name, region);
 
         ObjectNode response = objectMapper.createObjectNode();
@@ -645,7 +693,7 @@ public class SsmJsonHandler {
     }
 
     private Response handleDeleteDocument(JsonNode request, String region) {
-        String name = request.path("Name").asText();
+        String name = requireDocumentName(request);
         ssmService.deleteDocument(name, region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
