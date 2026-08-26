@@ -93,6 +93,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     /** CustomSuffix as AWS constrains it: 1-64 characters of {@code [\w+=,.@-]}. */
     private static final Pattern CUSTOM_SUFFIX_PATTERN = Pattern.compile("[\\w+=,.@-]{1,64}");
     private static final int ROLE_NAME_MAX_LENGTH = 64;
+    /** {@code tagListType} / {@code tagKeyListType} are both {@code max: 50}. */
+    private static final int MAX_TAGS_PER_INSTANCE_PROFILE = 50;
     private static final String ROOT_FEATURES_KEY = "org-root-features";
     public static final String FEATURE_ROOT_CREDENTIALS = "RootCredentialsManagement";
     public static final String FEATURE_ROOT_SESSIONS = "RootSessions";
@@ -2260,11 +2262,26 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
 
     public void tagInstanceProfile(String instanceProfileName, Map<String, String> newTags) {
         InstanceProfile profile = getInstanceProfile(instanceProfileName);
-        profile.getTags().putAll(newTags);
+        if (newTags != null && newTags.size() > MAX_TAGS_PER_INSTANCE_PROFILE) {
+            throw new AwsException("LimitExceeded",
+                    "Cannot exceed quota for TagsPerInstanceProfile: " + MAX_TAGS_PER_INSTANCE_PROFILE, 409);
+        }
+        Map<String, String> merged = new LinkedHashMap<>(profile.getTags());
+        merged.putAll(newTags == null ? Map.of() : newTags);
+        if (merged.size() > MAX_TAGS_PER_INSTANCE_PROFILE) {
+            throw new AwsException("LimitExceeded",
+                    "Cannot exceed quota for TagsPerInstanceProfile: " + MAX_TAGS_PER_INSTANCE_PROFILE, 409);
+        }
+        profile.getTags().putAll(newTags == null ? Map.of() : newTags);
         instanceProfiles.put(instanceProfileName, profile);
     }
 
     public void untagInstanceProfile(String instanceProfileName, List<String> tagKeys) {
+        if (tagKeys != null && tagKeys.size() > MAX_TAGS_PER_INSTANCE_PROFILE) {
+            throw new AwsException("ValidationError",
+                    "Value at 'tagKeys' failed to satisfy constraint: Member must have length "
+                            + "less than or equal to " + MAX_TAGS_PER_INSTANCE_PROFILE, 400);
+        }
         InstanceProfile profile = getInstanceProfile(instanceProfileName);
         tagKeys.forEach(profile.getTags()::remove);
         instanceProfiles.put(instanceProfileName, profile);

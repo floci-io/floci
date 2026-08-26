@@ -64,6 +64,59 @@ class InstanceProfileTagsIntegrationTest {
         .then().statusCode(200);
     }
 
+    /**
+     * {@code tagListType} is {@code max: 50}, and AWS caps an instance profile at 50 tags.
+     * Without the check the extra tags land in the profile's stored tag map and
+     * GetInstanceProfile reports a resource AWS could never have produced.
+     */
+    @Test
+    void tagInstanceProfileBeyondFiftyTagsReturnsLimitExceeded() {
+        String profile = "tag-limit-" + UUID.randomUUID().toString().substring(0, 8);
+        createProfile(profile);
+
+        var request = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "TagInstanceProfile")
+            .formParam("InstanceProfileName", profile)
+            .header("Authorization", auth(ACCOUNT, "iam"));
+        for (int i = 1; i <= 51; i++) {
+            request.formParam("Tags.member." + i + ".Key", "key" + i)
+                   .formParam("Tags.member." + i + ".Value", "value" + i);
+        }
+        request.when().post("/")
+            .then().statusCode(409)
+            .body(containsString("LimitExceeded"));
+
+        // Nothing was stored: the profile still reports no tags.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "GetInstanceProfile")
+            .formParam("InstanceProfileName", profile)
+            .header("Authorization", auth(ACCOUNT, "iam"))
+        .when().post("/")
+        .then().statusCode(200)
+            .body(org.hamcrest.Matchers.not(containsString("key1")));
+    }
+
+    /** {@code tagKeyListType} is {@code max: 50} on the request itself. */
+    @Test
+    void untagInstanceProfileBeyondFiftyKeysReturnsValidationError() {
+        String profile = "untag-limit-" + UUID.randomUUID().toString().substring(0, 8);
+        createProfile(profile);
+
+        var request = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UntagInstanceProfile")
+            .formParam("InstanceProfileName", profile)
+            .header("Authorization", auth(ACCOUNT, "iam"));
+        for (int i = 1; i <= 51; i++) {
+            request.formParam("TagKeys.member." + i, "key" + i);
+        }
+        request.when().post("/")
+            .then().statusCode(400)
+            .body(containsString("ValidationError"));
+    }
+
     @Test
     void tagNonexistentProfileReturnsNoSuchEntity() {
         String profile = "no-such-" + UUID.randomUUID().toString().substring(0, 8);
