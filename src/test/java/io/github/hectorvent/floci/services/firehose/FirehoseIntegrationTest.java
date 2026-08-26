@@ -271,6 +271,56 @@ class FirehoseIntegrationTest {
     }
 
     @Test
+    @Order(9)
+    void startDeliveryStreamEncryptionWithMalformedKeyArnReturnsInvalidArgument() {
+        String encryptionStream = "encryption-badarn-" + System.currentTimeMillis();
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "Firehose_20150804.CreateDeliveryStream")
+            .body("{ \"DeliveryStreamName\": \"" + encryptionStream + "\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // botocore pins AWSKMSKeyARNForSSE to
+        // arn:.*:kms:<region>:<12-digit account>:key/<id> — a bare key id is not a KeyARN,
+        // and storing it would make DescribeDeliveryStream report a key that cannot exist.
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "Firehose_20150804.StartDeliveryStreamEncryption")
+            .body("{ \"DeliveryStreamName\": \"" + encryptionStream
+                    + "\", \"DeliveryStreamEncryptionConfigurationInput\": "
+                    + "{ \"KeyType\": \"CUSTOMER_MANAGED_CMK\", \"KeyARN\": \"not-an-arn\" } }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidArgumentException"));
+
+        // The rejected call must not have enabled encryption on the stream.
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "Firehose_20150804.DescribeDeliveryStream")
+            .body("{ \"DeliveryStreamName\": \"" + encryptionStream + "\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DeliveryStreamDescription.DeliveryStreamEncryptionConfiguration.Status",
+                    equalTo("DISABLED"));
+
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "Firehose_20150804.DeleteDeliveryStream")
+            .body("{ \"DeliveryStreamName\": \"" + encryptionStream + "\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
     @Order(16)
     void describeDeliveryStreamReturnsKinesisSourceConfiguration() {
         given()

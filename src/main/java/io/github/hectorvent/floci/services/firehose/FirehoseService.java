@@ -36,6 +36,14 @@ public class FirehoseService {
     private static final String DEFAULT_BUCKET = "floci-firehose-results";
     private static final int DEFAULT_BUFFERING_INTERVAL_SECONDS = 300;
     private static final int DEFAULT_BUFFERING_SIZE_MBS = 5;
+    /**
+     * botocore's {@code AWSKMSKeyARNForSSE} shape: a KMS <em>key</em> ARN, not an alias and
+     * not a bare key id. Accepting anything else would let DescribeDeliveryStream report an
+     * encryption key that could never exist, where real AWS rejects the call outright.
+     */
+    private static final java.util.regex.Pattern SSE_KEY_ARN_PATTERN = java.util.regex.Pattern.compile(
+            "arn:.*:kms:[a-zA-Z0-9\\-]+:\\d{12}:key/[a-zA-Z_0-9+=,.@\\-_/]+");
+    private static final int SSE_KEY_ARN_MAX_LENGTH = 512;
 
     private final StorageBackend<String, DeliveryStreamDescription> streamStore;
     private final Map<String, List<byte[]>> buffers = new ConcurrentHashMap<>();
@@ -203,6 +211,11 @@ public class FirehoseService {
         if (effectiveKeyType.equals("CUSTOMER_MANAGED_CMK") && (keyArn == null || keyArn.isBlank())) {
             throw new AwsException("InvalidArgumentException",
                     "KeyARN is required for CUSTOMER_MANAGED_CMK.", 400);
+        }
+        if (keyArn != null && !keyArn.isBlank()
+                && (keyArn.length() > SSE_KEY_ARN_MAX_LENGTH || !SSE_KEY_ARN_PATTERN.matcher(keyArn).matches())) {
+            throw new AwsException("InvalidArgumentException",
+                    "KeyARN is not a valid KMS key ARN: " + keyArn, 400);
         }
         stream.setDeliveryStreamEncryptionConfiguration(
                 new DeliveryStreamDescription.DeliveryStreamEncryptionConfiguration(
