@@ -123,6 +123,51 @@ class RamIntegrationTest {
             .body("__type", equalTo("SerializationException"));
     }
 
+    /**
+     * The controller substitutes "SELF" only when resourceOwner is absent or null; a present-but-
+     * unmodelled value — including a non-string that {@code asText} coerces — has to reach the
+     * service check and come back as InvalidParameterException on the wire, which is the path LZA
+     * actually takes.
+     */
+    @Test
+    void unmodelledResourceOwnerIsRejectedOnTheWire() {
+        for (String path : new String[] {"/getresourceshares", "/listprincipals", "/listresources"}) {
+            given()
+                .contentType("application/json")
+                .header("Authorization", AUTH_HEADER)
+                .body("""
+                    { "resourceOwner": "self" }
+                    """)
+            .when()
+                .post(path)
+            .then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidParameterException"));
+        }
+
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                { "resourceOwner": 5 }
+                """)
+        .when()
+            .post("/getresourceshares")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameterException"));
+
+        // Absent resourceOwner keeps the existing SELF default — unchanged by this fix.
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("{}")
+        .when()
+            .post("/getresourceshares")
+        .then()
+            .statusCode(200);
+    }
+
     @Test
     void createThenGetResourceSharesAndListResources() {
         String tgwArn = "arn:aws:ec2:us-east-1:000000000000:transit-gateway/tgw-0abc";
