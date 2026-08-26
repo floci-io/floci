@@ -217,6 +217,25 @@ class NetworkFirewallIntegrationTest {
     }
 
     @Test
+    void associateSubnets_partiallyInvalidRequest_leavesStoredMappingsUntouched() {
+        // A valid mapping followed by one missing its required SubnetId must reject
+        // the WHOLE request without mutating stored state: validate-then-commit,
+        // never commit-then-validate.
+        String name = "PartialInvalidAssociateFirewall";
+        createFirewall(name, "", "subnet-11111111111111111");
+
+        call("AssociateSubnets", "{\"FirewallArn\":\"" + firewallArn(name) + "\","
+                + "\"SubnetMappings\":[{\"SubnetId\":\"subnet-22222222222222222\"},"
+                + "{\"IPAddressType\":\"IPV4\"}]}")
+            .statusCode(400);
+
+        call("DescribeFirewall", "{\"FirewallArn\":\"" + firewallArn(name) + "\"}")
+            .statusCode(200)
+            .body("Firewall.SubnetMappings.SubnetId", not(hasItem("subnet-22222222222222222")))
+            .body("Firewall.SubnetMappings", hasSize(1));
+    }
+
+    @Test
     void associateSubnets_withSubnetChangeProtection_isRejected() {
         String name = "SubnetProtectedAssociateFirewall";
         createFirewall(name, "\"SubnetChangeProtection\":true,", "subnet-66666666666666666");

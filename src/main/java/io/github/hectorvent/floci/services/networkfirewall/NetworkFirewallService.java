@@ -218,9 +218,14 @@ public class NetworkFirewallService {
         return firewall;
     }
 
+    /**
+     * Returns a DETACHED copy of the firewall's mapping array so per-element
+     * validation can reject mid-loop without mutating stored state; the copy is
+     * attached and persisted only by {@link #storeAndRespond}.
+     */
     private ArrayNode mappingsOf(ObjectNode firewall, String field) {
         JsonNode existing = firewall.path(field);
-        return existing.isArray() ? (ArrayNode) existing : firewall.putArray(field);
+        return existing.isArray() ? ((ArrayNode) existing).deepCopy() : objectMapper.createArrayNode();
     }
 
     private void addMapping(ArrayNode mappings, String memberField, String member, JsonNode mapping) {
@@ -242,6 +247,7 @@ public class NetworkFirewallService {
 
     private ObjectNode storeAndRespond(ObjectNode firewall, String field, ArrayNode mappings) {
         String firewallArn = firewall.path("FirewallArn").asText();
+        firewall.set(field, mappings);
         firewalls.put(firewallArn, firewall);
         ObjectNode response = objectMapper.createObjectNode();
         response.put("FirewallArn", firewallArn);
