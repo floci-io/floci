@@ -59,6 +59,12 @@ aws --endpoint-url http://localhost:4566 ram delete-resource-share \
 - Mutations are owner-only: a caller that is not the share's owning account gets
   `UnknownResourceException`, the same error an unknown ARN gets, since AWS resolves a share
   ARN within the caller's own account. Visibility above is unaffected.
+- `GetResourceShares` applies the `name`, `resourceShareArns` and `resourceShareStatus` filters;
+  `tagFilters`, `permissionArn`, `permissionVersion` and pagination (`nextToken`/`maxResults`)
+  are accepted but ignored — every matching share is returned in one page.
+- Operations outside the table above are not routed. RAM's paths are matched literally, so an
+  unimplemented operation falls through to S3's `/{bucket}` route and comes back as an XML error
+  a restJson1 client cannot parse, rather than a modeled `UnknownOperationException`.
 - `AssociateResourceShare`/`DisassociateResourceShare` responses synthesize one
   `resourceShareAssociation` row per requested ARN/principal rather than tracking real
   per-association status transitions (e.g. no `ASSOCIATING`/`DISASSOCIATING` intermediate
