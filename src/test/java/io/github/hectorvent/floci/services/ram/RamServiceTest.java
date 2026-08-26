@@ -202,6 +202,26 @@ class RamServiceTest {
         assertEquals(0, service.getResourceShares(ACCEPTER, "SELF").size());
     }
 
+    @Test
+    void mutatingADeletedShareRaisesUnknownResource() {
+        // DELETED is terminal: the share stays readable for the retention window,
+        // but every mutation resolves it the same as an ARN that never existed.
+        ResourceShare share = service.createResourceShare(
+                "gone", List.of(OU_ARN), List.of(TGW_ARN), false, "us-east-1", OWNER);
+        String arn = share.getResourceShareArn();
+        service.deleteResourceShare(arn, OWNER);
+
+        assertUnknownResource(() -> service.updateResourceShare(arn, "renamed", null, OWNER));
+        assertUnknownResource(() -> service.associateResourceShare(arn, List.of(TGW_ARN), List.of(), OWNER));
+        assertUnknownResource(() -> service.disassociateResourceShare(arn, List.of(TGW_ARN), List.of(), OWNER));
+        assertUnknownResource(() -> service.tagResource(arn, Map.of("k", "v"), OWNER));
+        assertUnknownResource(() -> service.untagResource(arn, List.of("k"), OWNER));
+        assertUnknownResource(() -> service.deleteResourceShare(arn, OWNER));
+
+        // Still readable with DELETED status — mutation rejection must not hide it from reads.
+        assertEquals("DELETED", service.getResourceShares(OWNER, "SELF").get(0).getStatus());
+    }
+
     private static void assertInvalidParameter(Executable read) {
         AwsException error = assertThrows(AwsException.class, read);
         assertEquals("InvalidParameterException", error.getErrorCode());

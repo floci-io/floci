@@ -220,6 +220,9 @@ public class RamService {
         return allShares().stream()
                 .filter(share -> share.getResourceShareArn().equals(resourceShareArn))
                 .filter(share -> share.getOwningAccountId().equals(callerAccountId))
+                // DELETED is terminal: the share stays readable via GetResourceShares for the
+                // retention window, but mutations resolve it like an ARN that never existed.
+                .filter(share -> !"DELETED".equals(share.getStatus()))
                 .findFirst();
     }
 
