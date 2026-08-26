@@ -163,6 +163,19 @@ class KmsServiceTest {
     }
 
     @Test
+    void createGrantUnknownOperationThrowsValidation() {
+        KmsKey key = kmsService.createKey("grant key", REGION);
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                kmsService.createGrant(key.getKeyId(), "arn:aws:iam::000000000000:user/grantee",
+                        List.of("Encrypt", "NotARealOperation"), REGION));
+
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertTrue(ex.getMessage().contains("NotARealOperation"),
+                "message should name the rejected operation, was: " + ex.getMessage());
+    }
+
+    @Test
     void createGrantUnknownKeyThrowsNotFound() {
         AwsException ex = assertThrows(AwsException.class, () ->
                 kmsService.createGrant("non-existent-id", "arn:aws:iam::000000000000:user/grantee", List.of("Encrypt"), REGION));

@@ -272,6 +272,13 @@ public class KmsService implements ResourceProvider {
         return keyStore.scan(k -> k.startsWith(prefix));
     }
 
+    /** GrantOperation enum from the KMS model (kms/2014-11-01/service-2.json). */
+    private static final Set<String> GRANT_OPERATIONS = new LinkedHashSet<>(List.of(
+            "Decrypt", "Encrypt", "GenerateDataKey", "GenerateDataKeyWithoutPlaintext",
+            "ReEncryptFrom", "ReEncryptTo", "Sign", "Verify", "GetPublicKey", "CreateGrant",
+            "RetireGrant", "DescribeKey", "GenerateDataKeyPair", "GenerateDataKeyPairWithoutPlaintext",
+            "GenerateMac", "VerifyMac", "DeriveSharedSecret"));
+
     public KmsGrant createGrant(String keyId, String granteePrincipal, List<String> operations, String region) {
         return createGrant(keyId, granteePrincipal, operations, null, null, null, region);
     }
@@ -292,6 +299,14 @@ public class KmsService implements ResourceProvider {
         }
         if (operations == null || operations.isEmpty()) {
             throw new AwsException("ValidationException", "Operations is required", 400);
+        }
+        for (String operation : operations) {
+            if (!GRANT_OPERATIONS.contains(operation)) {
+                throw new AwsException("ValidationException",
+                        "1 validation error detected: Value '" + operation + "' at 'operations' failed to satisfy "
+                                + "constraint: Member must satisfy enum value set: ["
+                                + String.join(", ", GRANT_OPERATIONS) + "]", 400);
+            }
         }
 
         KmsKey key = resolveKey(keyId, region);
