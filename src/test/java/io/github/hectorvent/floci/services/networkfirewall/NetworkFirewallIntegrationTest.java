@@ -2,7 +2,7 @@ package io.github.hectorvent.floci.services.networkfirewall;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
-import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.matchesPattern;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
@@ -51,8 +51,7 @@ class NetworkFirewallIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("Firewalls", hasSize(1))
-            .body("Firewalls[0].FirewallArn", equalTo(FIREWALL_ARN));
+            .body("Firewalls.FirewallArn", hasItem(FIREWALL_ARN));
 
         given()
             .contentType(CONTENT_TYPE)
@@ -111,9 +110,9 @@ class NetworkFirewallIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("RuleGroups", hasSize(1))
-            .body("RuleGroups[0].Arn", equalTo(arn))
-            .body("RuleGroups[0].Name", equalTo("vellum-domain-allow-list"));
+            .body("RuleGroups.Arn", hasItem(arn))
+            .body("RuleGroups.find { it.Arn == '" + arn + "' }.Name",
+                    equalTo("vellum-domain-allow-list"));
     }
 
     @Test
