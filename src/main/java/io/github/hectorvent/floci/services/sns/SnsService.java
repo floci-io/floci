@@ -5,6 +5,9 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.Resettable;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
@@ -51,12 +54,14 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
 
 @ApplicationScoped
-public class SnsService implements Resettable {
+public class SnsService implements Resettable, ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(SnsService.class);
     private static final Duration FIFO_DEDUP_WINDOW = Duration.ofMinutes(5);
     private static final int MAX_PUBLISH_SIZE = 262_144;
     private static final int PUSH_CAPTURE_LIMIT = 1000;
+    private static final String CONTROL_TOWER_AGGREGATE_SECURITY_TOPIC =
+            "aws-controltower-AggregateSecurityNotifications";
     private static final List<String> PENDING_CONFIRMATION_PROTOCOLS =
             List.of("http", "https", "email", "email-json", "sms");
     /** Mobile-push platforms Floci mocks. iOS and Android only — anything else is rejected. */
@@ -255,7 +260,7 @@ public class SnsService implements Resettable {
 
     public Subscription subscribe(String topicArn, String protocol, String endpoint, String region, Map<String, String> attributes) {
         String topicKey = topicKey(region, topicArn);
-        if (topicStore.get(topicKey).isEmpty()) {
+        if (topicStore.get(topicKey).isEmpty() && !ensureControlTowerManagedTopic(topicArn, region)) {
             throw new AwsException("NotFound", "Topic does not exist.", 404);
         }
         if (protocol == null || protocol.isBlank()) {
@@ -301,6 +306,16 @@ public class SnsService implements Resettable {
         }
 
         return subscription;
+    }
+
+    private boolean ensureControlTowerManagedTopic(String topicArn, String region) {
+        String expectedArn = regionResolver.buildArn(
+                "sns", region, CONTROL_TOWER_AGGREGATE_SECURITY_TOPIC);
+        if (!expectedArn.equals(topicArn)) {
+            return false;
+        }
+        createTopic(CONTROL_TOWER_AGGREGATE_SECURITY_TOPIC, Map.of(), Map.of(), region);
+        return true;
     }
 
     public String confirmSubscription(String topicArn, String token, String region) {
@@ -901,6 +916,29 @@ public class SnsService implements Resettable {
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "Resource does not exist.", 404));
         return new java.util.LinkedHashMap<>(topic.getTags());
+    }
+
+    @Override
+    public List<ExplorerResource> getResources() {
+        List<ExplorerResource> resources = new ArrayList<>();
+        for (Topic topic : topicStore.scan(k -> true)) {
+            String arn = topic.getTopicArn();
+            if (arn == null) {
+                continue;
+            }
+            AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+            resources.add(new ExplorerResource(
+                    arn, "sns:topic", "sns",
+                    parsed.region(), parsed.accountId(),
+                    topic.getCreatedAt() != null ? topic.getCreatedAt() : Instant.now(),
+                    topic.getTags() != null ? topic.getTags() : Map.of()));
+        }
+        return resources;
+    }
+
+    @Override
+    public Set<SupportedResourceType> getSupportedResourceTypes() {
+        return Set.of(new SupportedResourceType("sns:topic", "sns", true));
     }
 
     /**

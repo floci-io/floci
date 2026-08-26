@@ -8,7 +8,6 @@ import io.github.hectorvent.floci.testing.MutableClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.net.URI;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -24,6 +23,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -72,17 +72,17 @@ class SigninServiceTest {
         verify(iam).registerSessionForAccount(eq(ACCOUNT_A), eq(tokens.accessToken().accessKeyId()),
                 eq(tokens.accessToken().secretAccessKey()),
                 eq("arn:aws:iam::" + ACCOUNT_A + ":root"), any(), isNull());
-        assertThrows(SigninException.class, () -> exchangeCode(code, VERIFIER));
+        assertTokenValidation(() -> exchangeCode(code, VERIFIER));
     }
 
     @Test
     void requiresAwsSha256ChallengeMethod() throws Exception {
         SigninException error = assertThrows(SigninException.class,
-                () -> service.authorize(CLIENT_ID, challenge(VERIFIER), "S256", REDIRECT_URI,
+                () -> service.beginAuthorization(CLIENT_ID, challenge(VERIFIER), "S256", REDIRECT_URI,
                         "code", "openid", "state", null));
 
         assertEquals("invalid_request", error.error());
-        service.authorize(CLIENT_ID, challenge(VERIFIER), "SHA-256", REDIRECT_URI,
+        service.beginAuthorization(CLIENT_ID, challenge(VERIFIER), "SHA-256", REDIRECT_URI,
                 "code", "openid", "state", null);
     }
 
@@ -126,19 +126,19 @@ class SigninServiceTest {
     void validatesModeledTokenAndResourceBoundsBeforeConsumingState() throws Exception {
         String code = authorizeCode(VERIFIER);
 
-        assertInvalidRequest(() -> service.exchange(CLIENT_ID, "authorization_code", "x".repeat(513),
+        assertTokenValidation(() -> service.exchange(CLIENT_ID, "authorization_code", "x".repeat(513),
                 REDIRECT_URI, VERIFIER, null, null));
-        assertInvalidRequest(() -> service.exchange(CLIENT_ID, "authorization_code", code,
+        assertTokenValidation(() -> service.exchange(CLIENT_ID, "authorization_code", code,
                 "x".repeat(2049), VERIFIER, null, null));
-        assertInvalidRequest(() -> service.exchange(CLIENT_ID, "authorization_code", code,
+        assertTokenValidation(() -> service.exchange(CLIENT_ID, "authorization_code", code,
                 REDIRECT_URI, VERIFIER, null, ""));
-        assertInvalidRequest(() -> service.exchange(CLIENT_ID, "authorization_code", code,
+        assertTokenValidation(() -> service.exchange(CLIENT_ID, "authorization_code", code,
                 REDIRECT_URI, VERIFIER, null, "r".repeat(2049)));
-        assertInvalidRequest(() -> service.exchange(CLIENT_ID, "refresh_token", null,
+        assertTokenValidation(() -> service.exchange(CLIENT_ID, "refresh_token", null,
                 null, null, "r".repeat(2049), null));
-        assertInvalidRequest(() -> service.authorize(CLIENT_ID, challengeUnchecked(VERIFIER), "SHA-256",
+        assertInvalidRequest(() -> service.beginAuthorization(CLIENT_ID, challengeUnchecked(VERIFIER), "SHA-256",
                 REDIRECT_URI, "code", "openid", "state", ""));
-        assertInvalidRequest(() -> service.authorize(CLIENT_ID, challengeUnchecked(VERIFIER), "SHA-256",
+        assertInvalidRequest(() -> service.beginAuthorization(CLIENT_ID, challengeUnchecked(VERIFIER), "SHA-256",
                 REDIRECT_URI, "code", "openid", "state", "r".repeat(2049)));
 
         TokenResult result = service.exchange(CLIENT_ID, "authorization_code", code,
@@ -151,20 +151,77 @@ class SigninServiceTest {
         String code = authorizeCode(VERIFIER);
         clock.advance(Duration.ofMinutes(5));
 
-        SigninException error = assertThrows(SigninException.class,
-                () -> exchangeCode(code, VERIFIER));
+        assertAuthorizationCodeExpired(code);
+    }
 
-        assertEquals("invalid_grant", error.error());
+    @Test
+    void authorizationCodeExpiryRemainsModeledAfterUnrelatedCleanup() throws Exception {
+        String code = authorizeCode(VERIFIER);
+        clock.advance(Duration.ofMinutes(5));
+        authorizeCode(VERIFIER);
+
+        assertAuthorizationCodeExpired(code);
+    }
+
+    @Test
+    void authorizationCodeTombstoneCutoffIsCleanupIndependent() throws Exception {
+        String directAtCutoff = authorizeCode(VERIFIER);
+        String cleanedAtCutoff = authorizeCode(VERIFIER);
+        clock.advance(Duration.ofMinutes(20));
+
+        assertTokenValidation(() -> exchangeCode(directAtCutoff, VERIFIER));
+        authorizeCode(VERIFIER);
+        assertTokenValidation(() -> exchangeCode(cleanedAtCutoff, VERIFIER));
+
+        String directAfterCutoff = authorizeCode(VERIFIER);
+        String cleanedAfterCutoff = authorizeCode(VERIFIER);
+        clock.advance(Duration.ofMinutes(20).plusSeconds(1));
+
+        assertTokenValidation(() -> exchangeCode(directAfterCutoff, VERIFIER));
+        authorizeCode(VERIFIER);
+        assertTokenValidation(() -> exchangeCode(cleanedAfterCutoff, VERIFIER));
+    }
+
+    @Test
+    void authorizationCodeLifetimeStartsAtConsentCompletion() throws Exception {
+        String requestId = service.beginAuthorization(CLIENT_ID, challenge(VERIFIER), "SHA-256", REDIRECT_URI,
+                "code", "openid", "state", null);
+        clock.advance(Duration.ofMinutes(4));
+        String code = query(service.completeAuthorization(requestId)).get("code");
+        clock.advance(Duration.ofMinutes(4).plusSeconds(59));
+
+        TokenResult result = exchangeCode(code, VERIFIER);
+
+        assertEquals(900, result.expiresIn());
+    }
+
+    @Test
+    void pendingAuthorizationRequestsAreSingleUse() throws Exception {
+        String approvedRequest = service.beginAuthorization(CLIENT_ID, challenge(VERIFIER), "SHA-256", REDIRECT_URI,
+                "code", "openid", "approved", null);
+        service.completeAuthorization(approvedRequest);
+        assertInvalidRequest(() -> service.completeAuthorization(approvedRequest));
+
+        String deniedRequest = service.beginAuthorization(CLIENT_ID, challenge(VERIFIER), "SHA-256", REDIRECT_URI,
+                "code", "openid", "denied", null);
+        service.denyAuthorization(deniedRequest);
+        assertInvalidRequest(() -> service.denyAuthorization(deniedRequest));
+    }
+
+    @Test
+    void pendingAuthorizationRequestsExpireAtFiveMinuteBoundary() throws Exception {
+        String requestId = service.beginAuthorization(CLIENT_ID, challenge(VERIFIER), "SHA-256", REDIRECT_URI,
+                "code", "openid", "state", null);
+        clock.advance(Duration.ofMinutes(5));
+
+        assertInvalidRequest(() -> service.completeAuthorization(requestId));
     }
 
     @Test
     void rejectsPkceMismatchWithoutRegisteringCredentials() throws Exception {
         String code = authorizeCode(VERIFIER);
 
-        SigninException error = assertThrows(SigninException.class,
-                () -> exchangeCode(code, VERIFIER + "wrong"));
-
-        assertEquals("invalid_grant", error.error());
+        assertTokenValidation(() -> exchangeCode(code, VERIFIER + "wrong"));
     }
 
     @Test
@@ -218,20 +275,71 @@ class SigninServiceTest {
     }
 
     @Test
-    void rotatedRefreshTokenKeepsOriginalAbsoluteExpiry() throws Exception {
+    void rotatedRefreshTokenFamilyKeepsOriginalAbsoluteExpiry() throws Exception {
         TokenResult initial = issueInitialTokens();
         clock.advance(Duration.ofHours(11).plusMinutes(59));
 
         TokenResult rotated = refresh(initial.refreshToken());
-        clock.advance(Duration.ofMinutes(2));
+        clock.advance(Duration.ofMinutes(1));
 
-        assertInvalidRefresh(rotated.refreshToken());
+        assertRefreshExpired(initial.refreshToken());
+        assertRefreshExpired(rotated.refreshToken());
+    }
+
+    @Test
+    void refreshExpiryRemainsModeledAfterUnrelatedCleanup() throws Exception {
+        TokenResult initial = issueInitialTokens();
+        clock.advance(Duration.ofHours(12));
+        exchangeCode(authorizeCode(VERIFIER), VERIFIER);
+
+        assertRefreshExpired(initial.refreshToken());
+    }
+
+    @Test
+    void refreshTombstoneCutoffIsCleanupIndependent() throws Exception {
+        TokenResult directAtCutoff = issueInitialTokens();
+        TokenResult cleanedAtCutoff = issueInitialTokens();
+        clock.advance(Duration.ofHours(12).plusMinutes(15));
+
+        assertTokenValidation(() -> refresh(directAtCutoff.refreshToken()));
+        assertTokenValidation(() -> refresh(cleanedAtCutoff.refreshToken()));
+
+        TokenResult directAfterCutoff = issueInitialTokens();
+        TokenResult cleanedAfterCutoff = issueInitialTokens();
+        clock.advance(Duration.ofHours(12).plusMinutes(15).plusSeconds(1));
+
+        assertTokenValidation(() -> refresh(directAfterCutoff.refreshToken()));
+        assertTokenValidation(() -> refresh(cleanedAfterCutoff.refreshToken()));
+    }
+
+    @Test
+    void unsupportedGrantUsesOauthErrorMode() {
+        SigninTokenException error = assertThrows(SigninTokenException.class,
+                () -> service.exchange(CLIENT_ID, "unsupported", null,
+                        null, null, null, null));
+
+        assertEquals("unsupported_grant_type", error.responseError());
+        assertEquals(SigninTokenException.UNSUPPORTED_GRANT_MESSAGE, error.getMessage());
+        assertEquals(400, error.getHttpStatus());
+        assertFalse(error.modeled());
+    }
+
+    @Test
+    void refreshGrantRetentionNeverOutlivesAbsoluteExpiry() {
+        var expiresAt = clock.instant().plus(Duration.ofHours(12));
+        var earlierReplayExpiry = expiresAt.minus(Duration.ofMinutes(1));
+        var replayExpiresAt = expiresAt.plus(Duration.ofMinutes(14));
+
+        assertEquals(expiresAt, SigninService.refreshGrantRetentionExpiry(expiresAt, null));
+        assertEquals(earlierReplayExpiry,
+                SigninService.refreshGrantRetentionExpiry(expiresAt, earlierReplayExpiry));
+        assertEquals(expiresAt, SigninService.refreshGrantRetentionExpiry(expiresAt, replayExpiresAt));
     }
 
     @Test
     void expiryCleanupWaitsForInFlightRotation() throws Exception {
         TokenResult initial = issueInitialTokens();
-        clock.advance(Duration.ofHours(12).minusMillis(2));
+        clock.advance(Duration.ofHours(12).minusSeconds(1));
         CountDownLatch issuanceStarted = new CountDownLatch(1);
         CountDownLatch allowIssuance = new CountDownLatch(1);
         doAnswer(ignored -> {
@@ -280,13 +388,13 @@ class SigninServiceTest {
     }
 
     private String authorizeCode(String verifier) throws Exception {
-        String redirect = service.authorize(CLIENT_ID, challenge(verifier), "SHA-256", REDIRECT_URI,
+        String requestId = service.beginAuthorization(CLIENT_ID, challenge(verifier), "SHA-256", REDIRECT_URI,
                 "code", "openid", "state", null);
-        return query(URI.create(redirect).getRawQuery()).get("code");
+        return query(service.completeAuthorization(requestId)).get("code");
     }
 
     private String authorize(String codeChallenge, String clientId, String redirectUri, String state) {
-        return service.authorize(clientId, codeChallenge, "SHA-256", redirectUri,
+        return service.beginAuthorization(clientId, codeChallenge, "SHA-256", redirectUri,
                 "code", "openid", state, null);
     }
 
@@ -308,20 +416,39 @@ class SigninServiceTest {
 
     private void assertInvalidVerifier(String verifier) throws Exception {
         String code = authorizeCode(verifier);
-        SigninException error = assertThrows(SigninException.class,
-                () -> exchangeCode(code, verifier));
-        assertEquals("invalid_request", error.error());
+        assertTokenValidation(() -> exchangeCode(code, verifier));
     }
 
     private void assertInvalidRefresh(String refreshToken) {
-        SigninException error = assertThrows(SigninException.class,
+        assertTokenValidation(() -> refresh(refreshToken));
+    }
+
+    private void assertRefreshExpired(String refreshToken) {
+        SigninTokenException error = assertThrows(SigninTokenException.class,
                 () -> refresh(refreshToken));
-        assertEquals("invalid_grant", error.error());
+        assertEquals("AccessDeniedException", error.getErrorCode());
+        assertEquals("TOKEN_EXPIRED", error.responseError());
+        assertEquals(401, error.getHttpStatus());
+    }
+
+    private void assertAuthorizationCodeExpired(String code) {
+        SigninTokenException error = assertThrows(SigninTokenException.class,
+                () -> exchangeCode(code, VERIFIER));
+        assertEquals("AccessDeniedException", error.getErrorCode());
+        assertEquals("AUTHCODE_EXPIRED", error.responseError());
+        assertEquals(401, error.getHttpStatus());
     }
 
     private void assertInvalidRequest(org.junit.jupiter.api.function.Executable request) {
         SigninException error = assertThrows(SigninException.class, request);
         assertEquals("invalid_request", error.error());
+    }
+
+    private void assertTokenValidation(org.junit.jupiter.api.function.Executable request) {
+        SigninTokenException error = assertThrows(SigninTokenException.class, request);
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("INVALID_REQUEST", error.responseError());
+        assertEquals(400, error.getHttpStatus());
     }
 
     private static String challengeUnchecked(String verifier) {
@@ -338,7 +465,8 @@ class SigninServiceTest {
         return Base64.getUrlEncoder().withoutPadding().encodeToString(digest);
     }
 
-    private static Map<String, String> query(String query) {
+    private static Map<String, String> query(String redirect) {
+        String query = redirect.substring(redirect.indexOf('?') + 1);
         return java.util.Arrays.stream(query.split("&"))
                 .map(pair -> pair.split("=", 2))
                 .collect(java.util.stream.Collectors.toMap(

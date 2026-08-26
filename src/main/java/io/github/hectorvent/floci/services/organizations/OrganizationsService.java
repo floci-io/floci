@@ -397,6 +397,17 @@ public class OrganizationsService {
         return List.of(new ParentRef(parentId, parentType(organization, parentId)));
     }
 
+    /**
+     * The organization path of a root, OU or account:
+     * {@code o-<org>/r-<root>[/ou-<ou>]*[/<accountId>]/}, trailing slash included. This is the
+     * value the Organizations API reports as {@code OrganizationalUnit.Path} and as the single
+     * entry of {@code Account.Paths}, and what {@code Fn::GetAtt} returns for the same keys.
+     */
+    public String organizationPath(String callerAccountId, String resourceId) {
+        Organization organization = requireOrganizationForCaller(callerAccountId);
+        return organization.getId() + "/" + String.join("/", ancestryOf(organization, resourceId)) + "/";
+    }
+
     public List<ChildRef> listChildren(String callerAccountId, String parentId, String childType) {
         Organization organization = requireOrganizationForCaller(callerAccountId);
         requireParent(organization, parentId);
@@ -768,6 +779,56 @@ public class OrganizationsService {
         return new EffectivePolicy(merged.toString(), policyType, effectiveTarget, Instant.now());
     }
 
+    // ──────────────────────────── Control Tower guardrails ────────────────────────────
+
+    static final String CONTROL_TOWER_GUARDRAIL_ID = "p-flocictguardrail";
+    static final String CONTROL_TOWER_GUARDRAIL_NAME = "aws-guardrails-FlociControlTowerBaseline";
+
+    /**
+     * Reconciles the Organizations side effect of Control Tower OU registration. Real Control
+     * Tower attaches customer-managed SCPs named {@code aws-guardrails-*}; LZA 1.14 uses that
+     * observable contract to validate top-level OU governance. The Security OU is governed by
+     * the landing zone itself and therefore may not appear in the enabled-baseline targets.
+     */
+    public void ensureControlTowerGuardrails(String callerAccountId, Set<String> registeredOuIds) {
+        Organization organization;
+        try {
+            organization = requireManagementAccount(callerAccountId);
+        } catch (AwsException e) {
+            return;
+        }
+        Set<String> targetIds = new java.util.LinkedHashSet<>(registeredOuIds);
+        organizationalUnitsIn(organization).stream()
+                .filter(ou -> "Security".equals(ou.getName()))
+                .map(OrganizationalUnit::getId)
+                .forEach(targetIds::add);
+        if (targetIds.isEmpty()) {
+            return;
+        }
+        targetIds.forEach(targetId -> requireOrganizationalUnit(organization, targetId));
+
+        OrganizationPolicy guardrail = policiesIn(organization).stream()
+                .filter(policy -> SERVICE_CONTROL_POLICY.equals(policy.getType()))
+                .filter(policy -> CONTROL_TOWER_GUARDRAIL_NAME.equals(policy.getName()))
+                .findFirst()
+                .orElseGet(() -> {
+                    OrganizationPolicy policy = new OrganizationPolicy();
+                    policy.setId(CONTROL_TOWER_GUARDRAIL_ID);
+                    policy.setName(CONTROL_TOWER_GUARDRAIL_NAME);
+                    policy.setDescription("Control Tower governance marker for registered OUs");
+                    policy.setType(SERVICE_CONTROL_POLICY);
+                    policy.setContent(FULL_AWS_ACCESS_CONTENT);
+                    policy.setAwsManaged(false);
+                    policy.setOrganizationId(organization.getId());
+                    policy.setArn(policyArn(organization, CONTROL_TOWER_GUARDRAIL_ID, SERVICE_CONTROL_POLICY));
+                    return policy;
+                });
+
+        if (guardrail.getTargets().addAll(targetIds) || guardrail.getTargets().isEmpty()) {
+            policies.putForAccount(organization.getMasterAccountId(), guardrail.getId(), guardrail);
+        }
+    }
+
     // ──────────────────────────── Tags ────────────────────────────
 
     public Map<String, String> listTagsForResource(String callerAccountId, String resourceId) {
@@ -898,6 +959,12 @@ public class OrganizationsService {
         }
         organization.setResourcePolicyContent(content);
         if (tags != null) {
+            // Put replaces rather than merges: a caller that supplies Tags is stating the full set,
+            // so a key it no longer lists is dropped. The resource policy is not addressable by
+            // TagResource/UntagResource the way accounts, OUs, roots and policies are, so this call
+            // is the only way CloudFormation can converge Tags on an update. Omitting Tags
+            // entirely (null) leaves the existing ones untouched.
+            organization.getResourcePolicyTags().clear();
             organization.getResourcePolicyTags().putAll(tags);
         }
         organizations.putForAccount(organization.getMasterAccountId(), organization.getId(), organization);
@@ -1109,6 +1176,50 @@ public class OrganizationsService {
             throw accessDenied("This operation can be performed only by the management account of the organization.");
         }
         return organization;
+    }
+
+    /**
+     * The management account that owns the given organization, root, OU, account, policy or
+     * resource-policy id, or empty when nothing matches.
+     *
+     * <p>CloudFormation's delete path carries no caller identity — {@code CfnResourceProvisioner}
+     * hands over a physical id and a region only — so the owner has to be recovered from the
+     * resource itself before a management-account-scoped operation can run against it.
+     */
+    public Optional<String> findManagementAccountForResource(String resourceId) {
+        if (resourceId == null || resourceId.isEmpty()) {
+            return Optional.empty();
+        }
+        for (Organization organization : organizations.scanAllAccounts()) {
+            boolean owns = resourceId.equals(organization.getId())
+                    || resourceId.equals(organization.getRoot().getId())
+                    || resourceId.equals(organization.getResourcePolicyId());
+            if (owns) {
+                return Optional.of(organization.getMasterAccountId());
+            }
+        }
+        if (ACCOUNT_ID_PATTERN.matcher(resourceId).matches()) {
+            return accounts.scanAllAccounts().stream()
+                    .filter(account -> resourceId.equals(account.getId()))
+                    .findFirst()
+                    .flatMap(account -> organizationById(account.getOrganizationId()))
+                    .map(Organization::getMasterAccountId);
+        }
+        if (OU_ID_PATTERN.matcher(resourceId).matches()) {
+            return organizationalUnits.scanAllAccounts().stream()
+                    .filter(unit -> resourceId.equals(unit.getId()))
+                    .findFirst()
+                    .flatMap(unit -> organizationById(unit.getOrganizationId()))
+                    .map(Organization::getMasterAccountId);
+        }
+        if (POLICY_ID_PATTERN.matcher(resourceId).matches()) {
+            return policies.scanAllAccounts().stream()
+                    .filter(policy -> resourceId.equals(policy.getId()))
+                    .findFirst()
+                    .flatMap(policy -> organizationById(policy.getOrganizationId()))
+                    .map(Organization::getMasterAccountId);
+        }
+        return Optional.empty();
     }
 
     private Optional<Organization> findOrganizationForAccount(String accountId) {

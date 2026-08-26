@@ -77,6 +77,7 @@ public class SesContactService {
     public ContactList createContactList(String name, String description, List<Topic> topics,
                                          List<Tag> tags, String region) {
         validateContactListInput(name, description, topics);
+        SesTags.validate(tags);
         ContactList list = new ContactList(name);
         list.setDescription(description);
         list.setTopics(topics);

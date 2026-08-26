@@ -233,6 +233,9 @@ floci:
     ec2:
       enabled: true
 
+    efs:
+      enabled: true
+
     ecs:
       enabled: true
       mock: false                             # true = tasks go to RUNNING without Docker (useful for CI)

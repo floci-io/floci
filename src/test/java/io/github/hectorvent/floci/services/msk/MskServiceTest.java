@@ -183,9 +183,14 @@ class MskServiceTest {
     }
 
     @Test
-    void describeConfigurationNotFoundThrows() {
-        assertThrows(AwsException.class, () ->
+    void describeConfigurationUnknownArnThrowsBadRequest() {
+        // Real MSK uses BadRequestException with this message for unknown configuration ARNs;
+        // terraform-provider-aws substring-matches it to detect a deleted configuration.
+        AwsException ex = assertThrows(AwsException.class, () ->
                 mskService.describeConfiguration("arn:aws:kafka:us-east-1:000000000000:configuration/missing/id"));
+        assertEquals("BadRequestException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertTrue(ex.getMessage().contains("Configuration ARN does not exist"));
     }
 
     @Test
@@ -238,6 +243,18 @@ class MskServiceTest {
     }
 
     @Test
+    void describeConfigurationAfterDeleteThrowsBadRequest() {
+        MskConfiguration configuration = mskService.createConfiguration(
+                "test-config", "desc", List.of("3.6.0"), "props");
+        mskService.deleteConfiguration(configuration.getArn());
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                mskService.describeConfiguration(configuration.getArn()));
+        assertEquals("BadRequestException", ex.getErrorCode());
+        assertTrue(ex.getMessage().contains("Configuration ARN does not exist"));
+    }
+
+    @Test
     void updateConfiguration() {
         MskConfiguration created = mskService.createConfiguration(
                 "test-config", "v1 desc", List.of("3.6.0"), "auto.create.topics.enable=true");
@@ -284,10 +301,13 @@ class MskServiceTest {
     }
 
     @Test
-    void updateConfigurationNotFoundThrows() {
-        assertThrows(AwsException.class, () ->
+    void updateConfigurationUnknownArnThrowsBadRequest() {
+        AwsException ex = assertThrows(AwsException.class, () ->
                 mskService.updateConfiguration(
                         "arn:aws:kafka:us-east-1:000000000000:configuration/missing/id", "desc", "props"));
+        assertEquals("BadRequestException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertTrue(ex.getMessage().contains("Configuration ARN does not exist"));
     }
 
     @Test

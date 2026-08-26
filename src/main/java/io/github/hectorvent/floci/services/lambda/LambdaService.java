@@ -7,6 +7,9 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackedMap;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 import io.github.hectorvent.floci.services.lambda.model.EventSourceMapping;
 import io.github.hectorvent.floci.services.lambda.model.FunctionEventInvokeConfig;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
@@ -39,6 +42,7 @@ import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Pattern;
@@ -47,7 +51,7 @@ import java.util.regex.Pattern;
  * Business logic for Lambda function management and invocation.
  */
 @ApplicationScoped
-public class LambdaService {
+public class LambdaService implements ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(LambdaService.class);
     private static final Pattern EFS_ACCESS_POINT_ARN = Pattern.compile(
@@ -250,6 +254,32 @@ public class LambdaService {
         if (count > 0) {
             LOG.infov("Restored reserved concurrency for {0} function(s)", count);
         }
+    }
+
+    @Override
+    public List<ExplorerResource> getResources() {
+        List<ExplorerResource> resources = new ArrayList<>();
+        for (LambdaFunction fn : functionStore.listAll()) {
+            if (!"$LATEST".equals(fn.getVersion())) {
+                continue;
+            }
+            String arn = fn.getFunctionArn();
+            if (arn == null) {
+                continue;
+            }
+            AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+            resources.add(new ExplorerResource(
+                    arn, "lambda:function", "lambda",
+                    parsed.region(), parsed.accountId(),
+                    fn.getLastModified() > 0 ? Instant.ofEpochMilli(fn.getLastModified()) : Instant.now(),
+                    fn.getTags() != null ? fn.getTags() : Map.of()));
+        }
+        return resources;
+    }
+
+    @Override
+    public Set<SupportedResourceType> getSupportedResourceTypes() {
+        return Set.of(new SupportedResourceType("lambda:function", "lambda", true));
     }
 
     public LambdaFunction createFunction(String region, Map<String, Object> request) {

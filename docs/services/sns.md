@@ -88,6 +88,15 @@ Supported subscription protocols:
 - `http` / `https` — posts to an HTTP endpoint
 - `application` — fans out to a mobile push platform endpoint (see [Mobile push](#mobile-push-mock))
 
+## Control Tower managed topic
+
+AWS Control Tower creates the regional
+`aws-controltower-AggregateSecurityNotifications` topic before Landing Zone
+Accelerator deploys its audit notification forwarder. Floci lazily materializes that
+exact same-account managed topic when `Subscribe` first references it, matching the
+Control Tower prerequisite without weakening normal SNS validation. Subscribing to
+any other missing topic still returns `NotFound`.
+
 ## Mobile push (mock)
 
 Floci mocks SNS mobile push for iOS and Android. No real APNS or FCM connection is

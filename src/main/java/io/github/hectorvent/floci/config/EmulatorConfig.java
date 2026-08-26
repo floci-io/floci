@@ -268,6 +268,7 @@ public interface EmulatorConfig {
         BackupStorageConfig backup();
         FisStorageConfig fis();
         CloudFrontStorageConfig cloudfront();
+        ResourceExplorer2StorageConfig resourceexplorer2();
         AppSyncStorageConfig appsync();
         BatchStorageConfig batch();
         LightsailStorageConfig lightsail();
@@ -285,6 +286,11 @@ public interface EmulatorConfig {
         RumStorageConfig rum();
         GuardDutyStorageConfig guardduty();
         EmrServerlessStorageConfig emrserverless();
+
+        ControlTowerStorageConfig controltower();
+
+        LakeFormationStorageConfig lakeformation();
+        EfsStorageConfig efs();
     }
 
     interface SsmStorageConfig {
@@ -416,6 +422,13 @@ public interface EmulatorConfig {
         Optional<String> mode();
     }
 
+    interface ResourceExplorer2StorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+
     interface AppSyncStorageConfig {
         Optional<String> mode();
 
@@ -514,6 +527,13 @@ public interface EmulatorConfig {
         long flushIntervalMs();
     }
 
+    interface ControlTowerStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+
     interface GuardDutyStorageConfig {
         Optional<String> mode();
 
@@ -528,6 +548,19 @@ public interface EmulatorConfig {
         long flushIntervalMs();
     }
 
+    interface LakeFormationStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+    interface EfsStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+  
     interface CodeDeployStorageConfig {
         Optional<String> mode();
 
@@ -624,6 +657,7 @@ public interface EmulatorConfig {
         ConfigServiceConfig configservice();
         CloudTrailServiceConfig cloudtrail();
         CloudControlServiceConfig cloudcontrol();
+        ResourceExplorer2ServiceConfig resourceexplorer2();
         CloudFrontServiceConfig cloudfront();
         AppSyncServiceConfig appsync();
         BatchServiceConfig batch();
@@ -638,6 +672,11 @@ public interface EmulatorConfig {
         RumServiceConfig rum();
         GuardDutyServiceConfig guardduty();
         EmrServerlessServiceConfig emrserverless();
+
+        ControlTowerServiceConfig controltower();
+
+        LakeFormationServiceConfig lakeformation();
+        EfsServiceConfig efs();
     }
 
     interface IotServiceConfig {
@@ -671,12 +710,27 @@ public interface EmulatorConfig {
         boolean enabled();
     }
 
+    interface ControlTowerServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
     interface GuardDutyServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }
 
     interface EmrServerlessServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface LakeFormationServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+  
+    interface EfsServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }
@@ -749,6 +803,11 @@ public interface EmulatorConfig {
          *  default here is 60s so dev/CI feedback loops stay fast. */
         @WithDefault("60")
         int flushIntervalSeconds();
+    }
+
+    interface ResourceExplorer2ServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
     }
 
     interface AutoScalingServiceConfig {
