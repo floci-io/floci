@@ -60,7 +60,23 @@ class SsoAdminIntegrationTest {
         .when()
             .post("/")
         .then()
-            .statusCode(400);
+            .statusCode(400)
+            .body("__type", org.hamcrest.Matchers.containsString("UnsupportedOperation"));
+    }
+
+    @Test
+    void listInstances_ownerAccountIdTracksTheCaller() {
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=111122223333/20260101/us-east-1/sso/aws4_request")
+            .header("X-Amz-Target", "SWBExternalService.ListInstances")
+            .body("{}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Instances[0].OwnerAccountId", org.hamcrest.Matchers.equalTo("111122223333"));
     }
 
     private static String listInstancesArn() {

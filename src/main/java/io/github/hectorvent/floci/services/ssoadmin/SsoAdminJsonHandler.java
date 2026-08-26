@@ -20,21 +20,21 @@ public class SsoAdminJsonHandler {
         this.mapper = mapper;
     }
 
-    public Response handle(String action, JsonNode request, String region) {
+    public Response handle(String action, JsonNode request, String callerAccountId) {
         return switch (action) {
-            case "ListInstances" -> listInstances();
+            case "ListInstances" -> listInstances(callerAccountId);
             default -> throw new AwsException("UnsupportedOperation",
                     "Operation " + action + " is not supported.", 400);
         };
     }
 
-    private Response listInstances() {
+    private Response listInstances(String callerAccountId) {
         ObjectNode response = mapper.createObjectNode();
         ObjectNode instance = response.putArray("Instances").addObject();
         instance.put("InstanceArn", service.getInstanceArn());
         instance.put("IdentityStoreId", service.getIdentityStoreId());
         instance.put("Name", "floci-identity-center");
-        instance.put("OwnerAccountId", "000000000000");
+        instance.put("OwnerAccountId", callerAccountId);
         instance.put("Status", "ACTIVE");
         return Response.ok(response).build();
     }

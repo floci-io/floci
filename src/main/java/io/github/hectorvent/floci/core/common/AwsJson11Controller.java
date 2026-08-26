@@ -267,7 +267,7 @@ public class AwsJson11Controller {
                 // action is authorized against the calling account, so pass that instead of region.
                 case "organizations" ->
                         organizationsJsonHandler.handle(action, request, regionResolver.getAccountId());
-                case "sso" -> ssoAdminJsonHandler.handle(action, request, region);
+                case "sso" -> ssoAdminJsonHandler.handle(action, request, regionResolver.getAccountId());
                 default -> null;
             };
             // catalog.matchTarget is protocol-agnostic: a JSON 1.0 target
