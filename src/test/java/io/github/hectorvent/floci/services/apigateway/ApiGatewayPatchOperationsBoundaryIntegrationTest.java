@@ -86,6 +86,39 @@ class ApiGatewayPatchOperationsBoundaryIntegrationTest {
                 .body("description", equalTo("5"));
     }
 
+    /** UpdateRestApi predates this branch and shares the same boundary parse. */
+    @Test
+    void testMalformedEnvelopeOnRestApiIsRejected() {
+        String apiId = createApi("patch-boundary-restapi");
+
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"patchOperations\":\"oops\"}")
+                .patch("/restapis/" + apiId)
+                .then()
+                .statusCode(400);
+    }
+
+    /** UpdateApiKey likewise, including the structured-value shape that used to reach the service. */
+    @Test
+    void testStructuredPatchValueOnApiKeyIsRejected() {
+        String keyId = given()
+                .contentType(ContentType.JSON)
+                .body("{\"name\":\"patch-boundary-key\",\"enabled\":true}")
+                .post("/apikeys")
+                .then()
+                .statusCode(201)
+                .extract()
+                .path("id");
+
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"patchOperations\":[{\"op\":\"replace\",\"path\":\"/description\",\"value\":{\"nested\":1}}]}")
+                .patch("/apikeys/" + keyId)
+                .then()
+                .statusCode(400);
+    }
+
     /** The same boundary contract holds on a second handler, proving the parse is shared. */
     @Test
     void testMalformedEnvelopeOnRequestValidatorIsRejected() {
