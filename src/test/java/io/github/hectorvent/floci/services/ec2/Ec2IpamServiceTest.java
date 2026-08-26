@@ -65,6 +65,32 @@ class Ec2IpamServiceTest {
         assertTrue(service.getIpamOrganizationAdminAccount().isEmpty());
     }
 
+    @Test
+    @SuppressWarnings("unchecked")
+    void theDelegatedAdminIsVisibleAndConflictingFromEveryAccount() {
+        AtomicReference<String> caller = new AtomicReference<>("111111111111");
+        RequestContext requestContext = mock(RequestContext.class);
+        when(requestContext.getAccountId()).thenAnswer(invocation -> caller.get());
+        Instance<RequestContext> contextInstance = mock(Instance.class);
+        when(contextInstance.get()).thenReturn(requestContext);
+
+        AccountAwareStorageBackend<String> settings = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), contextInstance, "000000000000");
+        EmulatorConfig config = mock(EmulatorConfig.class);
+        when(config.defaultAccountId()).thenReturn("222222222222");
+        Ec2IpamService orgService = new Ec2IpamService(config, new InMemoryStorage<>(),
+                new InMemoryStorage<>(), settings, new InMemoryStorage<>(), contextInstance);
+
+        orgService.enableIpamOrganizationAdminAccount("333333333333");
+
+        caller.set("222222222222");
+        assertEquals("333333333333", orgService.getIpamOrganizationAdminAccount().orElseThrow(),
+                "the delegated admin is an organization-wide setting, readable from any account");
+        AwsException error = assertThrows(AwsException.class,
+                () -> orgService.enableIpamOrganizationAdminAccount("444444444444"));
+        assertEquals("InvalidParameterValue", error.getErrorCode());
+    }
+
     // --- IPAM + scopes ---
 
     @Test

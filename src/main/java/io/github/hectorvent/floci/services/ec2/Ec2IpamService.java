@@ -46,6 +46,14 @@ public class Ec2IpamService {
 
     private static final String ADMIN_ACCOUNT_KEY = "ipam-organization-admin-account";
 
+    /**
+     * Partition the delegated-admin setting is stored under. The management account delegates it
+     * once and every member account must read the same value, so it cannot live in the ordinary
+     * account-prefixed namespace. The literal is not a valid 12-digit account id precisely so it
+     * can never collide with a real account's partition.
+     */
+    private static final String ORGANIZATION_PARTITION = "organization";
+
     private final EmulatorConfig config;
     // key(region, ipamId) -> Ipam
     private final StorageBackend<String, Ipam> ipams;
@@ -115,29 +123,61 @@ public class Ec2IpamService {
         if (delegatedAdminAccountId == null || delegatedAdminAccountId.isBlank()) {
             throw new AwsException("MissingParameter", "DelegatedAdminAccountId is required.", 400);
         }
-        Optional<String> existing = settings.get(ADMIN_ACCOUNT_KEY);
+        Optional<String> existing = organizationAdmin();
         if (existing.isPresent() && !existing.get().equals(delegatedAdminAccountId)) {
             throw new AwsException("InvalidParameterValue",
                     "Account " + existing.get() + " is already the IPAM delegated administrator.", 400);
         }
-        settings.put(ADMIN_ACCOUNT_KEY, delegatedAdminAccountId);
+        putOrganizationAdmin(delegatedAdminAccountId);
         LOG.infov("IPAM organization admin delegated to {0}", delegatedAdminAccountId);
         return true;
     }
 
     public Optional<String> getIpamOrganizationAdminAccount() {
-        return settings.get(ADMIN_ACCOUNT_KEY);
+        return organizationAdmin();
     }
 
     public boolean disableIpamOrganizationAdminAccount(String delegatedAdminAccountId) {
-        Optional<String> existing = settings.get(ADMIN_ACCOUNT_KEY);
+        Optional<String> existing = organizationAdmin();
         if (existing.isEmpty() || !existing.get().equals(delegatedAdminAccountId)) {
             throw new AwsException("InvalidParameterValue",
                     "Account " + delegatedAdminAccountId + " is not the IPAM delegated administrator.", 400);
         }
-        settings.delete(ADMIN_ACCOUNT_KEY);
+        deleteOrganizationAdmin();
         LOG.infov("IPAM organization admin delegation removed from {0}", delegatedAdminAccountId);
         return true;
+    }
+
+    private Optional<String> organizationAdmin() {
+        if (settings instanceof AccountAwareStorageBackend<?> rawAccountAware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<String> accountAware =
+                    (AccountAwareStorageBackend<String>) rawAccountAware;
+            return accountAware.getForAccount(ORGANIZATION_PARTITION, ADMIN_ACCOUNT_KEY);
+        }
+        return settings.get(ADMIN_ACCOUNT_KEY);
+    }
+
+    private void putOrganizationAdmin(String delegatedAdminAccountId) {
+        if (settings instanceof AccountAwareStorageBackend<?> rawAccountAware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<String> accountAware =
+                    (AccountAwareStorageBackend<String>) rawAccountAware;
+            accountAware.putForAccount(ORGANIZATION_PARTITION, ADMIN_ACCOUNT_KEY, delegatedAdminAccountId);
+            return;
+        }
+        settings.put(ADMIN_ACCOUNT_KEY, delegatedAdminAccountId);
+    }
+
+    private void deleteOrganizationAdmin() {
+        if (settings instanceof AccountAwareStorageBackend<?> rawAccountAware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<String> accountAware =
+                    (AccountAwareStorageBackend<String>) rawAccountAware;
+            accountAware.deleteForAccount(ORGANIZATION_PARTITION, ADMIN_ACCOUNT_KEY);
+            return;
+        }
+        settings.delete(ADMIN_ACCOUNT_KEY);
     }
 
     // ─── IPAMs + default scopes ─────────────────────────────────────────────
