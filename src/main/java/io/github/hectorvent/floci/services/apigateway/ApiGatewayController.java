@@ -8,6 +8,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -81,16 +82,43 @@ public class ApiGatewayController {
             new TypeReference<>() { };
 
     /**
+     * The {@code op} enum, verbatim from the model. Wider than what any one handler implements on
+     * purpose: whether a handler supports {@code move} is its own business, but a value outside the
+     * enum never reaches a handler at all.
+     */
+    private static final Set<String> PATCH_OPS = Set.of("add", "remove", "replace", "move", "copy", "test");
+
+    /**
      * Reads the {@code patchOperations} envelope shared by every PATCH operation. A body that is not
      * JSON, an envelope that is not an array of string-valued operations, and a structured operation
      * value are all client errors; AWS answers BadRequestException for each.
+     *
+     * <p>The {@code op} value is checked here too. Handlers each decide which operations they
+     * implement, and several skip anything they do not recognise — so without a boundary check an
+     * unmodelled {@code op} was answered 200 with the resource silently untouched.
      */
     private List<Map<String, String>> parsePatchOperations(String body) {
+        List<Map<String, String>> patchOperations;
         try {
-            return objectMapper.convertValue(objectMapper.readTree(body).path("patchOperations"), PATCH_OPERATIONS);
+            patchOperations =
+                    objectMapper.convertValue(objectMapper.readTree(body).path("patchOperations"), PATCH_OPERATIONS);
         } catch (IOException | IllegalArgumentException e) {
             throw new AwsException("BadRequestException", "Invalid patchOperations: " + e.getMessage(), 400);
         }
+        if (patchOperations != null) {
+            for (Map<String, String> operation : patchOperations) {
+                if (operation == null) {
+                    continue;
+                }
+                String op = operation.get("op");
+                if (op != null && !PATCH_OPS.contains(op)) {
+                    throw new AwsException("BadRequestException",
+                            "Invalid patch operation '" + op + "'. Must be one of: add, remove, replace, "
+                                    + "move, copy, test", 400);
+                }
+            }
+        }
+        return patchOperations;
     }
 
     // ──────────────────────────── Specific v1 Paths (ORDER MATTERS) ────────────────────────────

@@ -139,4 +139,58 @@ class ApiGatewayPatchOperationsBoundaryIntegrationTest {
                 .then()
                 .statusCode(400);
     }
+
+    // ── op (botocore: enum add|remove|replace|move|copy|test) ──
+
+    private String createApiKey(String name) {
+        return given()
+                .contentType(ContentType.JSON)
+                .body("{\"name\":\"" + name + "\",\"enabled\":true}")
+                .post("/apikeys")
+                .then()
+                .statusCode(201)
+                .extract()
+                .path("id");
+    }
+
+    /**
+     * UpdateApiKey skips any operation it does not recognise, so an unmodelled op used to answer
+     * 200 with the resource untouched — success for a request AWS rejects outright.
+     */
+    @Test
+    void testUnmodelledOpOnApiKeyIsRejected() {
+        String keyId = createApiKey("patch-boundary-op-enum");
+
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"patchOperations\":[{\"op\":\"frobnicate\",\"path\":\"/name\",\"value\":\"after\"}]}")
+                .patch("/apikeys/" + keyId)
+                .then()
+                .statusCode(400);
+
+        given()
+                .get("/apikeys/" + keyId)
+                .then()
+                .statusCode(200)
+                .body("name", equalTo("patch-boundary-op-enum"));
+    }
+
+    @Test
+    void testUnmodelledOpOnModelIsRejected() {
+        patchModelExpecting("{\"patchOperations\":[{\"op\":\"REPLACE\",\"path\":\"/description\",\"value\":\"new\"}]}", 400);
+    }
+
+    /** A modelled op the handler does support must still go through. */
+    @Test
+    void testModelledOpOnApiKeyIsAccepted() {
+        String keyId = createApiKey("patch-boundary-op-modelled");
+
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"patchOperations\":[{\"op\":\"replace\",\"path\":\"/name\",\"value\":\"after\"}]}")
+                .patch("/apikeys/" + keyId)
+                .then()
+                .statusCode(200)
+                .body("name", equalTo("after"));
+    }
 }
