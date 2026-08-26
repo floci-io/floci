@@ -131,11 +131,16 @@ public class OrganizationsCfnProvisioner implements CfnResourceProvisioner {
             replaceTags(ctx.accountId(), unit.getId(), tags);
         } else {
             unit = organizationsService.createOrganizationalUnit(ctx.accountId(), parentId, name, tags);
+            // The OU is real once createOrganizationalUnit returns, so mark it stack-owned before
+            // the Path lookup below gets a chance to throw. CloudFormationService only deletes a
+            // CREATE_FAILED resource that is both marked owned and carries a physical id.
+            r.getAttributes().put(CfnRollback.ROLLBACK_OWNED_ATTR, "true");
         }
 
         r.setPhysicalId(unit.getId());
         r.getAttributes().put("Id", unit.getId());
         r.getAttributes().put("Arn", unit.getArn());
+        r.getAttributes().put("Path", organizationsService.organizationPath(ctx.accountId(), unit.getId()));
     }
 
     // ──────────────────────────── Account ────────────────────────────
@@ -159,22 +164,16 @@ public class OrganizationsCfnProvisioner implements CfnResourceProvisioner {
                 throw new AwsException("ConstraintViolationException",
                         "CreateAccount for " + accountName + " failed: " + status.getFailureReason(), 400);
             }
-            // The account exists from here on, so hand rollback the ownership marker before anything
-            // else can throw: CloudFormationService only deletes a CREATE_FAILED resource that is
-            // both marked owned and carries a physical id.
-            // The account exists from here on, so hand rollback the ownership marker before anything
-            // else can throw: CloudFormationService only deletes a CREATE_FAILED resource that is
-            // both marked owned and carries a physical id.
+            // CreateAccount has already made this a real member of the organization, so claim it
+            // for the stack before anything else can throw. CloudFormationService only deletes a
+            // CREATE_FAILED resource that is both marked owned and carries a physical id, and the
+            // move below raises DestinationParentNotFoundException whenever ParentIds names an OU
+            // that isn't there — a broken Ref or a stale literal. Recording either marker later
+            // would leave the account behind, unmanaged, after the stack reported its rollback.
             r.getAttributes().put(CfnRollback.ROLLBACK_OWNED_ATTR, "true");
             r.setPhysicalId(status.getAccountId());
             account = organizationsService.describeAccount(ctx.accountId(), status.getAccountId());
         }
-
-        // Claim the physical id before the move. CreateAccount has already made this a real member
-        // of the organization, so if moveAccount throws — a broken Ref or a stale literal in
-        // ParentIds raises DestinationParentNotFoundException — CloudFormation's rollback still has
-        // an id to call delete() with. Setting it afterwards would strand the account unmanaged.
-        r.setPhysicalId(account.getId());
 
         if (desiredParent != null && !desiredParent.equals(account.getParentId())) {
             organizationsService.moveAccount(
@@ -185,10 +184,21 @@ public class OrganizationsCfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put("AccountId", account.getId());
         r.getAttributes().put("Arn", account.getArn());
         r.getAttributes().put("Status", account.getStatus());
+        // State supersedes Status in the Organizations API, which retires Status on 2026-09-09.
+        // Floci only ever puts an account in ACTIVE or PENDING_CLOSURE, and both are AccountState
+        // values too, so the two agree; the phases State adds — PENDING_ACTIVATION and CLOSED —
+        // are ones the emulator does not model.
+        r.getAttributes().put("State", account.getStatus());
         r.getAttributes().put("JoinedMethod", account.getJoinedMethod());
         if (account.getJoinedTimestamp() != null) {
             r.getAttributes().put("JoinedTimestamp", account.getJoinedTimestamp().toString());
         }
+        // Paths is a list in the schema, but an account has exactly one parent and so exactly one
+        // path. Attributes are string-valued, and the engine's Fn::Select splits a comma-delimited
+        // scalar back into a list, so a one-element list round-trips as itself. Read this after the
+        // move above: the path has to name the parent the account actually ended up in.
+        r.getAttributes().put("Paths",
+                organizationsService.organizationPath(ctx.accountId(), account.getId()));
     }
 
     // ──────────────────────────── Policy ────────────────────────────

@@ -134,11 +134,17 @@ the rest of the stack's Organizations resources are provisioned into that accoun
 - `Account` — `ParentIds` accepts a single entry and the account is moved there after creation
   (accounts are always created under the root). Because Floci resolves a 12-digit access key id
   straight to an account, `Ref`/`Fn::GetAtt AccountId` yields an id you can immediately use as a
-  caller identity against other services.
+  caller identity against other services. `State` mirrors `Status`, the parameter AWS is retiring
+  it in favour of; Floci does not model the `PENDING_ACTIVATION` or `CLOSED` phases that only
+  `State` can express.
 - `Policy` — `TargetIds` is reconciled on update: targets the template adds are attached and ones
   it drops are detached. Deleting the resource detaches its remaining targets first, since
   `DeletePolicy` refuses while a policy is still attached.
 - `ResourcePolicy` — backed by `PutResourcePolicy`, which is already create-or-update.
+
+`Fn::GetAtt OrganizationalUnit.Path` and `Fn::GetAtt Account.Paths` return the organization path —
+`o-<org>/r-<root>/[ou-<ou>/…]<id>/`. An account has one parent and therefore one path, so the
+list-typed `Paths` holds a single entry; read it with `Fn::Select` as you would on AWS.
 
 Deleting the stack removes the resources in dependency order and finally the organization itself.
 Deleting a resource that is already gone is tolerated.

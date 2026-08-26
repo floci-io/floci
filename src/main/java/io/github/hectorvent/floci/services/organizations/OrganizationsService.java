@@ -397,6 +397,17 @@ public class OrganizationsService {
         return List.of(new ParentRef(parentId, parentType(organization, parentId)));
     }
 
+    /**
+     * The organization path of a root, OU or account:
+     * {@code o-<org>/r-<root>[/ou-<ou>]*[/<accountId>]/}, trailing slash included. This is the
+     * value the Organizations API reports as {@code OrganizationalUnit.Path} and as the single
+     * entry of {@code Account.Paths}, and what {@code Fn::GetAtt} returns for the same keys.
+     */
+    public String organizationPath(String callerAccountId, String resourceId) {
+        Organization organization = requireOrganizationForCaller(callerAccountId);
+        return organization.getId() + "/" + String.join("/", ancestryOf(organization, resourceId)) + "/";
+    }
+
     public List<ChildRef> listChildren(String callerAccountId, String parentId, String childType) {
         Organization organization = requireOrganizationForCaller(callerAccountId);
         requireParent(organization, parentId);

@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.services.organizations.model.OrganizationPolic
 import io.github.hectorvent.floci.services.organizations.model.OrganizationalUnit;
 import io.github.hectorvent.floci.services.organizations.model.Root;
 import org.junit.jupiter.api.Test;
+import org.mockito.InOrder;
 
 import java.time.Instant;
 import java.util.HashMap;
@@ -28,6 +29,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -46,6 +48,8 @@ class OrganizationsCfnProvisionerTest {
     private static final String ACCOUNT = "000000000000";
     private static final String ORG_ID = "o-abcdefghij";
     private static final String ROOT_ID = "r-ab12";
+    private static final String OU_PATH = ORG_ID + "/" + ROOT_ID + "/ou-ab12-abcd1234/";
+    private static final String ACCOUNT_PATH = ORG_ID + "/" + ROOT_ID + "/123456789012/";
 
     private final OrganizationsService organizations = mock(OrganizationsService.class);
     private final OrganizationsCfnProvisioner provisioner = new OrganizationsCfnProvisioner(organizations);
@@ -143,6 +147,7 @@ class OrganizationsCfnProvisionerTest {
         unit.setName("Workloads");
         when(organizations.createOrganizationalUnit(eq(ACCOUNT), eq(ROOT_ID), eq("Workloads"), any()))
                 .thenReturn(unit);
+        when(organizations.organizationPath(ACCOUNT, "ou-ab12-abcd1234")).thenReturn(OU_PATH);
 
         StackResource r = resource("AWS::Organizations::OrganizationalUnit", "Ou");
         ObjectNode props = mapper.createObjectNode().put("Name", "Workloads").put("ParentId", ROOT_ID);
@@ -153,6 +158,27 @@ class OrganizationsCfnProvisionerTest {
         assertEquals("ou-ab12-abcd1234", r.getAttributes().get("Id"));
         assertEquals("arn:aws:organizations::" + ACCOUNT + ":ou/" + ORG_ID + "/ou-ab12-abcd1234",
                 r.getAttributes().get("Arn"));
+        assertEquals(OU_PATH, r.getAttributes().get("Path"));
+    }
+
+    @Test
+    void anOuWhosePathLookupFailsStaysOwnedByTheStackForRollback() {
+        OrganizationalUnit unit = new OrganizationalUnit();
+        unit.setId("ou-ab12-abcd1234");
+        when(organizations.createOrganizationalUnit(eq(ACCOUNT), eq(ROOT_ID), eq("Workloads"), any()))
+                .thenReturn(unit);
+        when(organizations.organizationPath(ACCOUNT, "ou-ab12-abcd1234"))
+                .thenThrow(new AwsException("AWSOrganizationsNotInUseException", "gone", 400));
+
+        StackResource r = resource("AWS::Organizations::OrganizationalUnit", "Ou");
+        ObjectNode props = mapper.createObjectNode().put("Name", "Workloads").put("ParentId", ROOT_ID);
+
+        assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx()));
+
+        // The OU is a real member of the organization by then. CloudFormationService only deletes a
+        // CREATE_FAILED resource carrying both markers, so losing either strands the OU.
+        assertEquals("ou-ab12-abcd1234", r.getPhysicalId());
+        assertEquals("true", r.getAttributes().get(CfnRollback.ROLLBACK_OWNED_ATTR));
     }
 
     @Test
@@ -198,6 +224,7 @@ class OrganizationsCfnProvisionerTest {
         when(organizations.createAccount(eq(ACCOUNT), eq("dev@example.com"), eq("Dev"), any(), eq(false)))
                 .thenReturn(status);
         when(organizations.describeAccount(ACCOUNT, "123456789012")).thenReturn(account(ROOT_ID));
+        when(organizations.organizationPath(ACCOUNT, "123456789012")).thenReturn(ACCOUNT_PATH);
 
         StackResource r = resource("AWS::Organizations::Account", "Dev");
         ObjectNode props = mapper.createObjectNode()
@@ -210,8 +237,36 @@ class OrganizationsCfnProvisionerTest {
         assertEquals("arn:aws:organizations::" + ACCOUNT + ":account/" + ORG_ID + "/123456789012",
                 r.getAttributes().get("Arn"));
         assertEquals("ACTIVE", r.getAttributes().get("Status"));
+        assertEquals("ACTIVE", r.getAttributes().get("State"));
         assertEquals("CREATED", r.getAttributes().get("JoinedMethod"));
         assertEquals("2026-08-23T00:00:00Z", r.getAttributes().get("JoinedTimestamp"));
+        assertEquals(ACCOUNT_PATH, r.getAttributes().get("Paths"));
+    }
+
+    @Test
+    void accountPathsNameTheParentTheAccountWasMovedInto() {
+        CreateAccountStatus status = new CreateAccountStatus();
+        status.setState("SUCCEEDED");
+        status.setAccountId("123456789012");
+        when(organizations.createAccount(eq(ACCOUNT), anyString(), anyString(), any(), eq(false)))
+                .thenReturn(status);
+        when(organizations.describeAccount(ACCOUNT, "123456789012"))
+                .thenReturn(account(ROOT_ID), account("ou-ab12-abcd1234"));
+        when(organizations.organizationPath(ACCOUNT, "123456789012")).thenReturn(OU_PATH + "123456789012/");
+
+        StackResource r = resource("AWS::Organizations::Account", "Dev");
+        ObjectNode props = mapper.createObjectNode()
+                .put("AccountName", "Dev").put("Email", "dev@example.com");
+        props.putArray("ParentIds").add("ou-ab12-abcd1234");
+
+        provisioner.provision(r, props, ctx());
+
+        // Accounts are always created under the root and moved afterwards, so reading the path
+        // before the move would publish the root path for an account that no longer lives there.
+        InOrder order = inOrder(organizations);
+        order.verify(organizations).moveAccount(ACCOUNT, "123456789012", ROOT_ID, "ou-ab12-abcd1234");
+        order.verify(organizations).organizationPath(ACCOUNT, "123456789012");
+        assertEquals(OU_PATH + "123456789012/", r.getAttributes().get("Paths"));
     }
 
     @Test

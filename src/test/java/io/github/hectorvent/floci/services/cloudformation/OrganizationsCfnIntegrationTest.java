@@ -104,10 +104,14 @@ class OrganizationsCfnIntegrationTest {
             "RootId":         { "Value": { "Fn::GetAtt": ["Org", "RootId"] } },
             "OuId":           { "Value": { "Fn::GetAtt": ["Workloads", "Id"] } },
             "OuArn":          { "Value": { "Fn::GetAtt": ["Workloads", "Arn"] } },
+            "OuPath":         { "Value": { "Fn::GetAtt": ["Workloads", "Path"] } },
             "OuRef":          { "Value": { "Ref": "Workloads" } },
             "AccountId":      { "Value": { "Fn::GetAtt": ["Dev", "AccountId"] } },
             "AccountArn":     { "Value": { "Fn::GetAtt": ["Dev", "Arn"] } },
             "AccountStatus":  { "Value": { "Fn::GetAtt": ["Dev", "Status"] } },
+            "AccountState":   { "Value": { "Fn::GetAtt": ["Dev", "State"] } },
+            "AccountPaths":   { "Value": { "Fn::GetAtt": ["Dev", "Paths"] } },
+            "AccountPath0":   { "Value": { "Fn::Select": [0, { "Fn::GetAtt": ["Dev", "Paths"] }] } },
             "AccountJoined":  { "Value": { "Fn::GetAtt": ["Dev", "JoinedMethod"] } },
             "AccountJoinedAt":{ "Value": { "Fn::GetAtt": ["Dev", "JoinedTimestamp"] } },
             "PolicyId":       { "Value": { "Fn::GetAtt": ["Scp", "Id"] } },
@@ -208,6 +212,8 @@ class OrganizationsCfnIntegrationTest {
         assertThat(ouId, matchesRegex("ou-[a-z0-9]{4}-[a-z0-9]{8}"));
         assertEquals("arn:aws:organizations::" + MANAGEMENT_ACCOUNT + ":ou/" + organizationId + "/" + ouId,
                 output(stacks, "OuArn"));
+        // Path runs from the organization down to and including the OU, trailing slash and all.
+        assertEquals(organizationId + "/" + rootId + "/" + ouId + "/", output(stacks, "OuPath"));
         // Ref resolves to the physical id, which is what ParentIds/TargetIds referenced.
         assertEquals(ouId, output(stacks, "OuRef"));
     }
@@ -222,8 +228,17 @@ class OrganizationsCfnIntegrationTest {
         assertEquals("arn:aws:organizations::" + MANAGEMENT_ACCOUNT + ":account/" + organizationId
                 + "/" + memberAccountId, output(stacks, "AccountArn"));
         assertEquals("ACTIVE", output(stacks, "AccountStatus"));
+        // State is the successor AWS is retiring Status in favour of; both are mapped.
+        assertEquals("ACTIVE", output(stacks, "AccountState"));
         assertEquals("CREATED", output(stacks, "AccountJoined"));
         assertThat(output(stacks, "AccountJoinedAt"), matchesRegex("\\d{4}-\\d{2}-\\d{2}T.*Z"));
+
+        // Paths names the OU that ParentIds moved the account into, so it is read after the move
+        // rather than off the freshly created account still sitting under the root.
+        String path = organizationId + "/" + rootId + "/" + ouId + "/" + memberAccountId + "/";
+        assertEquals(path, output(stacks, "AccountPaths"));
+        // Paths is list-typed in the registry schema, and Fn::Select is how a template reads one.
+        assertEquals(path, output(stacks, "AccountPath0"));
     }
 
     @Test
