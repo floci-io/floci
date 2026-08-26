@@ -31,6 +31,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegions;
+import io.github.hectorvent.floci.core.common.CidrCanonicalizer;
 import io.github.hectorvent.floci.core.common.ContainerTeardown;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
@@ -4614,6 +4615,36 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     }
 
     /**
+     * AWS canonicalizes an IPv4 destination CIDR on input: "We modify the specified CIDR block to
+     * its canonical form; for example, if you specify 100.68.0.18/18, we modify it to
+     * 100.68.0.0/18." Running every DestinationCidrBlock through this once, here, is what lets
+     * CreateRoute, ReplaceRoute and DeleteRoute agree on "same destination" — two spellings of the
+     * same network now collide as duplicates instead of coexisting as two routes with undefined
+     * ReplaceRoute/DeleteRoute behaviour — and it is also why DescribeRouteTables echoes back the
+     * canonical form: the stored Route never holds anything else.
+     *
+     * <p>DestinationIpv6CidrBlock has no equivalent sentence in the CreateRoute/ReplaceRoute model
+     * and is left untouched. DestinationPrefixListId is an opaque ID, not a CIDR, and is likewise
+     * untouched.
+     *
+     * <p>A block that is not a well-formed "IPv4/prefix" is returned unchanged: canonicalizing is
+     * not this method's job to validate the request, only to reduce what is already well-formed.
+     * The unmodified value fails downstream exactly as it did before this change.
+     *
+     * <p>Delegates the actual bit-twiddling to {@link CidrCanonicalizer}, which also understands
+     * IPv6. That is deliberately not used here: DestinationCidrBlock is AWS's IPv4-only field —
+     * the API reference's canonicalization sentence appears only under it, never under
+     * DestinationIpv6CidrBlock — so a value that parses as an IPv6 literal is left untouched
+     * rather than canonicalized, the same as any other malformed-for-this-field input.
+     */
+    private static String canonicalizeIpv4Cidr(String destinationCidrBlock) {
+        if (!isSet(destinationCidrBlock) || destinationCidrBlock.contains(":")) {
+            return destinationCidrBlock;
+        }
+        return CidrCanonicalizer.canonicalize(destinationCidrBlock).orElse(destinationCidrBlock);
+    }
+
+    /**
      * AWS takes one destination per route, and there are three kinds of it: DestinationCidrBlock,
      * DestinationIpv6CidrBlock and DestinationPrefixListId. The CreateRoute reference is explicit
      * that a prefix list is a destination in its own right — "You must specify either a destination
@@ -4669,6 +4700,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         requireExactlyOneDestination("CreateRoute", destinationCidrBlock, destinationIpv6CidrBlock,
                 destinationPrefixListId);
         requireEgressOnlyGatewayIsTheOnlyTarget(gatewayId, natGatewayId, egressOnlyInternetGatewayId);
+        final String canonicalDestinationCidrBlock = canonicalizeIpv4Cidr(destinationCidrBlock);
         ensureDefaultResources(region);
         synchronized (lockFor(key(region, routeTableId))) {
             RouteTable current = getRequiredRouteTable(region, routeTableId);
@@ -4677,15 +4709,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             // removes every copy, so a table holding two routes with the same destination has no
             // well-defined behaviour for either. AWS rejects the second CreateRoute instead, and it
             // makes no exception for the local route seeded by CreateRouteTable.
-            if (next.stream().anyMatch(r -> matchesDestination(r, destinationCidrBlock,
+            if (next.stream().anyMatch(r -> matchesDestination(r, canonicalDestinationCidrBlock,
                     destinationIpv6CidrBlock, destinationPrefixListId))) {
                 throw new AwsException("RouteAlreadyExists",
                         "The route identified by "
-                                + destinationLabel(destinationCidrBlock, destinationIpv6CidrBlock,
+                                + destinationLabel(canonicalDestinationCidrBlock, destinationIpv6CidrBlock,
                                         destinationPrefixListId)
                                 + " already exists", 400);
             }
-            Route route = new Route(destinationCidrBlock, gatewayId, "CreateRoute");
+            Route route = new Route(canonicalDestinationCidrBlock, gatewayId, "CreateRoute");
             route.setDestinationIpv6CidrBlock(destinationIpv6CidrBlock);
             route.setDestinationPrefixListId(destinationPrefixListId);
             route.setNatGatewayId(natGatewayId);
@@ -4710,24 +4742,25 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             throw new AwsException("InvalidParameterCombination",
                     "ReplaceRoute takes exactly one target, and only GatewayId or NatGatewayId is supported.", 400);
         }
+        final String canonicalDestinationCidrBlock = canonicalizeIpv4Cidr(destinationCidrBlock);
 
         ensureDefaultResources(region);
         synchronized (lockFor(key(region, routeTableId))) {
             RouteTable current = getRequiredRouteTable(region, routeTableId);
             List<Route> next = new ArrayList<>(current.getRoutes());
             Route existing = next.stream()
-                    .filter(r -> matchesDestination(r, destinationCidrBlock, destinationIpv6CidrBlock,
+                    .filter(r -> matchesDestination(r, canonicalDestinationCidrBlock, destinationIpv6CidrBlock,
                             destinationPrefixListId))
                     .findFirst()
                     .orElseThrow(() -> new AwsException("InvalidRoute.NotFound",
                             "The route identified by "
-                                    + destinationLabel(destinationCidrBlock, destinationIpv6CidrBlock,
+                                    + destinationLabel(canonicalDestinationCidrBlock, destinationIpv6CidrBlock,
                                             destinationPrefixListId)
                                     + " does not exist", 400));
 
             // The target the request does not name is cleared rather than carried over from the
             // route being replaced.
-            Route replacement = new Route(destinationCidrBlock, hasGateway ? gatewayId : null, existing.getOrigin());
+            Route replacement = new Route(canonicalDestinationCidrBlock, hasGateway ? gatewayId : null, existing.getOrigin());
             replacement.setDestinationIpv6CidrBlock(destinationIpv6CidrBlock);
             replacement.setDestinationPrefixListId(destinationPrefixListId);
             replacement.setNatGatewayId(hasNatGateway ? natGatewayId : null);
@@ -4741,11 +4774,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                             String destinationIpv6CidrBlock, String destinationPrefixListId) {
         requireExactlyOneDestination("DeleteRoute", destinationCidrBlock, destinationIpv6CidrBlock,
                 destinationPrefixListId);
+        final String canonicalDestinationCidrBlock = canonicalizeIpv4Cidr(destinationCidrBlock);
         ensureDefaultResources(region);
         synchronized (lockFor(key(region, routeTableId))) {
             RouteTable current = getRequiredRouteTable(region, routeTableId);
             List<Route> next = new ArrayList<>(current.getRoutes());
-            next.removeIf(r -> matchesDestination(r, destinationCidrBlock, destinationIpv6CidrBlock,
+            next.removeIf(r -> matchesDestination(r, canonicalDestinationCidrBlock, destinationIpv6CidrBlock,
                     destinationPrefixListId));
             current.setRoutes(next);
             routeTables.put(key(region, routeTableId), current);
