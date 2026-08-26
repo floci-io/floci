@@ -123,6 +123,23 @@ class RamIntegrationTest {
             .body("__type", equalTo("SerializationException"));
     }
 
+    @Test
+    void malformedInvitationsBodyIsRejectedAsSerializationException() {
+        // GetResourceShareInvitations ignores its body semantically (invitations are
+        // always empty under organization sharing), but a malformed body is still a
+        // client error, not a 200.
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("not json at all")
+        .when()
+            .post("/getresourceshareinvitations")
+        .then()
+            .statusCode(400)
+            .contentType("application/json")
+            .body("__type", equalTo("SerializationException"));
+    }
+
     /**
      * The controller substitutes "SELF" only when resourceOwner is absent or null; a present-but-
      * unmodelled value — including a non-string that {@code asText} coerces — has to reach the

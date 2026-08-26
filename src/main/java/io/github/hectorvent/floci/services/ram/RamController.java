@@ -208,6 +208,9 @@ public class RamController {
     @Path("/getresourceshareinvitations")
     @Consumes(MediaType.WILDCARD)
     public Response getResourceShareInvitations(String body) {
+        // The body is semantically ignored (invitations are always empty under
+        // organization sharing) but malformed JSON is still a client error.
+        readTree(body);
         ObjectNode response = objectMapper.createObjectNode();
         response.set("resourceShareInvitations", objectMapper.createArrayNode());
         return Response.ok(response).build();
