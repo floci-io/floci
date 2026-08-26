@@ -73,6 +73,9 @@ floci:
         flush-interval-ms: 60000
       rum:
         flush-interval-ms: 60000
+      resourceexplorer2:
+        mode: memory
+        flush-interval-ms: 60000
       fis:
         flush-interval-ms: 60000
       guardduty:
@@ -302,6 +305,8 @@ floci:
       enabled: true
     cloudcontrol:
       enabled: true
+    resourceexplorer2:
+      enabled: true
     cloudfront:
       enabled: true
       allowed-private-origin-hosts: []
@@ -323,6 +328,8 @@ floci:
     iotdata:
       enabled: true
     cloudhsmv2:
+      enabled: true
+    efs:
       enabled: true
     organizations:
       enabled: true

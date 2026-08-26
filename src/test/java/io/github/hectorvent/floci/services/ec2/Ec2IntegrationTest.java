@@ -1163,6 +1163,100 @@ class Ec2IntegrationTest {
     }
 
     @Test
+    @Order(24)
+    void describeInstancesByAvailabilityZoneFilter() {
+        String isolatedVpcId = given()
+            .formParam("Action", "CreateVpc")
+            .formParam("CidrBlock", "10.11.0.0/16")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("CreateVpcResponse.vpc.vpcId");
+
+        String subnetA = given()
+            .formParam("Action", "CreateSubnet")
+            .formParam("VpcId", isolatedVpcId)
+            .formParam("CidrBlock", "10.11.1.0/24")
+            .formParam("AvailabilityZone", "us-east-1a")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("CreateSubnetResponse.subnet.subnetId");
+
+        String subnetB = given()
+            .formParam("Action", "CreateSubnet")
+            .formParam("VpcId", isolatedVpcId)
+            .formParam("CidrBlock", "10.11.2.0/24")
+            .formParam("AvailabilityZone", "us-east-1b")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("CreateSubnetResponse.subnet.subnetId");
+
+        String sgId = given()
+            .formParam("Action", "CreateSecurityGroup")
+            .formParam("GroupName", "az-filter-test-sg")
+            .formParam("GroupDescription", "AZ filter test")
+            .formParam("VpcId", isolatedVpcId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("CreateSecurityGroupResponse.groupId");
+
+        String instanceA = given()
+            .formParam("Action", "RunInstances")
+            .formParam("ImageId", "ami-0abcdef1234567890")
+            .formParam("InstanceType", "t2.micro")
+            .formParam("MinCount", "1")
+            .formParam("MaxCount", "1")
+            .formParam("SubnetId", subnetA)
+            .formParam("SecurityGroupId.1", sgId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("RunInstancesResponse.instancesSet.item.instanceId");
+
+        given()
+            .formParam("Action", "RunInstances")
+            .formParam("ImageId", "ami-0abcdef1234567890")
+            .formParam("InstanceType", "t2.micro")
+            .formParam("MinCount", "1")
+            .formParam("MaxCount", "1")
+            .formParam("SubnetId", subnetB)
+            .formParam("SecurityGroupId.1", sgId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .formParam("Action", "DescribeInstances")
+            .formParam("Filter.1.Name", "vpc-id")
+            .formParam("Filter.1.Value.1", isolatedVpcId)
+            .formParam("Filter.2.Name", "availability-zone")
+            .formParam("Filter.2.Value.1", "us-east-1a")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeInstancesResponse.reservationSet.item.instancesSet.item.instanceId", equalTo(instanceA))
+            .body("DescribeInstancesResponse.reservationSet.item.instancesSet.item.placement.availabilityZone",
+                    equalTo("us-east-1a"));
+    }
+
+    @Test
     @Order(21)
     void createSubnetHasAssignIpv6AddressOnCreation() {
         given()

@@ -268,6 +268,7 @@ public interface EmulatorConfig {
         BackupStorageConfig backup();
         FisStorageConfig fis();
         CloudFrontStorageConfig cloudfront();
+        ResourceExplorer2StorageConfig resourceexplorer2();
         AppSyncStorageConfig appsync();
         BatchStorageConfig batch();
         LightsailStorageConfig lightsail();
@@ -287,6 +288,8 @@ public interface EmulatorConfig {
         EmrServerlessStorageConfig emrserverless();
 
         ControlTowerStorageConfig controltower();
+
+        EfsStorageConfig efs();
     }
 
     interface SsmStorageConfig {
@@ -418,6 +421,13 @@ public interface EmulatorConfig {
         Optional<String> mode();
     }
 
+    interface ResourceExplorer2StorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+
     interface AppSyncStorageConfig {
         Optional<String> mode();
 
@@ -537,6 +547,13 @@ public interface EmulatorConfig {
         long flushIntervalMs();
     }
 
+    interface EfsStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+
     interface CodeDeployStorageConfig {
         Optional<String> mode();
 
@@ -633,6 +650,7 @@ public interface EmulatorConfig {
         ConfigServiceConfig configservice();
         CloudTrailServiceConfig cloudtrail();
         CloudControlServiceConfig cloudcontrol();
+        ResourceExplorer2ServiceConfig resourceexplorer2();
         CloudFrontServiceConfig cloudfront();
         AppSyncServiceConfig appsync();
         BatchServiceConfig batch();
@@ -649,6 +667,8 @@ public interface EmulatorConfig {
         EmrServerlessServiceConfig emrserverless();
 
         ControlTowerServiceConfig controltower();
+
+        EfsServiceConfig efs();
     }
 
     interface IotServiceConfig {
@@ -693,6 +713,11 @@ public interface EmulatorConfig {
     }
 
     interface EmrServerlessServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface EfsServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }
@@ -765,6 +790,11 @@ public interface EmulatorConfig {
          *  default here is 60s so dev/CI feedback loops stay fast. */
         @WithDefault("60")
         int flushIntervalSeconds();
+    }
+
+    interface ResourceExplorer2ServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
     }
 
     interface AutoScalingServiceConfig {

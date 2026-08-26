@@ -59,6 +59,7 @@ public class Ec2VpcEndpointCfnProvisioner implements CfnResourceProvisioner {
                 resolveIdList(props, "SubnetIds", ctx),
                 resolveIdList(props, "SecurityGroupIds", ctx),
                 privateDnsEnabled,
+                policyDocument(props, ctx),
                 List.of());
         r.setPhysicalId(endpoint.getVpcEndpointId());
         r.getAttributes().put("Id", endpoint.getVpcEndpointId());
@@ -75,6 +76,29 @@ public class Ec2VpcEndpointCfnProvisioner implements CfnResourceProvisioner {
     @Override
     public void delete(String resourceType, String physicalId, String region) {
         ec2Service.deleteVpcEndpoints(region, List.of(physicalId));
+    }
+
+    /**
+     * {@code PolicyDocument} is declared as JSON in the template, so it arrives as an object node
+     * whose fields may still carry intrinsics ({@code Ref}, {@code Fn::Sub}, {@code Fn::Join}).
+     * Serialising the raw node would store literal template syntax and DescribeVpcEndpoints would
+     * report it verbatim, so it goes through
+     * {@link io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine#resolveJsonAttribute},
+     * the engine helper for JSON-valued attributes (policy documents, RedrivePolicy,
+     * FilterPolicy, Step Functions definitions). That helper also avoids the double-encoding
+     * trap a naive {@code resolveNode(...).toString()} hits: resolveNode collapses an intrinsic
+     * to a TextNode holding already-serialized JSON, which {@code toString()} then re-quotes.
+     *
+     * <p>It returns null for a null or missing node, so no {@code has}/{@code isNull} guard is
+     * needed here beyond the null-props check.
+     *
+     * @see <a href="https://github.com/floci-io/floci/issues/2317">#2317</a>
+     */
+    private String policyDocument(JsonNode props, ProvisionContext ctx) {
+        if (props == null) {
+            return null;
+        }
+        return ctx.engine().resolveJsonAttribute(props.path("PolicyDocument"));
     }
 
     /** Resolve an array property of Ref/GetAtt entries into plain id strings. */

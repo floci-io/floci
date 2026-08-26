@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.LogEvent;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.LogGroup;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.LogStream;
+import io.github.hectorvent.floci.services.cloudwatch.logs.model.ResourcePolicy;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.SubscriptionFilter;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -55,6 +56,8 @@ public class CloudWatchLogsHandler {
             case "PutSubscriptionFilter" -> handlePutSubscriptionFilter(request, region);
             case "DescribeSubscriptionFilters" -> handleDescribeSubscriptionFilters(request, region);
             case "DeleteSubscriptionFilter" -> handleDeleteSubscriptionFilter(request, region);
+            case "PutResourcePolicy" -> handlePutResourcePolicy(request, region);
+            case "DescribeResourcePolicies" -> handleDescribeResourcePolicies(region);
             case "GetDataProtectionPolicy" -> handleGetDataProtectionPolicy(request, region);
             case "StartQuery" -> handleStartQuery(request, region);
             case "GetQueryResults" -> handleGetQueryResults(request, region);
@@ -116,6 +119,39 @@ public class CloudWatchLogsHandler {
         }
         response.set("logGroups", groupsArray);
         return Response.ok(response).build();
+    }
+
+    private Response handlePutResourcePolicy(JsonNode request, String region) {
+        String policyName = request.path("policyName").asText(null);
+        if (policyName == null || policyName.isBlank()) {
+            throw new AwsException("InvalidParameterException", "policyName is required.", 400);
+        }
+        String policyDocument = request.path("policyDocument").asText(null);
+        if (policyDocument == null || policyDocument.isBlank()) {
+            throw new AwsException("InvalidParameterException", "policyDocument is required.", 400);
+        }
+
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("resourcePolicy", buildResourcePolicy(
+                logsService.putResourcePolicy(policyName, policyDocument, region)));
+        return Response.ok(response).build();
+    }
+
+    private Response handleDescribeResourcePolicies(String region) {
+        ArrayNode policies = objectMapper.createArrayNode();
+        logsService.describeResourcePolicies(region).forEach(
+                policy -> policies.add(buildResourcePolicy(policy)));
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("resourcePolicies", policies);
+        return Response.ok(response).build();
+    }
+
+    private ObjectNode buildResourcePolicy(ResourcePolicy policy) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("policyName", policy.getPolicyName());
+        node.put("policyDocument", policy.getPolicyDocument());
+        node.put("lastUpdatedTime", policy.getLastUpdatedTime());
+        return node;
     }
 
     private Response handleCreateLogStream(JsonNode request, String region) {

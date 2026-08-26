@@ -38,6 +38,7 @@ public class SigninService {
     static final int ACCESS_TOKEN_TTL_SECONDS = 900;
     private static final long AUTHORIZATION_CODE_TTL_SECONDS = 300;
     private static final long REFRESH_TOKEN_TTL_SECONDS = 12 * 60 * 60;
+    private static final long EXPIRED_TOKEN_TOMBSTONE_TTL_SECONDS = ACCESS_TOKEN_TTL_SECONDS;
     private static final int MAX_AUTHORIZATION_CODE_LENGTH = 512;
     private static final int MAX_REDIRECT_URI_LENGTH = 2048;
     private static final int MAX_RESOURCE_LENGTH = 2048;
@@ -86,9 +87,9 @@ public class SigninService {
         validateOptionalResource(resource);
         String accountId = regionResolver.getAccountId();
         Instant now = clock.instant();
-        authorizationCodes.entrySet().removeIf(entry -> !entry.getValue().expiresAt().isAfter(now));
+        cleanupExpiredAuthorizationCodes(now);
         String code = randomToken(32);
-        authorizationCodes.put(code, new AuthorizationCode(
+        authorizationCodes.put(code, AuthorizationCode.active(
                 clientId, codeChallenge, redirectUri, resource, accountId,
                 now.plusSeconds(AUTHORIZATION_CODE_TTL_SECONDS)));
         return appendQuery(redirectUri, "code", code, "state", state);
@@ -96,15 +97,21 @@ public class SigninService {
 
     public TokenResult exchange(String clientId, String grantType, String code, String redirectUri,
                                 String codeVerifier, String refreshToken, String resource) {
-        validateClient(clientId);
-        validateOptionalResource(resource);
-        if ("authorization_code".equals(grantType)) {
-            return exchangeCode(clientId, code, redirectUri, codeVerifier, resource);
+        if (!"authorization_code".equals(grantType) && !"refresh_token".equals(grantType)) {
+            throw SigninTokenException.unsupportedGrant();
         }
-        if ("refresh_token".equals(grantType)) {
+        try {
+            validateClient(clientId);
+            validateOptionalResource(resource);
+            if ("authorization_code".equals(grantType)) {
+                return exchangeCode(clientId, code, redirectUri, codeVerifier, resource);
+            }
             return refresh(clientId, refreshToken);
+        } catch (SigninTokenException e) {
+            throw e;
+        } catch (SigninException e) {
+            throw SigninTokenException.validation();
         }
-        throw new SigninException("invalid_request", "grant_type must be authorization_code or refresh_token");
     }
 
     private TokenResult exchangeCode(String clientId, String code, String redirectUri, String codeVerifier,
@@ -120,9 +127,8 @@ public class SigninService {
                     "code_verifier must be 43-128 characters using the AWS PKCE alphabet");
         }
         Instant now = clock.instant();
-        AuthorizationCode authorization = authorizationCodes.remove(code);
-        if (authorization == null || !authorization.expiresAt().isAfter(now)
-                || !clientId.equals(authorization.clientId())
+        AuthorizationCode authorization = claimAuthorizationCode(code, now);
+        if (!clientId.equals(authorization.clientId())
                 || !redirectUri.equals(authorization.redirectUri())
                 || !matchesPkce(authorization.codeChallenge(), codeVerifier)) {
             throw new SigninException("invalid_grant", "The authorization code is invalid or expired");
@@ -136,23 +142,30 @@ public class SigninService {
             throw new SigninException("invalid_request", "refresh_token must be 1-2048 characters");
         }
         Instant now = clock.instant();
-        cleanupExpiredRefreshGrants(now);
         RefreshGrant grant = refreshGrants.get(refreshToken);
-        if (grant == null || !clientId.equals(grant.clientId())) {
+        cleanupExpiredRefreshGrants(now, refreshToken);
+        if (grant == null) {
+            throw new SigninException("invalid_grant", "The refresh token is invalid or expired");
+        }
+        rejectExpiredRefreshTombstone(refreshToken, grant, now);
+        if (!clientId.equals(grant.clientId())) {
             throw new SigninException("invalid_grant", "The refresh token is invalid or expired");
         }
         synchronized (grant) {
             if (refreshGrants.get(refreshToken) != grant) {
+                rejectExpiredRefreshTombstone(refreshToken, refreshGrants.get(refreshToken), now);
                 throw new SigninException("invalid_grant", "The refresh token is invalid or expired");
+            }
+            if (!grant.expiresAt().isAfter(now)) {
+                if (replaceWithExpiredRefreshTombstone(refreshToken, grant, now)) {
+                    throw SigninTokenException.refreshTokenExpired();
+                }
+                throw SigninTokenException.validation();
             }
             if (grant.replayResult() != null) {
                 if (grant.replayExpiresAt().isAfter(now)) {
                     return grant.replayResultWithRemainingLifetime(now);
                 }
-                refreshGrants.remove(refreshToken, grant);
-                throw new SigninException("invalid_grant", "The refresh token is invalid or expired");
-            }
-            if (!grant.expiresAt().isAfter(now)) {
                 refreshGrants.remove(refreshToken, grant);
                 throw new SigninException("invalid_grant", "The refresh token is invalid or expired");
             }
@@ -282,14 +295,97 @@ public class SigninService {
         }
     }
 
+    private AuthorizationCode claimAuthorizationCode(String code, Instant now) {
+        while (true) {
+            AuthorizationCode authorization = authorizationCodes.get(code);
+            if (authorization == null) {
+                throw new SigninException("invalid_grant", "The authorization code is invalid or expired");
+            }
+            if (authorization.expiredTombstone()) {
+                if (authorization.expiredTombstoneUntil().isAfter(now)) {
+                    throw SigninTokenException.authorizationCodeExpired();
+                }
+                if (authorizationCodes.remove(code, authorization)) {
+                    throw new SigninException("invalid_grant", "The authorization code is invalid or expired");
+                }
+                continue;
+            }
+            if (!authorization.expiresAt().isAfter(now)) {
+                AuthorizationCode tombstone = authorization.toExpiredTombstone();
+                if (tombstone.expiredTombstoneUntil().isAfter(now)) {
+                    if (authorizationCodes.replace(code, authorization, tombstone)) {
+                        throw SigninTokenException.authorizationCodeExpired();
+                    }
+                } else if (authorizationCodes.remove(code, authorization)) {
+                    throw SigninTokenException.validation();
+                }
+                continue;
+            }
+            if (authorizationCodes.remove(code, authorization)) {
+                return authorization;
+            }
+        }
+    }
+
+    private void cleanupExpiredAuthorizationCodes(Instant now) {
+        authorizationCodes.forEach((code, authorization) -> {
+            if (authorization.expiredTombstone()) {
+                if (!authorization.expiredTombstoneUntil().isAfter(now)) {
+                    authorizationCodes.remove(code, authorization);
+                }
+                return;
+            }
+            if (!authorization.expiresAt().isAfter(now)) {
+                AuthorizationCode tombstone = authorization.toExpiredTombstone();
+                if (tombstone.expiredTombstoneUntil().isAfter(now)) {
+                    authorizationCodes.replace(code, authorization, tombstone);
+                } else {
+                    authorizationCodes.remove(code, authorization);
+                }
+            }
+        });
+    }
+
     private void cleanupExpiredRefreshGrants(Instant now) {
+        cleanupExpiredRefreshGrants(now, null);
+    }
+
+    private void cleanupExpiredRefreshGrants(Instant now, String refreshTokenInUse) {
         refreshGrants.forEach((token, grant) -> {
+            if (token.equals(refreshTokenInUse)) {
+                return;
+            }
             synchronized (grant) {
-                if (grant.retentionExpiredAt(now)) {
+                if (refreshGrants.get(token) != grant || !grant.retentionExpiredAt(now)) {
+                    return;
+                }
+                if (!grant.expiredTombstone() && !grant.expiresAt().isAfter(now)) {
+                    replaceWithExpiredRefreshTombstone(token, grant, now);
+                } else {
                     refreshGrants.remove(token, grant);
                 }
             }
         });
+    }
+
+    private void rejectExpiredRefreshTombstone(String token, RefreshGrant grant, Instant now) {
+        if (grant == null || !grant.expiredTombstone()) {
+            return;
+        }
+        if (grant.expiredTombstoneUntil().isAfter(now)) {
+            throw SigninTokenException.refreshTokenExpired();
+        }
+        refreshGrants.remove(token, grant);
+        throw new SigninException("invalid_grant", "The refresh token is invalid or expired");
+    }
+
+    private boolean replaceWithExpiredRefreshTombstone(String token, RefreshGrant grant, Instant now) {
+        Instant retainedUntil = grant.expiresAt().plusSeconds(EXPIRED_TOKEN_TOMBSTONE_TTL_SECONDS);
+        if (retainedUntil.isAfter(now)) {
+            return refreshGrants.replace(token, grant, RefreshGrant.expired(retainedUntil));
+        }
+        refreshGrants.remove(token, grant);
+        return false;
     }
 
     private static boolean isSameDeviceRedirect(URI uri) {
@@ -349,7 +445,23 @@ public class SigninService {
     }
 
     private record AuthorizationCode(String clientId, String codeChallenge, String redirectUri,
-                                     String resource, String accountId, Instant expiresAt) {
+                                     String resource, String accountId, Instant expiresAt,
+                                     Instant expiredTombstoneUntil) {
+
+        private static AuthorizationCode active(String clientId, String codeChallenge, String redirectUri,
+                                                String resource, String accountId, Instant expiresAt) {
+            return new AuthorizationCode(clientId, codeChallenge, redirectUri, resource, accountId,
+                    expiresAt, null);
+        }
+
+        private boolean expiredTombstone() {
+            return expiredTombstoneUntil != null;
+        }
+
+        private AuthorizationCode toExpiredTombstone() {
+            return new AuthorizationCode(null, null, null, null, null, null,
+                    expiresAt.plusSeconds(EXPIRED_TOKEN_TOMBSTONE_TTL_SECONDS));
+        }
     }
 
     private record StoredRefreshGrant(String token, RefreshGrant grant) {
@@ -360,6 +472,7 @@ public class SigninService {
         private final String resource;
         private final String accountId;
         private final Instant expiresAt;
+        private final Instant expiredTombstoneUntil;
         private TokenResult replayResult;
         private Instant replayExpiresAt;
 
@@ -368,6 +481,19 @@ public class SigninService {
             this.resource = resource;
             this.accountId = accountId;
             this.expiresAt = expiresAt;
+            this.expiredTombstoneUntil = null;
+        }
+
+        private RefreshGrant(Instant expiredTombstoneUntil) {
+            this.clientId = null;
+            this.resource = null;
+            this.accountId = null;
+            this.expiresAt = null;
+            this.expiredTombstoneUntil = expiredTombstoneUntil;
+        }
+
+        private static RefreshGrant expired(Instant retainedUntil) {
+            return new RefreshGrant(retainedUntil);
         }
 
         private String clientId() {
@@ -386,6 +512,14 @@ public class SigninService {
             return expiresAt;
         }
 
+        private boolean expiredTombstone() {
+            return expiredTombstoneUntil != null;
+        }
+
+        private Instant expiredTombstoneUntil() {
+            return expiredTombstoneUntil;
+        }
+
         private TokenResult replayResult() {
             return replayResult;
         }
@@ -395,8 +529,12 @@ public class SigninService {
         }
 
         private boolean retentionExpiredAt(Instant now) {
+            if (expiredTombstone()) {
+                return !expiredTombstoneUntil.isAfter(now);
+            }
             Instant replayExpiry = replayExpiresAt;
-            Instant retentionExpiry = replayExpiry == null ? expiresAt : replayExpiry;
+            Instant retentionExpiry = replayExpiry == null || expiresAt.isBefore(replayExpiry)
+                    ? expiresAt : replayExpiry;
             return !retentionExpiry.isAfter(now);
         }
 

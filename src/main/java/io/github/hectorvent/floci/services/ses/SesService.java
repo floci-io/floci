@@ -1380,11 +1380,7 @@ public class SesService {
                     "ConfigurationSetName is required.", 400);
         }
         String key = configSetKey(region, configSet.getName());
-        if (configSet.getTags() != null) {
-            for (Tag tag : configSet.getTags()) {
-                SesTags.validate(tag);
-            }
-        }
+        SesTags.validate(configSet.getTags());
         if (configSet.getSuppressionOptions() != null
                 && configSet.getSuppressionOptions().getSuppressedReasons() != null) {
             for (String reason : configSet.getSuppressionOptions().getSuppressedReasons()) {
@@ -2066,9 +2062,7 @@ public class SesService {
                     "1 validation error detected: Value at 'tags' failed to satisfy constraint: "
                             + "Member must have length greater than or equal to 1", 400);
         }
-        for (Tag t : newTags) {
-            SesTags.validate(t);
-        }
+        SesTags.validate(newTags);
         switch (ref.type()) {
             case "configuration-set" -> tagConfigurationSet(ref.name(), ref.region(), newTags);
             case "template" -> tagEmailTemplate(ref.name(), ref.region(), newTags);
@@ -2161,6 +2155,7 @@ public class SesService {
         for (Tag t : incoming) {
             merged.put(t.key(), t.value());
         }
+        SesTags.validateMergedCount(merged.size());
         List<Tag> out = new ArrayList<>();
         merged.forEach((k, v) -> out.add(new Tag(k, v)));
         return out;
@@ -2195,11 +2190,7 @@ public class SesService {
     }
 
     public void setIdentityTags(String identityValue, String region, List<Tag> tags) {
-        if (tags != null) {
-            for (Tag tag : tags) {
-                SesTags.validate(tag);
-            }
-        }
+        SesTags.validate(tags);
         String key = identityKey(region, identityValue);
         Identity identity = identityStore.get(key)
                 .orElseThrow(() -> new AwsException("NotFoundException",

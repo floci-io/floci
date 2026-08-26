@@ -1,7 +1,9 @@
 package io.github.hectorvent.floci.services.signin;
 
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectReader;
 import io.github.hectorvent.floci.services.iam.model.SessionCreds;
 import io.github.hectorvent.floci.services.signin.model.TokenResult;
 import jakarta.inject.Inject;
@@ -28,12 +30,13 @@ import java.util.Map;
 public class SigninController {
 
     private final SigninService signinService;
-    private final ObjectMapper objectMapper;
+    private final ObjectReader tokenRequestReader;
 
     @Inject
     public SigninController(SigninService signinService, ObjectMapper objectMapper) {
         this.signinService = signinService;
-        this.objectMapper = objectMapper;
+        this.tokenRequestReader = objectMapper.reader()
+                .with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
     }
 
     @GET
@@ -97,7 +100,7 @@ public class SigninController {
                 }
                 return values;
             }
-            JsonNode root = objectMapper.readTree(body == null ? "" : body);
+            JsonNode root = tokenRequestReader.readTree(body == null ? "" : body);
             if (root != null && root.has("tokenInput")) {
                 root = root.get("tokenInput");
             }
@@ -110,8 +113,8 @@ public class SigninController {
                 });
             }
             return values;
-        } catch (IOException e) {
-            throw new SigninException("invalid_request", "Request body must be valid JSON");
+        } catch (IOException | IllegalArgumentException e) {
+            throw SigninTokenException.unsupportedGrant();
         }
     }
 

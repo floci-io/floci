@@ -324,6 +324,10 @@ public class S3Controller {
                 s3Service.putBucketAccelerateConfiguration(bucket, new String(body, StandardCharsets.UTF_8));
                 return Response.ok().build();
             }
+            if (hasQueryParam(uriInfo, "replication")) {
+                s3Service.putBucketReplication(bucket, new String(body, StandardCharsets.UTF_8));
+                return Response.ok().build();
+            }
             // Must be handled here: an unmatched subresource falls through to CreateBucket below,
             // which answers a metrics call with BucketAlreadyOwnedByYou.
             if (hasQueryParam(uriInfo, "metrics")) {
@@ -407,9 +411,7 @@ public class S3Controller {
                 return Response.noContent().build();
             }
             if (hasQueryParam(uriInfo, "replication")) {
-                // Floci does not model bucket replication; DeleteBucketReplication is a
-                // no-op that always returns 204, matching real S3. Crucially it must be
-                // handled here so it does NOT fall through to deleting the whole bucket.
+                s3Service.deleteBucketReplication(bucket);
                 return Response.noContent().build();
             }
             if (hasQueryParam(uriInfo, "metrics")) {
@@ -527,6 +529,10 @@ public class S3Controller {
             if (hasQueryParam(uriInfo, "accelerate")) {
                 s3Service.authorizeBucketRead(bucket, "s3:GetAccelerateConfiguration", authorization);
                 return Response.ok(s3Service.getBucketAccelerateConfiguration(bucket)).build();
+            }
+            if (hasQueryParam(uriInfo, "replication")) {
+                s3Service.authorizeBucketRead(bucket, "s3:GetReplicationConfiguration", authorization);
+                return Response.ok(s3Service.getBucketReplication(bucket)).build();
             }
             // GetBucketMetricsConfiguration and ListBucketMetricsConfigurations share ?metrics and
             // are told apart by the id, which only the single-configuration read carries.

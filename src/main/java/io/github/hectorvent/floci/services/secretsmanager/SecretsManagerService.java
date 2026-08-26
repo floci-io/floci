@@ -34,9 +34,14 @@ import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Predicate;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
+import java.util.LinkedHashMap;
+import java.util.Set;
 
 @ApplicationScoped
-public class SecretsManagerService {
+public class SecretsManagerService implements ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(SecretsManagerService.class);
 
@@ -994,5 +999,36 @@ public class SecretsManagerService {
             sb.append(ALPHABET.charAt(rng.nextInt(ALPHABET.length())));
         }
         return sb.toString();
+    }
+
+    // ─── Resource Explorer 2 ───────────────────────────────────────────────────
+
+    @Override
+    public List<ExplorerResource> getResources() {
+        List<ExplorerResource> resources = new ArrayList<>();
+        for (Secret secret : store.scan(k -> true)) {
+            String arn = secret.getArn();
+            if (arn == null) {
+                continue;
+            }
+            AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+            Map<String, String> tags = new LinkedHashMap<>();
+            if (secret.getTags() != null) {
+                for (Secret.Tag tag : secret.getTags()) {
+                    tags.put(tag.key(), tag.value() != null ? tag.value() : "");
+                }
+            }
+            resources.add(new ExplorerResource(
+                    arn, "secretsmanager:secret", "secretsmanager",
+                    parsed.region(), parsed.accountId(),
+                    secret.getCreatedDate() != null ? secret.getCreatedDate() : Instant.now(),
+                    tags));
+        }
+        return resources;
+    }
+
+    @Override
+    public Set<SupportedResourceType> getSupportedResourceTypes() {
+        return Set.of(new SupportedResourceType("secretsmanager:secret", "secretsmanager", true));
     }
 }
