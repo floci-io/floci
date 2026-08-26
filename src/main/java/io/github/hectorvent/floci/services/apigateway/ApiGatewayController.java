@@ -77,6 +77,22 @@ public class ApiGatewayController {
         this.objectMapper = objectMapper;
     }
 
+    private static final TypeReference<List<Map<String, String>>> PATCH_OPERATIONS =
+            new TypeReference<>() { };
+
+    /**
+     * Reads the {@code patchOperations} envelope shared by every PATCH operation. A body that is not
+     * JSON, an envelope that is not an array of string-valued operations, and a structured operation
+     * value are all client errors; AWS answers BadRequestException for each.
+     */
+    private List<Map<String, String>> parsePatchOperations(String body) {
+        try {
+            return objectMapper.convertValue(objectMapper.readTree(body).path("patchOperations"), PATCH_OPERATIONS);
+        } catch (IOException | IllegalArgumentException e) {
+            throw new AwsException("BadRequestException", "Invalid patchOperations: " + e.getMessage(), 400);
+        }
+    }
+
     // ──────────────────────────── Specific v1 Paths (ORDER MATTERS) ────────────────────────────
 
     @GET
@@ -172,15 +188,9 @@ public class ApiGatewayController {
                                               @PathParam("statusCode") String statusCode,
                                               String body) {
         String region = regionResolver.resolveRegion(headers);
-        try {
-            com.fasterxml.jackson.databind.JsonNode node = objectMapper.readTree(body).path("patchOperations");
-            @SuppressWarnings("unchecked")
-            List<Map<String, String>> patchOperations = objectMapper.convertValue(node, List.class);
-            io.github.hectorvent.floci.services.apigateway.model.IntegrationResponse integrationResponse = service.updateIntegrationResponse(region, apiId, resourceId, httpMethod, statusCode, patchOperations);
-            return Response.ok(toIntegrationResponseNode(integrationResponse).toString()).type(MediaType.APPLICATION_JSON).build();
-        } catch (IOException e) {
-            throw new AwsException("BadRequestException", e.getMessage(), 400);
-        }
+        List<Map<String, String>> patchOperations = parsePatchOperations(body);
+        io.github.hectorvent.floci.services.apigateway.model.IntegrationResponse integrationResponse = service.updateIntegrationResponse(region, apiId, resourceId, httpMethod, statusCode, patchOperations);
+        return Response.ok(toIntegrationResponseNode(integrationResponse).toString()).type(MediaType.APPLICATION_JSON).build();
     }
 
     @GET
@@ -576,15 +586,9 @@ public class ApiGatewayController {
     @Path("/restapis/{apiId}/deployments/{deploymentId}")
     public Response updateDeployment(@Context HttpHeaders headers, @PathParam("apiId") String apiId, @PathParam("deploymentId") String deploymentId, String body) {
         String region = regionResolver.resolveRegion(headers);
-        try {
-            com.fasterxml.jackson.databind.JsonNode node = objectMapper.readTree(body).path("patchOperations");
-            @SuppressWarnings("unchecked")
-            List<Map<String, String>> patchOperations = objectMapper.convertValue(node, List.class);
-            io.github.hectorvent.floci.services.apigateway.model.Deployment deployment = service.updateDeployment(region, apiId, deploymentId, patchOperations);
-            return Response.ok(toDeploymentNode(deployment).toString()).type(MediaType.APPLICATION_JSON).build();
-        } catch (IOException e) {
-            throw new AwsException("BadRequestException", e.getMessage(), 400);
-        }
+        List<Map<String, String>> patchOperations = parsePatchOperations(body);
+        io.github.hectorvent.floci.services.apigateway.model.Deployment deployment = service.updateDeployment(region, apiId, deploymentId, patchOperations);
+        return Response.ok(toDeploymentNode(deployment).toString()).type(MediaType.APPLICATION_JSON).build();
     }
 
     @DELETE
@@ -663,15 +667,9 @@ public class ApiGatewayController {
     @Path("/restapis/{apiId}/authorizers/{authorizerId}")
     public Response updateAuthorizer(@Context HttpHeaders headers, @PathParam("apiId") String apiId, @PathParam("authorizerId") String authorizerId, String body) {
         String region = regionResolver.resolveRegion(headers);
-        try {
-            com.fasterxml.jackson.databind.JsonNode node = objectMapper.readTree(body).path("patchOperations");
-            @SuppressWarnings("unchecked")
-            List<Map<String, String>> patchOperations = objectMapper.convertValue(node, List.class);
-            io.github.hectorvent.floci.services.apigateway.model.Authorizer authorizer = service.updateAuthorizer(region, apiId, authorizerId, patchOperations);
-            return Response.ok(toAuthorizerNode(authorizer).toString()).type(MediaType.APPLICATION_JSON).build();
-        } catch (IOException e) {
-            throw new AwsException("BadRequestException", e.getMessage(), 400);
-        }
+        List<Map<String, String>> patchOperations = parsePatchOperations(body);
+        io.github.hectorvent.floci.services.apigateway.model.Authorizer authorizer = service.updateAuthorizer(region, apiId, authorizerId, patchOperations);
+        return Response.ok(toAuthorizerNode(authorizer).toString()).type(MediaType.APPLICATION_JSON).build();
     }
 
     @DELETE
@@ -815,15 +813,9 @@ public class ApiGatewayController {
     @Path("/usageplans/{usagePlanId}")
     public Response updateUsagePlan(@Context HttpHeaders headers, @PathParam("usagePlanId") String usagePlanId, String body) {
         String region = regionResolver.resolveRegion(headers);
-        try {
-            com.fasterxml.jackson.databind.JsonNode node = objectMapper.readTree(body).path("patchOperations");
-            @SuppressWarnings("unchecked")
-            List<Map<String, String>> patchOperations = objectMapper.convertValue(node, List.class);
-            UsagePlan plan = service.updateUsagePlan(region, usagePlanId, patchOperations);
-            return Response.ok(toUsagePlanNode(plan).toString()).type(MediaType.APPLICATION_JSON).build();
-        } catch (IOException e) {
-            throw new AwsException("BadRequestException", "Malformed JSON", 400);
-        }
+        List<Map<String, String>> patchOperations = parsePatchOperations(body);
+        UsagePlan plan = service.updateUsagePlan(region, usagePlanId, patchOperations);
+        return Response.ok(toUsagePlanNode(plan).toString()).type(MediaType.APPLICATION_JSON).build();
     }
 
     @DELETE
@@ -917,15 +909,9 @@ public class ApiGatewayController {
                                            @PathParam("validatorId") String validatorId,
                                            String body) {
         String region = regionResolver.resolveRegion(headers);
-        try {
-            com.fasterxml.jackson.databind.JsonNode node = objectMapper.readTree(body).path("patchOperations");
-            @SuppressWarnings("unchecked")
-            List<Map<String, String>> patchOperations = objectMapper.convertValue(node, List.class);
-            RequestValidator validator = service.updateRequestValidator(region, apiId, validatorId, patchOperations);
-            return Response.ok(toRequestValidatorNode(validator).toString()).type(MediaType.APPLICATION_JSON).build();
-        } catch (IOException e) {
-            throw new AwsException("BadRequestException", e.getMessage(), 400);
-        }
+        List<Map<String, String>> patchOperations = parsePatchOperations(body);
+        RequestValidator validator = service.updateRequestValidator(region, apiId, validatorId, patchOperations);
+        return Response.ok(toRequestValidatorNode(validator).toString()).type(MediaType.APPLICATION_JSON).build();
     }
 
     @DELETE
@@ -978,15 +964,7 @@ public class ApiGatewayController {
     @Path("/restapis/{apiId}/models/{modelName}")
     public Response updateModel(@Context HttpHeaders headers, @PathParam("apiId") String apiId, @PathParam("modelName") String modelName, String body) {
         String region = regionResolver.resolveRegion(headers);
-        List<Map<String, String>> patchOperations;
-        try {
-            com.fasterxml.jackson.databind.JsonNode node = objectMapper.readTree(body).path("patchOperations");
-            @SuppressWarnings("unchecked")
-            List<Map<String, String>> parsed = objectMapper.convertValue(node, List.class);
-            patchOperations = parsed;
-        } catch (IOException e) {
-            throw new AwsException("BadRequestException", "Invalid request body", 400);
-        }
+        List<Map<String, String>> patchOperations = parsePatchOperations(body);
         io.github.hectorvent.floci.services.apigateway.model.Model model = service.updateModel(region, apiId, modelName, patchOperations);
         return Response.ok(toModelNode(model).toString()).type(MediaType.APPLICATION_JSON).build();
     }
@@ -1039,15 +1017,9 @@ public class ApiGatewayController {
     @Path("/domainnames/{domainName}")
     public Response updateDomainName(@Context HttpHeaders headers, @PathParam("domainName") String domainName, String body) {
         String region = regionResolver.resolveRegion(headers);
-        try {
-            com.fasterxml.jackson.databind.JsonNode node = objectMapper.readTree(body).path("patchOperations");
-            @SuppressWarnings("unchecked")
-            List<Map<String, String>> patchOperations = objectMapper.convertValue(node, List.class);
-            CustomDomain domain = service.updateDomainName(region, domainName, patchOperations);
-            return Response.ok(toDomainNode(domain).toString()).type(MediaType.APPLICATION_JSON).build();
-        } catch (IOException e) {
-            throw new AwsException("BadRequestException", e.getMessage(), 400);
-        }
+        List<Map<String, String>> patchOperations = parsePatchOperations(body);
+        CustomDomain domain = service.updateDomainName(region, domainName, patchOperations);
+        return Response.ok(toDomainNode(domain).toString()).type(MediaType.APPLICATION_JSON).build();
     }
 
     @DELETE
@@ -1096,15 +1068,9 @@ public class ApiGatewayController {
     @Path("/domainnames/{domainName}/basepathmappings/{basePath}")
     public Response updateBasePathMapping(@Context HttpHeaders headers, @PathParam("domainName") String domainName, @PathParam("basePath") String basePath, String body) {
         String region = regionResolver.resolveRegion(headers);
-        try {
-            com.fasterxml.jackson.databind.JsonNode node = objectMapper.readTree(body).path("patchOperations");
-            @SuppressWarnings("unchecked")
-            List<Map<String, String>> patchOperations = objectMapper.convertValue(node, List.class);
-            BasePathMapping mapping = service.updateBasePathMapping(region, domainName, basePath, patchOperations);
-            return Response.ok(toMappingNode(mapping).toString()).type(MediaType.APPLICATION_JSON).build();
-        } catch (IOException e) {
-            throw new AwsException("BadRequestException", e.getMessage(), 400);
-        }
+        List<Map<String, String>> patchOperations = parsePatchOperations(body);
+        BasePathMapping mapping = service.updateBasePathMapping(region, domainName, basePath, patchOperations);
+        return Response.ok(toMappingNode(mapping).toString()).type(MediaType.APPLICATION_JSON).build();
     }
 
     @DELETE
