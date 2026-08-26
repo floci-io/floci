@@ -7,6 +7,9 @@ import io.quarkus.runtime.ShutdownEvent;
 import io.quarkus.runtime.StartupEvent;
 import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
+import io.vertx.core.http.ClientAuth;
+import io.vertx.core.net.PemKeyCertOptions;
+import io.vertx.core.net.PemTrustOptions;
 import io.vertx.core.net.SocketAddress;
 import io.vertx.mqtt.MqttEndpoint;
 import io.vertx.mqtt.MqttServer;
@@ -40,6 +43,7 @@ public class IotMqttBrokerService {
     private final Map<String, ClientSession> sessionsByClient = new ConcurrentHashMap<>();
     private final Map<String, Map<String, Subscription>> subscriptionsByClient = new ConcurrentHashMap<>();
     private MqttServer server;
+    private MqttServer tlsServer;
 
     @Inject
     public IotMqttBrokerService(EmulatorConfig config, Vertx vertx, Instance<IotService> iotService) {
@@ -72,21 +76,58 @@ public class IotMqttBrokerService {
             return;
         }
 
-        MqttServer mqttServer = MqttServer.create(vertx, new MqttServerOptions()
-                .setHost(config.services().iot().mqtt().host())
-                .setPort(config.services().iot().mqtt().port()));
-        mqttServer.endpointHandler(this::handleEndpoint);
-        mqttServer.exceptionHandler(error -> LOG.warnv("IoT MQTT broker error: {0}", error.getMessage()));
+        EmulatorConfig.MqttConfig mqttConfig = config.services().iot().mqtt();
+        MqttServerOptions tlsOptions = mqttConfig.tls().enabled() ? tlsServerOptions(mqttConfig) : null;
+        MqttServer plaintextServer = createServer(new MqttServerOptions()
+                .setHost(mqttConfig.host())
+                .setPort(mqttConfig.port()));
+        MqttServer secureServer = tlsOptions == null ? null : createServer(tlsOptions);
 
         try {
-            mqttServer.listen().toCompletionStage().toCompletableFuture().join();
-            server = mqttServer;
-            LOG.infov("IoT MQTT broker started on {0}:{1}",
-                    config.services().iot().mqtt().host(), config.services().iot().mqtt().port());
+            plaintextServer.listen().toCompletionStage().toCompletableFuture().join();
+            LOG.infov("IoT MQTT broker started on {0}:{1}", mqttConfig.host(), mqttConfig.port());
+            if (secureServer != null) {
+                secureServer.listen().toCompletionStage().toCompletableFuture().join();
+                LOG.infov("IoT MQTT TLS broker started on {0}:{1}", mqttConfig.host(), mqttConfig.tls().port());
+            }
+            server = plaintextServer;
+            tlsServer = secureServer;
         } catch (Exception e) {
-            mqttServer.close();
+            plaintextServer.close();
+            if (secureServer != null) {
+                secureServer.close();
+            }
             throw new IllegalStateException("Failed to start IoT MQTT broker", e);
         }
+    }
+
+    private MqttServer createServer(MqttServerOptions options) {
+        MqttServer mqttServer = MqttServer.create(vertx, options);
+        mqttServer.endpointHandler(this::handleEndpoint);
+        mqttServer.exceptionHandler(error -> LOG.warnv("IoT MQTT broker error: {0}", error.getMessage()));
+        return mqttServer;
+    }
+
+    private MqttServerOptions tlsServerOptions(EmulatorConfig.MqttConfig mqttConfig) {
+        EmulatorConfig.MqttTlsConfig tlsConfig = mqttConfig.tls();
+        MqttServerOptions options = new MqttServerOptions();
+        options.setHost(mqttConfig.host());
+        options.setPort(tlsConfig.port());
+        options.setSsl(true);
+        options.setKeyCertOptions(new PemKeyCertOptions()
+                .setCertPath(requireTlsPath(tlsConfig.certPath(), "cert-path"))
+                .setKeyPath(requireTlsPath(tlsConfig.keyPath(), "key-path")));
+        if (tlsConfig.requireClientAuth()) {
+            options.setClientAuth(ClientAuth.REQUIRED);
+            options.setTrustOptions(new PemTrustOptions()
+                    .addCertPath(requireTlsPath(tlsConfig.caPath(), "ca-path")));
+        }
+        return options;
+    }
+
+    private static String requireTlsPath(Optional<String> value, String key) {
+        return value.filter(path -> !path.isBlank()).orElseThrow(() -> new IllegalStateException(
+                "IoT MQTT TLS is enabled but floci.services.iot.mqtt.tls." + key + " is not set"));
     }
 
     synchronized void stop() {
@@ -95,10 +136,15 @@ public class IotMqttBrokerService {
             return;
         }
         server = null;
+        MqttServer secureServer = tlsServer;
+        tlsServer = null;
         sessionsByClient.values().forEach(session -> session.endpoint().close());
         sessionsByClient.clear();
         subscriptionsByClient.clear();
         mqttServer.close().toCompletionStage().toCompletableFuture().join();
+        if (secureServer != null) {
+            secureServer.close().toCompletionStage().toCompletableFuture().join();
+        }
         LOG.info("IoT MQTT broker stopped");
     }
 

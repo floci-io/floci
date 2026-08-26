@@ -705,6 +705,25 @@ public interface EmulatorConfig {
 
         @WithDefault("1883")
         int port();
+
+        MqttTlsConfig tls();
+    }
+
+    interface MqttTlsConfig {
+        @WithDefault("false")
+        boolean enabled();
+
+        @WithDefault("8883")
+        int port();
+
+        Optional<String> certPath();
+
+        Optional<String> keyPath();
+
+        Optional<String> caPath();
+
+        @WithDefault("true")
+        boolean requireClientAuth();
     }
 
     interface IotDataServiceConfig {

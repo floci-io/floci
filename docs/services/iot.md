@@ -59,10 +59,36 @@ Broker scope:
 - Target real AWS IoT/device SDK style MQTT clients, not only handcrafted packet tests.
 - Support MQTT v3 and MQTT 5 CONNECT handling used by local compatibility tests.
 - Support QoS 0 and QoS 1 publish/subscribe behavior for the local AWS IoT slice.
-- Keep MQTT plaintext-only for this phase; TLS and mTLS are out of scope.
+- Serve plaintext MQTT by default, plus an optional TLS listener with required client certificates (mTLS); both listeners share the same session registry, subscriptions, and fan-out.
 - Keep MQTT authorization permissive for now, but leave room for a later pluggable IoT certificate and policy authorizer.
 - Keep MQTT broker logging minimal.
 - Validate the relevant IoT compatibility tests against the native binary before considering the phase complete.
+
+### TLS / mTLS
+
+The broker can expose a TLS listener alongside the plaintext one, mirroring AWS IoT
+Core's mTLS endpoint on port 8883. It is disabled by default; when enabled it
+requires clients to present a certificate that chains to the configured CA
+(`require-client-auth: false` downgrades it to server-only TLS).
+
+```yaml
+floci:
+  services:
+    iot:
+      mqtt:
+        tls:
+          enabled: true                 # default false (FLOCI_SERVICES_IOT_MQTT_TLS_ENABLED)
+          port: 8883
+          cert-path: /certs/server.pem  # server certificate (PEM)
+          key-path: /certs/server.key   # server private key (PEM)
+          ca-path: /certs/ca.pem        # CA that client certificates must chain to
+          require-client-auth: true     # default true
+```
+
+Startup fails fast with a descriptive error when TLS is enabled without the
+required paths. The TLS layer authenticates the transport only: certificate and
+policy resources are still not evaluated as broker authorization (see Known gaps
+and the pluggable authorizer note above).
 
 ## Reserved Topics
 

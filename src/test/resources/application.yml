@@ -327,6 +327,10 @@ floci:
         auto-start: false
         host: 127.0.0.1
         port: 1883
+        tls:
+          enabled: false
+          port: 8883
+          require-client-auth: true
     iotdata:
       enabled: true
     cloudhsmv2:
