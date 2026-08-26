@@ -107,6 +107,11 @@ public class RamService {
             if (!isVisible(share, callerAccountId, resourceOwner)) {
                 continue;
             }
+            // A deleted share stays readable via GetResourceShares (status DELETED)
+            // but its contents stop being consumable.
+            if ("DELETED".equals(share.getStatus())) {
+                continue;
+            }
             if (!resourceShareArns.isEmpty() && !resourceShareArns.contains(share.getResourceShareArn())) {
                 continue;
             }
@@ -167,6 +172,11 @@ public class RamService {
         List<PrincipalAssociation> result = new ArrayList<>();
         for (ResourceShare share : allShares()) {
             if (!isVisible(share, callerAccountId, resourceOwner)) {
+                continue;
+            }
+            // A deleted share stays readable via GetResourceShares (status DELETED)
+            // but its contents stop being consumable.
+            if ("DELETED".equals(share.getStatus())) {
                 continue;
             }
             if (!resourceShareArns.isEmpty() && !resourceShareArns.contains(share.getResourceShareArn())) {

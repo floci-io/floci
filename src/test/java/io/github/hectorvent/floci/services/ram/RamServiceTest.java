@@ -40,6 +40,26 @@ class RamServiceTest {
     }
 
     @Test
+    void deletedShareStopsExposingItsResourcesAndPrincipals() {
+        // Real RAM keeps a deleted share visible (status DELETED) for a retention
+        // window, but its resources and principals stop being consumable: a
+        // non-owning consumer must not discover AVAILABLE resources of a deleted
+        // share through ListResources or ListPrincipals.
+        ResourceShare share = service.createResourceShare(
+                "delete-me", List.of(OU_ARN), List.of(TGW_ARN), false, "us-east-1", OWNER);
+        service.deleteResourceShare(share.getResourceShareArn(), OWNER);
+
+        assertTrue(service.listResources(ACCEPTER, "OTHER-ACCOUNTS", List.of()).isEmpty());
+        assertTrue(service.listPrincipals(ACCEPTER, "OTHER-ACCOUNTS", List.of()).isEmpty());
+        assertTrue(service.listResources(OWNER, "SELF", List.of()).isEmpty());
+
+        // The share itself remains readable with DELETED status.
+        List<ResourceShare> own = service.getResourceShares(OWNER, "SELF");
+        assertEquals(1, own.size());
+        assertEquals("DELETED", own.get(0).getStatus());
+    }
+
+    @Test
     void createResourceShareIsVisibleToOwnerAsSelf() {
         ResourceShare share = service.createResourceShare(
                 "us-east-1-tgw-share", List.of(OU_ARN), List.of(TGW_ARN), false, "us-east-1", OWNER);
