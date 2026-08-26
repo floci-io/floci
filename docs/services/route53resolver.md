@@ -61,5 +61,12 @@ request without a `CreatorRequestId` opts out and always allocates a new resourc
   modelled.
 - **`CreateResolverRule`/`UpdateResolverRule` do not validate `ResolverEndpointId`
   against an existing endpoint.** Any non-blank string is accepted.
-- **No VPC-scoping or region-scoping is enforced anywhere in this service.** All
-  resources are visible regardless of the VPC or account context of the caller.
+- **No VPC-scoping or region-scoping is enforced for custom resources.** The four
+  stores go through `StorageFactory`, so every key is prefixed with the calling
+  credential's account id and custom resources *are* isolated per account: one account
+  cannot read, update or delete another's endpoints, rules, associations or domain
+  lists. Neither region nor VPC is part of the key, though, so a custom resource created
+  in one region is visible from every other, and `VPCId` on an association is stored but
+  never used to filter. The AWS-managed domain lists are the deliberate exception: they
+  are derived per region from the name list rather than stored, so they are region-scoped
+  and visible to every caller, as they are in AWS.
