@@ -24,7 +24,7 @@ workflow.
 | `SearchProductsAsAdmin` | List every product in the account from the admin view. |
 | `SearchProducts` | Search the products available to the caller. |
 | `ListProvisioningArtifacts` | List the provisioning artifacts (versions) of a product. |
-| `ProvisionProduct` | Provision a product; every request takes the Control Tower Account Factory path regardless of `ProductId`, creating a real Organizations member account and moving it to the requested OU. |
+| `ProvisionProduct` | Provision a product the catalog holds; the Control Tower Account Factory product creates a real Organizations member account and moves it to the requested OU, any other product persists a provisioned-product record only. |
 | `SearchProvisionedProducts` | Search provisioned products; only `status:` and `physicalid:` search terms are honoured and results are not paginated. |
 | `DeleteProduct` | Delete a product. |
 | `CreateTagOption` | Create a TagOption key/value pair. |
@@ -109,23 +109,13 @@ Account Factory product the first time `ListPortfolios`, `ListAcceptedPortfolioS
 `SearchProducts` or `ProvisionProduct` is called. `SearchProductsAsAdmin` does not trigger
 this, so the Account Factory product is absent from the admin view until one of those
 operations has run.
-`ProvisionProduct` then creates a real Organizations member account through the
-Organizations service — reusing an existing account when `AccountEmail` already matches
-one — moves it under the OU named by the `ManagedOrganizationalUnit` provisioning
-parameter, and persists an `AVAILABLE` provisioned product of type
-`CONTROL_TOWER_ACCOUNT`. Organizational-unit display labels such as
-`Infrastructure (ou-...)` are resolved to their underlying OU IDs.
+`ProvisionProduct` resolves the product named by `ProductId` or `ProductName` and rejects one the catalog does not hold with `ResourceNotFoundException`; a request naming neither is rejected with `InvalidParametersException`. A supplied `ProvisioningArtifactId` or `ProvisioningArtifactName` must belong to that product, and when neither is supplied the product's first artifact is used.
+
+When the resolved product is the Account Factory product, `ProvisionProduct` creates a real Organizations member account through the Organizations service — reusing an existing account when `AccountEmail` already matches one — moves it under the OU named by the `ManagedOrganizationalUnit` provisioning parameter, and persists an `AVAILABLE` provisioned product of type `CONTROL_TOWER_ACCOUNT`. Organizational-unit display labels such as `Infrastructure (ou-...)` are resolved to their underlying OU IDs. Any other product persists an `AVAILABLE` provisioned product of type `CFN_STACK` and never touches Organizations.
 
 ## Limitations
 
-- **`ProvisionProduct` always takes the Control Tower Account Factory path.** The request's
-  `ProductId` and `ProvisioningArtifactId` are not used to select what gets provisioned: every
-  call creates or reuses an Organizations member account and persists a
-  `CONTROL_TOWER_ACCOUNT` provisioned product pinned to the managed Account Factory product,
-  even for a product created with `CreateProduct`. No CloudFormation template is rendered and
-  no other resource is created. Provisioning is idempotent on `ProvisionedProductName` — a
-  repeat call returns the existing provisioned product unchanged rather than provisioning
-  again.
+- **`ProvisionProduct` provisions nothing outside the Account Factory path.** A product created with `CreateProduct` gets an `AVAILABLE` `CFN_STACK` provisioned product record and nothing else: no CloudFormation template is rendered, no stack exists, and the record carries no `PhysicalId`. Provisioning parameters are not applied or stored, and provisioning is idempotent on `ProvisionedProductName` — a repeat call returns the existing provisioned product unchanged, whichever product it names.
 - **`TerminateProvisionedProduct` does not release anything.** It flips the provisioned
   product's `Status` to `TERMINATED` and persists a record, but the provisioned product row is
   kept (so it still appears in `ScanProvisionedProducts` and `SearchProvisionedProducts`) and
