@@ -258,9 +258,20 @@ public class ServiceCatalogService {
         }
         String productName = text(request, "ProductName");
         if (productName != null && !productName.isBlank()) {
-            return productStore.scan(key -> true).stream()
+            // Names are not unique keys: an ambiguous name must fail rather than
+            // first-match into an arbitrary product (which could be, or displace,
+            // the Account Factory product).
+            List<ObjectNode> matches = productStore.scan(key -> true).stream()
                     .filter(product -> productName.equals(text(product, "Name")))
-                    .findFirst().orElseThrow(() -> notFound("product", productName));
+                    .toList();
+            if (matches.size() > 1) {
+                throw new AwsException("DuplicateResourceException",
+                        "More than one product matches name: " + productName, 400);
+            }
+            if (matches.isEmpty()) {
+                throw notFound("product", productName);
+            }
+            return matches.get(0);
         }
         throw new AwsException("InvalidParametersException", "ProductId or ProductName is required", 400);
     }

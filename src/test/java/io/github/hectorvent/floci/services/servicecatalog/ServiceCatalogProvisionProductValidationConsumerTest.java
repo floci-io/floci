@@ -112,6 +112,25 @@ class ServiceCatalogProvisionProductValidationConsumerTest {
     }
 
     @Test
+    void provisionProduct_ambiguousProductName_returnsDuplicateResourceAndCreatesNoAccount() {
+        // A user-created product may share its Name with another (names are not
+        // unique keys); first-match would nondeterministically pick one — including
+        // the Account Factory product. Ambiguity must fail, not guess.
+        ensureOrganization();
+        String email = "ab-ambiguous-name@floci.test";
+        createProduct("AmbiguousName");
+        createProduct("AmbiguousName");
+
+        call("ProvisionProduct", "{\"ProductName\":\"AmbiguousName\","
+                + accountFactoryParameters("ab-provision-ambiguous", email) + "}")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("DuplicateResourceException"));
+
+        assertNoAccountWithEmail(email);
+    }
+
+    @Test
     void provisionProduct_withoutProductIdentifier_returnsInvalidParametersAndCreatesNoAccount() {
         ensureOrganization();
         String email = "ab-no-product-identifier@floci.test";
