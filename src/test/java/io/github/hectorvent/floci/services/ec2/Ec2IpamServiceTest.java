@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.services.ec2.model.Tag;
 import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.function.Executable;
 
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
@@ -190,6 +191,43 @@ class Ec2IpamServiceTest {
         assertEquals(1, service.describeIpamPools(REGION, List.of(pool.getIpamPoolId())).size());
         assertThrows(AwsException.class,
                 () -> service.describeIpamPools(REGION, List.of("ipam-pool-doesnotexist")));
+    }
+
+    @Test
+    void omittingIpamPoolIdIsAMissingParameterNotANotFound() {
+        for (Executable call : List.<Executable>of(
+                () -> service.deleteIpamPool(REGION, null),
+                () -> service.modifyIpamPool(REGION, "", "d", null, null, null, null, false),
+                () -> service.provisionIpamPoolCidr(REGION, null, "10.0.0.0/8"),
+                () -> service.getIpamPoolCidrs(REGION, ""),
+                () -> service.allocateIpamPoolCidr(REGION, null, 24, null, null),
+                () -> service.releaseIpamPoolAllocation(REGION, "", "alloc", null),
+                () -> service.getIpamPoolAllocations(REGION, null))) {
+            AwsException error = assertThrows(AwsException.class, call);
+            assertEquals("MissingParameter", error.getErrorCode());
+        }
+    }
+
+    @Test
+    void createIpamPoolRejectsMissingAndUnknownScopes() {
+        AwsException missing = assertThrows(AwsException.class,
+                () -> service.createIpamPool(REGION, null, REGION, null, "ipv4", null));
+        assertEquals("MissingParameter", missing.getErrorCode());
+
+        AwsException unknown = assertThrows(AwsException.class,
+                () -> service.createIpamPool(REGION, "ipam-scope-doesnotexist", REGION, null, "ipv4", null));
+        assertEquals("InvalidIpamScopeId.NotFound", unknown.getErrorCode());
+    }
+
+    @Test
+    void createIpamPoolRejectsABlankSourcePoolIdAsTheSourceParameter() {
+        Ipam ipam = service.createIpam(REGION, null, List.of(REGION));
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.createIpamPool(REGION, ipam.getPrivateDefaultScopeId(),
+                        REGION, "", "ipv4", null));
+        assertEquals("MissingParameter", error.getErrorCode());
+        assertTrue(error.getMessage().contains("SourceIpamPoolId"),
+                "a blank SourceIpamPoolId must not be reported as a missing IpamPoolId");
     }
 
     // --- allocations (what LZA's get-ipam-subnet-cidr Lambda needs) ---

@@ -342,6 +342,12 @@ public class Ec2IpamService {
     public IpamPool createIpamPool(String region, String ipamScopeId, String locale,
                                    String sourceIpamPoolId, String addressFamily, String description,
                                    String ownerId, String clientToken) {
+        if (ipamScopeId == null || ipamScopeId.isBlank()) {
+            throw new AwsException("MissingParameter", "IpamScopeId is required.", 400);
+        }
+        if (sourceIpamPoolId != null && sourceIpamPoolId.isBlank()) {
+            throw new AwsException("MissingParameter", "SourceIpamPoolId is required.", 400);
+        }
         if (clientToken != null && !clientToken.isBlank()) {
             // Caller-partition scan: an idempotency token is scoped to the account that used it.
             for (IpamPool existing : pools.scan(k -> true)) {
@@ -400,10 +406,9 @@ public class Ec2IpamService {
         return pool;
     }
 
+    /** Resolves the IPAM owning a scope. {@code IpamScopeId} is a required member of
+     *  CreateIpamPool, so an unknown scope is an error rather than a null {@code ipamId}. */
     private String ipamIdOfScope(String ipamScopeId) {
-        if (ipamScopeId == null) {
-            return null;
-        }
         for (Ipam ipam : ipams.scan(k -> true)) {
             for (IpamScope scope : ipam.getScopes()) {
                 if (ipamScopeId.equals(scope.getIpamScopeId())) {
@@ -411,7 +416,8 @@ public class Ec2IpamService {
                 }
             }
         }
-        return null;
+        throw new AwsException("InvalidIpamScopeId.NotFound",
+                "IPAM scope " + ipamScopeId + " does not exist.", 400);
     }
 
     public List<IpamPool> describeIpamPools(String region, List<String> ipamPoolIds) {
@@ -687,6 +693,9 @@ public class Ec2IpamService {
     }
 
     private OwnedPool requireOwnedPool(String region, String ipamPoolId) {
+        if (ipamPoolId == null || ipamPoolId.isBlank()) {
+            throw new AwsException("MissingParameter", "IpamPoolId is required.", 400);
+        }
         if (pools instanceof AccountAwareStorageBackend<?> rawAccountAware) {
             @SuppressWarnings("unchecked")
             AccountAwareStorageBackend<IpamPool> accountAware =
