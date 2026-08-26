@@ -110,10 +110,51 @@ class IamGetAccountSummaryIntegrationTest {
             .body("GetAccountSummaryResponse.GetAccountSummaryResult.SummaryMap.entry"
                     + ".find { it.key == 'UsersQuota' }.value", equalTo("5000"))
             .body("GetAccountSummaryResponse.GetAccountSummaryResult.SummaryMap.entry"
+                    + ".find { it.key == 'GroupsQuota' }.value", equalTo("300"))
+            .body("GetAccountSummaryResponse.GetAccountSummaryResult.SummaryMap.entry"
+                    + ".find { it.key == 'RolesQuota' }.value", equalTo("1000"))
+            .body("GetAccountSummaryResponse.GetAccountSummaryResult.SummaryMap.entry"
+                    + ".find { it.key == 'PoliciesQuota' }.value", equalTo("1500"))
+            .body("GetAccountSummaryResponse.GetAccountSummaryResult.SummaryMap.entry"
+                    + ".find { it.key == 'InstanceProfilesQuota' }.value", equalTo("1000"))
+            .body("GetAccountSummaryResponse.GetAccountSummaryResult.SummaryMap.entry"
+                    + ".find { it.key == 'AttachedPoliciesPerUserQuota' }.value", equalTo("10"))
+            .body("GetAccountSummaryResponse.GetAccountSummaryResult.SummaryMap.entry"
+                    + ".find { it.key == 'AttachedPoliciesPerGroupQuota' }.value", equalTo("10"))
+            .body("GetAccountSummaryResponse.GetAccountSummaryResult.SummaryMap.entry"
+                    + ".find { it.key == 'AttachedPoliciesPerRoleQuota' }.value", equalTo("20"))
+            .body("GetAccountSummaryResponse.GetAccountSummaryResult.SummaryMap.entry"
+                    + ".find { it.key == 'PolicySizeQuota' }.value", equalTo("6144"))
+            .body("GetAccountSummaryResponse.GetAccountSummaryResult.SummaryMap.entry"
                     + ".find { it.key == 'AssumeRolePolicySizeQuota' }.value", equalTo("2048"))
             .body("GetAccountSummaryResponse.GetAccountSummaryResult.SummaryMap.entry"
                     + ".find { it.key == 'AccountPasswordPresent' }.value", equalTo("0"))
             .body("GetAccountSummaryResponse.GetAccountSummaryResult.SummaryMap.entry"
                     + ".find { it.key == 'MFADevices' }.value", equalTo("0"));
+    }
+
+    @Test
+    void userAccessKeysDoNotSetRootAccountAccessKeySignal() {
+        String userName = "gas-key-user-" + Long.toString(System.nanoTime(), 36);
+
+        given()
+            .formParam("Action", "CreateUser")
+            .formParam("UserName", userName)
+            .header("Authorization", IAM_AUTH)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .formParam("Action", "CreateAccessKey")
+            .formParam("UserName", userName)
+            .header("Authorization", IAM_AUTH)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        assertSummaryValue("AccountAccessKeysPresent", 0);
     }
 }

@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.S3Destination;
 import io.github.hectorvent.floci.services.firehose.model.Record;
+import io.github.hectorvent.floci.services.kinesis.KinesisService;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.PutObjectOptions;
 import io.github.hectorvent.floci.testing.MutableClock;
@@ -21,6 +22,8 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.Arrays;
+import java.util.HashMap;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -43,6 +46,7 @@ class FirehoseServiceTest {
     private static final String FIVE_RECORDS = "{\"n\":0}\n{\"n\":1}\n{\"n\":2}\n{\"n\":3}\n{\"n\":4}\n";
 
     private FirehoseService firehoseService;
+    private KinesisService kinesisService;
     private StorageFactory storageFactory;
     private S3Service s3Service;
     private MutableClock clock;
@@ -50,8 +54,16 @@ class FirehoseServiceTest {
     @BeforeEach
     void setUp() {
         storageFactory = Mockito.mock(StorageFactory.class);
+        // A backend per store, keyed by file name, exactly as the real StorageFactory
+        // reuses backends by path. One shared instance would put KinesisStream values in
+        // the map FirehoseService.scan() reads as delivery streams; a fresh instance per
+        // create() call would make a second service over "the same storage" impossible
+        // to build, which is what the restart test needs.
+        Map<String, AccountAwareStorageBackend<?>> backends = new HashMap<>();
         when(storageFactory.create(anyString(), anyString(), any()))
-                .thenReturn(AccountAwareStorageBackend.inMemory("000000000000"));
+                .thenAnswer(invocation -> backends.computeIfAbsent(
+                        invocation.getArgument(0) + "/" + invocation.getArgument(1),
+                        k -> AccountAwareStorageBackend.inMemory("000000000000")));
         s3Service = Mockito.mock(S3Service.class);
         clock = new MutableClock();
         firehoseService = newService(0);
@@ -67,8 +79,12 @@ class FirehoseServiceTest {
         EmulatorConfig config = mock(EmulatorConfig.class);
         when(config.services()).thenReturn(servicesCfg);
 
-        return new FirehoseService(storageFactory, s3Service,
-                new RegionResolver("us-east-1", "000000000000"), clock, config);
+        RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
+        // A real KinesisService, not a mock: the point of the source poller is that it
+        // sees what a GetRecords consumer sees, and a stubbed one could not show that.
+        kinesisService = new KinesisService(storageFactory, regionResolver);
+        return new FirehoseService(storageFactory, s3Service, kinesisService,
+                regionResolver, clock, config);
     }
 
     private static S3Destination destination(String bucketArn, String compressionFormat) {
@@ -419,4 +435,168 @@ class FirehoseServiceTest {
                 delivered("floci-firehose-results").body());
     }
 
+
+    // --- Kinesis stream as source -------------------------------------------------
+    //
+    // A KinesisStreamAsSource delivery stream is never given records by PutRecord: on
+    // real AWS the API rejects that, and everything it delivers comes from Firehose
+    // reading the source stream. Recording the source and not reading it makes such a
+    // stream a silent black hole -- create succeeds, describe looks healthy, nothing is
+    // ever delivered.
+
+    private static DeliveryStreamDescription.KinesisStreamSource kinesisSource(String streamName) {
+        DeliveryStreamDescription.KinesisStreamSource source =
+                new DeliveryStreamDescription.KinesisStreamSource();
+        source.setKinesisStreamArn("arn:aws:kinesis:us-east-1:000000000000:stream/" + streamName);
+        source.setRoleArn("arn:aws:iam::000000000000:role/firehose");
+        return source;
+    }
+
+    private void createSourcedDeliveryStream(String deliveryStream, String sourceStream) {
+        kinesisService.createStream(sourceStream, 1, "us-east-1");
+        firehoseService.createDeliveryStream(deliveryStream, destination("arn:aws:s3:::sink", null),
+                java.util.List.of(), "KinesisStreamAsSource", kinesisSource(sourceStream));
+    }
+
+    @Test
+    void kinesisSourceRecordsAreDelivered() {
+        createSourcedDeliveryStream("sourced-stream", "src-stream");
+        kinesisService.putRecord("src-stream", "hello".getBytes(StandardCharsets.UTF_8), "pk", "us-east-1");
+
+        firehoseService.pollKinesisSources();
+        firehoseService.flush("sourced-stream");
+
+        assertEquals("hello\n", delivered("sink").text());
+    }
+
+    @Test
+    void kinesisSourceRecordsAreDeliveredExactlyOnce() {
+        createSourcedDeliveryStream("sourced-stream", "src-stream");
+        kinesisService.putRecord("src-stream", "hello".getBytes(StandardCharsets.UTF_8), "pk", "us-east-1");
+
+        // The iterator is the checkpoint, so a second poll before the flush must not
+        // re-read what the first one already buffered.
+        firehoseService.pollKinesisSources();
+        firehoseService.pollKinesisSources();
+        firehoseService.flush("sourced-stream");
+
+        assertEquals("hello\n", delivered("sink").text());
+    }
+
+    @Test
+    void kinesisSourcePollingResumesAfterAFlush() {
+        createSourcedDeliveryStream("sourced-stream", "src-stream");
+        kinesisService.putRecord("src-stream", "first".getBytes(StandardCharsets.UTF_8), "pk", "us-east-1");
+        firehoseService.pollKinesisSources();
+        firehoseService.flush("sourced-stream");
+
+        kinesisService.putRecord("src-stream", "second".getBytes(StandardCharsets.UTF_8), "pk", "us-east-1");
+        firehoseService.pollKinesisSources();
+        firehoseService.flush("sourced-stream");
+
+        ArgumentCaptor<byte[]> body = ArgumentCaptor.forClass(byte[].class);
+        verify(s3Service, Mockito.times(2)).putObject(anyString(), anyString(), body.capture(), anyString(),
+                anyMap(), any(PutObjectOptions.class));
+        assertEquals(java.util.List.of("first\n", "second\n"),
+                body.getAllValues().stream().map(b -> new String(b, StandardCharsets.UTF_8)).toList());
+    }
+
+    @Test
+    void kinesisSourceDoesNotBackfillRecordsFromBeforeDeliveryStart() {
+        kinesisService.createStream("src-stream", 1, "us-east-1");
+        kinesisService.putRecord("src-stream", "old".getBytes(StandardCharsets.UTF_8), "pk", "us-east-1");
+        DeliveryStreamDescription.KinesisStreamSource source = kinesisSource("src-stream");
+        // Attaching Firehose to a stream that already holds records does not replay them;
+        // delivery starts at DeliveryStartTimestamp.
+        source.setDeliveryStartTimestamp(Instant.now().plusSeconds(3600));
+        firehoseService.createDeliveryStream("sourced-stream", destination("arn:aws:s3:::sink", null),
+                java.util.List.of(), "KinesisStreamAsSource", source);
+
+        firehoseService.pollKinesisSources();
+        firehoseService.flush("sourced-stream");
+
+        verifyNothingDelivered();
+    }
+
+    @Test
+    void deliveryStreamWithNoKinesisSourceIsUnaffectedByPolling() {
+        firehoseService.createDeliveryStream("plain-stream", destination("arn:aws:s3:::sink", null));
+
+        firehoseService.pollKinesisSources();
+        firehoseService.flush("plain-stream");
+
+        verifyNothingDelivered();
+    }
+
+    @Test
+    void kinesisSourceCheckpointSurvivesARestart() {
+        createSourcedDeliveryStream("sourced-stream", "src-stream");
+        kinesisService.putRecord("src-stream", "hello".getBytes(StandardCharsets.UTF_8), "pk", "us-east-1");
+        firehoseService.pollKinesisSources();
+        firehoseService.flush("sourced-stream");
+
+        // Restart: a fresh service over the same storage, the way the emulator comes back
+        // up against its persisted state. The delivery stream and the source stream's
+        // records both survive, so an in-memory-only checkpoint would rebuild the iterator
+        // from DeliveryStartTimestamp and deliver "hello" to S3 a second time.
+        firehoseService = newService(0);
+        firehoseService.pollKinesisSources();
+        firehoseService.flush("sourced-stream");
+
+        assertEquals("hello\n", delivered("sink").text());
+    }
+
+    @Test
+    void kinesisSourceRecordsBufferedButNeverFlushedSurviveARestart() {
+        createSourcedDeliveryStream("sourced-stream", "src-stream");
+        kinesisService.putRecord("src-stream", "hello".getBytes(StandardCharsets.UTF_8), "pk", "us-east-1");
+
+        // Poll, then crash. The record is in the in-memory buffer and no flush has run,
+        // so nothing reached S3 and nothing in memory survives.
+        firehoseService.pollKinesisSources();
+        verifyNothingDelivered();
+
+        // Restart. A checkpoint persisted at poll time would already have recorded the
+        // record as consumed, and the restored poller would skip past it forever --
+        // silent, permanent loss. Committing the checkpoint only on a successful flush
+        // means the restored poller reads it again and delivers it.
+        firehoseService = newService(0);
+        firehoseService.pollKinesisSources();
+        firehoseService.flush("sourced-stream");
+
+        assertEquals("hello\n", delivered("sink").text());
+    }
+
+    @Test
+    void aFailedDeliveryLeavesTheSourceCheckpointUncommitted() {
+        createSourcedDeliveryStream("sourced-stream", "src-stream");
+        kinesisService.putRecord("src-stream", "hello".getBytes(StandardCharsets.UTF_8), "pk", "us-east-1");
+        when(s3Service.putObject(anyString(), anyString(), any(byte[].class), anyString(),
+                anyMap(), any(PutObjectOptions.class))).thenThrow(new RuntimeException("s3 unavailable"));
+
+        firehoseService.pollKinesisSources();
+        firehoseService.flush("sourced-stream");
+
+        // The write failed, so the record is not durable and the checkpoint must not have
+        // moved: once S3 is back, the next poll has to read it again.
+        Mockito.reset(s3Service);
+        firehoseService.pollKinesisSources();
+        firehoseService.flush("sourced-stream");
+
+        assertEquals("hello\n", delivered("sink").text());
+    }
+
+    @Test
+    void aMissingSourceStreamDoesNotStopOtherStreamsFromPolling() {
+        // No createStream for "gone-stream": describeStream throws ResourceNotFound.
+        firehoseService.createDeliveryStream("broken-stream", destination("arn:aws:s3:::sink", null),
+                java.util.List.of(), "KinesisStreamAsSource", kinesisSource("gone-stream"));
+        createSourcedDeliveryStream("sourced-stream", "src-stream");
+        kinesisService.putRecord("src-stream", "hello".getBytes(StandardCharsets.UTF_8), "pk", "us-east-1");
+
+        firehoseService.pollKinesisSources();
+        firehoseService.flush("sourced-stream");
+
+        assertEquals("hello\n", delivered("sink").text());
+    }
 }
