@@ -65,6 +65,49 @@ class RamIntegrationTest {
     }
 
     @Test
+    void ownerCanTagAndDeleteItsOwnShareOverHttp() {
+        // Mutations resolve the share within the caller's account, so the identity stamped at
+        // create time has to be the identity resolved at tag/delete time — otherwise LZA's
+        // AWS::RAM::ResourceShare teardown would fail against a share it had just created.
+        String shareArn =
+            given()
+                .contentType("application/json")
+                .header("Authorization", AUTH_HEADER)
+                .body("""
+                    {
+                        "name": "owner-mutation-share",
+                        "principals": ["arn:aws:organizations::000000000000:ou/o-abc/ou-infra"],
+                        "resourceArns": ["arn:aws:ec2:us-east-1:000000000000:transit-gateway/tgw-0own"]
+                    }
+                    """)
+            .when()
+                .post("/createresourceshare")
+            .then()
+                .statusCode(200)
+            .extract().path("resourceShare.resourceShareArn");
+
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                { "resourceShareArn": "%s", "tags": [{"key": "Owner", "value": "network"}] }
+                """.formatted(shareArn))
+        .when()
+            .post("/tagresource")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .delete("/deleteresourceshare?resourceShareArn=" + shareArn)
+        .then()
+            .statusCode(200)
+            .body("returnValue", equalTo(true));
+    }
+
+    @Test
     void malformedBodyIsRejectedAsSerializationException() {
         // A body that is not JSON is a client error; without an explicit rejection the parse
         // failure escapes as UncheckedIOException and the SDK sees a 500 InternalFailure.
@@ -112,9 +155,10 @@ class RamIntegrationTest {
             .post("/getresourceshares")
         .then()
             .statusCode(200)
-            .body("resourceShares.size()", equalTo(1))
-            .body("resourceShares[0].name", equalTo("us-east-1-tgw-share"))
-            .body("resourceShares[0].owningAccountId", equalTo("000000000000"));
+            // Selected by name: the store is shared across the tests in this class.
+            .body("resourceShares.findAll { it.name == 'us-east-1-tgw-share' }.size()", equalTo(1))
+            .body("resourceShares.find { it.name == 'us-east-1-tgw-share' }.owningAccountId",
+                    equalTo("000000000000"));
 
         given()
             .contentType("application/json")

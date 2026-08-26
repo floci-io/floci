@@ -167,6 +167,8 @@ class RamServiceTest {
         AwsException error = assertThrows(AwsException.class, mutation);
         assertEquals("UnknownResourceException", error.getErrorCode());
         assertEquals(400, error.getHttpStatus());
+        // Same message an unknown ARN gets — a non-owner must not learn the share exists.
+        assertTrue(error.getMessage().endsWith(" does not exist."));
     }
 
     private static final class SharedStorageFactory extends StorageFactory {
