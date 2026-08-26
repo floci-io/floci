@@ -24,12 +24,13 @@ The seeded manifest always includes a `securityRoles` object. LZA's `makeManifes
 | Operation | Method and path | Description |
 |---|---|---|
 | `ListLandingZones` | `POST /list-landingzones` | Always returns the single seeded/reconciled landing zone |
-| `GetLandingZone` | `POST /get-landingzone` | Returns the stored landing zone (arn, version, status, drift status, manifest, remediation types) |
-| `CreateLandingZone` | `POST /create-landing-zone` | Creates a landing zone from a manifest and version; returns its ARN and operation identifier |
-| `UpdateLandingZone` | `POST /update-landingzone` | Reconciliation sink — stores the supplied manifest/version/remediation types and returns an operation id |
+| `GetLandingZone` | `POST /get-landingzone` | Returns the stored landing zone (arn, version, status, drift status, manifest, remediation types); requires `landingZoneIdentifier`, and an ARN that isn't the stored one returns `ResourceNotFoundException` |
+| `CreateLandingZone` | `POST /create-landingzone` | Creates a landing zone from a manifest and version; returns its ARN and operation identifier |
+| `UpdateLandingZone` | `POST /update-landingzone` | Reconciliation sink — stores the supplied manifest/version/remediation types and returns an operation id; requires a `landingZoneIdentifier` matching the stored landing zone |
 | `DeleteLandingZone` | `POST /delete-landingzone` | Removes the stored landing zone and returns a delete operation id |
 | `ResetLandingZone` | `POST /reset-landingzone` | Validates the landing zone identifier and returns a reset operation id |
 | `GetLandingZoneOperation` | `POST /get-landingzone-operation` | Reports `SUCCEEDED` for any operation id, including ones not in the in-memory ledger (restart-safe) |
+| `ListLandingZoneOperations` | `POST /list-landingzone-operations` | Lists the caller's landing-zone operations newest-first, with `types`/`statuses` filters and `maxResults`/`nextToken` pagination |
 | `ListBaselines` | `POST /list-baselines` | Static 4-entry catalog: `AWSControlTowerBaseline`, `IdentityCenterBaseline`, `AuditBaseline`, `LogArchiveBaseline`, with region-stamped arns |
 | `ListEnabledBaselines` | `POST /list-enabled-baselines` | Supports packet-defined baseline/target/status filters and `maxResults`/`nextToken` pagination. Child resources are not materialized; `includeChildren` returns configured parent resources only. |
 | `GetEnabledBaseline` | `POST /get-enabled-baseline` | Returns an enabled baseline by ARN, including status, parameters, and optional parent/drift details; unknown ARNs return `ResourceNotFoundException` |
@@ -38,7 +39,7 @@ The seeded manifest always includes a `securityRoles` object. LZA's `makeManifes
 | `UpdateEnabledBaseline` | `POST /update-enabled-baseline` | Updates an enabled baseline's version and optional parameters; returns an operation id |
 | `GetBaselineOperation` | `POST /get-baseline-operation` | Reports `SUCCEEDED` for any operation id, including ones not in the ledger |
 
-Note the landing-zone URIs spell "landingzone" as one word for existing operations (`/list-landingzones`, `/get-landingzone`, `/update-landingzone`, `/delete-landingzone`, `/reset-landingzone`, `/get-landingzone-operation`); `CreateLandingZone` uses AWS's hyphenated `/create-landing-zone` path.
+Every landing-zone URI spells "landingzone" as one word — `/list-landingzones`, `/get-landingzone`, `/create-landingzone`, `/update-landingzone`, `/delete-landingzone`, `/reset-landingzone`, `/get-landingzone-operation`, `/list-landingzone-operations` — matching the AWS Control Tower service model.
 
 ## Configuration
 
@@ -50,12 +51,19 @@ Note the landing-zone URIs spell "landingzone" as one word for existing operatio
 
 Landing zones and enabled baselines are isolated by account (via the account-aware storage wrapper) and by region (landing zone store key is the region; enabled-baseline store key is `region::targetIdentifier`).
 
+The operation ledger that backs `GetLandingZoneOperation`, `ListLandingZoneOperations`, and `GetBaselineOperation` is in-memory and scoped the same way, one ledger per account+region. A caller only ever sees operations issued under its own account and region; an identifier from another scope is treated as unknown and answers with the default operation type and `SUCCEEDED`, exactly as an identifier issued before a restart does. Each ledger keeps the most recent 250 operations and evicts the oldest, so a long-running emulator does not grow it without bound.
+
 ## Current Scope
 
-This service exists to unblock LZA's Prepare stage, not to model Control Tower generally. The following are deliberately **not implemented**, per the gap analysis:
+This service exists to unblock LZA's Prepare stage, not to model Control Tower generally. Two kinds of gap follow from that, and they are different things.
 
-- `ResetLandingZone` — implemented as an operation sink that validates the identifier and reports success without changing the manifest.
-- `ResetEnabledBaseline` — unreachable in the Prepare-stage flow (`reregisterOu`/enroll-accounts trigger); implemented as a small operation-sink pattern for later flows.
-- Any IAM/KMS/Organizations create-path prerequisite (`CreateRole`, `CreateKey`, `EnableAllFeatures`, etc.) — dead code on the pre-seed path.
+**Answered, but without the underlying effect.** These operations validate their input and return a well-formed success response, so a caller that reaches them is not blocked — but nothing behind Control Tower's API actually changes:
+
+- `ResetLandingZone` — validates the landing zone identifier and returns a `RESET` operation id, leaving the stored manifest untouched.
+- `ResetEnabledBaseline` — validates the enabled-baseline ARN, refreshes its `lastOperationIdentifier`, and returns an operation id. It is unreachable on the Prepare-stage path (`reregisterOu` and enroll-accounts trigger it) and exists for later flows.
+
+**Not implemented at all.** Nothing in Floci serves these, and nothing on the Prepare-stage path asks for them:
+
+- Any IAM/KMS/Organizations create-path prerequisite (`CreateRole`, `CreateKey`, `EnableAllFeatures`, etc.) — reachable only from the create-landing-zone branch that the pre-seed keeps unreachable.
 - `sso-admin`/`identitystore` — sidestepped by the synthetic IdentityCenter auto-enable derivation described above.
 - Org-wide CloudTrail and StackSets — manifest metadata only on the Prepare-stage path; not modeled as separate service calls.
