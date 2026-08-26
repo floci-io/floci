@@ -191,6 +191,13 @@ public class Route53ResolverService {
 
     public ObjectNode createResolverRule(JsonNode request, String region, String accountId) {
         requireEnum(requireText(request, "RuleType"), "RuleType", RULE_TYPES);
+        // TargetIps is modeled list min 1: present-but-empty is invalid, absent is
+        // allowed (SYSTEM rules carry no targets).
+        JsonNode targetIps = request.path("TargetIps");
+        if (targetIps.isArray() && targetIps.isEmpty()) {
+            throw new AwsException("InvalidParametersException",
+                    "TargetIps must contain at least one target address.", 400);
+        }
         String domainName = text(request, "DomainName");
         java.util.Optional<ObjectNode> replay = replayOf(ruleStore, request);
         if (replay.isPresent()) {

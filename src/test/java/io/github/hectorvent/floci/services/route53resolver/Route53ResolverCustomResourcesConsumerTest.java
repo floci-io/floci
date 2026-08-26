@@ -367,6 +367,18 @@ class Route53ResolverCustomResourcesConsumerTest {
     }
 
     @Test
+    void createResolverRule_emptyTargetIps_returnsInvalidParameters() {
+        // The model pins TargetIps to list min 1: present-but-empty is invalid.
+        // Absent TargetIps stays allowed (SYSTEM rules carry none).
+        call("CreateResolverRule", "{\"Name\":\"ab-rule-emptytargets\",\"RuleType\":\"FORWARD\","
+                + "\"DomainName\":\"ab-rule-emptytargets.example.com.\",\"TargetIps\":[],"
+                + "\"CreatorRequestId\":\"tok-rule-emptytargets\"}")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParametersException"));
+    }
+
+    @Test
     void createResolverRule_unknownRuleType_returnsInvalidParameters() {
         // RuleTypeOption is FORWARD / SYSTEM / RECURSIVE / DELEGATE. An unmodelled value
         // was stored verbatim and echoed back by Get/ListResolverRules as a real rule.
