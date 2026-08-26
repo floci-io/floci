@@ -49,7 +49,6 @@ import java.util.Optional;
 public class EmulatorLifecycle {
 
     private static final Logger LOG = Logger.getLogger(EmulatorLifecycle.class);
-    private static final int HTTP_PORT = 4566;
     private static final int TLS_HTTP_BACKEND_PORT = 4510;
 
     @ConfigProperty(name = "quarkus.application.version", defaultValue = "")
@@ -211,7 +210,11 @@ public class EmulatorLifecycle {
     }
 
     void onHttpStart(@ObservesAsync HttpServerStart event) {
-        int expectedPort = config.tls().enabled() ? TLS_HTTP_BACKEND_PORT : HTTP_PORT;
+        // Non-TLS: Quarkus listens on floci.port (quarkus.http.port: ${floci.port} in
+        // application.yml). TLS mode: TlsConfigSource pins the HTTP backend to 4510 and the
+        // public port is served by TlsProxyServer. Comparing against a hardcoded 4566 here
+        // made start/ready hooks never run when FLOCI_PORT was non-default (#2437).
+        int expectedPort = config.tls().enabled() ? TLS_HTTP_BACKEND_PORT : config.port();
         if (event.options().getPort() != expectedPort) {
             return;
         }

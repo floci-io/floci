@@ -60,6 +60,7 @@ class EcsContainerManagerPortMappingsTest {
     private ContainerBuilder.Builder builder;
     private ContainerLifecycleManager lifecycleManager;
     private ContainerDetector containerDetector;
+    private RegionResolver regionResolver;
     private EcsContainerManager manager;
 
     @BeforeEach
@@ -79,7 +80,7 @@ class EcsContainerManagerPortMappingsTest {
         ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
         containerDetector = mock(ContainerDetector.class);
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
-        RegionResolver regionResolver = mock(RegionResolver.class);
+        regionResolver = mock(RegionResolver.class);
         LaunchedContainerAwsEnv awsEnv = mock(LaunchedContainerAwsEnv.class);
         when(awsEnv.sdkBaselineEnv(any(), any())).thenReturn(List.of());
         SsmService ssmService = mock(SsmService.class);
@@ -108,6 +109,32 @@ class EcsContainerManagerPortMappingsTest {
         task.setTaskArn("arn:aws:ecs:us-east-1:000000000000:task/test-cluster/abc123");
 
         manager.startTask(task, taskDef, List.of(), "us-east-1");
+    }
+
+    @Test
+    void startTaskLabelsContainerWithResourceIdentity() {
+        when(containerDetector.isRunningInContainer()).thenReturn(false);
+        when(regionResolver.getAccountId()).thenReturn("000000000000");
+
+        ContainerDefinition app = new ContainerDefinition();
+        app.setName("app");
+        app.setImage("app:latest");
+
+        TaskDefinition taskDef = new TaskDefinition();
+        taskDef.setFamily("test-family");
+        taskDef.setContainerDefinitions(List.of(app));
+
+        EcsTask task = new EcsTask();
+        task.setTaskArn("arn:aws:ecs:us-east-1:000000000000:task/test-cluster/abc123");
+
+        manager.startTask(task, taskDef, List.of(), "us-east-1");
+
+        verify(builder).withLabels(Map.of(
+                "io.floci", "aws",
+                "io.floci.service", "ecs",
+                "io.floci.resource-id", "abc123",
+                "io.floci.account", "000000000000",
+                "io.floci.region", "us-east-1"));
     }
 
     @Test

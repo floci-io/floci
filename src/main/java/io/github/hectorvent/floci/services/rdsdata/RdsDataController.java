@@ -56,9 +56,9 @@ public class RdsDataController {
 
     @POST
     @Path("/BatchExecute")
-    public Response batchExecuteStatement() {
-        return error(400, "BadRequestException",
-                "BatchExecuteStatement is not supported by this local RDS Data API implementation.");
+    public Response batchExecuteStatement(@Context HttpHeaders headers, String body) {
+        return handle(headers, body, (request, region) ->
+                Response.ok(service.batchExecuteStatement(request, region)).build());
     }
 
     @POST

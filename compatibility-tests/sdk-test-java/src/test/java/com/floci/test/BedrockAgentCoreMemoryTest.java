@@ -4,6 +4,7 @@ import org.junit.jupiter.api.*;
 import software.amazon.awssdk.services.bedrockagentcorecontrol.BedrockAgentCoreControlClient;
 import software.amazon.awssdk.services.bedrockagentcorecontrol.model.*;
 
+import java.util.Map;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.*;
@@ -40,12 +41,19 @@ class BedrockAgentCoreMemoryTest {
                 .name(memoryName)
                 .eventExpiryDuration(30)
                 .description("v1")
+                .encryptionKeyArn("arn:aws:kms:us-east-1:000000000000:key/mem-key")
+                .memoryExecutionRoleArn("arn:aws:iam::000000000000:role/mem-role")
+                .tags(Map.of("team", "core"))
                 .build());
         memoryId = response.memory().id();
         assertThat(memoryId).isNotBlank();
         assertThat(response.memory().name()).isEqualTo(memoryName);
         assertThat(response.memory().arn()).contains(":memory/");
         assertThat(response.memory().statusAsString()).isEqualTo("ACTIVE");
+        assertThat(response.memory().encryptionKeyArn())
+                .isEqualTo("arn:aws:kms:us-east-1:000000000000:key/mem-key");
+        assertThat(response.memory().memoryExecutionRoleArn())
+                .isEqualTo("arn:aws:iam::000000000000:role/mem-role");
     }
 
     @Test
@@ -53,6 +61,8 @@ class BedrockAgentCoreMemoryTest {
     void getMemory() {
         GetMemoryResponse response = client.getMemory(GetMemoryRequest.builder().memoryId(memoryId).build());
         assertThat(response.memory().name()).isEqualTo(memoryName);
+        assertThat(response.memory().encryptionKeyArn())
+                .isEqualTo("arn:aws:kms:us-east-1:000000000000:key/mem-key");
     }
 
     @Test
@@ -66,8 +76,12 @@ class BedrockAgentCoreMemoryTest {
     @Order(4)
     void updateMemory() {
         UpdateMemoryResponse response = client.updateMemory(UpdateMemoryRequest.builder()
-                .memoryId(memoryId).description("v2").build());
+                .memoryId(memoryId).description("v2").eventExpiryDuration(60).build());
         assertThat(response.memory().id()).isEqualTo(memoryId);
+        assertThat(response.memory().eventExpiryDuration()).isEqualTo(60);
+
+        GetMemoryResponse after = client.getMemory(GetMemoryRequest.builder().memoryId(memoryId).build());
+        assertThat(after.memory().eventExpiryDuration()).isEqualTo(60);
     }
 
     @Test

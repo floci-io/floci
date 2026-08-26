@@ -307,6 +307,22 @@ public class ApiGatewayV2Service {
         authorizerStore.delete(authorizerKey(region, apiId, authorizerId));
     }
 
+    /** Restores an authorizer with its original ID for a higher-level transactional rollback. */
+    public void restoreAuthorizer(String region, String apiId, Authorizer authorizer) {
+        getApi(region, apiId);
+        Authorizer restored = new Authorizer();
+        restored.setAuthorizerId(authorizer.getAuthorizerId());
+        restored.setAuthorizerType(authorizer.getAuthorizerType());
+        restored.setName(authorizer.getName());
+        restored.setJwtConfiguration(authorizer.getJwtConfiguration());
+        restored.setIdentitySource(authorizer.getIdentitySource());
+        restored.setAuthorizerUri(authorizer.getAuthorizerUri());
+        restored.setAuthorizerPayloadFormatVersion(authorizer.getAuthorizerPayloadFormatVersion());
+        restored.setAuthorizerResultTtlInSeconds(authorizer.getAuthorizerResultTtlInSeconds());
+        restored.setEnableSimpleResponses(authorizer.getEnableSimpleResponses());
+        authorizerStore.put(authorizerKey(region, apiId, restored.getAuthorizerId()), restored);
+    }
+
     public Authorizer updateAuthorizer(String region, String apiId, String authorizerId,
                                        Map<String, Object> request) {
         Authorizer auth = getAuthorizer(region, apiId, authorizerId);
@@ -356,9 +372,11 @@ public class ApiGatewayV2Service {
 
     public Route createRoute(String region, String apiId, Map<String, Object> request) {
         getApi(region, apiId);
+        String requestedRouteKey = (String) request.get("routeKey");
+        ensureRouteKeyAvailable(region, apiId, requestedRouteKey, null);
         Route route = new Route();
         route.setRouteId(shortId(8));
-        route.setRouteKey((String) request.get("routeKey"));
+        route.setRouteKey(requestedRouteKey);
         route.setAuthorizationType((String) request.getOrDefault("authorizationType", "NONE"));
         route.setAuthorizerId((String) request.get("authorizerId"));
         route.setAuthorizationScopes(toStringList(request.get("authorizationScopes")));
@@ -385,11 +403,52 @@ public class ApiGatewayV2Service {
         routeStore.delete(routeKey(region, apiId, routeId));
     }
 
+    /** Restores a route without treating any conflicting route as rollback-owned. */
+    public void restoreRoute(String region, String apiId, Route route) {
+        restoreRoute(region, apiId, route, java.util.Set.of());
+    }
+
+    /**
+     * Restores a route with its original ID for a higher-level transactional rollback.
+     * Only conflicts explicitly identified as part of the failed replacement may be removed;
+     * independently managed routes must never be deleted as a rollback side effect.
+     */
+    public void restoreRoute(String region, String apiId, Route route,
+                             java.util.Collection<String> replaceableRouteIds) {
+        getApi(region, apiId);
+        // A failed cleanup can leave a replacement route behind. Remove that conflicting
+        // route only when the caller proves it belongs to that failed replacement.
+        for (Route existing : getRoutes(region, apiId)) {
+            if (!java.util.Objects.equals(existing.getRouteId(), route.getRouteId())
+                    && java.util.Objects.equals(existing.getRouteKey(), route.getRouteKey())) {
+                if (replaceableRouteIds.contains(existing.getRouteId())) {
+                    routeStore.delete(routeKey(region, apiId, existing.getRouteId()));
+                } else {
+                    throw new AwsException("ConflictException",
+                            "Cannot restore route with key '" + route.getRouteKey()
+                                    + "' because an independently managed route already exists",
+                            409);
+                }
+            }
+        }
+        Route restored = new Route();
+        restored.setRouteId(route.getRouteId());
+        restored.setRouteKey(route.getRouteKey());
+        restored.setAuthorizationType(route.getAuthorizationType());
+        restored.setAuthorizerId(route.getAuthorizerId());
+        restored.setAuthorizationScopes(route.getAuthorizationScopes());
+        restored.setTarget(route.getTarget());
+        restored.setRouteResponseSelectionExpression(route.getRouteResponseSelectionExpression());
+        routeStore.put(routeKey(region, apiId, restored.getRouteId()), restored);
+    }
+
     public Route updateRoute(String region, String apiId, String routeId, Map<String, Object> request) {
         Route route = getRoute(region, apiId, routeId);
 
         if (request.containsKey("routeKey") && request.get("routeKey") != null) {
-            route.setRouteKey((String) request.get("routeKey"));
+            String requestedRouteKey = (String) request.get("routeKey");
+            ensureRouteKeyAvailable(region, apiId, requestedRouteKey, routeId);
+            route.setRouteKey(requestedRouteKey);
         }
         if (request.containsKey("authorizationType") && request.get("authorizationType") != null) {
             route.setAuthorizationType((String) request.get("authorizationType"));
@@ -409,6 +468,20 @@ public class ApiGatewayV2Service {
 
         routeStore.put(routeKey(region, apiId, routeId), route);
         return route;
+    }
+
+    private void ensureRouteKeyAvailable(String region, String apiId, String requestedRouteKey,
+                                         String currentRouteId) {
+        if (requestedRouteKey == null) {
+            return;
+        }
+        boolean duplicate = getRoutes(region, apiId).stream()
+                .anyMatch(existing -> !java.util.Objects.equals(existing.getRouteId(), currentRouteId)
+                        && requestedRouteKey.equals(existing.getRouteKey()));
+        if (duplicate) {
+            throw new AwsException("ConflictException",
+                    "Route with key '" + requestedRouteKey + "' already exists", 409);
+        }
     }
 
     // JSON bodies can carry non-string elements (numbers, booleans); downstream code
@@ -543,6 +616,13 @@ public class ApiGatewayV2Service {
     public void deleteIntegration(String region, String apiId, String integrationId) {
         getIntegration(region, apiId, integrationId);
         integrationStore.delete(integrationKey(region, apiId, integrationId));
+    }
+
+    /** Restores an integration with its original ID for a higher-level transactional rollback. */
+    public void restoreIntegration(String region, String apiId, Integration integration) {
+        getApi(region, apiId);
+        integrationStore.put(integrationKey(region, apiId, integration.getIntegrationId()),
+                new Integration(integration));
     }
 
     public Integration updateIntegration(String region, String apiId, String integrationId,

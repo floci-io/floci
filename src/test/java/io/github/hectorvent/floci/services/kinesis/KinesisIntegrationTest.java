@@ -1133,6 +1133,66 @@ class KinesisIntegrationTest {
             .body("Records.size()", equalTo(0));
     }
 
+    @Test
+    @Order(65)
+    void createStreamAppliesTagsFromTheRequest() {
+        // CreateStream's Tags member used to be dropped, which Terraform surfaces as a
+        // permanent tags diff: aws_kinesis_stream tags at create time, then reads back
+        // with ListTagsForStream and finds nothing.
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.CreateStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "create-with-tags", "ShardCount": 1,
+                 "Tags": {"Foo": "Bar", "gw:example": "kinesis"}}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.ListTagsForStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "create-with-tags"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Tags.size()", equalTo(2))
+            .body("Tags.find { it.Key == 'Foo' }.Value", equalTo("Bar"))
+            .body("Tags.find { it.Key == 'gw:example' }.Value", equalTo("kinesis"));
+    }
+
+    @Test
+    @Order(66)
+    void createStreamWithoutTagsLeavesTheStreamUntagged() {
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.CreateStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "create-without-tags", "ShardCount": 1}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.ListTagsForStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "create-without-tags"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Tags.size()", equalTo(0));
+    }
+
     private JsonNode decodeFirstEventStreamMessage(byte[] data) throws Exception {
         ByteBuffer buf = ByteBuffer.wrap(data);
         // Skip the first message (initial-response)

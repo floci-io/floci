@@ -34,9 +34,14 @@ import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Predicate;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
+import java.util.LinkedHashMap;
+import java.util.Set;
 
 @ApplicationScoped
-public class SecretsManagerService {
+public class SecretsManagerService implements ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(SecretsManagerService.class);
 
@@ -138,11 +143,7 @@ public class SecretsManagerService {
 
     public SecretVersion getSecretValue(String secretId, String versionId, String versionStage, String region) {
         Secret secret = resolveSecret(secretId, region);
-
-        if (secret.getDeletedDate() != null) {
-            throw new AwsException("ResourceNotFoundException",
-                    "Secrets Manager can't find the specified secret.", 400);
-        }
+        throwIfPendingDeletion(secret);
 
         SecretVersion version;
         if (versionId != null && !versionId.isEmpty()) {
@@ -178,11 +179,7 @@ public class SecretsManagerService {
                                         String secretBinary, String clientRequestToken, String region,
                                         List<String> versionStages) {
         Secret secret = resolveSecret(secretId, region);
-
-        if (secret.getDeletedDate() != null) {
-            throw new AwsException("ResourceNotFoundException",
-                    "Secrets Manager can't find the specified secret.", 400);
-        }
+        throwIfPendingDeletion(secret);
 
         if (clientRequestToken != null && (clientRequestToken.length() < 32 || clientRequestToken.length() > 64)) {
             throw new AwsException("InvalidParameterException", "ClientRequestToken must be between 32 and 64 characters long.", 400);
@@ -285,11 +282,7 @@ public class SecretsManagerService {
 
     public Secret updateSecret(String secretId, String description, String kmsKeyId, String region) {
         Secret secret = resolveSecret(secretId, region);
-
-        if (secret.getDeletedDate() != null) {
-            throw new AwsException("ResourceNotFoundException",
-                    "Secrets Manager can't find the specified secret.", 400);
-        }
+        throwIfPendingDeletion(secret);
 
         if (description != null) {
             secret.setDescription(description);
@@ -370,10 +363,7 @@ public class SecretsManagerService {
         Secret resolved = resolveSecret(secretId, region);
         synchronized (lockFor(resolved.getArn())) {
             Secret secret = resolveSecret(resolved.getArn(), region);
-            if (secret.getDeletedDate() != null) {
-                throw new AwsException("ResourceNotFoundException",
-                        "Secrets Manager can't find the specified secret.", 400);
-            }
+            throwIfPendingDeletion(secret);
 
             String existingOwner = secret.getTargetAttachmentOwner();
             if (existingOwner != null && !existingOwner.equals(attachmentOwner)) {
@@ -585,11 +575,7 @@ public class SecretsManagerService {
     public Secret rotateSecret(String secretId, String clientRequestToken, String rotationLambdaArn, Secret.RotationRules rotationRules,
                                boolean rotateImmediately, String region) {
         Secret secret = resolveSecret(secretId, region);
-
-        if (secret.getDeletedDate() != null) {
-            throw new AwsException("ResourceNotFoundException",
-                    "Secrets Manager can't find the specified secret.", 400);
-        }
+        throwIfPendingDeletion(secret);
 
         if (clientRequestToken != null && (clientRequestToken.length() < 32 || clientRequestToken.length() > 64)) {
             throw new AwsException("InvalidParameterException", "ClientRequestToken must be between 32 and 64 characters long.", 400);
@@ -838,9 +824,7 @@ public class SecretsManagerService {
         }
 
         Secret secret = resolveSecret(secretId, region);
-        if (secret.getDeletedDate() != null) {
-            throw new AwsException("ResourceNotFoundException", "Secrets Manager can't find the specified secret.", 400);
-        }
+        throwIfPendingDeletion(secret);
 
         SecretVersion versionByStage = findVersionByStage(secret, versionStage);
         String currentVersionId = versionByStage != null
@@ -934,6 +918,22 @@ public class SecretsManagerService {
         }
     }
 
+    /**
+     * A secret found by {@link #resolveSecret} with {@code deletedDate} set is on the
+     * recovery-window path (still in {@code store}, still restorable) - {@link
+     * #deleteSecret} force-deletes by removing the entry from {@code store} outright, so a
+     * fully, permanently gone secret never reaches this check; {@code resolveSecret} throws
+     * ResourceNotFoundException for that case on its own. Real AWS's error for the
+     * recoverable case is InvalidRequestException, matching what {@code batchGetSecretValue}
+     * already does correctly - the other call sites threw ResourceNotFoundException instead.
+     */
+    private void throwIfPendingDeletion(Secret secret) {
+        if (secret.getDeletedDate() != null) {
+            throw new AwsException("InvalidRequestException",
+                    "You can't perform this operation on the secret because it was marked for deletion.", 400);
+        }
+    }
+
     private Secret resolveSecret(String secretId, String region) {
         if (secretId.startsWith("arn:")) {
             // 1. Exact full-ARN match
@@ -999,5 +999,36 @@ public class SecretsManagerService {
             sb.append(ALPHABET.charAt(rng.nextInt(ALPHABET.length())));
         }
         return sb.toString();
+    }
+
+    // ─── Resource Explorer 2 ───────────────────────────────────────────────────
+
+    @Override
+    public List<ExplorerResource> getResources() {
+        List<ExplorerResource> resources = new ArrayList<>();
+        for (Secret secret : store.scan(k -> true)) {
+            String arn = secret.getArn();
+            if (arn == null) {
+                continue;
+            }
+            AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+            Map<String, String> tags = new LinkedHashMap<>();
+            if (secret.getTags() != null) {
+                for (Secret.Tag tag : secret.getTags()) {
+                    tags.put(tag.key(), tag.value() != null ? tag.value() : "");
+                }
+            }
+            resources.add(new ExplorerResource(
+                    arn, "secretsmanager:secret", "secretsmanager",
+                    parsed.region(), parsed.accountId(),
+                    secret.getCreatedDate() != null ? secret.getCreatedDate() : Instant.now(),
+                    tags));
+        }
+        return resources;
+    }
+
+    @Override
+    public Set<SupportedResourceType> getSupportedResourceTypes() {
+        return Set.of(new SupportedResourceType("secretsmanager:secret", "secretsmanager", true));
     }
 }

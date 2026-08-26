@@ -38,6 +38,14 @@ services:
     doc: docs/services/docdb.md
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/docdb/DocDbQueryHandler.java, mode: switch }
+  - service: efs
+    doc: docs/services/efs.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/efs/EfsController.java, mode: rest }
+  - service: organizations
+    doc: docs/services/organizations.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/organizations/OrganizationsJsonHandler.java, mode: switch }
   - service: elasticache
     doc: docs/services/elasticache.md
     sources:
@@ -54,6 +62,19 @@ services:
     doc: docs/services/firehose.md
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/firehose/FirehoseJsonHandler.java, mode: switch }
+  - service: resource-explorer-2
+    doc: docs/services/resource-explorer.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/resourceexplorer2/ResourceExplorer2Controller.java, mode: rest }
+      - { path: src/main/java/io/github/hectorvent/floci/core/common/SharedTagsController.java, mode: rest }
+    rename_actions:
+      ListTags: ListTagsForResource
+      TagResourcePost: TagResource
+    exclude_actions:
+      - ListTagsByQuery
+      - TagResourceByBody
+      - TagResourcePut
+      - UntagResourceByQuery
   - service: fis
     doc: docs/services/fis.md
     sources:

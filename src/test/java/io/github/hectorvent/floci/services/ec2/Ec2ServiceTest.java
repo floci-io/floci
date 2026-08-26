@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.services.ec2.model.IpPermission;
 import io.github.hectorvent.floci.services.ec2.model.Ipv6Range;
 import io.github.hectorvent.floci.services.ec2.model.SecurityGroupRule;
 import io.github.hectorvent.floci.services.ec2.model.UserIdGroupPair;
+import io.github.hectorvent.floci.services.ec2.model.InstanceState;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
 import io.github.hectorvent.floci.services.ec2.model.ManagedPrefixList;
 import io.github.hectorvent.floci.services.ec2.model.SecurityGroupRule;
@@ -39,9 +40,9 @@ import io.github.hectorvent.floci.services.ec2.model.Vpc;
 import io.github.hectorvent.floci.services.ec2.model.VpcEndpoint;
 import io.github.hectorvent.floci.services.ec2.model.Volume;
 import io.github.hectorvent.floci.services.ec2.model.VolumeAttachment;
-import io.github.hectorvent.floci.services.ec2.model.InstanceState;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -78,6 +79,40 @@ class Ec2ServiceTest {
         service.terminateInstances("us-east-1", List.of(instanceId));
         assertFalse(service.isInstanceContainerRunning(instanceId));
         verifyNoInteractions(containerManager);
+    }
+
+    @Test
+    void awaitContainerLaunchReportsTerminatedContainer() {
+        Ec2Service service = new Ec2Service(mockConfig(false), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        Instance instance = new Instance();
+        instance.setInstanceId("i-terminated");
+        instance.setState(InstanceState.terminated());
+
+        AwsException error = assertThrows(AwsException.class, () -> service.awaitContainerLaunch(instance));
+
+        assertEquals("InternalError", error.getErrorCode());
+        assertTrue(error.getMessage().contains("container terminated during launch"));
+    }
+
+    @Test
+    void awaitContainerLaunchTimesOutWhileInstanceIsPending() {
+        Ec2ContainerManager containerManager = mock(Ec2ContainerManager.class);
+        Ec2Service service = new Ec2Service(mockConfig(false), containerManager,
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        Instance instance = new Instance();
+        instance.setInstanceId("i-pending");
+        instance.setState(InstanceState.pending());
+        when(containerManager.cancelLaunch(instance)).thenReturn(true);
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.awaitContainerLaunch(instance, Duration.ZERO));
+
+        assertEquals("InternalError", error.getErrorCode());
+        assertTrue(error.getMessage().contains("did not reach running state before the launch timeout"));
+        verify(containerManager).cancelLaunch(instance);
     }
 
     @Test
@@ -354,10 +389,10 @@ class Ec2ServiceTest {
                 Map.of("vpc-id", List.of(Ec2Service.defaultVpcId("us-east-1")))).getFirst().getSubnetId();
         VpcEndpoint endpoint = service.createVpcEndpoint("us-east-1", Ec2Service.defaultVpcId("us-east-1"),
                 "com.amazonaws.us-east-1.s3", "Interface",
-                List.of(), List.of(subnetId), List.of(), null, List.of());
+                List.of(), List.of(subnetId), List.of(), null, null, List.of());
         service.createVpcEndpoint("us-east-1", Ec2Service.defaultVpcId("us-east-1"),
                 "com.amazonaws.us-east-1.dynamodb", "Gateway",
-                List.of(), List.of(), List.of(), null, List.of());
+                List.of(), List.of(), List.of(), null, null, List.of());
 
         List<NetworkInterface> enis = service.endpointNetworkInterfaces("us-east-1");
 

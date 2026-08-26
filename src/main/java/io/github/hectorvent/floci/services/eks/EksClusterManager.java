@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.eks;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsRegions;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
@@ -60,6 +61,7 @@ public class EksClusterManager {
     private final DockerHostResolver dockerHostResolver;
     private final EcrRegistryManager ecrRegistryManager;
     private final EmulatorConfig config;
+    private final RegionResolver regionResolver;
 
     @Inject
     public EksClusterManager(ContainerBuilder containerBuilder,
@@ -68,7 +70,8 @@ public class EksClusterManager {
                              PortAllocator portAllocator,
                              DockerHostResolver dockerHostResolver,
                              EcrRegistryManager ecrRegistryManager,
-                             EmulatorConfig config) {
+                             EmulatorConfig config,
+                             RegionResolver regionResolver) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.containerDetector = containerDetector;
@@ -76,6 +79,7 @@ public class EksClusterManager {
         this.dockerHostResolver = dockerHostResolver;
         this.ecrRegistryManager = ecrRegistryManager;
         this.config = config;
+        this.regionResolver = regionResolver;
     }
 
     /**
@@ -120,7 +124,9 @@ public class EksClusterManager {
                 .withNamedVolume(volumeName, "/var/lib/rancher/k3s")
                 .withDockerNetwork(config.services().eks().dockerNetwork())
                 .withPrivileged(true)
-                .withLogRotation();
+                .withLogRotation()
+                .withLabels(ContainerStorageHelper.resourceIdentityLabels(
+                        "eks", cluster.getName(), regionResolver.getAccountId(), regionResolver.getDefaultRegion()));
 
         // Wire a token-authentication webhook so `aws eks get-token` bearer tokens are validated by
         // Floci and mapped to cluster-admin. The k3s API server POSTs a TokenReview to Floci's

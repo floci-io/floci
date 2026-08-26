@@ -105,6 +105,31 @@ public final class ContainerStorageHelper {
         return labels;
     }
 
+    /**
+     * Labels tying a container to the specific AWS resource it emulates: {@code io.floci}
+     * (cloud provider, for multi-cloud discovery), {@code io.floci.service},
+     * {@code io.floci.resource-id}, {@code io.floci.account}, and {@code io.floci.region}.
+     * Merged into a spec's own labels (never into {@link #defaultLabels}), so callers pass
+     * this to {@link ContainerBuilder.Builder#withLabels}. A blank or null value omits that
+     * key entirely, e.g. ECR's shared registry container has no per-resource id.
+     */
+    public static Map<String, String> resourceIdentityLabels(
+            String service, String resourceId, String accountId, String region) {
+        Map<String, String> labels = new LinkedHashMap<>();
+        labels.put("io.floci", CLOUD);
+        putIfNotBlank(labels, "io.floci.service", service);
+        putIfNotBlank(labels, "io.floci.resource-id", resourceId);
+        putIfNotBlank(labels, "io.floci.account", accountId);
+        putIfNotBlank(labels, "io.floci.region", region);
+        return labels;
+    }
+
+    private static void putIfNotBlank(Map<String, String> labels, String key, String value) {
+        if (value != null && !value.isBlank()) {
+            labels.put(key, value);
+        }
+    }
+
     public static Path hostResourcePath(EmulatorConfig config, String service, String resourceId) {
         String namespace = resourceNamespace(config);
         Path base = Path.of(config.storage().hostPersistentPath());

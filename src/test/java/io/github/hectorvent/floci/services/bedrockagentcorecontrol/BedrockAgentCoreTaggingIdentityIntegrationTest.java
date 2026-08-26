@@ -139,10 +139,52 @@ class BedrockAgentCoreTaggingIdentityIntegrationTest {
 
     @Test
     @Order(6)
-    void taggingUnsupportedResourceReturns400() {
-        // Memory/endpoint ARNs are not taggable (AWS: runtime + gateway only).
+    void memoryTagRoundTrip() {
+        // Memories are AWS-taggable; CreateMemory accepts a tags map.
+        String memArn = given().contentType("application/json")
+                .body("{\"name\":\"tagMem\",\"eventExpiryDuration\":30,\"tags\":{\"team\":\"core\"}}")
+                .when().post("/memories/create")
+                .then().statusCode(202)
+                .extract().path("memory.arn");
+
+        // tags provided at create time are retained
+        given().when().get("/tags/" + memArn)
+                .then().statusCode(200).body("tags.team", equalTo("core"));
+
+        given().contentType("application/json").body("{\"tags\":{\"env\":\"prod\"}}")
+                .when().post("/tags/" + memArn).then().statusCode(204);
+        given().when().get("/tags/" + memArn)
+                .then().statusCode(200)
+                .body("tags.env", equalTo("prod"))
+                .body("tags.team", equalTo("core"));
+
+        given().when().delete("/tags/" + memArn + "?tagKeys=env").then().statusCode(204);
+        given().when().get("/tags/" + memArn)
+                .then().statusCode(200)
+                .body("tags.env", nullValue())
+                .body("tags.team", equalTo("core"));
+
+        // The identity guard covers memories too: a foreign-account ARN must not resolve.
+        String foreignAccount = memArn.replace(":000000000000:", ":111111111111:");
+        given().when().get("/tags/" + foreignAccount).then().statusCode(404);
+    }
+
+    @Test
+    @Order(6)
+    void taggingNonexistentMemoryReturns404() {
         given().contentType("application/json").body("{\"tags\":{\"x\":\"y\"}}")
-                .when().post("/tags/arn:aws:bedrock-agentcore:us-east-1:000000000000:memory/mymem-abc1234567")
+                .when().post("/tags/arn:aws:bedrock-agentcore:us-east-1:000000000000:memory/nosuchmem-abc1234567")
+                .then().statusCode(404);
+    }
+
+    @Test
+    @Order(7)
+    void taggingUnsupportedResourceReturns400() {
+        // Workload identity ARNs are not taggable (AWS: runtime, gateway, memory, and the
+        // built-in tool resources only).
+        given().contentType("application/json").body("{\"tags\":{\"x\":\"y\"}}")
+                .when().post("/tags/arn:aws:bedrock-agentcore:us-east-1:000000000000:"
+                        + "workload-identity-directory/default/workload-identity/wid_test_1")
                 .then().statusCode(400);
     }
 }

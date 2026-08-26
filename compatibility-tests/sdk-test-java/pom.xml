@@ -142,6 +142,10 @@
         </dependency>
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
+            <artifactId>signin</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
             <artifactId>kafka</artifactId>
         </dependency>
         <dependency>
@@ -212,6 +216,11 @@
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>cloudhsmv2</artifactId>
+        </dependency>
+        <!-- Organizations client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>organizations</artifactId>
         </dependency>
         <!-- Cloud Map (servicediscovery) client -->
         <dependency>
@@ -378,6 +387,20 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>backup</artifactId>
         </dependency>
+        <!-- Resource Explorer 2 client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>resourceexplorer2</artifactId>
+        </dependency>
+        <!-- SSO credential support (needed for FLOCI_TARGET=aws with SSO profiles) -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>sso</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>ssooidc</artifactId>
+        </dependency>
         <!-- AppSync client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
@@ -456,6 +479,11 @@
             <artifactId>snappy-java</artifactId>
             <version>1.1.10.8</version>
             <scope>test</scope>
+        </dependency>
+        <!-- EFS client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>efs</artifactId>
         </dependency>
     </dependencies>
 

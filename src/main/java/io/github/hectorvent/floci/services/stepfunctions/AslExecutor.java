@@ -28,6 +28,8 @@ import io.github.hectorvent.floci.services.s3.model.S3Object;
 import io.github.hectorvent.floci.services.sqs.SqsJsonHandler;
 import io.github.hectorvent.floci.services.stepfunctions.model.Execution;
 import io.github.hectorvent.floci.services.stepfunctions.model.HistoryEvent;
+import io.github.hectorvent.floci.services.stepfunctions.model.MockedResponseStep;
+import io.github.hectorvent.floci.services.stepfunctions.model.MockedTestCase;
 import io.github.hectorvent.floci.services.stepfunctions.model.StateMachine;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -71,10 +73,12 @@ import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiConsumer;
@@ -153,6 +157,7 @@ public class AslExecutor {
     private final Instance<StepFunctionsService> sfnService;
     private final WebClient webClient;
     private final EmulatorConfig config;
+    private final Map<String, MockedTestCase> activeMocks = new ConcurrentHashMap<>();
     private final ExecutorService executor = Executors.newCachedThreadPool(r -> {
         Thread t = new Thread(r, "sfn-executor");
         t.setDaemon(true);
@@ -200,6 +205,18 @@ public class AslExecutor {
      */
     public void executeAsync(StateMachine sm, Execution exec, List<HistoryEvent> history,
                              BiConsumer<Execution, List<HistoryEvent>> onUpdate) {
+        executeAsync(sm, exec, history, null, onUpdate);
+    }
+
+    /**
+     * Variant of {@link #executeAsync(StateMachine, Execution, List, BiConsumer)} that runs the
+     * execution with a mock test case: Task states named in the test case return their mocked
+     * response instead of calling the integrated service.
+     */
+    public void executeAsync(StateMachine sm, Execution exec, List<HistoryEvent> history,
+                             MockedTestCase mockedTestCase,
+                             BiConsumer<Execution, List<HistoryEvent>> onUpdate) {
+        registerMocks(exec, mockedTestCase);
         executor.submit(() -> runUnderExecutionAccount(sm, () -> doExecute(sm, exec, history, onUpdate)));
     }
 
@@ -208,6 +225,17 @@ public class AslExecutor {
      */
     public void executeSync(StateMachine sm, Execution exec, List<HistoryEvent> history,
                             BiConsumer<Execution, List<HistoryEvent>> onUpdate) {
+        executeSync(sm, exec, history, null, onUpdate);
+    }
+
+    /**
+     * Variant of {@link #executeSync(StateMachine, Execution, List, BiConsumer)} that runs the
+     * execution with a mock test case.
+     */
+    public void executeSync(StateMachine sm, Execution exec, List<HistoryEvent> history,
+                            MockedTestCase mockedTestCase,
+                            BiConsumer<Execution, List<HistoryEvent>> onUpdate) {
+        registerMocks(exec, mockedTestCase);
         try {
             Future<?> f = executor.submit(() ->
                     runUnderExecutionAccount(sm, () -> doExecute(sm, exec, history, onUpdate)));
@@ -311,9 +339,9 @@ public class AslExecutor {
                 // Update per-state context fields
                 updateStateContext(execContext, currentStateName);
 
-                boolean jsonata = isJsonata(stateDef, topLevelQueryLanguage);
+                var jsonata = isJsonata(stateDef, topLevelQueryLanguage);
                 try {
-                    StateResult stateResult = executeState(currentStateName, type, stateDef, currentInput,
+                    var stateResult = executeStateWithRetry(currentStateName, type, stateDef, currentInput,
                             history, eventId, sm, jsonata, topLevelQueryLanguage, execContext, variables);
                     addEvent(history, eventId, stateExitedEventType(type), eventId.get() - 1,
                             Map.of("name", currentStateName, "output", stateResult.output().toString()));
@@ -370,16 +398,103 @@ public class AslExecutor {
             exec.setStopDate(System.currentTimeMillis() / 1000.0);
             exec.setStatus("FAILED");
             onUpdate.accept(exec, history);
+        } finally {
+            activeMocks.remove(exec.getExecutionArn());
+        }
+    }
+
+    private void registerMocks(Execution exec, MockedTestCase mockedTestCase) {
+        if (mockedTestCase != null) {
+            activeMocks.put(exec.getExecutionArn(), mockedTestCase);
+        }
+    }
+
+    /**
+     * Executes a state, honoring its {@code Retry} policy: a {@code FailStateException} matched by
+     * a retrier re-runs the state after the retrier's backoff until its {@code MaxAttempts} are
+     * used up. Errors that no retrier matches (or that exhaust their retrier) propagate to the
+     * caller's Catch handling, preserving Retry-before-Catch order.
+     */
+    private StateResult executeStateWithRetry(String name, String type, JsonNode stateDef, JsonNode input,
+                                              List<HistoryEvent> history, AtomicLong eventId, StateMachine sm,
+                                              boolean jsonata, String topLevelQueryLanguage, JsonNode context,
+                                              ObjectNode variables) throws Exception {
+        var retriers = stateDef.path("Retry");
+        var attemptsPerRetrier = new HashMap<Integer, Integer>();
+        var attempt = 0;
+        while (true) {
+            try {
+                return executeState(name, type, stateDef, input, history, eventId, sm, jsonata,
+                        topLevelQueryLanguage, context, variables, attempt);
+            } catch (FailStateException e) {
+                var retrierIndex = findMatchingRetrier(retriers, e);
+                if (retrierIndex < 0) {
+                    throw e;
+                }
+                var retrier = retriers.get(retrierIndex);
+                var attemptsUsed = attemptsPerRetrier.merge(retrierIndex, 1, Integer::sum);
+                if (attemptsUsed > retrier.path("MaxAttempts").asInt(3)) {
+                    throw e;
+                }
+                sleepBeforeRetry(retrier, attemptsUsed);
+                attempt++;
+                updateRetryCount(context, attempt);
+            }
+        }
+    }
+
+    private int findMatchingRetrier(JsonNode retriers, FailStateException failure) {
+        if (!retriers.isArray()) {
+            return -1;
+        }
+        var error = failure.error != null ? failure.error : "States.Runtime";
+        for (var i = 0; i < retriers.size(); i++) {
+            if (catchMatches(retriers.get(i), error)) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private void sleepBeforeRetry(JsonNode retrier, int attemptsUsed) throws InterruptedException {
+        var delaySeconds = retryDelaySeconds(retrier, attemptsUsed, ThreadLocalRandom.current().nextDouble());
+        if (delaySeconds > 0) {
+            Thread.sleep((long) (delaySeconds * 1000));
+        }
+    }
+
+    /**
+     * Computes the delay before a retry attempt. {@code random} is a value in [0, 1) used when
+     * the retrier declares {@code JitterStrategy: FULL}, which draws the delay uniformly between
+     * zero and the computed delay. Jitter applies after the caps, matching AWS.
+     */
+    static double retryDelaySeconds(JsonNode retrier, int attemptsUsed, double random) {
+        var interval = retrier.path("IntervalSeconds").asDouble(1.0);
+        var backoffRate = retrier.path("BackoffRate").asDouble(2.0);
+        var delaySeconds = interval * Math.pow(backoffRate, attemptsUsed - 1.0);
+        var maxDelay = retrier.path("MaxDelaySeconds").asDouble(MAX_WAIT_SECONDS);
+        // Like the Wait state, cap the delay at MAX_WAIT_SECONDS to keep emulated runs fast.
+        delaySeconds = Math.min(delaySeconds, Math.min(maxDelay, MAX_WAIT_SECONDS));
+        if ("FULL".equals(retrier.path("JitterStrategy").asText(null))) {
+            delaySeconds *= random;
+        }
+        return delaySeconds;
+    }
+
+    private void updateRetryCount(JsonNode context, int retryCount) {
+        if (context.get("State") instanceof ObjectNode state) {
+            state.put("RetryCount", retryCount);
         }
     }
 
     private StateResult executeState(String name, String type, JsonNode stateDef, JsonNode input,
                                      List<HistoryEvent> history, AtomicLong eventId, StateMachine sm,
                                      boolean jsonata, String topLevelQueryLanguage, JsonNode context,
-                                     ObjectNode variables) throws Exception {
+                                     ObjectNode variables, int attempt) throws Exception {
         return switch (type) {
             case "Pass" -> executePassState(stateDef, input, jsonata, context, variables);
-            case "Task" -> executeTaskState(name, stateDef, input, history, eventId, sm, jsonata, context, variables);
+            case "Task" -> executeTaskState(name, stateDef, input, history, eventId, sm, jsonata, context,
+                    variables, attempt);
             case "Choice" -> executeChoiceState(stateDef, input, jsonata, context, variables);
             case "Wait" -> executeWaitState(stateDef, input, jsonata, context, variables);
             case "Succeed" -> executeSucceedState(stateDef, input, jsonata, context, variables);
@@ -417,14 +532,18 @@ public class AslExecutor {
 
     private StateResult executeTaskState(String stateName, JsonNode stateDef, JsonNode input,
                                          List<HistoryEvent> history, AtomicLong eventId, StateMachine sm,
-                                         boolean jsonata, JsonNode context, ObjectNode variables) throws Exception {
-        String resource = stateDef.path("Resource").asText();
-        boolean isWaitForToken = resource.endsWith(".waitForTaskToken");
-        String effectiveResource = isWaitForToken
+                                         boolean jsonata, JsonNode context, ObjectNode variables,
+                                         int attempt) throws Exception {
+        var resource = stateDef.path("Resource").asText();
+        var isWaitForToken = resource.endsWith(".waitForTaskToken");
+        var effectiveResource = isWaitForToken
                 ? resource.substring(0, resource.length() - ".waitForTaskToken".length())
                 : resource;
-        boolean isActivity = isActivityArn(effectiveResource);
-        boolean needsToken = isWaitForToken || isActivity;
+        var isActivity = isActivityArn(effectiveResource);
+        var mockedSteps = findMockedResponses(context, stateName);
+        // A mocked task never calls the integrated service, so it neither registers a task token
+        // nor waits for one; the mocked response stands in for the whole interaction.
+        var needsToken = mockedSteps == null && (isWaitForToken || isActivity);
 
         String taskToken = null;
         CompletableFuture<JsonNode> tokenFuture = null;
@@ -436,18 +555,22 @@ public class AslExecutor {
 
         JsonNode taskResult;
         if (jsonata) {
-            JsonNode effectiveInput = input;
+            var effectiveInput = input;
             if (stateDef.has("Arguments")) {
-                JsonNode statesVar = buildStatesVar(input, null, context);
+                var statesVar = buildStatesVar(input, null, context);
                 effectiveInput = jsonataEvaluator.resolveTemplate(stateDef.get("Arguments"), statesVar, variables);
             }
-            taskResult = invokeResource(effectiveResource, effectiveInput, sm, taskToken);
+            taskResult = mockedSteps != null
+                    ? mockedTaskResult(mockedSteps, stateName, attempt)
+                    : invokeResource(effectiveResource, effectiveInput, sm, taskToken);
         } else {
-            JsonNode effectiveInput = applyInputPath(stateDef, input);
+            var effectiveInput = applyInputPath(stateDef, input);
             if (stateDef.has("Parameters")) {
                 effectiveInput = resolveParameters(stateDef.get("Parameters"), effectiveInput, context);
             }
-            taskResult = invokeResource(effectiveResource, effectiveInput, sm, taskToken);
+            taskResult = mockedSteps != null
+                    ? mockedTaskResult(mockedSteps, stateName, attempt)
+                    : invokeResource(effectiveResource, effectiveInput, sm, taskToken);
         }
 
         if (tokenFuture != null) {
@@ -466,6 +589,34 @@ public class AslExecutor {
             output = applyOutputPath(stateDef, input, output);
             return new StateResult(output, stateDef.path("Next").asText(null));
         }
+    }
+
+    private List<MockedResponseStep> findMockedResponses(JsonNode context, String stateName) {
+        if (activeMocks.isEmpty()) {
+            return null;
+        }
+        var executionArn = context.path("Execution").path("Id").asText(null);
+        if (executionArn == null) {
+            return null;
+        }
+        var testCase = activeMocks.get(executionArn);
+        return testCase != null ? testCase.stateResponses().get(stateName) : null;
+    }
+
+    private JsonNode mockedTaskResult(List<MockedResponseStep> steps, String stateName, int attempt) {
+        for (var step : steps) {
+            if (step.covers(attempt)) {
+                if (step.isThrow()) {
+                    // The mocked Error and Cause must reach Retry/Catch unchanged; routing them
+                    // through integration error translation would rewrite the error name that
+                    // catchers match on.
+                    throw new FailStateException(step.errorName(), step.errorCause());
+                }
+                return step.returnResult().deepCopy();
+            }
+        }
+        throw new FailStateException("States.Runtime",
+                "No mocked response defined for attempt " + attempt + " of state '" + stateName + "'");
     }
 
     private JsonNode awaitToken(CompletableFuture<JsonNode> future, JsonNode stateDef) throws Exception {
@@ -540,7 +691,10 @@ public class AslExecutor {
             String region = extractRegionFromArn(sm.getStateMachineArn());
             LambdaFunction fn = functionStore.get(region, functionName).orElse(null);
             if (fn == null) {
-                throw new RuntimeException("Lambda function not found: " + functionName);
+                // A missing function is a task failure on AWS, so it must stay reachable for
+                // Retry and Catch instead of surfacing as States.Runtime.
+                throw new FailStateException("Lambda.ResourceNotFoundException",
+                        "Lambda function not found: " + functionName);
             }
 
             String payloadStr = objectMapper.writeValueAsString(lambdaPayload);
@@ -1443,13 +1597,16 @@ public class AslExecutor {
             // Each branch gets an isolated copy of the current variables: assignments inside a
             // branch are scoped to that branch and do not leak back to the parent after the state.
             ObjectNode branchVariables = variables.deepCopy();
+            // Each branch also gets its own copy of the context object so State.RetryCount and
+            // Task.Token writes cannot race across concurrent branches.
+            var branchContext = ((ObjectNode) context).deepCopy();
 
             // Run each branch on its own worker thread under the execution's account: the request
             // scope is thread-bound, so without this a branch's Task integrations would resolve to
             // the default account rather than the execution's.
             futures.add(executor.submit(() -> callUnderExecutionAccount(sm,
-                    () -> executeBranch(startAt, branchStates, capturedInput, sm, topLevelQueryLanguage, context,
-                            branchVariables))));
+                    () -> executeBranch(startAt, branchStates, capturedInput, sm, topLevelQueryLanguage,
+                            branchContext, branchVariables))));
         }
 
         int timeoutSeconds = stateDef.path("TimeoutSeconds").asInt(0);
@@ -1475,6 +1632,16 @@ public class AslExecutor {
         } catch (InterruptedException e) {
             futures.forEach(future -> future.cancel(true));
             Thread.currentThread().interrupt();
+            throw e;
+        } catch (ExecutionException e) {
+            futures.forEach(future -> future.cancel(true));
+            // Unwrap so a branch's FailStateException reaches the Parallel state's own
+            // Retry and Catch handling instead of surfacing as States.Runtime. An Error
+            // cause stays wrapped so the execution-level Exception handlers still
+            // publish a terminal FAILED update instead of leaving the execution RUNNING.
+            if (e.getCause() instanceof Exception exception) {
+                throw exception;
+            }
             throw e;
         } catch (Exception | Error e) {
             futures.forEach(future -> future.cancel(true));
@@ -1997,9 +2164,10 @@ public class AslExecutor {
             }
             String type = stateDef.path("Type").asText();
             boolean stateJsonata = isJsonata(stateDef, topLevelQueryLanguage);
+            updateStateContext(context, currentState);
             StateResult result;
             try {
-                result = executeState(currentState, type, stateDef, currentInput, ignored, eventId, sm,
+                result = executeStateWithRetry(currentState, type, stateDef, currentInput, ignored, eventId, sm,
                         stateJsonata, topLevelQueryLanguage, context, variables);
             } catch (FailStateException e) {
                 StateResult caught = handleCatch(stateDef, currentInput, e, stateJsonata, context, variables);
@@ -2985,22 +3153,25 @@ public class AslExecutor {
     }
 
     private boolean catchMatches(JsonNode catcher, String error) {
-        JsonNode errors = catcher.path("ErrorEquals");
+        var errors = catcher.path("ErrorEquals");
         if (!errors.isArray()) {
             return false;
         }
+        // States.Runtime is never retried or caught, even when named explicitly in
+        // ErrorEquals. Verified against real AWS: the execution fails immediately.
+        if ("States.Runtime".equals(error)) {
+            return false;
+        }
         for (JsonNode candidate : errors) {
-            String expected = candidate.asText();
+            var expected = candidate.asText();
             if (expected.equals(error)) {
                 return true;
             }
             if ("States.TaskFailed".equals(expected)
-                    && !"States.Timeout".equals(error)
-                    && !"States.Runtime".equals(error)) {
+                    && !"States.Timeout".equals(error)) {
                 return true;
             }
             if ("States.ALL".equals(expected)
-                    && !"States.Runtime".equals(error)
                     && !"States.DataLimitExceeded".equals(error)) {
                 return true;
             }

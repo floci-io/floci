@@ -268,6 +268,7 @@ public interface EmulatorConfig {
         BackupStorageConfig backup();
         FisStorageConfig fis();
         CloudFrontStorageConfig cloudfront();
+        ResourceExplorer2StorageConfig resourceexplorer2();
         AppSyncStorageConfig appsync();
         BatchStorageConfig batch();
         LightsailStorageConfig lightsail();
@@ -286,6 +287,7 @@ public interface EmulatorConfig {
         GuardDutyStorageConfig guardduty();
         EmrServerlessStorageConfig emrserverless();
         LakeFormationStorageConfig lakeformation();
+        EfsStorageConfig efs();
     }
 
     interface SsmStorageConfig {
@@ -417,6 +419,13 @@ public interface EmulatorConfig {
         Optional<String> mode();
     }
 
+    interface ResourceExplorer2StorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+
     interface AppSyncStorageConfig {
         Optional<String> mode();
 
@@ -535,6 +544,13 @@ public interface EmulatorConfig {
         @WithDefault("5000")
         long flushIntervalMs();
     }
+    interface EfsStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+  
     interface CodeDeployStorageConfig {
         Optional<String> mode();
 
@@ -631,6 +647,7 @@ public interface EmulatorConfig {
         ConfigServiceConfig configservice();
         CloudTrailServiceConfig cloudtrail();
         CloudControlServiceConfig cloudcontrol();
+        ResourceExplorer2ServiceConfig resourceexplorer2();
         CloudFrontServiceConfig cloudfront();
         AppSyncServiceConfig appsync();
         BatchServiceConfig batch();
@@ -641,10 +658,12 @@ public interface EmulatorConfig {
         IotServiceConfig iot();
         IotDataServiceConfig iotdata();
         CloudHsmV2ServiceConfig cloudhsmv2();
+        OrganizationsServiceConfig organizations();
         RumServiceConfig rum();
         GuardDutyServiceConfig guardduty();
         EmrServerlessServiceConfig emrserverless();
         LakeFormationServiceConfig lakeformation();
+        EfsServiceConfig efs();
     }
 
     interface IotServiceConfig {
@@ -692,6 +711,12 @@ public interface EmulatorConfig {
         @WithDefault("true")
         boolean enabled();
     }
+  
+    interface EfsServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
     interface LightsailServiceConfig {
         @WithDefault("true")
         boolean enabled();
@@ -760,6 +785,11 @@ public interface EmulatorConfig {
          *  default here is 60s so dev/CI feedback loops stay fast. */
         @WithDefault("60")
         int flushIntervalSeconds();
+    }
+
+    interface ResourceExplorer2ServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
     }
 
     interface AutoScalingServiceConfig {
@@ -1173,6 +1203,16 @@ public interface EmulatorConfig {
         /** Allows invoking plain HTTP endpoints. By default, AWS only allows HTTPS. */
         @WithDefault("true")
         boolean allowPlaintextHttp();
+
+        /**
+         * Path to a Step Functions Local compatible mock configuration file
+         * ({@code MockConfigFile.json}). When set, {@code StartExecution} on
+         * {@code <stateMachineArn>#<testCaseName>} runs the state machine with that test
+         * case's mocked service integration responses. The main application.yml defaults
+         * this to the {@code SFN_MOCK_CONFIG} environment variable for drop-in
+         * compatibility with Step Functions Local.
+         */
+        Optional<String> mockConfigFile();
     }
 
     interface SwfServiceConfig {
@@ -1213,6 +1253,11 @@ public interface EmulatorConfig {
     }
 
     interface CloudHsmV2ServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface OrganizationsServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }

@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ec2;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
@@ -19,6 +20,7 @@ import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Function;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
@@ -30,6 +32,9 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.ContainerTeardown;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -94,7 +99,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 @ApplicationScoped
-public class Ec2Service implements ContainerTeardown {
+public class Ec2Service implements ContainerTeardown, ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(Ec2Service.class);
     private static final DateTimeFormatter ISO_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'")
@@ -111,6 +116,10 @@ public class Ec2Service implements ContainerTeardown {
             Pattern.compile("^tgw-rtb-[0-9a-f]{8}([0-9a-f]{9})?$");
     private static final Pattern TRANSIT_GATEWAY_ATTACHMENT_ID_PATTERN =
             Pattern.compile("^tgw-attach-[0-9a-f]{8}([0-9a-f]{9})?$");
+    // A first launch may need to pull a large AMI-backed image. Keep a finite CloudFormation
+    // bound, but allow enough time for that legitimate cold-start path before cancellation.
+    private static final Duration CONTAINER_LAUNCH_TIMEOUT = Duration.ofMinutes(5);
+    private static final long CONTAINER_LAUNCH_POLL_MILLIS = 50;
 
     private final String accountId;
     private final EmulatorConfig config;
@@ -2232,6 +2241,54 @@ public class Ec2Service implements ContainerTeardown {
     }
 
     /**
+     * Waits for a container-backed EC2 instance to reach a terminal launch state.
+     * CloudFormation uses this to avoid reporting a stack success when the asynchronous
+     * Docker launch has already failed. Mock-mode instances do not launch containers.
+     * On timeout, cancellation marks the launch terminal and the container manager prevents any
+     * in-flight Docker phase from later publishing a running instance.
+     *
+     * @param instance the instance returned by {@link #runInstances}
+     * @throws AwsException if the container terminates or does not launch before the timeout
+     */
+    public void awaitContainerLaunch(Instance instance) {
+        awaitContainerLaunch(instance, CONTAINER_LAUNCH_TIMEOUT);
+    }
+
+    void awaitContainerLaunch(Instance instance, Duration timeout) {
+        if (config.services().ec2().mock()) {
+            return;
+        }
+
+        long deadline = System.nanoTime() + timeout.toNanos();
+        while (true) {
+            String state = instance.getState() != null ? instance.getState().getName() : null;
+            if ("running".equals(state)) {
+                return;
+            }
+            if ("terminated".equals(state)) {
+                throw launchFailure(instance, "its container terminated during launch");
+            }
+            if (System.nanoTime() - deadline >= 0) {
+                if (containerManager.cancelLaunch(instance)) {
+                    throw launchFailure(instance, "it did not reach running state before the launch timeout");
+                }
+            }
+            try {
+                Thread.sleep(CONTAINER_LAUNCH_POLL_MILLIS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new AwsException("InternalError", "Interrupted while waiting for EC2 instance "
+                        + instance.getInstanceId() + " to launch", 500);
+            }
+        }
+    }
+
+    private static AwsException launchFailure(Instance instance, String reason) {
+        return new AwsException("InternalError", "EC2 instance " + instance.getInstanceId() + " failed to launch because "
+                + reason, 500);
+    }
+
+    /**
      * Resolves the TCP ingress ports Floci should publish on the host for an instance, aggregated
      * across its attached security groups. Empty when publishing is disabled or nothing is opened.
      */
@@ -2681,7 +2738,8 @@ public class Ec2Service implements ContainerTeardown {
 
     public VpcEndpoint createVpcEndpoint(String region, String vpcId, String serviceName, String endpointType,
                                          List<String> routeTableIds, List<String> subnetIds,
-                                         List<String> securityGroupIds, Boolean privateDnsEnabled, List<Tag> endpointTags) {
+                                         List<String> securityGroupIds, Boolean privateDnsEnabled,
+                                         String policyDocument, List<Tag> endpointTags) {
         ensureDefaultResources(region);
         getRequiredVpc(region, vpcId);
         for (String routeTableId : routeTableIds) {
@@ -2706,12 +2764,96 @@ public class Ec2Service implements ContainerTeardown {
         endpoint.setRouteTableIds(new ArrayList<>(routeTableIds));
         endpoint.setSubnetIds(new ArrayList<>(subnetIds));
         endpoint.setSecurityGroupIds(new ArrayList<>(securityGroupIds));
+        endpoint.setPolicyDocument(policyDocument);
         if (endpointTags != null && !endpointTags.isEmpty()) {
             endpoint.setTags(new ArrayList<>(endpointTags));
             tags.put(endpoint.getVpcEndpointId(), new ArrayList<>(endpointTags));
         }
         vpcEndpoints.put(key(region, endpoint.getVpcEndpointId()), endpoint);
         return endpoint;
+    }
+
+    /**
+     * Applies a ModifyVpcEndpoint request. Every parameter is optional and each applies
+     * independently, so one request may move route tables and rewrite the policy.
+     *
+     * <p>The add/remove parameters are set operations. AWS accepts an id that is already
+     * associated, or a removal of one that is not, without complaint, so this is
+     * idempotent on both sides. {@code resetPolicy} returns the endpoint to the default
+     * full-access policy, modelled here as carrying no document at all.
+     */
+    public VpcEndpoint modifyVpcEndpoint(String region, String endpointId,
+                                         List<String> addRouteTableIds, List<String> removeRouteTableIds,
+                                         List<String> addSubnetIds, List<String> removeSubnetIds,
+                                         List<String> addSecurityGroupIds, List<String> removeSecurityGroupIds,
+                                         String policyDocument, Boolean resetPolicy, Boolean privateDnsEnabled) {
+        // VpcEndpointId is the one required member of ModifyVpcEndpointRequest. The model
+        // requires it to be present, not to be non-empty, so only an absent value is a
+        // MissingParameter; a present-but-unknown id is an InvalidVpcEndpointId.NotFound.
+        if (endpointId == null) {
+            throw new AwsException("MissingParameter",
+                    "The request must contain the parameter VpcEndpointId", 400);
+        }
+        ensureDefaultResources(region);
+        // Terraform declares each aws_vpc_endpoint_route_table_association as its own
+        // resource and applies them in parallel, so several ModifyVpcEndpoint calls land
+        // on one endpoint at once. Without the lock this read-modify-write loses updates:
+        // each caller reads the same association list, adds its own id, and the last write
+        // wins -- leaving the other caller's waiter polling for an association that was
+        // silently dropped.
+        synchronized (lockFor(key(region, endpointId))) {
+            return modifyVpcEndpointLocked(region, endpointId,
+                    addRouteTableIds, removeRouteTableIds, addSubnetIds, removeSubnetIds,
+                    addSecurityGroupIds, removeSecurityGroupIds,
+                    policyDocument, resetPolicy, privateDnsEnabled);
+        }
+    }
+
+    private VpcEndpoint modifyVpcEndpointLocked(String region, String endpointId,
+                                                List<String> addRouteTableIds, List<String> removeRouteTableIds,
+                                                List<String> addSubnetIds, List<String> removeSubnetIds,
+                                                List<String> addSecurityGroupIds, List<String> removeSecurityGroupIds,
+                                                String policyDocument, Boolean resetPolicy,
+                                                Boolean privateDnsEnabled) {
+        VpcEndpoint endpoint = getRequiredVpcEndpoint(region, endpointId);
+
+        // Validate every referenced id before mutating anything, so a request naming one
+        // bad id does not leave the endpoint half-modified.
+        for (String routeTableId : addRouteTableIds) {
+            getRequiredRouteTable(region, routeTableId);
+        }
+        for (String subnetId : addSubnetIds) {
+            requireSubnet(region, subnetId);
+        }
+        for (String securityGroupId : addSecurityGroupIds) {
+            getRequiredSecurityGroup(region, securityGroupId);
+        }
+
+        applyIdChanges(endpoint.getRouteTableIds(), addRouteTableIds, removeRouteTableIds);
+        applyIdChanges(endpoint.getSubnetIds(), addSubnetIds, removeSubnetIds);
+        applyIdChanges(endpoint.getSecurityGroupIds(), addSecurityGroupIds, removeSecurityGroupIds);
+
+        if (Boolean.TRUE.equals(resetPolicy)) {
+            endpoint.setPolicyDocument(null);
+        } else if (policyDocument != null) {
+            endpoint.setPolicyDocument(policyDocument);
+        }
+        if (privateDnsEnabled != null) {
+            endpoint.setPrivateDnsEnabled(privateDnsEnabled);
+        }
+
+        vpcEndpoints.put(key(region, endpointId), endpoint);
+        return endpoint;
+    }
+
+    /** Removals apply before additions, and an id is never added twice. */
+    private static void applyIdChanges(List<String> current, List<String> toAdd, List<String> toRemove) {
+        current.removeAll(toRemove);
+        for (String id : toAdd) {
+            if (!current.contains(id)) {
+                current.add(id);
+            }
+        }
     }
 
     public List<VpcEndpoint> describeVpcEndpoints(String region, List<String> endpointIds,
@@ -4440,29 +4582,118 @@ public class Ec2Service implements ContainerTeardown {
         }
     }
 
-    public void createRoute(String region, String routeTableId, String destinationCidrBlock, String gatewayId, String natGatewayId) {
+    private static boolean isSet(String value) {
+        return value != null && !value.isBlank();
+    }
+
+    /**
+     * A route is addressed by exactly one destination, and a table can hold an IPv4 and an IPv6
+     * route side by side, so the member the route does not carry is null. Comparing from the
+     * request side rather than the stored side keeps a null destination from being dereferenced:
+     * an IPv6 route in the table used to make every DeleteRoute against that table throw, IPv4
+     * ones included.
+     */
+    private static boolean matchesDestination(Route route, String destinationCidrBlock,
+                                              String destinationIpv6CidrBlock, String destinationPrefixListId) {
+        if (isSet(destinationCidrBlock) && destinationCidrBlock.equals(route.getDestinationCidrBlock())) {
+            return true;
+        }
+        if (isSet(destinationIpv6CidrBlock) && destinationIpv6CidrBlock.equals(route.getDestinationIpv6CidrBlock())) {
+            return true;
+        }
+        return isSet(destinationPrefixListId) && destinationPrefixListId.equals(route.getDestinationPrefixListId());
+    }
+
+    /** The destination naming a route, for error messages. */
+    private static String destinationLabel(String destinationCidrBlock, String destinationIpv6CidrBlock,
+                                           String destinationPrefixListId) {
+        if (isSet(destinationCidrBlock)) {
+            return destinationCidrBlock;
+        }
+        return isSet(destinationIpv6CidrBlock) ? destinationIpv6CidrBlock : destinationPrefixListId;
+    }
+
+    /**
+     * AWS takes one destination per route, and there are three kinds of it: DestinationCidrBlock,
+     * DestinationIpv6CidrBlock and DestinationPrefixListId. The CreateRoute reference is explicit
+     * that a prefix list is a destination in its own right — "You must specify either a destination
+     * CIDR block or a prefix list ID" — and all three are members of the Route output shape, so a
+     * prefix-list route is stored and reported like any other rather than rejected.
+     *
+     * <p>Naming none of them is the case that has no valid reading: the route could never be
+     * addressed again by DeleteRoute or ReplaceRoute, which match on the destination. AWS declares
+     * no operation-specific error for CreateRoute, DeleteRoute or ReplaceRoute — the API reference
+     * Errors section is empty and the service model carries no error shapes — so the code here is
+     * chosen from EC2's common client error codes rather than confirmed against the real service.
+     * MissingParameter ("the request is missing a required parameter") is the closest fit.
+     */
+    private static void requireExactlyOneDestination(String action, String destinationCidrBlock,
+                                                     String destinationIpv6CidrBlock, String destinationPrefixListId) {
+        int given = (isSet(destinationCidrBlock) ? 1 : 0)
+                + (isSet(destinationIpv6CidrBlock) ? 1 : 0)
+                + (isSet(destinationPrefixListId) ? 1 : 0);
+        if (given == 0) {
+            throw new AwsException("MissingParameter",
+                    "The request must include DestinationCidrBlock, DestinationIpv6CidrBlock or "
+                            + "DestinationPrefixListId; routes are matched on their destination.", 400);
+        }
+        if (given > 1) {
+            throw new AwsException("InvalidParameterCombination",
+                    action + " takes one destination: DestinationCidrBlock, DestinationIpv6CidrBlock or "
+                            + "DestinationPrefixListId, not several.", 400);
+        }
+    }
+
+    /**
+     * An egress-only internet gateway is IPv6-only and is a target in its own right, so it cannot
+     * be combined with the IPv4 targets. Only the newly accepted parameter is validated here:
+     * CreateRoute has never enforced exclusivity between GatewayId and NatGatewayId, and starting
+     * to would be a behaviour change beyond this fix.
+     */
+    private static void requireEgressOnlyGatewayIsTheOnlyTarget(String gatewayId, String natGatewayId,
+                                                                String egressOnlyInternetGatewayId) {
+        if (!isSet(egressOnlyInternetGatewayId)) {
+            return;
+        }
+        if (isSet(gatewayId) || isSet(natGatewayId)) {
+            throw new AwsException("InvalidParameterCombination",
+                    "EgressOnlyInternetGatewayId cannot be combined with GatewayId or NatGatewayId; "
+                            + "a route takes one target.", 400);
+        }
+    }
+
+    public void createRoute(String region, String routeTableId, String destinationCidrBlock,
+                            String destinationIpv6CidrBlock, String destinationPrefixListId,
+                            String gatewayId, String natGatewayId,
+                            String egressOnlyInternetGatewayId) {
+        requireExactlyOneDestination("CreateRoute", destinationCidrBlock, destinationIpv6CidrBlock,
+                destinationPrefixListId);
+        requireEgressOnlyGatewayIsTheOnlyTarget(gatewayId, natGatewayId, egressOnlyInternetGatewayId);
         ensureDefaultResources(region);
         synchronized (lockFor(key(region, routeTableId))) {
             RouteTable current = getRequiredRouteTable(region, routeTableId);
             List<Route> next = new ArrayList<>(current.getRoutes());
             Route route = new Route(destinationCidrBlock, gatewayId, "CreateRoute");
+            route.setDestinationIpv6CidrBlock(destinationIpv6CidrBlock);
+            route.setDestinationPrefixListId(destinationPrefixListId);
             route.setNatGatewayId(natGatewayId);
+            route.setEgressOnlyInternetGatewayId(egressOnlyInternetGatewayId);
             next.add(route);
             current.setRoutes(next);
             routeTables.put(key(region, routeTableId), current);
         }
     }
 
-    public void replaceRoute(String region, String routeTableId, String destinationCidrBlock, String gatewayId, String natGatewayId) {
-        if (destinationCidrBlock == null || destinationCidrBlock.isBlank()) {
-            throw new AwsException("MissingParameter",
-                    "The request must include DestinationCidrBlock; routes are matched on their IPv4 destination.", 400);
-        }
+    public void replaceRoute(String region, String routeTableId, String destinationCidrBlock,
+                             String destinationIpv6CidrBlock, String destinationPrefixListId,
+                             String gatewayId, String natGatewayId) {
+        requireExactlyOneDestination("ReplaceRoute", destinationCidrBlock, destinationIpv6CidrBlock,
+                destinationPrefixListId);
         // AWS takes exactly one target. Rejecting both-or-neither also keeps the targets this
         // emulator cannot model (transit gateway, network interface, peering connection, ...) from
         // silently clearing the route and reporting success.
-        boolean hasGateway = gatewayId != null && !gatewayId.isBlank();
-        boolean hasNatGateway = natGatewayId != null && !natGatewayId.isBlank();
+        boolean hasGateway = isSet(gatewayId);
+        boolean hasNatGateway = isSet(natGatewayId);
         if (hasGateway == hasNatGateway) {
             throw new AwsException("InvalidParameterCombination",
                     "ReplaceRoute takes exactly one target, and only GatewayId or NatGatewayId is supported.", 400);
@@ -4473,14 +4704,20 @@ public class Ec2Service implements ContainerTeardown {
             RouteTable current = getRequiredRouteTable(region, routeTableId);
             List<Route> next = new ArrayList<>(current.getRoutes());
             Route existing = next.stream()
-                    .filter(r -> destinationCidrBlock.equals(r.getDestinationCidrBlock()))
+                    .filter(r -> matchesDestination(r, destinationCidrBlock, destinationIpv6CidrBlock,
+                            destinationPrefixListId))
                     .findFirst()
                     .orElseThrow(() -> new AwsException("InvalidRoute.NotFound",
-                            "The route identified by " + destinationCidrBlock + " does not exist", 400));
+                            "The route identified by "
+                                    + destinationLabel(destinationCidrBlock, destinationIpv6CidrBlock,
+                                            destinationPrefixListId)
+                                    + " does not exist", 400));
 
             // The target the request does not name is cleared rather than carried over from the
             // route being replaced.
             Route replacement = new Route(destinationCidrBlock, hasGateway ? gatewayId : null, existing.getOrigin());
+            replacement.setDestinationIpv6CidrBlock(destinationIpv6CidrBlock);
+            replacement.setDestinationPrefixListId(destinationPrefixListId);
             replacement.setNatGatewayId(hasNatGateway ? natGatewayId : null);
             next.set(next.indexOf(existing), replacement);
             current.setRoutes(next);
@@ -4488,12 +4725,16 @@ public class Ec2Service implements ContainerTeardown {
         }
     }
 
-    public void deleteRoute(String region, String routeTableId, String destinationCidrBlock) {
+    public void deleteRoute(String region, String routeTableId, String destinationCidrBlock,
+                            String destinationIpv6CidrBlock, String destinationPrefixListId) {
+        requireExactlyOneDestination("DeleteRoute", destinationCidrBlock, destinationIpv6CidrBlock,
+                destinationPrefixListId);
         ensureDefaultResources(region);
         synchronized (lockFor(key(region, routeTableId))) {
             RouteTable current = getRequiredRouteTable(region, routeTableId);
             List<Route> next = new ArrayList<>(current.getRoutes());
-            next.removeIf(r -> r.getDestinationCidrBlock().equals(destinationCidrBlock));
+            next.removeIf(r -> matchesDestination(r, destinationCidrBlock, destinationIpv6CidrBlock,
+                    destinationPrefixListId));
             current.setRoutes(next);
             routeTables.put(key(region, routeTableId), current);
         }
@@ -4855,6 +5096,8 @@ public class Ec2Service implements ContainerTeardown {
                 case "instance-type" -> matchesValue(values, inst.getInstanceType());
                 case "vpc-id" -> matchesValue(values, inst.getVpcId());
                 case "subnet-id" -> matchesValue(values, inst.getSubnetId());
+                case "availabilityZone", "availability-zone" -> inst.getPlacement() != null
+                        && matchesValue(values, inst.getPlacement().getAvailabilityZone());
                 default -> true;
             };
         }
@@ -4878,6 +5121,12 @@ public class Ec2Service implements ContainerTeardown {
                         .anyMatch(a -> a.getGatewayId() != null && matchesValue(values, a.getGatewayId()));
                 case "association.main" -> rt.getAssociations().stream()
                         .anyMatch(a -> matchesValue(values, String.valueOf(a.isMain())));
+                case "route.destination-ipv6-cidr-block" -> rt.getRoutes().stream()
+                        .anyMatch(r -> r.getDestinationIpv6CidrBlock() != null
+                                && matchesValue(values, r.getDestinationIpv6CidrBlock()));
+                case "route.destination-prefix-list-id" -> rt.getRoutes().stream()
+                        .anyMatch(r -> r.getDestinationPrefixListId() != null
+                                && matchesValue(values, r.getDestinationPrefixListId()));
                 default -> true;
             };
         }
@@ -5368,5 +5617,81 @@ public class Ec2Service implements ContainerTeardown {
         }
 
         return result;
+    }
+
+    // ─── Resource Explorer 2 ───────────────────────────────────────────────────
+
+    /**
+     * The EC2 resources Resource Explorer indexes. Each store is scanned across every Region,
+     * because a provider answers for the whole emulator rather than for the request's Region.
+     *
+     * <p>Types not listed here — images, snapshots, key pairs, transit gateways — are omitted
+     * deliberately: they are either AWS-owned catalogue entries rather than account resources, or
+     * carry no tags and no identity worth searching on.
+     */
+    @Override
+    public List<ExplorerResource> getResources() {
+        List<ExplorerResource> resources = new ArrayList<>();
+        collectExplorerResources(resources, instances.scan(k -> true), "instance",
+                Instance::getInstanceId, Instance::getRegion, Instance::getLaunchTime, Instance::getTags);
+        collectExplorerResources(resources, vpcs.scan(k -> true), "vpc",
+                Vpc::getVpcId, Vpc::getRegion, v -> null, Vpc::getTags);
+        collectExplorerResources(resources, subnets.scan(k -> true), "subnet",
+                Subnet::getSubnetId, Subnet::getRegion, s -> null, Subnet::getTags);
+        collectExplorerResources(resources, securityGroups.scan(k -> true), "security-group",
+                SecurityGroup::getGroupId, SecurityGroup::getRegion, g -> null, SecurityGroup::getTags);
+        collectExplorerResources(resources, volumes.scan(k -> true), "volume",
+                Volume::getVolumeId, Volume::getRegion, Volume::getCreateTime, Volume::getTags);
+        collectExplorerResources(resources, internetGateways.scan(k -> true), "internet-gateway",
+                InternetGateway::getInternetGatewayId, InternetGateway::getRegion, g -> null, InternetGateway::getTags);
+        collectExplorerResources(resources, natGateways.scan(k -> true), "natgateway",
+                NatGateway::getNatGatewayId, NatGateway::getRegion, NatGateway::getCreateTime, NatGateway::getTags);
+        collectExplorerResources(resources, routeTables.scan(k -> true), "route-table",
+                RouteTable::getRouteTableId, RouteTable::getRegion, t -> null, RouteTable::getTags);
+        return resources;
+    }
+
+    @Override
+    public Set<SupportedResourceType> getSupportedResourceTypes() {
+        return Set.of(
+                new SupportedResourceType("ec2:instance", "ec2", true),
+                new SupportedResourceType("ec2:vpc", "ec2", true),
+                new SupportedResourceType("ec2:subnet", "ec2", true),
+                new SupportedResourceType("ec2:security-group", "ec2", true),
+                new SupportedResourceType("ec2:volume", "ec2", true),
+                new SupportedResourceType("ec2:internet-gateway", "ec2", true),
+                new SupportedResourceType("ec2:natgateway", "ec2", true),
+                new SupportedResourceType("ec2:route-table", "ec2", true));
+    }
+
+    private <T> void collectExplorerResources(List<ExplorerResource> out, List<T> stored, String resourceType,
+                                              Function<T, String> id, Function<T, String> region,
+                                              Function<T, Instant> createdAt, Function<T, List<Tag>> tags) {
+        for (T resource : stored) {
+            String resourceId = id.apply(resource);
+            String resourceRegion = region.apply(resource);
+            if (resourceId == null || resourceRegion == null) {
+                continue;
+            }
+            Instant created = createdAt.apply(resource);
+            out.add(new ExplorerResource(
+                    "arn:aws:ec2:" + resourceRegion + ":" + accountId + ":" + resourceType + "/" + resourceId,
+                    "ec2:" + resourceType, "ec2", resourceRegion, accountId,
+                    created != null ? created : Instant.now(),
+                    explorerTags(tags.apply(resource))));
+        }
+    }
+
+    private static Map<String, String> explorerTags(List<Tag> tags) {
+        if (tags == null) {
+            return Map.of();
+        }
+        Map<String, String> converted = new LinkedHashMap<>();
+        for (Tag tag : tags) {
+            if (tag.getKey() != null) {
+                converted.put(tag.getKey(), tag.getValue() != null ? tag.getValue() : "");
+            }
+        }
+        return converted;
     }
 }

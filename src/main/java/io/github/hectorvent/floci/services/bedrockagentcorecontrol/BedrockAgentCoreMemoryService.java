@@ -12,6 +12,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import java.time.Instant;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -45,7 +46,8 @@ public class BedrockAgentCoreMemoryService {
     }
 
     public Memory create(String name, Integer eventExpiryDuration, String description,
-                         String clientToken, String region) {
+                         String encryptionKeyArn, String memoryExecutionRoleArn,
+                         Map<String, String> tags, String clientToken, String region) {
         if (clientToken != null) {
             Optional<Memory> replay = storage.scan(k -> k.startsWith(keyPrefix(region))).stream()
                     .filter(m -> clientToken.equals(m.getClientToken()))
@@ -60,9 +62,7 @@ public class BedrockAgentCoreMemoryService {
         if (eventExpiryDuration == null) {
             throw new AwsException("ValidationException", "eventExpiryDuration is required", 400);
         }
-        if (eventExpiryDuration < 3 || eventExpiryDuration > 365) {
-            throw new AwsException("ValidationException", "eventExpiryDuration must be between 3 and 365", 400);
-        }
+        validateExpiry(eventExpiryDuration);
         Instant now = Instant.now();
         String id = sanitize(name) + "-" + random(10);
         Memory memory = new Memory();
@@ -71,10 +71,15 @@ public class BedrockAgentCoreMemoryService {
         memory.setStatus(STATUS_ACTIVE);
         memory.setDescription(description);
         memory.setEventExpiryDuration(eventExpiryDuration);
+        memory.setEncryptionKeyArn(encryptionKeyArn);
+        memory.setMemoryExecutionRoleArn(memoryExecutionRoleArn);
         memory.setCreatedAt(now);
         memory.setUpdatedAt(now);
         memory.setAccountId(regionResolver.getAccountId());
         memory.setClientToken(clientToken);
+        if (tags != null) {
+            memory.getTags().putAll(tags);
+        }
         storage.put(key(region, id), memory);
         return memory;
     }
@@ -85,14 +90,32 @@ public class BedrockAgentCoreMemoryService {
                         "Memory not found: " + id, 404));
     }
 
-    public Memory update(String id, String description, String region) {
+    public Memory update(String id, String description, Integer eventExpiryDuration,
+                         String memoryExecutionRoleArn, String region) {
+        // Validate all inputs before mutating: get() returns the live stored object,
+        // so a throw after the first setter would leave a partially applied update.
+        if (eventExpiryDuration != null) {
+            validateExpiry(eventExpiryDuration);
+        }
         Memory memory = get(id, region);
         if (description != null) {
             memory.setDescription(description);
         }
+        if (eventExpiryDuration != null) {
+            memory.setEventExpiryDuration(eventExpiryDuration);
+        }
+        if (memoryExecutionRoleArn != null) {
+            memory.setMemoryExecutionRoleArn(memoryExecutionRoleArn);
+        }
         memory.setUpdatedAt(Instant.now());
         storage.put(key(region, id), memory);
         return memory;
+    }
+
+    private static void validateExpiry(int eventExpiryDuration) {
+        if (eventExpiryDuration < 3 || eventExpiryDuration > 365) {
+            throw new AwsException("ValidationException", "eventExpiryDuration must be between 3 and 365", 400);
+        }
     }
 
     public Memory delete(String id, String clientToken, String region) {
@@ -123,6 +146,32 @@ public class BedrockAgentCoreMemoryService {
 
     public String arn(Memory memory, String region) {
         return regionResolver.buildArn(ARN_SERVICE, region, "memory/" + memory.getMemoryId());
+    }
+
+    // ── Tagging ──
+
+    public Map<String, String> getTagsByArn(String region, String arn) {
+        return new HashMap<>(findByArn(region, arn).getTags());
+    }
+
+    public void tagByArn(String region, String arn, Map<String, String> tags) {
+        Memory memory = findByArn(region, arn);
+        memory.getTags().putAll(tags);
+        storage.put(key(region, memory.getMemoryId()), memory);
+    }
+
+    public void untagByArn(String region, String arn, List<String> keys) {
+        Memory memory = findByArn(region, arn);
+        keys.forEach(memory.getTags()::remove);
+        storage.put(key(region, memory.getMemoryId()), memory);
+    }
+
+    private Memory findByArn(String region, String arn) {
+        String[] parts = arn == null ? new String[0] : arn.split(":");
+        if (parts.length < 6 || !parts[5].startsWith("memory/")) {
+            throw new AwsException("ValidationException", "Unsupported resource ARN: " + arn, 400);
+        }
+        return get(parts[5].substring("memory/".length()), region);
     }
 
     private static String sanitize(String name) {

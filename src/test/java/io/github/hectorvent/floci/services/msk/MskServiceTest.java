@@ -149,6 +149,25 @@ class MskServiceTest {
     }
 
     @Test
+    void createConfigurationAcceptsEmptyServerProperties() {
+        // A zero-length blob means "no property overrides" - Gruntwork's msk module joins a
+        // map that defaults to {} and creates aws_msk_configuration unconditionally.
+        MskConfiguration configuration = mskService.createConfiguration(
+                "empty-props-config", "desc", List.of("3.6.0"), "");
+
+        assertEquals("", configuration.getServerPropertiesByRevision().get(1L));
+        assertEquals(ConfigurationState.ACTIVE, configuration.getState());
+    }
+
+    @Test
+    void createConfigurationAcceptsNonEmptyServerProperties() {
+        MskConfiguration configuration = mskService.createConfiguration(
+                "props-config", "desc", List.of("3.6.0"), "num.partitions=3");
+
+        assertEquals("num.partitions=3", configuration.getServerPropertiesByRevision().get(1L));
+    }
+
+    @Test
     void createConfigurationRejectsDuplicateName() {
         mskService.createConfiguration("test-config", "desc", List.of("3.6.0"), "props");
         assertThrows(AwsException.class, () ->
@@ -164,9 +183,14 @@ class MskServiceTest {
     }
 
     @Test
-    void describeConfigurationNotFoundThrows() {
-        assertThrows(AwsException.class, () ->
+    void describeConfigurationUnknownArnThrowsBadRequest() {
+        // Real MSK uses BadRequestException with this message for unknown configuration ARNs;
+        // terraform-provider-aws substring-matches it to detect a deleted configuration.
+        AwsException ex = assertThrows(AwsException.class, () ->
                 mskService.describeConfiguration("arn:aws:kafka:us-east-1:000000000000:configuration/missing/id"));
+        assertEquals("BadRequestException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertTrue(ex.getMessage().contains("Configuration ARN does not exist"));
     }
 
     @Test
@@ -219,6 +243,18 @@ class MskServiceTest {
     }
 
     @Test
+    void describeConfigurationAfterDeleteThrowsBadRequest() {
+        MskConfiguration configuration = mskService.createConfiguration(
+                "test-config", "desc", List.of("3.6.0"), "props");
+        mskService.deleteConfiguration(configuration.getArn());
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                mskService.describeConfiguration(configuration.getArn()));
+        assertEquals("BadRequestException", ex.getErrorCode());
+        assertTrue(ex.getMessage().contains("Configuration ARN does not exist"));
+    }
+
+    @Test
     void updateConfiguration() {
         MskConfiguration created = mskService.createConfiguration(
                 "test-config", "v1 desc", List.of("3.6.0"), "auto.create.topics.enable=true");
@@ -243,10 +279,35 @@ class MskServiceTest {
     }
 
     @Test
-    void updateConfigurationNotFoundThrows() {
-        assertThrows(AwsException.class, () ->
+    void updateConfigurationAcceptsEmptyServerProperties() {
+        MskConfiguration created = mskService.createConfiguration(
+                "test-config", "desc", List.of("3.6.0"), "num.partitions=3");
+
+        MskConfiguration updated = mskService.updateConfiguration(created.getArn(), "cleared", "");
+
+        assertEquals(2L, updated.getLatestRevision().getRevision());
+        assertEquals("", updated.getServerPropertiesByRevision().get(2L));
+    }
+
+    @Test
+    void updateConfigurationAcceptsNonEmptyServerProperties() {
+        MskConfiguration created = mskService.createConfiguration(
+                "test-config", "desc", List.of("3.6.0"), "");
+
+        MskConfiguration updated = mskService.updateConfiguration(
+                created.getArn(), "desc", "num.partitions=3");
+
+        assertEquals("num.partitions=3", updated.getServerPropertiesByRevision().get(2L));
+    }
+
+    @Test
+    void updateConfigurationUnknownArnThrowsBadRequest() {
+        AwsException ex = assertThrows(AwsException.class, () ->
                 mskService.updateConfiguration(
                         "arn:aws:kafka:us-east-1:000000000000:configuration/missing/id", "desc", "props"));
+        assertEquals("BadRequestException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertTrue(ex.getMessage().contains("Configuration ARN does not exist"));
     }
 
     @Test

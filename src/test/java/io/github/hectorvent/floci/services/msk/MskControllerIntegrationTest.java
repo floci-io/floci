@@ -8,6 +8,7 @@ import java.util.Base64;
 import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
@@ -126,11 +127,70 @@ class MskControllerIntegrationTest {
             .body("arn", equalTo(arn))
             .body("state", equalTo("DELETING"));
 
+        // Real MSK signals a deleted configuration as BadRequestException, and the terraform/pulumi
+        // provider's delete waiter only recognizes that code plus this exact message substring as
+        // "gone" - assert the full wire contract, not just a status code.
         given()
         .when()
             .get("/v1/configurations/{arn}", arn)
         .then()
-            .statusCode(404);
+            .statusCode(400)
+            .header("X-Amzn-Errortype", equalTo("BadRequestException"))
+            .body("message", containsString("Configuration ARN does not exist"));
+    }
+
+    // An empty base64 blob decodes to "" and means "no property overrides". Absent and
+    // present-but-empty stay distinguishable at the REST layer: a missing member arrives as
+    // null, an empty one as a zero-length String, so only the former is rejected.
+    @Test
+    void createAndUpdateConfigurationAcceptEmptyServerProperties() {
+        String arn = given()
+            .contentType("application/json")
+            .body("""
+                {"name": "empty-props-%s", "kafkaVersions": ["3.6.0"], "serverProperties": ""}
+                """.formatted(UUID.randomUUID().toString().substring(0, 8)))
+        .when()
+            .post("/v1/configurations")
+        .then()
+            .statusCode(200)
+            .body("state", equalTo("ACTIVE"))
+            .body("latestRevision.revision", equalTo(1))
+            .extract().path("arn");
+
+        given()
+            .contentType("application/json")
+            .body("""
+                {"description": "still empty", "serverProperties": ""}
+                """)
+        .when()
+            .put("/v1/configurations/{arn}", arn)
+        .then()
+            .statusCode(200)
+            .body("latestRevision.revision", equalTo(2));
+
+        // Both revisions, not just the one create wrote: an empty update has to store ""
+        // rather than silently carry the previous revision's properties forward.
+        for (int revision : new int[] { 1, 2 }) {
+            given()
+            .when()
+                .get("/v1/configurations/{arn}/revisions/{revision}", arn, revision)
+            .then()
+                .statusCode(200)
+                .body("serverProperties", equalTo(""));
+        }
+    }
+
+    @Test
+    void createConfigurationRejectsMissingServerProperties() {
+        given()
+            .contentType("application/json")
+            .body("""
+                {"name": "no-props-config", "kafkaVersions": ["3.6.0"]}
+                """)
+        .when()
+            .post("/v1/configurations")
+        .then()
+            .statusCode(400);
     }
 
     @Test
@@ -188,12 +248,14 @@ class MskControllerIntegrationTest {
     }
 
     @Test
-    void describeConfigurationReturnsNotFoundForUnknownArn() {
+    void describeConfigurationReturnsBadRequestForUnknownArn() {
         given()
         .when()
             .get("/v1/configurations/{arn}", "arn:aws:kafka:us-east-1:000000000000:configuration/missing/id")
         .then()
-            .statusCode(404);
+            .statusCode(400)
+            .header("X-Amzn-Errortype", equalTo("BadRequestException"))
+            .body("message", containsString("Configuration ARN does not exist"));
     }
 
     // kafkaVersions is optional on CreateConfigurationRequest. Omitting it must not leak a
@@ -367,14 +429,16 @@ class MskControllerIntegrationTest {
     }
 
     @Test
-    void updateConfigurationReturnsNotFoundForUnknownArn() {
+    void updateConfigurationReturnsBadRequestForUnknownArn() {
         given()
             .contentType("application/json")
             .body("{\"serverProperties\": \"cHJvcHM=\"}")
         .when()
             .put("/v1/configurations/{arn}", "arn:aws:kafka:us-east-1:000000000000:configuration/missing/id")
         .then()
-            .statusCode(404);
+            .statusCode(400)
+            .header("X-Amzn-Errortype", equalTo("BadRequestException"))
+            .body("message", containsString("Configuration ARN does not exist"));
     }
 
     @Test

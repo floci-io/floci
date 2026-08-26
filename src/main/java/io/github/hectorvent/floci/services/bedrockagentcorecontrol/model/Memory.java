@@ -5,6 +5,8 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
+import java.util.HashMap;
+import java.util.Map;
 
 /** An AgentCore memory resource. Metadata registry only — no real recall. */
 @RegisterForReflection
@@ -17,10 +19,13 @@ public class Memory {
     private String status;
     private String description;
     private Integer eventExpiryDuration;
+    private String encryptionKeyArn;
+    private String memoryExecutionRoleArn;
     private Instant createdAt;
     private Instant updatedAt;
     private String accountId;
     private String clientToken;
+    private Map<String, String> tags = new HashMap<>();
 
     public String getMemoryId() {
         return memoryId;
@@ -62,6 +67,22 @@ public class Memory {
         this.eventExpiryDuration = eventExpiryDuration;
     }
 
+    public String getEncryptionKeyArn() {
+        return encryptionKeyArn;
+    }
+
+    public void setEncryptionKeyArn(String encryptionKeyArn) {
+        this.encryptionKeyArn = encryptionKeyArn;
+    }
+
+    public String getMemoryExecutionRoleArn() {
+        return memoryExecutionRoleArn;
+    }
+
+    public void setMemoryExecutionRoleArn(String memoryExecutionRoleArn) {
+        this.memoryExecutionRoleArn = memoryExecutionRoleArn;
+    }
+
     public Instant getCreatedAt() {
         return createdAt;
     }
@@ -92,5 +113,13 @@ public class Memory {
 
     public void setClientToken(String clientToken) {
         this.clientToken = clientToken;
+    }
+
+    public Map<String, String> getTags() {
+        return tags;
+    }
+
+    public void setTags(Map<String, String> tags) {
+        this.tags = tags;
     }
 }

@@ -44,6 +44,7 @@ public class AppSyncService {
     private final Instance<RequestContext> requestContextInstance;
     private final ObjectMapper objectMapper;
     private final Clock clock;
+    private final String baseUrl;
 
     @Inject
     public AppSyncService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver,
@@ -70,6 +71,7 @@ public class AppSyncService {
         this.requestContextInstance = requestContextInstance;
         this.objectMapper = objectMapper;
         this.clock = clock;
+        this.baseUrl = trimTrailingSlash(config.effectiveBaseUrl());
     }
 
     // ──────────────────────────── GraphQL API ────────────────────────────
@@ -124,11 +126,7 @@ public class AppSyncService {
 
         api.setArn(buildApiArn(apiId, region));
 
-        Map<String, String> uris = new HashMap<>();
-        String baseUri = "http://localhost:4566";
-        uris.put("GRAPHQL", baseUri + "/v1/apis/" + apiId + "/graphql");
-        uris.put("REALTIME", "ws://localhost:4566/v1/apis/" + apiId + "/graphql/realtime");
-        api.setUris(uris);
+        api.setUris(graphqlApiUris(apiId));
 
         Map<String, Object> tags = castMap(request.get("tags"));
         if (tags != null) {
@@ -144,11 +142,14 @@ public class AppSyncService {
 
     public GraphqlApi getGraphqlApi(String apiId) {
         return apiStore.get(apiId)
+                .map(this::refreshGraphqlApiUris)
                 .orElseThrow(() -> new AwsException("NotFoundException", "GraphQL API not found: " + apiId, 404));
     }
 
     public Page<GraphqlApi> listGraphqlApis(Integer maxResults, String nextToken) {
-        return paginate(apiStore.scan(k -> true), nextToken, maxResults);
+        List<GraphqlApi> apis = apiStore.scan(k -> true);
+        apis.forEach(this::refreshGraphqlApiUris);
+        return paginate(apis, nextToken, maxResults);
     }
 
     @SuppressWarnings("unchecked")
@@ -1126,6 +1127,31 @@ public class AppSyncService {
     private String coerceString(Object value, String defaultValue) {
         String result = coerceString(value);
         return result != null ? result : defaultValue;
+    }
+
+    private static String trimTrailingSlash(String value) {
+        return value.endsWith("/") ? value.substring(0, value.length() - 1) : value;
+    }
+
+    private static String toWebSocketBaseUrl(String value) {
+        return value.replaceFirst("^http", "ws");
+    }
+
+    private Map<String, String> graphqlApiUris(String apiId) {
+        String graphqlPath = "/v1/apis/" + apiId + "/graphql";
+        Map<String, String> uris = new HashMap<>();
+        uris.put("GRAPHQL", baseUrl + graphqlPath);
+        uris.put("REALTIME", toWebSocketBaseUrl(baseUrl) + graphqlPath + "/realtime");
+        return uris;
+    }
+
+    private GraphqlApi refreshGraphqlApiUris(GraphqlApi api) {
+        Map<String, String> expectedUris = graphqlApiUris(api.getApiId());
+        if (!expectedUris.equals(api.getUris())) {
+            api.setUris(expectedUris);
+            apiStore.put(api.getApiId(), api);
+        }
+        return api;
     }
 
     private Integer castInt(Object value) {

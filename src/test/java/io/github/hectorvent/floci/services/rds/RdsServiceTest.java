@@ -41,6 +41,11 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.OptionalInt;
 import java.util.stream.Collectors;
@@ -179,6 +184,213 @@ class RdsServiceTest {
                 RdsService.imageForRequestedVersion("postgres", "18.1"));
         assertEquals("postgres:18.1-alpine",
                 RdsService.imageForRequestedVersion("postgres:16-alpine", "18.1-alpine"));
+    }
+
+    @Test
+    void createDbClusterRejectsADuplicateIdentifier() {
+        rdsService.createDbCluster("dup-cluster", "postgres", "17.5",
+                "admin", "password", "dbname", false, null, null, null, false);
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                rdsService.createDbCluster("dup-cluster", "postgres", "17.5",
+                        "admin", "password", "dbname", false, null, null, null, false));
+        assertEquals("DBClusterAlreadyExistsFault", exception.getErrorCode());
+        verify(containerManager, times(1)).start(any(), any(), any(), any(), any(), any(), any(), any(), any());
+    }
+
+    /**
+     * A client-side retry that arrives while the first CreateDBCluster is still
+     * pulling the image used to pass the exists-check (the cluster is registered
+     * only after provisioning) and start a second backing container, silently
+     * splitting the cluster and instance endpoints across two databases. The
+     * duplicate must fail fast instead, and only one container may ever start.
+     */
+    @Test
+    void createDbClusterRejectsADuplicateWhileTheFirstIsStillProvisioning() throws Exception {
+        CountDownLatch insideStart = new CountDownLatch(1);
+        CountDownLatch releaseStart = new CountDownLatch(1);
+        when(containerManager.start(any(), any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenAnswer(invocation -> {
+                    insideStart.countDown();
+                    assertTrue(releaseStart.await(5, TimeUnit.SECONDS), "test released the latch");
+                    return new RdsContainerHandle("cont-id", "id", "localhost", 5432);
+                });
+
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            Future<DbCluster> first = executor.submit(() -> rdsService.createDbCluster(
+                    "racy-cluster", "postgres", "17.5", "admin", "password", "dbname",
+                    false, null, null, null, false));
+            assertTrue(insideStart.await(5, TimeUnit.SECONDS), "first create reached provisioning");
+
+            AwsException fault = assertThrows(AwsException.class, () ->
+                    rdsService.createDbCluster("racy-cluster", "postgres", "17.5",
+                            "admin", "password", "dbname", false, null, null, null, false));
+            assertEquals("DBClusterAlreadyExistsFault", fault.getErrorCode());
+            assertEquals(400, fault.getHttpStatus());
+
+            releaseStart.countDown();
+            assertNotNull(first.get(5, TimeUnit.SECONDS));
+        } finally {
+            executor.shutdownNow();
+        }
+        verify(containerManager, times(1)).start(any(), any(), any(), any(), any(), any(), any(), any(), any());
+        assertNotNull(rdsService.getDbCluster("racy-cluster"));
+    }
+
+    @Test
+    void createDbInstanceRejectsADuplicateWhileTheFirstIsStillProvisioning() throws Exception {
+        CountDownLatch insideStart = new CountDownLatch(1);
+        CountDownLatch releaseStart = new CountDownLatch(1);
+        when(containerManager.start(any(), any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenAnswer(invocation -> {
+                    insideStart.countDown();
+                    assertTrue(releaseStart.await(5, TimeUnit.SECONDS), "test released the latch");
+                    return new RdsContainerHandle("cont-id", "id", "localhost", 5432);
+                });
+
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            Future<DbInstance> first = executor.submit(() -> rdsService.createDbInstance(
+                    "racy-db", "postgres", "17.5", "admin", "password", "dbname",
+                    "db.t3.micro", 20, false, null, null, null, null, false));
+            assertTrue(insideStart.await(5, TimeUnit.SECONDS), "first create reached provisioning");
+
+            AwsException fault = assertThrows(AwsException.class, () ->
+                    rdsService.createDbInstance("racy-db", "postgres", "17.5",
+                            "admin", "password", "dbname", "db.t3.micro",
+                            20, false, null, null, null, null, false));
+            assertEquals("DBInstanceAlreadyExists", fault.getErrorCode());
+            assertEquals(400, fault.getHttpStatus());
+
+            releaseStart.countDown();
+            assertNotNull(first.get(5, TimeUnit.SECONDS));
+        } finally {
+            executor.shutdownNow();
+        }
+        verify(containerManager, times(1)).start(any(), any(), any(), any(), any(), any(), any(), any(), any());
+        assertNotNull(rdsService.getDbInstance("racy-db"));
+    }
+
+    /**
+     * The issue's own repro provisions a cluster and an instance under one
+     * identifier — the two live in separate namespaces, so the guard must not
+     * let an in-flight cluster create block an instance create of the same name.
+     */
+    @Test
+    void clusterAndInstanceMayShareAnIdentifierEvenWhileProvisioning() throws Exception {
+        CountDownLatch insideStart = new CountDownLatch(1);
+        CountDownLatch releaseStart = new CountDownLatch(1);
+        AtomicBoolean firstCall = new AtomicBoolean(true);
+        when(containerManager.start(any(), any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenAnswer(invocation -> {
+                    if (firstCall.getAndSet(false)) {
+                        insideStart.countDown();
+                        assertTrue(releaseStart.await(5, TimeUnit.SECONDS), "test released the latch");
+                    }
+                    return new RdsContainerHandle("cont-id", "id", "localhost", 5432);
+                });
+
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            Future<DbCluster> cluster = executor.submit(() -> rdsService.createDbCluster(
+                    "shared-id", "postgres", "17.5", "admin", "password", "dbname",
+                    false, null, null, null, false));
+            assertTrue(insideStart.await(5, TimeUnit.SECONDS), "cluster create reached provisioning");
+
+            assertNotNull(rdsService.createDbInstance("shared-id", "postgres", "17.5",
+                    "admin", "password", "dbname", "db.t3.micro",
+                    20, false, null, null, null, null, false));
+
+            releaseStart.countDown();
+            assertNotNull(cluster.get(5, TimeUnit.SECONDS));
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    /** A successful create must release the identifier too — delete then recreate reuses it. */
+    @Test
+    void deleteThenRecreateReusesTheIdentifier() {
+        assertNotNull(rdsService.createDbCluster("reused-cluster", "postgres", "17.5",
+                "admin", "password", "dbname", false, null, null, null, false));
+        rdsService.deleteDbCluster("reused-cluster");
+        assertNotNull(rdsService.createDbCluster("reused-cluster", "postgres", "17.5",
+                "admin", "password", "dbname", false, null, null, null, false));
+        verify(containerManager, times(2)).start(any(), any(), any(), any(), any(), any(), any(), any(), any());
+    }
+
+    /** The instance-side twin: a successful create must release the identifier too. */
+    @Test
+    void deleteThenRecreateReusesTheInstanceIdentifier() {
+        assertNotNull(rdsService.createDbInstance("reused-db", "postgres", "17.5",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false));
+        rdsService.deleteDbInstance("reused-db");
+        assertNotNull(rdsService.createDbInstance("reused-db", "postgres", "17.5",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false));
+        verify(containerManager, times(2)).start(any(), any(), any(), any(), any(), any(), any(), any(), any());
+    }
+
+    /**
+     * The sentinel must be held until registration completes: releasing it
+     * before the store write would re-open the double-provision window this
+     * fix closes, for a duplicate landing between release and registration.
+     */
+    @Test
+    void sentinelIsHeldUntilRegistrationCompletes() throws Exception {
+        CountDownLatch insidePut = new CountDownLatch(1);
+        CountDownLatch releasePut = new CountDownLatch(1);
+        InMemoryStorage<String, DbCluster> blockingClusters = new InMemoryStorage<>() {
+            @Override
+            public void put(String key, DbCluster value) {
+                insidePut.countDown();
+                try {
+                    assertTrue(releasePut.await(5, TimeUnit.SECONDS), "test released the latch");
+                } catch (InterruptedException e) {
+                    throw new IllegalStateException(e);
+                }
+                super.put(key, value);
+            }
+        };
+        RdsService service = newService(containerManager, proxyManager,
+                new InMemoryStorage<>(), blockingClusters,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            Future<DbCluster> first = executor.submit(() -> service.createDbCluster(
+                    "ordered-cluster", "postgres", "17.5", "admin", "password", "dbname",
+                    false, null, null, null, false));
+            assertTrue(insidePut.await(5, TimeUnit.SECONDS), "first create reached registration");
+
+            AwsException fault = assertThrows(AwsException.class, () ->
+                    service.createDbCluster("ordered-cluster", "postgres", "17.5",
+                            "admin", "password", "dbname", false, null, null, null, false));
+            assertEquals("DBClusterAlreadyExistsFault", fault.getErrorCode());
+
+            releasePut.countDown();
+            assertNotNull(first.get(5, TimeUnit.SECONDS));
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    /** A failed create must release the identifier so a clean retry can proceed. */
+    @Test
+    void createDbClusterFailureReleasesTheIdentifierForRetry() {
+        when(containerManager.start(any(), any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenThrow(new RuntimeException("image pull failed"))
+                .thenReturn(new RdsContainerHandle("cont-id", "id", "localhost", 5432));
+
+        assertThrows(RuntimeException.class, () ->
+                rdsService.createDbCluster("retry-cluster", "postgres", "17.5",
+                        "admin", "password", "dbname", false, null, null, null, false));
+
+        assertNotNull(rdsService.createDbCluster("retry-cluster", "postgres", "17.5",
+                "admin", "password", "dbname", false, null, null, null, false));
+        verify(containerManager, times(2)).start(any(), any(), any(), any(), any(), any(), any(), any(), any());
     }
 
     @Test
@@ -4558,7 +4770,7 @@ class RdsServiceTest {
         return new RdsService(containerManager, proxyManager, ec2Service, resolver, config,
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), null, null, null,
-                new InMemoryStorage<>(), new InMemoryStorage<>(), optionGroups);
+                new InMemoryStorage<>(), new InMemoryStorage<>(), optionGroups, null);
     }
 
     private DbInstance createInstanceWithOptionGroup(

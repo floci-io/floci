@@ -73,6 +73,9 @@ floci:
         flush-interval-ms: 60000
       rum:
         flush-interval-ms: 60000
+      resourceexplorer2:
+        mode: memory
+        flush-interval-ms: 60000
       fis:
         flush-interval-ms: 60000
       guardduty:
@@ -202,6 +205,7 @@ floci:
     stepfunctions:
       enabled: true
       allow-plaintext-http: true
+      mock-config-file: ${SFN_MOCK_CONFIG:src/test/resources/fixtures/sfn-mock-config.json}
     swf:
       enabled: true
       timeout-sweep-enabled: true
@@ -303,6 +307,8 @@ floci:
       enabled: true
     cloudcontrol:
       enabled: true
+    resourceexplorer2:
+      enabled: true
     cloudfront:
       enabled: true
       allowed-private-origin-hosts: []
@@ -324,6 +330,10 @@ floci:
     iotdata:
       enabled: true
     cloudhsmv2:
+      enabled: true
+    efs:
+      enabled: true
+    organizations:
       enabled: true
     rum:
       enabled: true

@@ -15,9 +15,15 @@ import org.jboss.logging.Logger;
 
 import java.time.Instant;
 import java.util.*;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import java.util.ArrayList;
+import java.util.Set;
 
 @ApplicationScoped
-public class SsmService {
+public class SsmService implements ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(SsmService.class);
 
@@ -334,5 +340,30 @@ public class SsmService {
         }
 
         historyStore.put(storageKey, history);
+    }
+
+    // ─── Resource Explorer 2 ───────────────────────────────────────────────────
+
+    @Override
+    public List<ExplorerResource> getResources() {
+        List<ExplorerResource> resources = new ArrayList<>();
+        for (Parameter parameter : parameterStore.scan(k -> true)) {
+            String arn = parameter.getArn();
+            if (arn == null) {
+                continue;
+            }
+            AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+            resources.add(new ExplorerResource(
+                    arn, "ssm:parameter", "ssm",
+                    parsed.region(), parsed.accountId(),
+                    parameter.getLastModifiedDate() != null ? parameter.getLastModifiedDate() : Instant.now(),
+                    parameter.getTags() != null ? parameter.getTags() : Map.of()));
+        }
+        return resources;
+    }
+
+    @Override
+    public Set<SupportedResourceType> getSupportedResourceTypes() {
+        return Set.of(new SupportedResourceType("ssm:parameter", "ssm", true));
     }
 }

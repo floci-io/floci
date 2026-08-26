@@ -118,6 +118,54 @@ class MemoryDbContainerManagerTest {
         }
     }
 
+    @Test
+    void startLabelsContainerWithResourceIdentity() throws IOException {
+        try (ServerSocket serverSocket = new ServerSocket(0)) {
+            Thread responder = new Thread(() -> {
+                try (Socket socket = serverSocket.accept()) {
+                    socket.getInputStream().read(new byte[64]);
+                    OutputStream out = socket.getOutputStream();
+                    out.write("+PONG\r\n".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                    out.flush();
+                } catch (IOException e) {
+                    LOG.debugv(e, "Acceptor socket closed during test teardown");
+                }
+            });
+            responder.setDaemon(true);
+            responder.start();
+
+            ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+            when(lifecycleManager.createAndStart(any())).thenReturn(new ContainerLifecycleManager.ContainerInfo(
+                    "container-id", Map.of(6379, new ContainerLifecycleManager.EndpointInfo(
+                            "127.0.0.1", serverSocket.getLocalPort()))));
+
+            ContainerBuilder containerBuilder = mock(ContainerBuilder.class);
+            ContainerBuilder.Builder builder = mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
+            when(containerBuilder.newContainer(anyString())).thenReturn(builder);
+            when(builder.build()).thenReturn(mock(ContainerSpec.class));
+
+            EmulatorConfig config = mock(EmulatorConfig.class);
+            EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
+            EmulatorConfig.MemoryDbServiceConfig memorydb = mock(EmulatorConfig.MemoryDbServiceConfig.class);
+            when(config.services()).thenReturn(services);
+            when(services.memorydb()).thenReturn(memorydb);
+            when(memorydb.dockerNetwork()).thenReturn(Optional.empty());
+
+            MemoryDbContainerManager manager = new MemoryDbContainerManager(containerBuilder, lifecycleManager,
+                    mock(ContainerLogStreamer.class), mock(ContainerDetector.class), config,
+                    new RegionResolver("us-east-1", "000000000000"));
+
+            manager.start("cluster1", "valkey/valkey:8");
+
+            verify(builder).withLabels(Map.of(
+                    "io.floci", "aws",
+                    "io.floci.service", "memorydb",
+                    "io.floci.resource-id", "cluster1",
+                    "io.floci.account", "000000000000",
+                    "io.floci.region", "us-east-1"));
+        }
+    }
+
     private MemoryDbContainerManager newManager(ContainerLifecycleManager lifecycleManager) {
         ContainerBuilder containerBuilder = mock(ContainerBuilder.class);
         ContainerBuilder.Builder builder = mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);

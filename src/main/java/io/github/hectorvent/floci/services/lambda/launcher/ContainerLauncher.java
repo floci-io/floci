@@ -251,6 +251,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         String cwLogGroup  = "/aws/lambda/" + fn.getFunctionName();
         String cwLogStream = LOG_STREAM_DATE_FMT.format(LocalDate.now()) + "/[$LATEST]" + shortId;
         String lambdaRegion = extractRegionFromArn(fn.getFunctionArn(), config.defaultRegion());
+        String lambdaAccountId = AwsArnUtils.accountOrDefault(fn.getFunctionArn(), config.defaultAccountId());
 
         // When TLS is on, the container must trust Floci's self-signed cert so HTTPS callbacks
         // to Floci succeed (e.g. a CDK custom resource's cfn-response, which hardcodes https://).
@@ -298,7 +299,9 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
                 .withMemoryMb(fn.getMemorySize())
                 .withDockerNetwork(config.services().lambda().dockerNetwork())
                 .withHostDockerInternalOnLinux()
-                .withLogRotation();
+                .withLogRotation()
+                .withLabels(ContainerStorageHelper.resourceIdentityLabels(
+                        "lambda", fn.getFunctionName(), lambdaAccountId, lambdaRegion));
 
         specBuilder.withEmbeddedDns();
 

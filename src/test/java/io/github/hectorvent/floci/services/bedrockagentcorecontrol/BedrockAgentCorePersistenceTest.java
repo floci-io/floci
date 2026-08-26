@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.PersistentStorage;
 import io.github.hectorvent.floci.services.bedrockagentcorecontrol.model.AgentRuntime;
+import io.github.hectorvent.floci.services.bedrockagentcorecontrol.model.Memory;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -80,5 +81,38 @@ class BedrockAgentCorePersistenceTest {
         assertEquals(2, loaded.getEndpoints().size());
         assertTrue(loaded.getEndpoints().stream().anyMatch(e -> "prod".equals(e.getName())));
         assertTrue(loaded.getEndpoints().stream().anyMatch(e -> "DEFAULT".equals(e.getName())));
+    }
+
+    @Test
+    void memorySurvivesPersistentStorageRoundTrip(@TempDir Path dir) {
+        BedrockAgentCoreMemoryService svc = new BedrockAgentCoreMemoryService(
+                new InMemoryStorage<>(), new RegionResolver(REGION, "000000000000"));
+
+        Memory created = svc.create("persistMem", 45, "a memory",
+                "arn:aws:kms:us-east-1:000000000000:key/mem-key",
+                "arn:aws:iam::000000000000:role/mem-role",
+                Map.of("team", "core"), null, REGION);
+        String id = created.getMemoryId();
+        svc.tagByArn(REGION, svc.arn(created, REGION), Map.of("env", "prod"));
+        Memory before = svc.get(id, REGION);
+
+        Path file = dir.resolve("bedrock-agentcore-memories.json");
+        TypeReference<Map<String, Memory>> ref = new TypeReference<>() {};
+        PersistentStorage<String, Memory> writer = new PersistentStorage<>(file, ref);
+        writer.put("memory:" + REGION + ":" + id, before);
+        writer.flush();
+
+        PersistentStorage<String, Memory> reader = new PersistentStorage<>(file, ref);
+        reader.load();
+        Memory loaded = reader.get("memory:" + REGION + ":" + id).orElseThrow();
+
+        assertEquals("persistMem", loaded.getName());
+        assertEquals(45, loaded.getEventExpiryDuration());
+        assertEquals("arn:aws:kms:us-east-1:000000000000:key/mem-key", loaded.getEncryptionKeyArn());
+        assertEquals("arn:aws:iam::000000000000:role/mem-role", loaded.getMemoryExecutionRoleArn());
+        assertEquals("core", loaded.getTags().get("team"));
+        assertEquals("prod", loaded.getTags().get("env"));
+        assertNotNull(loaded.getCreatedAt());
+        assertNotNull(loaded.getUpdatedAt());
     }
 }

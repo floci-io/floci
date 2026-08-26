@@ -140,6 +140,20 @@ Extra labels are a list of key/value entries rather than a map so that label key
 !!! note
     Entries using one of the reserved keys (`floci`, `floci_emulator`, `floci_namespace`) are ignored with a warning — user configuration can never break Floci's own container discovery and volume pruning.
 
+### Resource Identity Labels
+
+A container backing an emulated AWS resource also carries labels tying it back to that resource, additive to the labels above:
+
+| Label | Value | Purpose |
+|---|---|---|
+| `io.floci` | `aws` | Cloud provider, for multi-cloud discovery when several Floci-like emulators share a host |
+| `io.floci.service` | e.g. `rds` | The AWS service the container backs |
+| `io.floci.resource-id` | e.g. `orders-db-primary` | The resource's identifier (DB instance identifier, cluster name, function name, ...) |
+| `io.floci.account` | the resolved account id | The AWS account the resource belongs to |
+| `io.floci.region` | the resolved region | The AWS region the resource belongs to |
+
+This makes `docker ps --filter label=io.floci.resource-id=orders-db-primary` resolve a specific emulated resource to its backing container directly, without inferring it from names or creation order. Applied to RDS, DocDB, ElastiCache (Redis/Valkey and Memcached), MemoryDB, Neptune, MSK, OpenSearch, ECS, EKS, AmazonMQ, MWAA, Kinesis Data Analytics (Flink), Batch, CodeBuild, Lambda, and EC2. ECR's backing registry container carries every label except `io.floci.resource-id`, since it is a shared singleton with no single resource identifier.
+
 ## Docker Network
 
 Containers spawned by Floci (Lambda, RDS, ElastiCache, OpenSearch, MSK, ECS) need to be on the same Docker network to communicate with each other and with Floci itself.

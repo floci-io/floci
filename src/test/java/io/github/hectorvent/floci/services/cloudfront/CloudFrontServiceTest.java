@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.cloudfront;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.cloudfront.model.CacheBehavior;
@@ -15,6 +16,7 @@ import io.github.hectorvent.floci.services.cloudfront.model.OriginAccessControl;
 import io.github.hectorvent.floci.services.cloudfront.model.PublicKey;
 import io.github.hectorvent.floci.services.cloudfront.model.ResponseHeadersPolicy;
 import io.github.hectorvent.floci.services.cloudfront.model.StreamingDistribution;
+import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
@@ -38,6 +40,81 @@ import static org.mockito.Mockito.when;
 class CloudFrontServiceTest {
 
     private static final String ACCOUNT = "000000000000";
+
+    private static final String DEFAULT_DOMAIN_SUFFIX = "cloudfront.net";
+    private static final int LIST_MAX_ITEMS = 100;
+    private static final String ID_ELEMENT = "Id";
+    private static final String DISTRIBUTION_CONFIG_XML = """
+            <DistributionConfig>
+              <CallerReference>terraform-shape-test</CallerReference>
+              <Comment>shape test</Comment>
+              <Enabled>true</Enabled>
+              <Origins>
+                <Quantity>1</Quantity>
+                <Items>
+                  <Origin>
+                    <Id>origin1</Id>
+                    <DomainName>example-bucket.s3.us-east-1.amazonaws.com</DomainName>
+                    <S3OriginConfig>
+                      <OriginAccessIdentity></OriginAccessIdentity>
+                    </S3OriginConfig>
+                  </Origin>
+                </Items>
+              </Origins>
+              <DefaultCacheBehavior>
+                <TargetOriginId>origin1</TargetOriginId>
+                <ViewerProtocolPolicy>redirect-to-https</ViewerProtocolPolicy>
+              </DefaultCacheBehavior>
+              <ViewerCertificate>
+                <CloudFrontDefaultCertificate>true</CloudFrontDefaultCertificate>
+              </ViewerCertificate>
+            </DistributionConfig>
+            """;
+    private static final String EMPTY_ORIGIN_GROUPS_XML =
+            "<OriginGroups><Quantity>0</Quantity></OriginGroups>";
+    private static final String EMPTY_RESTRICTIONS_XML =
+            "<Restrictions><GeoRestriction><RestrictionType>none</RestrictionType><Quantity>0</Quantity>"
+                    + "</GeoRestriction></Restrictions>";
+    private static final String GEO_RESTRICTED_DISTRIBUTION_CONFIG_XML = """
+            <DistributionConfig>
+              <CallerReference>geo-restriction-test</CallerReference>
+              <Comment>geo restriction test</Comment>
+              <Enabled>true</Enabled>
+              <Origins>
+                <Quantity>1</Quantity>
+                <Items>
+                  <Origin>
+                    <Id>origin1</Id>
+                    <DomainName>example-bucket.s3.us-east-1.amazonaws.com</DomainName>
+                    <S3OriginConfig>
+                      <OriginAccessIdentity></OriginAccessIdentity>
+                    </S3OriginConfig>
+                  </Origin>
+                </Items>
+              </Origins>
+              <DefaultCacheBehavior>
+                <TargetOriginId>origin1</TargetOriginId>
+                <ViewerProtocolPolicy>redirect-to-https</ViewerProtocolPolicy>
+              </DefaultCacheBehavior>
+              <ViewerCertificate>
+                <CloudFrontDefaultCertificate>true</CloudFrontDefaultCertificate>
+              </ViewerCertificate>
+              <Restrictions>
+                <GeoRestriction>
+                  <RestrictionType>whitelist</RestrictionType>
+                  <Quantity>2</Quantity>
+                  <Items>
+                    <Location>US</Location>
+                    <Location>CA</Location>
+                  </Items>
+                </GeoRestriction>
+              </Restrictions>
+            </DistributionConfig>
+            """;
+    private static final String WHITELIST_RESTRICTIONS_XML =
+            "<Restrictions><GeoRestriction><RestrictionType>whitelist</RestrictionType><Quantity>2</Quantity>"
+                    + "<Items><Location>US</Location><Location>CA</Location></Items>"
+                    + "</GeoRestriction></Restrictions>";
 
     private CloudFrontService serviceWithDomainSuffix(String domainSuffix) {
         StorageFactory storageFactory = Mockito.mock(StorageFactory.class);
@@ -818,5 +895,51 @@ class CloudFrontServiceTest {
                 () -> service.createOriginAccessControl(oac));
         assertEquals("InvalidArgument", error.getErrorCode());
         assertEquals(400, error.getHttpStatus());
+    }
+
+    @Test
+    void createDistributionIncludesEmptyOriginGroupsAndRestrictions() {
+        CloudFrontController controller =
+                new CloudFrontController(serviceWithDomainSuffix(DEFAULT_DOMAIN_SUFFIX));
+
+        Response response = controller.createDistribution(null, DISTRIBUTION_CONFIG_XML);
+        String xml = response.getEntity().toString();
+        String distributionId = XmlParser.extractFirst(xml, ID_ELEMENT, null);
+
+        assertIncludesTerraformRequiredDistributionConfig(xml);
+
+        Response getResponse = controller.getDistribution(distributionId);
+        assertIncludesTerraformRequiredDistributionConfig(getResponse.getEntity().toString());
+
+        Response listResponse = controller.listDistributions(null, LIST_MAX_ITEMS);
+        assertIncludesTerraformRequiredDistributionConfig(listResponse.getEntity().toString());
+    }
+
+    @Test
+    void createDistributionPreservesGeoRestrictionLocations() {
+        CloudFrontController controller =
+                new CloudFrontController(serviceWithDomainSuffix(DEFAULT_DOMAIN_SUFFIX));
+
+        Response response =
+                controller.createDistribution(null, GEO_RESTRICTED_DISTRIBUTION_CONFIG_XML);
+        String xml = response.getEntity().toString();
+        String distributionId = XmlParser.extractFirst(xml, ID_ELEMENT, null);
+
+        assertIncludesGeoRestrictionLocations(xml);
+
+        Response getResponse = controller.getDistribution(distributionId);
+        assertIncludesGeoRestrictionLocations(getResponse.getEntity().toString());
+
+        Response listResponse = controller.listDistributions(null, LIST_MAX_ITEMS);
+        assertIncludesGeoRestrictionLocations(listResponse.getEntity().toString());
+    }
+
+    private void assertIncludesTerraformRequiredDistributionConfig(String xml) {
+        assertTrue(xml.contains(EMPTY_ORIGIN_GROUPS_XML), xml);
+        assertTrue(xml.contains(EMPTY_RESTRICTIONS_XML), xml);
+    }
+
+    private void assertIncludesGeoRestrictionLocations(String xml) {
+        assertTrue(xml.contains(WHITELIST_RESTRICTIONS_XML), xml);
     }
 }

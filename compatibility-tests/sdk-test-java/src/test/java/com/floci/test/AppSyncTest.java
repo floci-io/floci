@@ -623,6 +623,8 @@ class AppSyncTest {
                         .build());
 
         assertThat(resp.status()).isNotNull();
+        SchemaStatus terminal = pollSchemaStatusToTerminal();
+        assertThat(terminal).isEqualTo(SchemaStatus.SUCCESS);
     }
 
     // ── Channel Namespaces ─────────────────────────────────────────────

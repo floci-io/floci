@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.s3;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.services.cloudfront.CloudFrontDistributionFilter;
@@ -13,6 +14,7 @@ import jakarta.ws.rs.core.UriBuilder;
 import jakarta.ws.rs.ext.Provider;
 
 import java.net.URI;
+import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
@@ -34,6 +36,29 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
      * alongside plain {@code localhost}. Stored lowercase for case-insensitive matching.
      */
     private final Set<String> serviceHostSuffixes;
+
+    /**
+     * Host labels belonging to other AWS services that virtual-host under the same endpoint
+     * host as S3. A hostname carrying one of these is that service's, never an S3 bucket
+     * whose name happens to contain dots — see {@link #bucketFromPrefix}.
+     *
+     * <p>Every entry names a service that Floci itself routes by {@code Host} in a
+     * <em>regionless</em> form, which {@link #isForeignRegionalHost} cannot catch. A label is only
+     * justified when some filter in this repository claims that hostname; a speculative entry
+     * costs real bucket names, because {@code my.elb.logs} — AWS's own load-balancer
+     * access-log naming convention — is a perfectly legal bucket.
+     */
+    private static final Set<String> NON_S3_SERVICE_LABELS = Set.of(
+            "execute-api",      // ApiGatewayExecuteApiHostFilter: <api-id>.execute-api[.<region>].<host>
+            "lambda-url",       // LambdaUrlRoutingFilter: <url-id>.lambda-url.<region>.<host>
+            "emr-serverless",   // EmrServerlessRouteFilter: emr-serverless.<host>
+            "cloudfront");      // CloudFrontDistributionFilter: <dist-id>.cloudfront.net
+
+    /**
+     * The label that makes an S3 endpoint host IPv6-capable: {@code s3.dualstack.<region>},
+     * {@code s3-fips.dualstack.<region>}, {@code s3-accelerate.dualstack}.
+     */
+    private static final String DUALSTACK = "dualstack";
 
     @Inject
     public S3VirtualHostFilter(EmulatorConfig config, ContainerDetector containerDetector) {
@@ -142,19 +167,44 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
     /**
      * Extracts a bucket name from a virtual-hosted-style Host header.
      *
-     * A request is considered virtual-hosted-style when the hostname's remainder
-     * after the first label matches the configured Floci base hostname, or when it
-     * matches a well-known AWS S3 domain pattern (for DNS-redirect setups).
+     * <p>A request is considered virtual-hosted-style when the hostname <em>ends with</em> a
+     * known endpoint host — the configured Floci base hostname, plain {@code localhost}, a
+     * configured DNS suffix, or a well-known AWS S3 domain (for DNS-redirect setups). The
+     * bucket is everything in front of that suffix, minus an optional S3 qualifier
+     * ({@code s3}, {@code s3.<region>}, {@code s3-website-<region>}, …).
+     *
+     * <p><strong>The bucket is not just the first label.</strong> S3 bucket names may contain
+     * dots, and naming a website bucket after a domain is the conventional pattern, so
+     * {@code www.example.com.localhost} is the bucket {@code www.example.com} — not the bucket
+     * {@code www} with an unrecognised remainder. Splitting at the first dot made every dotted
+     * bucket fall through to path-style, where {@code HEAD /} answers 200 and the AWS provider
+     * reads that as "bucket already exists".
      *
      * Examples with baseHostname="localhost":
      *   my-bucket.localhost:4566       -> "my-bucket"
      *   my-bucket.localhost            -> "my-bucket"
+     *   www.example.com.localhost      -> "www.example.com"   (dotted bucket)
+     *   my.bucket-logs.localhost:4566  -> "my.bucket-logs"    (dots and hyphens)
+     *   my.s3.archive.localhost        -> "my.s3.archive"    (an s3 label followed by a
+     *                                                         non-qualifier is bucket text)
+     *   data.my-cd-1.localhost         -> "data.my-cd-1"     (region-SHAPED, not a region id)
+     *   my-bucket.s3.us-east-1.localhost -> "my-bucket"       (region-qualified)
+     *   www.example.com.s3.us-east-1.amazonaws.com -> "www.example.com"
+     *   s3.localhost                   -> null  (service endpoint, not a bucket named "s3")
+     *   s3.us-east-1.localhost         -> null  (region-qualified service endpoint)
      *   floci.svc.cluster.local        -> null  (no bucket prefix, path-style)
-     *   my-svc.floci.svc.cluster.local -> null  (remainder doesn't match "localhost")
+     *   my-svc.floci.svc.cluster.local -> null  (does not end with a known endpoint host)
      *
      * Examples with baseHostname="floci.svc.cluster.local":
      *   my-bucket.floci.svc.cluster.local -> "my-bucket"
      *   floci.svc.cluster.local           -> null  (no bucket prefix, path-style)
+     *
+     * <p>Inherent ambiguity: a bucket whose <em>own</em> name ends in a complete qualifier
+     * ({@code foo.s3}, {@code foo.s3.us-east-1}) is indistinguishable from a qualified reference
+     * to {@code foo} and is read as the latter. That is the whole of the ambiguity — a bucket
+     * whose name merely <em>contains</em> {@code s3} ({@code my.s3.archive}) is not ambiguous and
+     * is not truncated. The service endpoint always wins over the bucket reading, so
+     * {@code s3.localhost} stays bucketless.
      *
      * Returns null if the host does not match a virtual-hosted pattern.
      */
@@ -177,52 +227,266 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
             return null;
         }
 
+        // The service-endpoint guard runs first and wins over every suffix match below, so a
+        // bare s3.<endpoint> host is never mistaken for a bucket literally named "s3".
         String firstLabel = hostname.substring(0, firstDot);
         String remainder  = hostname.substring(firstDot + 1);
-
         if (isS3ServiceEndpointHost(firstLabel, remainder, baseHostname, serviceHostSuffixes)) {
             return null;
         }
 
-        // Primary: remainder must match the configured base hostname,
-        // either directly or in the AWS region-qualified s3.<region>.<host> form.
-        if (baseHostname != null && matchesEndpointHost(remainder, baseHostname)) {
-            return firstLabel;
+        // Primary: the longest known endpoint host this hostname ends with — the configured
+        // base hostname, always-on localhost, or a configured Floci DNS suffix (builtins +
+        // floci.dns.extra-suffixes). Longest wins, so bucket.localhost.floci.io yields
+        // "bucket" rather than "bucket.localhost" when both suffixes are known.
+        String prefix = longestEndpointPrefix(hostname, baseHostname, serviceHostSuffixes);
+        if (prefix != null) {
+            return bucketFromPrefix(prefix, false);
         }
 
-        // Fallback: well-known AWS S3 domains, for users who route AWS DNS to Floci
-        if (isAwsS3Domain(remainder)) {
-            return firstLabel;
+        // Fallback: well-known AWS S3 domains, for users who route AWS DNS to Floci. An S3
+        // qualifier is required here, so a plain foo.amazonaws.com is not an S3 bucket.
+        String awsPrefix = stripHostSuffix(hostname, "amazonaws.com");
+        if (awsPrefix != null) {
+            return bucketFromPrefix(awsPrefix, true);
         }
 
-        // Configured Floci DNS suffixes (builtins + floci.dns.extra-suffixes): route
-        // bucket.<suffix>, bucket.s3.<suffix> and bucket.s3.<region>.<suffix> the same
-        // way the always-on wildcard-DNS builtins resolve.
-        if (matchesConfiguredSuffixHost(remainder, serviceHostSuffixes)) {
-            return firstLabel;
-        }
-
-        return null;
+        // Website endpoints keep their historical tail-agnostic handling: any
+        // bucket.s3-website-<region>.<anything> is virtual-hosted.
+        return bucketBeforeWebsiteQualifier(hostname);
     }
 
     /**
-     * Matches the virtual-hosted bucket forms for a configured DNS suffix {@code S}
-     * (a builtin, {@code floci.hostname}, or a {@code floci.dns.extra-suffix}): {@code bucket.S},
-     * {@code bucket.s3.S}, and the region-qualified {@code bucket.s3.<region>.S}.
-     * Plain {@code localhost} is skipped here — it keeps its dedicated
-     * {@link #matchesEndpointHost} handling via {@link #isAwsS3Domain}.
+     * Returns the part of {@code hostname} preceding the longest known endpoint host it ends
+     * with, or {@code null} if it ends with none of them. Candidates are the configured base
+     * hostname, plain {@code localhost} (which always resolves to 127.0.0.1 regardless of
+     * {@code FLOCI_HOSTNAME}), and every configured DNS suffix.
      */
-    private static boolean matchesConfiguredSuffixHost(String remainder, Set<String> serviceHostSuffixes) {
-        String lower = remainder.toLowerCase();
+    private static String longestEndpointPrefix(String hostname, String baseHostname,
+                                                Set<String> serviceHostSuffixes) {
+        String best = baseHostname == null ? null : stripHostSuffix(hostname, baseHostname);
+        best = shorter(best, stripHostSuffix(hostname, "localhost"));
         for (String suffix : serviceHostSuffixes) {
-            if ("localhost".equals(suffix)) {
-                continue;
+            best = shorter(best, stripHostSuffix(hostname, suffix));
+        }
+        return best;
+    }
+
+    /** The shorter of two candidate prefixes is the one that matched the longer suffix. */
+    private static String shorter(String a, String b) {
+        if (a == null) {
+            return b;
+        }
+        if (b == null) {
+            return a;
+        }
+        return b.length() < a.length() ? b : a;
+    }
+
+    /**
+     * Returns everything before {@code "." + endpointHost} (case-insensitive), or {@code null}
+     * when {@code hostname} does not end with that suffix or has nothing in front of it.
+     */
+    private static String stripHostSuffix(String hostname, String endpointHost) {
+        if (endpointHost == null || endpointHost.isEmpty()) {
+            return null;
+        }
+        String suffix = "." + endpointHost;
+        if (hostname.length() <= suffix.length()) {
+            return null;
+        }
+        int start = hostname.length() - suffix.length();
+        if (!hostname.regionMatches(true, start, suffix, 0, suffix.length())) {
+            return null;
+        }
+        return hostname.substring(0, start);
+    }
+
+    /**
+     * Reduces the part of the hostname in front of the endpoint host to a bucket name by
+     * removing a trailing S3 endpoint qualifier when one is present.
+     *
+     * <p>Everything before the qualifier is the bucket, so dots inside the bucket name survive.
+     * A prefix that <em>is</em> a qualifier ({@code s3}, {@code s3.us-east-1}) is the bucketless
+     * service endpoint and yields {@code null}.
+     *
+     * <p><strong>A qualifier is a tail, not a label.</strong> The split point is the first index
+     * from which the remaining labels form a <em>complete</em> qualifier — see
+     * {@link #isS3QualifierTail}. Testing labels one at a time truncates dotted buckets whose name
+     * happens to contain {@code s3}: for {@code my.s3.archive.localhost} a per-label test finds
+     * {@code s3} at index 1 and hands back the bucket {@code my}, so a request for
+     * {@code my.s3.archive} silently reads and writes a different bucket. Nothing legal follows
+     * {@code s3} except a region, {@code dualstack.<region>}, or the end of the prefix, so
+     * {@code s3.archive} is bucket text and the whole prefix is the bucket.
+     *
+     * @param requireQualifier when true, a prefix with no qualifier is not a bucket at all
+     *                         (used for {@code amazonaws.com}, where only s3-qualified hosts count)
+     */
+    private static String bucketFromPrefix(String prefix, boolean requireQualifier) {
+        if (prefix == null || prefix.isEmpty()) {
+            return null;
+        }
+        String[] labels = prefix.split("\\.", -1);
+
+        // Other AWS services virtual-host under the same endpoint host as S3 does
+        // (<api-id>.execute-api.<endpoint>, <url-id>.lambda-url.<region>.<endpoint>, …).
+        // Suffix matching would otherwise read those as a dotted bucket named
+        // "<api-id>.execute-api" and hijack the request away from their own filters.
+        // Index 0 is exempt: a host whose *first* label is the service label
+        // (emr-serverless.<endpoint>) was already read as a bucket before this change.
+        for (int i = 1; i < labels.length; i++) {
+            if (NON_S3_SERVICE_LABELS.contains(labels[i].toLowerCase())) {
+                return null;
             }
-            if (lower.equals(suffix) || (lower.startsWith("s3.") && lower.endsWith("." + suffix))) {
+        }
+
+        int qualifier = -1;
+        for (int i = 0; i < labels.length; i++) {
+            if (isS3QualifierTail(labels, i)) {
+                qualifier = i;
+                break;
+            }
+        }
+        if (qualifier < 0) {
+            if (requireQualifier) {
+                return null;
+            }
+            // No S3 qualifier anywhere, and an AWS region id appears in a non-leading position:
+            // this is another service's regional virtual host, not a dotted bucket. See
+            // isForeignRegionalHost — this is what keeps <acct>.dkr.ecr.<region>.localhost and
+            // <domain>.<region>.es.localhost from being served as buckets.
+            if (isForeignRegionalHost(labels)) {
+                return null;
+            }
+            return prefix;
+        }
+        if (qualifier == 0) {
+            // Bare service endpoint: s3.<host>, s3.<region>.<host>, s3-website-<region>.<host>
+            return null;
+        }
+        return String.join(".", Arrays.copyOfRange(labels, 0, qualifier));
+    }
+
+    /**
+     * True when {@code labels[from..]} is exactly an S3 endpoint qualifier — that is, when the
+     * labels from {@code from} onwards account for the <em>whole</em> remainder of the prefix and
+     * spell one of the endpoint forms AWS actually publishes:
+     *
+     * <pre>
+     *   s3                                s3-fips.&lt;region&gt;
+     *   s3.&lt;region&gt;                       s3-fips.dualstack.&lt;region&gt;
+     *   s3.dualstack.&lt;region&gt;             s3-accelerate
+     *   s3-&lt;region&gt;            (legacy)   s3-accelerate.dualstack
+     *   s3-website                        s3-website.&lt;region&gt;    (newer regions)
+     *                                     s3-website-&lt;region&gt;    (older regions)
+     * </pre>
+     *
+     * <p>Forms taken from the Amazon S3 endpoint tables in the AWS General Reference. Note that
+     * the website endpoint spells its region with a dot in newer regions and a dash in older ones
+     * ({@code s3-website.eu-west-2} vs {@code s3-website-eu-west-1}), so both are accepted.
+     *
+     * <p>The "whole remainder" requirement is the point of this method. It is what makes an
+     * {@code s3} label that is followed by something else — {@code my.s3.archive} — bucket text
+     * rather than a qualifier, and it is what stops the bucket being truncated at it.
+     *
+     * <p>{@code s3-accesspoint} and {@code s3-control} are deliberately absent: those hosts are
+     * prefixed by an access point name or an account id, not a bucket, and {@code filter} already
+     * routes S3 Control away by path.
+     */
+    private static boolean isS3QualifierTail(String[] labels, int from) {
+        int n = labels.length;
+        if (from >= n) {
+            return false;
+        }
+        String head = labels[from].toLowerCase();
+        int i = from + 1;
+
+        // Transfer acceleration is global: it names no region, only an optional dualstack.
+        if ("s3-accelerate".equals(head)) {
+            if (i < n && DUALSTACK.equals(labels[i].toLowerCase())) {
+                i++;
+            }
+            return i == n;
+        }
+
+        // Legacy dash forms carry the region inside the head label, so nothing may follow:
+        // s3-website-us-east-1, s3-us-west-2.
+        if (head.startsWith("s3-website-") && AwsRegions.isRegionId(head.substring("s3-website-".length()))) {
+            return i == n;
+        }
+        if (head.startsWith("s3-") && AwsRegions.isRegionId(head.substring("s3-".length()))) {
+            return i == n;
+        }
+
+        // Dotted forms: <head>[.dualstack][.<region>]
+        if (!"s3".equals(head) && !"s3-fips".equals(head) && !"s3-website".equals(head)) {
+            return false;
+        }
+        boolean dualstack = i < n && DUALSTACK.equals(labels[i].toLowerCase());
+        if (dualstack) {
+            i++;
+        }
+        if (i < n && AwsRegions.isRegionId(labels[i])) {
+            i++;
+        } else if (dualstack) {
+            // "dualstack" only appears in front of a region; a bare s3.dualstack is not an
+            // endpoint, so treat the whole thing as bucket text rather than truncating.
+            return false;
+        }
+        return i == n;
+    }
+
+    /**
+     * True when an unqualified prefix carries an AWS region id in a non-leading label — the shape
+     * every <em>other</em> regional service virtual-hosts under: {@code <acct>.dkr.ecr.<region>},
+     * {@code <domain>.<region>.es}, {@code <id>.iot.<region>}. A real S3 virtual host always
+     * carries an {@code s3} qualifier instead, and when it does the region is read from there, so
+     * a bucket whose own name contains a region stays addressable as {@code logs.us-east-1.s3.<host>}.
+     * One structural rule covers every regional service at once, including services Floci does not
+     * model yet, where a label denylist would have to enumerate them and would silently hijack the
+     * first one it missed.
+     *
+     * <p><strong>Region ids, not a region-shaped pattern.</strong> This used to match
+     * {@code [a-z]{2}-[a-z-]+-\d+}, which is also the shape of ordinary bucket labels:
+     * {@code data.my-cd-1} is a legal bucket, and matching by shape rejected it, dropped it back to
+     * path-style, and restored the false "bucket exists" 200 this filter exists to prevent. The
+     * finite list in {@link AwsRegions#KNOWN_IDS} is what separates "another service's regional
+     * virtual host" from "a bucket whose label happens to look region-shaped".
+     *
+     * <p>Two residual costs, both accepted deliberately:
+     * <ul>
+     *   <li>A bucket whose name contains a <em>real</em> region id in a non-leading position
+     *       ({@code data.us-east-1}) is still not addressable in the unqualified virtual-hosted
+     *       form. It remains addressable qualified ({@code data.us-east-1.s3.<host>}) and
+     *       path-style, and it was equally unaddressable before this filter existed.</li>
+     *   <li>A regional service host in a region AWS launches after {@link AwsRegions#KNOWN_IDS}
+     *       was last updated would be read as a bucket. That is the reason to keep the list
+     *       current; the failure is a wrong route rather than data loss, and the
+     *       {@code NON_S3_SERVICE_LABELS} entries still cover the services Floci itself routes.</li>
+     * </ul>
+     */
+    private static boolean isForeignRegionalHost(String[] labels) {
+        // Index 0 is exempt so a bucket literally named "us-east-1" keeps working.
+        for (int i = 1; i < labels.length; i++) {
+            if (AwsRegions.isRegionId(labels[i])) {
                 return true;
             }
         }
         return false;
+    }
+
+    /**
+     * Historical tail-agnostic website handling: {@code bucket.s3-website-<region>.<anything>}
+     * is virtual-hosted even when the tail is not a configured endpoint host.
+     */
+    private static String bucketBeforeWebsiteQualifier(String hostname) {
+        String[] labels = hostname.split("\\.", -1);
+        for (int i = labels.length - 2; i >= 1; i--) {
+            if (labels[i].toLowerCase().startsWith("s3-website")) {
+                return String.join(".", Arrays.copyOfRange(labels, 0, i));
+            }
+        }
+        return null;
     }
 
     static boolean isS3ServiceEndpointHost(String firstLabel, String remainder, String baseHostname,
@@ -288,32 +552,4 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
         return true;
     }
 
-    /**
-     * Returns true for well-known AWS S3 domains and the always-on {@code localhost}
-     * endpoint. The Floci wildcard-DNS builtins ({@code localhost.floci.io},
-     * {@code localhost.localstack.cloud}) and any configured {@code floci.dns.extra-suffixes}
-     * are handled by {@link #matchesConfiguredSuffixHost} instead, so they stay derived
-     * from the DNS source of truth rather than hardcoded here.
-     */
-    private static boolean isAwsS3Domain(String remainder) {
-        if ("s3.amazonaws.com".equals(remainder)) {
-            return true;
-        }
-        // s3.<region>.amazonaws.com
-        if (remainder.startsWith("s3.") && remainder.endsWith(".amazonaws.com")) {
-            return true;
-        }
-        // localhost always resolves to 127.0.0.1 — accept regardless of FLOCI_HOSTNAME config.
-        // Fixes: SDK with endpointOverride("http://localhost:4566") without forcePathStyle sends
-        // Host: my-bucket.localhost:4566, which must be recognized even when baseHostname=floci.
-        // Also accept the region-qualified s3.<region>.localhost form (e.g. bucket.s3.us-east-1.localhost).
-        if (matchesEndpointHost(remainder, "localhost")) {
-            return true;
-        }
-        // S3 website endpoints: bucket.s3-website-<region>.amazonaws.com, bucket.s3-website-<region>.localhost, etc.
-        if (remainder.startsWith("s3-website")) {
-            return true;
-        }
-        return false;
-    }
 }
