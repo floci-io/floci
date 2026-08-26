@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.ram.model.PrincipalAssociation;
 import io.github.hectorvent.floci.services.ram.model.ResourceShare;
@@ -21,7 +22,6 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 
 import java.io.IOException;
-import java.io.UncheckedIOException;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -284,13 +284,19 @@ public class RamController {
         return node;
     }
 
+    /**
+     * A body that is not valid JSON is a client error: restJson1 rejects it with 400
+     * SerializationException. Left as an UncheckedIOException it escapes to Quarkus'
+     * generic handler and the SDK sees a 500 InternalFailure instead.
+     */
     private JsonNode readTree(String body) {
         try {
             return (body == null || body.isBlank())
                     ? objectMapper.createObjectNode()
                     : objectMapper.readTree(body);
         } catch (IOException e) {
-            throw new UncheckedIOException(e);
+            throw new AwsException("SerializationException",
+                    "The request could not be parsed as valid JSON.", 400);
         }
     }
 

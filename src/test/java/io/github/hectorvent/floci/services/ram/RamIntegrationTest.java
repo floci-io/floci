@@ -65,6 +65,22 @@ class RamIntegrationTest {
     }
 
     @Test
+    void malformedBodyIsRejectedAsSerializationException() {
+        // A body that is not JSON is a client error; without an explicit rejection the parse
+        // failure escapes as UncheckedIOException and the SDK sees a 500 InternalFailure.
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("not json at all")
+        .when()
+            .post("/getresourceshares")
+        .then()
+            .statusCode(400)
+            .contentType("application/json")
+            .body("__type", equalTo("SerializationException"));
+    }
+
+    @Test
     void createThenGetResourceSharesAndListResources() {
         String tgwArn = "arn:aws:ec2:us-east-1:000000000000:transit-gateway/tgw-0abc";
         String shareArn =
