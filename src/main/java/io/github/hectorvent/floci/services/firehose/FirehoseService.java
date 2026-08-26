@@ -196,6 +196,15 @@ public class FirehoseService {
 
         validateBufferingHints(s3Config);
         String arn = AwsArnUtils.Arn.of("firehose", regionResolver.getDefaultRegion(), regionResolver.getAccountId(), "deliverystream/" + name).toString();
+        // CreateDeliveryStream's KinesisStreamSourceConfiguration carries only the ARN and
+        // role -- DeliveryStartTimestamp exists only on the Description shape, which AWS
+        // fills in at creation. Stamping it here, at creation time, is what makes the first
+        // shard iterator in pollKinesisSource start AT_TIMESTAMP=now instead of falling back
+        // to TRIM_HORIZON: attaching Firehose to a stream that already holds records must not
+        // backfill its history into S3.
+        if (source != null && source.getDeliveryStartTimestamp() == null) {
+            source.setDeliveryStartTimestamp(Instant.now());
+        }
         DeliveryStreamDescription description = new DeliveryStreamDescription(name, arn, s3Config, source);
         description.setAccountId(regionResolver.getAccountId());
         description.setTags(tags);
