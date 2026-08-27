@@ -176,6 +176,31 @@ class KmsServiceTest {
     }
 
     @Test
+    void createGrantInvalidNameCharacterThrowsValidation() {
+        KmsKey key = kmsService.createKey("grant key", REGION);
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                kmsService.createGrant(key.getKeyId(), "arn:aws:iam::000000000000:user/grantee",
+                        List.of("Encrypt"), null, "invalid name with spaces", null, REGION));
+
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertTrue(ex.getMessage().contains("'name'"),
+                "message should name the rejected field, was: " + ex.getMessage());
+    }
+
+    @Test
+    void createGrantNameTooLongThrowsValidation() {
+        KmsKey key = kmsService.createKey("grant key", REGION);
+        String tooLong = "a".repeat(257);
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                kmsService.createGrant(key.getKeyId(), "arn:aws:iam::000000000000:user/grantee",
+                        List.of("Encrypt"), null, tooLong, null, REGION));
+
+        assertEquals("ValidationException", ex.getErrorCode());
+    }
+
+    @Test
     void createGrantUnknownKeyThrowsNotFound() {
         AwsException ex = assertThrows(AwsException.class, () ->
                 kmsService.createGrant("non-existent-id", "arn:aws:iam::000000000000:user/grantee", List.of("Encrypt"), REGION));

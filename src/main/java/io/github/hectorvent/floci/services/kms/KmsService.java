@@ -279,6 +279,10 @@ public class KmsService implements ResourceProvider {
             "RetireGrant", "DescribeKey", "GenerateDataKeyPair", "GenerateDataKeyPairWithoutPlaintext",
             "GenerateMac", "VerifyMac", "DeriveSharedSecret"));
 
+    /** GrantNameType pattern/length from the KMS model (kms/2014-11-01/service-2.json). */
+    private static final java.util.regex.Pattern GRANT_NAME_PATTERN =
+            java.util.regex.Pattern.compile("^[a-zA-Z0-9:/_-]+$");
+
     public KmsGrant createGrant(String keyId, String granteePrincipal, List<String> operations, String region) {
         return createGrant(keyId, granteePrincipal, operations, null, null, null, region);
     }
@@ -306,6 +310,19 @@ public class KmsService implements ResourceProvider {
                         "1 validation error detected: Value '" + operation + "' at 'operations' failed to satisfy "
                                 + "constraint: Member must satisfy enum value set: ["
                                 + String.join(", ", GRANT_OPERATIONS) + "]", 400);
+            }
+        }
+        if (name != null) {
+            if (name.isEmpty() || name.length() > 256) {
+                throw new AwsException("ValidationException",
+                        "1 validation error detected: Value '" + name + "' at 'name' failed to satisfy "
+                                + "constraint: Member must have length less than or equal to 256", 400);
+            }
+            if (!GRANT_NAME_PATTERN.matcher(name).matches()) {
+                throw new AwsException("ValidationException",
+                        "1 validation error detected: Value '" + name + "' at 'name' failed to satisfy "
+                                + "constraint: Member must satisfy regular expression pattern: "
+                                + "^[a-zA-Z0-9:/_-]+$", 400);
             }
         }
 
