@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.services.msk.model.ClusterState;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.github.hectorvent.floci.services.msk.model.BrokerNodeGroupInfo;
 import io.github.hectorvent.floci.services.msk.model.ClientAuthentication;
@@ -261,14 +262,15 @@ class MskServiceTest {
         assertFalse(cluster.getEncryptionInfo().getEncryptionInTransit().getInCluster());
     }
 
-    // MskCluster is the shape WalStorage/PersistentStorage/HybridStorage write, all with a
-    // plain ObjectMapper. Hiding the internal bookkeeping from the API by annotating the model
-    // would hide it from the store too, and a restart would come back with no bootstrap
-    // brokers (breaking GetBootstrapBrokers and the Pipes Kafka source) and no container or
-    // volume ID (orphaning the Docker resources). Responses stay clean via MskController's
-    // views instead - see MskControllerIntegrationTest#describeClusterDoesNotLeakInternalFields.
+    // MskCluster is the shape WalStorage/PersistentStorage/HybridStorage write. All three build
+    // their mapper the same way this test does - JavaTimeModule and a date format, no view or
+    // mixin - so a @JsonIgnore on the model hides the field from the store, not just from the
+    // API: a restart would come back with no bootstrap brokers (breaking GetBootstrapBrokers
+    // and the Pipes Kafka source) and no container or volume ID (orphaning the Docker
+    // resources). Responses stay clean through MskController's views instead - see
+    // MskControllerIntegrationTest#describeClusterDoesNotLeakInternalFields.
     @Test
-    void clusterSurvivesAPlainObjectMapperRoundTripWithItsInternalFields() throws Exception {
+    void clusterSurvivesTheStorageMapperRoundTripWithItsInternalFields() throws Exception {
         CreateClusterRequest request = new CreateClusterRequest();
         request.setClusterName("persistence-cluster");
         request.setKafkaVersion("3.6.0");
@@ -277,7 +279,9 @@ class MskServiceTest {
         MskCluster cluster = mskService.createCluster(request);
         cluster.setContainerId("container-abc");
 
-        ObjectMapper storageMapper = new ObjectMapper().registerModule(new JavaTimeModule());
+        ObjectMapper storageMapper = new ObjectMapper();
+        storageMapper.registerModule(new JavaTimeModule());
+        storageMapper.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
         MskCluster reloaded = storageMapper.readValue(storageMapper.writeValueAsString(cluster), MskCluster.class);
 
         assertEquals(cluster.getBootstrapBrokers(), reloaded.getBootstrapBrokers());
