@@ -339,6 +339,35 @@ class SsmIntegrationTest {
     }
 
     @Test
+    void updateServiceSetting_whitespaceOnlySettingValueIsStoredVerbatim() {
+        given()
+            .header("X-Amz-Target", "AmazonSSM.UpdateServiceSetting")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                {
+                    "SettingId": "/ssm/parameter-store/default-parameter-tier",
+                    "SettingValue": " "
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.GetServiceSetting")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                { "SettingId": "/ssm/parameter-store/default-parameter-tier" }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ServiceSetting.SettingValue", equalTo(" "));
+    }
+
+    @Test
     void updateServiceSetting_settingValueOverMaxLengthReturnsValidationException() {
         String tooLong = "x".repeat(4097);
         given()
@@ -1089,6 +1118,40 @@ class SsmIntegrationTest {
                 .statusCode(200)
                 .body("DocumentDescription.DocumentType", equalTo(documentTypes[i]));
         }
+    }
+
+    @Test
+    void modifyDocumentPermission_nonListAccountIdsToAddReturnsValidationException() {
+        createSharableDocument("Non-List-Account-Ids-Document");
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.ModifyDocumentPermission")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                {
+                    "Name": "Non-List-Account-Ids-Document",
+                    "PermissionType": "Share",
+                    "AccountIdsToAdd": "444444444444"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
+
+        // Nothing may have been shared — the scalar must not be silently treated as empty.
+        given()
+            .header("X-Amz-Target", "AmazonSSM.DescribeDocumentPermission")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                { "Name": "Non-List-Account-Ids-Document", "PermissionType": "Share" }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("AccountIds", empty());
     }
 
     // ── AccountIdsToAdd/Remove (botocore: list max 20, member (?i)all|[0-9]{12}) ──

@@ -383,8 +383,15 @@ public class SsmJsonHandler {
      * be reported back by DescribeDocumentPermission as though the share had happened.
      */
     private List<String> accountIds(JsonNode request, String field) {
+        JsonNode fieldNode = request.path(field);
+        if (!fieldNode.isMissingNode() && !fieldNode.isNull() && !fieldNode.isArray()) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value at '" + decapitalize(field) + "' failed to satisfy "
+                            + "constraint: Member must be a list",
+                    400);
+        }
         List<String> accountIds = new ArrayList<>();
-        request.path(field).forEach(node -> accountIds.add(node.asText()));
+        fieldNode.forEach(node -> accountIds.add(node.asText()));
         if (accountIds.size() > MAX_ACCOUNT_IDS) {
             throw new AwsException("ValidationException",
                     "1 validation error detected: Value at '" + decapitalize(field) + "' failed to satisfy "
@@ -476,8 +483,9 @@ public class SsmJsonHandler {
         List<String> accountIdsToRemove = accountIds(request, "AccountIdsToRemove");
         if (accountIdsToAdd.isEmpty() && accountIdsToRemove.isEmpty()) {
             throw new AwsException("ValidationException",
-                    "You must specify a value for the AccountIdsToAdd parameter or the "
-                            + "AccountIdsToRemove parameter.",
+                    "1 validation error detected: Value null at 'accountIdsToAdd' failed to satisfy "
+                            + "constraint: Member must not be null, or a value must be specified for "
+                            + "'accountIdsToRemove'",
                     400);
         }
 
@@ -618,7 +626,7 @@ public class SsmJsonHandler {
     private String requireSettingValue(JsonNode request) {
         JsonNode valueNode = request.path("SettingValue");
         String settingValue = valueNode.asText();
-        if (!valueNode.isTextual() || settingValue.isBlank()) {
+        if (!valueNode.isTextual() || settingValue.isEmpty()) {
             throw new AwsException("ValidationException",
                     "1 validation error detected: Value null at 'settingValue' failed to satisfy "
                             + "constraint: Member must not be null",
