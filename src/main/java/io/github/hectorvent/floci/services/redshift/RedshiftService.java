@@ -153,8 +153,17 @@ public class RedshiftService {
         Cluster cluster = clusters.get(clusterIdentifier)
                 .orElseThrow(() -> new AwsException("ClusterNotFound", "Cluster " + clusterIdentifier + " not found", 404));
 
-        // NodeType/NumberOfNodes only update metadata — they do not resize the underlying
-        // Postgres container, which has no notion of Redshift node count.
+        // alterUserPassword chạy TRƯỚC mọi mutation trên object cluster (live reference từ
+        // HybridStorage, không phải copy) — nếu nó throw, chưa có metadata nào bị đổi.
+        if (masterUserPassword != null && !masterUserPassword.isBlank()) {
+            containerManager.alterUserPassword(clusters.accountId(), clusterIdentifier,
+                    cluster.getMasterUsername(), masterUserPassword);
+            cluster.setMasterPassword(masterUserPassword);
+        }
+
+        // NodeType chỉ update metadata — không resize container Postgres bên dưới (không có
+        // khái niệm Redshift node count). NumberOfNodes được nhận cho tương thích API shape
+        // nhưng chưa được model/lưu ở đâu cả — gap đã biết, chưa cần xử lý (xem plan Task 9).
         if (nodeType != null && !nodeType.isBlank()) {
             cluster.setNodeType(nodeType);
         }
@@ -163,11 +172,6 @@ public class RedshiftService {
         }
         if (vpcSecurityGroupIds != null && !vpcSecurityGroupIds.isEmpty()) {
             cluster.setVpcSecurityGroupIds(vpcSecurityGroupIds);
-        }
-        if (masterUserPassword != null && !masterUserPassword.isBlank()) {
-            containerManager.alterUserPassword(clusters.accountId(), clusterIdentifier,
-                    cluster.getMasterUsername(), masterUserPassword);
-            cluster.setMasterPassword(masterUserPassword);
         }
 
         clusters.put(clusterIdentifier, cluster);
@@ -471,7 +475,7 @@ public class RedshiftService {
     public List<ClusterSubnetGroup> describeClusterSubnetGroups(String name) {
         if (name != null && !name.isBlank()) {
             ClusterSubnetGroup group = subnetGroups.get(name)
-                    .orElseThrow(() -> new AwsException("ClusterSubnetGroupNotFoundFault", "Cluster subnet group " + name + " not found", 404));
+                    .orElseThrow(() -> new AwsException("ClusterSubnetGroupNotFound", "Cluster subnet group " + name + " not found", 404));
             return List.of(group);
         }
         return subnetGroups.scan(k -> true);
@@ -479,7 +483,7 @@ public class RedshiftService {
 
     public synchronized ClusterSubnetGroup modifyClusterSubnetGroup(String name, String description, List<String> subnetIds) {
         ClusterSubnetGroup group = subnetGroups.get(name)
-                .orElseThrow(() -> new AwsException("ClusterSubnetGroupNotFoundFault", "Cluster subnet group " + name + " not found", 404));
+                .orElseThrow(() -> new AwsException("ClusterSubnetGroupNotFound", "Cluster subnet group " + name + " not found", 404));
         if (description != null) {
             group.setDescription(description);
         }
@@ -493,7 +497,7 @@ public class RedshiftService {
 
     public ClusterSubnetGroup deleteClusterSubnetGroup(String name) {
         ClusterSubnetGroup group = subnetGroups.get(name)
-                .orElseThrow(() -> new AwsException("ClusterSubnetGroupNotFoundFault", "Cluster subnet group " + name + " not found", 404));
+                .orElseThrow(() -> new AwsException("ClusterSubnetGroupNotFound", "Cluster subnet group " + name + " not found", 404));
         subnetGroups.delete(name);
         subnetGroups.flush();
         return group;
@@ -656,7 +660,7 @@ public class RedshiftService {
             }
             case "subnetgroup" -> {
                 ClusterSubnetGroup group = subnetGroups.get(id)
-                        .orElseThrow(() -> new AwsException("ClusterSubnetGroupNotFoundFault", "Cluster subnet group " + id + " not found", 404));
+                        .orElseThrow(() -> new AwsException("ClusterSubnetGroupNotFound", "Cluster subnet group " + id + " not found", 404));
                 yield new TagHandle(group.getTags(), updated -> {
                     group.setTags(updated);
                     subnetGroups.put(id, group);

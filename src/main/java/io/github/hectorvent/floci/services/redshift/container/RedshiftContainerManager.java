@@ -219,8 +219,10 @@ public class RedshiftContainerManager {
         try {
             ExecResult result = execInContainer(handle.getContainerId(), cmd, 15);
             if (result.exitCode() != 0) {
-                LOG.warnv("ALTER USER failed for cluster {0} (exit {1}): {2}", clusterIdentifier, result.exitCode(), result.stderr());
-                throw new AwsException("InternalFailure", "Failed to change master password for cluster " + clusterIdentifier + ": " + result.stderr(), 500);
+                // KHÔNG log/đưa result.stderr() vào message — psql có thể echo lại câu lệnh
+                // ALTER USER lỗi (kèm password literal) trong context dòng lỗi, rò rỉ secret.
+                LOG.warnv("ALTER USER command failed for cluster {0} (exit {1})", clusterIdentifier, result.exitCode());
+                throw new AwsException("InternalFailure", "Failed to change master password for cluster " + clusterIdentifier, 500);
             }
         } catch (AwsException e) {
             throw e;

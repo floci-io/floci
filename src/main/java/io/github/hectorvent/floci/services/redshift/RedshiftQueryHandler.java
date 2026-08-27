@@ -204,6 +204,9 @@ public class RedshiftQueryHandler {
             return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
         } else if ("ModifyClusterParameterGroup".equals(action)) {
             String parameterGroupName = params.getFirst("ParameterGroupName");
+            if (parameterGroupName == null || parameterGroupName.isBlank()) {
+                throw new AwsException("InvalidParameterValue", "ParameterGroupName is required", 400);
+            }
             List<Parameter> updates = parseParameters(params);
             service.modifyClusterParameterGroup(parameterGroupName, updates);
             String xml = new XmlBuilder()
@@ -282,6 +285,9 @@ public class RedshiftQueryHandler {
             return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
         } else if ("CreateClusterSubnetGroup".equals(action)) {
             String name = params.getFirst("ClusterSubnetGroupName");
+            if (name == null || name.isBlank()) {
+                throw new AwsException("InvalidParameterValue", "ClusterSubnetGroupName is required", 400);
+            }
             String description = params.getFirst("Description");
             List<String> subnetIds = memberList(params, "SubnetIds");
             ClusterSubnetGroup group = service.createClusterSubnetGroup(name, description, null, subnetIds);
@@ -344,9 +350,11 @@ public class RedshiftQueryHandler {
             return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
         } else if ("ModifyCluster".equals(action)) {
             String clusterIdentifier = params.getFirst("ClusterIdentifier");
+            if (clusterIdentifier == null || clusterIdentifier.isBlank()) {
+                throw new AwsException("InvalidParameterValue", "ClusterIdentifier is required", 400);
+            }
             String nodeType = params.getFirst("NodeType");
-            Integer numberOfNodes = params.getFirst("NumberOfNodes") != null
-                    ? Integer.valueOf(params.getFirst("NumberOfNodes")) : null;
+            Integer numberOfNodes = parseOptionalInteger(params, "NumberOfNodes");
             String masterUserPassword = params.getFirst("MasterUserPassword");
             String clusterParameterGroupName = params.getFirst("ClusterParameterGroupName");
             List<String> vpcSecurityGroupIds = memberList(params, "VpcSecurityGroupIds");
@@ -365,6 +373,9 @@ public class RedshiftQueryHandler {
             return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
         } else if ("RebootCluster".equals(action)) {
             String clusterIdentifier = params.getFirst("ClusterIdentifier");
+            if (clusterIdentifier == null || clusterIdentifier.isBlank()) {
+                throw new AwsException("InvalidParameterValue", "ClusterIdentifier is required", 400);
+            }
             Cluster cluster = service.rebootCluster(clusterIdentifier);
             String xml = new XmlBuilder()
                     .start("RebootClusterResponse")
@@ -397,6 +408,26 @@ public class RedshiftQueryHandler {
                 builder.start("VpcSecurityGroup").elem("VpcSecurityGroupId", sgId).end("VpcSecurityGroup");
             }
             builder.end("VpcSecurityGroups");
+        }
+
+        if (cluster.getClusterParameterGroupName() != null) {
+            builder.start("ClusterParameterGroups")
+                .start("ClusterParameterGroup")
+                  .elem("ParameterGroupName", cluster.getClusterParameterGroupName())
+                  .elem("ParameterApplyStatus", "in-sync")
+                .end("ClusterParameterGroup")
+              .end("ClusterParameterGroups");
+        }
+
+        if (cluster.getTags() != null && !cluster.getTags().isEmpty()) {
+            builder.start("Tags");
+            for (Map.Entry<String, String> tag : cluster.getTags().entrySet()) {
+                builder.start("Tag")
+                    .elem("Key", tag.getKey())
+                    .elem("Value", tag.getValue())
+                  .end("Tag");
+            }
+            builder.end("Tags");
         }
 
         if (cluster.getEndpoint() != null) {
@@ -461,41 +492,82 @@ public class RedshiftQueryHandler {
 
     private static List<String> memberList(MultivaluedMap<String, String> params, String baseName) {
         return params.keySet().stream()
-                .filter(key -> key.matches(java.util.regex.Pattern.quote(baseName) + "(\\.member)?\\.\\d+"))
+                .filter(key -> key.matches(memberKeyRegex(baseName)))
                 .sorted(java.util.Comparator.comparingInt(RedshiftQueryHandler::numericSuffix))
                 .map(params::getFirst)
                 .filter(value -> value != null && !value.isBlank())
                 .toList();
     }
 
+    // AWS Query protocol cho phép cả form generic ".member.N" lẫn locationName riêng của từng
+    // shape (vd Redshift SDK thật gửi "SubnetIds.SubnetIdentifier.N" thay vì "SubnetIds.member.N").
+    private static String memberKeyRegex(String baseName) {
+        String quoted = java.util.regex.Pattern.quote(baseName);
+        return switch (baseName) {
+            case "SubnetIds" -> quoted + "(\\.member|\\.SubnetIdentifier)?\\.\\d+";
+            case "VpcSecurityGroupIds" -> quoted + "(\\.member|\\.VpcSecurityGroupId)?\\.\\d+";
+            case "TagKeys" -> quoted + "(\\.member|\\.TagKey)?\\.\\d+";
+            default -> quoted + "(\\.member)?\\.\\d+";
+        };
+    }
+
     private static int numericSuffix(String key) {
         int lastDot = key.lastIndexOf('.');
-        return Integer.parseInt(key.substring(lastDot + 1));
+        if (lastDot < 0 || lastDot == key.length() - 1) {
+            return Integer.MAX_VALUE;
+        }
+        try {
+            return Integer.parseInt(key.substring(lastDot + 1));
+        } catch (NumberFormatException e) {
+            return Integer.MAX_VALUE;
+        }
     }
 
     private static List<Parameter> parseParameters(MultivaluedMap<String, String> params) {
         List<Parameter> parsed = new java.util.ArrayList<>();
+        readParameters(params, "Parameters.member", parsed);
+        readParameters(params, "Parameters.Parameter", parsed);
+        return parsed;
+    }
+
+    private static void readParameters(MultivaluedMap<String, String> params, String prefix, List<Parameter> parsed) {
         for (int i = 1; ; i++) {
-            String name = params.getFirst("Parameters.member." + i + ".ParameterName");
+            String name = params.getFirst(prefix + "." + i + ".ParameterName");
             if (name == null) {
                 break;
             }
-            String value = params.getFirst("Parameters.member." + i + ".ParameterValue");
+            String value = params.getFirst(prefix + "." + i + ".ParameterValue");
             parsed.add(new Parameter(name, value));
         }
-        return parsed;
     }
 
     private static Map<String, String> parseTags(MultivaluedMap<String, String> params) {
         Map<String, String> tags = new java.util.LinkedHashMap<>();
+        readTags(params, "Tags.member", tags);
+        readTags(params, "Tags.Tag", tags);
+        return tags;
+    }
+
+    private static void readTags(MultivaluedMap<String, String> params, String prefix, Map<String, String> tags) {
         for (int i = 1; ; i++) {
-            String key = params.getFirst("Tags.member." + i + ".Key");
+            String key = params.getFirst(prefix + "." + i + ".Key");
             if (key == null) {
                 break;
             }
-            String value = params.getFirst("Tags.member." + i + ".Value");
+            String value = params.getFirst(prefix + "." + i + ".Value");
             tags.put(key, value == null ? "" : value);
         }
-        return tags;
+    }
+
+    private static Integer parseOptionalInteger(MultivaluedMap<String, String> params, String parameterName) {
+        String value = params.getFirst(parameterName);
+        if (value == null) {
+            return null;
+        }
+        try {
+            return Integer.valueOf(value);
+        } catch (NumberFormatException e) {
+            throw new AwsException("InvalidParameterValue", parameterName + " must be an integer.", 400);
+        }
     }
 }
