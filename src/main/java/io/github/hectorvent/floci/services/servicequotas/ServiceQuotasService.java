@@ -12,6 +12,7 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Pattern;
 import java.util.zip.CRC32;
 import java.time.Instant;
 
@@ -32,6 +33,8 @@ import java.time.Instant;
 public class ServiceQuotasService {
 
     private static final double GENERIC_QUOTA_VALUE = 5000.0;
+    private static final Pattern SERVICE_CODE_PATTERN =
+            Pattern.compile("[a-zA-Z][a-zA-Z0-9-]{1,63}");
 
     private static final Map<String, String> SERVICE_NAMES = Map.ofEntries(
             Map.entry("codebuild", "AWS CodeBuild"),
@@ -137,10 +140,22 @@ public class ServiceQuotasService {
         return node;
     }
 
+    /**
+     * Unknown-but-well-formed service codes deliberately generate a quota catalog, which makes the
+     * shape check load-bearing: without it a code that cannot name any service — {@code "!!!"} —
+     * comes back with invented quotas instead of an error. The model constrains ServiceCode to at
+     * most 63 characters matching {@code [a-zA-Z][a-zA-Z0-9-]{1,63}} (the pattern's own minimum of
+     * two characters is the binding one, the shape's {@code min: 1} notwithstanding).
+     */
     private static void requireServiceCode(String serviceCode) {
         if (serviceCode == null || serviceCode.isEmpty()) {
             throw new AwsException("IllegalArgumentException",
                     "Invalid input: ServiceCode must not be empty.", 400);
+        }
+        if (serviceCode.length() > 63 || !SERVICE_CODE_PATTERN.matcher(serviceCode).matches()) {
+            throw new AwsException("IllegalArgumentException",
+                    "Invalid input: ServiceCode must match [a-zA-Z][a-zA-Z0-9-]{1,63} "
+                            + "and be at most 63 characters.", 400);
         }
     }
 

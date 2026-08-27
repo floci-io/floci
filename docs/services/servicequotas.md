@@ -36,6 +36,10 @@ see Limitations.
   request ever reaches `APPROVED`, `CASE_OPENED`, or `DENIED`. `PENDING` is what real AWS
   returns on creation, so a caller that only reads the creation response sees faithful data;
   a caller that polls for completion will wait forever.
+- **Unknown service codes generate a quota catalog rather than failing.** This is deliberate, so
+  the code has to be well-formed to be trusted: `ServiceCode` is validated against the modeled
+  `[a-zA-Z][a-zA-Z0-9-]{1,63}` (max 63 characters) and a malformed one is rejected with
+  `IllegalArgumentException` instead of returning invented quotas.
 - **A requested increase does not change the quota.** `GetServiceQuota` continues to return
   the catalog value after a successful increase request. Quota values remain static by design
   so pipelines never stall on an unenforced limit.

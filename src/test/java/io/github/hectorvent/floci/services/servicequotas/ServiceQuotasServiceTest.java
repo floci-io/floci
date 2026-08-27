@@ -48,4 +48,35 @@ class ServiceQuotasServiceTest {
                 () -> service.getServiceQuota("codebuild", "L-DOESNOTEX", "us-east-1", "000000000000"));
         assertEquals("NoSuchResourceException", e.getErrorCode());
     }
+
+    /**
+     * Unknown-but-well-formed service codes deliberately generate a quota catalog, so a code that
+     * cannot name a service at all has to be rejected up front — otherwise "!!!" comes back with
+     * three invented quotas instead of an error. The model constrains ServiceCode to at most 63
+     * characters matching {@code [a-zA-Z][a-zA-Z0-9-]{1,63}}.
+     */
+    @Test
+    void malformedServiceCodeIsRejected() {
+        for (String bad : List.of("!!!", "1codebuild", "-codebuild", "code build", "c", "a".repeat(64))) {
+            AwsException listing = assertThrows(AwsException.class,
+                    () -> service.listServiceQuotas(bad, null, null, null, "us-east-1", "000000000000"),
+                    "expected ListServiceQuotas to reject " + bad);
+            assertEquals("IllegalArgumentException", listing.getErrorCode(), bad);
+            assertEquals(400, listing.getHttpStatus(), bad);
+
+            AwsException get = assertThrows(AwsException.class,
+                    () -> service.getServiceQuota(bad, "L-2DC20C30", "us-east-1", "000000000000"),
+                    "expected GetServiceQuota to reject " + bad);
+            assertEquals("IllegalArgumentException", get.getErrorCode(), bad);
+        }
+    }
+
+    @Test
+    void wellFormedServiceCodesAreStillAccepted() {
+        // Including an unknown-but-valid code: generating a catalog for those is deliberate.
+        for (String good : List.of("codebuild", "widgetfactory", "elasticloadbalancing", "AWS-Thing", "ec")) {
+            assertTrue(service.listServiceQuotas(good, null, null, null, "us-east-1", "000000000000")
+                    .withArray("Quotas").size() > 0, good);
+        }
+    }
 }
