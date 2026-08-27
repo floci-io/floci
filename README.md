@@ -568,9 +568,11 @@ aws --endpoint-url http://localhost:4566 s3 ls
 
 Floci has Testcontainers modules for starting isolated Floci instances directly from tests. This avoids shared state, manual daemon setup, and port conflicts.
 
+For Testcontainers 1.x, use the versions as indicated in the table below.
+
 | Language | Package | Latest | Registry | Source |
 |---|---|---|---|---|
-| Java | `io.floci:testcontainers-floci` | `1.4.0` | [Maven Central](https://mvnrepository.com/artifact/io.floci/testcontainers-floci) | [GitHub](https://github.com/floci-io/testcontainers-floci) |
+| Java | `io.floci:testcontainers-floci` | `1.14.0` | [Maven Central](https://mvnrepository.com/artifact/io.floci/testcontainers-floci) | [GitHub](https://github.com/floci-io/testcontainers-floci) |
 | Node.js | `@floci/testcontainers` | `0.1.0` | [npm](https://www.npmjs.com/package/@floci/testcontainers) | [GitHub](https://github.com/floci-io/testcontainers-floci-node) |
 | Python | `testcontainers-floci` | `0.1.1` | [PyPI](https://pypi.org/project/testcontainers-floci/) | [GitHub](https://github.com/floci-io/testcontainers-floci-python) |
 | Go | In progress | In progress | N/A | [GitHub](https://github.com/floci-io/testcontainers-floci-go) |
@@ -582,7 +584,7 @@ Floci has Testcontainers modules for starting isolated Floci instances directly 
 <dependency>
     <groupId>io.floci</groupId>
     <artifactId>testcontainers-floci</artifactId>
-    <version>1.4.0</version>
+    <version>1.14.0</version>
     <scope>test</scope>
 </dependency>
 ```
@@ -609,7 +611,7 @@ class S3IntegrationTest {
 }
 ```
 
-For Testcontainers 2.x / Spring Boot 4.x, use version `2.5.0`.
+For Testcontainers 2.x / Spring Boot 4.x, use version `2.15.0`.
 
 </details>
 
