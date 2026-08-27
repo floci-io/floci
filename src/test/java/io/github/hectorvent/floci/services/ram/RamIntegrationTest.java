@@ -204,10 +204,9 @@ class RamIntegrationTest {
     }
 
     /**
-     * The controller substitutes "SELF" only when resourceOwner is absent or null; a present-but-
-     * unmodelled value — including a non-string that {@code asText} coerces — has to reach the
-     * service check and come back as InvalidParameterException on the wire, which is the path LZA
-     * actually takes.
+     * A present-but-unmodelled resourceOwner — including a non-string that {@code asText}
+     * coerces — has to reach the service check and come back as InvalidParameterException on the
+     * wire, which is the path LZA actually takes.
      */
     @Test
     void unmodelledResourceOwnerIsRejectedOnTheWire() {
@@ -237,15 +236,39 @@ class RamIntegrationTest {
             .statusCode(400)
             .body("__type", equalTo("InvalidParameterException"));
 
-        // Absent resourceOwner keeps the existing SELF default — unchanged by this fix.
+    }
+
+    /**
+     * resourceOwner is a required member on all three read operations. Substituting SELF for an
+     * absent one answered a question the caller never asked — and answered it with the caller's
+     * own shares, which is the more dangerous of the two branches to guess at.
+     */
+    @Test
+    void missingResourceOwnerIsRejectedOnEveryReadPath() {
+        for (String path : new String[] {"/getresourceshares", "/listprincipals", "/listresources"}) {
+            given()
+                .contentType("application/json")
+                .header("Authorization", AUTH_HEADER)
+                .body("{}")
+            .when()
+                .post(path)
+            .then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidParameterException"));
+        }
+
+        // An explicit null is absent too, not a third state.
         given()
             .contentType("application/json")
             .header("Authorization", AUTH_HEADER)
-            .body("{}")
+            .body("""
+                { "resourceOwner": null }
+                """)
         .when()
             .post("/getresourceshares")
         .then()
-            .statusCode(200);
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameterException"));
     }
 
     @Test

@@ -59,6 +59,9 @@ aws --endpoint-url http://localhost:4566 ram delete-resource-share \
 - Mutations are owner-only: a caller that is not the share's owning account gets
   `UnknownResourceException`, the same error an unknown ARN gets, since AWS resolves a share
   ARN within the caller's own account. Visibility above is unaffected.
+- `resourceOwner` is required on `GetResourceShares`, `ListPrincipals` and `ListResources`: a
+  missing or unmodelled value is rejected with `InvalidParameterException` rather than defaulted
+  to `SELF`.
 - `GetResourceShares` applies the `name`, `resourceShareArns` and `resourceShareStatus` filters;
   `tagFilters`, `permissionArn`, `permissionVersion` and pagination (`nextToken`/`maxResults`)
   are accepted but ignored — every matching share is returned in one page.

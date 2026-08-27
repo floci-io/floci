@@ -86,7 +86,8 @@ public class RamController {
     @Consumes(MediaType.WILDCARD)
     public Response getResourceShares(String body) {
         JsonNode request = readTree(body);
-        String resourceOwner = request.path("resourceOwner").asText("SELF");
+        String resourceOwner = request.hasNonNull("resourceOwner")
+                ? request.path("resourceOwner").asText() : null;
         List<ResourceShare> shares = service.getResourceShares(
                 regionResolver.getAccountId(),
                 resourceOwner,
@@ -175,7 +176,8 @@ public class RamController {
     @Consumes(MediaType.WILDCARD)
     public Response listPrincipals(String body) {
         JsonNode request = readTree(body);
-        String resourceOwner = request.path("resourceOwner").asText("SELF");
+        String resourceOwner = request.hasNonNull("resourceOwner")
+                ? request.path("resourceOwner").asText() : null;
         List<PrincipalAssociation> principals = service.listPrincipals(
                 regionResolver.getAccountId(), resourceOwner, stringList(request.path("resourceShareArns")));
 
@@ -233,7 +235,8 @@ public class RamController {
     @Consumes(MediaType.WILDCARD)
     public Response listResources(String body) {
         JsonNode request = readTree(body);
-        String resourceOwner = request.path("resourceOwner").asText("SELF");
+        String resourceOwner = request.hasNonNull("resourceOwner")
+                ? request.path("resourceOwner").asText() : null;
         List<SharedResource> resources = service.listResources(
                 regionResolver.getAccountId(), resourceOwner, stringList(request.path("resourceShareArns")));
 

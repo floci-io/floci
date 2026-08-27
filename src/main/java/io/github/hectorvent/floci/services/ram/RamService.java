@@ -286,6 +286,9 @@ public class RamService {
      * read operation that takes it. The visibility fork below is a two-way branch, so an unmodelled
      * value silently means OTHER-ACCOUNTS — a caller who sent {@code "self"} would be handed every
      * share they do NOT own. AWS answers InvalidParameterException, which all three operations list.
+     *
+     * <p>It is also a required member, so a null one is rejected rather than defaulted: guessing
+     * SELF answers a question the caller never asked, with the caller's own shares.
      */
     /** {@code ResourceShareStatus} is optional on GetResourceShares, but enumerated when sent. */
     private static void requireResourceShareStatus(String resourceShareStatus) {
@@ -296,6 +299,10 @@ public class RamService {
     }
 
     private static void requireResourceOwner(String resourceOwner) {
+        if (resourceOwner == null) {
+            throw new AwsException("InvalidParameterException",
+                    "resourceOwner is required and must be one of [SELF, OTHER-ACCOUNTS].", 400);
+        }
         if (!"SELF".equals(resourceOwner) && !"OTHER-ACCOUNTS".equals(resourceOwner)) {
             throw new AwsException("InvalidParameterException",
                     "resourceOwner must be one of [SELF, OTHER-ACCOUNTS].", 400);
