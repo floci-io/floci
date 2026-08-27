@@ -88,11 +88,16 @@ public class FileSystem {
         this.fileSystemId = fileSystemId;
     }
 
-    public FileSystemProtectionDescription getFileSystemProtectionDescription() {
+    // The wire name is FileSystemProtection, not FileSystemProtectionDescription --
+    // FileSystemProtectionDescription is the *shape* name, and the member on
+    // FileSystemDescription that carries it is called FileSystemProtection. Because
+    // UpperCamelCaseStrategy derives the JSON key from the accessor, the old
+    // getFileSystemProtectionDescription() name put the shape name on the wire.
+    public FileSystemProtectionDescription getFileSystemProtection() {
         return fileSystemProtection;
     }
 
-    public void setFileSystemProtectionDescription(FileSystemProtectionDescription fileSystemProtection) {
+    public void setFileSystemProtection(FileSystemProtectionDescription fileSystemProtection) {
         this.fileSystemProtection = fileSystemProtection;
     }
 

@@ -13,6 +13,7 @@ The EFS emulator provides a metadata control plane for file systems, mount targe
 | `CreateFileSystem` | - |
 | `DescribeFileSystems` | - |
 | `UpdateFileSystem` | - |
+| `UpdateFileSystemProtection` | - |
 | `DeleteFileSystem` | - |
 | `CreateTags` | - |
 | `DescribeTags` | - |

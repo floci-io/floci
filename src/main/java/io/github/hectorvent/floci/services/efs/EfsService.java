@@ -112,6 +112,10 @@ public class EfsService implements Resettable {
         size.setValueInStandard(0L);
         fs.setSizeInBytes(size);
 
+        // "Replication overwrite protection is ENABLED by default" -- the file system is
+        // writeable and cannot be a replication destination until something disables it.
+        fs.setFileSystemProtection(protection(ReplicationOverwriteProtection.ENABLED));
+
         fileSystemStore.put(regionKey, fs);
         
         BackupPolicy bp = new BackupPolicy();
@@ -134,7 +138,7 @@ public class EfsService implements Resettable {
                         fs.setName(tag.getValue());
                     });
                 }
-                return fs;
+                return withDefaultProtection(fs);
             })
             .sorted(Comparator.comparing(FileSystem::getFileSystemId))
             .collect(Collectors.toList());
@@ -181,7 +185,38 @@ public class EfsService implements Resettable {
         if (fs == null) {
             throw EfsException.fileSystemNotFound(fileSystemId);
         }
+        return withDefaultProtection(fs);
+    }
+
+    private static FileSystemProtectionDescription protection(ReplicationOverwriteProtection value) {
+        FileSystemProtectionDescription description = new FileSystemProtectionDescription();
+        description.setReplicationOverwriteProtection(value);
+        return description;
+    }
+
+    /**
+     * AWS always reports a protection status; there is no such thing as a file system
+     * without one. Applied on read as well as on create so that file systems already in
+     * a persisted store -- written before protection was modelled -- describe the same
+     * as one created today, rather than omitting the field.
+     */
+    private static FileSystem withDefaultProtection(FileSystem fs) {
+        if (fs.getFileSystemProtection() == null) {
+            fs.setFileSystemProtection(protection(ReplicationOverwriteProtection.ENABLED));
+        }
         return fs;
+    }
+
+    public FileSystemProtectionDescription updateFileSystemProtection(
+            String region, String fileSystemId, UpdateFileSystemProtectionRequest request) {
+        synchronized (lockFor(regionKey(region, fileSystemId))) {
+            FileSystem fs = getFileSystem(region, fileSystemId);
+            if (request != null && request.getReplicationOverwriteProtection() != null) {
+                fs.setFileSystemProtection(protection(request.getReplicationOverwriteProtection()));
+                fileSystemStore.put(regionKey(region, fileSystemId), fs);
+            }
+            return fs.getFileSystemProtection();
+        }
     }
 
     public FileSystem updateFileSystem(String region, String fileSystemId, UpdateFileSystemRequest request) {
