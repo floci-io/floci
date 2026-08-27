@@ -416,6 +416,20 @@ class IamServiceTest {
     }
 
     @Test
+    void instanceProfileSetTagsRejectsNullAndDefensivelyCopies() {
+        InstanceProfile profile = new InstanceProfile("AIPAX", "p", "/", "arn:aws:iam::111111111111:instance-profile/p");
+        profile.setTags(null);
+        assertNotNull(profile.getTags());
+        assertTrue(profile.getTags().isEmpty());
+
+        Map<String, String> source = new java.util.HashMap<>(Map.of("k", "v"));
+        profile.setTags(source);
+        source.put("k2", "v2");
+        assertFalse(profile.getTags().containsKey("k2"),
+                "setTags should defensively copy, not alias the caller's map");
+    }
+
+    @Test
     void deletePolicyWithAttachmentsFails() {
         iamService.createUser("alice", "/");
         IamPolicy policy = iamService.createPolicy("P", "/", null, "{}", null);
