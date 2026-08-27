@@ -658,7 +658,7 @@ pip install testcontainers-floci
 
 ```python
 import boto3
-from testcontainers_floci import FlociContainer
+from floci import FlociContainer
 
 
 def test_s3_create_bucket():
