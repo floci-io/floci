@@ -121,6 +121,10 @@ class ContainerLauncherTest {
         lenient().when(efs.mountGroupAdd()).thenReturn(OptionalInt.empty());
 
         when(embeddedDnsServer.getServerIp()).thenReturn(Optional.empty());
+        // Default: pass images through unchanged, matching the real EcrRegistryManager's
+        // behavior for non-ECR-shaped images. Individual ECR-rewrite tests override this.
+        lenient().when(ecrRegistryManager.rewriteImageUri(any()))
+                .thenAnswer(inv -> inv.getArgument(0));
 
         ContainerBuilder containerBuilder = new ContainerBuilder(config, dockerHostResolver, embeddedDnsServer);
         ContainerReachableEndpoint reachableEndpoint =
@@ -447,14 +451,13 @@ class ContainerLauncherTest {
         fn.setPackageType("Image");
         fn.setImageUri("123456789012.dkr.ecr.us-east-1.amazonaws.com/backend-user:1");
 
-        when(ecrRegistryManager.getRepositoryUri("123456789012", "us-east-1", "backend-user:1"))
+        when(ecrRegistryManager.rewriteImageUri("123456789012.dkr.ecr.us-east-1.amazonaws.com/backend-user:1"))
                 .thenReturn("123456789012.dkr.ecr.us-east-1.localhost:5100/backend-user:1");
 
         launcher.launch(fn);
 
         ContainerSpec spec = captureRealContainerSpec();
-        verify(ecrRegistryManager).ensureStarted();
-        verify(ecrRegistryManager).getRepositoryUri("123456789012", "us-east-1", "backend-user:1");
+        verify(ecrRegistryManager).rewriteImageUri("123456789012.dkr.ecr.us-east-1.amazonaws.com/backend-user:1");
         assertEquals("123456789012.dkr.ecr.us-east-1.localhost:5100/backend-user:1",
                 spec.image());
     }
@@ -466,14 +469,13 @@ class ContainerLauncherTest {
         fn.setPackageType("Image");
         fn.setImageUri("123456789012.dkr.ecr.us-east-1.amazonaws.com/backend-user:1");
 
-        when(ecrRegistryManager.getRepositoryUri("123456789012", "us-east-1", "backend-user:1"))
+        when(ecrRegistryManager.rewriteImageUri("123456789012.dkr.ecr.us-east-1.amazonaws.com/backend-user:1"))
                 .thenReturn("localhost:5100/123456789012/us-east-1/backend-user:1");
 
         launcher.launch(fn);
 
         ContainerSpec spec = captureRealContainerSpec();
-        verify(ecrRegistryManager).ensureStarted();
-        verify(ecrRegistryManager).getRepositoryUri("123456789012", "us-east-1", "backend-user:1");
+        verify(ecrRegistryManager).rewriteImageUri("123456789012.dkr.ecr.us-east-1.amazonaws.com/backend-user:1");
         assertEquals("localhost:5100/123456789012/us-east-1/backend-user:1",
                 spec.image());
     }

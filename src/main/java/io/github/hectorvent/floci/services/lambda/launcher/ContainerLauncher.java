@@ -123,10 +123,6 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
     private final LaunchedContainerAwsEnv awsEnv;
     private final LambdaExecutionRoleCredentials executionRoleCredentials;
 
-    /** Matches an AWS-shaped ECR image URI: {@code <account>.dkr.ecr.<region>.amazonaws.com/<repo>[:tag]}. */
-    private static final java.util.regex.Pattern AWS_ECR_URI =
-            java.util.regex.Pattern.compile("^([0-9]{12})\\.dkr\\.ecr\\.([a-z0-9-]+)\\.amazonaws\\.com/(.+)$");
-
     @Inject
     public ContainerLauncher(ContainerBuilder containerBuilder,
                              ContainerLifecycleManager lifecycleManager,
@@ -161,28 +157,6 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
     @PreDestroy
     void shutdown() {
         volumeCleanupScheduler.shutdownNow();
-    }
-
-    /**
-     * Rewrites real-AWS-shaped ECR image URIs to point at Floci's loopback registry.
-     * Stored ImageUri is preserved (so describe-function returns the original);
-     * the rewrite is only applied immediately before the docker pull.
-     */
-    private String rewriteForEmulatedRegistry(String image) {
-        if (image == null) {
-            return null;
-        }
-        java.util.regex.Matcher m = AWS_ECR_URI.matcher(image);
-        if (!m.matches()) {
-            return image;
-        }
-        String account = m.group(1);
-        String region = m.group(2);
-        String repoAndTag = m.group(3);
-        ecrRegistryManager.ensureStarted();
-        String rewritten = ecrRegistryManager.getRepositoryUri(account, region, repoAndTag);
-        LOG.infov("Rewriting ECR image URI {0} -> {1}", image, rewritten);
-        return rewritten;
     }
 
     public ContainerHandle launch(LambdaFunction fn) {
@@ -236,7 +210,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
                 : imageResolver.resolve(fn.getRuntime());
 
         // If this is an AWS-shaped ECR URI, rewrite it to Floci's loopback registry
-        image = rewriteForEmulatedRegistry(image);
+        image = ecrRegistryManager.rewriteImageUri(image);
 
         // Determine host address reachable from container
         String hostAddress = dockerHostResolver.resolve();
