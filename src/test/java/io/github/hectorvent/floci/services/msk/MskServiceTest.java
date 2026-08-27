@@ -855,11 +855,13 @@ class MskServiceTest {
     }
 
     @Test
-    void createClusterRejectsOutOfRangeBrokerCountAndVolumeSize() {
-        CreateClusterRequest tooMany = new CreateClusterRequest();
-        tooMany.setClusterName("too-many");
-        tooMany.setNumberOfBrokerNodes(16);
-        assertThrows(AwsException.class, () -> mskService.createCluster(tooMany));
+    void createClusterRejectsOnlyNonsensicalBrokerCountsAndOutOfRangeVolumeSize() {
+        // No upper bound: the SDK model says 15, but the REST reference documents no maximum and
+        // the quota page allows 30 (ZooKeeper) / 60 (KRaft), adjustable upward.
+        CreateClusterRequest manyBrokers = new CreateClusterRequest();
+        manyBrokers.setClusterName("many-brokers");
+        manyBrokers.setNumberOfBrokerNodes(30);
+        assertEquals(30, mskService.createCluster(manyBrokers).getNumberOfBrokerNodes());
 
         CreateClusterRequest tooFew = new CreateClusterRequest();
         tooFew.setClusterName("too-few");

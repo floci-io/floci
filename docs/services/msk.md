@@ -86,9 +86,15 @@ The v1 API predates serverless and its `ClusterInfo` cannot represent one, so �
 ### Validation
 
 `CreateCluster`/`CreateClusterV2` reject the values AWS rejects: a missing or over-64-character
-`clusterName`, a `numberOfBrokerNodes` outside 1–15, an EBS `volumeSize` outside 1–16384, a
+`clusterName`, a `numberOfBrokerNodes` below 1, an EBS `volumeSize` outside 1–16384, a
 `configurationInfo.revision` below 1, and any unrecognised `enhancedMonitoring`, `storageMode`,
-`rebalancing.status` or `encryptionInTransit.clientBroker` value.
+`rebalancing.status` or `encryptionInTransit.clientBroker` value. Each 400 names the offending
+member in `invalidParameter`, as MSK's `Error` schema does.
+
+There is deliberately **no** upper bound on `numberOfBrokerNodes`. The SDK model caps it at 15,
+but the REST API reference documents no maximum for it — on a page that gives ranges for its
+neighbours — and the quota page allows 30 brokers per ZooKeeper cluster and 60 per KRaft
+cluster, both adjustable. A 30-broker cluster is an ordinary thing to have.
 
 Unlike AWS, the *presence* of `kafkaVersion`, `numberOfBrokerNodes` and `brokerNodeGroupInfo` is
 not required — the emulator defaults them so that a minimal create request still works.

@@ -972,13 +972,15 @@ class MskControllerIntegrationTest {
         given()
             .contentType("application/json")
             .body("""
-                {"clusterName": "too-many-brokers", "kafkaVersion": "3.6.0", "numberOfBrokerNodes": 16}
+                {"clusterName": "zero-brokers", "kafkaVersion": "3.6.0", "numberOfBrokerNodes": 0}
                 """)
         .when()
             .post("/v1/clusters")
         .then()
             .statusCode(400)
-            .body("message", containsString("numberOfBrokerNodes"));
+            .body("message", containsString("numberOfBrokerNodes"))
+            // MSK's Error schema names the offending member alongside the message
+            .body("invalidParameter", equalTo("numberOfBrokerNodes"));
 
         given()
             .contentType("application/json")
@@ -1020,6 +1022,30 @@ class MskControllerIntegrationTest {
         .then()
             .statusCode(400)
             .body("message", containsString("clientBroker"));
+    }
+
+    // The SDK model caps numberOfBrokerNodes at 15, but the REST API reference documents no
+    // maximum and the quota page allows 30 per ZooKeeper cluster and 60 per KRaft cluster, both
+    // adjustable. Rejecting these would break clusters real MSK creates happily.
+    @Test
+    void createClusterAcceptsBrokerCountsAboveTheSdkModelCap() {
+        String clusterArn = given()
+            .contentType("application/json")
+            .body("""
+                {"clusterName": "thirty-brokers", "kafkaVersion": "3.6.0", "numberOfBrokerNodes": 30}
+                """)
+        .when()
+            .post("/v1/clusters")
+        .then()
+            .statusCode(200)
+            .extract().path("clusterArn");
+
+        given()
+        .when()
+            .get("/v1/clusters/{clusterArn}", clusterArn)
+        .then()
+            .statusCode(200)
+            .body("clusterInfo.numberOfBrokerNodes", equalTo(30));
     }
 
     // ── Serverless clusters ──────────────────────────────────────────────────────────────

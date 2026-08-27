@@ -54,8 +54,15 @@ public class MskService implements ResourceProvider {
     private static final String SERVERLESS_CLUSTER_TYPE = "SERVERLESS";
     private static final int MAX_PAGE = 100;
     private static final int MAX_CLUSTER_NAME_LENGTH = 64;
+    // Floor only, deliberately no ceiling. The SDK/CLI reference carries an __integerMin1Max15
+    // shape for numberOfBrokerNodes, but the REST API reference documents no minimum or maximum
+    // for it - on a page that does give ranges for its neighbours (volumeSize 1-16384,
+    // revision min 1) - and the quota page allows 30 brokers per ZooKeeper cluster and 60 per
+    // KRaft cluster, both adjustable upward. Capping at 15 would reject clusters real MSK
+    // accepts and turn a converging-on-the-wrong-number bug into an outright apply failure for
+    // every count from 16 up. An emulator that accepts a little more than AWS costs nobody
+    // anything; one that rejects a valid request blocks real work.
     private static final int MIN_BROKER_NODES = 1;
-    private static final int MAX_BROKER_NODES = 15;
     private static final int MIN_EBS_VOLUME_SIZE = 1;
     private static final int MAX_EBS_VOLUME_SIZE = 16384;
     private static final Set<String> ENHANCED_MONITORING_VALUES =
@@ -169,8 +176,8 @@ public class MskService implements ResourceProvider {
         // provisioned and echoed broker metadata the caller never asked for.
         if (request.getServerless() != null) {
             if (request.getProvisioned() != null) {
-                throw new AwsException("BadRequestException",
-                        "Exactly one of provisioned and serverless must be specified.", 400);
+                throw badRequest("serverless",
+                        "Exactly one of provisioned and serverless must be specified.");
             }
             return createServerlessCluster(request);
         }
@@ -210,17 +217,17 @@ public class MskService implements ResourceProvider {
     private void validateCreateRequest(CreateClusterRequest request) {
         String clusterName = request.getClusterName();
         if (clusterName == null || clusterName.isBlank()) {
-            throw new AwsException("BadRequestException", "clusterName is required.", 400);
+            throw badRequest("clusterName", "clusterName is required.");
         }
         if (clusterName.length() > MAX_CLUSTER_NAME_LENGTH) {
-            throw new AwsException("BadRequestException",
-                    "clusterName must be between 1 and " + MAX_CLUSTER_NAME_LENGTH + " characters.", 400);
+            throw badRequest("clusterName",
+                    "clusterName must be between 1 and " + MAX_CLUSTER_NAME_LENGTH + " characters.");
         }
 
         Integer brokerNodes = request.getNumberOfBrokerNodes();
-        if (brokerNodes != null && (brokerNodes < MIN_BROKER_NODES || brokerNodes > MAX_BROKER_NODES)) {
-            throw new AwsException("BadRequestException",
-                    "numberOfBrokerNodes must be between " + MIN_BROKER_NODES + " and " + MAX_BROKER_NODES + ".", 400);
+        if (brokerNodes != null && brokerNodes < MIN_BROKER_NODES) {
+            throw badRequest("numberOfBrokerNodes",
+                    "numberOfBrokerNodes must be at least " + MIN_BROKER_NODES + ".");
         }
 
         BrokerNodeGroupInfo nodeGroup = request.getBrokerNodeGroupInfo();
@@ -228,15 +235,15 @@ public class MskService implements ResourceProvider {
                 && nodeGroup.getStorageInfo().getEbsStorageInfo() != null) {
             Integer volumeSize = nodeGroup.getStorageInfo().getEbsStorageInfo().getVolumeSize();
             if (volumeSize != null && (volumeSize < MIN_EBS_VOLUME_SIZE || volumeSize > MAX_EBS_VOLUME_SIZE)) {
-                throw new AwsException("BadRequestException",
-                        "volumeSize must be between " + MIN_EBS_VOLUME_SIZE + " and " + MAX_EBS_VOLUME_SIZE + ".", 400);
+                throw badRequest("volumeSize",
+                        "volumeSize must be between " + MIN_EBS_VOLUME_SIZE + " and " + MAX_EBS_VOLUME_SIZE + ".");
             }
         }
 
         ConfigurationInfo configurationInfo = request.getConfigurationInfo();
         if (configurationInfo != null && configurationInfo.getRevision() != null
                 && configurationInfo.getRevision() < 1) {
-            throw new AwsException("BadRequestException", "configurationInfo.revision must be at least 1.", 400);
+            throw badRequest("configurationInfo.revision", "configurationInfo.revision must be at least 1.");
         }
 
         validateEnum("enhancedMonitoring", request.getEnhancedMonitoring(), ENHANCED_MONITORING_VALUES);
@@ -252,9 +259,16 @@ public class MskService implements ResourceProvider {
 
     private void validateEnum(String field, String value, Set<String> allowed) {
         if (value != null && !allowed.contains(value)) {
-            throw new AwsException("BadRequestException",
-                    field + " must be one of " + String.join(", ", new java.util.TreeSet<>(allowed)) + ".", 400);
+            throw badRequest(field,
+                    field + " must be one of " + String.join(", ", new java.util.TreeSet<>(allowed)) + ".");
         }
+    }
+
+    // MSK's Error schema is two members - message and invalidParameter, "the parameter that
+    // caused the error" - so a validation failure names the member it rejected.
+    private AwsException badRequest(String invalidParameter, String message) {
+        return new AwsException("BadRequestException", message, 400,
+                Map.of("invalidParameter", invalidParameter));
     }
 
     /**
@@ -288,11 +302,11 @@ public class MskService implements ResourceProvider {
     private MskCluster createServerlessCluster(CreateClusterV2Request request) {
         String clusterName = request.getClusterName();
         if (clusterName == null || clusterName.isBlank()) {
-            throw new AwsException("BadRequestException", "clusterName is required.", 400);
+            throw badRequest("clusterName", "clusterName is required.");
         }
         if (clusterName.length() > MAX_CLUSTER_NAME_LENGTH) {
-            throw new AwsException("BadRequestException",
-                    "clusterName must be between 1 and " + MAX_CLUSTER_NAME_LENGTH + " characters.", 400);
+            throw badRequest("clusterName",
+                    "clusterName must be between 1 and " + MAX_CLUSTER_NAME_LENGTH + " characters.");
         }
         if (storage.scan(k -> true).stream().anyMatch(c -> c.getClusterName().equals(clusterName))) {
             throw new AwsException("ConflictException", "Cluster already exists: " + clusterName, 409);
