@@ -528,6 +528,7 @@ public class SsmService implements ResourceProvider {
                     "Document " + name + " does not exist.", 400);
         }
         documentStore.delete(storageKey);
+        documentPermissionStore.delete(storageKey);
     }
 
     // ─── Resource Explorer 2 ───────────────────────────────────────────────────

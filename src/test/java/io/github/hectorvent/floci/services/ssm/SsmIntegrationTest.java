@@ -776,6 +776,78 @@ class SsmIntegrationTest {
         }
     }
 
+    @Test
+    void deleteDocument_clearsSharePermissionsSoARecreatedDocumentStartsUnshared() {
+        given()
+            .header("X-Amz-Target", "AmazonSSM.CreateDocument")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                {
+                    "Name": "Floci-Recreated-Shared-Doc",
+                    "Content": "{\\"schemaVersion\\":\\"1.0\\"}"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.ModifyDocumentPermission")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                {
+                    "Name": "Floci-Recreated-Shared-Doc",
+                    "PermissionType": "Share",
+                    "AccountIdsToAdd": ["444444444444"]
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.DeleteDocument")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                { "Name": "Floci-Recreated-Shared-Doc" }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.CreateDocument")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                {
+                    "Name": "Floci-Recreated-Shared-Doc",
+                    "Content": "{\\"schemaVersion\\":\\"1.0\\"}"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.DescribeDocumentPermission")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                {
+                    "Name": "Floci-Recreated-Shared-Doc",
+                    "PermissionType": "Share"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("AccountIds", empty());
+    }
+
     // ── Permission ops agree with the document store (botocore models InvalidDocument) ──
 
     @Test
