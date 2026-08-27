@@ -308,7 +308,7 @@ public class SsmService implements ResourceProvider {
                         "Document " + name + " does not exist.", 400));
     }
 
-    public SsmDocument createDocument(String name, String content, String documentType, String region) {
+    public synchronized SsmDocument createDocument(String name, String content, String documentType, String region) {
         String storageKey = regionKey(region, name);
         if (documentStore.get(storageKey).isPresent()) {
             throw new AwsException("DocumentAlreadyExists",
@@ -359,7 +359,7 @@ public class SsmService implements ResourceProvider {
      * caller cannot see. Deriving the check from the partition rather than a second stored
      * owner field keeps the guard and the storage scope from ever disagreeing.
      */
-    public void modifyDocumentPermission(String name, List<String> accountIdsToAdd,
+    public synchronized void modifyDocumentPermission(String name, List<String> accountIdsToAdd,
                                          List<String> accountIdsToRemove, String region) {
         getDocument(name, region);
         String storageKey = regionKey(region, name);
@@ -521,7 +521,7 @@ public class SsmService implements ResourceProvider {
         historyStore.put(storageKey, history);
     }
 
-    public void deleteDocument(String name, String region) {
+    public synchronized void deleteDocument(String name, String region) {
         String storageKey = regionKey(region, name);
         if (!documentStore.get(storageKey).isPresent()) {
             throw new AwsException("InvalidDocument",

@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.ssm;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.ssm.model.Parameter;
 import io.github.hectorvent.floci.services.ssm.model.ParameterHistory;
 import io.github.hectorvent.floci.services.ssm.model.ServiceSetting;
@@ -11,6 +12,15 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.function.Predicate;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -346,5 +356,102 @@ class SsmServiceTest {
         ServiceSetting b = accountB.getServiceSetting(PUBLIC_SHARING, "us-east-1");
         assertEquals("Enable", b.getSettingValue());
         assertEquals("arn:aws:ssm:us-east-1:222222222222:servicesetting" + PUBLIC_SHARING, b.getArn());
+    }
+
+    /**
+     * A delete that overlaps a same-name recreate-and-share must not let the delete's
+     * trailing permission cleanup wipe out the recreated document's new shares.
+     * {@code documentStore.delete} is instrumented to signal once it starts and then
+     * block, giving a concurrent createDocument/modifyDocumentPermission call a window
+     * to run before deleteDocument reaches documentPermissionStore.delete.
+     */
+    @Test
+    void deleteOverlappingRecreateAndShareDoesNotLoseNewPermission() throws Exception {
+        String region = "us-east-1";
+        String name = "RaceDoc";
+
+        CountDownLatch deleteStarted = new CountDownLatch(1);
+        CountDownLatch releaseDelete = new CountDownLatch(1);
+        InMemoryStorage<String, SsmDocument> realDocumentStore = new InMemoryStorage<>();
+        StorageBackend<String, SsmDocument> instrumentedDocumentStore =
+                new StorageBackend<>() {
+                    @Override
+                    public void put(String key, SsmDocument value) {
+                        realDocumentStore.put(key, value);
+                    }
+
+                    @Override
+                    public Optional<SsmDocument> get(String key) {
+                        return realDocumentStore.get(key);
+                    }
+
+                    @Override
+                    public void delete(String key) {
+                        realDocumentStore.delete(key);
+                        deleteStarted.countDown();
+                        try {
+                            releaseDelete.await(10, TimeUnit.SECONDS);
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                        }
+                    }
+
+                    @Override
+                    public List<SsmDocument> scan(Predicate<String> keyFilter) {
+                        return realDocumentStore.scan(keyFilter);
+                    }
+
+                    @Override
+                    public Set<String> keys() {
+                        return realDocumentStore.keys();
+                    }
+
+                    @Override
+                    public void flush() {
+                        realDocumentStore.flush();
+                    }
+
+                    @Override
+                    public void load() {
+                        realDocumentStore.load();
+                    }
+
+                    @Override
+                    public void clear() {
+                        realDocumentStore.clear();
+                    }
+                };
+
+        SsmService service = new SsmService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), instrumentedDocumentStore,
+                new InMemoryStorage<>(), 5, new RegionResolver(region, "000000000000"));
+        service.createDocument(name, "{}", "Command", region);
+        service.modifyDocumentPermission(name, List.of("111111111111"), List.of(), region);
+
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            Future<?> deleteFuture = pool.submit(() -> service.deleteDocument(name, region));
+            assertTrue(deleteStarted.await(10, TimeUnit.SECONDS),
+                    "delete must finish removing the document before this window opens");
+
+            Future<?> recreateFuture = pool.submit(() -> {
+                service.createDocument(name, "{}", "Command", region);
+                service.modifyDocumentPermission(name, List.of("222222222222"), List.of(), region);
+                return null;
+            });
+            assertThrows(TimeoutException.class, () -> recreateFuture.get(300, TimeUnit.MILLISECONDS),
+                    "recreate-and-share must be serialized against the in-flight delete, "
+                            + "not interleaved with it");
+
+            releaseDelete.countDown();
+            deleteFuture.get(10, TimeUnit.SECONDS);
+            recreateFuture.get(10, TimeUnit.SECONDS);
+        } finally {
+            pool.shutdownNow();
+        }
+
+        assertEquals(List.of("222222222222"), service.describeDocumentPermission(name, region),
+                "the delete's trailing permission cleanup must not remove the recreated "
+                        + "document's new share");
     }
 }
