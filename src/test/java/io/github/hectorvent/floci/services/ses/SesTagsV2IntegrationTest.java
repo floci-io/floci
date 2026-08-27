@@ -310,7 +310,9 @@ class SesTagsV2IntegrationTest {
             .statusCode(400)
             .header("X-Amzn-Errortype", containsString("ValidationException"))
             .body("__type", equalTo("ValidationException"))
-            .body("message", nullValue());
+            // Raw-body match: GPath's nullValue() also passes when the member is absent, so it
+            // can't pin that the body carries an explicit "message":null.
+            .body(containsString("\"message\":null"));
     }
 
     @Test
