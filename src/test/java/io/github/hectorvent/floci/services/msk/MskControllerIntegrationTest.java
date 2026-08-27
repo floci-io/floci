@@ -824,4 +824,278 @@ class MskControllerIntegrationTest {
         .then()
             .statusCode(400);
     }
+
+    // ── Tags (/v1/tags/{arn}, shared with AppSync behind V1TagsController) ────────────────
+
+    @Test
+    void clusterTagsRoundTripThroughTheTagEndpoints() {
+        String clusterArn = given()
+            .contentType("application/json")
+            .body("""
+                {"clusterName": "tag-cluster", "kafkaVersion": "3.6.0", "tags": {"Environment": "example"}}
+                """)
+        .when()
+            .post("/v1/clusters")
+        .then()
+            .statusCode(200)
+            .extract().path("clusterArn");
+
+        // tags set at create time are visible to ListTagsForResource
+        given()
+            .urlEncodingEnabled(false)
+        .when()
+            .get("/v1/tags/" + clusterArn)
+        .then()
+            .statusCode(200)
+            .body("tags.Environment", equalTo("example"));
+
+        given()
+            .contentType("application/json")
+            .body("""
+                {"tags": {"Team": "data", "Environment": "prod"}}
+                """)
+            .urlEncodingEnabled(false)
+        .when()
+            .post("/v1/tags/" + clusterArn)
+        .then()
+            .statusCode(204);
+
+        given()
+            .urlEncodingEnabled(false)
+        .when()
+            .get("/v1/tags/" + clusterArn)
+        .then()
+            .statusCode(200)
+            .body("tags.Team", equalTo("data"))
+            .body("tags.Environment", equalTo("prod"));
+
+        // and DescribeCluster echoes the same set, so a tag update is not invisible to a refresh
+        given()
+        .when()
+            .get("/v1/clusters/{clusterArn}", clusterArn)
+        .then()
+            .statusCode(200)
+            .body("clusterInfo.tags.Team", equalTo("data"))
+            .body("clusterInfo.tags.Environment", equalTo("prod"));
+
+        given()
+            .queryParam("tagKeys", "Team")
+            .urlEncodingEnabled(false)
+        .when()
+            .delete("/v1/tags/" + clusterArn)
+        .then()
+            .statusCode(204);
+
+        given()
+            .urlEncodingEnabled(false)
+        .when()
+            .get("/v1/tags/" + clusterArn)
+        .then()
+            .statusCode(200)
+            .body("tags", not(hasKey("Team")))
+            .body("tags.Environment", equalTo("prod"));
+    }
+
+    @Test
+    void configurationTagsRoundTripThroughTheTagEndpoints() {
+        String properties = Base64.getEncoder()
+                .encodeToString("auto.create.topics.enable=true".getBytes(StandardCharsets.UTF_8));
+        String arn = given()
+            .contentType("application/json")
+            .body("""
+                {"name": "tagged-config", "description": "d", "kafkaVersions": ["3.6.0"], "serverProperties": "%s"}
+                """.formatted(properties))
+        .when()
+            .post("/v1/configurations")
+        .then()
+            .statusCode(200)
+            .extract().path("arn");
+
+        given()
+            .contentType("application/json")
+            .body("""
+                {"tags": {"Owner": "platform"}}
+                """)
+            .urlEncodingEnabled(false)
+        .when()
+            .post("/v1/tags/" + arn)
+        .then()
+            .statusCode(204);
+
+        given()
+            .urlEncodingEnabled(false)
+        .when()
+            .get("/v1/tags/" + arn)
+        .then()
+            .statusCode(200)
+            .body("tags.Owner", equalTo("platform"));
+
+        // AWS's DescribeConfiguration shape has no tags member, so they stay out of that view
+        given()
+        .when()
+            .get("/v1/configurations/{arn}", arn)
+        .then()
+            .statusCode(200)
+            .body("$", not(hasKey("tags")));
+    }
+
+    @Test
+    void tagEndpointsReturnNotFoundForAnUnknownKafkaArn() {
+        String missing = "arn:aws:kafka:us-east-1:000000000000:cluster/nope/00000000-0000-0000-0000-000000000000";
+
+        given()
+            .urlEncodingEnabled(false)
+        .when()
+            .get("/v1/tags/" + missing)
+        .then()
+            .statusCode(404);
+    }
+
+    // ── CreateCluster validation ─────────────────────────────────────────────────────────
+
+    @Test
+    void createClusterRejectsAMissingClusterName() {
+        given()
+            .contentType("application/json")
+            .body("""
+                {"kafkaVersion": "3.6.0"}
+                """)
+        .when()
+            .post("/v1/clusters")
+        .then()
+            .statusCode(400)
+            .body("message", containsString("clusterName"));
+    }
+
+    @Test
+    void createClusterRejectsOutOfRangeAndUnknownEnumValues() {
+        given()
+            .contentType("application/json")
+            .body("""
+                {"clusterName": "too-many-brokers", "kafkaVersion": "3.6.0", "numberOfBrokerNodes": 16}
+                """)
+        .when()
+            .post("/v1/clusters")
+        .then()
+            .statusCode(400)
+            .body("message", containsString("numberOfBrokerNodes"));
+
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                  "clusterName": "bad-volume-size",
+                  "kafkaVersion": "3.6.0",
+                  "brokerNodeGroupInfo": {"storageInfo": {"ebsStorageInfo": {"volumeSize": 0}}}
+                }
+                """)
+        .when()
+            .post("/v1/clusters")
+        .then()
+            .statusCode(400)
+            .body("message", containsString("volumeSize"));
+
+        given()
+            .contentType("application/json")
+            .body("""
+                {"clusterName": "bad-monitoring", "kafkaVersion": "3.6.0", "enhancedMonitoring": "SOMETIMES"}
+                """)
+        .when()
+            .post("/v1/clusters")
+        .then()
+            .statusCode(400)
+            .body("message", containsString("enhancedMonitoring"));
+
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                  "clusterName": "bad-client-broker",
+                  "kafkaVersion": "3.6.0",
+                  "encryptionInfo": {"encryptionInTransit": {"clientBroker": "MAYBE"}}
+                }
+                """)
+        .when()
+            .post("/v1/clusters")
+        .then()
+            .statusCode(400)
+            .body("message", containsString("clientBroker"));
+    }
+
+    // ── Serverless clusters ──────────────────────────────────────────────────────────────
+
+    @Test
+    void createClusterV2SupportsServerlessAndKeepsItOutOfTheV1Api() {
+        String clusterArn = given()
+            .contentType("application/json")
+            .body("""
+                {
+                  "clusterName": "serverless-cluster",
+                  "tags": {"Environment": "prod"},
+                  "serverless": {
+                    "vpcConfigs": [{"subnetIds": ["subnet-aaa", "subnet-bbb"], "securityGroupIds": ["sg-111"]}],
+                    "clientAuthentication": {"sasl": {"iam": {"enabled": true}}}
+                  }
+                }
+                """)
+        .when()
+            .post("/api/v2/clusters")
+        .then()
+            .statusCode(200)
+            .body("clusterType", equalTo("SERVERLESS"))
+            .extract().path("clusterArn");
+
+        given()
+        .when()
+            .get("/api/v2/clusters/{clusterArn}", clusterArn)
+        .then()
+            .statusCode(200)
+            .body("clusterInfo.clusterType", equalTo("SERVERLESS"))
+            .body("clusterInfo.tags.Environment", equalTo("prod"))
+            .body("clusterInfo.serverless.vpcConfigs[0].subnetIds", hasItem("subnet-aaa"))
+            .body("clusterInfo.serverless.vpcConfigs[0].securityGroupIds", hasItem("sg-111"))
+            .body("clusterInfo.serverless.clientAuthentication.sasl.iam.enabled", equalTo(true))
+            // a serverless cluster has no provisioned envelope at all
+            .body("clusterInfo", not(hasKey("provisioned")));
+
+        // the v1 API predates serverless and cannot describe one
+        given()
+        .when()
+            .get("/v1/clusters/{clusterArn}", clusterArn)
+        .then()
+            .statusCode(400)
+            .body("message", containsString("DescribeClusterV2"));
+
+        given()
+        .when()
+            .get("/v1/clusters")
+        .then()
+            .statusCode(200)
+            .body("clusterInfoList.findAll { it.clusterName == 'serverless-cluster' }", hasSize(0));
+
+        given()
+        .when()
+            .get("/api/v2/clusters")
+        .then()
+            .statusCode(200)
+            .body("clusterInfoList.findAll { it.clusterName == 'serverless-cluster' }", hasSize(1));
+    }
+
+    @Test
+    void createClusterV2RejectsBothProvisionedAndServerless() {
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                  "clusterName": "both-shapes",
+                  "provisioned": {"kafkaVersion": "3.6.0"},
+                  "serverless": {"vpcConfigs": [{"subnetIds": ["subnet-aaa"]}]}
+                }
+                """)
+        .when()
+            .post("/api/v2/clusters")
+        .then()
+            .statusCode(400)
+            .body("message", containsString("Exactly one"));
+    }
 }

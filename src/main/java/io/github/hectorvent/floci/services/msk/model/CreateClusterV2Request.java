@@ -19,6 +19,9 @@ public class CreateClusterV2Request {
     @JsonProperty("provisioned")
     private ProvisionedRequest provisioned;
 
+    @JsonProperty("serverless")
+    private Serverless serverless;
+
     public CreateClusterV2Request() {}
 
     public String getClusterName() { return clusterName; }
@@ -29,4 +32,7 @@ public class CreateClusterV2Request {
 
     public ProvisionedRequest getProvisioned() { return provisioned; }
     public void setProvisioned(ProvisionedRequest provisioned) { this.provisioned = provisioned; }
+
+    public Serverless getServerless() { return serverless; }
+    public void setServerless(Serverless serverless) { this.serverless = serverless; }
 }

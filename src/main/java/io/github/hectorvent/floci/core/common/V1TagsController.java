@@ -11,7 +11,6 @@ import jakarta.ws.rs.PUT;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
-import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
@@ -19,51 +18,31 @@ import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.UriInfo;
 
 /**
- * Dispatcher for AWS services that share the REST {@code /tags/{resourceArn}} path
- * (API Gateway, EventBridge Scheduler, EKS, ...).
+ * Dispatcher for the AWS services that put their tag endpoints on {@code /v1/tags/{resourceArn}}
+ * (AppSync, MSK).
  *
- * <p>AWS distinguishes these services by hostname, but floci serves every service on a
- * single port, so the path alone is ambiguous. This controller resolves the owning
- * service from the {@code service} segment of the request ARN
- * ({@code arn:aws:<service>:<region>:<account>:<resource>}) and dispatches to the
- * matching {@link TagHandler}.
- *
- * <p>The resolution and wire-shape logic lives in {@link TagDispatcher}, shared with
- * {@link V1TagsController}, which does the same job for the services AWS puts on
- * {@code /v1/tags/{resourceArn}} instead.
+ * <p>Same problem and same resolution as {@link SharedTagsController}, one path up: AWS tells
+ * these services apart by hostname, floci serves them all on one port, so the owning service is
+ * resolved from the {@code service} segment of the request ARN and the request handed to the
+ * matching {@link TagHandler}. Handlers opt in to this path with {@link V1Tags}.
  */
-@Path("/tags")
+@Path("/v1/tags")
 @Produces(MediaType.APPLICATION_JSON)
-public class SharedTagsController {
+public class V1TagsController {
 
     private final TagDispatcher dispatcher;
 
     @Inject
-    public SharedTagsController(Instance<TagHandler> handlers,
-                                RegionResolver regionResolver,
-                                ObjectMapper objectMapper) {
+    public V1TagsController(@V1Tags Instance<TagHandler> handlers,
+                            RegionResolver regionResolver,
+                            ObjectMapper objectMapper) {
         this.dispatcher = new TagDispatcher(handlers, regionResolver, objectMapper);
-    }
-
-    @GET
-    public Response listTagsByQuery(@Context HttpHeaders headers,
-                                    @QueryParam("resourceArn") String arn) {
-        return dispatcher.listTagsForArn(headers, arn);
     }
 
     @GET
     @Path("/{arn: .+}")
     public Response listTags(@Context HttpHeaders headers, @PathParam("arn") String arn) {
         return dispatcher.listTagsForArn(headers, arn);
-    }
-
-    @POST
-    @Consumes(MediaType.APPLICATION_JSON)
-    public Response tagResourceByBody(@Context HttpHeaders headers, String body) {
-        String arn = dispatcher.readResourceArn(body);
-        TagHandler handler = dispatcher.resolveHandler(arn);
-        return dispatcher.doTagResource(headers, handler, arn, body,
-                Response.ok(dispatcher.emptyObject()).build());
     }
 
     @POST
@@ -89,18 +68,10 @@ public class SharedTagsController {
     }
 
     @DELETE
-    public Response untagResourceByQuery(@Context HttpHeaders headers,
-                                         @Context UriInfo uriInfo,
-                                         @QueryParam("resourceArn") String arn) {
-        return dispatcher.untagResourceForArn(headers, uriInfo, arn,
-                Response.ok(dispatcher.emptyObject()).build());
-    }
-
-    @DELETE
     @Path("/{arn: .+}")
     public Response untagResource(@Context HttpHeaders headers,
-                                   @Context UriInfo uriInfo,
-                                   @PathParam("arn") String arn) {
+                                  @Context UriInfo uriInfo,
+                                  @PathParam("arn") String arn) {
         TagHandler handler = dispatcher.resolveHandler(arn);
         return dispatcher.untagResourceForArn(headers, uriInfo, arn,
                 Response.status(handler.untagResourceSuccessStatus()).build(), handler);

@@ -21,6 +21,7 @@ import io.github.hectorvent.floci.services.msk.model.ConfigurationState;
 import io.github.hectorvent.floci.services.msk.model.CreateClusterRequest;
 import io.github.hectorvent.floci.services.msk.model.CreateClusterV2Request;
 import io.github.hectorvent.floci.services.msk.model.EncryptionInTransit;
+import io.github.hectorvent.floci.services.msk.model.EbsStorageInfo;
 import io.github.hectorvent.floci.services.msk.model.EncryptionInfo;
 import io.github.hectorvent.floci.services.msk.model.JmxExporter;
 import io.github.hectorvent.floci.services.msk.model.LoggingInfo;
@@ -32,6 +33,9 @@ import io.github.hectorvent.floci.services.msk.model.MskConfiguration;
 import io.github.hectorvent.floci.services.msk.model.ProvisionedRequest;
 import io.github.hectorvent.floci.services.msk.model.Sasl;
 import io.github.hectorvent.floci.services.msk.model.Scram;
+import io.github.hectorvent.floci.services.msk.model.Serverless;
+import io.github.hectorvent.floci.services.msk.model.StorageInfo;
+import io.github.hectorvent.floci.services.msk.model.VpcConfig;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
@@ -776,5 +780,165 @@ class MskServiceTest {
             assertNotNull(finalState.getServerPropertiesByRevision().get(revision),
                     "revision " + revision + " lost its serverProperties");
         }
+    }
+
+    // ── Tags ─────────────────────────────────────────────────────────────────────────────
+
+    @Test
+    void tagAndUntagResourceWorkOnClustersAndConfigurations() {
+        MskCluster cluster = mskService.createCluster("tagged-cluster");
+        mskService.tagResource(cluster.getClusterArn(), Map.of("Environment", "example"));
+        assertEquals("example", mskService.listTagsForResource(cluster.getClusterArn()).get("Environment"));
+
+        MskConfiguration configuration = mskService.createConfiguration(
+                "tagged-config", "d", List.of("3.6.0"), "auto.create.topics.enable=true");
+        mskService.tagResource(configuration.getArn(), Map.of("Owner", "platform"));
+        assertEquals("platform", mskService.listTagsForResource(configuration.getArn()).get("Owner"));
+
+        mskService.untagResource(cluster.getClusterArn(), List.of("Environment"));
+        assertTrue(mskService.listTagsForResource(cluster.getClusterArn()).isEmpty());
+    }
+
+    // createCluster stores whatever map the request carried, which for an immutable Map.of would
+    // reject an in-place putAll - the tag write has to copy instead.
+    @Test
+    void tagResourceCanExtendAnImmutableTagMapSetAtCreateTime() {
+        CreateClusterRequest request = new CreateClusterRequest();
+        request.setClusterName("immutable-tags-cluster");
+        request.setTags(Map.of("Environment", "example"));
+        MskCluster cluster = mskService.createCluster(request);
+
+        mskService.tagResource(cluster.getClusterArn(), Map.of("Team", "data"));
+
+        Map<String, String> tags = mskService.listTagsForResource(cluster.getClusterArn());
+        assertEquals("example", tags.get("Environment"));
+        assertEquals("data", tags.get("Team"));
+    }
+
+    @Test
+    void tagOperationsOnAnUnknownArnAreNotFound() {
+        String missing = "arn:aws:kafka:us-east-1:000000000000:cluster/nope/id";
+        assertThrows(AwsException.class, () -> mskService.listTagsForResource(missing));
+        assertThrows(AwsException.class, () -> mskService.tagResource(missing, Map.of("a", "b")));
+        assertThrows(AwsException.class, () -> mskService.untagResource(missing, List.of("a")));
+    }
+
+    @Test
+    void configurationKeepsTagsAndAccountIdAcrossTheStorageMapperRoundTrip() throws Exception {
+        MskConfiguration configuration = mskService.createConfiguration(
+                "persisted-config", "d", List.of("3.6.0"), "auto.create.topics.enable=true");
+        mskService.tagResource(configuration.getArn(), Map.of("Owner", "platform"));
+        MskConfiguration tagged = mskService.describeConfiguration(configuration.getArn());
+
+        ObjectMapper storageMapper = new ObjectMapper();
+        storageMapper.registerModule(new JavaTimeModule());
+        storageMapper.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
+        MskConfiguration reloaded = storageMapper.readValue(
+                storageMapper.writeValueAsString(tagged), MskConfiguration.class);
+
+        assertEquals("platform", reloaded.getTags().get("Owner"));
+        assertEquals(tagged.getAccountId(), reloaded.getAccountId());
+        assertNotNull(reloaded.getAccountId());
+    }
+
+    // ── CreateCluster validation ─────────────────────────────────────────────────────────
+
+    @Test
+    void createClusterRejectsAMissingOrOversizedClusterName() {
+        CreateClusterRequest noName = new CreateClusterRequest();
+        noName.setKafkaVersion("3.6.0");
+        assertThrows(AwsException.class, () -> mskService.createCluster(noName));
+
+        CreateClusterRequest longName = new CreateClusterRequest();
+        longName.setClusterName("c".repeat(65));
+        assertThrows(AwsException.class, () -> mskService.createCluster(longName));
+    }
+
+    @Test
+    void createClusterRejectsOutOfRangeBrokerCountAndVolumeSize() {
+        CreateClusterRequest tooMany = new CreateClusterRequest();
+        tooMany.setClusterName("too-many");
+        tooMany.setNumberOfBrokerNodes(16);
+        assertThrows(AwsException.class, () -> mskService.createCluster(tooMany));
+
+        CreateClusterRequest tooFew = new CreateClusterRequest();
+        tooFew.setClusterName("too-few");
+        tooFew.setNumberOfBrokerNodes(0);
+        assertThrows(AwsException.class, () -> mskService.createCluster(tooFew));
+
+        CreateClusterRequest badVolume = new CreateClusterRequest();
+        badVolume.setClusterName("bad-volume");
+        EbsStorageInfo ebs = new EbsStorageInfo();
+        ebs.setVolumeSize(16385);
+        StorageInfo storageInfo = new StorageInfo();
+        storageInfo.setEbsStorageInfo(ebs);
+        BrokerNodeGroupInfo nodeGroup = new BrokerNodeGroupInfo();
+        nodeGroup.setStorageInfo(storageInfo);
+        badVolume.setBrokerNodeGroupInfo(nodeGroup);
+        assertThrows(AwsException.class, () -> mskService.createCluster(badVolume));
+    }
+
+    @Test
+    void createClusterRejectsUnknownEnumValuesButAcceptsTheDocumentedOnes() {
+        CreateClusterRequest bad = new CreateClusterRequest();
+        bad.setClusterName("bad-monitoring");
+        bad.setEnhancedMonitoring("SOMETIMES");
+        assertThrows(AwsException.class, () -> mskService.createCluster(bad));
+
+        CreateClusterRequest good = new CreateClusterRequest();
+        good.setClusterName("good-monitoring");
+        good.setEnhancedMonitoring("PER_TOPIC_PER_PARTITION");
+        good.setStorageMode("TIERED");
+        assertEquals("PER_TOPIC_PER_PARTITION", mskService.createCluster(good).getEnhancedMonitoring());
+    }
+
+    // ── Serverless ───────────────────────────────────────────────────────────────────────
+
+    @Test
+    void createClusterV2CreatesAServerlessClusterWithoutProvisionedMetadata() {
+        VpcConfig vpcConfig = new VpcConfig();
+        vpcConfig.setSubnetIds(List.of("subnet-aaa"));
+        Serverless serverless = new Serverless();
+        serverless.setVpcConfigs(List.of(vpcConfig));
+
+        CreateClusterV2Request request = new CreateClusterV2Request();
+        request.setClusterName("serverless-cluster");
+        request.setServerless(serverless);
+
+        MskCluster cluster = mskService.createCluster(request);
+
+        assertTrue(mskService.isServerless(cluster));
+        assertEquals("SERVERLESS", cluster.getClusterType());
+        assertEquals(List.of("subnet-aaa"), cluster.getServerless().getVpcConfigs().get(0).getSubnetIds());
+        assertNull(cluster.getBrokerNodeGroupInfo());
+        assertNull(cluster.getCurrentBrokerSoftwareInfo());
+        assertEquals(0, cluster.getNumberOfBrokerNodes());
+    }
+
+    @Test
+    void v1ReadsExcludeServerlessClusters() {
+        Serverless serverless = new Serverless();
+        serverless.setVpcConfigs(List.of(new VpcConfig()));
+        CreateClusterV2Request request = new CreateClusterV2Request();
+        request.setClusterName("serverless-cluster");
+        request.setServerless(serverless);
+        MskCluster serverlessCluster = mskService.createCluster(request);
+
+        mskService.createCluster("provisioned-cluster");
+
+        assertThrows(AwsException.class, () -> mskService.describeClusterV1(serverlessCluster.getClusterArn()));
+        assertEquals(2, mskService.listClusters().size());
+        assertEquals(1, mskService.listProvisionedClusters().size());
+        assertEquals("provisioned-cluster", mskService.listProvisionedClusters().get(0).getClusterName());
+    }
+
+    @Test
+    void createClusterV2RejectsBothProvisionedAndServerless() {
+        CreateClusterV2Request request = new CreateClusterV2Request();
+        request.setClusterName("both-shapes");
+        request.setProvisioned(new ProvisionedRequest());
+        request.setServerless(new Serverless());
+
+        assertThrows(AwsException.class, () -> mskService.createCluster(request));
     }
 }

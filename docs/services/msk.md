@@ -10,7 +10,7 @@ Floci emulates Amazon MSK by orchestrating **Redpanda** containers. This provide
 | Action | Description |
 |---|---|
 | `CreateCluster` | Spawns a new Redpanda container for the cluster |
-| `CreateClusterV2` | Modern serverless/provisioned creation (mapped to provisioned) |
+| `CreateClusterV2` | Create a provisioned or serverless cluster |
 | `ListClusters` | List all emulated clusters |
 | `ListClustersV2` | List all emulated clusters using V2 API |
 | `DescribeCluster` | Get cluster metadata and state |
@@ -24,6 +24,9 @@ Floci emulates Amazon MSK by orchestrating **Redpanda** containers. This provide
 | `UpdateConfiguration` | Create a new revision of a configuration |
 | `ListConfigurationRevisions` | List all revisions of a configuration |
 | `DescribeConfigurationRevision` | Get a specific revision, including its `server.properties` |
+| `ListTagsForResource` | List the tags on a cluster or configuration |
+| `TagResource` | Add tags to a cluster or configuration |
+| `UntagResource` | Remove tags from a cluster or configuration |
 
 ## Configuration
 
@@ -68,8 +71,35 @@ Two details worth knowing:
   `enhancedMonitoring` becomes `DEFAULT`, and `encryptionInfo.encryptionInTransit` becomes
   `clientBroker: TLS_PLAINTEXT` / `inCluster: true` when the request omits them.
 
-Serverless clusters are not emulated; `CreateClusterV2` maps every request to a provisioned
-cluster and the `serverless` member is ignored.
+### Serverless clusters
+
+`CreateClusterV2` accepts a `serverless` member as well as `provisioned` — exactly one of the
+two, as on AWS. A serverless cluster stores its `vpcConfigs` and `clientAuthentication`, reports
+`clusterType: SERVERLESS`, and comes back from `DescribeClusterV2` under a `serverless` envelope
+rather than a `provisioned` one. It is backed by the same emulated Kafka endpoint, so
+`GetBootstrapBrokers` works normally.
+
+The v1 API predates serverless and its `ClusterInfo` cannot represent one, so — as on AWS —
+`DescribeCluster` on a serverless cluster returns `BadRequestException` pointing you at
+`DescribeClusterV2`, and `ListClusters` omits serverless clusters entirely.
+
+### Validation
+
+`CreateCluster`/`CreateClusterV2` reject the values AWS rejects: a missing or over-64-character
+`clusterName`, a `numberOfBrokerNodes` outside 1–15, an EBS `volumeSize` outside 1–16384, a
+`configurationInfo.revision` below 1, and any unrecognised `enhancedMonitoring`, `storageMode`,
+`rebalancing.status` or `encryptionInTransit.clientBroker` value.
+
+Unlike AWS, the *presence* of `kafkaVersion`, `numberOfBrokerNodes` and `brokerNodeGroupInfo` is
+not required — the emulator defaults them so that a minimal create request still works.
+
+### Tags
+
+Cluster and configuration tags are managed through `/v1/tags/{resourceArn}`
+(`ListTagsForResource`, `TagResource`, `UntagResource`). Cluster tags also round-trip through
+`DescribeCluster`/`DescribeClusterV2`, so a tag change is visible to a refresh either way.
+Configuration tags are reachable only through the tag endpoints, because AWS's
+`DescribeConfiguration` response has no tags member.
 
 ## Examples
 

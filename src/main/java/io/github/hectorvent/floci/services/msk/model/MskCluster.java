@@ -28,6 +28,14 @@ public class MskCluster {
     @JsonProperty("clusterName")
     private String clusterName;
 
+    // PROVISIONED or SERVERLESS. Selects which envelope the v2 view emits, and whether the v1
+    // operations - which predate serverless and have no way to describe one - accept it at all.
+    @JsonProperty("clusterType")
+    private String clusterType;
+
+    @JsonProperty("serverless")
+    private Serverless serverless;
+
     @JsonProperty("state")
     private ClusterState state;
 
@@ -111,6 +119,12 @@ public class MskCluster {
 
     public String getClusterName() { return clusterName; }
     public void setClusterName(String clusterName) { this.clusterName = clusterName; }
+
+    public String getClusterType() { return clusterType; }
+    public void setClusterType(String clusterType) { this.clusterType = clusterType; }
+
+    public Serverless getServerless() { return serverless; }
+    public void setServerless(Serverless serverless) { this.serverless = serverless; }
 
     public ClusterState getState() { return state; }
     public void setState(ClusterState state) { this.state = state; }

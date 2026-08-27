@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.msk.model.BrokerNodeGroupInfo;
 import io.github.hectorvent.floci.services.msk.model.ClusterState;
 import io.github.hectorvent.floci.services.msk.model.ConfigurationRevision;
 import io.github.hectorvent.floci.services.msk.model.ConfigurationRevisionDetail;
@@ -33,6 +34,7 @@ import org.jboss.logging.Logger;
 import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -48,7 +50,19 @@ public class MskService implements ResourceProvider {
     private static final String DEFAULT_KAFKA_VERSION = "3.6.0";
     private static final String DEFAULT_ENHANCED_MONITORING = "DEFAULT";
     private static final String DEFAULT_CLIENT_BROKER_ENCRYPTION = "TLS_PLAINTEXT";
+    private static final String PROVISIONED_CLUSTER_TYPE = "PROVISIONED";
+    private static final String SERVERLESS_CLUSTER_TYPE = "SERVERLESS";
     private static final int MAX_PAGE = 100;
+    private static final int MAX_CLUSTER_NAME_LENGTH = 64;
+    private static final int MIN_BROKER_NODES = 1;
+    private static final int MAX_BROKER_NODES = 15;
+    private static final int MIN_EBS_VOLUME_SIZE = 1;
+    private static final int MAX_EBS_VOLUME_SIZE = 16384;
+    private static final Set<String> ENHANCED_MONITORING_VALUES =
+            Set.of("DEFAULT", "PER_BROKER", "PER_TOPIC_PER_BROKER", "PER_TOPIC_PER_PARTITION");
+    private static final Set<String> STORAGE_MODE_VALUES = Set.of("LOCAL", "TIERED");
+    private static final Set<String> CLIENT_BROKER_VALUES = Set.of("TLS", "TLS_PLAINTEXT", "PLAINTEXT");
+    private static final Set<String> REBALANCING_STATUS_VALUES = Set.of("PAUSED", "ACTIVE");
     private final StorageBackend<String, MskCluster> storage;
     private final StorageBackend<String, MskConfiguration> configurationStorage;
     private final EmulatorConfig config;
@@ -95,6 +109,7 @@ public class MskService implements ResourceProvider {
     }
 
     public MskCluster createCluster(CreateClusterRequest request) {
+        validateCreateRequest(request);
         String clusterName = request.getClusterName();
         if (storage.scan(k -> true).stream().anyMatch(c -> c.getClusterName().equals(clusterName))) {
             throw new AwsException("ConflictException", "Cluster already exists: " + clusterName, 409);
@@ -106,6 +121,7 @@ public class MskService implements ResourceProvider {
         String kafkaVersion = request.getKafkaVersion();
         String resolvedKafkaVersion = (kafkaVersion == null || kafkaVersion.isBlank()) ? DEFAULT_KAFKA_VERSION : kafkaVersion;
         MskCluster cluster = new MskCluster(clusterArn, clusterName, resolvedKafkaVersion);
+        cluster.setClusterType(PROVISIONED_CLUSTER_TYPE);
         cluster.setAccountId(accountId);
         cluster.setVolumeId(String.format("%06x", new SecureRandom().nextInt(0xFFFFFF)));
 
@@ -148,6 +164,17 @@ public class MskService implements ResourceProvider {
     }
 
     public MskCluster createCluster(CreateClusterV2Request request) {
+        // A CreateClusterV2 request carries exactly one of provisioned/serverless. A serverless
+        // request used to be flattened into a provisioned cluster, which then reported itself as
+        // provisioned and echoed broker metadata the caller never asked for.
+        if (request.getServerless() != null) {
+            if (request.getProvisioned() != null) {
+                throw new AwsException("BadRequestException",
+                        "Exactly one of provisioned and serverless must be specified.", 400);
+            }
+            return createServerlessCluster(request);
+        }
+
         CreateClusterRequest merged = new CreateClusterRequest();
         merged.setClusterName(request.getClusterName());
         merged.setTags(request.getTags());
@@ -165,6 +192,69 @@ public class MskService implements ResourceProvider {
             merged.setRebalancing(request.getProvisioned().getRebalancing());
         }
         return createCluster(merged);
+    }
+
+    /**
+     * Rejects the CreateCluster input AWS rejects.
+     *
+     * <p>Scoped to the members AWS documents an actual constraint for, plus {@code clusterName},
+     * whose absence used to build an ARN containing {@code cluster/null/<uuid>} and store a
+     * cluster that could never be addressed by name.
+     *
+     * <p>Deliberately NOT enforced: the *presence* of {@code kafkaVersion},
+     * {@code numberOfBrokerNodes} and {@code brokerNodeGroupInfo}, which real MSK requires.
+     * The emulator has always defaulted those, and tightening it would reject minimal fixtures
+     * across the suite for no emulation benefit - a separate, deliberate break rather than
+     * something to slip into a metadata round-trip fix.
+     */
+    private void validateCreateRequest(CreateClusterRequest request) {
+        String clusterName = request.getClusterName();
+        if (clusterName == null || clusterName.isBlank()) {
+            throw new AwsException("BadRequestException", "clusterName is required.", 400);
+        }
+        if (clusterName.length() > MAX_CLUSTER_NAME_LENGTH) {
+            throw new AwsException("BadRequestException",
+                    "clusterName must be between 1 and " + MAX_CLUSTER_NAME_LENGTH + " characters.", 400);
+        }
+
+        Integer brokerNodes = request.getNumberOfBrokerNodes();
+        if (brokerNodes != null && (brokerNodes < MIN_BROKER_NODES || brokerNodes > MAX_BROKER_NODES)) {
+            throw new AwsException("BadRequestException",
+                    "numberOfBrokerNodes must be between " + MIN_BROKER_NODES + " and " + MAX_BROKER_NODES + ".", 400);
+        }
+
+        BrokerNodeGroupInfo nodeGroup = request.getBrokerNodeGroupInfo();
+        if (nodeGroup != null && nodeGroup.getStorageInfo() != null
+                && nodeGroup.getStorageInfo().getEbsStorageInfo() != null) {
+            Integer volumeSize = nodeGroup.getStorageInfo().getEbsStorageInfo().getVolumeSize();
+            if (volumeSize != null && (volumeSize < MIN_EBS_VOLUME_SIZE || volumeSize > MAX_EBS_VOLUME_SIZE)) {
+                throw new AwsException("BadRequestException",
+                        "volumeSize must be between " + MIN_EBS_VOLUME_SIZE + " and " + MAX_EBS_VOLUME_SIZE + ".", 400);
+            }
+        }
+
+        ConfigurationInfo configurationInfo = request.getConfigurationInfo();
+        if (configurationInfo != null && configurationInfo.getRevision() != null
+                && configurationInfo.getRevision() < 1) {
+            throw new AwsException("BadRequestException", "configurationInfo.revision must be at least 1.", 400);
+        }
+
+        validateEnum("enhancedMonitoring", request.getEnhancedMonitoring(), ENHANCED_MONITORING_VALUES);
+        validateEnum("storageMode", request.getStorageMode(), STORAGE_MODE_VALUES);
+        if (request.getEncryptionInfo() != null && request.getEncryptionInfo().getEncryptionInTransit() != null) {
+            validateEnum("encryptionInfo.encryptionInTransit.clientBroker",
+                    request.getEncryptionInfo().getEncryptionInTransit().getClientBroker(), CLIENT_BROKER_VALUES);
+        }
+        if (request.getRebalancing() != null) {
+            validateEnum("rebalancing.status", request.getRebalancing().getStatus(), REBALANCING_STATUS_VALUES);
+        }
+    }
+
+    private void validateEnum(String field, String value, Set<String> allowed) {
+        if (value != null && !allowed.contains(value)) {
+            throw new AwsException("BadRequestException",
+                    field + " must be one of " + String.join(", ", new java.util.TreeSet<>(allowed)) + ".", 400);
+        }
     }
 
     /**
@@ -188,6 +278,74 @@ public class MskService implements ResourceProvider {
             inTransit.setInCluster(true);
         }
         return encryptionInfo;
+    }
+
+    /**
+     * Serverless clusters have no broker node group, instance type or broker count to speak of -
+     * AWS manages that - so none of the provisioned metadata is stored or echoed for them. The
+     * emulated Kafka endpoint behind the cluster is the same either way.
+     */
+    private MskCluster createServerlessCluster(CreateClusterV2Request request) {
+        String clusterName = request.getClusterName();
+        if (clusterName == null || clusterName.isBlank()) {
+            throw new AwsException("BadRequestException", "clusterName is required.", 400);
+        }
+        if (clusterName.length() > MAX_CLUSTER_NAME_LENGTH) {
+            throw new AwsException("BadRequestException",
+                    "clusterName must be between 1 and " + MAX_CLUSTER_NAME_LENGTH + " characters.", 400);
+        }
+        if (storage.scan(k -> true).stream().anyMatch(c -> c.getClusterName().equals(clusterName))) {
+            throw new AwsException("ConflictException", "Cluster already exists: " + clusterName, 409);
+        }
+
+        String accountId = regionResolver.getAccountId();
+        String clusterArn = AwsArnUtils.Arn.of("kafka", config.defaultRegion(), accountId,
+                "cluster/" + clusterName + "/" + UUID.randomUUID()).toString();
+
+        MskCluster cluster = new MskCluster(clusterArn, clusterName, DEFAULT_KAFKA_VERSION);
+        cluster.setClusterType(SERVERLESS_CLUSTER_TYPE);
+        cluster.setServerless(request.getServerless());
+        cluster.setTags(request.getTags());
+        cluster.setAccountId(accountId);
+        cluster.setVolumeId(String.format("%06x", new SecureRandom().nextInt(0xFFFFFF)));
+
+        // Provisioned-only members must not surface on a serverless cluster.
+        cluster.setNumberOfBrokerNodes(0);
+        cluster.setZookeeperConnectString(null);
+        cluster.setCurrentBrokerSoftwareInfo(null);
+
+        if (config.services().msk().mock()) {
+            cluster.setState(ClusterState.ACTIVE);
+            cluster.setBootstrapBrokers("localhost:9092");
+        } else {
+            redpandaManager.startContainer(cluster);
+        }
+
+        storage.put(clusterArn, cluster);
+        return cluster;
+    }
+
+    public boolean isServerless(MskCluster cluster) {
+        return SERVERLESS_CLUSTER_TYPE.equals(cluster.getClusterType());
+    }
+
+    /**
+     * DescribeCluster for the v1 API, which predates serverless: its ClusterInfo has no way to
+     * represent one, and real MSK answers a v1 describe of a serverless cluster with a
+     * BadRequestException pointing the caller at DescribeClusterV2.
+     */
+    public MskCluster describeClusterV1(String clusterArn) {
+        MskCluster cluster = describeCluster(clusterArn);
+        if (isServerless(cluster)) {
+            throw new AwsException("BadRequestException",
+                    "This operation cannot be performed on serverless clusters. Use DescribeClusterV2 instead.", 400);
+        }
+        return cluster;
+    }
+
+    /** ListClusters for the v1 API, which likewise cannot represent serverless clusters. */
+    public List<MskCluster> listProvisionedClusters() {
+        return storage.scan(k -> true).stream().filter(c -> !isServerless(c)).toList();
     }
 
     public MskCluster describeCluster(String clusterArn) {
@@ -341,6 +499,80 @@ public class MskService implements ResourceProvider {
         }
         return new ConfigurationRevisionDetail(arn, found.getCreationTime(), found.getDescription(),
                 revision, serverProperties);
+    }
+
+    // ── Tags (ListTagsForResource / TagResource / UntagResource on /v1/tags/{arn}) ──────────
+    //
+    // MSK tags both clusters and configurations, and the tag path carries only an ARN, so the
+    // resource type is resolved by looking the ARN up in each store rather than by parsing it.
+    // An unknown ARN is a 404 here, which is what the tags path documents - unlike
+    // DescribeConfiguration, whose 400 is a deliberate terraform-provider contract.
+
+    public Map<String, String> listTagsForResource(String arn) {
+        MskCluster cluster = storage.get(arn).orElse(null);
+        if (cluster != null) {
+            return cluster.getTags() != null ? cluster.getTags() : Map.of();
+        }
+        MskConfiguration configuration = configurationStorage.get(arn).orElse(null);
+        if (configuration != null) {
+            return configuration.getTags() != null ? configuration.getTags() : Map.of();
+        }
+        throw taggedResourceNotFound(arn);
+    }
+
+    public void tagResource(String arn, Map<String, String> tags) {
+        MskCluster cluster = storage.get(arn).orElse(null);
+        if (cluster != null) {
+            cluster.setTags(merged(cluster.getTags(), tags));
+            storage.put(arn, cluster);
+            return;
+        }
+        MskConfiguration configuration = configurationStorage.get(arn).orElse(null);
+        if (configuration != null) {
+            configuration.setTags(merged(configuration.getTags(), tags));
+            configurationStorage.put(arn, configuration);
+            return;
+        }
+        throw taggedResourceNotFound(arn);
+    }
+
+    public void untagResource(String arn, List<String> tagKeys) {
+        MskCluster cluster = storage.get(arn).orElse(null);
+        if (cluster != null) {
+            cluster.setTags(without(cluster.getTags(), tagKeys));
+            storage.put(arn, cluster);
+            return;
+        }
+        MskConfiguration configuration = configurationStorage.get(arn).orElse(null);
+        if (configuration != null) {
+            configuration.setTags(without(configuration.getTags(), tagKeys));
+            configurationStorage.put(arn, configuration);
+            return;
+        }
+        throw taggedResourceNotFound(arn);
+    }
+
+    // Copies rather than mutating in place: a tag map that arrived through CreateCluster can be
+    // an immutable Map (Map.of, or whatever Jackson handed us), which putAll/remove would
+    // reject at runtime.
+    private Map<String, String> merged(Map<String, String> existing, Map<String, String> added) {
+        Map<String, String> result = new HashMap<>(existing != null ? existing : Map.of());
+        if (added != null) {
+            result.putAll(added);
+        }
+        return result;
+    }
+
+    private Map<String, String> without(Map<String, String> existing, List<String> tagKeys) {
+        Map<String, String> result = new HashMap<>(existing != null ? existing : Map.of());
+        if (tagKeys != null) {
+            tagKeys.forEach(result::remove);
+        }
+        return result;
+    }
+
+    private AwsException taggedResourceNotFound(String arn) {
+        return new AwsException("NotFoundException", "Resource " + arn + " does not exist.", 404);
     }
 
     private void startReadinessPoller() {

@@ -25,8 +25,8 @@ import java.util.Map;
 @Consumes(MediaType.APPLICATION_JSON)
 public class MskController {
 
-    // The emulator only models provisioned clusters; CreateClusterV2's "serverless" member
-    // is not supported, so every cluster it returns reports this type.
+    // Fallback for clusters persisted before clusterType was stored - everything written back
+    // then was provisioned, since serverless had no representation at all.
     private static final String PROVISIONED_CLUSTER_TYPE = "PROVISIONED";
 
     private final MskService mskService;
@@ -51,13 +51,13 @@ public class MskController {
                 "clusterArn", cluster.getClusterArn(),
                 "clusterName", cluster.getClusterName(),
                 "state", cluster.getState(),
-                "clusterType", PROVISIONED_CLUSTER_TYPE)).build();
+                "clusterType", clusterType(cluster))).build();
     }
 
     @GET
     @Path("/v1/clusters")
     public Response listClusters() {
-        var clusters = mskService.listClusters().stream().map(this::toClusterViewV1).toList();
+        var clusters = mskService.listProvisionedClusters().stream().map(this::toClusterViewV1).toList();
         return Response.ok(Map.of("clusterInfoList", clusters)).build();
     }
 
@@ -71,7 +71,7 @@ public class MskController {
     @GET
     @Path("/v1/clusters/{clusterArn}")
     public Response describeCluster(@PathParam("clusterArn") String clusterArn) {
-        MskCluster cluster = mskService.describeCluster(clusterArn);
+        MskCluster cluster = mskService.describeClusterV1(clusterArn);
         return Response.ok(Map.of("clusterInfo", toClusterViewV1(cluster))).build();
     }
 
@@ -210,9 +210,17 @@ public class MskController {
     // looks for these fields only there, so returning them flat leaves them invisible to it.
     private Map<String, Object> toClusterViewV2(MskCluster cluster) {
         Map<String, Object> view = commonClusterFields(cluster);
-        view.put("clusterType", PROVISIONED_CLUSTER_TYPE);
-        view.put("provisioned", provisionedFields(cluster));
+        view.put("clusterType", clusterType(cluster));
+        if (mskService.isServerless(cluster)) {
+            putIfPresent(view, "serverless", cluster.getServerless());
+        } else {
+            view.put("provisioned", provisionedFields(cluster));
+        }
         return view;
+    }
+
+    private String clusterType(MskCluster cluster) {
+        return cluster.getClusterType() != null ? cluster.getClusterType() : PROVISIONED_CLUSTER_TYPE;
     }
 
     // Members that stay top-level in both versions.
