@@ -557,6 +557,8 @@ floci:
       enabled: true
     route53resolver:
       enabled: true
+    aps:
+      enabled: true
     lakeformation:
       enabled: true
     tagging:
