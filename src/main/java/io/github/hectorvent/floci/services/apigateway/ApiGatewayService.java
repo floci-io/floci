@@ -882,7 +882,9 @@ public class ApiGatewayService {
         Map<String, Integer> columns = new HashMap<>();
         for (int i = 0; i < header.size(); i++) {
             String column = header.get(i);
-            if (column == null) continue;
+            if (column == null) {
+                continue;
+            }
             columns.putIfAbsent(column.trim().toLowerCase(java.util.Locale.ROOT), i);
         }
         int nameIndex = columns.getOrDefault("name", -1);
@@ -926,7 +928,9 @@ public class ApiGatewayService {
 
     /** Reads one CSV cell by column index, tolerating rows shorter than the header. */
     private static String csvCell(List<String> row, int index) {
-        if (index < 0 || index >= row.size()) return "";
+        if (index < 0 || index >= row.size()) {
+            return "";
+        }
         String value = row.get(index);
         return value == null ? "" : value.trim();
     }
@@ -1723,8 +1727,12 @@ public class ApiGatewayService {
             return;
         }
         for (ApiGatewayResource sibling : getResources(region, apiId)) {
-            if (selfId != null && selfId.equals(sibling.getId())) continue;
-            if (!parentId.equals(sibling.getParentId())) continue;
+            if (selfId != null && selfId.equals(sibling.getId())) {
+                continue;
+            }
+            if (!parentId.equals(sibling.getParentId())) {
+                continue;
+            }
             if (pathPart.equals(sibling.getPathPart())) {
                 throw new AwsException("ConflictException",
                         "Another resource with the same parent already has this name: " + pathPart, 409);

@@ -7,7 +7,9 @@ public final class ApiKeyCsvParser {
     private ApiKeyCsvParser() {}
 
     public static List<List<String>> parse(String csv) {
-        if (csv == null || csv.isEmpty()) return new ArrayList<>();
+        if (csv == null || csv.isEmpty()) {
+            return new ArrayList<>();
+        }
         List<List<String>> rows = new ArrayList<>();
         List<String> row = new ArrayList<>();
         StringBuilder field = new StringBuilder();
@@ -48,7 +50,9 @@ public final class ApiKeyCsvParser {
                 }
             }
         }
-        if (inQuote) throw new IllegalArgumentException("Unclosed quote");
+        if (inQuote) {
+            throw new IllegalArgumentException("Unclosed quote");
+        }
         if (!field.isEmpty() || !row.isEmpty()) {
             row.add(field.toString());
             rows.add(row);

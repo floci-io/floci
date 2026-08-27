@@ -2175,11 +2175,21 @@ public class ApiGatewayController {
         if (d.getCertificateArn() != null) node.put("certificateArn", d.getCertificateArn());
         node.put("regionalDomainName", d.getRegionalDomainName());
         node.put("regionalHostedZoneId", d.getRegionalHostedZoneId());
-        if (d.getRegionalCertificateName() != null) node.put("regionalCertificateName", d.getRegionalCertificateName());
-        if (d.getRegionalCertificateArn() != null) node.put("regionalCertificateArn", d.getRegionalCertificateArn());
-        if (d.getDistributionDomainName() != null) node.put("distributionDomainName", d.getDistributionDomainName());
-        if (d.getDistributionHostedZoneId() != null) node.put("distributionHostedZoneId", d.getDistributionHostedZoneId());
-        if (d.getSecurityPolicy() != null) node.put("securityPolicy", d.getSecurityPolicy());
+        if (d.getRegionalCertificateName() != null) {
+            node.put("regionalCertificateName", d.getRegionalCertificateName());
+        }
+        if (d.getRegionalCertificateArn() != null) {
+            node.put("regionalCertificateArn", d.getRegionalCertificateArn());
+        }
+        if (d.getDistributionDomainName() != null) {
+            node.put("distributionDomainName", d.getDistributionDomainName());
+        }
+        if (d.getDistributionHostedZoneId() != null) {
+            node.put("distributionHostedZoneId", d.getDistributionHostedZoneId());
+        }
+        if (d.getSecurityPolicy() != null) {
+            node.put("securityPolicy", d.getSecurityPolicy());
+        }
         return node;
     }
 
