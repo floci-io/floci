@@ -216,6 +216,184 @@ class CloudWatchLogsServiceTest {
     }
 
     @Test
+    void describeLogStreamsOrdersByLastEventTimeDescendingWithLimit() {
+        // The SDK idiom for "find the most recently active stream":
+        // orderBy(LAST_EVENT_TIME).descending(true).limit(1). Alphabetical order is set up
+        // to disagree with event recency so a name-sorted result would fail the assertion.
+        service.createLogGroup("/app/logs", null, null, REGION);
+        service.createLogStream("/app/logs", "a-oldest", REGION);
+        service.createLogStream("/app/logs", "b-newest", REGION);
+        service.createLogStream("/app/logs", "c-middle", REGION);
+        service.putLogEvents("/app/logs", "a-oldest", List.of(Map.of("timestamp", 1000L, "message", "old")), REGION);
+        service.putLogEvents("/app/logs", "b-newest", List.of(Map.of("timestamp", 3000L, "message", "new")), REGION);
+        service.putLogEvents("/app/logs", "c-middle", List.of(Map.of("timestamp", 2000L, "message", "mid")), REGION);
+
+        var result = service.describeLogStreams("/app/logs", null, "LastEventTime", true, 1, null, REGION);
+
+        assertEquals(1, result.logStreams().size());
+        assertEquals("b-newest", result.logStreams().getFirst().getLogStreamName());
+        assertNotNull(result.nextToken());
+    }
+
+    @Test
+    void describeLogStreamsSortsStreamsWithoutEventsOldestByLastEventTime() {
+        service.createLogGroup("/app/logs", null, null, REGION);
+        service.createLogStream("/app/logs", "z-empty", REGION);
+        service.createLogStream("/app/logs", "a-active", REGION);
+        service.putLogEvents("/app/logs", "a-active", List.of(Map.of("timestamp", 1000L, "message", "x")), REGION);
+
+        var descending = service.describeLogStreams("/app/logs", null, "LastEventTime", true, 0, null, REGION);
+        assertEquals(List.of("a-active", "z-empty"),
+                descending.logStreams().stream().map(LogStream::getLogStreamName).toList());
+
+        var ascending = service.describeLogStreams("/app/logs", null, "LastEventTime", false, 0, null, REGION);
+        assertEquals(List.of("z-empty", "a-active"),
+                ascending.logStreams().stream().map(LogStream::getLogStreamName).toList());
+    }
+
+    @Test
+    void describeLogStreamsPaginatesWithNextToken() {
+        service.createLogGroup("/app/logs", null, null, REGION);
+        service.createLogStream("/app/logs", "stream-1", REGION);
+        service.createLogStream("/app/logs", "stream-2", REGION);
+        service.createLogStream("/app/logs", "stream-3", REGION);
+
+        var page1 = service.describeLogStreams("/app/logs", null, null, false, 2, null, REGION);
+        assertEquals(List.of("stream-1", "stream-2"),
+                page1.logStreams().stream().map(LogStream::getLogStreamName).toList());
+        assertNotNull(page1.nextToken());
+
+        var page2 = service.describeLogStreams("/app/logs", null, null, false, 2, page1.nextToken(), REGION);
+        assertEquals(List.of("stream-3"),
+                page2.logStreams().stream().map(LogStream::getLogStreamName).toList());
+        assertNull(page2.nextToken());
+    }
+
+    @Test
+    void describeLogStreamsRejectsMalformedNextToken() {
+        // A garbage token must fail loudly: silently restarting from the first page makes
+        // custom pagination loops duplicate results or never progress.
+        service.createLogGroup("/app/logs", null, null, REGION);
+        service.createLogStream("/app/logs", "stream-1", REGION);
+
+        AwsException e = assertThrows(AwsException.class, () ->
+                service.describeLogStreams("/app/logs", null, null, false, 0, "not-a-token", REGION));
+        assertEquals("InvalidParameterException", e.getErrorCode());
+    }
+
+    @Test
+    void describeLogStreamsRejectsTokenFromDifferentOrdering() {
+        service.createLogGroup("/app/logs", null, null, REGION);
+        service.createLogStream("/app/logs", "stream-1", REGION);
+        service.createLogStream("/app/logs", "stream-2", REGION);
+
+        String nameOrderToken = service
+                .describeLogStreams("/app/logs", null, null, false, 1, null, REGION)
+                .nextToken();
+        assertNotNull(nameOrderToken);
+
+        AwsException e = assertThrows(AwsException.class, () ->
+                service.describeLogStreams("/app/logs", null, "LastEventTime", true, 1, nameOrderToken, REGION));
+        assertEquals("InvalidParameterException", e.getErrorCode());
+    }
+
+    @Test
+    void describeLogStreamsPaginationDoesNotSkipAfterDeletionBetweenPages() {
+        // A positional offset applied to the re-scanned collection would skip stream-3 here:
+        // deleting already-returned stream-1 shifts everything left by one. The cursor keeps
+        // the resume point anchored to the last returned stream instead.
+        service.createLogGroup("/app/logs", null, null, REGION);
+        for (int i = 1; i <= 4; i++) {
+            service.createLogStream("/app/logs", "stream-" + i, REGION);
+        }
+
+        var page1 = service.describeLogStreams("/app/logs", null, null, false, 2, null, REGION);
+        assertEquals(List.of("stream-1", "stream-2"),
+                page1.logStreams().stream().map(LogStream::getLogStreamName).toList());
+
+        service.deleteLogStream("/app/logs", "stream-1", REGION);
+
+        var page2 = service.describeLogStreams("/app/logs", null, null, false, 2, page1.nextToken(), REGION);
+        assertEquals(List.of("stream-3", "stream-4"),
+                page2.logStreams().stream().map(LogStream::getLogStreamName).toList());
+        assertNull(page2.nextToken());
+    }
+
+    @Test
+    void describeLogStreamsLastEventTimePaginationDoesNotRepeatReorderedStreams() {
+        // PutLogEvents to an already-returned stream between pages moves it even further
+        // ahead in descending order. A positional offset would then re-serve the stream at
+        // the boundary; the cursor never returns anything at-or-before the last seen key.
+        service.createLogGroup("/app/logs", null, null, REGION);
+        service.createLogStream("/app/logs", "a", REGION);
+        service.createLogStream("/app/logs", "b", REGION);
+        service.createLogStream("/app/logs", "c", REGION);
+        service.createLogStream("/app/logs", "d", REGION);
+        service.putLogEvents("/app/logs", "a", List.of(Map.of("timestamp", 1000L, "message", "x")), REGION);
+        service.putLogEvents("/app/logs", "b", List.of(Map.of("timestamp", 2000L, "message", "x")), REGION);
+        service.putLogEvents("/app/logs", "c", List.of(Map.of("timestamp", 3000L, "message", "x")), REGION);
+        service.putLogEvents("/app/logs", "d", List.of(Map.of("timestamp", 4000L, "message", "x")), REGION);
+
+        var page1 = service.describeLogStreams("/app/logs", null, "LastEventTime", true, 2, null, REGION);
+        assertEquals(List.of("d", "c"),
+                page1.logStreams().stream().map(LogStream::getLogStreamName).toList());
+
+        service.putLogEvents("/app/logs", "d", List.of(Map.of("timestamp", 5000L, "message", "x")), REGION);
+
+        var page2 = service.describeLogStreams("/app/logs", null, "LastEventTime", true, 2, page1.nextToken(), REGION);
+        assertEquals(List.of("b", "a"),
+                page2.logStreams().stream().map(LogStream::getLogStreamName).toList());
+        assertNull(page2.nextToken());
+    }
+
+    @Test
+    void describeLogStreamsReturnsUnseenStreamThatReorderedAcrossThePageBoundary() {
+        // An unreturned stream that receives a newer event between descending LastEventTime
+        // pages sorts ahead of any saved sort-key cursor on the next request and would be
+        // skipped forever. The snapshot freezes the ordering at page one, so the stream is
+        // still returned in its original position.
+        service.createLogGroup("/app/logs", null, null, REGION);
+        service.createLogStream("/app/logs", "a", REGION);
+        service.createLogStream("/app/logs", "b", REGION);
+        service.createLogStream("/app/logs", "c", REGION);
+        service.createLogStream("/app/logs", "d", REGION);
+        service.putLogEvents("/app/logs", "a", List.of(Map.of("timestamp", 1000L, "message", "x")), REGION);
+        service.putLogEvents("/app/logs", "b", List.of(Map.of("timestamp", 2000L, "message", "x")), REGION);
+        service.putLogEvents("/app/logs", "c", List.of(Map.of("timestamp", 3000L, "message", "x")), REGION);
+        service.putLogEvents("/app/logs", "d", List.of(Map.of("timestamp", 4000L, "message", "x")), REGION);
+
+        var page1 = service.describeLogStreams("/app/logs", null, "LastEventTime", true, 2, null, REGION);
+        assertEquals(List.of("d", "c"),
+                page1.logStreams().stream().map(LogStream::getLogStreamName).toList());
+
+        // b was not returned yet; this would now sort it ahead of c, the last returned stream.
+        service.putLogEvents("/app/logs", "b", List.of(Map.of("timestamp", 9000L, "message", "x")), REGION);
+
+        var page2 = service.describeLogStreams("/app/logs", null, "LastEventTime", true, 2, page1.nextToken(), REGION);
+        assertEquals(List.of("b", "a"),
+                page2.logStreams().stream().map(LogStream::getLogStreamName).toList());
+        assertNull(page2.nextToken());
+        // Attributes are live even though the position is frozen.
+        assertEquals(9000L, page2.logStreams().getFirst().getLastEventTimestamp());
+    }
+
+    @Test
+    void describeLogStreamsRejectsLastEventTimeWithPrefix() {
+        service.createLogGroup("/app/logs", null, null, REGION);
+        AwsException e = assertThrows(AwsException.class, () ->
+                service.describeLogStreams("/app/logs", "stream", "LastEventTime", true, 0, null, REGION));
+        assertEquals("InvalidParameterException", e.getErrorCode());
+    }
+
+    @Test
+    void describeLogStreamsRejectsUnknownOrderBy() {
+        service.createLogGroup("/app/logs", null, null, REGION);
+        AwsException e = assertThrows(AwsException.class, () ->
+                service.describeLogStreams("/app/logs", null, "CreationTime", false, 0, null, REGION));
+        assertEquals("InvalidParameterException", e.getErrorCode());
+    }
+
+    @Test
     void deleteLogGroupCascadesStreamsAndEvents() {
         service.createLogGroup("/app/logs", null, null, REGION);
         service.createLogStream("/app/logs", "stream-1", REGION);
@@ -284,7 +462,7 @@ class CloudWatchLogsServiceTest {
         service.putLogEvents("/app/logs", "stream-1", events, REGION);
 
         CloudWatchLogsService.FilteredLogEventsResult result = service.filterLogEvents(
-                "/app/logs", null, null, null, "SEQLINE", 100, REGION);
+                "/app/logs", null, null, null, "SEQLINE", 100, null, REGION);
 
         assertEquals(10, result.events().size());
         for (int i = 0; i < 10; i++) {
@@ -323,7 +501,7 @@ class CloudWatchLogsServiceTest {
         ), REGION);
 
         CloudWatchLogsService.FilteredLogEventsResult result = service.filterLogEvents(
-                "/app/logs", null, null, null, "ERROR", 100, REGION);
+                "/app/logs", null, null, null, "ERROR", 100, null, REGION);
         assertEquals(2, result.events().size());
         assertTrue(result.events().stream().allMatch(f -> f.event().getMessage().contains("ERROR")));
     }
@@ -341,7 +519,7 @@ class CloudWatchLogsServiceTest {
                 List.of(Map.of("timestamp", now + 1, "message", "ERROR: from two")), REGION);
 
         CloudWatchLogsService.FilteredLogEventsResult result = service.filterLogEvents(
-                "/app/logs", null, null, null, "ERROR", 100, REGION);
+                "/app/logs", null, null, null, "ERROR", 100, null, REGION);
 
         assertEquals(2, result.events().size());
         assertEquals("stream-1", result.events().get(0).logStreamName());
@@ -361,7 +539,7 @@ class CloudWatchLogsServiceTest {
                 List.of(Map.of("timestamp", now + 1, "message", "drop me")), REGION);
 
         CloudWatchLogsService.FilteredLogEventsResult result = service.filterLogEvents(
-                "/app/logs", List.of("stream-2"), null, null, null, 100, REGION);
+                "/app/logs", List.of("stream-2"), null, null, null, 100, null, REGION);
 
         assertEquals(1, result.events().size());
         assertEquals("stream-2", result.events().getFirst().logStreamName());
@@ -384,7 +562,7 @@ class CloudWatchLogsServiceTest {
                 List.of(Map.of("timestamp", now, "message", "archived")), REGION);
 
         CloudWatchLogsService.FilteredLogEventsResult result = service.filterLogEvents(
-                "/app/logs", null, null, null, null, 100, REGION);
+                "/app/logs", null, null, null, null, 100, null, REGION);
 
         assertEquals(1, result.events().size());
         assertEquals("live", result.events().getFirst().event().getMessage());
@@ -402,7 +580,7 @@ class CloudWatchLogsServiceTest {
                 List.of(Map.of("timestamp", System.currentTimeMillis(), "message", "hello")), REGION);
 
         CloudWatchLogsService.FilteredLogEventsResult result = service.filterLogEvents(
-                "/app/logs", null, null, null, null, 100, REGION);
+                "/app/logs", null, null, null, null, 100, null, REGION);
 
         assertEquals(1, result.events().size());
         assertEquals(awkward, result.events().getFirst().logStreamName());
@@ -420,7 +598,7 @@ class CloudWatchLogsServiceTest {
         ), REGION);
 
         CloudWatchLogsService.FilteredLogEventsResult result = service.filterLogEvents(
-                "/app/logs", null, null, null, null, 100, REGION);
+                "/app/logs", null, null, null, null, 100, null, REGION);
         assertEquals(2, result.events().size());
     }
 
@@ -525,6 +703,39 @@ class CloudWatchLogsServiceTest {
     }
 
     @Test
+    void getLogEventsPagesForwardWithAnUnboundedMaxEventsPerQuery() {
+        CloudWatchLogsService unboundedService = new CloudWatchLogsService(
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                Integer.MAX_VALUE,
+                new RegionResolver("us-east-1", "000000000000")
+        );
+
+        unboundedService.createLogGroup("/app/logs", null, null, REGION);
+        unboundedService.createLogStream("/app/logs", "stream-1", REGION);
+        long now = System.currentTimeMillis();
+        unboundedService.putLogEvents("/app/logs", "stream-1", List.of(
+                Map.of("timestamp", now, "message", "a"),
+                Map.of("timestamp", now + 1, "message", "b"),
+                Map.of("timestamp", now + 2, "message", "c")
+        ), REGION);
+
+        CloudWatchLogsService.LogEventsResult page =
+                unboundedService.getLogEvents("/app/logs", "stream-1", null, null, 0, true, null, REGION);
+        assertEquals(3, page.events().size());
+        assertEquals("f/3", page.nextForwardToken());
+
+        // GetLogEvents echoes its token at the end of the stream, so a paginator always
+        // spends one more call on the token it was just handed.
+        CloudWatchLogsService.LogEventsResult atEnd = unboundedService.getLogEvents(
+                "/app/logs", "stream-1", null, null, 0, true, page.nextForwardToken(), REGION);
+        assertEquals(0, atEnd.events().size());
+        assertEquals("f/3", atEnd.nextForwardToken());
+    }
+
+    @Test
     void getLogEventsRejectsMalformedNextToken() {
         service.createLogGroup("/app/logs", null, null, REGION);
         service.createLogStream("/app/logs", "stream-1", REGION);
@@ -596,6 +807,276 @@ class CloudWatchLogsServiceTest {
         assertEquals("msg-4", result.events().get(2).getMessage());
         assertEquals("b/2", result.nextBackwardToken());
         assertEquals("f/5", result.nextForwardToken());
+    }
+
+    @Test
+    void filterLogEventsPagesForwardToTheNewestMatches() {
+        service.createLogGroup("/app/logs", null, null, REGION);
+        service.createLogStream("/app/logs", "stream-1", REGION);
+        putEvents("/app/logs", "stream-1", System.currentTimeMillis(), 5);
+
+        CloudWatchLogsService.FilteredLogEventsResult page1 = service.filterLogEvents(
+                "/app/logs", null, null, null, null, 3, null, REGION);
+
+        assertEquals(List.of("msg-0", "msg-1", "msg-2"),
+                page1.events().stream().map(f -> f.event().getMessage()).toList());
+        assertEquals("f/3", page1.nextToken());
+
+        CloudWatchLogsService.FilteredLogEventsResult page2 = service.filterLogEvents(
+                "/app/logs", null, null, null, null, 3, page1.nextToken(), REGION);
+
+        // The newest matches were unreachable before: the cap kept the oldest slice and the token
+        // carried no position, so this second page could never be requested.
+        assertEquals(List.of("msg-3", "msg-4"),
+                page2.events().stream().map(f -> f.event().getMessage()).toList());
+        assertNull(page2.nextToken(), "a short final page must not advertise more results");
+    }
+
+    @Test
+    void filterLogEventsOmitsTokenOnASingleFullPage() {
+        service.createLogGroup("/app/logs", null, null, REGION);
+        service.createLogStream("/app/logs", "stream-1", REGION);
+        putEvents("/app/logs", "stream-1", System.currentTimeMillis(), 3);
+
+        CloudWatchLogsService.FilteredLogEventsResult result = service.filterLogEvents(
+                "/app/logs", null, null, null, null, 3, null, REGION);
+
+        assertEquals(3, result.events().size());
+        assertNull(result.nextToken(), "a page that exactly exhausts the matches is the last one");
+    }
+
+    @Test
+    void filterLogEventsOmitsTokenOnAFullFinalPage() {
+        service.createLogGroup("/app/logs", null, null, REGION);
+        service.createLogStream("/app/logs", "stream-1", REGION);
+        putEvents("/app/logs", "stream-1", System.currentTimeMillis(), 6);
+
+        CloudWatchLogsService.FilteredLogEventsResult page1 = service.filterLogEvents(
+                "/app/logs", null, null, null, null, 3, null, REGION);
+        assertEquals(3, page1.events().size());
+        assertEquals("f/3", page1.nextToken());
+
+        CloudWatchLogsService.FilteredLogEventsResult page2 = service.filterLogEvents(
+                "/app/logs", null, null, null, null, 3, page1.nextToken(), REGION);
+
+        // Both pages are exactly full, so page size cannot distinguish "more to come" from
+        // "finished". Only the position can, which is what makes this the case that pins the
+        // emission condition.
+        assertEquals(3, page2.events().size());
+        assertEquals("msg-5", page2.events().get(2).event().getMessage());
+        assertNull(page2.nextToken());
+    }
+
+    @Test
+    void filterLogEventsEmptyGroupReturnsEmptyPageWithNoToken() {
+        service.createLogGroup("/app/logs", null, null, REGION);
+
+        CloudWatchLogsService.FilteredLogEventsResult result = service.filterLogEvents(
+                "/app/logs", null, null, null, null, 10, null, REGION);
+
+        assertTrue(result.events().isEmpty());
+        assertNull(result.nextToken());
+    }
+
+    @Test
+    void filterLogEventsAllMatchesExcludedReturnsEmptyPageWithNoToken() {
+        service.createLogGroup("/app/logs", null, null, REGION);
+        service.createLogStream("/app/logs", "stream-1", REGION);
+        putEvents("/app/logs", "stream-1", System.currentTimeMillis(), 5);
+
+        CloudWatchLogsService.FilteredLogEventsResult result = service.filterLogEvents(
+                "/app/logs", null, null, null, "NOTHING-MATCHES-THIS", 3, null, REGION);
+
+        assertTrue(result.events().isEmpty());
+        assertNull(result.nextToken());
+    }
+
+    @Test
+    void filterLogEventsTokenPastTheEndReturnsEmptyPageWithNoToken() {
+        service.createLogGroup("/app/logs", null, null, REGION);
+        service.createLogStream("/app/logs", "stream-1", REGION);
+        putEvents("/app/logs", "stream-1", System.currentTimeMillis(), 3);
+
+        CloudWatchLogsService.FilteredLogEventsResult result = service.filterLogEvents(
+                "/app/logs", null, null, null, null, 10, "f/99", REGION);
+
+        assertTrue(result.events().isEmpty());
+        assertNull(result.nextToken());
+    }
+
+    @Test
+    void filterLogEventsCursorAppliesAfterPatternAndTimeFilters() {
+        service.createLogGroup("/app/logs", null, null, REGION);
+        service.createLogStream("/app/logs", "stream-1", REGION);
+
+        long now = System.currentTimeMillis();
+        service.putLogEvents("/app/logs", "stream-1", List.of(
+                Map.of("timestamp", now, "message", "ERROR: one"),
+                Map.of("timestamp", now + 1, "message", "INFO: noise"),
+                Map.of("timestamp", now + 2, "message", "ERROR: two"),
+                Map.of("timestamp", now + 3, "message", "INFO: more noise"),
+                Map.of("timestamp", now + 4, "message", "ERROR: three")
+        ), REGION);
+
+        CloudWatchLogsService.FilteredLogEventsResult page1 = service.filterLogEvents(
+                "/app/logs", null, null, null, "ERROR", 2, null, REGION);
+        assertEquals(2, page1.events().size());
+        assertEquals("ERROR: one", page1.events().get(0).event().getMessage());
+        assertEquals("ERROR: two", page1.events().get(1).event().getMessage());
+        // Offset 2 indexes the three matches, not the five stored events. Indexing the raw scan
+        // would land on "ERROR: two" here.
+        assertEquals("f/2", page1.nextToken());
+
+        CloudWatchLogsService.FilteredLogEventsResult page2 = service.filterLogEvents(
+                "/app/logs", null, null, null, "ERROR", 2, page1.nextToken(), REGION);
+        assertEquals(1, page2.events().size());
+        assertEquals("ERROR: three", page2.events().get(0).event().getMessage());
+        assertNull(page2.nextToken());
+    }
+
+    @Test
+    void filterLogEventsPaginatesAcrossStreamsKeepingAttribution() {
+        service.createLogGroup("/app/logs", null, null, REGION);
+        service.createLogStream("/app/logs", "stream-1", REGION);
+        service.createLogStream("/app/logs", "stream-2", REGION);
+
+        long now = System.currentTimeMillis();
+        service.putLogEvents("/app/logs", "stream-1", List.of(
+                Map.of("timestamp", now, "message", "ERROR: a"),
+                Map.of("timestamp", now + 2, "message", "ERROR: c")
+        ), REGION);
+        service.putLogEvents("/app/logs", "stream-2", List.of(
+                Map.of("timestamp", now + 1, "message", "ERROR: b"),
+                Map.of("timestamp", now + 3, "message", "ERROR: d")
+        ), REGION);
+
+        CloudWatchLogsService.FilteredLogEventsResult page1 = service.filterLogEvents(
+                "/app/logs", null, null, null, "ERROR", 2, null, REGION);
+        assertEquals(List.of("stream-1", "stream-2"),
+                page1.events().stream().map(CloudWatchLogsService.FilteredEvent::logStreamName).toList());
+        assertEquals("f/2", page1.nextToken());
+
+        CloudWatchLogsService.FilteredLogEventsResult page2 = service.filterLogEvents(
+                "/app/logs", null, null, null, "ERROR", 2, page1.nextToken(), REGION);
+        assertEquals(List.of("stream-1", "stream-2"),
+                page2.events().stream().map(CloudWatchLogsService.FilteredEvent::logStreamName).toList());
+        assertEquals(List.of("ERROR: c", "ERROR: d"),
+                page2.events().stream().map(f -> f.event().getMessage()).toList());
+        assertNull(page2.nextToken());
+    }
+
+    @Test
+    void filterLogEventsPaginatesWithinNamedStreamsOnly() {
+        service.createLogGroup("/app/logs", null, null, REGION);
+        service.createLogStream("/app/logs", "stream-1", REGION);
+        service.createLogStream("/app/logs", "stream-2", REGION);
+
+        long now = System.currentTimeMillis();
+        service.putLogEvents("/app/logs", "stream-1", List.of(
+                Map.of("timestamp", now, "message", "kept-0"),
+                Map.of("timestamp", now + 2, "message", "kept-1"),
+                Map.of("timestamp", now + 4, "message", "kept-2")
+        ), REGION);
+        service.putLogEvents("/app/logs", "stream-2", List.of(
+                Map.of("timestamp", now + 1, "message", "excluded-0"),
+                Map.of("timestamp", now + 3, "message", "excluded-1")
+        ), REGION);
+
+        CloudWatchLogsService.FilteredLogEventsResult page1 = service.filterLogEvents(
+                "/app/logs", List.of("stream-1"), null, null, null, 2, null, REGION);
+        assertEquals(List.of("kept-0", "kept-1"),
+                page1.events().stream().map(f -> f.event().getMessage()).toList());
+        // The excluded stream's events are dropped before the offset is computed, so the cursor
+        // never has to skip over them.
+        assertEquals("f/2", page1.nextToken());
+
+        CloudWatchLogsService.FilteredLogEventsResult page2 = service.filterLogEvents(
+                "/app/logs", List.of("stream-1"), null, null, null, 2, page1.nextToken(), REGION);
+        assertEquals(List.of("kept-2"),
+                page2.events().stream().map(f -> f.event().getMessage()).toList());
+        assertNull(page2.nextToken());
+    }
+
+    @Test
+    void filterLogEventsNeverEmitsACursorThatCannotAdvance() {
+        CloudWatchLogsService capped = new CloudWatchLogsService(
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                0,
+                new RegionResolver("us-east-1", "000000000000")
+        );
+        capped.createLogGroup("/app/logs", null, null, REGION);
+        capped.createLogStream("/app/logs", "stream-1", REGION);
+        capped.putLogEvents("/app/logs", "stream-1",
+                List.of(Map.of("timestamp", System.currentTimeMillis(), "message", "msg")), REGION);
+
+        CloudWatchLogsService.FilteredLogEventsResult result = capped.filterLogEvents(
+                "/app/logs", null, null, null, null, 0, null, REGION);
+
+        // A zero cap yields an empty page. Emitting a token here would point at the same offset
+        // forever, so a paginating client would never terminate.
+        assertTrue(result.events().isEmpty());
+        assertNull(result.nextToken());
+    }
+
+    @Test
+    void filterLogEventsRejectsMalformedNextToken() {
+        service.createLogGroup("/app/logs", null, null, REGION);
+        service.createLogStream("/app/logs", "stream-1", REGION);
+        putEvents("/app/logs", "stream-1", System.currentTimeMillis(), 3);
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.filterLogEvents("/app/logs", null, null, null, null, 10, "f/not-a-token", REGION));
+
+        assertEquals("InvalidParameterException", exception.getErrorCode());
+        assertEquals(400, exception.getHttpStatus());
+        assertEquals("The specified nextToken is invalid.", exception.getMessage());
+    }
+
+    @Test
+    void filterLogEventsRejectsNegativeNextToken() {
+        service.createLogGroup("/app/logs", null, null, REGION);
+        service.createLogStream("/app/logs", "stream-1", REGION);
+        putEvents("/app/logs", "stream-1", System.currentTimeMillis(), 3);
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.filterLogEvents("/app/logs", null, null, null, null, 10, "f/-1", REGION));
+
+        assertEquals("InvalidParameterException", exception.getErrorCode());
+        assertEquals(400, exception.getHttpStatus());
+    }
+
+    @Test
+    void filterLogEventsRejectsOverflowNextToken() {
+        service.createLogGroup("/app/logs", null, null, REGION);
+        service.createLogStream("/app/logs", "stream-1", REGION);
+        putEvents("/app/logs", "stream-1", System.currentTimeMillis(), 3);
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.filterLogEvents("/app/logs", null, null, null, null, 10, "f/2147483648", REGION));
+
+        assertEquals("InvalidParameterException", exception.getErrorCode());
+        assertEquals(400, exception.getHttpStatus());
+    }
+
+    @Test
+    void filterLogEventsRejectsUnrecognizedNextTokens() {
+        service.createLogGroup("/app/logs", null, null, REGION);
+        service.createLogStream("/app/logs", "stream-1", REGION);
+        putEvents("/app/logs", "stream-1", System.currentTimeMillis(), 3);
+
+        // "b/0" is a GetLogEvents backward token; FilterLogEvents pages forward only, so it is
+        // not a token this action can have issued.
+        for (String token : List.of("", "b/0", "x/1", "garbage")) {
+            AwsException exception = assertThrows(AwsException.class, () ->
+                    service.filterLogEvents("/app/logs", null, null, null, null, 10, token, REGION));
+
+            assertEquals("InvalidParameterException", exception.getErrorCode());
+            assertEquals(400, exception.getHttpStatus());
+            assertEquals("The specified nextToken is invalid.", exception.getMessage());
+        }
     }
 
     // ──────────────────────────── Subscription Filters ────────────────────────────

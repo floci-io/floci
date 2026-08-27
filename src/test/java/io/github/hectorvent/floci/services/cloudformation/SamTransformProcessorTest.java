@@ -897,4 +897,235 @@ class SamTransformProcessorTest {
         assertTrue(expanded.path("Transform").isMissingNode());
         assertTrue(expanded.path("Globals").isMissingNode());
     }
+    @Test
+    void expandSamTemplate_httpApiPreservesDefinitionBodyAsRoutes() throws Exception {
+        // Regression for #1956: a route-bearing HttpApi carries its routes in the inline
+        // OpenAPI DefinitionBody, which must survive as the ApiGatewayV2::Api Body — otherwise
+        // the API expands with no routes.
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Resources": {
+                "MyHttpApi": {
+                  "Type": "AWS::Serverless::HttpApi",
+                  "Properties": {
+                    "DefinitionBody": {
+                      "openapi": "3.0.1",
+                      "paths": {
+                        "/hello": { "get": { "x-amazon-apigateway-integration": { "type": "aws_proxy" } } }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            """);
+
+        JsonNode resources = processor.expandSamTemplate(template).path("Resources");
+
+        JsonNode api = resources.path("MyHttpApi");
+        assertEquals("AWS::ApiGatewayV2::Api", api.path("Type").asText());
+        JsonNode body = api.path("Properties").path("Body");
+        assertFalse(body.isMissingNode(), "DefinitionBody must be preserved as the API Body");
+        assertEquals("3.0.1", body.path("openapi").asText());
+        assertTrue(body.path("paths").has("/hello"), "route definitions must survive the transform");
+    }
+
+    @Test
+    void expandSamTemplate_httpApiEventMergesIntoMatchingDefinitionBodyOperation() throws Exception {
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Resources": {
+                "MyHttpApi": {
+                  "Type": "AWS::Serverless::HttpApi",
+                  "Properties": {
+                    "Auth": {
+                      "DefaultAuthorizer": "JwtAuth",
+                      "Authorizers": {
+                        "JwtAuth": {
+                          "IdentitySource": "$request.header.Authorization",
+                          "AuthorizationScopes": ["read:items"],
+                          "JwtConfiguration": {
+                            "Issuer": "https://issuer.example.com",
+                            "Audience": ["items-client"]
+                          }
+                        }
+                      }
+                    },
+                    "DefinitionBody": {
+                      "openapi": "3.0.1",
+                      "paths": {
+                        "/items": {
+                          "get": {
+                            "security": [],
+                            "responses": { "200": { "description": "ok" } }
+                          }
+                        }
+                      }
+                    }
+                  }
+                },
+                "MyFunction": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "Runtime": "python3.12",
+                    "Handler": "index.handler",
+                    "InlineCode": "def handler(e,c): return {}",
+                    "Events": {
+                      "Api": {
+                        "Type": "HttpApi",
+                        "Properties": {
+                          "ApiId": { "Ref": "MyHttpApi" },
+                          "Path": "/items",
+                          "Method": "GET"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            """);
+
+        JsonNode resources = processor.expandSamTemplate(template).path("Resources");
+        JsonNode operation = resources.path("MyHttpApi").path("Properties").path("Body")
+                .path("paths").path("/items").path("get");
+        JsonNode integration = operation.path("x-amazon-apigateway-integration");
+        JsonNode authorizer = resources.path("MyHttpApi").path("Properties").path("Body")
+                .path("components").path("securitySchemes").path("JwtAuth");
+
+        assertEquals("ok", operation.path("responses").path("200").path("description").asText());
+        assertEquals("aws_proxy", integration.path("type").asText());
+        assertEquals("POST", integration.path("httpMethod").asText());
+        assertEquals("2.0", integration.path("payloadFormatVersion").asText());
+        assertEquals("MyFunction", integration.path("uri").path("Fn::Sub").path(1)
+                .path("FnArn").path("Fn::GetAtt").path(0).asText());
+        assertEquals("oauth2", authorizer.path("type").asText());
+        assertEquals("jwt", authorizer.path("x-amazon-apigateway-authorizer").path("type").asText());
+        assertEquals("$request.header.Authorization", authorizer.path("x-amazon-apigateway-authorizer")
+                .path("identitySource").path(0).asText());
+        assertEquals("https://issuer.example.com", authorizer.path("x-amazon-apigateway-authorizer")
+                .path("jwtConfiguration").path("issuer").asText());
+        assertEquals("items-client", authorizer.path("x-amazon-apigateway-authorizer")
+                .path("jwtConfiguration").path("audience").path(0).asText());
+        assertEquals("read:items", operation.path("security").path(0).path("JwtAuth").path(0).asText());
+
+        int routeResources = 0;
+        int integrationResources = 0;
+        int permissionResources = 0;
+        Iterator<JsonNode> definitions = resources.elements();
+        while (definitions.hasNext()) {
+            String type = definitions.next().path("Type").asText();
+            routeResources += "AWS::ApiGatewayV2::Route".equals(type) ? 1 : 0;
+            integrationResources += "AWS::ApiGatewayV2::Integration".equals(type) ? 1 : 0;
+            permissionResources += "AWS::Lambda::Permission".equals(type) ? 1 : 0;
+        }
+        assertEquals(0, routeResources, "matching body operations must not emit a duplicate route resource");
+        assertEquals(0, integrationResources, "the body owns the merged integration");
+        assertEquals(1, permissionResources, "API Gateway still needs permission to invoke the function");
+    }
+
+    @Test
+    void expandSamTemplate_matchingHttpApiEventCanOptOutOfDefaultAuthorizer() throws Exception {
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Resources": {
+                "HttpApi": {
+                  "Type": "AWS::Serverless::HttpApi",
+                  "Properties": {
+                    "Auth": {
+                      "DefaultAuthorizer": "JwtAuth",
+                      "Authorizers": {
+                        "JwtAuth": {
+                          "IdentitySource": ["$request.header.Authorization"],
+                          "JwtConfiguration": {
+                            "issuer": "https://issuer.example.com",
+                            "audience": ["client-id"]
+                          }
+                        }
+                      }
+                    },
+                    "DefinitionBody": {
+                      "openapi": "3.0.1",
+                      "paths": { "/public": { "get": {} } }
+                    }
+                  }
+                },
+                "Handler": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "Runtime": "python3.12",
+                    "Handler": "index.handler",
+                    "InlineCode": "def handler(e,c): return {}",
+                    "Events": {
+                      "Public": {
+                        "Type": "HttpApi",
+                        "Properties": {
+                          "ApiId": { "Ref": "HttpApi" },
+                          "Path": "/public",
+                          "Method": "GET",
+                          "Auth": { "Authorizer": "NONE" }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            """);
+
+        JsonNode operation = processor.expandSamTemplate(template).path("Resources")
+                .path("HttpApi").path("Properties").path("Body")
+                .path("paths").path("/public").path("get");
+
+        assertTrue(operation.path("security").isArray());
+        assertTrue(operation.path("security").isEmpty(),
+                "Authorizer NONE must override the API's default authorizer");
+        assertTrue(operation.path("x-amazon-apigateway-integration").isObject());
+    }
+
+    @Test
+    void expandSamTemplate_httpApiMapsDefinitionUriToBodyS3Location() throws Exception {
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Resources": {
+                "MyHttpApi": {
+                  "Type": "AWS::Serverless::HttpApi",
+                  "Properties": { "DefinitionUri": "s3://api-specs/openapi.yaml" }
+                }
+              }
+            }
+            """);
+
+        JsonNode properties = processor.expandSamTemplate(template)
+                .path("Resources").path("MyHttpApi").path("Properties");
+
+        assertTrue(properties.path("Body").isMissingNode(), "DefinitionUri must not become an inline Body");
+        assertEquals("api-specs", properties.path("BodyS3Location").path("Bucket").asText());
+        assertEquals("openapi.yaml", properties.path("BodyS3Location").path("Key").asText());
+    }
+    @Test
+    void expandSamTemplate_httpApiPreservesIntrinsicDefinitionUriForProvisioning() throws Exception {
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Resources": {
+                "MyHttpApi": {
+                  "Type": "AWS::Serverless::HttpApi",
+                  "Properties": {
+                    "DefinitionUri": { "Fn::Sub": "s3://${SpecBucket}/openapi.yaml" }
+                  }
+                }
+              }
+            }
+            """);
+
+        JsonNode bodyS3Location = processor.expandSamTemplate(template)
+                .path("Resources").path("MyHttpApi").path("Properties").path("BodyS3Location");
+
+        assertEquals("s3://${SpecBucket}/openapi.yaml", bodyS3Location.path("Fn::Sub").asText());
+    }
 }

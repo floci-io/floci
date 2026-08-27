@@ -88,6 +88,13 @@ public class GlobalCorsFilter implements ContainerRequestFilter, ContainerRespon
             return;
         }
 
+        // The API Gateway data plane owns CORS for deployed routes. REST APIs dispatch
+        // OPTIONS to an integration, while HTTP APIs answer from CorsConfiguration in
+        // ApiGatewayExecuteController; neither should be short-circuited here (#1928).
+        if (isDeployedApiPath(requestContext.getUriInfo().getPath())) {
+            return;
+        }
+
         String origin = requestContext.getHeaderString(ORIGIN);
         if (origin == null || !s.matchesOrigin(origin)) {
             return;
@@ -123,6 +130,12 @@ public class GlobalCorsFilter implements ContainerRequestFilter, ContainerRespon
             return;
         }
 
+        // See filter(request): deployed API Gateway responses carry either integration-owned
+        // REST CORS headers or API-owned HTTP API CORS headers.
+        if (isDeployedApiPath(requestContext.getUriInfo().getPath())) {
+            return;
+        }
+
         String origin = requestContext.getHeaderString(ORIGIN);
         if (origin == null || !s.matchesOrigin(origin)) {
             return;
@@ -144,6 +157,24 @@ public class GlobalCorsFilter implements ContainerRequestFilter, ContainerRespon
         if (!hasOrigin) {
             headers.add(VARY, ORIGIN);
         }
+    }
+
+    /**
+     * True for requests to a <em>deployed</em> API Gateway stage — the {@code execute-api}
+     * paths and the LocalStack-compatible {@code _user_request_} form. Floci's global CORS
+     * must not intercept these: the API Gateway data plane owns their CORS behavior, and
+     * short-circuiting here prevents REST integrations or HTTP API configuration from handling
+     * the preflight (#1928). Management endpoints such as {@code /restapis/{id}/resources/...}
+     * are unaffected.
+     */
+    static boolean isDeployedApiPath(String path) {
+        if (path == null) {
+            return false;
+        }
+        String p = path.startsWith("/") ? path : "/" + path;
+        return p.startsWith("/execute-api/")
+                || p.startsWith("/_aws/execute-api/")
+                || p.contains("/_user_request_");
     }
 
     private record CorsSettings(boolean disabled,

@@ -578,6 +578,10 @@ public class ApiGatewayV2JsonHandler {
         node.put("RouteKey", r.getRouteKey());
         node.put("AuthorizationType", r.getAuthorizationType());
         if (r.getAuthorizerId() != null) node.put("AuthorizerId", r.getAuthorizerId());
+        if (r.getAuthorizationScopes() != null && !r.getAuthorizationScopes().isEmpty()) {
+            ArrayNode scopes = node.putArray("AuthorizationScopes");
+            r.getAuthorizationScopes().forEach(scopes::add);
+        }
         if (r.getTarget() != null) node.put("Target", r.getTarget());
         if (r.getRouteResponseSelectionExpression() != null) {
             node.put("RouteResponseSelectionExpression", r.getRouteResponseSelectionExpression());
@@ -627,6 +631,10 @@ public class ApiGatewayV2JsonHandler {
         if (s.getStageVariables() != null) {
             ObjectNode stageVariables = node.putObject("StageVariables");
             s.getStageVariables().forEach(stageVariables::put);
+        }
+        if (s.getTags() != null && !s.getTags().isEmpty()) {
+            ObjectNode tags = node.putObject("Tags");
+            s.getTags().forEach(tags::put);
         }
         return node;
     }
@@ -707,7 +715,8 @@ public class ApiGatewayV2JsonHandler {
             if (!key.isEmpty() && Character.isUpperCase(key.charAt(0))) {
                 key = Character.toLowerCase(key.charAt(0)) + key.substring(1);
             }
-            result.put(key, normalizeValue(entry.getValue()));
+            Object value = "tags".equals(key) ? entry.getValue() : normalizeValue(entry.getValue());
+            result.put(key, value);
         }
         return result;
     }

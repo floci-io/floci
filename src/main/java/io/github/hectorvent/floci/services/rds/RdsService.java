@@ -10,6 +10,9 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.CurrentContainerNetworkResolver;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
@@ -30,7 +33,10 @@ import io.github.hectorvent.floci.services.rds.model.DbProxyAuth;
 import io.github.hectorvent.floci.services.rds.model.DbProxyTarget;
 import io.github.hectorvent.floci.services.rds.model.DbProxyTargetGroup;
 import io.github.hectorvent.floci.services.rds.model.DbSubnetGroup;
+import io.github.hectorvent.floci.services.rds.model.OptionGroup;
+import io.github.hectorvent.floci.services.rds.model.OptionGroupOption;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyManager;
+import io.github.hectorvent.floci.services.resourcegroupstagging.ResourceGroupsTaggingService;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
 import io.github.hectorvent.floci.core.common.Resettable;
@@ -45,6 +51,7 @@ import java.util.Collection;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -58,10 +65,12 @@ import java.util.regex.Pattern;
  * Starts DB containers and auth proxies on creation.
  */
 @ApplicationScoped
-public class RdsService implements Resettable {
+public class RdsService implements Resettable, ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(RdsService.class);
     private static final ObjectMapper JSON = new ObjectMapper();
+    /** Value AWS reports as the OwningService of a secret RDS manages. */
+    private static final String MANAGED_SECRET_OWNING_SERVICE = "rds";
     private static final List<ManagedClusterParameterGroup> MANAGED_CLUSTER_PARAMETER_GROUPS = List.of(
             managedDefault("aurora-mysql5.7"),
             managedDefault("aurora-mysql8.0"),
@@ -83,26 +92,73 @@ public class RdsService implements Resettable {
             managedDefault("postgres17"),
             managedDefault("postgres18"));
 
+    /**
+     * Engines AWS accepts for {@code EngineName} on an option group. Floci can only run
+     * postgres, mysql and mariadb, but option groups are pure metadata, so a group for an
+     * engine Floci cannot start is still valid to create and describe.
+     */
+    private static final Set<String> OPTION_GROUP_ENGINES = Set.of(
+            "db2-ae", "db2-ce", "db2-se", "mariadb", "mysql",
+            "oracle-ee", "oracle-ee-cdb", "oracle-se2", "oracle-se2-cdb", "postgres",
+            "sqlserver-ee", "sqlserver-se", "sqlserver-ex", "sqlserver-web");
+
+    /**
+     * The {@code default:<engine>-<major version>} groups AWS creates implicitly. Only the
+     * engines Floci can actually run are listed, so every instance Floci creates resolves to
+     * a default option group that {@code DescribeOptionGroups} also returns.
+     */
+    private static final List<ManagedOptionGroup> MANAGED_OPTION_GROUPS = List.of(
+            managedOptionGroup("mariadb", "10.11"),
+            managedOptionGroup("mariadb", "11.2"),
+            managedOptionGroup("mariadb", "11.4"),
+            managedOptionGroup("mysql", "8.0"),
+            managedOptionGroup("mysql", "8.4"),
+            managedOptionGroup("postgres", "13"),
+            managedOptionGroup("postgres", "14"),
+            managedOptionGroup("postgres", "15"),
+            managedOptionGroup("postgres", "16"),
+            managedOptionGroup("postgres", "17"),
+            managedOptionGroup("postgres", "18"));
+
     private final StorageBackend<String, DbInstance> instances;
     private final StorageBackend<String, DbCluster> clusters;
     private final StorageBackend<String, DbParameterGroup> parameterGroups;
     private final StorageBackend<String, DbClusterParameterGroup> clusterParameterGroups;
+    private final StorageBackend<String, OptionGroup> optionGroups;
     private final StorageBackend<String, DbSubnetGroup> subnetGroups;
     private final StorageBackend<String, DbProxy> proxies;
     private final StorageBackend<String, DbProxyTargetGroup> proxyTargetGroups;
     private final RdsContainerManager containerManager;
     private final RdsProxyManager proxyManager;
+    // CreateDBCluster/CreateDBInstance register the new resource only after the
+    // backing container is provisioned, and an image pull can hold that window
+    // open long enough for a client-side retry to pass the exists-check again
+    // and provision a second container for the same identifier. The sentinel
+    // serializes creates per identifier so the duplicate fails fast with the
+    // same fault a completed create produces.
+    private final Set<String> provisioningIds = ConcurrentHashMap.newKeySet();
     private final Ec2Service ec2Service;
     private final RegionResolver regionResolver;
     private final EmulatorConfig config;
     private final SecretsManagerService secretsManagerService;
     private final DockerHostResolver dockerHostResolver;
     private final CurrentContainerNetworkResolver currentContainerNetworkResolver;
+    private final ResourceGroupsTaggingService taggingService;
     private final Set<Integer> usedPorts = ConcurrentHashMap.newKeySet();
     private static final Pattern IMAGE_TAG_VERSION_PATTERN = Pattern.compile("^(\\d+(?:\\.\\d+)*)(.*)$");
     private static final Pattern SAFE_IMAGE_TAG_PATTERN = Pattern.compile("[A-Za-z0-9._-]+");
+    private static final int SERVERLESS_V2_DEFAULT_AUTO_PAUSE_SECONDS = 300;
+    private static final int SERVERLESS_V2_MAX_AUTO_PAUSE_SECONDS = 86_400;
     private static final Pattern DB_PROXY_NAME_PATTERN =
             Pattern.compile("[a-zA-Z](?:-?[a-zA-Z0-9]+)*");
+    /**
+     * AWS constrains a user-created option group name to 1–255 letters, numbers or hyphens,
+     * starting with a letter, without a trailing or doubled hyphen. The implicit
+     * {@code default:<engine>-<version>} groups are exempt — they are not user-creatable.
+     */
+    private static final Pattern OPTION_GROUP_NAME_PATTERN =
+            Pattern.compile("[a-zA-Z][a-zA-Z0-9]*(?:-[a-zA-Z0-9]+)*");
+    private static final int OPTION_GROUP_NAME_MAX_LENGTH = 255;
     private static final Set<String> DB_PROXY_AUTH_SCHEMES = Set.of("SECRETS");
     private static final Set<String> DB_PROXY_IAM_AUTH_MODES =
             Set.of("DISABLED", "REQUIRED", "ENABLED");
@@ -119,7 +175,8 @@ public class RdsService implements Resettable {
                       StorageFactory storageFactory,
                       SecretsManagerService secretsManagerService,
                       DockerHostResolver dockerHostResolver,
-                      CurrentContainerNetworkResolver currentContainerNetworkResolver) {
+                      CurrentContainerNetworkResolver currentContainerNetworkResolver,
+                      ResourceGroupsTaggingService taggingService) {
         this.containerManager = containerManager;
         this.proxyManager = proxyManager;
         this.ec2Service = ec2Service;
@@ -128,6 +185,7 @@ public class RdsService implements Resettable {
         this.secretsManagerService = secretsManagerService;
         this.dockerHostResolver = dockerHostResolver;
         this.currentContainerNetworkResolver = currentContainerNetworkResolver;
+        this.taggingService = taggingService;
         this.instances = storageFactory.create("rds", "rds-instances.json",
                 new TypeReference<Map<String, DbInstance>>() {});
         this.clusters = storageFactory.create("rds", "rds-clusters.json",
@@ -136,6 +194,8 @@ public class RdsService implements Resettable {
                 new TypeReference<Map<String, DbParameterGroup>>() {});
         this.clusterParameterGroups = storageFactory.create("rds", "rds-cluster-parameter-groups.json",
                 new TypeReference<Map<String, DbClusterParameterGroup>>() {});
+        this.optionGroups = storageFactory.create("rds", "rds-option-groups.json",
+                new TypeReference<Map<String, OptionGroup>>() {});
         this.subnetGroups = storageFactory.create("rds", "rds-subnet-groups.json",
                 new TypeReference<Map<String, DbSubnetGroup>>() {});
         this.proxies = storageFactory.create("rds", "rds-proxies.json",
@@ -231,6 +291,29 @@ public class RdsService implements Resettable {
                CurrentContainerNetworkResolver currentContainerNetworkResolver,
                StorageBackend<String, DbProxy> proxies,
                StorageBackend<String, DbProxyTargetGroup> proxyTargetGroups) {
+        this(containerManager, proxyManager, ec2Service, regionResolver, config,
+                instances, clusters, parameterGroups, clusterParameterGroups, subnetGroups,
+                secretsManagerService, dockerHostResolver, currentContainerNetworkResolver,
+                proxies, proxyTargetGroups, new InMemoryStorage<>(), null);
+    }
+
+    RdsService(RdsContainerManager containerManager,
+               RdsProxyManager proxyManager,
+               Ec2Service ec2Service,
+               RegionResolver regionResolver,
+               EmulatorConfig config,
+               StorageBackend<String, DbInstance> instances,
+               StorageBackend<String, DbCluster> clusters,
+               StorageBackend<String, DbParameterGroup> parameterGroups,
+               StorageBackend<String, DbClusterParameterGroup> clusterParameterGroups,
+               StorageBackend<String, DbSubnetGroup> subnetGroups,
+               SecretsManagerService secretsManagerService,
+               DockerHostResolver dockerHostResolver,
+               CurrentContainerNetworkResolver currentContainerNetworkResolver,
+               StorageBackend<String, DbProxy> proxies,
+               StorageBackend<String, DbProxyTargetGroup> proxyTargetGroups,
+               StorageBackend<String, OptionGroup> optionGroups,
+               ResourceGroupsTaggingService taggingService) {
         this.containerManager = containerManager;
         this.proxyManager = proxyManager;
         this.ec2Service = ec2Service;
@@ -243,15 +326,18 @@ public class RdsService implements Resettable {
         this.clusters = clusters;
         this.parameterGroups = parameterGroups;
         this.clusterParameterGroups = clusterParameterGroups;
+        this.optionGroups = optionGroups;
         this.subnetGroups = subnetGroups;
         this.proxies = proxies;
         this.proxyTargetGroups = proxyTargetGroups;
+        this.taggingService = taggingService;
     }
 
     public void restorePersistedRuntime() {
         restoreClusters();
         restoreInstances();
         restoreProxies();
+        backfillManagedSecretOwnership();
     }
 
     public void clear() {
@@ -371,6 +457,56 @@ public class RdsService implements Resettable {
                                        Map<String, String> tags,
                                        List<String> vpcSecurityGroupIds,
                                        String region) {
+        return createDbInstance(id, engineParam, engineVersion, masterUsername, masterPassword,
+                dbName, dbInstanceClass, allocatedStorage, iamEnabled, paramGroupName,
+                dbSubnetGroupName, dbClusterIdentifier, availabilityZone, multiAz,
+                manageMasterUserPassword, masterUserSecretKmsKeyId, tags, vpcSecurityGroupIds,
+                null, region, true);
+    }
+
+    public DbInstance createDbInstance(String id, String engineParam, String engineVersion,
+                                       String masterUsername, String masterPassword,
+                                       String dbName, String dbInstanceClass,
+                                       int allocatedStorage, boolean iamEnabled,
+                                       String paramGroupName, String dbSubnetGroupName,
+                                       String dbClusterIdentifier, String availabilityZone,
+                                       boolean multiAz, boolean manageMasterUserPassword,
+                                       String masterUserSecretKmsKeyId,
+                                       Map<String, String> tags,
+                                       List<String> vpcSecurityGroupIds,
+                                       String optionGroupName,
+                                       String region,
+                                       boolean autoMinorVersionUpgrade) {
+        String provisioningKey = "instance:" + currentAccountId() + ":"
+                + dbResourceKey(effectiveRegion(region), id);
+        if (!provisioningIds.add(provisioningKey)) {
+            throw new AwsException("DBInstanceAlreadyExists",
+                    "DB instance " + id + " already exists.", 400);
+        }
+        try {
+            return doCreateDbInstance(id, engineParam, engineVersion, masterUsername,
+                    masterPassword, dbName, dbInstanceClass, allocatedStorage, iamEnabled,
+                    paramGroupName, dbSubnetGroupName, dbClusterIdentifier, availabilityZone,
+                    multiAz, manageMasterUserPassword, masterUserSecretKmsKeyId, tags,
+                    vpcSecurityGroupIds, optionGroupName, region, autoMinorVersionUpgrade);
+        } finally {
+            provisioningIds.remove(provisioningKey);
+        }
+    }
+
+    private DbInstance doCreateDbInstance(String id, String engineParam, String engineVersion,
+                                          String masterUsername, String masterPassword,
+                                          String dbName, String dbInstanceClass,
+                                          int allocatedStorage, boolean iamEnabled,
+                                          String paramGroupName, String dbSubnetGroupName,
+                                          String dbClusterIdentifier, String availabilityZone,
+                                          boolean multiAz, boolean manageMasterUserPassword,
+                                          String masterUserSecretKmsKeyId,
+                                          Map<String, String> tags,
+                                          List<String> vpcSecurityGroupIds,
+                                          String optionGroupName,
+                                          String region,
+                                          boolean autoMinorVersionUpgrade) {
         String effectiveRegion = effectiveRegion(region);
         String dbiResourceId = "db-" + java.util.UUID.randomUUID().toString()
                 .replace("-", "").substring(0, 24).toUpperCase();
@@ -387,6 +523,7 @@ public class RdsService implements Resettable {
         }
         validateInstanceParameterGroup(
                 paramGroupName, engineParam, engineVersion, effectiveRegion);
+        validateInstanceOptionGroup(optionGroupName, engineParam, engineVersion, effectiveRegion);
         boolean mock = config.services().rds().mock();
         // Always reserve a unique port (even in mock) so endpoints stay distinct and usedPorts
         // is consistent; mock mode only skips starting the container and auth proxy.
@@ -455,6 +592,7 @@ public class RdsService implements Resettable {
         DbInstance instance = new DbInstance(id, engine, engineVersion, masterUsername, masterPassword,
                 dbName, dbInstanceClass, allocatedStorage, DbInstanceStatus.AVAILABLE,
                 endpoint, iamEnabled, paramGroupName, dbClusterIdentifier, Instant.now(), proxyPort);
+        instance.setOptionGroupName(optionGroupName);
         instance.setDbSubnetGroupName(dbSubnetGroupName);
         instance.setContainerId(containerId);
         instance.setContainerHost(containerHost);
@@ -469,6 +607,7 @@ public class RdsService implements Resettable {
         instance.setAvailabilityZone(placement.availabilityZone());
         instance.setMultiAz(placement.multiAz());
         instance.setSubnetAvailabilityZones(placement.subnetAvailabilityZones());
+        instance.setAutoMinorVersionUpgrade(autoMinorVersionUpgrade);
 
         instance.setDbiResourceId(dbiResourceId);
         instance.setDbInstanceArn(dbInstanceArn);
@@ -625,7 +764,33 @@ public class RdsService implements Resettable {
                     proxies.put(dbProxyKey(effectiveRegion, resolvedProxy.getDbProxyName()), updatedProxy);
                 });
             }
-            // Valid RDS resource types Floci does not model yet (og, pg, snapshot, ...) — taggable
+            case "pg" -> {
+                DbParameterGroup group = getDbParameterGroup(resourceId, effectiveRegion);
+                yield new TagHandle(group.getTags(), updated -> {
+                    group.setTags(updated);
+                    putParameterGroupForRegion(resourceId, effectiveRegion, group);
+                });
+            }
+            case "cluster-pg" -> {
+                DbClusterParameterGroup group =
+                        getDbClusterParameterGroup(resourceId, effectiveRegion);
+                yield new TagHandle(group.getTags(), updated -> {
+                    group.setTags(updated);
+                    putClusterParameterGroupForRegion(resourceId, effectiveRegion, group);
+                });
+            }
+            case "og" -> {
+                if (managedOptionGroup(resourceId) != null) {
+                    throw new AwsException("InvalidOptionGroupStateFault",
+                            "The default option group " + resourceId + " cannot be tagged.", 400);
+                }
+                OptionGroup group = getOptionGroup(resourceId, effectiveRegion);
+                yield new TagHandle(group.getTags(), updated -> {
+                    group.setTags(updated);
+                    putOptionGroupForRegion(resourceId, effectiveRegion, group);
+                });
+            }
+            // Valid RDS resource types Floci does not model yet (snapshot, ri, ...) — taggable
             // on real AWS, so the message states the Floci limitation rather than AWS semantics.
             default -> throw new AwsException("InvalidParameterValue",
                     "Tagging for resource type '" + type + "' is not yet implemented by Floci: " + resourceName, 400);
@@ -637,19 +802,60 @@ public class RdsService implements Resettable {
                 ? regionFromArn(resourceName) : regionResolver.getDefaultRegion();
     }
 
+    /**
+     * Marks the master user secrets of persisted instances as owned by RDS. An instance stored
+     * before floci tracked ownership refers to a secret that would otherwise read as an ordinary
+     * one, and so would refuse the Lambda-free rotation these secrets are rotated with. RDS state
+     * is what makes the secret managed, so the instance is what this reads — never the name.
+     *
+     * <p>Runs from {@link #restorePersistedRuntime()} rather than from its own {@code StartupEvent}
+     * observer: the lifecycle calls that after {@code storageFactory.loadAll()}, whereas two
+     * observers of the same event have no ordering between them, and a reload would discard these
+     * writes before they were flushed.
+     */
+    void backfillManagedSecretOwnership() {
+        if (secretsManagerService == null) {
+            return;
+        }
+        // Reading persisted state must not be able to stop the emulator from starting.
+        try {
+            for (DbInstance instance : allInstances()) {
+                String secretArn = instance.getMasterUserSecretArn();
+                if (secretArn == null) {
+                    continue;
+                }
+                try {
+                    // The secret's ARN names its own account and region, neither of which a
+                    // startup backfill has a request context to infer.
+                    secretsManagerService.markOwnedByService(secretArn, MANAGED_SECRET_OWNING_SERVICE);
+                } catch (RuntimeException e) {
+                    LOG.debugv(e, "Could not mark master user secret {0} as service-managed", secretArn);
+                }
+            }
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "Skipped the master user secret ownership backfill");
+        }
+    }
+
     private void attachManagedMasterUserSecret(DbInstance instance, String region, String kmsKeyId) {
         if (secretsManagerService == null) {
             throw new AwsException("InvalidParameterCombination",
                     "ManageMasterUserPassword requires Secrets Manager support.", 400);
         }
         String secretName = "rds!" + instance.getDbiResourceId();
+        // RDS owns the secret it manages: it rotates the master password itself, so the secret
+        // carries no rotation Lambda. AWS marks that with OwningService and these two tags.
+        List<Secret.Tag> tags = List.of(
+                new Secret.Tag("aws:rds:primaryDBInstanceArn", instance.getDbInstanceArn()),
+                new Secret.Tag("aws:secretsmanager:owningService", MANAGED_SECRET_OWNING_SERVICE));
         Secret secret = secretsManagerService.createSecret(
                 secretName,
                 managedMasterSecretString(instance),
                 null,
                 "Managed RDS master user secret for " + instance.getDbInstanceIdentifier(),
                 kmsKeyId,
-                null,
+                tags,
+                MANAGED_SECRET_OWNING_SERVICE,
                 region);
         instance.setMasterUserSecretArn(secret.getArn());
         instance.setMasterUserSecretStatus("active");
@@ -742,9 +948,31 @@ public class RdsService implements Resettable {
     public DbInstance modifyDbInstance(
             String id, String newPassword, Boolean iamEnabled,
             String dbSubnetGroupName, List<String> vpcSecurityGroupIds, String region) {
+        return modifyDbInstance(id, newPassword, iamEnabled, dbSubnetGroupName,
+                vpcSecurityGroupIds, null, region, null);
+    }
+
+    public DbInstance modifyDbInstance(
+            String id, String newPassword, Boolean iamEnabled,
+            String dbSubnetGroupName, List<String> vpcSecurityGroupIds,
+            String optionGroupName, String region) {
+        return modifyDbInstance(id, newPassword, iamEnabled, dbSubnetGroupName,
+                vpcSecurityGroupIds, optionGroupName, region, null);
+    }
+
+    public DbInstance modifyDbInstance(
+            String id, String newPassword, Boolean iamEnabled,
+            String dbSubnetGroupName, List<String> vpcSecurityGroupIds,
+            String optionGroupName, String region, Boolean autoMinorVersionUpgrade) {
         String effectiveRegion = effectiveRegion(region);
         DbInstance instance = getDbInstance(id, effectiveRegion);
         instance.setStatus(DbInstanceStatus.AVAILABLE);
+        if (optionGroupName != null && !optionGroupName.isBlank()) {
+            validateInstanceOptionGroup(optionGroupName,
+                    instance.getEngine() == null ? null : instance.getEngine().name().toLowerCase(),
+                    instance.getEngineVersion(), effectiveRegion);
+            instance.setOptionGroupName(optionGroupName);
+        }
         if (newPassword != null && !newPassword.isBlank()) {
             instance.setMasterPassword(newPassword);
         }
@@ -757,6 +985,9 @@ public class RdsService implements Resettable {
         }
         if (vpcSecurityGroupIds != null && !vpcSecurityGroupIds.isEmpty()) {
             instance.setVpcSecurityGroupIds(vpcSecurityGroupIds);
+        }
+        if (autoMinorVersionUpgrade != null) {
+            instance.setAutoMinorVersionUpgrade(autoMinorVersionUpgrade);
         }
         putInstanceForScope(currentAccountId(), effectiveRegion, id, instance);
         LOG.infov("DB instance {0} modified", id);
@@ -932,6 +1163,52 @@ public class RdsService implements Resettable {
                                      String databaseName, boolean iamEnabled,
                                      String paramGroupName, String dbSubnetGroupName,
                                      String availabilityZone, boolean multiAz, String region) {
+        return createDbCluster(id, engineParam, engineVersion, masterUsername, masterPassword,
+                databaseName, iamEnabled, paramGroupName, dbSubnetGroupName, availabilityZone,
+                multiAz, region, null, null);
+    }
+
+    public DbCluster createDbCluster(String id, String engineParam, String engineVersion,
+                                     String masterUsername, String masterPassword,
+                                     String databaseName, boolean iamEnabled,
+                                     String paramGroupName, String dbSubnetGroupName,
+                                     String availabilityZone, boolean multiAz, String region,
+                                     Double serverlessV2MinCapacity, Double serverlessV2MaxCapacity) {
+        return createDbCluster(id, engineParam, engineVersion, masterUsername, masterPassword,
+                databaseName, iamEnabled, paramGroupName, dbSubnetGroupName, availabilityZone,
+                multiAz, region, serverlessV2MinCapacity, serverlessV2MaxCapacity, null);
+    }
+
+    public DbCluster createDbCluster(String id, String engineParam, String engineVersion,
+                                     String masterUsername, String masterPassword,
+                                     String databaseName, boolean iamEnabled,
+                                     String paramGroupName, String dbSubnetGroupName,
+                                     String availabilityZone, boolean multiAz, String region,
+                                     Double serverlessV2MinCapacity, Double serverlessV2MaxCapacity,
+                                     Integer serverlessV2SecondsUntilAutoPause) {
+        String provisioningKey = "cluster:" + currentAccountId() + ":"
+                + dbResourceKey(effectiveRegion(region), id);
+        if (!provisioningIds.add(provisioningKey)) {
+            throw new AwsException("DBClusterAlreadyExistsFault",
+                    "DB cluster " + id + " already exists.", 400);
+        }
+        try {
+            return doCreateDbCluster(id, engineParam, engineVersion, masterUsername, masterPassword,
+                    databaseName, iamEnabled, paramGroupName, dbSubnetGroupName, availabilityZone,
+                    multiAz, region, serverlessV2MinCapacity, serverlessV2MaxCapacity,
+                    serverlessV2SecondsUntilAutoPause);
+        } finally {
+            provisioningIds.remove(provisioningKey);
+        }
+    }
+
+    private DbCluster doCreateDbCluster(String id, String engineParam, String engineVersion,
+                                        String masterUsername, String masterPassword,
+                                        String databaseName, boolean iamEnabled,
+                                        String paramGroupName, String dbSubnetGroupName,
+                                        String availabilityZone, boolean multiAz, String region,
+                                        Double serverlessV2MinCapacity, Double serverlessV2MaxCapacity,
+                                        Integer serverlessV2SecondsUntilAutoPause) {
         String effectiveRegion = effectiveRegion(region);
         String clusterResourceId = "cluster-" + java.util.UUID.randomUUID().toString()
                 .replace("-", "").substring(0, 24).toUpperCase();
@@ -941,8 +1218,12 @@ public class RdsService implements Resettable {
             throw new AwsException("DBClusterAlreadyExistsFault",
                     "DB cluster " + id + " already exists.", 400);
         }
-
         DatabaseEngine engine = resolveEngine(engineParam);
+        validateServerlessV2Engine(
+                engineParam, serverlessV2MinCapacity, serverlessV2MaxCapacity,
+                serverlessV2SecondsUntilAutoPause);
+        Integer effectiveAutoPauseSeconds = validateServerlessV2ScalingConfiguration(
+                serverlessV2MinCapacity, serverlessV2MaxCapacity, serverlessV2SecondsUntilAutoPause);
         validateClusterParameterGroup(
                 paramGroupName, engineParam, engineVersion, effectiveRegion);
         PlacementResolution placement = resolvePlacement(dbSubnetGroupName, availabilityZone, multiAz, effectiveRegion);
@@ -955,6 +1236,7 @@ public class RdsService implements Resettable {
         DbCluster cluster = new DbCluster(id, engine, engineVersion, masterUsername, masterPassword,
                 databaseName, DbInstanceStatus.AVAILABLE, endpoint, endpoint,
                 iamEnabled, new ArrayList<>(), paramGroupName, Instant.now(), proxyPort);
+        cluster.setEngineIdentifier(effectiveEngineName(engineParam).toLowerCase(Locale.ROOT));
         cluster.setContainerStorageResourceId(clusterResourceId);
         if (!mock) {
             String image = imageForEngine(engine, engineVersion);
@@ -992,10 +1274,107 @@ public class RdsService implements Resettable {
                             accountId, clusterRegion, id, user, pw));
         }
 
+        cluster.setServerlessV2MinCapacity(serverlessV2MinCapacity);
+        cluster.setServerlessV2MaxCapacity(serverlessV2MaxCapacity);
+        cluster.setServerlessV2SecondsUntilAutoPause(effectiveAutoPauseSeconds);
         putClusterForScope(currentAccountId(), effectiveRegion, id, cluster);
         LOG.infov("DB cluster {0} created (mock={1}), engine={2}, endpoint={3}:{4}",
                 id, String.valueOf(mock), engine, endpoint.address(), String.valueOf(endpoint.port()));
         return cluster;
+    }
+
+    /**
+     * Validates an Aurora Serverless v2 scaling configuration against the AWS ACU constraints:
+     * capacities are specified in half-step (0.5) increments; MinCapacity ranges 0–256 (0 requires an
+     * auto-pause-capable engine version, otherwise the smallest value is 0.5) and MaxCapacity is
+     * greater than or equal to 1.0 and at most 256, with MaxCapacity at least MinCapacity. A null capacity is left
+     * unset.
+     */
+    void validateServerlessV2Capacity(Double minCapacity, Double maxCapacity) {
+        validateServerlessV2ScalingConfiguration(minCapacity, maxCapacity, null);
+    }
+
+    Integer validateServerlessV2ScalingConfiguration(
+            Double minCapacity, Double maxCapacity, Integer secondsUntilAutoPause) {
+        if (minCapacity == null && maxCapacity == null && secondsUntilAutoPause == null) {
+            return null;
+        }
+        // A complete effective configuration requires both bounds. Modify requests merge omitted
+        // members with the stored configuration before reaching this validation.
+        if (minCapacity == null || maxCapacity == null) {
+            throw new AwsException("InvalidParameterCombination",
+                    "ServerlessV2ScalingConfiguration requires both MinCapacity and MaxCapacity.", 400);
+        }
+        validateAcu("MinCapacity", minCapacity, 0.0);
+        validateAcu("MaxCapacity", maxCapacity, 1.0);
+        if (maxCapacity < minCapacity) {
+            throw new AwsException("InvalidParameterCombination",
+                    "MaxCapacity must be greater than or equal to MinCapacity.", 400);
+        }
+        if (secondsUntilAutoPause != null
+                && (secondsUntilAutoPause < SERVERLESS_V2_DEFAULT_AUTO_PAUSE_SECONDS
+                || secondsUntilAutoPause > SERVERLESS_V2_MAX_AUTO_PAUSE_SECONDS)) {
+            throw new AwsException("InvalidParameterValue",
+                    "SecondsUntilAutoPause must be between 300 and 86400 seconds.", 400);
+        }
+        if (minCapacity > 0.0) {
+            return null;
+        }
+        return secondsUntilAutoPause != null
+                ? secondsUntilAutoPause
+                : SERVERLESS_V2_DEFAULT_AUTO_PAUSE_SECONDS;
+    }
+
+    private static void validateAcu(String field, double value, double smallest) {
+        if (!Double.isFinite(value) || value < smallest || value > 256.0) {
+            throw new AwsException("InvalidParameterValue",
+                    field + " must be between " + smallest + " and 256.0 ACUs.", 400);
+        }
+        // ACUs are only valid in half-step increments (0.5, 1, 1.5, ...).
+        if (Math.abs(value * 2.0 - Math.rint(value * 2.0)) > 1e-9) {
+            throw new AwsException("InvalidParameterValue",
+                    field + " must be specified in half-step (0.5) increments.", 400);
+        }
+    }
+
+    private void validateServerlessV2Engine(
+            String engineIdentifier, Double minCapacity, Double maxCapacity,
+            Integer secondsUntilAutoPause) {
+        boolean hasScalingConfiguration = minCapacity != null
+                || maxCapacity != null
+                || secondsUntilAutoPause != null;
+        if (hasScalingConfiguration && !isAuroraEngine(engineIdentifier)) {
+            throw new AwsException("InvalidParameterCombination",
+                    invalidParameterCombinationMessage(),
+                    400);
+        }
+    }
+
+    private static boolean isAuroraEngine(String engineIdentifier) {
+        return engineIdentifier != null
+                && ("aurora-mysql".equalsIgnoreCase(engineIdentifier)
+                || "aurora-postgresql".equalsIgnoreCase(engineIdentifier));
+    }
+
+    /**
+     * Whether RDS holds a cluster or instance under this identifier.
+     *
+     * <p>The RDS-family services share one identifier space — a live account refuses to create an
+     * Aurora cluster named like an existing DocumentDB one with {@code DBClusterAlreadyExistsFault}
+     * — so a create naming an identifier RDS already holds belongs to RDS, whichever engine it
+     * names.
+     */
+    public boolean hasClusterOrInstance(String clusterId, String instanceId, String region) {
+        // The request's region, and only it: RDS scopes these names by region — the same name in
+        // two regions is two resources, which the SDK compatibility suite pins — and two records
+        // in different regions carry different ARNs, so there is nothing for a tag call to
+        // confuse. What must not exist is one identifier in both services in one region.
+        String effectiveRegion = effectiveRegion(region);
+        boolean cluster = clusterId != null && !clusterId.isBlank()
+                && findClusterForScope(currentAccountId(), effectiveRegion, clusterId) != null;
+        boolean instance = instanceId != null && !instanceId.isBlank()
+                && findInstanceForScope(currentAccountId(), effectiveRegion, instanceId) != null;
+        return cluster || instance;
     }
 
     public DbCluster getDbCluster(String id) {
@@ -1038,19 +1417,62 @@ public class RdsService implements Resettable {
     }
 
     public DbCluster modifyDbCluster(String id, String newPassword, Boolean iamEnabled) {
-        return modifyDbCluster(id, newPassword, iamEnabled,
+        return modifyDbCluster(id, newPassword, iamEnabled, null, null, null,
                 regionResolver.getDefaultRegion());
     }
 
-    public DbCluster modifyDbCluster(
-            String id, String newPassword, Boolean iamEnabled, String region) {
+    public DbCluster modifyDbCluster(String id, String newPassword, Boolean iamEnabled,
+                                     Double serverlessV2MinCapacity, Double serverlessV2MaxCapacity,
+                                     Integer serverlessV2SecondsUntilAutoPause) {
+        return modifyDbCluster(id, newPassword, iamEnabled, serverlessV2MinCapacity,
+                serverlessV2MaxCapacity, serverlessV2SecondsUntilAutoPause,
+                regionResolver.getDefaultRegion());
+    }
+
+    public DbCluster modifyDbCluster(String id, String newPassword, Boolean iamEnabled,
+                                     String region) {
+        return modifyDbCluster(id, newPassword, iamEnabled, null, null, null, region);
+    }
+
+    public DbCluster modifyDbCluster(String id, String newPassword, Boolean iamEnabled,
+                                     Double serverlessV2MinCapacity, Double serverlessV2MaxCapacity,
+                                     Integer serverlessV2SecondsUntilAutoPause, String region) {
         String effectiveRegion = effectiveRegion(region);
         DbCluster cluster = getDbCluster(id, effectiveRegion);
+        boolean modifiesServerlessV2Scaling = serverlessV2MinCapacity != null
+                || serverlessV2MaxCapacity != null
+                || serverlessV2SecondsUntilAutoPause != null;
+        if (modifiesServerlessV2Scaling) {
+            validateServerlessV2Engine(
+                    cluster.getEngineIdentifier(), serverlessV2MinCapacity,
+                    serverlessV2MaxCapacity, serverlessV2SecondsUntilAutoPause);
+        }
+        Double effectiveMinCapacity = serverlessV2MinCapacity;
+        Double effectiveMaxCapacity = serverlessV2MaxCapacity;
+        Integer effectiveAutoPauseSeconds = null;
+        if (modifiesServerlessV2Scaling) {
+            effectiveMinCapacity = serverlessV2MinCapacity != null
+                    ? serverlessV2MinCapacity
+                    : cluster.getServerlessV2MinCapacity();
+            effectiveMaxCapacity = serverlessV2MaxCapacity != null
+                    ? serverlessV2MaxCapacity
+                    : cluster.getServerlessV2MaxCapacity();
+            Integer requestedOrExistingAutoPause = serverlessV2SecondsUntilAutoPause != null
+                    ? serverlessV2SecondsUntilAutoPause
+                    : cluster.getServerlessV2SecondsUntilAutoPause();
+            effectiveAutoPauseSeconds = validateServerlessV2ScalingConfiguration(
+                    effectiveMinCapacity, effectiveMaxCapacity, requestedOrExistingAutoPause);
+        }
         if (newPassword != null && !newPassword.isBlank()) {
             cluster.setMasterPassword(newPassword);
         }
         if (iamEnabled != null) {
             cluster.setIamDatabaseAuthenticationEnabled(iamEnabled);
+        }
+        if (modifiesServerlessV2Scaling) {
+            cluster.setServerlessV2MinCapacity(effectiveMinCapacity);
+            cluster.setServerlessV2MaxCapacity(effectiveMaxCapacity);
+            cluster.setServerlessV2SecondsUntilAutoPause(effectiveAutoPauseSeconds);
         }
         putClusterForScope(currentAccountId(), effectiveRegion, id, cluster);
         LOG.infov("DB cluster {0} modified", id);
@@ -1937,6 +2359,7 @@ public class RdsService implements Resettable {
         }
         DbParameterGroup group = new DbParameterGroup(name, family, description);
         group.setRegion(effectiveRegion);
+        group.setDbParameterGroupArn(regionResolver.buildArn("rds", effectiveRegion, "pg:" + name));
         putParameterGroupForRegion(name, effectiveRegion, group);
         return group;
     }
@@ -2085,6 +2508,7 @@ public class RdsService implements Resettable {
         }
         DbClusterParameterGroup group = new DbClusterParameterGroup(name, family, description);
         group.setRegion(effectiveRegion);
+        group.setDbClusterParameterGroupArn(regionResolver.buildArn("rds", effectiveRegion, "cluster-pg:" + name));
         putClusterParameterGroupForRegion(name, effectiveRegion, group);
         return group;
     }
@@ -2215,6 +2639,279 @@ public class RdsService implements Resettable {
         }
         putClusterParameterGroupForRegion(name, effectiveRegion, group);
         return group;
+    }
+
+    // ── Option Groups ─────────────────────────────────────────────────────────
+
+    public OptionGroup createOptionGroup(
+            String name, String engineName, String majorEngineVersion, String description) {
+        return createOptionGroup(name, engineName, majorEngineVersion, description,
+                Map.of(), regionResolver.getDefaultRegion());
+    }
+
+    public OptionGroup createOptionGroup(
+            String name, String engineName, String majorEngineVersion, String description,
+            Map<String, String> tags, String region) {
+        String effectiveRegion = effectiveRegion(region);
+        validateOptionGroupName(name);
+        validateOptionGroupEngine(engineName);
+        if (findOptionGroupForRegion(name, effectiveRegion) != null
+                || scopedKeyExists(optionGroups, currentAccountId(),
+                dbResourceKey(effectiveRegion, name))) {
+            throw new AwsException("OptionGroupAlreadyExistsFault",
+                    "Option group " + name + " already exists.", 400);
+        }
+        OptionGroup group = new OptionGroup(name, engineName, majorEngineVersion, description);
+        group.setRegion(effectiveRegion);
+        group.setOptionGroupArn(regionResolver.buildArn("rds", effectiveRegion, "og:" + name));
+        group.setTags(tags == null ? new LinkedHashMap<>() : new LinkedHashMap<>(tags));
+        putOptionGroupForRegion(name, effectiveRegion, group);
+        return group;
+    }
+
+    public OptionGroup getOptionGroup(String name) {
+        return getOptionGroup(name, regionResolver.getDefaultRegion());
+    }
+
+    public OptionGroup getOptionGroup(String name, String region) {
+        String effectiveRegion = effectiveRegion(region);
+        OptionGroup group = findOptionGroupForRegion(name, effectiveRegion);
+        if (group == null) {
+            ManagedOptionGroup managed = managedOptionGroup(name);
+            if (managed != null) {
+                group = managed.toModel(effectiveRegion, regionResolver);
+            }
+        }
+        if (group == null) {
+            throw new AwsException("OptionGroupNotFoundFault",
+                    "Option group " + name + " not found.", 404);
+        }
+        return group;
+    }
+
+    public Collection<OptionGroup> listOptionGroups(
+            String filterName, String engineName, String majorEngineVersion) {
+        return listOptionGroups(filterName, engineName, majorEngineVersion,
+                regionResolver.getDefaultRegion());
+    }
+
+    public Collection<OptionGroup> listOptionGroups(
+            String filterName, String engineName, String majorEngineVersion, String region) {
+        String effectiveRegion = effectiveRegion(region);
+        boolean hasName = filterName != null && !filterName.isBlank();
+        boolean hasEngine = engineName != null && !engineName.isBlank();
+        boolean hasVersion = majorEngineVersion != null && !majorEngineVersion.isBlank();
+        if (hasName && (hasEngine || hasVersion)) {
+            throw new AwsException("InvalidParameterCombination",
+                    "OptionGroupName can't be supplied together with EngineName "
+                            + "or MajorEngineVersion.", 400);
+        }
+        if (hasVersion && !hasEngine) {
+            throw new AwsException("InvalidParameterCombination",
+                    "MajorEngineVersion must be used with EngineName.", 400);
+        }
+        if (hasName) {
+            return List.of(getOptionGroup(filterName, effectiveRegion));
+        }
+
+        Map<String, OptionGroup> unique = new LinkedHashMap<>();
+        for (ManagedOptionGroup managed : MANAGED_OPTION_GROUPS) {
+            OptionGroup group = managed.toModel(effectiveRegion, regionResolver);
+            unique.put(group.getOptionGroupName(), group);
+        }
+        List<OptionGroup> storedGroups;
+        if (optionGroups instanceof AccountAwareStorageBackend<OptionGroup> aware) {
+            storedGroups = new ArrayList<>(aware.scanForAccount(currentAccountId(), k -> true));
+            if (Objects.equals(currentAccountId(), defaultAccountId())) {
+                storedGroups.addAll(aware.scanUnscopedLegacy(group ->
+                        optionGroupBelongsToRegion(group, effectiveRegion)));
+            }
+        } else {
+            storedGroups = optionGroups.scan(k -> true);
+        }
+        storedGroups.stream()
+                .sorted(Comparator.comparing(OptionGroup::getOptionGroupName,
+                        Comparator.nullsLast(Comparator.naturalOrder())))
+                .filter(group -> optionGroupBelongsToRegion(group, effectiveRegion))
+                .map(group -> findOptionGroupForRegion(
+                        group.getOptionGroupName(), effectiveRegion))
+                .filter(Objects::nonNull)
+                .forEach(group -> unique.put(group.getOptionGroupName(), group));
+
+        return unique.values().stream()
+                .filter(group -> !hasEngine || engineName.equalsIgnoreCase(group.getEngineName()))
+                .filter(group -> !hasVersion
+                        || majorEngineVersion.equalsIgnoreCase(group.getMajorEngineVersion()))
+                .toList();
+    }
+
+    public OptionGroup modifyOptionGroup(String name,
+                                         List<OptionGroupOption> optionsToInclude,
+                                         List<String> optionsToRemove) {
+        return modifyOptionGroup(name, optionsToInclude, optionsToRemove,
+                regionResolver.getDefaultRegion());
+    }
+
+    public OptionGroup modifyOptionGroup(String name,
+                                         List<OptionGroupOption> optionsToInclude,
+                                         List<String> optionsToRemove,
+                                         String region) {
+        String effectiveRegion = effectiveRegion(region);
+        if (managedOptionGroup(name) != null) {
+            throw new AwsException("InvalidOptionGroupStateFault",
+                    "The default option group " + name + " cannot be modified.", 400);
+        }
+        OptionGroup group = getOptionGroup(name, effectiveRegion);
+        if (optionsToRemove != null && !optionsToRemove.isEmpty()) {
+            group.getOptions().removeIf(option ->
+                    optionsToRemove.contains(option.getOptionName()));
+        }
+        if (optionsToInclude != null) {
+            for (OptionGroupOption option : optionsToInclude) {
+                mergeOption(group, option);
+            }
+        }
+        putOptionGroupForRegion(name, effectiveRegion, group);
+        return group;
+    }
+
+    public void deleteOptionGroup(String name) {
+        deleteOptionGroup(name, regionResolver.getDefaultRegion());
+    }
+
+    public void deleteOptionGroup(String name, String region) {
+        String effectiveRegion = effectiveRegion(region);
+        if (managedOptionGroup(name) != null) {
+            throw new AwsException("InvalidOptionGroupStateFault",
+                    "The default option group " + name + " cannot be deleted.", 400);
+        }
+        if (findOptionGroupForRegion(name, effectiveRegion) == null) {
+            throw new AwsException("OptionGroupNotFoundFault",
+                    "Option group " + name + " not found.", 404);
+        }
+        boolean attached = listDbInstances(null, effectiveRegion).stream()
+                .anyMatch(instance -> name.equals(instance.getOptionGroupName()));
+        if (attached) {
+            throw new AwsException("InvalidOptionGroupStateFault",
+                    "The option group " + name + " is still associated with a DB instance.", 400);
+        }
+        deleteOptionGroupForRegion(name, effectiveRegion);
+    }
+
+    /**
+     * Merges an incoming {@code OptionsToInclude} entry: an option that is already present
+     * has its configuration updated in place, mirroring the AWS upsert semantics.
+     */
+    private static void mergeOption(OptionGroup group, OptionGroupOption incoming) {
+        if (incoming == null || incoming.getOptionName() == null
+                || incoming.getOptionName().isBlank()) {
+            throw new AwsException("InvalidParameterValue",
+                    "OptionName is required for every option in OptionsToInclude.", 400);
+        }
+        OptionGroupOption existing = group.getOptions().stream()
+                .filter(option -> incoming.getOptionName().equals(option.getOptionName()))
+                .findFirst()
+                .orElse(null);
+        if (existing == null) {
+            group.getOptions().add(incoming);
+            return;
+        }
+        existing.setOptionDescription(incoming.getOptionDescription());
+        existing.setOptionVersion(incoming.getOptionVersion());
+        existing.setPort(incoming.getPort());
+        existing.getOptionSettings().putAll(incoming.getOptionSettings());
+        existing.setVpcSecurityGroupMemberships(incoming.getVpcSecurityGroupMemberships());
+        existing.setDbSecurityGroupMemberships(incoming.getDbSecurityGroupMemberships());
+    }
+
+    private static void validateOptionGroupName(String name) {
+        if (name == null || name.isBlank()
+                || name.length() > OPTION_GROUP_NAME_MAX_LENGTH
+                || !OPTION_GROUP_NAME_PATTERN.matcher(name).matches()) {
+            throw new AwsException("InvalidParameterValue",
+                    "OptionGroupName must be 1 to " + OPTION_GROUP_NAME_MAX_LENGTH
+                            + " letters, numbers or hyphens, must start with a letter, and "
+                            + "can't end with a hyphen or contain two consecutive hyphens.", 400);
+        }
+    }
+
+    private static void validateOptionGroupEngine(String engineName) {
+        if (engineName == null || engineName.isBlank()
+                || !OPTION_GROUP_ENGINES.contains(engineName.toLowerCase())) {
+            throw new AwsException("InvalidParameterValue",
+                    "EngineName " + engineName + " is not a valid option group engine.", 400);
+        }
+    }
+
+    private void validateInstanceOptionGroup(
+            String optionGroupName, String engineParam, String engineVersion, String region) {
+        if (optionGroupName == null || optionGroupName.isBlank()) {
+            return;
+        }
+        OptionGroup group = getOptionGroup(optionGroupName, region);
+        String engine = effectiveEngineName(engineParam);
+        if (!engine.equalsIgnoreCase(group.getEngineName())) {
+            throw new AwsException("InvalidParameterCombination",
+                    invalidParameterCombinationMessage(), 400);
+        }
+        // An option group is scoped to one major engine version, so a group built for another
+        // major version can't be attached even when the engine itself matches.
+        String majorVersion = optionGroupMajorVersion(engine, engineVersion);
+        if (!majorVersion.isEmpty()
+                && !majorVersion.equalsIgnoreCase(group.getMajorEngineVersion())) {
+            throw new AwsException("InvalidParameterCombination",
+                    invalidParameterCombinationMessage(), 400);
+        }
+    }
+
+    /**
+     * AWS keys an option group on the engine's major version, which is the leading component for
+     * postgres and {@code major.minor} for the MySQL-family engines. Returns an empty string when
+     * the version is unknown.
+     */
+    public static String optionGroupMajorVersion(String engineName, String engineVersion) {
+        if (engineVersion == null || engineVersion.isBlank()) {
+            return "";
+        }
+        String[] parts = engineVersion.trim().split("\\.");
+        if ("postgres".equalsIgnoreCase(engineName) || parts.length < 2) {
+            return parts[0];
+        }
+        return parts[0] + "." + parts[1];
+    }
+
+    private static ManagedOptionGroup managedOptionGroup(String name) {
+        for (ManagedOptionGroup group : MANAGED_OPTION_GROUPS) {
+            if (group.name().equals(name)) {
+                return group;
+            }
+        }
+        return null;
+    }
+
+    private static ManagedOptionGroup managedOptionGroup(
+            String engineName, String majorEngineVersion) {
+        return new ManagedOptionGroup(
+                defaultOptionGroupName(engineName, majorEngineVersion),
+                engineName,
+                majorEngineVersion,
+                "Default option group for " + engineName + " " + majorEngineVersion);
+    }
+
+    /** AWS names implicit option groups {@code default:<engine>-<major version>}, dots as dashes. */
+    public static String defaultOptionGroupName(String engineName, String majorEngineVersion) {
+        return "default:" + engineName + "-" + majorEngineVersion.replace('.', '-');
+    }
+
+    private record ManagedOptionGroup(String name, String engineName,
+                                      String majorEngineVersion, String description) {
+        private OptionGroup toModel(String region, RegionResolver regionResolver) {
+            OptionGroup group = new OptionGroup(
+                    name, engineName, majorEngineVersion, description);
+            group.setRegion(region);
+            group.setOptionGroupArn(regionResolver.buildArn("rds", region, "og:" + name));
+            return group;
+        }
     }
 
     // ── Password validation callbacks ─────────────────────────────────────────
@@ -3786,8 +4483,19 @@ public class RdsService implements Resettable {
             }
         }
         resolved.ifPresent(group -> {
-            if (group.getRegion() == null || group.getRegion().isBlank()) {
-                group.setRegion(effectiveRegion);
+            // A group persisted before either field existed reads back without them. The ARN is
+            // what a caller tags by, so a group that never gets one cannot be tagged at all.
+            boolean regionMissing = group.getRegion() == null || group.getRegion().isBlank();
+            boolean arnMissing = group.getDbParameterGroupArn() == null
+                    || group.getDbParameterGroupArn().isBlank();
+            if (regionMissing || arnMissing) {
+                if (regionMissing) {
+                    group.setRegion(effectiveRegion);
+                }
+                if (arnMissing) {
+                    group.setDbParameterGroupArn(
+                            regionResolver.buildArn("rds", group.getRegion(), "pg:" + groupName));
+                }
                 putParameterGroupForRegion(groupName, effectiveRegion, group);
             }
         });
@@ -3859,8 +4567,17 @@ public class RdsService implements Resettable {
             }
         }
         resolved.ifPresent(group -> {
-            if (group.getRegion() == null || group.getRegion().isBlank()) {
-                group.setRegion(effectiveRegion);
+            boolean regionMissing = group.getRegion() == null || group.getRegion().isBlank();
+            boolean arnMissing = group.getDbClusterParameterGroupArn() == null
+                    || group.getDbClusterParameterGroupArn().isBlank();
+            if (regionMissing || arnMissing) {
+                if (regionMissing) {
+                    group.setRegion(effectiveRegion);
+                }
+                if (arnMissing) {
+                    group.setDbClusterParameterGroupArn(regionResolver.buildArn(
+                            "rds", group.getRegion(), "cluster-pg:" + groupName));
+                }
                 putClusterParameterGroupForRegion(groupName, effectiveRegion, group);
             }
         });
@@ -3896,6 +4613,73 @@ public class RdsService implements Resettable {
             aware.deleteForAccount(currentAccountId(), key);
         } else {
             clusterParameterGroups.delete(key);
+        }
+    }
+
+    private synchronized OptionGroup findOptionGroupForRegion(String groupName, String region) {
+        String effectiveRegion = effectiveRegion(region);
+        String accountId = currentAccountId();
+        String key = dbResourceKey(effectiveRegion, groupName);
+        java.util.function.Predicate<OptionGroup> owner = group ->
+                Objects.equals(groupName, group.getOptionGroupName())
+                        && optionGroupBelongsToRegion(group, effectiveRegion);
+        Optional<OptionGroup> resolved;
+        if (optionGroups instanceof AccountAwareStorageBackend<OptionGroup> aware) {
+            resolved = aware.getForAccountMigratingLegacyKeys(
+                    accountId, key, List.of(groupName), owner,
+                    Objects.equals(accountId, defaultAccountId()));
+        } else {
+            Optional<OptionGroup> canonicalValue = optionGroups.get(key);
+            Optional<OptionGroup> canonical = canonicalValue.filter(owner);
+            if (canonical.isPresent()) {
+                optionGroups.get(groupName).filter(owner)
+                        .ifPresent(ignored -> optionGroups.delete(groupName));
+                resolved = canonical;
+            } else if (canonicalValue.isPresent()) {
+                resolved = Optional.empty();
+            } else {
+                Optional<OptionGroup> legacy = optionGroups.get(groupName).filter(owner);
+                if (legacy.isPresent()) {
+                    optionGroups.put(key, legacy.get());
+                    optionGroups.delete(groupName);
+                }
+                resolved = legacy;
+            }
+        }
+        resolved.ifPresent(group -> {
+            if (group.getRegion() == null || group.getRegion().isBlank()) {
+                group.setRegion(effectiveRegion);
+                putOptionGroupForRegion(groupName, effectiveRegion, group);
+            }
+        });
+        return resolved.orElse(null);
+    }
+
+    private boolean optionGroupBelongsToRegion(OptionGroup group, String region) {
+        if (group == null) {
+            return false;
+        }
+        String storedRegion = group.getRegion();
+        return storedRegion == null || storedRegion.isBlank()
+                ? Objects.equals(regionResolver.getDefaultRegion(), region)
+                : Objects.equals(storedRegion, region);
+    }
+
+    private void putOptionGroupForRegion(String groupName, String region, OptionGroup group) {
+        String key = dbResourceKey(region, groupName);
+        if (optionGroups instanceof AccountAwareStorageBackend<OptionGroup> aware) {
+            aware.putForAccount(currentAccountId(), key, group);
+        } else {
+            optionGroups.put(key, group);
+        }
+    }
+
+    private void deleteOptionGroupForRegion(String groupName, String region) {
+        String key = dbResourceKey(region, groupName);
+        if (optionGroups instanceof AccountAwareStorageBackend<OptionGroup> aware) {
+            aware.deleteForAccount(currentAccountId(), key);
+        } else {
+            optionGroups.delete(key);
         }
     }
 
@@ -4169,7 +4953,8 @@ public class RdsService implements Resettable {
     }
 
     private DbSubnetGroup buildDefaultSubnetGroup(String region) {
-        List<Subnet> subnets = ec2Service.describeSubnets(region, List.of(), Map.of("vpc-id", List.of("vpc-default")));
+        List<Subnet> subnets = ec2Service.describeSubnets(region, List.of(),
+                Map.of("vpc-id", List.of(ec2Service.resolveDefaultVpcId(region))));
         if (subnets.isEmpty()) {
             throw new AwsException("InvalidVPCNetworkStateFault",
                     "No subnets available for DB subnet group default.", 400);
@@ -4322,5 +5107,49 @@ public class RdsService implements Resettable {
                     cluster.isMultiAz(),
                     cluster.getSubnetAvailabilityZones());
         }
+    }
+
+    @Override
+    public List<ExplorerResource> getResources() {
+        List<ExplorerResource> resources = new ArrayList<>();
+        for (DbInstance instance : listDbInstances(null)) {
+            String arn = instance.getDbInstanceArn();
+            if (arn == null) {
+                continue;
+            }
+            AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+            resources.add(new ExplorerResource(arn, "rds:db", "rds",
+                    parsed.region(), parsed.accountId(),
+                    instance.getCreatedAt() != null ? instance.getCreatedAt() : Instant.now(),
+                    tagsFor(parsed.region(), arn)));
+        }
+        for (DbCluster cluster : listDbClusters(null)) {
+            String arn = cluster.getDbClusterArn();
+            if (arn == null) {
+                continue;
+            }
+            AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+            resources.add(new ExplorerResource(arn, "rds:cluster", "rds",
+                    parsed.region(), parsed.accountId(),
+                    cluster.getCreatedAt() != null ? cluster.getCreatedAt() : Instant.now(),
+                    tagsFor(parsed.region(), arn)));
+        }
+        return resources;
+    }
+
+    /**
+     * Resolves tags for a resource, tolerating a null taggingService. The CDI constructor always
+     * supplies one; the storage-backed test constructors pass null, and unit tests that exercise
+     * getResources() would otherwise NPE.
+     */
+    private Map<String, String> tagsFor(String region, String arn) {
+        return taggingService != null ? taggingService.getTagsForResource(region, arn) : Map.of();
+    }
+
+    @Override
+    public Set<SupportedResourceType> getSupportedResourceTypes() {
+        return Set.of(
+                new SupportedResourceType("rds:db", "rds", true),
+                new SupportedResourceType("rds:cluster", "rds", true));
     }
 }

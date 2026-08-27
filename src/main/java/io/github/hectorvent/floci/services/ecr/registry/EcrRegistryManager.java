@@ -172,7 +172,9 @@ public class EcrRegistryManager {
                     .withEnv(env)
                     .withPortBinding(CONTAINER_INTERNAL_PORT, chosenPort)
                     .withDockerNetwork(resolveRegistryDockerNetwork())
-                    .withLogRotation();
+                    .withLogRotation()
+                    .withLabels(ContainerStorageHelper.resourceIdentityLabels(
+                            "ecr", null, regionResolver.getAccountId(), regionResolver.getDefaultRegion()));
 
             // Handle persistence mounting based on storage configuration
             addPersistenceMounts(specBuilder, env);

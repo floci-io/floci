@@ -35,7 +35,7 @@ class ApiGatewayExecuteControllerTest {
         return new ApiGatewayExecuteController(
                 null, null, null,
                 regionResolver, objectMapper, null,
-                null, null, null, null, new ApiGatewayExecuteRouteContext());
+                null, null, null, null, new ApiGatewayExecuteRouteContext(), null, null);
     }
 
     @Test
@@ -132,7 +132,7 @@ class ApiGatewayExecuteControllerTest {
         ApiGatewayExecuteController controller = controller(new ObjectMapper());
         Response response = controller.buildProxyResponse(proxyPayload("""
                 {"statusCode":404,"headers":{"content-type":"application/problem+json"},"body":"{}"}
-                """));
+                """), false);
         assertEquals("application/problem+json", response.getMediaType().toString());
     }
 
@@ -143,7 +143,7 @@ class ApiGatewayExecuteControllerTest {
         ApiGatewayExecuteController controller = controller(new ObjectMapper());
         Response response = controller.buildProxyResponse(proxyPayload("""
                 {"statusCode":200,"headers":{"Content-Type":"text/plain"},"body":"hi"}
-                """));
+                """), false);
         assertEquals("text/plain", response.getMediaType().toString());
     }
 
@@ -152,7 +152,7 @@ class ApiGatewayExecuteControllerTest {
         ApiGatewayExecuteController controller = controller(new ObjectMapper());
         Response response = controller.buildProxyResponse(proxyPayload("""
                 {"statusCode":200,"headers":{"CONTENT-TYPE":"application/xml"},"body":"<a/>"}
-                """));
+                """), false);
         assertEquals("application/xml", response.getMediaType().toString());
     }
 
@@ -161,7 +161,7 @@ class ApiGatewayExecuteControllerTest {
         ApiGatewayExecuteController controller = controller(new ObjectMapper());
         Response response = controller.buildProxyResponse(proxyPayload("""
                 {"statusCode":200,"headers":{"X-Other":"value"},"body":"{}"}
-                """));
+                """), false);
         assertEquals("application/json", response.getMediaType().toString());
     }
 
@@ -172,7 +172,7 @@ class ApiGatewayExecuteControllerTest {
         ApiGatewayExecuteController controller = controller(new ObjectMapper());
         Response response = controller.buildProxyResponse(proxyPayload("""
                 {"statusCode":200,"headers":{"content-type":null},"body":"{}"}
-                """));
+                """), false);
         assertEquals("application/json", response.getMediaType().toString());
     }
 
@@ -183,7 +183,7 @@ class ApiGatewayExecuteControllerTest {
         ApiGatewayExecuteController controller = controller(new ObjectMapper());
         Response response = controller.buildProxyResponse(proxyPayload("""
                 {"statusCode":200,"multiValueHeaders":{"content-type":["application/xml"]},"body":"<a/>"}
-                """));
+                """), false);
         assertEquals("application/xml", response.getMediaType().toString());
     }
 
@@ -197,7 +197,7 @@ class ApiGatewayExecuteControllerTest {
                 "headers":{"Content-Type":"text/plain"},\
                 "multiValueHeaders":{"Content-Type":["application/xml"]},\
                 "body":"<a/>"}
-                """));
+                """), false);
         assertEquals("application/xml", response.getMediaType().toString());
     }
 
@@ -235,7 +235,7 @@ class ApiGatewayExecuteControllerTest {
         ApiGatewayExecuteController controller = new ApiGatewayExecuteController(
                 apiGatewayService, apiGatewayV2Service, null,
                 regionResolver, new ObjectMapper(), null,
-                null, null, null, null, new ApiGatewayExecuteRouteContext());
+                null, null, null, null, new ApiGatewayExecuteRouteContext(), null, null);
 
         Response response = controller.dispatch("GET", "abc123", "prod", "hello", headers, null, null);
 
@@ -265,7 +265,7 @@ class ApiGatewayExecuteControllerTest {
         ApiGatewayExecuteController controller = new ApiGatewayExecuteController(
                 apiGatewayService, apiGatewayV2Service, null,
                 regionResolver, new ObjectMapper(), null,
-                null, null, null, null, new ApiGatewayExecuteRouteContext());
+                null, null, null, null, new ApiGatewayExecuteRouteContext(), null, null);
 
         controller.dispatch("GET", "abc123", "prod", "hello", headers, null, null);
 
@@ -299,11 +299,74 @@ class ApiGatewayExecuteControllerTest {
         ApiGatewayExecuteController controller = new ApiGatewayExecuteController(
                 apiGatewayService, apiGatewayV2Service, null,
                 regionResolver, new ObjectMapper(), null,
-                null, null, null, null, new ApiGatewayExecuteRouteContext());
+                null, null, null, null, new ApiGatewayExecuteRouteContext(), null, null);
 
         controller.dispatch("GET", "restapi1", "prod", "hello", headers, null, null);
 
         verify(apiGatewayService).resolveRestApiRegion("us-east-1", "restapi1");
         verify(apiGatewayService).getRestApi("ap-southeast-2", "restapi1");
+    }
+
+    @Test
+    void projectsHttpApiV2CookiesAsRepeatedSetCookieHeadersAlongsideResponseHeaders() {
+        ObjectMapper objectMapper = new ObjectMapper();
+        ApiGatewayExecuteController controller = controller(objectMapper);
+        InvokeResult result = new InvokeResult(
+                200,
+                null,
+                """
+                {
+                  "statusCode": 200,
+                  "headers": {
+                    "X-Trace": "cookie-projection"
+                  },
+                  "cookies": [
+                    "session=one; Path=/; HttpOnly",
+                    "csrf=two; Path=/; Secure"
+                  ]
+                }
+                """.getBytes(StandardCharsets.UTF_8),
+                null,
+                "request-id");
+
+        try (Response response = controller.buildProxyResponse(result, true)) {
+            assertEquals(
+                    List.of("session=one; Path=/; HttpOnly", "csrf=two; Path=/; Secure"),
+                    response.getStringHeaders().get(HttpHeaders.SET_COOKIE));
+            assertEquals("cookie-projection", response.getHeaderString("X-Trace"));
+        }
+    }
+
+    @Test
+    void ignoresHttpApiV2CookiesForRestApiV1Responses() {
+        ObjectMapper objectMapper = new ObjectMapper();
+        ApiGatewayExecuteController controller = controller(objectMapper);
+        InvokeResult result = new InvokeResult(
+                200,
+                null,
+                """
+                {
+                  "statusCode": 200,
+                  "headers": {
+                    "X-Trace": "rest-v1"
+                  },
+                  "multiValueHeaders": {
+                    "Set-Cookie": [
+                      "legacy=one; Path=/; HttpOnly",
+                      "legacy=two; Path=/; Secure"
+                    ]
+                  },
+                  "cookies": ["http-api-v2=ignored; Path=/"]
+                }
+                """.getBytes(StandardCharsets.UTF_8),
+                null,
+                "request-id");
+
+        try (Response response = controller.buildProxyResponse(result, false)) {
+            assertEquals(
+                    List.of("legacy=one; Path=/; HttpOnly", "legacy=two; Path=/; Secure"),
+                    response.getStringHeaders().get(HttpHeaders.SET_COOKIE));
+            assertEquals("rest-v1", response.getHeaderString("X-Trace"));
+        }
     }
 }

@@ -13,15 +13,24 @@ import software.amazon.awssdk.services.rds.RdsClient;
 import software.amazon.awssdk.services.rds.model.ConnectionPoolConfigurationInfo;
 import software.amazon.awssdk.services.rds.model.CreateDbProxyResponse;
 import software.amazon.awssdk.services.rds.model.CreateDbSubnetGroupResponse;
+import software.amazon.awssdk.services.rds.model.CreateOptionGroupResponse;
 import software.amazon.awssdk.services.rds.model.DBProxyTarget;
 import software.amazon.awssdk.services.rds.model.DescribeDbSubnetGroupsResponse;
+import software.amazon.awssdk.services.rds.model.DescribeOptionGroupsResponse;
 import software.amazon.awssdk.services.rds.model.DescribeOrderableDbInstanceOptionsResponse;
+import software.amazon.awssdk.services.rds.model.InvalidOptionGroupStateException;
+import software.amazon.awssdk.services.rds.model.ModifyOptionGroupResponse;
+import software.amazon.awssdk.services.rds.model.OptionConfiguration;
+import software.amazon.awssdk.services.rds.model.OptionGroupNotFoundException;
+import software.amazon.awssdk.services.rds.model.OptionSetting;
 
 import java.util.List;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.tuple;
 
 @DisplayName("RDS Control Plane")
 class RdsControlPlaneTest {
@@ -30,6 +39,7 @@ class RdsControlPlaneTest {
     private static RdsClient rds;
     private static String subnetGroupName;
     private static String proxyName;
+    private static String serverlessClusterName;
     private static List<String> subnetIds;
 
     @BeforeAll
@@ -37,6 +47,7 @@ class RdsControlPlaneTest {
         rds = TestFixtures.rdsClient();
         subnetGroupName = TestFixtures.uniqueName("rds-subnets");
         proxyName = TestFixtures.uniqueName("rds-proxy");
+        serverlessClusterName = TestFixtures.uniqueName("rds-serverless");
         try (Ec2Client ec2 = TestFixtures.ec2Client()) {
             DescribeSubnetsResponse response = ec2.describeSubnets();
             subnetIds = response.subnets().stream()
@@ -52,6 +63,14 @@ class RdsControlPlaneTest {
     static void cleanup() {
         if (rds != null) {
             try {
+                rds.deleteDBCluster(b -> b
+                        .dbClusterIdentifier(serverlessClusterName)
+                        .skipFinalSnapshot(true));
+            } catch (Exception e) {
+                LOG.log(Level.FINE, "RDS Serverless v2 cluster already absent during cleanup "
+                        + serverlessClusterName, e);
+            }
+            try {
                 rds.deleteDBProxy(b -> b.dbProxyName(proxyName));
             } catch (Exception e) {
                 LOG.log(Level.WARNING, "Failed to clean up RDS DB proxy " + proxyName, e);
@@ -63,6 +82,44 @@ class RdsControlPlaneTest {
             }
             rds.close();
         }
+    }
+
+    @Test
+    void sdkRoundTripsAuroraServerlessV2ScalingConfiguration() {
+        var created = rds.createDBCluster(b -> b
+                .dbClusterIdentifier(serverlessClusterName)
+                .engine("aurora-postgresql")
+                .masterUsername("admin")
+                .masterUserPassword("password")
+                .serverlessV2ScalingConfiguration(c -> c
+                        .minCapacity(0.0)
+                        .maxCapacity(16.0)));
+
+        assertThat(created.dbCluster().engine()).isEqualTo("aurora-postgresql");
+        assertThat(created.dbCluster().serverlessV2ScalingConfiguration().minCapacity())
+                .isEqualTo(0.0);
+        assertThat(created.dbCluster().serverlessV2ScalingConfiguration().maxCapacity())
+                .isEqualTo(16.0);
+        assertThat(created.dbCluster().serverlessV2ScalingConfiguration().secondsUntilAutoPause())
+                .isEqualTo(300);
+
+        var modified = rds.modifyDBCluster(b -> b
+                .dbClusterIdentifier(serverlessClusterName)
+                .serverlessV2ScalingConfiguration(c -> c
+                        .secondsUntilAutoPause(600)));
+        assertThat(modified.dbCluster().serverlessV2ScalingConfiguration().minCapacity())
+                .isEqualTo(0.0);
+        assertThat(modified.dbCluster().serverlessV2ScalingConfiguration().maxCapacity())
+                .isEqualTo(16.0);
+        assertThat(modified.dbCluster().serverlessV2ScalingConfiguration().secondsUntilAutoPause())
+                .isEqualTo(600);
+
+        var described = rds.describeDBClusters(b -> b
+                .dbClusterIdentifier(serverlessClusterName)).dbClusters().get(0);
+        assertThat(described.serverlessV2ScalingConfiguration().minCapacity()).isEqualTo(0.0);
+        assertThat(described.serverlessV2ScalingConfiguration().maxCapacity()).isEqualTo(16.0);
+        assertThat(described.serverlessV2ScalingConfiguration().secondsUntilAutoPause())
+                .isEqualTo(600);
     }
 
     @Test
@@ -223,8 +280,10 @@ class RdsControlPlaneTest {
         String regionalProxyName = TestFixtures.uniqueName("rds-proxy-regional");
         try (RdsClient east = rdsClient(Region.US_EAST_1);
              RdsClient west = rdsClient(Region.US_WEST_2)) {
-            var eastProxy = createIamProxy(east, regionalProxyName);
-            var westProxy = createIamProxy(west, regionalProxyName);
+            // Subnet ids are region-scoped on real AWS (and on floci, since #21), so each proxy
+            // needs subnets from its own signed region rather than the shared us-east-1 subnetIds.
+            var eastProxy = createIamProxy(east, regionalProxyName, subnetIdsFor(Region.US_EAST_1));
+            var westProxy = createIamProxy(west, regionalProxyName, subnetIdsFor(Region.US_WEST_2));
 
             assertThat(eastProxy.dbProxy().dbProxyArn()).contains(":rds:us-east-1:");
             assertThat(westProxy.dbProxy().dbProxyArn()).contains(":rds:us-west-2:");
@@ -335,13 +394,32 @@ class RdsControlPlaneTest {
         }
     }
 
-    private static CreateDbProxyResponse createIamProxy(RdsClient client, String name) {
+    private static CreateDbProxyResponse createIamProxy(RdsClient client, String name, List<String> vpcSubnetIds) {
         return client.createDBProxy(b -> b
                 .dbProxyName(name)
                 .engineFamily("POSTGRESQL")
                 .roleArn("arn:aws:iam::000000000000:role/rds-proxy-regional")
-                .vpcSubnetIds(subnetIds)
+                .vpcSubnetIds(vpcSubnetIds)
                 .defaultAuthScheme("IAM_AUTH"));
+    }
+
+    private static List<String> subnetIdsFor(Region region) {
+        try (Ec2Client ec2 = ec2Client(region)) {
+            return ec2.describeSubnets().subnets().stream()
+                    .map(subnet -> subnet.subnetId())
+                    .sorted()
+                    .limit(2)
+                    .toList();
+        }
+    }
+
+    private static Ec2Client ec2Client(Region region) {
+        return Ec2Client.builder()
+                .endpointOverride(TestFixtures.endpoint())
+                .region(region)
+                .credentialsProvider(StaticCredentialsProvider.create(
+                        AwsBasicCredentials.create("test", "test")))
+                .build();
     }
 
     private static software.amazon.awssdk.services.rds.model.CreateDbInstanceResponse createDbInstance(
@@ -364,6 +442,152 @@ class RdsControlPlaneTest {
                 .credentialsProvider(StaticCredentialsProvider.create(
                         AwsBasicCredentials.create("test", "test")))
                 .build();
+    }
+
+    @Test
+    void sdkRoundTripsOptionGroupCrudAndItsOptions() {
+        String optionGroupName = TestFixtures.uniqueName("rds-og");
+        try {
+            CreateOptionGroupResponse created = rds.createOptionGroup(b -> b
+                    .optionGroupName(optionGroupName)
+                    .engineName("mysql")
+                    .majorEngineVersion("8.0")
+                    .optionGroupDescription("SDK option group shape"));
+
+            assertThat(created.optionGroup().optionGroupName()).isEqualTo(optionGroupName);
+            assertThat(created.optionGroup().engineName()).isEqualTo("mysql");
+            assertThat(created.optionGroup().majorEngineVersion()).isEqualTo("8.0");
+            assertThat(created.optionGroup().optionGroupArn())
+                    .endsWith(":og:" + optionGroupName);
+            assertThat(created.optionGroup().allowsVpcAndNonVpcInstanceMemberships()).isTrue();
+            assertThat(created.optionGroup().options()).isEmpty();
+
+            ModifyOptionGroupResponse modified = rds.modifyOptionGroup(b -> b
+                    .optionGroupName(optionGroupName)
+                    .applyImmediately(true)
+                    .optionsToInclude(OptionConfiguration.builder()
+                            .optionName("MEMCACHED")
+                            .port(11211)
+                            .optionSettings(OptionSetting.builder()
+                                    .name("BACKLOG_QUEUE_LIMIT")
+                                    .value("1024")
+                                    .build())
+                            .vpcSecurityGroupMemberships("sg-00000000")
+                            .build()));
+
+            assertThat(modified.optionGroup().options()).singleElement().satisfies(option -> {
+                assertThat(option.optionName()).isEqualTo("MEMCACHED");
+                assertThat(option.port()).isEqualTo(11211);
+                assertThat(option.optionSettings())
+                        .extracting("name", "value")
+                        .containsExactly(tuple("BACKLOG_QUEUE_LIMIT", "1024"));
+                assertThat(option.vpcSecurityGroupMemberships())
+                        .extracting("vpcSecurityGroupId")
+                        .containsExactly("sg-00000000");
+            });
+
+            DescribeOptionGroupsResponse described = rds.describeOptionGroups(b -> b
+                    .optionGroupName(optionGroupName));
+            assertThat(described.optionGroupsList()).singleElement().satisfies(group ->
+                    assertThat(group.options()).extracting("optionName")
+                            .containsExactly("MEMCACHED"));
+
+            rds.modifyOptionGroup(b -> b
+                    .optionGroupName(optionGroupName)
+                    .optionsToRemove("MEMCACHED"));
+            assertThat(rds.describeOptionGroups(b -> b.optionGroupName(optionGroupName))
+                    .optionGroupsList()).singleElement()
+                    .satisfies(group -> assertThat(group.options()).isEmpty());
+
+            rds.deleteOptionGroup(b -> b.optionGroupName(optionGroupName));
+            assertThatThrownBy(() -> rds.describeOptionGroups(b -> b
+                    .optionGroupName(optionGroupName)))
+                    .isInstanceOf(OptionGroupNotFoundException.class);
+        } finally {
+            deleteOptionGroup(rds, optionGroupName);
+        }
+    }
+
+    @Test
+    void sdkDescribesImplicitDefaultOptionGroups() {
+        DescribeOptionGroupsResponse all = rds.describeOptionGroups();
+        assertThat(all.optionGroupsList()).extracting("optionGroupName")
+                .contains("default:mysql-8-0", "default:postgres-16");
+
+        DescribeOptionGroupsResponse filtered = rds.describeOptionGroups(b -> b
+                .engineName("mysql")
+                .majorEngineVersion("8.0"));
+        assertThat(filtered.optionGroupsList()).isNotEmpty();
+        assertThat(filtered.optionGroupsList())
+                .allSatisfy(group -> assertThat(group.engineName()).isEqualTo("mysql"));
+
+        assertThatThrownBy(() -> rds.deleteOptionGroup(b -> b
+                .optionGroupName("default:mysql-8-0")))
+                .isInstanceOf(InvalidOptionGroupStateException.class);
+    }
+
+    @Test
+    void sdkFaultsDeletingAnOptionGroupStillAttachedToAnInstance() {
+        String optionGroupName = TestFixtures.uniqueName("rds-og-attached");
+        String instanceName = TestFixtures.uniqueName("rds-db-og");
+        try {
+            rds.createOptionGroup(b -> b
+                    .optionGroupName(optionGroupName)
+                    .engineName("postgres")
+                    .majorEngineVersion("16")
+                    .optionGroupDescription("attached to an instance"));
+
+            var instance = rds.createDBInstance(b -> b
+                    .dbInstanceIdentifier(instanceName)
+                    .engine("postgres")
+                    .engineVersion("16.3")
+                    .masterUsername("admin")
+                    .masterUserPassword("og-secret")
+                    .dbName("app")
+                    .dbInstanceClass("db.t3.micro")
+                    .allocatedStorage(20)
+                    .optionGroupName(optionGroupName));
+
+            assertThat(instance.dbInstance().optionGroupMemberships())
+                    .singleElement()
+                    .satisfies(membership -> {
+                        assertThat(membership.optionGroupName()).isEqualTo(optionGroupName);
+                        assertThat(membership.status()).isEqualTo("in-sync");
+                    });
+
+            assertThatThrownBy(() -> rds.deleteOptionGroup(b -> b
+                    .optionGroupName(optionGroupName)))
+                    .isInstanceOf(InvalidOptionGroupStateException.class);
+
+            deleteDbInstance(rds, instanceName);
+            rds.deleteOptionGroup(b -> b.optionGroupName(optionGroupName));
+        } finally {
+            deleteDbInstance(rds, instanceName);
+            deleteOptionGroup(rds, optionGroupName);
+        }
+    }
+
+    @Test
+    void sdkReportsTheDefaultOptionGroupForAnUnattachedInstance() {
+        String instanceName = TestFixtures.uniqueName("rds-db-default-og");
+        try {
+            var instance = createDbInstance(rds, instanceName, "default-og-secret");
+
+            assertThat(instance.dbInstance().optionGroupMemberships())
+                    .singleElement()
+                    .satisfies(membership -> assertThat(membership.optionGroupName())
+                            .isEqualTo("default:postgres-16"));
+        } finally {
+            deleteDbInstance(rds, instanceName);
+        }
+    }
+
+    private static void deleteOptionGroup(RdsClient client, String name) {
+        try {
+            client.deleteOptionGroup(b -> b.optionGroupName(name));
+        } catch (Exception e) {
+            LOG.log(Level.FINE, "RDS option group already absent during cleanup " + name, e);
+        }
     }
 
     private static void deleteProxy(RdsClient client, String name) {

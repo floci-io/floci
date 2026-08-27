@@ -1,9 +1,13 @@
 package io.github.hectorvent.floci.services.kms;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ReservedTags;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.kms.model.KmsAlias;
@@ -58,7 +62,7 @@ import static io.github.hectorvent.floci.services.kms.model.KmsMessageType.DIGES
 import static io.github.hectorvent.floci.services.kms.model.KmsMessageType.RAW;
 
 @ApplicationScoped
-public class KmsService {
+public class KmsService implements ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(KmsService.class);
 
@@ -225,6 +229,13 @@ public class KmsService {
 
     private static boolean isHmac(KmsKeySpec spec) {
         return spec != null && spec.getKeyType() == KmsKeySpec.KeyType.HMAC;
+    }
+
+    // AWS UpdateAlias only requires the current and new key to be "the same type (both
+    // symmetric or both asymmetric or both HMAC)" - not an exact KeySpec match, so e.g.
+    // RSA_2048 and ECC_NIST_P256 are compatible, but SYMMETRIC_DEFAULT and RSA_2048 are not.
+    private static boolean sameKeyFamily(KmsKeySpec a, KmsKeySpec b) {
+        return isHmac(a) == isHmac(b) && (a == KmsKeySpec.SYMMETRIC_DEFAULT) == (b == KmsKeySpec.SYMMETRIC_DEFAULT);
     }
 
     private static void validateKeyUsageForSpec(KmsKeyUsage keyUsage, KmsKeySpec spec) {
@@ -603,6 +614,30 @@ public class KmsService {
         KmsAlias alias = new KmsAlias(aliasName, aliasArn, key.getKeyId());
         aliasStore.put(region + "::" + aliasName, alias);
         LOG.infov("Created KMS alias: {0} -> {1}", aliasName, key.getKeyId());
+    }
+
+    public void updateAlias(String aliasName, String targetKeyId, String region) {
+        String storageKey = region + "::" + aliasName;
+        KmsAlias existing = aliasStore.get(storageKey)
+                .orElseThrow(() -> new AwsException("NotFoundException", "Alias not found: " + aliasName, 404));
+
+        KmsKey currentKey = resolveKey(existing.getTargetKeyId(), region);
+        KmsKey newKey = resolveKey(targetKeyId, region); // Validate key exists and normalize to plain key ID
+
+        if ("PendingDeletion".equals(newKey.getKeyState())) {
+            throw new AwsException("KMSInvalidStateException",
+                    "KMS key " + newKey.getKeyId() + " is pending deletion.", 400);
+        }
+        if (currentKey.getKeyUsage() != newKey.getKeyUsage() || !sameKeyFamily(currentKey.getKeySpec(), newKey.getKeySpec())) {
+            throw new AwsException("ValidationException",
+                    "The replacement KMS key must have the same key usage and key type "
+                            + "(symmetric, asymmetric, or HMAC) as the alias's current target key.",
+                    400);
+        }
+
+        existing.setTargetKeyId(newKey.getKeyId());
+        aliasStore.put(storageKey, existing);
+        LOG.infov("Updated KMS alias: {0} -> {1}", aliasName, newKey.getKeyId());
     }
 
     public void deleteAlias(String aliasName, String region) {
@@ -1134,4 +1169,26 @@ public class KmsService {
         }
     }
 
+    @Override
+    public List<ExplorerResource> getResources() {
+        List<ExplorerResource> resources = new ArrayList<>();
+        for (KmsKey key : keyStore.scan(k -> true)) {
+            String arn = key.getArn();
+            if (arn == null) {
+                continue;
+            }
+            AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+            resources.add(new ExplorerResource(
+                    arn, "kms:key", "kms",
+                    parsed.region(), parsed.accountId(),
+                    key.getCreationDate() > 0 ? Instant.ofEpochSecond(key.getCreationDate()) : Instant.now(),
+                    key.getTags() != null ? key.getTags() : Map.of()));
+        }
+        return resources;
+    }
+
+    @Override
+    public Set<SupportedResourceType> getSupportedResourceTypes() {
+        return Set.of(new SupportedResourceType("kms:key", "kms", true));
+    }
 }

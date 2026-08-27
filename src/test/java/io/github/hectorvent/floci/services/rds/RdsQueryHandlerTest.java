@@ -12,11 +12,14 @@ import io.github.hectorvent.floci.services.rds.model.DbProxyAuth;
 import io.github.hectorvent.floci.services.rds.model.DbProxyTarget;
 import io.github.hectorvent.floci.services.rds.model.DbProxyTargetGroup;
 import io.github.hectorvent.floci.services.rds.model.DbSubnetGroup;
+import io.github.hectorvent.floci.services.rds.model.OptionGroup;
+import io.github.hectorvent.floci.services.rds.model.OptionGroupOption;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 import java.util.List;
 import java.util.Map;
@@ -207,12 +210,13 @@ class RdsQueryHandlerTest {
         when(service.listDbInstances(null, "us-west-2")).thenReturn(List.of());
         when(service.getDbInstance("mydb", "us-west-2")).thenReturn(instance);
         when(service.modifyDbInstance(
-                eq("mydb"), isNull(), isNull(), isNull(), anyList(), eq("us-west-2")))
+                eq("mydb"), isNull(), isNull(), isNull(), anyList(), isNull(), eq("us-west-2"), isNull()))
                 .thenReturn(instance);
         when(service.rebootDbInstance("mydb", "us-west-2")).thenReturn(instance);
         when(service.listDbClusters(null, "us-west-2")).thenReturn(List.of());
         when(service.getDbCluster("mycluster", "us-west-2")).thenReturn(cluster);
-        when(service.modifyDbCluster("mycluster", null, null, "us-west-2"))
+        when(service.modifyDbCluster("mycluster", null, null,
+                null, null, null, "us-west-2"))
                 .thenReturn(cluster);
 
         handler.handle("DescribeDBInstances", params(), "us-west-2");
@@ -232,12 +236,13 @@ class RdsQueryHandlerTest {
         verify(service).getDbInstance("mydb", "us-west-2");
         verify(service).deleteDbInstance("mydb", "us-west-2");
         verify(service).modifyDbInstance(
-                eq("mydb"), isNull(), isNull(), isNull(), anyList(), eq("us-west-2"));
+                eq("mydb"), isNull(), isNull(), isNull(), anyList(), isNull(), eq("us-west-2"), isNull());
         verify(service).rebootDbInstance("mydb", "us-west-2");
         verify(service).listDbClusters(null, "us-west-2");
         verify(service).getDbCluster("mycluster", "us-west-2");
         verify(service).deleteDbCluster("mycluster", "us-west-2");
-        verify(service).modifyDbCluster("mycluster", null, null, "us-west-2");
+        verify(service).modifyDbCluster("mycluster", null, null,
+                null, null, null, "us-west-2");
     }
 
     @Test
@@ -345,7 +350,7 @@ class RdsQueryHandlerTest {
         when(service.createDbInstance(eq("mydb"), eq("postgres"), eq("16.3"),
                 eq(null), eq(null), eq(null), eq("db.t3.micro"),
                 eq(20), eq(false), eq(null), eq(null), eq(null), eq(null), eq(false), eq(false), eq(null),
-                eq(java.util.Map.of("example:ClusterId", "cluster-a", "Name", "mydb")), eq(List.of()), isNull()))
+                eq(java.util.Map.of("example:ClusterId", "cluster-a", "Name", "mydb")), eq(List.of()), isNull(), isNull(), eq(true)))
                 .thenReturn(instance);
 
         MultivaluedMap<String, String> p = params();
@@ -359,7 +364,7 @@ class RdsQueryHandlerTest {
 
         verify(service).createDbInstance("mydb", "postgres", "16.3",
                 null, null, null, "db.t3.micro", 20, false, null, null, null, null, false, false, null,
-                java.util.Map.of("example:ClusterId", "cluster-a", "Name", "mydb"), List.of(), null);
+                java.util.Map.of("example:ClusterId", "cluster-a", "Name", "mydb"), List.of(), null, null, true);
     }
 
     @Test
@@ -369,7 +374,7 @@ class RdsQueryHandlerTest {
         when(service.createDbInstance(eq("mydb"), eq("postgres"), eq("16.3"),
                 eq(null), eq(null), eq(null), eq("db.t3.micro"),
                 eq(20), eq(false), eq(null), eq(null), eq(null), eq(null), eq(false), eq(false), eq(null),
-                eq(java.util.Map.of()), eq(List.of("sg-123", "sg-456")), isNull()))
+                eq(java.util.Map.of()), eq(List.of("sg-123", "sg-456")), isNull(), isNull(), eq(true)))
                 .thenReturn(instance);
 
         MultivaluedMap<String, String> p = params();
@@ -384,7 +389,7 @@ class RdsQueryHandlerTest {
         assertTrue(body.contains("<VpcSecurityGroupId>sg-456</VpcSecurityGroupId>"));
         verify(service).createDbInstance("mydb", "postgres", "16.3",
                 null, null, null, "db.t3.micro", 20, false, null, null, null, null, false, false, null,
-                java.util.Map.of(), List.of("sg-123", "sg-456"), null);
+                java.util.Map.of(), List.of("sg-123", "sg-456"), null, null, true);
     }
 
     @Test
@@ -400,7 +405,7 @@ class RdsQueryHandlerTest {
         assertTrue(((String) response.getEntity()).contains("InvalidParameterValue"));
         verify(service, never()).createDbInstance(any(), any(), any(), any(), any(), any(), any(),
                 anyInt(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), anyBoolean(),
-                any(), any(), any(), any());
+                any(), any(), any(), any(), any(), anyBoolean());
     }
 
     @Test
@@ -414,7 +419,7 @@ class RdsQueryHandlerTest {
         assertEquals(400, response.getStatus());
         assertTrue(((String) response.getEntity()).contains("InvalidParameterValue"));
         verify(service, never()).modifyDbInstance(
-                any(), any(), any(), any(), any(), any());
+                any(), any(), any(), any(), any(), any(), any());
     }
 
     @Test
@@ -500,7 +505,7 @@ class RdsQueryHandlerTest {
         when(service.createDbInstance(eq("mydb"), eq("postgres"), eq("16.3"),
                 eq("admin"), eq("secret"), eq("dbname"), eq("db.t3.micro"),
                 eq(20), eq(false), eq(null), eq(null), eq(null), eq(null), eq(false), eq(false),
-                eq(null), eq(java.util.Map.of()), eq(List.of()), isNull()))
+                eq(null), eq(java.util.Map.of()), eq(List.of()), isNull(), isNull(), eq(true)))
                 .thenReturn(instance);
 
         MultivaluedMap<String, String> p = params();
@@ -514,7 +519,7 @@ class RdsQueryHandlerTest {
 
         verify(service).createDbInstance("mydb", "postgres", "16.3",
                 "admin", "secret", "dbname", "db.t3.micro", 20, false, null, null, null, null, false, false,
-                null, java.util.Map.of(), List.of(), null);
+                null, java.util.Map.of(), List.of(), null, null, true);
     }
 
     @Test
@@ -526,7 +531,7 @@ class RdsQueryHandlerTest {
         when(service.createDbInstance(eq("mydb"), eq("postgres"), eq("16.3"),
                 eq("admin"), eq(null), eq("dbname"), eq("db.t3.micro"),
                 eq(20), eq(false), eq(null), eq(null), eq(null), eq(null), eq(false), eq(true),
-                eq("kms-key-1"), eq(java.util.Map.of()), eq(List.of()), isNull()))
+                eq("kms-key-1"), eq(java.util.Map.of()), eq(List.of()), isNull(), isNull(), eq(true)))
                 .thenReturn(instance);
 
         MultivaluedMap<String, String> p = params();
@@ -545,7 +550,7 @@ class RdsQueryHandlerTest {
         assertTrue(body.contains("<KmsKeyId>kms-key-1</KmsKeyId>"));
         verify(service).createDbInstance("mydb", "postgres", "16.3",
                 "admin", null, "dbname", "db.t3.micro", 20, false, null, null, null, null, false, true,
-                "kms-key-1", java.util.Map.of(), List.of(), null);
+                "kms-key-1", java.util.Map.of(), List.of(), null, null, true);
     }
 
     @Test
@@ -558,7 +563,7 @@ class RdsQueryHandlerTest {
         when(service.createDbInstance(eq("mydb"), eq("postgres"), eq("16.3"),
                 eq("admin"), eq("secret"), eq("dbname"), eq("db.t3.micro"),
                 eq(20), eq(false), eq(null), eq("default"), eq(null), eq("ap-northeast-1a"), eq(true),
-                eq(false), eq(null), eq(java.util.Map.of()), eq(List.of()), isNull()))
+                eq(false), eq(null), eq(java.util.Map.of()), eq(List.of()), isNull(), isNull(), eq(true)))
                 .thenReturn(instance);
 
         MultivaluedMap<String, String> p = params();
@@ -582,11 +587,33 @@ class RdsQueryHandlerTest {
     }
 
     @Test
+    void createDbInstance_honorsExplicitAutoMinorVersionUpgradeFalse() {
+        DbInstance instance = makeInstance("mydb");
+        instance.setAutoMinorVersionUpgrade(false);
+        when(service.createDbInstance(eq("mydb"), eq("postgres"), eq("16.3"),
+                eq(null), eq(null), eq(null), eq("db.t3.micro"),
+                eq(20), eq(false), eq(null), eq(null), eq(null), eq(null), eq(false),
+                eq(false), eq(null), eq(java.util.Map.of()), eq(List.of()), isNull(), isNull(), eq(false)))
+                .thenReturn(instance);
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBInstanceIdentifier", "mydb");
+        p.add("Engine", "postgres");
+        p.add("AutoMinorVersionUpgrade", "false");
+
+        Response response = handler.handle("CreateDBInstance", p);
+
+        assertEquals(200, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<AutoMinorVersionUpgrade>false</AutoMinorVersionUpgrade>"));
+    }
+
+    @Test
     void createDbInstance_unknownSubnetGroupShouldFailValidation() {
         when(service.createDbInstance(eq("mydb"), eq("postgres"), eq("16.3"),
                 eq("admin"), eq("secret"), eq("dbname"), eq("db.t3.micro"),
                 eq(20), eq(false), eq(null), eq("missing-subnet-group"), eq(null), eq(null), eq(false),
-                eq(false), eq(null), eq(java.util.Map.of()), eq(List.of()), isNull()))
+                eq(false), eq(null), eq(java.util.Map.of()), eq(List.of()), isNull(), isNull(), eq(true)))
                 .thenThrow(new AwsException("DBSubnetGroupNotFoundFault",
                         "DB subnet group missing-subnet-group not found.", 404));
 
@@ -678,7 +705,7 @@ class RdsQueryHandlerTest {
         when(service.createDbInstance(eq("mydb"), eq("oracle"), eq("1.0"),
                 eq(null), eq(null), eq(null), eq("db.t3.micro"),
                 eq(20), eq(false), eq(null), eq(null), eq(null), eq(null), eq(false), eq(false),
-                eq(null), eq(java.util.Map.of()), eq(List.of()), isNull()))
+                eq(null), eq(java.util.Map.of()), eq(List.of()), isNull(), isNull(), eq(true)))
                 .thenThrow(new AwsException("InvalidParameterValue",
                         "Unsupported engine: oracle. Supported: postgres, mysql, mariadb.", 400));
 
@@ -902,6 +929,108 @@ class RdsQueryHandlerTest {
         assertTrue(body.contains("<DescribeDBClusterSnapshotsResult>"));
         assertTrue(body.contains("<DBClusterSnapshots></DBClusterSnapshots>"));
         assertFalse(body.contains("<Marker>"));
+    }
+
+    // ─────────────────────────── Global clusters ───────────────────────────────
+
+    @Test
+    void describeGlobalClusters_returnsEmptyListWith200() {
+        // The RDS and DocumentDB providers both read this on every cluster read, and DocumentDB
+        // signs with the "rds" scope, so this handler answers for both. A live account with no
+        // global clusters answers with an empty list, not an error.
+        Response response = handler.handle("DescribeGlobalClusters", params());
+
+        String body = (String) response.getEntity();
+        assertEquals(200, response.getStatus());
+        assertTrue(body.contains("<DescribeGlobalClustersResult>"));
+        assertTrue(body.contains("<GlobalClusters></GlobalClusters>"));
+        assertTrue(body.contains("rds.amazonaws.com/doc/2014-10-31"));
+    }
+
+    @Test
+    void describeGlobalClusters_unknownIdentifierIsNotFound() {
+        // Naming one that does not exist is a different question from listing none, and AWS
+        // answers it with GlobalClusterNotFoundFault rather than an empty list.
+        MultivaluedMap<String, String> params = params();
+        params.putSingle("GlobalClusterIdentifier", "no-such-gc");
+
+        Response response = handler.handle("DescribeGlobalClusters", params);
+
+        String body = (String) response.getEntity();
+        assertEquals(404, response.getStatus());
+        assertTrue(body.contains("<Code>GlobalClusterNotFoundFault</Code>"));
+        assertTrue(body.contains("Global cluster &apos;no-such-gc&apos; not found"));
+    }
+
+    @Test
+    void describeGlobalClusters_blankIdentifierListsRatherThanFailing() {
+        // An empty form field is the SDK omitting the filter, not a request for a cluster named "".
+        MultivaluedMap<String, String> params = params();
+        params.putSingle("GlobalClusterIdentifier", "");
+
+        Response response = handler.handle("DescribeGlobalClusters", params);
+
+        assertEquals(200, response.getStatus());
+        assertTrue(((String) response.getEntity()).contains("<GlobalClusters></GlobalClusters>"));
+    }
+
+    @Test
+    void describeGlobalClusters_rejectsMaxRecordsOutsideTheAllowedRange() {
+        // A live account rejects this before it looks the identifier up, so an empty model is no
+        // reason to accept a value AWS refuses.
+        for (String value : new String[]{"5", "101", "abc"}) {
+            MultivaluedMap<String, String> params = params();
+            params.putSingle("MaxRecords", value);
+            params.putSingle("GlobalClusterIdentifier", "no-such-gc");
+
+            Response response = handler.handle("DescribeGlobalClusters", params);
+
+            assertEquals(400, response.getStatus(), "MaxRecords=" + value);
+            String body = (String) response.getEntity();
+            assertTrue(body.contains("Invalid value " + value + " for MaxRecords"), body);
+        }
+    }
+
+    @Test
+    void describeGlobalClusters_acceptsMaxRecordsInsideTheAllowedRange() {
+        MultivaluedMap<String, String> params = params();
+        params.putSingle("MaxRecords", "20");
+
+        Response response = handler.handle("DescribeGlobalClusters", params);
+
+        assertEquals(200, response.getStatus());
+    }
+
+    @Test
+    void describeGlobalClusters_rejectsAMarkerItNeverIssued() {
+        // No page is ever handed out, so a marker cannot have come from here. AWS checks this
+        // after the identifier, which is why the not-found wins when both are present.
+        MultivaluedMap<String, String> params = params();
+        params.putSingle("Marker", "bogus");
+
+        Response response = handler.handle("DescribeGlobalClusters", params);
+
+        assertEquals(400, response.getStatus());
+        assertTrue(((String) response.getEntity()).contains("The request token is invalid."));
+
+        params.putSingle("GlobalClusterIdentifier", "no-such-gc");
+        Response withBoth = handler.handle("DescribeGlobalClusters", params);
+        assertEquals(404, withBoth.getStatus());
+        assertTrue(((String) withBoth.getEntity()).contains("GlobalClusterNotFoundFault"));
+    }
+
+    @Test
+    void describeGlobalClusters_acceptsFiltersWithoutValidatingThem() {
+        // Every filter name AWS accepts answers empty here, and Floci carries no list of the
+        // accepted names — rejecting one would refuse a filter a live account allows.
+        MultivaluedMap<String, String> params = params();
+        params.putSingle("Filters.Filter.1.Name", "db-cluster-id");
+        params.putSingle("Filters.Filter.1.Values.Value.1", "anything");
+
+        Response response = handler.handle("DescribeGlobalClusters", params);
+
+        assertEquals(200, response.getStatus());
+        assertTrue(((String) response.getEntity()).contains("<GlobalClusters></GlobalClusters>"));
     }
 
     // ──────────────────────────── DBProxy wire shapes ──────────────────────────
@@ -1504,7 +1633,329 @@ class RdsQueryHandlerTest {
         assertFalse(body.contains("DBClusterNotFoundFault"));
     }
 
+    // ──────────────────────────── Option groups ────────────────────────────
+
+    @Test
+    void createOptionGroup_returnsOptionGroupShape() {
+        when(service.createOptionGroup("og1", "mysql", "8.0", "my og", Map.of(), null))
+                .thenReturn(makeOptionGroup("og1"));
+
+        MultivaluedMap<String, String> p = params();
+        p.add("OptionGroupName", "og1");
+        p.add("EngineName", "mysql");
+        p.add("MajorEngineVersion", "8.0");
+        p.add("OptionGroupDescription", "my og");
+        Response response = handler.handle("CreateOptionGroup", p);
+
+        assertEquals(200, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<CreateOptionGroupResult>"), body);
+        assertTrue(body.contains("<OptionGroup>"), body);
+        assertTrue(body.contains("<OptionGroupName>og1</OptionGroupName>"), body);
+        assertTrue(body.contains("<EngineName>mysql</EngineName>"), body);
+        assertTrue(body.contains("<MajorEngineVersion>8.0</MajorEngineVersion>"), body);
+        assertTrue(body.contains("<OptionGroupDescription>my og</OptionGroupDescription>"), body);
+        assertTrue(body.contains(
+                "<OptionGroupArn>arn:aws:rds:us-east-1:123456789012:og:og1</OptionGroupArn>"), body);
+        assertTrue(body.contains(
+                "<AllowsVpcAndNonVpcInstanceMemberships>true</AllowsVpcAndNonVpcInstanceMemberships>"), body);
+        assertTrue(body.contains("<Options></Options>"), body);
+    }
+
+    @Test
+    void createOptionGroup_passesTags() {
+        when(service.createOptionGroup(eq("og1"), eq("mysql"), eq("8.0"), eq("my og"),
+                eq(Map.of("env", "dev")), isNull()))
+                .thenReturn(makeOptionGroup("og1"));
+
+        MultivaluedMap<String, String> p = params();
+        p.add("OptionGroupName", "og1");
+        p.add("EngineName", "mysql");
+        p.add("MajorEngineVersion", "8.0");
+        p.add("OptionGroupDescription", "my og");
+        p.add("Tags.Tag.1.Key", "env");
+        p.add("Tags.Tag.1.Value", "dev");
+        Response response = handler.handle("CreateOptionGroup", p);
+
+        assertEquals(200, response.getStatus());
+        verify(service).createOptionGroup("og1", "mysql", "8.0", "my og", Map.of("env", "dev"), null);
+    }
+
+    @Test
+    void createOptionGroup_requiresMandatoryParameters() {
+        assertEquals(400, handler.handle("CreateOptionGroup", params()).getStatus());
+
+        MultivaluedMap<String, String> noEngine = params();
+        noEngine.add("OptionGroupName", "og1");
+        assertEquals(400, handler.handle("CreateOptionGroup", noEngine).getStatus());
+
+        MultivaluedMap<String, String> noVersion = params();
+        noVersion.add("OptionGroupName", "og1");
+        noVersion.add("EngineName", "mysql");
+        assertEquals(400, handler.handle("CreateOptionGroup", noVersion).getStatus());
+
+        MultivaluedMap<String, String> noDescription = params();
+        noDescription.add("OptionGroupName", "og1");
+        noDescription.add("EngineName", "mysql");
+        noDescription.add("MajorEngineVersion", "8.0");
+        assertEquals(400, handler.handle("CreateOptionGroup", noDescription).getStatus());
+
+        verify(service, never()).createOptionGroup(any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void describeOptionGroups_usesOptionGroupsListWrapper() {
+        when(service.listOptionGroups(null, null, null, null))
+                .thenReturn(List.of(makeOptionGroup("og1")));
+
+        Response response = handler.handle("DescribeOptionGroups", params());
+
+        assertEquals(200, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<OptionGroupsList>"), body);
+        assertTrue(body.contains("<OptionGroupsList><OptionGroup>"), body);
+        assertTrue(body.contains("</OptionGroup></OptionGroupsList>"), body);
+        assertTrue(body.contains("<Marker></Marker>"), body);
+        assertFalse(body.contains("<member>"), body);
+    }
+
+    @Test
+    void describeOptionGroups_passesFilters() {
+        when(service.listOptionGroups("og1", "mysql", "8.0", null)).thenReturn(List.of());
+
+        MultivaluedMap<String, String> p = params();
+        p.add("OptionGroupName", "og1");
+        p.add("EngineName", "mysql");
+        p.add("MajorEngineVersion", "8.0");
+        handler.handle("DescribeOptionGroups", p);
+
+        verify(service).listOptionGroups("og1", "mysql", "8.0", null);
+    }
+
+    @Test
+    void describeOptionGroups_propagatesNotFoundFault() {
+        when(service.listOptionGroups("missing", null, null, null))
+                .thenThrow(new AwsException("OptionGroupNotFoundFault",
+                        "Option group missing not found.", 404));
+
+        MultivaluedMap<String, String> p = params();
+        p.add("OptionGroupName", "missing");
+        Response response = handler.handle("DescribeOptionGroups", p);
+
+        assertEquals(404, response.getStatus());
+        assertTrue(((String) response.getEntity()).contains("OptionGroupNotFoundFault"));
+    }
+
+    @Test
+    void describeOptionGroups_rendersOptionsWithSettingsAndSecurityGroups() {
+        OptionGroup group = makeOptionGroup("og1");
+        OptionGroupOption option = new OptionGroupOption("MEMCACHED");
+        option.setOptionDescription("Innodb Memcached for MySQL");
+        option.setPort(11211);
+        option.setOptionSettings(new java.util.LinkedHashMap<>(
+                Map.of("BACKLOG_QUEUE_LIMIT", "1024")));
+        option.setVpcSecurityGroupMemberships(List.of("sg-123"));
+        option.setDbSecurityGroupMemberships(List.of("default"));
+        group.setOptions(new java.util.ArrayList<>(List.of(option)));
+        when(service.listOptionGroups(null, null, null, null)).thenReturn(List.of(group));
+
+        Response response = handler.handle("DescribeOptionGroups", params());
+
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<Options><Option>"), body);
+        assertTrue(body.contains("<OptionName>MEMCACHED</OptionName>"), body);
+        assertTrue(body.contains(
+                "<OptionDescription>Innodb Memcached for MySQL</OptionDescription>"), body);
+        assertTrue(body.contains("<Port>11211</Port>"), body);
+        assertTrue(body.contains("<Persistent>false</Persistent>"), body);
+        assertTrue(body.contains("<Permanent>false</Permanent>"), body);
+        assertTrue(body.contains("<OptionSettings><OptionSetting>"
+                + "<Name>BACKLOG_QUEUE_LIMIT</Name><Value>1024</Value>"), body);
+        assertTrue(body.contains("<VpcSecurityGroupMemberships><VpcSecurityGroupMembership>"
+                + "<VpcSecurityGroupId>sg-123</VpcSecurityGroupId>"
+                + "<Status>active</Status>"), body);
+        assertTrue(body.contains("<DBSecurityGroupMemberships><DBSecurityGroup>"
+                + "<DBSecurityGroupName>default</DBSecurityGroupName>"
+                + "<Status>authorized</Status>"), body);
+    }
+
+    @Test
+    void modifyOptionGroup_parsesOptionConfigurations() {
+        when(service.modifyOptionGroup(eq("og1"), anyList(), anyList(), isNull()))
+                .thenReturn(makeOptionGroup("og1"));
+
+        MultivaluedMap<String, String> p = params();
+        p.add("OptionGroupName", "og1");
+        p.add("ApplyImmediately", "true");
+        p.add("OptionsToInclude.OptionConfiguration.1.OptionName", "MEMCACHED");
+        p.add("OptionsToInclude.OptionConfiguration.1.Port", "11211");
+        p.add("OptionsToInclude.OptionConfiguration.1.OptionVersion", "1.0");
+        p.add("OptionsToInclude.OptionConfiguration.1.OptionSettings.OptionSetting.1.Name",
+                "BACKLOG_QUEUE_LIMIT");
+        p.add("OptionsToInclude.OptionConfiguration.1.OptionSettings.OptionSetting.1.Value", "1024");
+        p.add("OptionsToInclude.OptionConfiguration.1.VpcSecurityGroupMemberships"
+                + ".VpcSecurityGroupId.1", "sg-123");
+        p.add("OptionsToInclude.OptionConfiguration.1.DBSecurityGroupMemberships"
+                + ".DBSecurityGroupName.1", "default");
+        Response response = handler.handle("ModifyOptionGroup", p);
+
+        assertEquals(200, response.getStatus());
+        assertTrue(((String) response.getEntity()).contains("<ModifyOptionGroupResult>"));
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<OptionGroupOption>> include = ArgumentCaptor.forClass(List.class);
+        verify(service).modifyOptionGroup(eq("og1"), include.capture(), anyList(), isNull());
+        assertEquals(1, include.getValue().size());
+        OptionGroupOption parsed = include.getValue().getFirst();
+        assertEquals("MEMCACHED", parsed.getOptionName());
+        assertEquals(11211, parsed.getPort());
+        assertEquals("1.0", parsed.getOptionVersion());
+        assertEquals(Map.of("BACKLOG_QUEUE_LIMIT", "1024"), parsed.getOptionSettings());
+        assertEquals(List.of("sg-123"), parsed.getVpcSecurityGroupMemberships());
+        assertEquals(List.of("default"), parsed.getDbSecurityGroupMemberships());
+    }
+
+    @Test
+    void modifyOptionGroup_acceptsLegacyMemberEncodingForOptionsToInclude() {
+        when(service.modifyOptionGroup(eq("og1"), anyList(), anyList(), isNull()))
+                .thenReturn(makeOptionGroup("og1"));
+
+        MultivaluedMap<String, String> p = params();
+        p.add("OptionGroupName", "og1");
+        p.add("OptionsToInclude.member.1.OptionName", "MEMCACHED");
+        handler.handle("ModifyOptionGroup", p);
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<OptionGroupOption>> include = ArgumentCaptor.forClass(List.class);
+        verify(service).modifyOptionGroup(eq("og1"), include.capture(), anyList(), isNull());
+        assertEquals(1, include.getValue().size());
+        assertEquals("MEMCACHED", include.getValue().getFirst().getOptionName());
+    }
+
+    @Test
+    void modifyOptionGroup_parsesOptionsToRemove() {
+        when(service.modifyOptionGroup(eq("og1"), anyList(), anyList(), isNull()))
+                .thenReturn(makeOptionGroup("og1"));
+
+        MultivaluedMap<String, String> p = params();
+        p.add("OptionGroupName", "og1");
+        p.add("OptionsToRemove.member.1", "MEMCACHED");
+        p.add("OptionsToRemove.member.2", "MARIADB_AUDIT_PLUGIN");
+        handler.handle("ModifyOptionGroup", p);
+
+        verify(service).modifyOptionGroup(eq("og1"), anyList(),
+                eq(List.of("MEMCACHED", "MARIADB_AUDIT_PLUGIN")), isNull());
+    }
+
+    @Test
+    void modifyOptionGroup_rejectsNonNumericPort() {
+        MultivaluedMap<String, String> p = params();
+        p.add("OptionGroupName", "og1");
+        p.add("OptionsToInclude.OptionConfiguration.1.OptionName", "MEMCACHED");
+        p.add("OptionsToInclude.OptionConfiguration.1.Port", "not-a-number");
+        Response response = handler.handle("ModifyOptionGroup", p);
+
+        assertEquals(400, response.getStatus());
+        assertTrue(((String) response.getEntity()).contains("InvalidParameterValue"));
+        verify(service, never()).modifyOptionGroup(any(), anyList(), anyList(), any());
+    }
+
+    @Test
+    void modifyOptionGroup_requiresOptionGroupName() {
+        Response response = handler.handle("ModifyOptionGroup", params());
+
+        assertEquals(400, response.getStatus());
+        verify(service, never()).modifyOptionGroup(any(), anyList(), anyList(), any());
+    }
+
+    @Test
+    void deleteOptionGroup_returnsResultlessEnvelope() {
+        MultivaluedMap<String, String> p = params();
+        p.add("OptionGroupName", "og1");
+        Response response = handler.handle("DeleteOptionGroup", p);
+
+        assertEquals(200, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<DeleteOptionGroupResponse"), body);
+        assertFalse(body.contains("<DeleteOptionGroupResult>"), body);
+        verify(service).deleteOptionGroup("og1", null);
+    }
+
+    @Test
+    void deleteOptionGroup_requiresOptionGroupName() {
+        Response response = handler.handle("DeleteOptionGroup", params());
+
+        assertEquals(400, response.getStatus());
+        verify(service, never()).deleteOptionGroup(any(), any());
+    }
+
+    @Test
+    void deleteOptionGroup_propagatesInvalidStateFault() {
+        doThrow(new AwsException("InvalidOptionGroupStateFault",
+                "The option group og1 is in use.", 400))
+                .when(service).deleteOptionGroup("og1", null);
+
+        MultivaluedMap<String, String> p = params();
+        p.add("OptionGroupName", "og1");
+        Response response = handler.handle("DeleteOptionGroup", p);
+
+        assertEquals(400, response.getStatus());
+        assertTrue(((String) response.getEntity()).contains("InvalidOptionGroupStateFault"));
+    }
+
+    @Test
+    void describeDbInstances_includesAttachedOptionGroupMembership() {
+        DbInstance instance = makeInstance("mydb");
+        instance.setOptionGroupName("og1");
+        when(service.listDbInstances(null, null)).thenReturn(List.of(instance));
+
+        Response response = handler.handle("DescribeDBInstances", params());
+
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<OptionGroupMemberships><OptionGroupMembership>"
+                + "<OptionGroupName>og1</OptionGroupName><Status>in-sync</Status>"), body);
+    }
+
+    @Test
+    void describeDbInstances_reportsDefaultOptionGroupWhenUnattached() {
+        DbInstance instance = makeInstance("mydb");
+        instance.setEngineVersion("16.3");
+        when(service.listDbInstances(null, null)).thenReturn(List.of(instance));
+
+        Response response = handler.handle("DescribeDBInstances", params());
+
+        String body = (String) response.getEntity();
+        assertTrue(body.contains(
+                "<OptionGroupName>default:postgres-16</OptionGroupName>"), body);
+    }
+
+    @Test
+    void createDbInstance_passesOptionGroupName() {
+        DbInstance instance = makeInstance("mydb");
+        when(service.createDbInstance(any(), any(), any(), any(), any(), any(), any(),
+                anyInt(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), anyBoolean(),
+                any(), any(), anyList(), any(), any(), anyBoolean()))
+                .thenReturn(instance);
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBInstanceIdentifier", "mydb");
+        p.add("Engine", "mysql");
+        p.add("OptionGroupName", "og1");
+        Response response = handler.handle("CreateDBInstance", p);
+
+        assertEquals(200, response.getStatus());
+        verify(service).createDbInstance(eq("mydb"), eq("mysql"), any(), any(), any(), any(),
+                any(), anyInt(), anyBoolean(), any(), any(), any(), any(), anyBoolean(),
+                anyBoolean(), any(), any(), anyList(), eq("og1"), any(), anyBoolean());
+    }
+
     // ──────────────────────────── Helpers ────────────────────────────
+
+    private static OptionGroup makeOptionGroup(String name) {
+        OptionGroup group = new OptionGroup(name, "mysql", "8.0", "my og");
+        group.setOptionGroupArn("arn:aws:rds:us-east-1:123456789012:og:" + name);
+        return group;
+    }
 
     private static MultivaluedMap<String, String> params() {
         return new MultivaluedHashMap<>();

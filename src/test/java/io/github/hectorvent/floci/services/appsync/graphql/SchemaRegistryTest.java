@@ -1,10 +1,13 @@
 package io.github.hectorvent.floci.services.appsync.graphql;
 
 import graphql.GraphQL;
+import graphql.schema.GraphQLAppliedDirective;
+import graphql.schema.GraphQLFieldDefinition;
 import io.github.hectorvent.floci.services.appsync.graphql.scalars.AppSyncScalarRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -51,5 +54,14 @@ class SchemaRegistryTest {
 
         assertNotSame(original, replaced);
         assertSame(replaced, registry.getGraphQL("api-1").orElseThrow());
+    }
+
+    @Test
+    void awsAuthOnFieldDefinitionParses() {
+        var schema = new AppSyncSchemaParser(new AppSyncScalarRegistry())
+                .parse("type Query { secret: String @aws_auth(cognito_groups: [\"Admins\"]) }");
+        GraphQLFieldDefinition field = schema.getQueryType().getFieldDefinition("secret");
+        GraphQLAppliedDirective directive = field.getAppliedDirective("aws_auth");
+        assertNotNull(directive);
     }
 }

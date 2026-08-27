@@ -9,6 +9,9 @@ import software.amazon.awssdk.services.firehose.model.PutRecordRequest;
 import software.amazon.awssdk.services.firehose.model.Record;
 import software.amazon.awssdk.services.glue.GlueClient;
 import software.amazon.awssdk.services.glue.model.*;
+import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
+import software.amazon.awssdk.services.s3.model.NoSuchBucketException;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -26,6 +29,7 @@ class DataLakeTest {
     private static AthenaClient athena;
     private static GlueClient glue;
     private static FirehoseClient firehose;
+    private static S3Client s3;
 
     private static final String DB_NAME = TestFixtures.uniqueName("test_db");
     private static final String TABLE_NAME = "orders";
@@ -36,6 +40,7 @@ class DataLakeTest {
         athena = TestFixtures.athenaClient();
         glue = TestFixtures.glueClient();
         firehose = TestFixtures.firehoseClient();
+        s3 = TestFixtures.s3Client();
     }
 
     @Test
@@ -76,6 +81,12 @@ class DataLakeTest {
                         .bucketARN("arn:aws:s3:::floci-firehose-results")
                         .roleARN("arn:aws:iam::000000000000:role/datalake-firehose-role")
                         .prefix(STREAM_NAME + "/")
+                        // Floci does not enforce AWS's 60s minimum interval, which keeps
+                        // the delivery wait short (would need 60+ against real AWS).
+                        .bufferingHints(software.amazon.awssdk.services.firehose.model.BufferingHints.builder()
+                                .sizeInMBs(1)
+                                .intervalInSeconds(5)
+                                .build())
                         .build())
                 .build());
     }
@@ -91,6 +102,28 @@ class DataLakeTest {
                     .record(Record.builder().data(SdkBytes.fromString(json, StandardCharsets.UTF_8)).build())
                     .build());
         }
+
+        // Small records stay buffered until the stream's IntervalInSeconds
+        // elapses; wait for Firehose to deliver before querying, the same way a
+        // real AWS client would.
+        long deadline = System.currentTimeMillis() + 30_000;
+        boolean delivered = false;
+        while (!delivered && System.currentTimeMillis() < deadline) {
+            try {
+                delivered = !s3.listObjectsV2(ListObjectsV2Request.builder()
+                        .bucket("floci-firehose-results")
+                        .prefix(STREAM_NAME + "/")
+                        .build()).contents().isEmpty();
+            } catch (NoSuchBucketException e) {
+                // The bucket itself is only created on the first delivery.
+            }
+            if (!delivered) {
+                Thread.sleep(2_000);
+            }
+        }
+        assertThat(delivered)
+                .as("Firehose should deliver the buffered records within IntervalInSeconds")
+                .isTrue();
 
         // Athena Query
         StartQueryExecutionResponse startResp = athena.startQueryExecution(StartQueryExecutionRequest.builder()

@@ -2,33 +2,23 @@ package io.github.hectorvent.floci.services.ec2;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
-import io.github.hectorvent.floci.core.storage.PersistentStorage;
-import io.github.hectorvent.floci.core.storage.StorageBackend;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
+import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.model.Address;
 import io.github.hectorvent.floci.services.ec2.model.Image;
 import io.github.hectorvent.floci.services.ec2.model.InternetGateway;
 import io.github.hectorvent.floci.services.ec2.model.KeyPair;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
-import io.github.hectorvent.floci.services.ec2.model.NatGateway;
 import io.github.hectorvent.floci.services.ec2.model.ManagedPrefixList;
+import io.github.hectorvent.floci.services.ec2.model.NatGateway;
 import io.github.hectorvent.floci.services.ec2.model.NetworkAcl;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.Reservation;
-import io.github.hectorvent.floci.services.ec2.model.RouteTable;
-import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
-import io.github.hectorvent.floci.services.ec2.model.SecurityGroupRule;
-import io.github.hectorvent.floci.services.ec2.model.Snapshot;
-import io.github.hectorvent.floci.services.ec2.model.SpotInstanceRequest;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
-import io.github.hectorvent.floci.services.ec2.model.Tag;
-import io.github.hectorvent.floci.services.ec2.model.Volume;
 import io.github.hectorvent.floci.services.ec2.model.Vpc;
-import io.github.hectorvent.floci.services.ec2.model.VpcEndpoint;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.io.TempDir;
 
-import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 
@@ -52,8 +42,8 @@ class Ec2PublicIpOnLaunchTest {
     private static final String AMI = "ami-0abcdef1234567890";
 
     @Test
-    void publicSubnetInstanceGetsPublicIpFlag_privateDoesNot(@TempDir Path dir) {
-        Ec2Service ec2 = newService(dir);
+    void publicSubnetInstanceGetsPublicIpFlag_privateDoesNot() {
+        Ec2Service ec2 = newService();
         Vpc vpc = ec2.createVpc(REGION, "10.0.0.0/16", false);
 
         Subnet publicSubnet = ec2.createSubnet(REGION, vpc.getVpcId(), "10.0.0.0/24", REGION + "a");
@@ -84,8 +74,8 @@ class Ec2PublicIpOnLaunchTest {
     }
 
     @Test
-    void launchTimeOverrideBeatsSubnetDefaultBothDirections(@TempDir Path dir) {
-        Ec2Service ec2 = newService(dir);
+    void launchTimeOverrideBeatsSubnetDefaultBothDirections() {
+        Ec2Service ec2 = newService();
         Vpc vpc = ec2.createVpc(REGION, "10.0.0.0/16", false);
 
         Subnet publicSubnet = ec2.createSubnet(REGION, vpc.getVpcId(), "10.0.0.0/24", REGION + "a");
@@ -127,7 +117,7 @@ class Ec2PublicIpOnLaunchTest {
         return r.getInstances().get(0);
     }
 
-    private Ec2Service newService(Path dir) {
+    private Ec2Service newService() {
         EmulatorConfig config = mock(EmulatorConfig.class);
         when(config.defaultAccountId()).thenReturn("000000000000");
         // mock() == true short-circuits the container launch in runInstances, so
@@ -142,31 +132,18 @@ class Ec2PublicIpOnLaunchTest {
         // flag is set on the instance BEFORE launch, so no Docker is needed here.
         return new Ec2Service(config, mock(Ec2ContainerManager.class), mock(Ec2PortForwardManager.class),
                 new AmiImageResolver(imageCatalog), imageCatalog,
-                new Ec2InstanceTypeCatalog(),
-                load(dir, "ec2-vpcs.json", new TypeReference<Map<String, Vpc>>() {}),
-                load(dir, "ec2-subnets.json", new TypeReference<Map<String, Subnet>>() {}),
-                load(dir, "ec2-security-groups.json", new TypeReference<Map<String, SecurityGroup>>() {}),
-                load(dir, "ec2-security-group-rules.json", new TypeReference<Map<String, SecurityGroupRule>>() {}),
-                load(dir, "ec2-internet-gateways.json", new TypeReference<Map<String, InternetGateway>>() {}),
-                load(dir, "ec2-route-tables.json", new TypeReference<Map<String, RouteTable>>() {}),
-                load(dir, "ec2-key-pairs.json", new TypeReference<Map<String, KeyPair>>() {}),
-                load(dir, "ec2-addresses.json", new TypeReference<Map<String, Address>>() {}),
-                load(dir, "ec2-instances.json", new TypeReference<Map<String, Instance>>() {}),
-                load(dir, "ec2-volumes.json", new TypeReference<Map<String, Volume>>() {}),
-                load(dir, "ec2-registered-images.json", new TypeReference<Map<String, Image>>() {}),
-                load(dir, "ec2-snapshots.json", new TypeReference<Map<String, Snapshot>>() {}),
-                load(dir, "ec2-launch-templates.json", new TypeReference<Map<String, LaunchTemplate>>() {}),
-                load(dir, "ec2-vpc-endpoints.json", new TypeReference<Map<String, VpcEndpoint>>() {}),
-                load(dir, "ec2-nat-gateways.json", new TypeReference<Map<String, NatGateway>>() {}),
-                load(dir, "ec2-spot-instance-requests.json", new TypeReference<Map<String, SpotInstanceRequest>>() {}),
-                load(dir, "ec2-network-acls.json", new TypeReference<Map<String, NetworkAcl>>() {}),
-                load(dir, "ec2-managed-prefix-lists.json", new TypeReference<Map<String, ManagedPrefixList>>() {}),
-                load(dir, "ec2-tags.json", new TypeReference<Map<String, List<Tag>>>() {}));
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
     }
 
-    private <V> StorageBackend<String, V> load(Path dir, String file, TypeReference<Map<String, V>> type) {
-        PersistentStorage<String, V> backend = new PersistentStorage<>(dir.resolve(file), type);
-        backend.load();
-        return backend;
+    private static final class InMemoryStorageFactory extends StorageFactory {
+        private InMemoryStorageFactory() {
+            super(null, null);
+        }
+
+        @Override
+        public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
+                                                        TypeReference<Map<String, V>> typeReference) {
+            return AccountAwareStorageBackend.inMemory("000000000000");
+        }
     }
 }

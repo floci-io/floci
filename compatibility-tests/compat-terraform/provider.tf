@@ -41,5 +41,6 @@ provider "aws" {
     route53        = var.endpoint
     appautoscaling = var.endpoint
     ses            = var.endpoint
+    guardduty      = var.endpoint
   }
 }

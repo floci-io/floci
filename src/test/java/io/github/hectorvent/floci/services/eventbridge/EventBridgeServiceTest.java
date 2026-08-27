@@ -41,6 +41,7 @@ class EventBridgeServiceTest {
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
                 new RegionResolver("us-east-1", "000000000000"),
                 new ObjectMapper(),
                 null,
@@ -126,6 +127,7 @@ class EventBridgeServiceTest {
     void deleteEventBus() {
         service.createEventBus("my-bus", null, null, REGION);
         service.deleteEventBus("my-bus", REGION);
+        assertDoesNotThrow(() -> service.deleteEventBus("my-bus", REGION));
 
         assertThrows(AwsException.class, () ->
                 service.describeEventBus("my-bus", REGION));
@@ -220,12 +222,22 @@ class EventBridgeServiceTest {
     }
 
     @Test
-    void deleteRule() {
+    void deleteRuleIsIdempotent() {
         service.putRule("my-rule", null, null, "rate(1 minute)", RuleState.ENABLED,
                 null, null, null, REGION);
         service.deleteRule("my-rule", null, REGION);
+        assertDoesNotThrow(() -> service.deleteRule("my-rule", null, REGION));
 
         assertTrue(service.listRules(null, null, REGION).isEmpty());
+    }
+
+    @Test
+    void deleteRuleForMissingCustomBusThrowsResourceNotFound() {
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.deleteRule("missing-rule", "missing-bus", REGION));
+
+        assertEquals("ResourceNotFoundException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
     }
 
     @Test

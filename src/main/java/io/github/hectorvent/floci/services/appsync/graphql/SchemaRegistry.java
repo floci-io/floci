@@ -5,6 +5,7 @@ import graphql.execution.AsyncExecutionStrategy;
 import graphql.execution.AsyncSerialExecutionStrategy;
 import graphql.execution.SubscriptionExecutionStrategy;
 import graphql.schema.GraphQLSchema;
+import io.github.hectorvent.floci.services.appsync.graphql.auth.AuthFieldWrapper;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -17,14 +18,23 @@ public class SchemaRegistry {
     private final Map<String, GraphQLSchema> schemas = new ConcurrentHashMap<>();
     private final Map<String, GraphQL> engines = new ConcurrentHashMap<>();
     private final AppSyncSchemaParser appSyncSchemaParser;
+    private final AuthFieldWrapper authFieldWrapper;
+
+    public SchemaRegistry(AppSyncSchemaParser appSyncSchemaParser) {
+        this(appSyncSchemaParser, null);
+    }
 
     @Inject
-    public SchemaRegistry(AppSyncSchemaParser appSyncSchemaParser) {
+    public SchemaRegistry(AppSyncSchemaParser appSyncSchemaParser, AuthFieldWrapper authFieldWrapper) {
         this.appSyncSchemaParser = appSyncSchemaParser;
+        this.authFieldWrapper = authFieldWrapper;
     }
 
     public void register(String apiId, String sdl) {
         GraphQLSchema schema = appSyncSchemaParser.parse(sdl);
+        if (authFieldWrapper != null) {
+            schema = authFieldWrapper.wrap(schema);
+        }
         schemas.put(apiId, schema);
         engines.put(apiId, buildGraphQL(schema));
     }
@@ -42,7 +52,7 @@ public class SchemaRegistry {
         engines.remove(apiId);
     }
 
-    static GraphQL buildGraphQL(GraphQLSchema schema) {
+    public static GraphQL buildGraphQL(GraphQLSchema schema) {
         return GraphQL.newGraphQL(schema)
                 .queryExecutionStrategy(new AsyncExecutionStrategy())
                 .mutationExecutionStrategy(new AsyncSerialExecutionStrategy())

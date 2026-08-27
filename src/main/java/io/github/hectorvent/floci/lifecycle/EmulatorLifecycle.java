@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.floci.ui.FlociUiManager;
 import io.github.hectorvent.floci.services.amazonmq.container.RabbitMqManager;
 import io.github.hectorvent.floci.services.kinesisanalytics.container.FlinkContainerManager;
+import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheContainerManager;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheMemcachedContainerManager;
 import io.github.hectorvent.floci.services.elasticache.proxy.ElastiCacheProxyManager;
@@ -48,7 +49,6 @@ import java.util.Optional;
 public class EmulatorLifecycle {
 
     private static final Logger LOG = Logger.getLogger(EmulatorLifecycle.class);
-    private static final int HTTP_PORT = 4566;
     private static final int TLS_HTTP_BACKEND_PORT = 4510;
 
     @ConfigProperty(name = "quarkus.application.version", defaultValue = "")
@@ -65,6 +65,7 @@ public class EmulatorLifecycle {
     private final StorageFactory storageFactory;
     private final ServiceRegistry serviceRegistry;
     private final EmulatorConfig config;
+    private final IamService iamService;
     private final ElastiCacheContainerManager elastiCacheContainerManager;
     private final ElastiCacheMemcachedContainerManager elastiCacheMemcachedContainerManager;
     private final ElastiCacheProxyManager elastiCacheProxyManager;
@@ -95,6 +96,7 @@ public class EmulatorLifecycle {
     @Inject
     public EmulatorLifecycle(StorageFactory storageFactory, ServiceRegistry serviceRegistry,
                              EmulatorConfig config,
+                             IamService iamService,
                              ElastiCacheContainerManager elastiCacheContainerManager,
                              ElastiCacheMemcachedContainerManager elastiCacheMemcachedContainerManager,
                              ElastiCacheProxyManager elastiCacheProxyManager,
@@ -124,6 +126,7 @@ public class EmulatorLifecycle {
         this.storageFactory = storageFactory;
         this.serviceRegistry = serviceRegistry;
         this.config = config;
+        this.iamService = iamService;
         this.elastiCacheContainerManager = elastiCacheContainerManager;
         this.elastiCacheMemcachedContainerManager = elastiCacheMemcachedContainerManager;
         this.elastiCacheProxyManager = elastiCacheProxyManager;
@@ -174,6 +177,10 @@ public class EmulatorLifecycle {
 
         serviceRegistry.logEnabledServices();
         storageFactory.loadAll();
+        int sweptSessions = iamService.sweepOrphanedLambdaExecutionRoleSessions();
+        if (sweptSessions > 0) {
+            LOG.infov("Removed {0} orphaned Lambda execution-role session(s)", sweptSessions);
+        }
         schemaCreationWorker.recoverOrphans();
         schemaCreationWorker.rehydrateSchemas();
 
@@ -203,7 +210,11 @@ public class EmulatorLifecycle {
     }
 
     void onHttpStart(@ObservesAsync HttpServerStart event) {
-        int expectedPort = config.tls().enabled() ? TLS_HTTP_BACKEND_PORT : HTTP_PORT;
+        // Non-TLS: Quarkus listens on floci.port (quarkus.http.port: ${floci.port} in
+        // application.yml). TLS mode: TlsConfigSource pins the HTTP backend to 4510 and the
+        // public port is served by TlsProxyServer. Comparing against a hardcoded 4566 here
+        // made start/ready hooks never run when FLOCI_PORT was non-default (#2437).
+        int expectedPort = config.tls().enabled() ? TLS_HTTP_BACKEND_PORT : config.port();
         if (event.options().getPort() != expectedPort) {
             return;
         }

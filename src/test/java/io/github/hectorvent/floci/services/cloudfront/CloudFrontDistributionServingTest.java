@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.cloudfront.model.DistributionConfig;
 import io.github.hectorvent.floci.services.cloudfront.model.KeyGroup;
 import io.github.hectorvent.floci.services.cloudfront.model.Origin;
 import io.github.hectorvent.floci.services.cloudfront.model.PublicKey;
+import io.github.hectorvent.floci.services.cloudfront.model.ResponseHeadersPolicy;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.PutObjectOptions;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
@@ -30,6 +31,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -779,6 +781,745 @@ class CloudFrontDistributionServingTest {
         assertDistributionWasNotCreated(callerReference);
     }
 
+    @Test
+    void roundTripsOriginCustomHeadersThroughTheApi() {
+        // The distribution parser must capture and re-serialize origin CustomHeaders so a read-back
+        // (get-distribution) matches what was configured, rather than dropping them.
+        String body = """
+                <?xml version="1.0" encoding="UTF-8"?>
+                <DistributionConfig xmlns="http://cloudfront.amazonaws.com/doc/2020-05-31/">
+                  <CallerReference>cf-custom-headers-roundtrip</CallerReference>
+                  <Origins>
+                    <Quantity>1</Quantity>
+                    <Items>
+                      <Origin>
+                        <Id>secured</Id>
+                        <DomainName>api.internal.example</DomainName>
+                        <OriginPath></OriginPath>
+                        <CustomHeaders>
+                          <Quantity>1</Quantity>
+                          <Items>
+                            <OriginCustomHeader>
+                              <HeaderName>X-Origin-Verify</HeaderName>
+                              <HeaderValue>shared-secret-42</HeaderValue>
+                            </OriginCustomHeader>
+                          </Items>
+                        </CustomHeaders>
+                        <CustomOriginConfig>
+                          <HTTPPort>80</HTTPPort>
+                          <HTTPSPort>443</HTTPSPort>
+                          <OriginProtocolPolicy>https-only</OriginProtocolPolicy>
+                        </CustomOriginConfig>
+                      </Origin>
+                    </Items>
+                  </Origins>
+                  <DefaultCacheBehavior>
+                    <TargetOriginId>secured</TargetOriginId>
+                    <ViewerProtocolPolicy>https-only</ViewerProtocolPolicy>
+                  </DefaultCacheBehavior>
+                  <Comment>custom-headers round-trip</Comment>
+                  <Enabled>true</Enabled>
+                </DistributionConfig>
+                """;
+
+        given()
+            .contentType("application/xml")
+            .body(body)
+        .when()
+            .post("/2020-05-31/distribution")
+        .then()
+            .statusCode(201)
+            .body(containsString("<OriginCustomHeader>"))
+            .body(containsString("<HeaderName>X-Origin-Verify</HeaderName>"))
+            .body(containsString("<HeaderValue>shared-secret-42</HeaderValue>"));
+    }
+
+    @Test
+    void rejectsProhibitedOriginCustomHeaders() {
+        String body = """
+                <DistributionConfig xmlns="http://cloudfront.amazonaws.com/doc/2020-05-31/">
+                  <CallerReference>cf-prohibited-custom-header</CallerReference>
+                  <Origins><Quantity>1</Quantity><Items><Origin>
+                    <Id>secured</Id><DomainName>example.com</DomainName>
+                    <CustomHeaders><Quantity>1</Quantity><Items><OriginCustomHeader>
+                      <HeaderName>Host</HeaderName><HeaderValue>internal.example</HeaderValue>
+                    </OriginCustomHeader></Items></CustomHeaders>
+                    <CustomOriginConfig><HTTPPort>80</HTTPPort><HTTPSPort>443</HTTPSPort>
+                      <OriginProtocolPolicy>https-only</OriginProtocolPolicy></CustomOriginConfig>
+                  </Origin></Items></Origins>
+                  <DefaultCacheBehavior><TargetOriginId>secured</TargetOriginId>
+                    <ViewerProtocolPolicy>https-only</ViewerProtocolPolicy></DefaultCacheBehavior>
+                  <Enabled>true</Enabled>
+                </DistributionConfig>
+                """;
+
+        given()
+            .contentType("application/xml")
+            .body(body)
+        .when()
+            .post("/2020-05-31/distribution")
+        .then()
+            .statusCode(400)
+            .body(containsString("<Code>InvalidArgument</Code>"));
+    }
+
+    @Test
+    void acceptsAuthorizationOriginCustomHeaders() {
+        String body = distributionWithOriginCustomHeaders(1, """
+                <OriginCustomHeader>
+                  <HeaderName>Authorization</HeaderName>
+                  <HeaderValue>Bearer secret</HeaderValue>
+                </OriginCustomHeader>
+                """).replace("cf-custom-header-validation", "cf-authorization-custom-header");
+
+        given()
+            .contentType("application/xml")
+            .body(body)
+        .when()
+            .post("/2020-05-31/distribution")
+        .then()
+            .statusCode(201)
+            .body(containsString("<HeaderName>Authorization</HeaderName>"))
+            .body(containsString("<HeaderValue>Bearer secret</HeaderValue>"));
+    }
+
+    @Test
+    void rejectsInconsistentOriginCustomHeaderQuantity() {
+        String body = distributionWithOriginCustomHeaders(2, """
+                <OriginCustomHeader>
+                  <HeaderName>X-Origin-Verify</HeaderName>
+                  <HeaderValue>shared-secret</HeaderValue>
+                </OriginCustomHeader>
+                """);
+
+        given()
+            .contentType("application/xml")
+            .body(body)
+        .when()
+            .post("/2020-05-31/distribution")
+        .then()
+            .statusCode(400)
+            .body(containsString("<Code>InconsistentQuantities</Code>"));
+    }
+
+    @Test
+    void serializesEmptyOriginCustomHeadersWithZeroQuantity() {
+        given()
+            .contentType("application/xml")
+            .body(distributionWithOriginCustomHeaders(0, "", false))
+        .when()
+            .post("/2020-05-31/distribution")
+        .then()
+            .statusCode(201)
+            .body(containsString("<CustomHeaders><Quantity>0</Quantity></CustomHeaders>"));
+    }
+
+    @Test
+    void rejectsMalformedOriginCustomHeaderStructure() {
+        String item = """
+                <OriginCustomHeader>
+                  <HeaderName>X-Origin-Verify</HeaderName>
+                  <HeaderValue>shared-secret</HeaderValue>
+                </OriginCustomHeader>
+                """;
+        List<String> malformedBodies = List.of(
+                distributionWithOriginCustomHeaders(1, item, false),
+                distributionWithOriginCustomHeaders(1, """
+                        <Header>
+                          <HeaderName>X-Origin-Verify</HeaderName>
+                          <HeaderValue>shared-secret</HeaderValue>
+                        </Header>
+                        """),
+                distributionWithOriginCustomHeaders(1, """
+                        <OriginCustomHeader>
+                          <HeaderName><Value>X-Origin-Verify</Value></HeaderName>
+                          <HeaderValue>shared-secret</HeaderValue>
+                        </OriginCustomHeader>
+                        """));
+
+        for (String body : malformedBodies) {
+            given()
+                .contentType("application/xml")
+                .body(body)
+            .when()
+                .post("/2020-05-31/distribution")
+            .then()
+                .statusCode(400)
+                .body(containsString("<Code>InvalidArgument</Code>"));
+        }
+    }
+
+    @Test
+    void rejectsTooManyOriginCustomHeadersWithAwsErrorCode() {
+        StringBuilder items = new StringBuilder();
+        for (int i = 0; i < 31; i++) {
+            items.append("""
+                    <OriginCustomHeader>
+                      <HeaderName>X-Origin-%d</HeaderName>
+                      <HeaderValue>value</HeaderValue>
+                    </OriginCustomHeader>
+                    """.formatted(i));
+        }
+        String body = distributionWithOriginCustomHeaders(31, items.toString());
+
+        given()
+            .contentType("application/xml")
+            .body(body)
+        .when()
+            .post("/2020-05-31/distribution")
+        .then()
+            .statusCode(400)
+            .body(containsString("<Code>TooManyOriginCustomHeaders</Code>"));
+    }
+
+    /**
+     * A rule whose {@code AllowedOrigin} is {@code *} echoes {@code *}, and the CORS specification
+     * forbids pairing that with {@code Access-Control-Allow-Credentials: true} — browsers reject the
+     * combination for credentialed requests, so emitting it would break in the browser while passing
+     * here. Verified against real S3: a wildcard rule returns only Allow-Origin, Allow-Methods and
+     * Max-Age, with no Allow-Credentials and no Vary; a concrete origin returns both (covered by
+     * {@link #appliesConfiguredOriginHeaderToS3CorsResponses()}).
+     */
+    @Test
+    void wildcardCorsOriginOmitsCredentialsAndVary() {
+        String suffix = suffix();
+        String bucket = "cf-origin-header-cors-wild-" + suffix;
+        createBucket(bucket);
+        putObject(bucket, "asset.txt", "cors-body", "text/plain");
+        s3Service.putBucketCors(bucket, """
+                <CORSConfiguration>
+                  <CORSRule>
+                    <AllowedOrigin>*</AllowedOrigin>
+                    <AllowedMethod>GET</AllowedMethod>
+                    <AllowedMethod>HEAD</AllowedMethod>
+                    <MaxAgeSeconds>600</MaxAgeSeconds>
+                  </CORSRule>
+                </CORSConfiguration>
+                """);
+
+        Origin origin = s3Origin("s3-origin", bucket);
+        origin.setCustomHeaders(List.of(new LinkedHashMap<>(Map.of(
+                "HeaderName", "Origin",
+                "HeaderValue", "https://configured.example"))));
+        DistributionConfig cfg = new DistributionConfig();
+        cfg.setEnabled(true);
+        cfg.setOrigins(List.of(origin));
+        DefaultCacheBehavior behavior = defaultBehavior(origin.getId());
+        behavior.setAllowedMethods(List.of("GET", "HEAD", "OPTIONS"));
+        cfg.setDefaultCacheBehavior(behavior);
+        Distribution dist = cloudFrontService.createDistribution(distribution(cfg), Map.of());
+
+        given()
+            .header("Host", dist.getDomainName())
+            .header("Origin", "https://viewer.example")
+        .when()
+            .get("/asset.txt")
+        .then()
+            .statusCode(200)
+            .header("Access-Control-Allow-Origin", equalTo("*"))
+            .header("Access-Control-Allow-Methods", equalTo("GET, HEAD"))
+            .header("Access-Control-Max-Age", equalTo("600"))
+            .header("Access-Control-Allow-Credentials", nullValue())
+            .header("Vary", nullValue());
+
+        given()
+            .header("Host", dist.getDomainName())
+            .header("Origin", "https://viewer.example")
+            .header("Access-Control-Request-Method", "GET")
+        .when()
+            .options("/asset.txt")
+        .then()
+            .statusCode(200)
+            .header("Access-Control-Allow-Origin", equalTo("*"))
+            .header("Access-Control-Allow-Methods", equalTo("GET, HEAD"))
+            .header("Access-Control-Max-Age", equalTo("600"))
+            .header("Access-Control-Allow-Credentials", nullValue())
+            .header("Vary", nullValue());
+    }
+
+    @Test
+    void appliesConfiguredOriginHeaderToS3CorsResponses() {
+        String suffix = suffix();
+        String bucket = "cf-origin-header-cors-" + suffix;
+        createBucket(bucket);
+        putObject(bucket, "asset.txt", "cors-body", "text/plain");
+        s3Service.putBucketCors(bucket, """
+                <CORSConfiguration>
+                  <CORSRule>
+                    <AllowedOrigin>https://configured.example</AllowedOrigin>
+                    <AllowedMethod>GET</AllowedMethod>
+                    <AllowedMethod>HEAD</AllowedMethod>
+                    <ExposeHeader>ETag</ExposeHeader>
+                    <MaxAgeSeconds>600</MaxAgeSeconds>
+                  </CORSRule>
+                </CORSConfiguration>
+                """);
+
+        Origin origin = s3Origin("s3-origin", bucket);
+        origin.setCustomHeaders(List.of(new LinkedHashMap<>(Map.of(
+                "HeaderName", "Origin",
+                "HeaderValue", "https://configured.example"))));
+        DistributionConfig cfg = new DistributionConfig();
+        cfg.setEnabled(true);
+        cfg.setOrigins(List.of(origin));
+        cfg.setDefaultCacheBehavior(defaultBehavior(origin.getId()));
+        Distribution dist = cloudFrontService.createDistribution(distribution(cfg), Map.of());
+
+        given()
+            .header("Host", dist.getDomainName())
+            .header("Origin", "https://viewer.example")
+        .when()
+            .get("/asset.txt")
+        .then()
+            .statusCode(200)
+            .header("Access-Control-Allow-Origin", equalTo("https://configured.example"))
+            .header("Access-Control-Allow-Methods", equalTo("GET, HEAD"))
+            .header("Access-Control-Allow-Credentials", equalTo("true"))
+            .header("Access-Control-Max-Age", equalTo("600"))
+            .header("Access-Control-Expose-Headers", equalTo("ETag"))
+            .header("Vary", containsString("Origin"))
+            .header("Vary", containsString("Access-Control-Request-Headers"))
+            .header("Vary", containsString("Access-Control-Request-Method"));
+
+        given()
+            .header("Host", dist.getDomainName())
+            .header("Origin", "https://viewer.example")
+        .when()
+            .head("/asset.txt")
+        .then()
+            .statusCode(200)
+            .header("Access-Control-Allow-Origin", equalTo("https://configured.example"))
+            .header("Access-Control-Allow-Methods", equalTo("GET, HEAD"))
+            .header("Access-Control-Allow-Credentials", equalTo("true"))
+            .header("Access-Control-Max-Age", equalTo("600"))
+            .header("Access-Control-Expose-Headers", equalTo("ETag"))
+            .header("Vary", containsString("Origin"))
+            .header("Vary", containsString("Access-Control-Request-Headers"))
+            .header("Vary", containsString("Access-Control-Request-Method"));
+    }
+
+    @Test
+    void appliesConfiguredOriginHeaderToS3CorsPreflight() {
+        String suffix = suffix();
+        String bucket = "cf-origin-header-preflight-" + suffix;
+        createBucket(bucket);
+        s3Service.putBucketCors(bucket, """
+                <CORSConfiguration>
+                  <CORSRule>
+                    <AllowedOrigin>https://configured.example</AllowedOrigin>
+                    <AllowedMethod>GET</AllowedMethod>
+                    <AllowedHeader>Authorization</AllowedHeader>
+                  </CORSRule>
+                </CORSConfiguration>
+                """);
+
+        Origin origin = s3Origin("s3-origin", bucket);
+        origin.setCustomHeaders(List.of(new LinkedHashMap<>(Map.of(
+                "HeaderName", "Origin",
+                "HeaderValue", "https://configured.example"))));
+        DefaultCacheBehavior behavior = defaultBehavior(origin.getId());
+        behavior.setAllowedMethods(List.of("GET", "HEAD", "OPTIONS"));
+        DistributionConfig config = new DistributionConfig();
+        config.setEnabled(true);
+        config.setOrigins(List.of(origin));
+        config.setDefaultCacheBehavior(behavior);
+        Distribution distribution =
+                cloudFrontService.createDistribution(distribution(config), Map.of());
+
+        given()
+                .header("Host", distribution.getDomainName())
+                .header("Origin", "https://viewer.example")
+                .header("Access-Control-Request-Method", "GET")
+                .header("Access-Control-Request-Headers", "Authorization")
+                .when().options("/asset.txt")
+                .then().statusCode(200)
+                .header("Access-Control-Allow-Origin", equalTo("https://configured.example"))
+                .header("Access-Control-Allow-Methods", equalTo("GET"))
+                .header("Access-Control-Allow-Headers", equalTo("Authorization"))
+                .header("Access-Control-Allow-Credentials", equalTo("true"))
+                .header("Vary", containsString("Origin"))
+                .header("Vary", containsString("Access-Control-Request-Headers"))
+                .header("Vary", containsString("Access-Control-Request-Method"));
+    }
+
+    private static String distributionWithOriginCustomHeaders(int quantity, String items) {
+        return distributionWithOriginCustomHeaders(quantity, items, true);
+    }
+
+    private static String distributionWithOriginCustomHeaders(
+            int quantity, String items, boolean includeItems) {
+        String itemList = includeItems ? "<Items>" + items + "</Items>" : items;
+        return """
+                <DistributionConfig xmlns="http://cloudfront.amazonaws.com/doc/2020-05-31/">
+                  <CallerReference>cf-custom-header-validation</CallerReference>
+                  <Origins><Quantity>1</Quantity><Items><Origin>
+                    <Id>secured</Id><DomainName>example.com</DomainName>
+                    <CustomHeaders><Quantity>%d</Quantity>%s</CustomHeaders>
+                    <CustomOriginConfig><HTTPPort>80</HTTPPort><HTTPSPort>443</HTTPSPort>
+                      <OriginProtocolPolicy>https-only</OriginProtocolPolicy></CustomOriginConfig>
+                  </Origin></Items></Origins>
+                  <DefaultCacheBehavior><TargetOriginId>secured</TargetOriginId>
+                    <ViewerProtocolPolicy>https-only</ViewerProtocolPolicy></DefaultCacheBehavior>
+                  <Enabled>true</Enabled>
+                </DistributionConfig>
+                """.formatted(quantity, itemList);
+    }
+
+    @Test
+    void appliesResponseHeadersPolicyToServedResponses() {
+        String suffix = suffix();
+        String bucket = "cf-rhp-" + suffix;
+        createBucket(bucket);
+        putObject(bucket, "index.html", "RHP-INDEX-" + suffix, "text/html");
+
+        Map<String, Object> security = new LinkedHashMap<>();
+        security.put("StrictTransportSecurity", new LinkedHashMap<>(Map.of(
+                "Override", "true", "AccessControlMaxAgeSec", "31536000",
+                "IncludeSubdomains", "true", "Preload", "false")));
+        security.put("ContentTypeOptions", new LinkedHashMap<>(Map.of("Override", "true")));
+        security.put("FrameOptions", new LinkedHashMap<>(Map.of("Override", "true", "FrameOption", "DENY")));
+        Map<String, Object> config = new LinkedHashMap<>();
+        config.put("SecurityHeadersConfig", security);
+        config.put("CustomHeadersConfig", List.of(new LinkedHashMap<>(Map.of(
+                "Header", "X-App", "Value", "floci", "Override", "true"))));
+        config.put("CorsConfig", new LinkedHashMap<>(Map.of(
+                "AccessControlAllowCredentials", "false",
+                "AccessControlAllowHeaders", List.of(),
+                "AccessControlAllowMethods", List.of("GET", "HEAD"),
+                "AccessControlAllowOrigins", List.of("*"),
+                "OriginOverride", "true")));
+
+        ResponseHeadersPolicy policy = new ResponseHeadersPolicy();
+        policy.setName("sec-" + suffix);
+        policy.setConfig(config);
+        ResponseHeadersPolicy created = cloudFrontService.createResponseHeadersPolicy(policy);
+
+        DefaultCacheBehavior dcb = defaultBehavior("only-origin");
+        dcb.setResponseHeadersPolicyId(created.getId());
+
+        DistributionConfig cfg = new DistributionConfig();
+        cfg.setEnabled(true);
+        cfg.setDefaultRootObject("index.html");
+        cfg.setOrigins(List.of(s3Origin("only-origin", bucket)));
+        cfg.setDefaultCacheBehavior(dcb);
+
+        Distribution dist = cloudFrontService.createDistribution(distribution(cfg), Map.of());
+
+        given()
+                .header("Host", dist.getDomainName())
+                .header("Origin", "https://viewer.example")
+                .when().get("/")
+                .then().statusCode(200)
+                .header("Strict-Transport-Security", containsString("max-age=31536000"))
+                .header("X-Content-Type-Options", "nosniff")
+                .header("X-Frame-Options", "DENY")
+                .header("X-App", "floci")
+                .header("Access-Control-Allow-Origin", "*")
+                .body(containsString("RHP-INDEX-" + suffix));
+    }
+
+    @Test
+    void preservesOverridesAndRemovesS3OriginHeaders() {
+        String suffix = suffix();
+        String bucket = "cf-s3-headers-" + suffix;
+        createBucket(bucket);
+        s3Service.putObject(bucket, "index.html",
+                ("S3-HEADERS-" + suffix).getBytes(StandardCharsets.UTF_8),
+                "text/html",
+                Map.of("keep", "origin-keep", "override", "origin-override", "remove", "remove-me"),
+                new PutObjectOptions()
+                        .withCacheControl("public, max-age=60")
+                        .withContentDisposition("inline"));
+
+        Map<String, Object> policyConfig = new LinkedHashMap<>();
+        policyConfig.put("RemoveHeadersConfig", List.of("X-Amz-Meta-Remove"));
+        policyConfig.put("CustomHeadersConfig", List.of(
+                policyHeader("Cache-Control", "policy-cache", false),
+                policyHeader("X-Amz-Meta-Override", "policy-override", true),
+                policyHeader("X-New", "policy-new", false)));
+        ResponseHeadersPolicy policy = new ResponseHeadersPolicy();
+        policy.setName("s3-origin-headers-" + suffix);
+        policy.setConfig(policyConfig);
+        policy = cloudFrontService.createResponseHeadersPolicy(policy);
+
+        DefaultCacheBehavior behavior = defaultBehavior("only-origin");
+        behavior.setResponseHeadersPolicyId(policy.getId());
+        DistributionConfig config = new DistributionConfig();
+        config.setEnabled(true);
+        config.setDefaultRootObject("index.html");
+        config.setOrigins(List.of(s3Origin("only-origin", bucket)));
+        config.setDefaultCacheBehavior(behavior);
+        Distribution distribution = cloudFrontService.createDistribution(distribution(config), Map.of());
+
+        given().header("Host", distribution.getDomainName())
+                .when().get("/")
+                .then().statusCode(200)
+                .header("Cache-Control", equalTo("public, max-age=60"))
+                .header("Content-Disposition", equalTo("inline"))
+                .header("ETag", notNullValue())
+                .header("Last-Modified", notNullValue())
+                .header("X-Amz-Meta-Keep", equalTo("origin-keep"))
+                .header("X-Amz-Meta-Override", equalTo("policy-override"))
+                .header("X-Amz-Meta-Remove", nullValue())
+                .header("X-New", equalTo("policy-new"));
+    }
+
+    @Test
+    void servesCorsPreflightThroughS3AndAppliesPreflightPolicyFields() {
+        String suffix = suffix();
+        String bucket = "cf-preflight-" + suffix;
+        createBucket(bucket);
+        s3Service.putBucketCors(bucket, """
+                <CORSConfiguration>
+                  <CORSRule>
+                    <AllowedOrigin>*</AllowedOrigin>
+                    <AllowedMethod>GET</AllowedMethod>
+                    <AllowedHeader>*</AllowedHeader>
+                  </CORSRule>
+                </CORSConfiguration>
+                """);
+
+        Map<String, Object> cors = new LinkedHashMap<>();
+        cors.put("AccessControlAllowCredentials", "false");
+        cors.put("AccessControlAllowHeaders", List.of("*", "Authorization"));
+        cors.put("AccessControlAllowMethods", List.of("ALL"));
+        cors.put("AccessControlAllowOrigins", List.of("*"));
+        cors.put("AccessControlExposeHeaders", List.of("ETag"));
+        cors.put("AccessControlMaxAgeSec", "600");
+        cors.put("OriginOverride", "true");
+        ResponseHeadersPolicy policy = new ResponseHeadersPolicy();
+        policy.setName("preflight-policy-" + suffix);
+        policy.setConfig(Map.of("CorsConfig", cors));
+        policy = cloudFrontService.createResponseHeadersPolicy(policy);
+
+        DefaultCacheBehavior behavior = defaultBehavior("only-origin");
+        behavior.setAllowedMethods(List.of("GET", "HEAD", "OPTIONS"));
+        behavior.setResponseHeadersPolicyId(policy.getId());
+        DistributionConfig config = new DistributionConfig();
+        config.setEnabled(true);
+        config.setOrigins(List.of(s3Origin("only-origin", bucket)));
+        config.setDefaultCacheBehavior(behavior);
+        Distribution distribution = cloudFrontService.createDistribution(distribution(config), Map.of());
+
+        given()
+                .header("Host", distribution.getDomainName())
+                .header("Origin", "https://viewer.example")
+                .header("Access-Control-Request-Method", "GET")
+                .header("Access-Control-Request-Headers", "Authorization")
+                .when().options("/resource")
+                .then().statusCode(200)
+                .header("Access-Control-Allow-Origin", equalTo("*"))
+                .header("Access-Control-Allow-Methods",
+                        equalTo("DELETE, GET, HEAD, OPTIONS, PATCH, POST, PUT"))
+                .header("Access-Control-Allow-Headers", equalTo("*, Authorization"))
+                .header("Access-Control-Expose-Headers", equalTo("ETag"))
+                .header("Access-Control-Max-Age", equalTo("600"));
+
+        given()
+                .header("Host", distribution.getDomainName())
+                .header("Access-Control-Request-Method", "GET")
+                .when().options("/resource")
+                .then().statusCode(403);
+
+        given()
+                .header("Host", distribution.getDomainName())
+                .header("Origin", "https://viewer.example")
+                .when().options("/resource")
+                .then().statusCode(403);
+
+        given()
+                .header("Host", distribution.getDomainName())
+                .header("Origin", "https://viewer.example")
+                .header("Access-Control-Request-Method", "POST")
+                .when().options("/resource")
+                .then().statusCode(403);
+    }
+
+    @Test
+    void corsOriginOverrideIsGroupWideButDoesNotSuppressCustomHeaders() {
+        String suffix = suffix();
+        String bucket = "cf-cors-origin-override-" + suffix;
+        createBucket(bucket);
+        s3Service.putBucketCors(bucket, """
+                <CORSConfiguration><CORSRule>
+                  <AllowedOrigin>*</AllowedOrigin>
+                  <AllowedMethod>GET</AllowedMethod>
+                </CORSRule></CORSConfiguration>
+                """);
+
+        Map<String, Object> cors = new LinkedHashMap<>();
+        cors.put("AccessControlAllowCredentials", "false");
+        cors.put("AccessControlAllowHeaders", List.of());
+        cors.put("AccessControlAllowMethods", List.of("GET"));
+        cors.put("AccessControlAllowOrigins", List.of("*"));
+        cors.put("AccessControlExposeHeaders", List.of());
+        cors.put("AccessControlMaxAgeSec", "600");
+        cors.put("OriginOverride", "false");
+
+        Map<String, Object> policyConfig = new LinkedHashMap<>();
+        policyConfig.put("CorsConfig", cors);
+        policyConfig.put("CustomHeadersConfig", List.of(
+                policyHeader("Access-Control-X-Floci", "custom", false)));
+        ResponseHeadersPolicy policy = new ResponseHeadersPolicy();
+        policy.setName("cors-origin-override-" + suffix);
+        policy.setConfig(policyConfig);
+        policy = cloudFrontService.createResponseHeadersPolicy(policy);
+
+        DefaultCacheBehavior behavior = defaultBehavior("only-origin");
+        behavior.setAllowedMethods(List.of("GET", "HEAD", "OPTIONS"));
+        behavior.setResponseHeadersPolicyId(policy.getId());
+        DistributionConfig config = new DistributionConfig();
+        config.setEnabled(true);
+        config.setOrigins(List.of(s3Origin("only-origin", bucket)));
+        config.setDefaultCacheBehavior(behavior);
+        Distribution distribution = cloudFrontService.createDistribution(distribution(config), Map.of());
+
+        given()
+                .header("Host", distribution.getDomainName())
+                .header("Origin", "https://viewer.example")
+                .header("Access-Control-Request-Method", "GET")
+                .when().options("/resource")
+                .then().statusCode(200)
+                .header("Access-Control-Allow-Origin", equalTo("*"))
+                .header("Access-Control-Max-Age", nullValue())
+                .header("Access-Control-X-Floci", equalTo("custom"));
+    }
+
+    @Test
+    void rejectsOptionsWhenTheMatchedBehaviorDoesNotAllowIt() {
+        String suffix = suffix();
+        String bucket = "cf-options-" + suffix;
+        createBucket(bucket);
+        s3Service.putBucketCors(bucket, """
+                <CORSConfiguration><CORSRule>
+                  <AllowedOrigin>*</AllowedOrigin>
+                  <AllowedMethod>GET</AllowedMethod>
+                </CORSRule></CORSConfiguration>
+                """);
+
+        DefaultCacheBehavior dflt = defaultBehavior("only-origin");
+        dflt.setAllowedMethods(List.of("GET", "HEAD", "OPTIONS"));
+        CacheBehavior api = behavior("api/*", "only-origin");
+        api.setAllowedMethods(List.of("GET", "HEAD"));
+        DistributionConfig config = new DistributionConfig();
+        config.setEnabled(true);
+        config.setOrigins(List.of(s3Origin("only-origin", bucket)));
+        config.setDefaultCacheBehavior(dflt);
+        config.setCacheBehaviors(List.of(api));
+        Distribution distribution = cloudFrontService.createDistribution(distribution(config), Map.of());
+
+        given()
+                .header("Host", distribution.getDomainName())
+                .header("Origin", "https://viewer.example")
+                .header("Access-Control-Request-Method", "GET")
+                .when().options("/api/resource")
+                .then().statusCode(403)
+                .body(equalTo("Invalid method."));
+
+        given()
+                .header("Host", distribution.getDomainName())
+                .header("Origin", "https://viewer.example")
+                .header("Access-Control-Request-Method", "GET")
+                .when().options("/resource")
+                .then().statusCode(200);
+    }
+
+    @Test
+    void managedPreflightPoliciesEmitOnlyAllowOriginForSimpleRequests() {
+        String suffix = suffix();
+        String bucket = "cf-managed-cors-" + suffix;
+        createBucket(bucket);
+        putObject(bucket, "index.html", "MANAGED-CORS-" + suffix, "text/html");
+
+        for (String policyId : List.of(
+                CloudFrontService.MANAGED_CORS_PREFLIGHT_POLICY_ID,
+                CloudFrontService.MANAGED_CORS_PREFLIGHT_AND_SECURITY_POLICY_ID)) {
+            DefaultCacheBehavior behavior = defaultBehavior("only-origin");
+            behavior.setResponseHeadersPolicyId(policyId);
+            DistributionConfig config = new DistributionConfig();
+            config.setEnabled(true);
+            config.setDefaultRootObject("index.html");
+            config.setOrigins(List.of(s3Origin("only-origin", bucket)));
+            config.setDefaultCacheBehavior(behavior);
+            Distribution distribution =
+                    cloudFrontService.createDistribution(distribution(config), Map.of());
+
+            given()
+                    .header("Host", distribution.getDomainName())
+                    .header("Origin", "https://viewer.example")
+                    .when().get("/")
+                    .then().statusCode(200)
+                    .header("Access-Control-Allow-Origin", equalTo("*"))
+                    .header("Access-Control-Expose-Headers", nullValue())
+                    .header("Access-Control-Allow-Methods", nullValue());
+        }
+    }
+
+    @Test
+    void pragmaForcesServerTimingWhenSamplingRateIsZero() {
+        String suffix = suffix();
+        String bucket = "cf-timing-" + suffix;
+        createBucket(bucket);
+        putObject(bucket, "index.html", "TIMING-" + suffix, "text/html");
+
+        ResponseHeadersPolicy policy = new ResponseHeadersPolicy();
+        policy.setName("timing-" + suffix);
+        policy.setConfig(Map.of("ServerTimingHeadersConfig",
+                Map.of("Enabled", "true", "SamplingRate", "0")));
+        policy = cloudFrontService.createResponseHeadersPolicy(policy);
+        DefaultCacheBehavior behavior = defaultBehavior("only-origin");
+        behavior.setResponseHeadersPolicyId(policy.getId());
+        DistributionConfig config = new DistributionConfig();
+        config.setEnabled(true);
+        config.setDefaultRootObject("index.html");
+        config.setOrigins(List.of(s3Origin("only-origin", bucket)));
+        config.setDefaultCacheBehavior(behavior);
+        Distribution distribution = cloudFrontService.createDistribution(distribution(config), Map.of());
+
+        given()
+                .header("Host", distribution.getDomainName())
+                .when().get("/")
+                .then().statusCode(200)
+                .header("Server-Timing", nullValue());
+
+        given()
+                .header("Host", distribution.getDomainName())
+                .header("Pragma", "server-timing")
+                .when().get("/")
+                .then().statusCode(200)
+                .header("Server-Timing", containsString("cdn-cache-miss"));
+    }
+
+    @Test
+    void listsManagedResponseHeadersPoliciesWithAwsModeledPayloadRoot() {
+        String body = given()
+                .queryParam("Type", "managed")
+                .when().get("/2020-05-31/response-headers-policy")
+                .then().statusCode(200)
+                .extract().asString();
+
+        assertTrue(body.startsWith("<ResponseHeadersPolicyList xmlns=\""
+                + "http://cloudfront.amazonaws.com/doc/2020-05-31/\">"), body);
+        assertFalse(body.contains("<ListResponseHeadersPoliciesResult"), body);
+        assertTrue(body.contains("<Quantity>5</Quantity>"), body);
+        assertFalse(body.contains("<NextMarker>"), body);
+        assertFalse(body.contains("<Marker>"), body);
+        assertFalse(body.contains("<IsTruncated>"), body);
+        assertTrue(body.contains("<Type>managed</Type>"), body);
+        assertTrue(body.contains("Managed-SimpleCORS"), body);
+        assertFalse(body.contains("<Type>custom</Type>"), body);
+
+        String firstPage = given()
+                .queryParam("Type", "managed")
+                .queryParam("MaxItems", 1)
+                .when().get("/2020-05-31/response-headers-policy")
+                .then().statusCode(200)
+                .extract().asString();
+        assertTrue(firstPage.contains("<Quantity>1</Quantity>"), firstPage);
+        assertTrue(firstPage.contains("<NextMarker>"), firstPage);
+        assertFalse(firstPage.contains("<IsTruncated>"), firstPage);
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────────────
 
     private static String trustedKeyGroupsXml(String keyGroup) {
@@ -877,6 +1618,13 @@ class CloudFrontDistributionServingTest {
         cer.put("ResponseCode", String.valueOf(responseCode));
         cer.put("ResponsePagePath", pagePath);
         return cer;
+    }
+
+    private static Map<String, String> policyHeader(String name, String value, boolean override) {
+        return new LinkedHashMap<>(Map.of(
+                "Header", name,
+                "Value", value,
+                "Override", Boolean.toString(override)));
     }
 
     private static String suffix() {

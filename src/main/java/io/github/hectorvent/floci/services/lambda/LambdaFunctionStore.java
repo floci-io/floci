@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.lambda;
 
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
@@ -90,10 +91,25 @@ public class LambdaFunctionStore implements Resettable {
     }
 
     public Optional<LambdaFunction> getForAccount(String accountId, String region, String functionName) {
+        return getForAccount(accountId, region, functionName, "$LATEST");
+    }
+
+    public Optional<LambdaFunction> getForAccount(
+            String accountId, String region, String functionName, String version) {
         if (backend instanceof AccountAwareStorageBackend<LambdaFunction> aware) {
-            return aware.getForAccount(accountId, regionKey(region, functionName, "$LATEST"));
+            return aware.getForAccountMigratingLegacy(
+                    accountId,
+                    regionKey(region, functionName, version),
+                    function -> belongsToAccount(function, accountId));
         }
-        return backend.get(regionKey(region, functionName, "$LATEST"));
+        return backend.get(regionKey(region, functionName, version));
+    }
+
+    private static boolean belongsToAccount(LambdaFunction function, String accountId) {
+        if (function.getAccountId() != null && !function.getAccountId().isBlank()) {
+            return accountId.equals(function.getAccountId());
+        }
+        return accountId.equals(AwsArnUtils.accountOrDefault(function.getFunctionArn(), ""));
     }
 
     public Optional<LambdaFunction> getByUrlId(String urlId) {

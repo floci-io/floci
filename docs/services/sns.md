@@ -86,6 +86,16 @@ Supported subscription protocols:
 - `sqs` — delivers to a Floci SQS queue
 - `lambda` — invokes a Floci Lambda function
 - `http` / `https` — posts to an HTTP endpoint
+- `application` — fans out to a mobile push platform endpoint (see [Mobile push](#mobile-push-mock))
+
+## Control Tower managed topic
+
+AWS Control Tower creates the regional
+`aws-controltower-AggregateSecurityNotifications` topic before Landing Zone
+Accelerator deploys its audit notification forwarder. Floci lazily materializes that
+exact same-account managed topic when `Subscribe` first references it, matching the
+Control Tower prerequisite without weakening normal SNS validation. Subscribing to
+any other missing topic still returns `NotFound`.
 
 ## Mobile push (mock)
 
@@ -121,6 +131,42 @@ aws sns publish --target-arn $ENDPOINT_ARN --message-structure json \
 When `MessageStructure="json"`, Floci picks the key matching the endpoint's platform
 (`APNS`, `APNS_SANDBOX`, `GCM`, or `FCM`), falling back to `default`. The envelope
 must be a JSON object and must include `default` — otherwise `InvalidParameter`.
+
+### Broadcast to devices via a topic
+
+Subscribe platform endpoints to a topic with `Protocol="application"`, then publish to
+the topic to fan out to every subscribed device — each endpoint is captured exactly as
+if you had published to it directly (same platform-payload resolution, same `Enabled`
+gating). A disabled endpoint in the fan-out is skipped; the rest still receive the push.
+
+```bash
+aws sns subscribe --topic-arn $TOPIC_ARN \
+  --protocol application --notification-endpoint $ENDPOINT_ARN \
+  --endpoint-url http://localhost:4566
+
+aws sns publish --topic-arn $TOPIC_ARN --message-structure json \
+  --message '{"default":"market open","GCM":"{\"notification\":{\"body\":\"market alert\"}}"}' \
+  --endpoint-url http://localhost:4566
+```
+
+Broadcast pushes surface in the same retrospection API, keyed by `EndpointArn`.
+
+### Per-protocol payloads on topic publish
+
+`MessageStructure="json"` resolves per subscriber, not just for mobile endpoints. Each
+subscription receives the value under its own protocol key — `sqs`, `lambda`, `http`,
+`https`, `email`, `email-json`, `sms`, or the push platform (`APNS`, `GCM`, …) for
+`application` — falling back to `default` when that key is absent.
+
+```bash
+aws sns publish --topic-arn $TOPIC_ARN --message-structure json \
+  --message '{"default":"hello","sqs":"hi sqs","GCM":"{\"notification\":{\"body\":\"hi device\"}}"}' \
+  --endpoint-url http://localhost:4566
+```
+
+The SQS subscriber receives `hi sqs`, the platform endpoint receives the `GCM` payload,
+and every other subscriber receives `hello`. As with any topic publish, the envelope must
+be a JSON object carrying `default`, validated before fan-out begins.
 
 ### Inspecting captured pushes
 

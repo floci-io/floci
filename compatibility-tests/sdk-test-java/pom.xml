@@ -16,8 +16,8 @@
         <maven.compiler.source>17</maven.compiler.source>
         <maven.compiler.target>17</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <aws.sdk.version>2.44.14</aws.sdk.version>
-        <awsjavasdk.version>2.44.14</awsjavasdk.version>
+        <aws.sdk.version>2.52.0</aws.sdk.version>
+        <awsjavasdk.version>2.52.0</awsjavasdk.version>
         <jackson.version>2.18.8</jackson.version>
         <kafka.clients.version>3.9.2</kafka.clients.version>
         <netty.version>4.1.135.Final</netty.version>
@@ -142,6 +142,10 @@
         </dependency>
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
+            <artifactId>signin</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
             <artifactId>kafka</artifactId>
         </dependency>
         <dependency>
@@ -208,6 +212,16 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>eventbridge</artifactId>
         </dependency>
+        <!-- CloudHSM v2 client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>cloudhsmv2</artifactId>
+        </dependency>
+        <!-- Organizations client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>organizations</artifactId>
+        </dependency>
         <!-- Cloud Map (servicediscovery) client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
@@ -253,6 +267,15 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>rum</artifactId>
         </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>fis</artifactId>
+        </dependency>
+        <!-- GuardDuty client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>guardduty</artifactId>
+        </dependency>
         <!-- Secrets Manager client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
@@ -291,6 +314,16 @@
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>pipes</artifactId>
+        </dependency>
+        <!-- Bedrock AgentCore control-plane client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>bedrockagentcorecontrol</artifactId>
+        </dependency>
+        <!-- Bedrock AgentCore data-plane client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>bedrockagentcore</artifactId>
         </dependency>
         <!-- AWS IoT client -->
         <dependency>
@@ -354,6 +387,20 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>backup</artifactId>
         </dependency>
+        <!-- Resource Explorer 2 client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>resourceexplorer2</artifactId>
+        </dependency>
+        <!-- SSO credential support (needed for FLOCI_TARGET=aws with SSO profiles) -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>sso</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>ssooidc</artifactId>
+        </dependency>
         <!-- AppSync client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
@@ -368,6 +415,11 @@
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>s3vectors</artifactId>
+        </dependency>
+        <!-- S3 Tables client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>s3tables</artifactId>
         </dependency>
         <!-- AppConfig and AppConfigData clients -->
         <dependency>
@@ -412,6 +464,26 @@
             <artifactId>assertj-core</artifactId>
             <version>3.25.3</version>
             <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.bouncycastle</groupId>
+            <artifactId>bcpkix-jdk18on</artifactId>
+            <version>1.84</version>
+            <scope>test</scope>
+        </dependency>
+        <!-- Decodes the Snappy variants Firehose delivers to S3 (issue #2328).
+             Pinned because this module imports no BOM; keep it in step with the
+             version the Quarkus BOM manages for the emulator itself. -->
+        <dependency>
+            <groupId>org.xerial.snappy</groupId>
+            <artifactId>snappy-java</artifactId>
+            <version>1.1.10.8</version>
+            <scope>test</scope>
+        </dependency>
+        <!-- EFS client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>efs</artifactId>
         </dependency>
     </dependencies>
 

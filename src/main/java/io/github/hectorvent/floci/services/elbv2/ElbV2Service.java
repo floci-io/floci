@@ -19,9 +19,16 @@ import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 @ApplicationScoped
-public class ElbV2Service {
+public class ElbV2Service implements ResourceProvider {
 
     @Inject
     ElbV2DataPlane dataPlane;
@@ -1144,5 +1151,44 @@ public class ElbV2Service {
                 out.add(t.getTargetGroupArn());
             }
         }
+    }
+
+    // ─── Resource Explorer 2 ───────────────────────────────────────────────────
+
+    @Override
+    public List<ExplorerResource> getResources() {
+        List<ExplorerResource> resources = new ArrayList<>();
+        for (Map<String, LoadBalancer> regionLoadBalancers : loadBalancers.values()) {
+            for (LoadBalancer loadBalancer : regionLoadBalancers.values()) {
+                addExplorerResource(resources, loadBalancer.getLoadBalancerArn(),
+                        "elasticloadbalancing:loadbalancer", loadBalancer.getCreatedTime());
+            }
+        }
+        for (Map<String, TargetGroup> regionTargetGroups : targetGroups.values()) {
+            for (TargetGroup targetGroup : regionTargetGroups.values()) {
+                addExplorerResource(resources, targetGroup.getTargetGroupArn(),
+                        "elasticloadbalancing:targetgroup", null);
+            }
+        }
+        return resources;
+    }
+
+    @Override
+    public Set<SupportedResourceType> getSupportedResourceTypes() {
+        return Set.of(
+                new SupportedResourceType("elasticloadbalancing:loadbalancer", "elasticloadbalancing", true),
+                new SupportedResourceType("elasticloadbalancing:targetgroup", "elasticloadbalancing", true));
+    }
+
+    private void addExplorerResource(List<ExplorerResource> out, String arn, String resourceType,
+                                     Instant createdAt) {
+        if (arn == null) {
+            return;
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        out.add(new ExplorerResource(arn, resourceType, "elasticloadbalancing",
+                parsed.region(), parsed.accountId(),
+                createdAt != null ? createdAt : Instant.now(),
+                tags.getOrDefault(arn, Map.of())));
     }
 }

@@ -2,12 +2,16 @@ package io.github.hectorvent.floci.services.eks;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsRegions;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
+import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.ContainerInfo;
+import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.common.docker.PortAllocator;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
+import io.github.hectorvent.floci.services.eks.model.Cluster;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.CopyArchiveToContainerCmd;
 import org.junit.jupiter.api.BeforeEach;
@@ -18,6 +22,8 @@ import org.mockito.Mockito;
 
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -154,6 +160,53 @@ class EksClusterManagerTest {
         assertEquals(serverArgs, wrapped.subList(1, wrapped.size()));
     }
 
+    @Test
+    void startClusterLabelsContainerWithResourceIdentity() {
+        EmulatorConfig config = Mockito.mock(EmulatorConfig.class);
+        EmulatorConfig.ServicesConfig services = Mockito.mock(EmulatorConfig.ServicesConfig.class);
+        EmulatorConfig.EksServiceConfig eks = Mockito.mock(EmulatorConfig.EksServiceConfig.class);
+        when(config.services()).thenReturn(services);
+        when(services.eks()).thenReturn(eks);
+        when(eks.defaultImage()).thenReturn("rancher/k3s:v1.30.0-k3s1");
+        when(eks.apiServerBasePort()).thenReturn(6440);
+        when(eks.apiServerMaxPort()).thenReturn(6499);
+        when(eks.dockerNetwork()).thenReturn(Optional.empty());
+        when(eks.disableCni()).thenReturn(false);
+        when(eks.iamAuthWebhook()).thenReturn(false);
+        when(eks.ecrRegistryMirror()).thenReturn(false);
+
+        ContainerLifecycleManager lifecycleManager = Mockito.mock(ContainerLifecycleManager.class);
+        when(lifecycleManager.create(any())).thenReturn("container-id");
+        when(lifecycleManager.startCreated(any(), any())).thenReturn(
+                new ContainerInfo("container-id", Map.of()));
+
+        ContainerBuilder containerBuilder = Mockito.mock(ContainerBuilder.class);
+        ContainerBuilder.Builder builder = Mockito.mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
+        when(containerBuilder.newContainer(anyString())).thenReturn(builder);
+        when(builder.build()).thenReturn(Mockito.mock(ContainerSpec.class));
+
+        RegionResolver regionResolver = Mockito.mock(RegionResolver.class);
+        when(regionResolver.getAccountId()).thenReturn("000000000000");
+        when(regionResolver.getDefaultRegion()).thenReturn("us-east-1");
+
+        EksClusterManager manager = new EksClusterManager(containerBuilder, lifecycleManager,
+                Mockito.mock(ContainerDetector.class), Mockito.mock(PortAllocator.class),
+                Mockito.mock(DockerHostResolver.class), Mockito.mock(EcrRegistryManager.class),
+                config, regionResolver);
+
+        Cluster cluster = new Cluster();
+        cluster.setName("my-cluster");
+
+        manager.startCluster(cluster);
+
+        verify(builder).withLabels(Map.of(
+                "io.floci", "aws",
+                "io.floci.service", "eks",
+                "io.floci.resource-id", "my-cluster",
+                "io.floci.account", "000000000000",
+                "io.floci.region", "us-east-1"));
+    }
+
     /** Mirror-injection guard behavior, without a Docker daemon. */
     @Nested
     class InjectEcrRegistryMirror {
@@ -196,7 +249,8 @@ class EksClusterManagerTest {
             manager = new EksClusterManager(
                     Mockito.mock(ContainerBuilder.class), lifecycleManager,
                     Mockito.mock(ContainerDetector.class), Mockito.mock(PortAllocator.class),
-                    Mockito.mock(DockerHostResolver.class), registryManager, config);
+                    Mockito.mock(DockerHostResolver.class), registryManager, config,
+                    Mockito.mock(RegionResolver.class));
         }
 
         @Test

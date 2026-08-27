@@ -51,11 +51,79 @@ Results remain in input order even when iterations finish out of order. If an it
 the Map state fails promptly, cancels its active sibling iterations, and does not start queued
 iterations.
 
+## Retry policies
+
+`Task`, `Parallel`, and `Map` states honor their `Retry` field. `ErrorEquals` matching
+follows AWS semantics, including the `States.ALL` and `States.TaskFailed` wildcards.
+`States.Runtime` is never retried. AWS defaults apply when fields are omitted
+(`MaxAttempts` 3, `IntervalSeconds` 1, `BackoffRate` 2.0), `MaxDelaySeconds` is honored,
+and each retrier keeps its own attempt counter. `Retry` is evaluated before `Catch`, and
+`$$.State.RetryCount` increments per attempt. Attempt counts, defaults, and backoff
+timing were verified against real AWS Step Functions.
+
+`JitterStrategy` supports `NONE` (the default) and `FULL`. `FULL` draws the delay
+uniformly between zero and the computed delay, as on AWS. One deviation. The delay
+between attempts is capped at 30 seconds, the same cap Floci applies to `Wait` states,
+so emulated runs stay fast.
+
+## Mocked service integrations
+
+Floci supports the Step Functions Local mock configuration format
+(`MockConfigFile.json`). This lets a Task state return a predefined result or error
+instead of calling the integrated service. It is the standard way to unit test `Catch`
+and `Retry` branches, and it also lets you execute state machines whose integrations
+Floci does not implement yet.
+
+Point `SFN_MOCK_CONFIG` at the mock configuration file and start an execution against
+`<stateMachineArn>#<testCaseName>`:
+
+```bash
+# docker run -e SFN_MOCK_CONFIG=/tmp/mock.json -v ./MockConfigFile.json:/tmp/mock.json ...
+aws stepfunctions start-execution \
+  --state-machine-arn "$SM_ARN#Throw422" \
+  --input '{}' \
+  --endpoint-url $AWS_ENDPOINT_URL
+```
+
+```json
+{
+  "StateMachines": {
+    "Test": { "TestCases": { "Throw422": { "Call API": "ApiFailure" } } }
+  },
+  "MockedResponses": {
+    "ApiFailure": {
+      "0": { "Throw": { "Error": "ApiGateway.422", "Cause": "Unprocessable" } }
+    },
+    "ApiSuccess": {
+      "0-1": { "Return": { "StatusCode": 200, "ResponseBody": { "id": 1 } } }
+    }
+  }
+}
+```
+
+Each test case maps a state name to a `MockedResponses` entry. Each mocked response is
+keyed by retry attempt (`"0"`, `"1"`, or a range like `"1-2"`), so a state can fail on
+the first attempt and succeed on a retry. `Return` supplies the task result. `Throw`
+fails the task with the given `Error` and `Cause`, which flow through `Retry` and
+`Catch` unchanged. States not named in the test case run their real integration, so
+mocked and real service calls can be combined in one execution. The file is re-read
+when it changes, so it can be edited without restarting Floci.
+
+Behavior was verified against Step Functions Local 2.0.0. As there, `StartSyncExecution`
+rejects a test case suffix with `UnsupportedOperation` and does not strip a bare trailing
+`#`, a bare trailing `#` on `StartExecution` runs the execution unmocked, and a retry
+attempt with no mocked entry fails the execution with `States.Runtime`. One intentional deviation: Floci reports an unknown test case and any
+invalid mock configuration (unparseable file, bad attempt key, missing `MockedResponses`
+entry, `Return` and `Throw` together, `Throw` without `Error`) as a structured 400 error
+at `StartExecution`. Step Functions Local instead returns a plain HTTP 500 for most of
+these and starts the execution only to fail it with `States.Runtime` for the last two.
+
 ## Configuration
 
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_SERVICES_STEPFUNCTIONS_ENABLED` | `true` | Enable or disable the service |
+| `SFN_MOCK_CONFIG` | unset | Path to a Step Functions Local compatible mock configuration file (alias: `FLOCI_SERVICES_STEPFUNCTIONS_MOCK_CONFIG_FILE`) |
 
 ## Examples
 

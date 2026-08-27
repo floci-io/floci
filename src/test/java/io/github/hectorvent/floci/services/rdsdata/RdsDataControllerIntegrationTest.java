@@ -114,10 +114,56 @@ class RdsDataControllerIntegrationTest {
     }
 
     @Test
-    void batchExecuteReturnsJsonUnsupportedError() {
+    void batchExecuteRejectsMissingSqlWithJsonDataApiError() {
         given()
             .contentType("application/json")
             .body("{}")
+        .when()
+            .post("/BatchExecute")
+        .then()
+            .statusCode(400)
+            .contentType("application/json")
+            .header("X-Amzn-Errortype", "BadRequestException")
+            .header("x-amzn-query-error", "BadRequestException;Sender")
+            .body("__type", equalTo("BadRequestException"));
+    }
+
+    @Test
+    void batchExecuteRejectsMalformedParameterSetsWithJsonDataApiError() {
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                  "resourceArn": "arn:aws:rds:us-east-1:000000000000:cluster:missing",
+                  "secretArn": "arn:aws:secretsmanager:us-east-1:000000000000:secret:missing",
+                  "database": "app",
+                  "sql": "insert into items(id) values (:id)",
+                  "parameterSets": {"name": "id"}
+                }
+                """)
+        .when()
+            .post("/BatchExecute")
+        .then()
+            .statusCode(400)
+            .contentType("application/json")
+            .header("X-Amzn-Errortype", "BadRequestException")
+            .header("x-amzn-query-error", "BadRequestException;Sender")
+            .body("__type", equalTo("BadRequestException"));
+    }
+
+    @Test
+    void batchExecuteUnknownResourceReturnsJsonDataApiError() {
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                  "resourceArn": "arn:aws:rds:us-east-1:000000000000:cluster:missing",
+                  "secretArn": "arn:aws:secretsmanager:us-east-1:000000000000:secret:missing",
+                  "database": "app",
+                  "sql": "insert into items(id) values (:id)",
+                  "parameterSets": [[{"name": "id", "value": {"longValue": 1}}]]
+                }
+                """)
         .when()
             .post("/BatchExecute")
         .then()

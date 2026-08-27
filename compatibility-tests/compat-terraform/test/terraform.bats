@@ -261,17 +261,14 @@ setup() {
 # field still applies cleanly, and only shows up later as perpetual drift. Asserting an
 # empty second plan is what actually catches that class of bug.
 #
-# Scoped to the Application Auto Scaling resources deliberately. A whole-config re-plan
-# currently reports drift on aws_cognito_user_pool, aws_db_instance
-# (auto_minor_version_upgrade) and aws_kinesis_firehose_delivery_stream
-# (s3_backup_mode) — pre-existing and unrelated to these resources. Widen this to the
-# full configuration once those are fixed.
-@test "Terraform: re-planning Application Auto Scaling reports no changes" {
+# Whole-config: this used to be scoped to just the Application Auto Scaling resources
+# because a full re-plan reported drift on aws_cognito_user_pool (device_configuration,
+# email_configuration, user_pool_add_ons), aws_db_instance (auto_minor_version_upgrade)
+# and aws_kinesis_firehose_delivery_stream (s3_backup_mode) - see #2200. Now that those
+# are fixed, this guards every resource in the fixture instead of a hand-picked subset.
+@test "Terraform: re-planning the full configuration reports no changes" {
     cd "$TF_DIR"
-    run terraform plan -var="endpoint=${FLOCI_ENDPOINT}" -input=false -no-color -detailed-exitcode \
-        -target=aws_appautoscaling_target.ecs_service \
-        -target=aws_appautoscaling_policy.ecs_cpu \
-        -target=aws_appautoscaling_policy.ecs_alb_requests
+    run terraform plan -var="endpoint=${FLOCI_ENDPOINT}" -input=false -no-color -detailed-exitcode
     if [ "$status" -eq 2 ]; then
         echo "# drift detected on re-plan:" >&3
         echo "$output" >&3
@@ -341,6 +338,43 @@ setup() {
     run terraform plan -var="endpoint=${FLOCI_ENDPOINT}" -input=false -no-color -detailed-exitcode \
         -target=aws_iam_role.tagged \
         -target=aws_iam_policy.tagged
+    if [ "$status" -eq 2 ]; then
+        echo "# drift detected on re-plan:" >&3
+        echo "$output" >&3
+    fi
+    [ "$status" -eq 0 ]
+}
+
+@test "Terraform: GuardDuty detector is created with features" {
+    run aws_cmd guardduty list-detectors --query "DetectorIds[0]" --output text
+    assert_success
+    DETECTOR_ID="$output"
+    run aws_cmd guardduty get-detector --detector-id "$DETECTOR_ID" \
+        --query "[Status, FindingPublishingFrequency]" --output text
+    assert_success
+    assert_output --partial "ENABLED"
+    assert_output --partial "SIX_HOURS"
+}
+
+@test "Terraform: GuardDuty organization configuration round-trips" {
+    run aws_cmd guardduty list-detectors --query "DetectorIds[0]" --output text
+    assert_success
+    DETECTOR_ID="$output"
+    run aws_cmd guardduty describe-organization-configuration --detector-id "$DETECTOR_ID" \
+        --query "AutoEnableOrganizationMembers" --output text
+    assert_success
+    assert_output "ALL"
+}
+
+# additional_configuration is an ordered list block; drift here means the
+# emulator reordered the list on read-back.
+@test "Terraform: re-planning GuardDuty reports no changes" {
+    cd "$TF_DIR"
+    run terraform plan -var="endpoint=${FLOCI_ENDPOINT}" -input=false -no-color -detailed-exitcode \
+        -target=aws_guardduty_detector.compat \
+        -target=aws_guardduty_detector_feature.runtime_monitoring \
+        -target=aws_guardduty_organization_configuration.compat \
+        -target=aws_guardduty_organization_configuration_feature.runtime_monitoring
     if [ "$status" -eq 2 ]; then
         echo "# drift detected on re-plan:" >&3
         echo "$output" >&3

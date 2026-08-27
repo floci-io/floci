@@ -2,22 +2,25 @@ package io.github.hectorvent.floci.services.ec2;
 
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.containsString;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.hamcrest.Matchers.not;
+import static org.hamcrest.Matchers.endsWith;
 import static org.hamcrest.Matchers.emptyOrNullString;
 import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.everyItem;
 import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.greaterThanOrEqualTo;
-import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.nullValue;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.startsWith;
-import static org.hamcrest.Matchers.containsString;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.List;
+import java.util.UUID;
 import java.util.zip.GZIPOutputStream;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -44,6 +47,8 @@ class Ec2IntegrationTest {
     private static String subnetId;
     private static String securityGroupId;
     private static String keyPairId;
+    private static String keyPairName;
+    private static String importedKeyName;
     private static String igwId;
     private static String routeTableId;
     private static String rtbAssocId;
@@ -80,7 +85,7 @@ class Ec2IntegrationTest {
         .then()
             .statusCode(200)
             .contentType("application/xml")
-            .body("DescribeVpcsResponse.vpcSet.item[0].vpcId", equalTo("vpc-default"))
+            .body("DescribeVpcsResponse.vpcSet.item[0].vpcId", equalTo(Ec2Service.defaultVpcId("us-east-1")))
             .body("DescribeVpcsResponse.vpcSet.item[0].cidrBlock", equalTo("172.31.0.0/16"))
             .body("DescribeVpcsResponse.vpcSet.item[0].isDefault", equalTo("true"));
     }
@@ -94,7 +99,7 @@ class Ec2IntegrationTest {
         given()
             .formParam("Action", "DescribeSubnets")
             .formParam("Filter.1.Name", "vpc-id")
-            .formParam("Filter.1.Value.1", "vpc-default")
+            .formParam("Filter.1.Value.1", Ec2Service.defaultVpcId("us-east-1"))
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
@@ -119,7 +124,7 @@ class Ec2IntegrationTest {
             .formParam("Filter.1.Name", "group-name")
             .formParam("Filter.1.Value.1", "default")
             .formParam("Filter.2.Name", "vpc-id")
-            .formParam("Filter.2.Value.1", "vpc-default")
+            .formParam("Filter.2.Value.1", Ec2Service.defaultVpcId("us-east-1"))
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
@@ -129,7 +134,7 @@ class Ec2IntegrationTest {
             .body("DescribeSecurityGroupsResponse.securityGroupInfo.item[0].groupName", equalTo("default"))
             .body("DescribeSecurityGroupsResponse.securityGroupInfo.item[0].groupDescription",
                 equalTo("default VPC security group"))
-            .body("DescribeSecurityGroupsResponse.securityGroupInfo.item[0].vpcId", equalTo("vpc-default"));
+            .body("DescribeSecurityGroupsResponse.securityGroupInfo.item[0].vpcId", equalTo(Ec2Service.defaultVpcId("us-east-1")));
     }
 
     // =========================================================================
@@ -225,6 +230,257 @@ class Ec2IntegrationTest {
 
     @Test
     @Order(9)
+    void synthesizedLookupImageSatisfiesAnInfixWildcardName() {
+        // Truncating at the first wildcard produced "unmatched-vendor-20260101", which does not
+        // satisfy the pattern the caller asked for.
+        String name = given()
+            .formParam("Action", "DescribeImages")
+            .formParam("Filter.1.Name", "name")
+            .formParam("Filter.1.Value.1", "unmatched-vendor-*-20.04-*")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeImagesResponse.imagesSet.item.size()", equalTo(1))
+            .extract().path("DescribeImagesResponse.imagesSet.item.name");
+
+        assertThat(name, startsWith("unmatched-vendor-"));
+        assertThat(name, containsString("-20.04-"));
+    }
+
+    @Test
+    @Order(9)
+    void synthesizedLookupImageSatisfiesASingleCharacterWildcard() {
+        // ? matches exactly one character in an AWS filter. Leaving it in the synthesized name
+        // handed back "unmatched-vendor-?", which the requesting filter does not match once the
+        // matcher reads ? as a wildcard rather than a literal.
+        String name = given()
+            .formParam("Action", "DescribeImages")
+            .formParam("Filter.1.Name", "name")
+            .formParam("Filter.1.Value.1", "unmatched-vendor-?-single")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeImagesResponse.imagesSet.item.size()", equalTo(1))
+            .extract().path("DescribeImagesResponse.imagesSet.item.name");
+
+        assertThat(name, not(containsString("?")));
+        assertThat(name, startsWith("unmatched-vendor-"));
+        assertThat(name, endsWith("-single"));
+        assertEquals("unmatched-vendor-".length() + 1 + "-single".length(), name.length());
+    }
+
+    @Test
+    @Order(9)
+    void synthesizedLookupImageResolvesTheSelfOwnerAlias() {
+        // Owner.N takes aliases. Writing "self" through verbatim produced an image owned by the
+        // literal string, which no owner scope resolves to, and the guard never re-checked the
+        // owner because it only looked at Filter.N.
+        String owner = given()
+            .formParam("Action", "DescribeImages")
+            .formParam("Owner.1", "self")
+            .formParam("Filter.1.Name", "name")
+            .formParam("Filter.1.Value.1", "unmatched-self-owned-*")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeImagesResponse.imagesSet.item.size()", equalTo(1))
+            .extract().path("DescribeImagesResponse.imagesSet.item.imageOwnerId");
+
+        assertEquals("000000000000", owner);
+    }
+
+    /**
+     * Owner scope, then the id and alias the synthesized image must report together. A null
+     * expectedAlias means AWS reports no alias for that account, so the element is asserted
+     * absent from the body rather than compared as a value.
+     */
+    private void assertSynthesizedOwnership(String ownerScope, String expectedId, String expectedAlias) {
+        var response = given()
+            .formParam("Action", "DescribeImages")
+            .formParam("Owner.1", ownerScope)
+            .formParam("Filter.1.Name", "name")
+            .formParam("Filter.1.Value.1", "unmatched-coherence-" + ownerScope + "-*")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeImagesResponse.imagesSet.item.size()", equalTo(1))
+            .extract();
+
+        assertEquals(expectedId, response.path("DescribeImagesResponse.imagesSet.item.imageOwnerId"),
+                "imageOwnerId for Owner.1=" + ownerScope);
+        if (expectedAlias == null) {
+            assertThat("imageOwnerAlias for Owner.1=" + ownerScope,
+                    response.asString(), not(containsString("<imageOwnerAlias>")));
+        } else {
+            assertEquals(expectedAlias,
+                    response.path("DescribeImagesResponse.imagesSet.item.imageOwnerAlias").toString(),
+                    "imageOwnerAlias for Owner.1=" + ownerScope);
+        }
+    }
+
+    @Test
+    @Order(9)
+    void synthesizedOwnershipIsSelfConsistentAcrossOwnerScopes() {
+        // Every earlier round here fixed one field and left the one beside it, so this asserts the
+        // pair together. An id resolved from the scope with an alias defaulted to amazon reports
+        // ownership that contradicts itself.
+        assertSynthesizedOwnership("self", "000000000000", null);
+        assertSynthesizedOwnership("amazon", "137112412989", "amazon");
+        assertSynthesizedOwnership("aws-marketplace", "679593333241", "aws-marketplace");
+        assertSynthesizedOwnership("099720109477", "099720109477", null);
+    }
+
+    @Test
+    @Order(9)
+    void anOwnerAliasFilterAloneStillAgreesWithTheOwnerId() {
+        // The mirror of the above. Filtering on the alias with no Owner.N left the id at the
+        // Amazon default, so the image reported aws-marketplace beside Amazon's account.
+        var response = given()
+            .formParam("Action", "DescribeImages")
+            .formParam("Filter.1.Name", "name")
+            .formParam("Filter.1.Value.1", "unmatched-alias-filter-only-*")
+            .formParam("Filter.2.Name", "owner-alias")
+            .formParam("Filter.2.Value.1", "aws-marketplace")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeImagesResponse.imagesSet.item.size()", equalTo(1))
+            .extract();
+
+        assertEquals("679593333241",
+                response.path("DescribeImagesResponse.imagesSet.item.imageOwnerId"));
+        assertEquals("aws-marketplace",
+                response.path("DescribeImagesResponse.imagesSet.item.imageOwnerAlias").toString());
+    }
+
+    @Test
+    @Order(9)
+    void aWildcardBehindAnExactNameValueStillSynthesizes() {
+        // A filter's values are an OR. Taking the first value outright picked the exact one, the
+        // wildcard check failed, and the lookup got an empty set it could have satisfied.
+        String name = given()
+            .formParam("Action", "DescribeImages")
+            .formParam("Filter.1.Name", "name")
+            .formParam("Filter.1.Value.1", "unmatched-exact-name-no-wildcard")
+            .formParam("Filter.1.Value.2", "unmatched-second-value-*")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeImagesResponse.imagesSet.item.size()", equalTo(1))
+            .extract().path("DescribeImagesResponse.imagesSet.item.name");
+
+        assertThat(name, startsWith("unmatched-second-value-"));
+    }
+
+    @Test
+    @Order(9)
+    void amazonOwnerScopeFindsTheSeededAmazonLinuxImages() {
+        // The catalog matches on its own owner metadata, and the two Amazon Linux entries carried
+        // none, so Owner.1=amazon omitted them however the registered-image matcher read the alias.
+        given()
+            .formParam("Action", "DescribeImages")
+            .formParam("Owner.1", "amazon")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("amzn2-ami-hvm"))
+            .body(containsString("al2023-ami"));
+    }
+
+    @Test
+    @Order(9)
+    void synthesizedLookupImageResolvesTheAmazonOwnerAlias() {
+        // imageOwnerId is always an account id in AWS. Writing the alias through left the image
+        // owned by the literal "amazon", and the owner check accepted it by string equality.
+        String owner = given()
+            .formParam("Action", "DescribeImages")
+            .formParam("Owner.1", "amazon")
+            .formParam("Filter.1.Name", "name")
+            .formParam("Filter.1.Value.1", "unmatched-amazon-owned-*")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeImagesResponse.imagesSet.item.size()", equalTo(1))
+            .extract().path("DescribeImagesResponse.imagesSet.item.imageOwnerId");
+
+        assertEquals("137112412989", owner);
+    }
+
+    @Test
+    @Order(9)
+    void synthesizedLookupImageIsWithheldFromAnOwnerScopeItCannotSatisfy() {
+        // A foreign owner scope cannot be satisfied by anything we synthesize, so the lookup gets
+        // the empty result rather than an AMI that contradicts the request.
+        given()
+            .formParam("Action", "DescribeImages")
+            .formParam("Owner.1", "999999999999")
+            .formParam("Filter.1.Name", "name")
+            .formParam("Filter.1.Value.1", "unmatched-foreign-owner-*")
+            .formParam("Filter.2.Name", "owner-id")
+            .formParam("Filter.2.Value.1", "137112412989")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(not(containsString("<imageId>")));
+    }
+
+    @Test
+    @Order(9)
+    void synthesizedLookupImageHonorsOtherRequestedFilters() {
+        given()
+            .formParam("Action", "DescribeImages")
+            .formParam("Filter.1.Name", "name")
+            .formParam("Filter.1.Value.1", "unmatched-vendor-arm-*")
+            .formParam("Filter.2.Name", "architecture")
+            .formParam("Filter.2.Value.1", "arm64")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeImagesResponse.imagesSet.item.size()", equalTo(1))
+            .body("DescribeImagesResponse.imagesSet.item.architecture", equalTo("arm64"));
+    }
+
+    @Test
+    @Order(9)
+    void synthesizedLookupImageIsWithheldWhenItCannotSatisfyTheRequest() {
+        // The synthesized description is fixed, so a description filter it cannot meet must yield
+        // an empty result rather than an AMI that violates the request.
+        given()
+            .formParam("Action", "DescribeImages")
+            .formParam("Filter.1.Name", "name")
+            .formParam("Filter.1.Value.1", "unmatched-vendor-none-*")
+            .formParam("Filter.2.Name", "description")
+            .formParam("Filter.2.Value.1", "a description no synthesized image carries")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(not(containsString("<imageId>")));
+    }
+
+    @Test
+    @Order(9)
     void describeImagesWithUbuntu2404Arm64Filters() {
         given()
             .formParam("Action", "DescribeImages")
@@ -267,10 +523,14 @@ class Ec2IntegrationTest {
             .statusCode(200)
             .extract().path("RunInstancesResponse.instancesSet.item.instanceId");
 
+        // Per-invocation image name: CreateImage rejects a duplicate AMI name, and this image is
+        // never deregistered, so a fixed literal would collide with a leftover from an earlier
+        // pass through this class in the same JVM.
+        String imageName = "created-from-instance-" + UUID.randomUUID().toString().substring(0, 8);
         String amiId = given()
             .formParam("Action", "CreateImage")
             .formParam("InstanceId", imgInstanceId)
-            .formParam("Name", "created-from-instance")
+            .formParam("Name", imageName)
             .formParam("Description", "CreateImage test")
             .header("Authorization", AUTH_HEADER)
         .when()
@@ -289,7 +549,7 @@ class Ec2IntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("DescribeImagesResponse.imagesSet.item.name", equalTo("created-from-instance"));
+            .body("DescribeImagesResponse.imagesSet.item.name", equalTo(imageName));
 
         // The source instance is terminated here rather than left running: the
         // DescribeNetworkInterfaces pagination tests at @Order(92) assert that the
@@ -324,10 +584,14 @@ class Ec2IntegrationTest {
             .statusCode(200)
             .extract().path("RunInstancesResponse.instancesSet.item.instanceId");
 
+        // Per-invocation image name: CreateImage rejects a duplicate AMI name, and this image is
+        // never deregistered, so a fixed literal would collide with a leftover from an earlier
+        // pass through this class in the same JVM.
+        String imageName = "created-from-arm-instance-" + UUID.randomUUID().toString().substring(0, 8);
         String amiId = given()
             .formParam("Action", "CreateImage")
             .formParam("InstanceId", armInstanceId)
-            .formParam("Name", "created-from-arm-instance")
+            .formParam("Name", imageName)
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
@@ -377,9 +641,13 @@ class Ec2IntegrationTest {
     @Test
     @Order(10)
     void registerImageCreatesDescribableImageWithSnapshotMapping() {
+        // Per-invocation image name: RegisterImage rejects a duplicate AMI name, and this image
+        // is never deregistered, so a fixed literal would collide with a leftover from an
+        // earlier pass through this class in the same JVM.
+        String imageName = "test-image-" + UUID.randomUUID().toString().substring(0, 8);
         registeredImageId = given()
             .formParam("Action", "RegisterImage")
-            .formParam("Name", "test-image")
+            .formParam("Name", imageName)
             .formParam("Description", "test image")
             .formParam("Architecture", "x86_64")
             .formParam("RootDeviceName", "/dev/sda1")
@@ -399,7 +667,7 @@ class Ec2IntegrationTest {
         given()
             .formParam("Action", "DescribeImages")
             .formParam("Filter.1.Name", "name")
-            .formParam("Filter.1.Value.1", "test-image")
+            .formParam("Filter.1.Value.1", imageName)
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
@@ -895,6 +1163,100 @@ class Ec2IntegrationTest {
     }
 
     @Test
+    @Order(24)
+    void describeInstancesByAvailabilityZoneFilter() {
+        String isolatedVpcId = given()
+            .formParam("Action", "CreateVpc")
+            .formParam("CidrBlock", "10.11.0.0/16")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("CreateVpcResponse.vpc.vpcId");
+
+        String subnetA = given()
+            .formParam("Action", "CreateSubnet")
+            .formParam("VpcId", isolatedVpcId)
+            .formParam("CidrBlock", "10.11.1.0/24")
+            .formParam("AvailabilityZone", "us-east-1a")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("CreateSubnetResponse.subnet.subnetId");
+
+        String subnetB = given()
+            .formParam("Action", "CreateSubnet")
+            .formParam("VpcId", isolatedVpcId)
+            .formParam("CidrBlock", "10.11.2.0/24")
+            .formParam("AvailabilityZone", "us-east-1b")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("CreateSubnetResponse.subnet.subnetId");
+
+        String sgId = given()
+            .formParam("Action", "CreateSecurityGroup")
+            .formParam("GroupName", "az-filter-test-sg")
+            .formParam("GroupDescription", "AZ filter test")
+            .formParam("VpcId", isolatedVpcId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("CreateSecurityGroupResponse.groupId");
+
+        String instanceA = given()
+            .formParam("Action", "RunInstances")
+            .formParam("ImageId", "ami-0abcdef1234567890")
+            .formParam("InstanceType", "t2.micro")
+            .formParam("MinCount", "1")
+            .formParam("MaxCount", "1")
+            .formParam("SubnetId", subnetA)
+            .formParam("SecurityGroupId.1", sgId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("RunInstancesResponse.instancesSet.item.instanceId");
+
+        given()
+            .formParam("Action", "RunInstances")
+            .formParam("ImageId", "ami-0abcdef1234567890")
+            .formParam("InstanceType", "t2.micro")
+            .formParam("MinCount", "1")
+            .formParam("MaxCount", "1")
+            .formParam("SubnetId", subnetB)
+            .formParam("SecurityGroupId.1", sgId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .formParam("Action", "DescribeInstances")
+            .formParam("Filter.1.Name", "vpc-id")
+            .formParam("Filter.1.Value.1", isolatedVpcId)
+            .formParam("Filter.2.Name", "availability-zone")
+            .formParam("Filter.2.Value.1", "us-east-1a")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeInstancesResponse.reservationSet.item.instancesSet.item.instanceId", equalTo(instanceA))
+            .body("DescribeInstancesResponse.reservationSet.item.instancesSet.item.placement.availabilityZone",
+                    equalTo("us-east-1a"));
+    }
+
+    @Test
     @Order(21)
     void createSubnetHasAssignIpv6AddressOnCreation() {
         given()
@@ -1044,7 +1406,7 @@ class Ec2IntegrationTest {
         given()
             .formParam("Action", "DescribeSecurityGroupRules")
             .formParam("Filter.1.Name", "group-id")
-            .formParam("Filter.1.Value.1", "sg-default")
+            .formParam("Filter.1.Value.1", Ec2Service.defaultSecurityGroupId("us-east-1"))
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
@@ -1064,15 +1426,19 @@ class Ec2IntegrationTest {
     @Test
     @Order(40)
     void createKeyPair() {
+        // Generated fresh per invocation (rather than a fixed literal) so a second pass through
+        // this class in the same JVM doesn't collide with a key pair the first pass already
+        // created — CreateKeyPair rejects a duplicate KeyName.
+        keyPairName = "test-key-" + UUID.randomUUID().toString().substring(0, 8);
         keyPairId = given()
             .formParam("Action", "CreateKeyPair")
-            .formParam("KeyName", "test-key")
+            .formParam("KeyName", keyPairName)
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
         .then()
             .statusCode(200)
-            .body("CreateKeyPairResponse.keyName", equalTo("test-key"))
+            .body("CreateKeyPairResponse.keyName", equalTo(keyPairName))
             .body("CreateKeyPairResponse.keyMaterial", notNullValue())
             .extract().path("CreateKeyPairResponse.keyPairId");
     }
@@ -1082,13 +1448,13 @@ class Ec2IntegrationTest {
     void describeKeyPairs() {
         given()
             .formParam("Action", "DescribeKeyPairs")
-            .formParam("KeyName.1", "test-key")
+            .formParam("KeyName.1", keyPairName)
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
         .then()
             .statusCode(200)
-            .body("DescribeKeyPairsResponse.keySet.item.keyName", equalTo("test-key"));
+            .body("DescribeKeyPairsResponse.keySet.item.keyName", equalTo(keyPairName));
     }
 
     @Test
@@ -1108,16 +1474,19 @@ class Ec2IntegrationTest {
     @Test
     @Order(39)
     void importKeyPair() {
+        // Generated fresh per invocation: this key pair is never deleted, so a fixed literal
+        // would collide with a leftover from an earlier pass through this class in the same JVM.
+        importedKeyName = "imported-key-" + UUID.randomUUID().toString().substring(0, 8);
         given()
             .formParam("Action", "ImportKeyPair")
-            .formParam("KeyName", "imported-key")
+            .formParam("KeyName", importedKeyName)
             .formParam("PublicKeyMaterial", "c3NoLXJzYSBBQUFBQjNOemFDMXljMkVBQUFBREFRQUJBQUFCQVFD")
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
         .then()
             .statusCode(200)
-            .body("ImportKeyPairResponse.keyName", equalTo("imported-key"))
+            .body("ImportKeyPairResponse.keyName", equalTo(importedKeyName))
             .body("ImportKeyPairResponse.keyPairId", startsWith("key-"));
     }
 
@@ -1126,7 +1495,7 @@ class Ec2IntegrationTest {
     void importKeyPairRejectsDuplicateKeyName() {
         given()
             .formParam("Action", "ImportKeyPair")
-            .formParam("KeyName", "imported-key")
+            .formParam("KeyName", importedKeyName)
             .formParam("PublicKeyMaterial", "c3NoLXJzYSBBQUFBQjNOemFDMXljMkVBQUFBREFRQUJBQUFCQVFD")
             .header("Authorization", AUTH_HEADER)
         .when()
@@ -3107,6 +3476,13 @@ class Ec2IntegrationTest {
     @Test
     @Order(150)
     void spotInstanceLifecycle() {
+        // Per-invocation tag value: DescribeSpotInstanceRequests has no owner scoping beyond
+        // region, and this request's tag is never cleaned up (only cancelled). A fixed tag value
+        // would match a leftover cancelled request from an earlier pass through this class in
+        // the same JVM too, and since the in-memory store's scan has no defined ordering, step 3
+        // below could pick either match at item[0] and assert the wrong spotInstanceRequestId.
+        String spotTagValue = "SpotValue-" + UUID.randomUUID().toString().substring(0, 8);
+
         // 1. Request Spot Instance
         String spotRequestId = given()
             .formParam("Action", "RequestSpotInstances")
@@ -3117,7 +3493,7 @@ class Ec2IntegrationTest {
             .formParam("LaunchSpecification.InstanceType", "t2.micro")
             .formParam("TagSpecification.1.ResourceType", "spot-instances-request")
             .formParam("TagSpecification.1.Tag.1.Key", "SpotKey")
-            .formParam("TagSpecification.1.Tag.1.Value", "SpotValue")
+            .formParam("TagSpecification.1.Tag.1.Value", spotTagValue)
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
@@ -3131,7 +3507,7 @@ class Ec2IntegrationTest {
             .body("RequestSpotInstancesResponse.spotInstanceRequestSet.item[0].launchSpecification.imageId", equalTo("ami-0abcdef1234567890"))
             .body("RequestSpotInstancesResponse.spotInstanceRequestSet.item[0].productDescription", equalTo("Linux/UNIX"))
             .body("RequestSpotInstancesResponse.spotInstanceRequestSet.item[0].tagSet.item[0].key", equalTo("SpotKey"))
-            .body("RequestSpotInstancesResponse.spotInstanceRequestSet.item[0].tagSet.item[0].value", equalTo("SpotValue"))
+            .body("RequestSpotInstancesResponse.spotInstanceRequestSet.item[0].tagSet.item[0].value", equalTo(spotTagValue))
             .extract().path("RequestSpotInstancesResponse.spotInstanceRequestSet.item[0].spotInstanceRequestId");
 
         // 2. Describe Spot Instance Request by ID
@@ -3150,7 +3526,7 @@ class Ec2IntegrationTest {
         given()
             .formParam("Action", "DescribeSpotInstanceRequests")
             .formParam("Filter.1.Name", "tag:SpotKey")
-            .formParam("Filter.1.Value.1", "SpotValue")
+            .formParam("Filter.1.Value.1", spotTagValue)
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")

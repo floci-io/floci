@@ -76,6 +76,8 @@ floci:
         flush-interval-ms: 5000
       opensearch:
         flush-interval-ms: 5000
+      fis:
+        flush-interval-ms: 5000
 
   dns:
     # Extra hostname suffixes resolved to Floci's container IP by the embedded DNS server.
@@ -87,7 +89,7 @@ floci:
     #   - localhost.localstack.cloud
 
   auth:
-    validate-signatures: false               # Set to true to enforce AWS SigV4 validation
+    validate-signatures: false               # Set to true to verify S3 presigned URL signatures
     presign-secret: local-emulator-secret    # HMAC secret for S3 pre-signed URL verification
 
   tls:
@@ -152,6 +154,13 @@ floci:
       enabled: true
       enforcement-enabled: false        # Set to true to enforce IAM policies on all requests
       seed-deployer-principal: false    # Set to true to create a local floci-deployer admin principal
+
+    servicequotas:
+      enabled: true
+
+    ram:
+      enabled: true
+
 
     elasticache:
       enabled: true
@@ -231,6 +240,9 @@ floci:
     ec2:
       enabled: true
 
+    efs:
+      enabled: true
+
     ecs:
       enabled: true
       mock: false                             # true = tasks go to RUNNING without Docker (useful for CI)
@@ -242,6 +254,9 @@ floci:
       enabled: true
 
     appconfigdata:
+      enabled: true
+
+    fis:
       enabled: true
 
     ecr:

@@ -150,7 +150,8 @@ class S3VectorsIntegrationTest {
                                 "float32": [1.0, 0.0, 0.0]
                             },
                             "metadata": {
-                                "label": "first"
+                                "label": "first",
+                                "tenant": "tenant-a"
                             }
                         },
                         {
@@ -159,7 +160,8 @@ class S3VectorsIntegrationTest {
                                 "float32": [0.0, 1.0, 0.0]
                             },
                             "metadata": {
-                                "label": "second"
+                                "label": "second",
+                                "tenant": "tenant-b"
                             }
                         }
                     ]
@@ -225,6 +227,87 @@ class S3VectorsIntegrationTest {
 
     @Test
     @Order(10)
+    void queryVectorsFiltersByMetadataEquality() {
+        given()
+            .contentType(JSON_CONTENT_TYPE)
+            .body("""
+                {
+                    "vectorBucketName": "%s",
+                    "indexName": "%s",
+                    "queryVector": {
+                        "float32": [1.0, 0.0, 0.0]
+                    },
+                    "topK": 2,
+                    "filter": {
+                        "tenant": {
+                            "$eq": "tenant-a"
+                        }
+                    },
+                    "returnMetadata": true
+                }
+                """.formatted(BUCKET_NAME, INDEX_NAME))
+        .when()
+            .post("/QueryVectors")
+        .then()
+            .statusCode(200)
+            .body("vectors", hasSize(1))
+            .body("vectors[0].key", equalTo("v1"))
+            .body("vectors[0].metadata.tenant", equalTo("tenant-a"));
+    }
+
+    @Test
+    @Order(11)
+    void queryVectorsReturnsEmptyWhenFilterDoesNotMatch() {
+        given()
+            .contentType(JSON_CONTENT_TYPE)
+            .body("""
+                {
+                    "vectorBucketName": "%s",
+                    "indexName": "%s",
+                    "queryVector": {
+                        "float32": [1.0, 0.0, 0.0]
+                    },
+                    "topK": 2,
+                    "filter": {
+                        "tenant": "tenant-c"
+                    }
+                }
+                """.formatted(BUCKET_NAME, INDEX_NAME))
+        .when()
+            .post("/QueryVectors")
+        .then()
+            .statusCode(200)
+            .body("vectors", empty());
+    }
+
+    @Test
+    @Order(12)
+    void queryVectorsFiltersBeforeApplyingTopK() {
+        given()
+            .contentType(JSON_CONTENT_TYPE)
+            .body("""
+                {
+                    "vectorBucketName": "%s",
+                    "indexName": "%s",
+                    "queryVector": {
+                        "float32": [1.0, 0.0, 0.0]
+                    },
+                    "topK": 1,
+                    "filter": {
+                        "tenant": "tenant-b"
+                    }
+                }
+                """.formatted(BUCKET_NAME, INDEX_NAME))
+        .when()
+            .post("/QueryVectors")
+        .then()
+            .statusCode(200)
+            .body("vectors", hasSize(1))
+            .body("vectors[0].key", equalTo("v2"));
+    }
+
+    @Test
+    @Order(13)
     void queryVectors_withoutReturnDistance_omitsDistance() {
         given()
             .contentType(JSON_CONTENT_TYPE)
@@ -243,11 +326,81 @@ class S3VectorsIntegrationTest {
         .then()
             .statusCode(200)
             .body("vectors", hasSize(1))
-            .body("vectors[0]", not(hasKey("distance")));
+            .body("vectors[0]", not(hasKey("distance")))
+            .body("vectors[0]", not(hasKey("metadata")));
     }
 
     @Test
-    @Order(11)
+    @Order(14)
+    void listVectors() {
+        // Reproduces #2161: ListVectors previously had no route and fell through to the S3
+        // REST-XML controller, returning an S3 <Error>InvalidArgument</Error> instead of a
+        // ListVectors response.
+        given()
+            .contentType(JSON_CONTENT_TYPE)
+            .body("""
+                {
+                    "vectorBucketName": "%s",
+                    "indexName": "%s",
+                    "returnData": true,
+                    "returnMetadata": true
+                }
+                """.formatted(BUCKET_NAME, INDEX_NAME))
+        .when()
+            .post("/ListVectors")
+        .then()
+            .contentType(JSON_CONTENT_TYPE)
+            .statusCode(200)
+            .body("vectors", hasSize(2))
+            .body("vectors.find { it.key == 'v1' }.data.float32", contains(1.0f, 0.0f, 0.0f))
+            .body("vectors.find { it.key == 'v1' }.metadata.label", equalTo("first"))
+            .body("vectors.find { it.key == 'v2' }.metadata.label", equalTo("second"))
+            .body("nextToken", nullValue());
+    }
+
+    @Test
+    @Order(15)
+    void listVectorsPaginatesWithMaxResultsAndNextToken() {
+        String firstPageNextToken =
+            given()
+                .contentType(JSON_CONTENT_TYPE)
+                .body("""
+                    {
+                        "vectorBucketName": "%s",
+                        "indexName": "%s",
+                        "maxResults": 1
+                    }
+                    """.formatted(BUCKET_NAME, INDEX_NAME))
+            .when()
+                .post("/ListVectors")
+            .then()
+                .statusCode(200)
+                .body("vectors", hasSize(1))
+                .body("vectors[0].key", equalTo("v1"))
+                .body("nextToken", notNullValue())
+            .extract().path("nextToken");
+
+        given()
+            .contentType(JSON_CONTENT_TYPE)
+            .body("""
+                {
+                    "vectorBucketName": "%s",
+                    "indexName": "%s",
+                    "maxResults": 1,
+                    "nextToken": "%s"
+                }
+                """.formatted(BUCKET_NAME, INDEX_NAME, firstPageNextToken))
+        .when()
+            .post("/ListVectors")
+        .then()
+            .statusCode(200)
+            .body("vectors", hasSize(1))
+            .body("vectors[0].key", equalTo("v2"))
+            .body("nextToken", nullValue());
+    }
+
+    @Test
+    @Order(16)
     void deleteVectors() {
         given()
             .contentType(JSON_CONTENT_TYPE)
@@ -282,7 +435,7 @@ class S3VectorsIntegrationTest {
     }
 
     @Test
-    @Order(12)
+    @Order(17)
     void deleteIndex() {
         given()
             .contentType(JSON_CONTENT_TYPE)
@@ -313,7 +466,7 @@ class S3VectorsIntegrationTest {
     }
 
     @Test
-    @Order(13)
+    @Order(18)
     void deleteVectorBucket() {
         given()
             .contentType(JSON_CONTENT_TYPE)
@@ -339,5 +492,230 @@ class S3VectorsIntegrationTest {
             .post("/GetVectorBucket")
         .then()
             .statusCode(404);
+    }
+
+    // Self-contained: each test below creates its own bucket/index so it doesn't depend on the
+    // ordered setup/teardown sequence above.
+
+    @Test
+    @Order(16)
+    void listVectorsByIndexArnOnly() {
+        String bucketName = "arn-list-vectors-bucket";
+        String indexName = "arn-idx";
+
+        given()
+            .contentType(JSON_CONTENT_TYPE)
+            .body("""
+                { "vectorBucketName": "%s" }
+                """.formatted(bucketName))
+        .when()
+            .post("/CreateVectorBucket")
+        .then()
+            .statusCode(200);
+
+        String indexArn =
+            given()
+                .contentType(JSON_CONTENT_TYPE)
+                .body("""
+                    {
+                        "vectorBucketName": "%s",
+                        "indexName": "%s",
+                        "dimension": 2,
+                        "distanceMetric": "cosine",
+                        "dataType": "float32"
+                    }
+                    """.formatted(bucketName, indexName))
+            .when()
+                .post("/CreateIndex")
+            .then()
+                .statusCode(200)
+            .extract().path("indexArn");
+
+        given()
+            .contentType(JSON_CONTENT_TYPE)
+            .body("""
+                {
+                    "vectorBucketName": "%s",
+                    "indexName": "%s",
+                    "vectors": [{"key": "only", "data": {"float32": [1.0, 0.0]}}]
+                }
+                """.formatted(bucketName, indexName))
+        .when()
+            .post("/PutVectors")
+        .then()
+            .statusCode(200);
+
+        // ListVectors identified by indexArn alone (no vectorBucketName/indexName) must resolve
+        // to the same index rather than looking up a null bucket name.
+        given()
+            .contentType(JSON_CONTENT_TYPE)
+            .body("""
+                { "indexArn": "%s" }
+                """.formatted(indexArn))
+        .when()
+            .post("/ListVectors")
+        .then()
+            .statusCode(200)
+            .body("vectors", hasSize(1))
+            .body("vectors[0].key", equalTo("only"));
+    }
+
+    @Test
+    @Order(17)
+    void listVectorsPaginationRoundTripsKeysWithQuotes() {
+        String bucketName = "quote-key-vector-bucket";
+        String indexName = "quote-idx";
+
+        given()
+            .contentType(JSON_CONTENT_TYPE)
+            .body("""
+                { "vectorBucketName": "%s" }
+                """.formatted(bucketName))
+        .when()
+            .post("/CreateVectorBucket")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType(JSON_CONTENT_TYPE)
+            .body("""
+                {
+                    "vectorBucketName": "%s",
+                    "indexName": "%s",
+                    "dimension": 2,
+                    "distanceMetric": "cosine",
+                    "dataType": "float32"
+                }
+                """.formatted(bucketName, indexName))
+        .when()
+            .post("/CreateIndex")
+        .then()
+            .statusCode(200);
+
+        // One key contains a double quote — the pagination cursor must round-trip it intact
+        // rather than truncating at the quote.
+        given()
+            .contentType(JSON_CONTENT_TYPE)
+            .body("""
+                {
+                    "vectorBucketName": "%s",
+                    "indexName": "%s",
+                    "vectors": [
+                        {"key": "a\\"b", "data": {"float32": [1.0, 0.0]}},
+                        {"key": "c", "data": {"float32": [0.0, 1.0]}}
+                    ]
+                }
+                """.formatted(bucketName, indexName))
+        .when()
+            .post("/PutVectors")
+        .then()
+            .statusCode(200);
+
+        String firstPageNextToken =
+            given()
+                .contentType(JSON_CONTENT_TYPE)
+                .body("""
+                    {
+                        "vectorBucketName": "%s",
+                        "indexName": "%s",
+                        "maxResults": 1
+                    }
+                    """.formatted(bucketName, indexName))
+            .when()
+                .post("/ListVectors")
+            .then()
+                .statusCode(200)
+                .body("vectors", hasSize(1))
+                .body("vectors[0].key", equalTo("a\"b"))
+                .body("nextToken", notNullValue())
+            .extract().path("nextToken");
+
+        given()
+            .contentType(JSON_CONTENT_TYPE)
+            .body("""
+                {
+                    "vectorBucketName": "%s",
+                    "indexName": "%s",
+                    "maxResults": 1,
+                    "nextToken": "%s"
+                }
+                """.formatted(bucketName, indexName, firstPageNextToken))
+        .when()
+            .post("/ListVectors")
+        .then()
+            .statusCode(200)
+            .body("vectors", hasSize(1))
+            .body("vectors[0].key", equalTo("c"))
+            .body("nextToken", nullValue());
+    }
+
+    @Test
+    @Order(18)
+    void listVectorsByIndexArnResolvesTheArnsOwnRegionNotTheRequestRegion() {
+        String bucketName = "cross-region-vector-bucket";
+        String indexName = "cross-region-idx";
+        String otherRegionAuth = "Credential=AKID/20260101/us-west-2/s3vectors/aws4_request";
+
+        // Create the bucket/index in us-west-2 (via the SigV4 credential scope region).
+        given()
+            .contentType(JSON_CONTENT_TYPE)
+            .header("Authorization", otherRegionAuth)
+            .body("""
+                { "vectorBucketName": "%s" }
+                """.formatted(bucketName))
+        .when()
+            .post("/CreateVectorBucket")
+        .then()
+            .statusCode(200);
+
+        String indexArn =
+            given()
+                .contentType(JSON_CONTENT_TYPE)
+                .header("Authorization", otherRegionAuth)
+                .body("""
+                    {
+                        "vectorBucketName": "%s",
+                        "indexName": "%s",
+                        "dimension": 2,
+                        "distanceMetric": "cosine",
+                        "dataType": "float32"
+                    }
+                    """.formatted(bucketName, indexName))
+            .when()
+                .post("/CreateIndex")
+            .then()
+                .statusCode(200)
+                .body("indexArn", containsString(":us-west-2:"))
+            .extract().path("indexArn");
+
+        given()
+            .contentType(JSON_CONTENT_TYPE)
+            .header("Authorization", otherRegionAuth)
+            .body("""
+                {
+                    "vectorBucketName": "%s",
+                    "indexName": "%s",
+                    "vectors": [{"key": "only", "data": {"float32": [1.0, 0.0]}}]
+                }
+                """.formatted(bucketName, indexName))
+        .when()
+            .post("/PutVectors")
+        .then()
+            .statusCode(200);
+
+        // No Authorization header here, so this request resolves to the default region — not
+        // us-west-2. The lookup must still succeed because it honors the region encoded in the
+        // ARN itself, not the region the ListVectors request happens to be signed for.
+        given()
+            .contentType(JSON_CONTENT_TYPE)
+            .body("""
+                { "indexArn": "%s" }
+                """.formatted(indexArn))
+        .when()
+            .post("/ListVectors")
+        .then()
+            .statusCode(200)
+            .body("vectors", hasSize(1))
+            .body("vectors[0].key", equalTo("only"));
     }
 }

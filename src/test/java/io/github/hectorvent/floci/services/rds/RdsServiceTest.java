@@ -24,6 +24,8 @@ import io.github.hectorvent.floci.services.rds.model.DbProxyAuth;
 import io.github.hectorvent.floci.services.rds.model.DbProxyTarget;
 import io.github.hectorvent.floci.services.rds.model.DbProxyTargetGroup;
 import io.github.hectorvent.floci.services.rds.model.DbSubnetGroup;
+import io.github.hectorvent.floci.services.rds.model.OptionGroup;
+import io.github.hectorvent.floci.services.rds.model.OptionGroupOption;
 import io.github.hectorvent.floci.services.rds.proxy.RdsAuthProxy;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyManager;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
@@ -39,6 +41,11 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.OptionalInt;
 import java.util.stream.Collectors;
@@ -121,6 +128,8 @@ class RdsServiceTest {
 
         when(containerManager.start(any(), any(), any(), any(), any(), any(), any(), any(), any()))
                 .thenReturn(new RdsContainerHandle("cont-id", "id", "localhost", 5432));
+        when(ec2Service.resolveDefaultVpcId(any()))
+                .thenAnswer(invocation -> Ec2Service.defaultVpcId(invocation.getArgument(0)));
         when(ec2Service.describeSubnets(any(), anyList(), any()))
                 .thenAnswer(invocation -> {
                     @SuppressWarnings("unchecked")
@@ -175,6 +184,213 @@ class RdsServiceTest {
                 RdsService.imageForRequestedVersion("postgres", "18.1"));
         assertEquals("postgres:18.1-alpine",
                 RdsService.imageForRequestedVersion("postgres:16-alpine", "18.1-alpine"));
+    }
+
+    @Test
+    void createDbClusterRejectsADuplicateIdentifier() {
+        rdsService.createDbCluster("dup-cluster", "postgres", "17.5",
+                "admin", "password", "dbname", false, null, null, null, false);
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                rdsService.createDbCluster("dup-cluster", "postgres", "17.5",
+                        "admin", "password", "dbname", false, null, null, null, false));
+        assertEquals("DBClusterAlreadyExistsFault", exception.getErrorCode());
+        verify(containerManager, times(1)).start(any(), any(), any(), any(), any(), any(), any(), any(), any());
+    }
+
+    /**
+     * A client-side retry that arrives while the first CreateDBCluster is still
+     * pulling the image used to pass the exists-check (the cluster is registered
+     * only after provisioning) and start a second backing container, silently
+     * splitting the cluster and instance endpoints across two databases. The
+     * duplicate must fail fast instead, and only one container may ever start.
+     */
+    @Test
+    void createDbClusterRejectsADuplicateWhileTheFirstIsStillProvisioning() throws Exception {
+        CountDownLatch insideStart = new CountDownLatch(1);
+        CountDownLatch releaseStart = new CountDownLatch(1);
+        when(containerManager.start(any(), any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenAnswer(invocation -> {
+                    insideStart.countDown();
+                    assertTrue(releaseStart.await(5, TimeUnit.SECONDS), "test released the latch");
+                    return new RdsContainerHandle("cont-id", "id", "localhost", 5432);
+                });
+
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            Future<DbCluster> first = executor.submit(() -> rdsService.createDbCluster(
+                    "racy-cluster", "postgres", "17.5", "admin", "password", "dbname",
+                    false, null, null, null, false));
+            assertTrue(insideStart.await(5, TimeUnit.SECONDS), "first create reached provisioning");
+
+            AwsException fault = assertThrows(AwsException.class, () ->
+                    rdsService.createDbCluster("racy-cluster", "postgres", "17.5",
+                            "admin", "password", "dbname", false, null, null, null, false));
+            assertEquals("DBClusterAlreadyExistsFault", fault.getErrorCode());
+            assertEquals(400, fault.getHttpStatus());
+
+            releaseStart.countDown();
+            assertNotNull(first.get(5, TimeUnit.SECONDS));
+        } finally {
+            executor.shutdownNow();
+        }
+        verify(containerManager, times(1)).start(any(), any(), any(), any(), any(), any(), any(), any(), any());
+        assertNotNull(rdsService.getDbCluster("racy-cluster"));
+    }
+
+    @Test
+    void createDbInstanceRejectsADuplicateWhileTheFirstIsStillProvisioning() throws Exception {
+        CountDownLatch insideStart = new CountDownLatch(1);
+        CountDownLatch releaseStart = new CountDownLatch(1);
+        when(containerManager.start(any(), any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenAnswer(invocation -> {
+                    insideStart.countDown();
+                    assertTrue(releaseStart.await(5, TimeUnit.SECONDS), "test released the latch");
+                    return new RdsContainerHandle("cont-id", "id", "localhost", 5432);
+                });
+
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            Future<DbInstance> first = executor.submit(() -> rdsService.createDbInstance(
+                    "racy-db", "postgres", "17.5", "admin", "password", "dbname",
+                    "db.t3.micro", 20, false, null, null, null, null, false));
+            assertTrue(insideStart.await(5, TimeUnit.SECONDS), "first create reached provisioning");
+
+            AwsException fault = assertThrows(AwsException.class, () ->
+                    rdsService.createDbInstance("racy-db", "postgres", "17.5",
+                            "admin", "password", "dbname", "db.t3.micro",
+                            20, false, null, null, null, null, false));
+            assertEquals("DBInstanceAlreadyExists", fault.getErrorCode());
+            assertEquals(400, fault.getHttpStatus());
+
+            releaseStart.countDown();
+            assertNotNull(first.get(5, TimeUnit.SECONDS));
+        } finally {
+            executor.shutdownNow();
+        }
+        verify(containerManager, times(1)).start(any(), any(), any(), any(), any(), any(), any(), any(), any());
+        assertNotNull(rdsService.getDbInstance("racy-db"));
+    }
+
+    /**
+     * The issue's own repro provisions a cluster and an instance under one
+     * identifier — the two live in separate namespaces, so the guard must not
+     * let an in-flight cluster create block an instance create of the same name.
+     */
+    @Test
+    void clusterAndInstanceMayShareAnIdentifierEvenWhileProvisioning() throws Exception {
+        CountDownLatch insideStart = new CountDownLatch(1);
+        CountDownLatch releaseStart = new CountDownLatch(1);
+        AtomicBoolean firstCall = new AtomicBoolean(true);
+        when(containerManager.start(any(), any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenAnswer(invocation -> {
+                    if (firstCall.getAndSet(false)) {
+                        insideStart.countDown();
+                        assertTrue(releaseStart.await(5, TimeUnit.SECONDS), "test released the latch");
+                    }
+                    return new RdsContainerHandle("cont-id", "id", "localhost", 5432);
+                });
+
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            Future<DbCluster> cluster = executor.submit(() -> rdsService.createDbCluster(
+                    "shared-id", "postgres", "17.5", "admin", "password", "dbname",
+                    false, null, null, null, false));
+            assertTrue(insideStart.await(5, TimeUnit.SECONDS), "cluster create reached provisioning");
+
+            assertNotNull(rdsService.createDbInstance("shared-id", "postgres", "17.5",
+                    "admin", "password", "dbname", "db.t3.micro",
+                    20, false, null, null, null, null, false));
+
+            releaseStart.countDown();
+            assertNotNull(cluster.get(5, TimeUnit.SECONDS));
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    /** A successful create must release the identifier too — delete then recreate reuses it. */
+    @Test
+    void deleteThenRecreateReusesTheIdentifier() {
+        assertNotNull(rdsService.createDbCluster("reused-cluster", "postgres", "17.5",
+                "admin", "password", "dbname", false, null, null, null, false));
+        rdsService.deleteDbCluster("reused-cluster");
+        assertNotNull(rdsService.createDbCluster("reused-cluster", "postgres", "17.5",
+                "admin", "password", "dbname", false, null, null, null, false));
+        verify(containerManager, times(2)).start(any(), any(), any(), any(), any(), any(), any(), any(), any());
+    }
+
+    /** The instance-side twin: a successful create must release the identifier too. */
+    @Test
+    void deleteThenRecreateReusesTheInstanceIdentifier() {
+        assertNotNull(rdsService.createDbInstance("reused-db", "postgres", "17.5",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false));
+        rdsService.deleteDbInstance("reused-db");
+        assertNotNull(rdsService.createDbInstance("reused-db", "postgres", "17.5",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false));
+        verify(containerManager, times(2)).start(any(), any(), any(), any(), any(), any(), any(), any(), any());
+    }
+
+    /**
+     * The sentinel must be held until registration completes: releasing it
+     * before the store write would re-open the double-provision window this
+     * fix closes, for a duplicate landing between release and registration.
+     */
+    @Test
+    void sentinelIsHeldUntilRegistrationCompletes() throws Exception {
+        CountDownLatch insidePut = new CountDownLatch(1);
+        CountDownLatch releasePut = new CountDownLatch(1);
+        InMemoryStorage<String, DbCluster> blockingClusters = new InMemoryStorage<>() {
+            @Override
+            public void put(String key, DbCluster value) {
+                insidePut.countDown();
+                try {
+                    assertTrue(releasePut.await(5, TimeUnit.SECONDS), "test released the latch");
+                } catch (InterruptedException e) {
+                    throw new IllegalStateException(e);
+                }
+                super.put(key, value);
+            }
+        };
+        RdsService service = newService(containerManager, proxyManager,
+                new InMemoryStorage<>(), blockingClusters,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            Future<DbCluster> first = executor.submit(() -> service.createDbCluster(
+                    "ordered-cluster", "postgres", "17.5", "admin", "password", "dbname",
+                    false, null, null, null, false));
+            assertTrue(insidePut.await(5, TimeUnit.SECONDS), "first create reached registration");
+
+            AwsException fault = assertThrows(AwsException.class, () ->
+                    service.createDbCluster("ordered-cluster", "postgres", "17.5",
+                            "admin", "password", "dbname", false, null, null, null, false));
+            assertEquals("DBClusterAlreadyExistsFault", fault.getErrorCode());
+
+            releasePut.countDown();
+            assertNotNull(first.get(5, TimeUnit.SECONDS));
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    /** A failed create must release the identifier so a clean retry can proceed. */
+    @Test
+    void createDbClusterFailureReleasesTheIdentifierForRetry() {
+        when(containerManager.start(any(), any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenThrow(new RuntimeException("image pull failed"))
+                .thenReturn(new RdsContainerHandle("cont-id", "id", "localhost", 5432));
+
+        assertThrows(RuntimeException.class, () ->
+                rdsService.createDbCluster("retry-cluster", "postgres", "17.5",
+                        "admin", "password", "dbname", false, null, null, null, false));
+
+        assertNotNull(rdsService.createDbCluster("retry-cluster", "postgres", "17.5",
+                "admin", "password", "dbname", false, null, null, null, false));
+        verify(containerManager, times(2)).start(any(), any(), any(), any(), any(), any(), any(), any(), any());
     }
 
     @Test
@@ -274,7 +490,7 @@ class RdsServiceTest {
         SecretsManagerService secretsManager = mock(SecretsManagerService.class);
         Secret secret = new Secret();
         secret.setArn("arn:aws:secretsmanager:us-east-1:123456789012:secret:rds!db-secret");
-        when(secretsManager.createSecret(any(), any(), eq(null), any(), eq("kms-key-1"), eq(null), eq("us-east-1")))
+        when(secretsManager.createSecret(any(), any(), eq(null), any(), eq("kms-key-1"), any(), eq("rds"), eq("us-east-1")))
                 .thenReturn(secret);
         RdsService service = newService(containerManager, proxyManager,
                 new InMemoryStorage<>(), new InMemoryStorage<>(),
@@ -293,11 +509,107 @@ class RdsServiceTest {
 
         ArgumentCaptor<String> secretName = ArgumentCaptor.forClass(String.class);
         ArgumentCaptor<String> secretString = ArgumentCaptor.forClass(String.class);
-        verify(secretsManager).createSecret(secretName.capture(), secretString.capture(), eq(null), any(), eq("kms-key-1"), eq(null), eq("us-east-1"));
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<Secret.Tag>> secretTags = ArgumentCaptor.forClass(List.class);
+        verify(secretsManager).createSecret(secretName.capture(), secretString.capture(), eq(null), any(),
+                eq("kms-key-1"), secretTags.capture(), eq("rds"), eq("us-east-1"));
         assertTrue(secretName.getValue().startsWith("rds!db-"));
         assertTrue(secretString.getValue().contains("\"username\":\"admin\""));
         assertTrue(secretString.getValue().contains("\"password\":\"" + instance.getMasterPassword() + "\""));
         assertTrue(secretString.getValue().contains("\"dbInstanceIdentifier\":\"mydb\""));
+
+        // AWS marks the secret it manages with both of these tags, alongside OwningService.
+        assertTrue(secretTags.getValue().contains(
+                new Secret.Tag("aws:secretsmanager:owningService", "rds")));
+        assertTrue(secretTags.getValue().contains(
+                new Secret.Tag("aws:rds:primaryDBInstanceArn", instance.getDbInstanceArn())));
+    }
+
+    @Test
+    void backfillMarksMasterUserSecretsOfPersistedInstances() {
+        SecretsManagerService secretsManager = mock(SecretsManagerService.class);
+        Secret secret = new Secret();
+        String secretArn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:rds!db-secret";
+        secret.setArn(secretArn);
+        when(secretsManager.createSecret(any(), any(), eq(null), any(), eq(null), any(), eq("rds"), eq("us-east-1")))
+                .thenReturn(secret);
+        RdsService service = newService(containerManager, proxyManager,
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                secretsManager);
+
+        service.createDbInstance("mydb", "postgres", "13",
+                "admin", null, "dbname", "db.t3.micro",
+                20, true, null, null, null, true, null);
+
+        // An instance persisted by a floci that predates ownership tracking still names its
+        // secret, which is what makes that secret managed — the name never is.
+        service.backfillManagedSecretOwnership();
+
+        verify(secretsManager).markOwnedByService(secretArn, "rds");
+    }
+
+    @Test
+    void restorePersistedRuntimeRunsTheOwnershipBackfill() {
+        // The lifecycle calls restorePersistedRuntime() after storageFactory.loadAll(), so the
+        // backfill hangs off that rather than off its own StartupEvent observer, which would have
+        // no ordering against the reload.
+        SecretsManagerService secretsManager = mock(SecretsManagerService.class);
+        Secret restored = new Secret();
+        String restoredArn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:rds!db-secret";
+        restored.setArn(restoredArn);
+        when(secretsManager.createSecret(any(), any(), eq(null), any(), eq(null), any(), eq("rds"), eq("us-east-1")))
+                .thenReturn(restored);
+        RdsService service = newService(containerManager, proxyManager,
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                secretsManager);
+
+        service.createDbInstance("mydb", "postgres", "13",
+                "admin", null, "dbname", "db.t3.micro",
+                20, true, null, null, null, true, null);
+
+        service.restorePersistedRuntime();
+
+        verify(secretsManager).markOwnedByService(restoredArn, "rds");
+    }
+
+    @Test
+    void backfillDoesNotStopStartupWhenASecretCannotBeMarked() {
+        SecretsManagerService secretsManager = mock(SecretsManagerService.class);
+        Secret secret = new Secret();
+        secret.setArn("arn:aws:secretsmanager:us-east-1:123456789012:secret:rds!db-secret");
+        when(secretsManager.createSecret(any(), any(), eq(null), any(), eq(null), any(), eq("rds"), eq("us-east-1")))
+                .thenReturn(secret);
+        doThrow(new IllegalStateException("storage unavailable"))
+                .when(secretsManager).markOwnedByService(any(), any());
+        RdsService service = newService(containerManager, proxyManager,
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                secretsManager);
+
+        service.createDbInstance("mydb", "postgres", "13",
+                "admin", null, "dbname", "db.t3.micro",
+                20, true, null, null, null, true, null);
+
+        assertDoesNotThrow(() -> service.backfillManagedSecretOwnership());
+    }
+
+    @Test
+    void backfillIgnoresInstancesWithoutAManagedSecret() {
+        SecretsManagerService secretsManager = mock(SecretsManagerService.class);
+        RdsService service = newService(containerManager, proxyManager,
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                secretsManager);
+
+        service.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null);
+
+        service.backfillManagedSecretOwnership();
+
+        verify(secretsManager, never()).markOwnedByService(any(), any());
     }
 
     @Test
@@ -424,6 +736,23 @@ class RdsServiceTest {
 
         assertEquals("original-password", modified.getMasterPassword());
         assertTrue(modified.isIamDatabaseAuthenticationEnabled());
+    }
+
+    @Test
+    void modifyDbInstanceAppliesAutoMinorVersionUpgrade() {
+        // #2420 review: ModifyDBInstance silently dropped this - created true (the AWS
+        // default), an explicit modify to false must actually take effect and stick on a
+        // later read, not just get echoed back unchanged.
+        rdsService.createDbInstance("mydb", "postgres", "13",
+                "admin", "original-password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+
+        DbInstance modified = rdsService.modifyDbInstance(
+                "mydb", null, null, null, List.of(), null, null, false);
+        assertFalse(modified.isAutoMinorVersionUpgrade());
+
+        DbInstance described = rdsService.getDbInstance("mydb");
+        assertFalse(described.isAutoMinorVersionUpgrade());
     }
 
     @Test
@@ -558,12 +887,17 @@ class RdsServiceTest {
 
     @Test
     void tagOperationsRejectUnsupportedResourceArn() {
-        AwsException exception = assertThrows(AwsException.class, () ->
-                rdsService.listTagsForResource("arn:aws:rds:us-east-1:123456789012:og:some-option-group"));
+        // Parameter groups are tagged now, so an absent one is a missing resource rather than a
+        // missing feature. A type Floci still does not model keeps the limitation message.
+        AwsException absentGroup = assertThrows(AwsException.class, () ->
+                rdsService.listTagsForResource("arn:aws:rds:us-east-1:123456789012:pg:some-parameter-group"));
+        assertEquals("DBParameterGroupNotFound", absentGroup.getErrorCode());
 
-        assertEquals("InvalidParameterValue", exception.getErrorCode());
+        AwsException unsupportedType = assertThrows(AwsException.class, () ->
+                rdsService.listTagsForResource("arn:aws:rds:us-east-1:123456789012:snapshot:some-snapshot"));
+        assertEquals("InvalidParameterValue", unsupportedType.getErrorCode());
         // The type is valid on real AWS; the message must present this as a Floci limitation.
-        assertTrue(exception.getMessage().contains("not yet implemented by Floci"));
+        assertTrue(unsupportedType.getMessage().contains("not yet implemented by Floci"));
     }
 
     @Test
@@ -668,6 +1002,219 @@ class RdsServiceTest {
         verify(containerManager, never()).start(any(), any(), any(), any(), any(), any(), any(), any(), any());
         verify(proxyManager, never()).startProxy(any(), any(), anyBoolean(), anyInt(), any(), anyInt(),
                 any(), any(), any(), any());
+    }
+
+    @Test
+    void createDbClusterAppliesServerlessV2Scaling() {
+        when(config.services().rds().mock()).thenReturn(true);
+
+        DbCluster cluster = rdsService.createDbCluster("cluster1", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", false, null, null, null, false, "us-east-1",
+                0.0, 16.0, 600);
+
+        assertEquals(0.0, cluster.getServerlessV2MinCapacity());
+        assertEquals(16.0, cluster.getServerlessV2MaxCapacity());
+        assertEquals(600, cluster.getServerlessV2SecondsUntilAutoPause());
+    }
+
+    @Test
+    void createDbClusterRejectsServerlessV2ScalingForNonAuroraEngines() {
+        when(config.services().rds().mock()).thenReturn(true);
+
+        for (String engine : List.of("postgres", "mysql", "mariadb")) {
+            String clusterId = "cluster-" + engine;
+            AwsException exception = assertThrows(AwsException.class,
+                    () -> rdsService.createDbCluster(
+                            clusterId, engine, null, "admin", "password", "dbname",
+                            false, null, null, null, false, "us-east-1",
+                            0.5, 16.0, null));
+
+            assertEquals("InvalidParameterCombination", exception.getErrorCode());
+            assertEquals(400, exception.getHttpStatus());
+            assertEquals(
+                    "Parameters that must not be used together were used together. "
+                            + "Remove one of the conflicting parameters and try again.",
+                    exception.getMessage());
+            assertTrue(rdsService.listDbClusters(clusterId).isEmpty());
+        }
+    }
+
+    @Test
+    void createDbClusterDefaultsAndClearsServerlessV2AutoPauseInterval() {
+        when(config.services().rds().mock()).thenReturn(true);
+
+        DbCluster autoPauseCluster = rdsService.createDbCluster(
+                "auto-pause", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", false, null, null, null, false, "us-east-1",
+                0.0, 16.0);
+        DbCluster alwaysActiveCluster = rdsService.createDbCluster(
+                "always-active", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", false, null, null, null, false, "us-east-1",
+                0.5, 16.0, 600);
+
+        assertEquals(300, autoPauseCluster.getServerlessV2SecondsUntilAutoPause());
+        assertNull(alwaysActiveCluster.getServerlessV2SecondsUntilAutoPause());
+    }
+
+    @Test
+    void modifyDbClusterAppliesServerlessV2ScalingConfiguration() {
+        when(config.services().rds().mock()).thenReturn(true);
+        rdsService.createDbCluster("cluster1", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", false, null, null, null, false, "us-east-1",
+                0.0, 16.0, 600);
+
+        DbCluster widerRange = rdsService.modifyDbCluster(
+                "cluster1", null, null, null, 32.0, null);
+
+        assertEquals(0.0, widerRange.getServerlessV2MinCapacity());
+        assertEquals(32.0, widerRange.getServerlessV2MaxCapacity());
+        assertEquals(600, widerRange.getServerlessV2SecondsUntilAutoPause());
+
+        DbCluster longerAutoPause = rdsService.modifyDbCluster(
+                "cluster1", null, null, null, null, 900);
+
+        assertEquals(0.0, longerAutoPause.getServerlessV2MinCapacity());
+        assertEquals(32.0, longerAutoPause.getServerlessV2MaxCapacity());
+        assertEquals(900, longerAutoPause.getServerlessV2SecondsUntilAutoPause());
+
+        DbCluster alwaysActiveCluster = rdsService.modifyDbCluster(
+                "cluster1", null, null, 0.5, null, null);
+        assertEquals(0.5, alwaysActiveCluster.getServerlessV2MinCapacity());
+        assertEquals(32.0, alwaysActiveCluster.getServerlessV2MaxCapacity());
+        assertNull(alwaysActiveCluster.getServerlessV2SecondsUntilAutoPause());
+
+        DbCluster autoPauseAgain = rdsService.modifyDbCluster(
+                "cluster1", null, null, 0.0, null, null);
+        assertEquals(300, autoPauseAgain.getServerlessV2SecondsUntilAutoPause());
+
+        DbCluster passwordOnlyChange = rdsService.modifyDbCluster(
+                "cluster1", "new-password", null);
+        assertEquals(0.0, passwordOnlyChange.getServerlessV2MinCapacity());
+        assertEquals(32.0, passwordOnlyChange.getServerlessV2MaxCapacity());
+        assertEquals(300, passwordOnlyChange.getServerlessV2SecondsUntilAutoPause());
+    }
+
+    @Test
+    void modifyDbClusterRejectsServerlessV2ScalingForNonAuroraCluster() {
+        when(config.services().rds().mock()).thenReturn(true);
+        DbCluster cluster = rdsService.createDbCluster(
+                "cluster1", "postgres", "16.3", "admin", "original-password",
+                "dbname", false, null);
+
+        AwsException exception = assertThrows(AwsException.class,
+                () -> rdsService.modifyDbCluster(
+                        "cluster1", "new-password", true, 0.5, 16.0, null));
+
+        assertEquals("InvalidParameterCombination", exception.getErrorCode());
+        assertEquals(400, exception.getHttpStatus());
+        assertEquals(
+                "Parameters that must not be used together were used together. "
+                        + "Remove one of the conflicting parameters and try again.",
+                exception.getMessage());
+        assertEquals("original-password", cluster.getMasterPassword());
+        assertFalse(cluster.isIamDatabaseAuthenticationEnabled());
+        assertNull(cluster.getServerlessV2MinCapacity());
+        assertNull(cluster.getServerlessV2MaxCapacity());
+    }
+
+    @Test
+    void modifyDbClusterCanAddServerlessV2ScalingToExistingAuroraCluster() {
+        when(config.services().rds().mock()).thenReturn(true);
+        rdsService.createDbCluster("cluster1", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", false, null);
+
+        DbCluster cluster = rdsService.modifyDbCluster(
+                "cluster1", null, null, 0.5, 16.0, null);
+
+        assertEquals("aurora-postgresql", cluster.getEngineIdentifier());
+        assertEquals(0.5, cluster.getServerlessV2MinCapacity());
+        assertEquals(16.0, cluster.getServerlessV2MaxCapacity());
+    }
+
+    @Test
+    void modifyDbClusterRejectsScalingWhenPersistedEngineIdentityIsMissing() {
+        when(config.services().rds().mock()).thenReturn(true);
+        DbCluster cluster = rdsService.createDbCluster(
+                "cluster1", "aurora-postgresql", "16.3", "admin", "password",
+                "dbname", false, null);
+        cluster.setEngineIdentifier(null);
+
+        AwsException exception = assertThrows(AwsException.class,
+                () -> rdsService.modifyDbCluster(
+                        "cluster1", null, null, 0.5, 16.0, null));
+
+        assertEquals("InvalidParameterCombination", exception.getErrorCode());
+        assertEquals(400, exception.getHttpStatus());
+        assertNull(cluster.getServerlessV2MinCapacity());
+        assertNull(cluster.getServerlessV2MaxCapacity());
+    }
+
+    @Test
+    void modifyDbClusterRejectsPartialScalingWithoutAnExistingConfiguration() {
+        when(config.services().rds().mock()).thenReturn(true);
+        DbCluster cluster = rdsService.createDbCluster("cluster1", "aurora-postgresql", "16.3",
+                "admin", "original-password", "dbname", false, null);
+
+        assertThrows(AwsException.class, () -> rdsService.modifyDbCluster(
+                "cluster1", "new-password", true, null, 16.0, null));
+
+        assertEquals("original-password", cluster.getMasterPassword());
+        assertFalse(cluster.isIamDatabaseAuthenticationEnabled());
+        assertNull(cluster.getServerlessV2MinCapacity());
+        assertNull(cluster.getServerlessV2MaxCapacity());
+    }
+
+    @Test
+    void modifyDbClusterValidatesScalingBeforeApplyingOtherChanges() {
+        when(config.services().rds().mock()).thenReturn(true);
+        DbCluster cluster = rdsService.createDbCluster("cluster1", "aurora-postgresql", "16.3",
+                "admin", "original-password", "dbname", false, null);
+
+        assertThrows(AwsException.class, () -> rdsService.modifyDbCluster(
+                "cluster1", "new-password", true, 0.0, 16.0, 299));
+
+        assertEquals("original-password", cluster.getMasterPassword());
+        assertFalse(cluster.isIamDatabaseAuthenticationEnabled());
+        assertNull(cluster.getServerlessV2MinCapacity());
+        assertNull(cluster.getServerlessV2MaxCapacity());
+    }
+
+    @Test
+    void serverlessV2CapacityValidationEnforcesAcuConstraints() {
+        // Non-half-step increment.
+        assertThrows(AwsException.class, () -> rdsService.validateServerlessV2Capacity(0.3, 16.0));
+        // Above the 256-ACU ceiling.
+        assertThrows(AwsException.class, () -> rdsService.validateServerlessV2Capacity(0.5, 300.0));
+        // AWS requires MaxCapacity to be greater than 0.5 ACUs.
+        assertThrows(AwsException.class, () -> rdsService.validateServerlessV2Capacity(0.0, 0.5));
+        // Non-finite values are not valid AWS Query numbers.
+        assertThrows(AwsException.class, () -> rdsService.validateServerlessV2Capacity(Double.NaN, 16.0));
+        assertThrows(AwsException.class, () -> rdsService.validateServerlessV2Capacity(0.5, Double.NaN));
+        assertThrows(AwsException.class,
+                () -> rdsService.validateServerlessV2Capacity(0.5, Double.POSITIVE_INFINITY));
+        assertThrows(AwsException.class,
+                () -> rdsService.validateServerlessV2Capacity(Double.NEGATIVE_INFINITY, 16.0));
+        // MaxCapacity below MinCapacity.
+        assertThrows(AwsException.class, () -> rdsService.validateServerlessV2Capacity(16.0, 8.0));
+        // Valid: 0 (auto-pause), the 256 ceiling, and half-step values.
+        assertDoesNotThrow(() -> rdsService.validateServerlessV2Capacity(0.0, 256.0));
+        assertDoesNotThrow(() -> rdsService.validateServerlessV2Capacity(0.5, 128.0));
+        // Both null is a no-op (not a Serverless v2 cluster).
+        assertDoesNotThrow(() -> rdsService.validateServerlessV2Capacity(null, null));
+        // A create-time or otherwise incomplete effective configuration requires both bounds.
+        assertThrows(AwsException.class, () -> rdsService.validateServerlessV2Capacity(0.5, null));
+        assertThrows(AwsException.class, () -> rdsService.validateServerlessV2Capacity(null, 16.0));
+        assertThrows(AwsException.class,
+                () -> rdsService.validateServerlessV2ScalingConfiguration(0.0, 16.0, 299));
+        assertThrows(AwsException.class,
+                () -> rdsService.validateServerlessV2ScalingConfiguration(0.0, 16.0, 86_401));
+        assertThrows(AwsException.class,
+                () -> rdsService.validateServerlessV2ScalingConfiguration(null, null, 300));
+        assertEquals(300,
+                rdsService.validateServerlessV2ScalingConfiguration(0.0, 16.0, null));
+        assertEquals(86_400,
+                rdsService.validateServerlessV2ScalingConfiguration(0.0, 16.0, 86_400));
+        assertNull(rdsService.validateServerlessV2ScalingConfiguration(0.5, 16.0, 600));
     }
 
     @Test
@@ -1011,6 +1558,40 @@ class RdsServiceTest {
                 "regional-pg", "us-west-2").getDescription());
         assertEquals("west", rdsService.getDbClusterParameterGroup(
                 "regional-cpg", "us-west-2").getDescription());
+    }
+
+    @Test
+    void aParameterGroupPersistedWithoutAnArnGetsOneOnFirstRead() {
+        // Only creation assigned the ARN, so a group written by an earlier version would never
+        // get one — and the ARN is what a caller tags by, so the group could not be tagged at all.
+        String accountId = "123456789012";
+        InMemoryStorage<String, DbParameterGroup> rawParameterGroups = new InMemoryStorage<>();
+        InMemoryStorage<String, DbClusterParameterGroup> rawClusterParameterGroups =
+                new InMemoryStorage<>();
+        rawParameterGroups.put("legacy-pg", new DbParameterGroup(
+                "legacy-pg", "postgres16", "legacy"));
+        rawClusterParameterGroups.put("legacy-cpg", new DbClusterParameterGroup(
+                "legacy-cpg", "aurora-postgresql16", "legacy"));
+        RdsService service = new RdsService(
+                containerManager, proxyManager, ec2Service,
+                new RegionResolver("us-east-1", accountId), config,
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new AccountAwareStorageBackend<>(rawParameterGroups, null, accountId),
+                new AccountAwareStorageBackend<>(rawClusterParameterGroups, null, accountId),
+                new InMemoryStorage<>());
+
+        assertEquals("arn:aws:rds:us-east-1:" + accountId + ":pg:legacy-pg",
+                service.getDbParameterGroup("legacy-pg", "us-east-1").getDbParameterGroupArn());
+        assertEquals("arn:aws:rds:us-east-1:" + accountId + ":cluster-pg:legacy-cpg",
+                service.getDbClusterParameterGroup("legacy-cpg", "us-east-1")
+                        .getDbClusterParameterGroupArn());
+
+        // And with an ARN it can be tagged, which is the point of backfilling it.
+        service.addTagsToResource(
+                "arn:aws:rds:us-east-1:" + accountId + ":cluster-pg:legacy-cpg",
+                Map.of("env", "upgraded"), "us-east-1");
+        assertEquals(Map.of("env", "upgraded"), service.listTagsForResource(
+                "arn:aws:rds:us-east-1:" + accountId + ":cluster-pg:legacy-cpg", "us-east-1"));
     }
 
     @Test
@@ -3724,6 +4305,479 @@ class RdsServiceTest {
         assertTrue(rawTargetGroups.get(targetAccount + "/us-east-1::app-proxy").isPresent());
         assertTrue(rawProxies.get(targetAccount + "/app-proxy").isEmpty());
         assertTrue(rawTargetGroups.get(targetAccount + "/app-proxy").isEmpty());
+    }
+
+    // ── Option Groups ─────────────────────────────────────────────────────────
+
+    @Test
+    void createOptionGroupReturnsArnAndNoOptions() {
+        OptionGroup group = rdsService.createOptionGroup(
+                "og1", "mysql", "8.0", "my option group");
+
+        assertEquals("og1", group.getOptionGroupName());
+        assertEquals("mysql", group.getEngineName());
+        assertEquals("8.0", group.getMajorEngineVersion());
+        assertEquals("my option group", group.getOptionGroupDescription());
+        assertEquals("arn:aws:rds:us-east-1:123456789012:og:og1", group.getOptionGroupArn());
+        assertTrue(group.isAllowsVpcAndNonVpcInstanceMemberships());
+        assertTrue(group.getOptions().isEmpty());
+    }
+
+    @Test
+    void createOptionGroupRejectsDuplicateName() {
+        rdsService.createOptionGroup("og1", "mysql", "8.0", "first");
+
+        AwsException exception = assertThrows(AwsException.class,
+                () -> rdsService.createOptionGroup("og1", "mysql", "8.0", "second"));
+
+        assertEquals("OptionGroupAlreadyExistsFault", exception.getErrorCode());
+        assertEquals(400, exception.getHttpStatus());
+    }
+
+    @Test
+    void createOptionGroupCannotShadowAManagedDefaultName() {
+        // A default group's name contains ':', which the AWS name constraint forbids, so the
+        // name check rejects it before the already-exists check can ever be reached.
+        AwsException exception = assertThrows(AwsException.class,
+                () -> rdsService.createOptionGroup(
+                        "default:mysql-8-0", "mysql", "8.0", "shadowing a default"));
+
+        assertEquals("InvalidParameterValue", exception.getErrorCode());
+        assertEquals("mysql", rdsService.getOptionGroup("default:mysql-8-0").getEngineName());
+    }
+
+    @Test
+    void createOptionGroupRejectsUnknownEngine() {
+        AwsException exception = assertThrows(AwsException.class,
+                () -> rdsService.createOptionGroup("og1", "cassandra", "5.0", "nope"));
+
+        assertEquals("InvalidParameterValue", exception.getErrorCode());
+        assertEquals(400, exception.getHttpStatus());
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "1og",              // must start with a letter
+            "-og",              // must start with a letter
+            "og-",              // can't end with a hyphen
+            "og--1",            // can't contain two consecutive hyphens
+            "og_1",             // only letters, numbers and hyphens
+            "og name"           // only letters, numbers and hyphens
+    })
+    void createOptionGroupRejectsNamesThatViolateAwsConstraints(String name) {
+        AwsException exception = assertThrows(AwsException.class,
+                () -> rdsService.createOptionGroup(name, "mysql", "8.0", "bad name"));
+
+        assertEquals("InvalidParameterValue", exception.getErrorCode());
+        assertEquals(400, exception.getHttpStatus());
+    }
+
+    @Test
+    void createOptionGroupRejectsNameLongerThan255Characters() {
+        String name = "o" + "g".repeat(255);
+
+        AwsException exception = assertThrows(AwsException.class,
+                () -> rdsService.createOptionGroup(name, "mysql", "8.0", "too long"));
+
+        assertEquals("InvalidParameterValue", exception.getErrorCode());
+    }
+
+    @Test
+    void createOptionGroupAcceptsHyphenatedAlphanumericName() {
+        OptionGroup group = rdsService.createOptionGroup(
+                "my-og-1", "mysql", "8.0", "valid name");
+
+        assertEquals("my-og-1", group.getOptionGroupName());
+    }
+
+    @Test
+    void getOptionGroupThrowsOptionGroupNotFoundFaultForUnknownName() {
+        AwsException exception = assertThrows(AwsException.class,
+                () -> rdsService.getOptionGroup("missing"));
+
+        assertEquals("OptionGroupNotFoundFault", exception.getErrorCode());
+        assertEquals(404, exception.getHttpStatus());
+    }
+
+    @Test
+    void listOptionGroupsAlwaysIncludesManagedDefaults() {
+        List<String> names = rdsService.listOptionGroups(null, null, null).stream()
+                .map(OptionGroup::getOptionGroupName)
+                .toList();
+
+        assertTrue(names.contains("default:mysql-8-0"), names.toString());
+        assertTrue(names.contains("default:postgres-16"), names.toString());
+        assertTrue(names.contains("default:mariadb-11-4"), names.toString());
+    }
+
+    @Test
+    void listOptionGroupsIncludesCreatedGroupsAlongsideDefaults() {
+        rdsService.createOptionGroup("og1", "mysql", "8.0", "mine");
+
+        List<String> names = rdsService.listOptionGroups(null, null, null).stream()
+                .map(OptionGroup::getOptionGroupName)
+                .toList();
+
+        assertTrue(names.contains("og1"), names.toString());
+        assertTrue(names.contains("default:mysql-8-0"), names.toString());
+    }
+
+    @Test
+    void listOptionGroupsFiltersByEngineName() {
+        rdsService.createOptionGroup("og-oracle", "oracle-ee", "19", "oracle");
+
+        Collection<OptionGroup> groups = rdsService.listOptionGroups(null, "oracle-ee", null);
+
+        assertFalse(groups.isEmpty());
+        assertTrue(groups.stream().allMatch(group -> "oracle-ee".equals(group.getEngineName())));
+        assertTrue(groups.stream()
+                .anyMatch(group -> "og-oracle".equals(group.getOptionGroupName())));
+    }
+
+    @Test
+    void listOptionGroupsFiltersByMajorEngineVersion() {
+        Collection<OptionGroup> groups = rdsService.listOptionGroups(null, "mysql", "8.4");
+
+        assertEquals(1, groups.size());
+        assertEquals("default:mysql-8-4", groups.iterator().next().getOptionGroupName());
+    }
+
+    @Test
+    void listOptionGroupsRejectsMajorEngineVersionWithoutEngineName() {
+        AwsException exception = assertThrows(AwsException.class,
+                () -> rdsService.listOptionGroups(null, null, "8.0"));
+
+        assertEquals("InvalidParameterCombination", exception.getErrorCode());
+    }
+
+    @Test
+    void listOptionGroupsByUnknownNameThrowsInsteadOfReturningEmptyList() {
+        AwsException exception = assertThrows(AwsException.class,
+                () -> rdsService.listOptionGroups("missing", null, null));
+
+        assertEquals("OptionGroupNotFoundFault", exception.getErrorCode());
+        assertEquals(404, exception.getHttpStatus());
+    }
+
+    @Test
+    void listOptionGroupsByNameResolvesManagedDefault() {
+        Collection<OptionGroup> groups =
+                rdsService.listOptionGroups("default:postgres-16", null, null);
+
+        assertEquals(1, groups.size());
+        OptionGroup group = groups.iterator().next();
+        assertEquals("postgres", group.getEngineName());
+        assertEquals("16", group.getMajorEngineVersion());
+    }
+
+    @Test
+    void modifyOptionGroupAddsOptions() {
+        rdsService.createOptionGroup("og1", "mariadb", "11.4", "mine");
+        OptionGroupOption option = new OptionGroupOption("MARIADB_AUDIT_PLUGIN");
+        option.setPort(11211);
+        option.setOptionSettings(new java.util.LinkedHashMap<>(
+                Map.of("SERVER_AUDIT_EVENTS", "CONNECT")));
+        option.setVpcSecurityGroupMemberships(List.of("sg-123"));
+
+        OptionGroup group = rdsService.modifyOptionGroup("og1", List.of(option), List.of());
+
+        assertEquals(1, group.getOptions().size());
+        OptionGroupOption stored = group.getOptions().getFirst();
+        assertEquals("MARIADB_AUDIT_PLUGIN", stored.getOptionName());
+        assertEquals(11211, stored.getPort());
+        assertEquals("CONNECT", stored.getOptionSettings().get("SERVER_AUDIT_EVENTS"));
+        assertEquals(List.of("sg-123"), stored.getVpcSecurityGroupMemberships());
+        assertEquals(1, rdsService.getOptionGroup("og1").getOptions().size());
+    }
+
+    @Test
+    void modifyOptionGroupUpdatesAnExistingOptionInPlace() {
+        rdsService.createOptionGroup("og1", "mariadb", "11.4", "mine");
+        OptionGroupOption first = new OptionGroupOption("MARIADB_AUDIT_PLUGIN");
+        first.setOptionSettings(new java.util.LinkedHashMap<>(
+                Map.of("SERVER_AUDIT_EVENTS", "CONNECT")));
+        rdsService.modifyOptionGroup("og1", List.of(first), List.of());
+
+        OptionGroupOption update = new OptionGroupOption("MARIADB_AUDIT_PLUGIN");
+        update.setOptionSettings(new java.util.LinkedHashMap<>(
+                Map.of("SERVER_AUDIT_EVENTS", "CONNECT,QUERY")));
+        OptionGroup group = rdsService.modifyOptionGroup("og1", List.of(update), List.of());
+
+        assertEquals(1, group.getOptions().size());
+        assertEquals("CONNECT,QUERY",
+                group.getOptions().getFirst().getOptionSettings().get("SERVER_AUDIT_EVENTS"));
+    }
+
+    @Test
+    void modifyOptionGroupRemovesOptions() {
+        rdsService.createOptionGroup("og1", "mysql", "8.0", "mine");
+        rdsService.modifyOptionGroup(
+                "og1", List.of(new OptionGroupOption("MEMCACHED")), List.of());
+
+        OptionGroup group = rdsService.modifyOptionGroup("og1", List.of(), List.of("MEMCACHED"));
+
+        assertTrue(group.getOptions().isEmpty());
+        assertTrue(rdsService.getOptionGroup("og1").getOptions().isEmpty());
+    }
+
+    @Test
+    void modifyOptionGroupThrowsForUnknownGroup() {
+        AwsException exception = assertThrows(AwsException.class,
+                () -> rdsService.modifyOptionGroup("missing", List.of(), List.of()));
+
+        assertEquals("OptionGroupNotFoundFault", exception.getErrorCode());
+        assertEquals(404, exception.getHttpStatus());
+    }
+
+    @Test
+    void modifyOptionGroupRejectsManagedDefault() {
+        AwsException exception = assertThrows(AwsException.class,
+                () -> rdsService.modifyOptionGroup("default:mysql-8-0",
+                        List.of(new OptionGroupOption("MEMCACHED")), List.of()));
+
+        assertEquals("InvalidOptionGroupStateFault", exception.getErrorCode());
+        assertEquals(400, exception.getHttpStatus());
+    }
+
+    @Test
+    void deleteOptionGroupRemovesTheGroup() {
+        rdsService.createOptionGroup("og1", "mysql", "8.0", "mine");
+
+        rdsService.deleteOptionGroup("og1");
+
+        AwsException exception = assertThrows(AwsException.class,
+                () -> rdsService.getOptionGroup("og1"));
+        assertEquals("OptionGroupNotFoundFault", exception.getErrorCode());
+    }
+
+    @Test
+    void deleteOptionGroupThrowsForUnknownGroup() {
+        AwsException exception = assertThrows(AwsException.class,
+                () -> rdsService.deleteOptionGroup("missing"));
+
+        assertEquals("OptionGroupNotFoundFault", exception.getErrorCode());
+        assertEquals(404, exception.getHttpStatus());
+    }
+
+    @Test
+    void deleteOptionGroupRejectsManagedDefault() {
+        AwsException exception = assertThrows(AwsException.class,
+                () -> rdsService.deleteOptionGroup("default:mysql-8-0"));
+
+        assertEquals("InvalidOptionGroupStateFault", exception.getErrorCode());
+        assertEquals(400, exception.getHttpStatus());
+    }
+
+    @Test
+    void deleteOptionGroupRejectsGroupStillAttachedToAnInstance() {
+        rdsService.createOptionGroup("og1", "mysql", "8.0", "mine");
+        createInstanceWithOptionGroup("mydb", "mysql", "8.0", "og1");
+
+        AwsException exception = assertThrows(AwsException.class,
+                () -> rdsService.deleteOptionGroup("og1"));
+
+        assertEquals("InvalidOptionGroupStateFault", exception.getErrorCode());
+        assertEquals(400, exception.getHttpStatus());
+    }
+
+    @Test
+    void optionGroupsAreScopedByRegion() {
+        rdsService.createOptionGroup("og1", "mysql", "8.0", "mine", Map.of(), "us-east-1");
+
+        AwsException exception = assertThrows(AwsException.class,
+                () -> rdsService.getOptionGroup("og1", "eu-west-1"));
+
+        assertEquals("OptionGroupNotFoundFault", exception.getErrorCode());
+        assertEquals("arn:aws:rds:us-east-1:123456789012:og:og1",
+                rdsService.getOptionGroup("og1", "us-east-1").getOptionGroupArn());
+    }
+
+    @Test
+    void createDbInstanceStoresAttachedOptionGroup() {
+        rdsService.createOptionGroup("og1", "mysql", "8.0", "mine");
+
+        DbInstance instance = createInstanceWithOptionGroup("mydb", "mysql", "8.0", "og1");
+
+        assertEquals("og1", instance.getOptionGroupName());
+        assertEquals("og1", rdsService.getDbInstance("mydb").getOptionGroupName());
+    }
+
+    @Test
+    void createDbInstanceRejectsUnknownOptionGroup() {
+        AwsException exception = assertThrows(AwsException.class,
+                () -> createInstanceWithOptionGroup("mydb", "mysql", "8.0", "missing"));
+
+        assertEquals("OptionGroupNotFoundFault", exception.getErrorCode());
+    }
+
+    @Test
+    void createDbInstanceRejectsOptionGroupForAnotherEngine() {
+        rdsService.createOptionGroup("og1", "mysql", "8.0", "mine");
+
+        AwsException exception = assertThrows(AwsException.class,
+                () -> createInstanceWithOptionGroup("mydb", "postgres", "16.3", "og1"));
+
+        assertEquals("InvalidParameterCombination", exception.getErrorCode());
+    }
+
+    @Test
+    void createDbInstanceRejectsOptionGroupForAnotherMajorEngineVersion() {
+        rdsService.createOptionGroup("og1", "mysql", "8.0", "mine");
+
+        AwsException exception = assertThrows(AwsException.class,
+                () -> createInstanceWithOptionGroup("mydb", "mysql", "8.4.3", "og1"));
+
+        assertEquals("InvalidParameterCombination", exception.getErrorCode());
+    }
+
+    @Test
+    void createDbInstanceRejectsPostgresOptionGroupForAnotherMajorEngineVersion() {
+        rdsService.createOptionGroup("og1", "postgres", "13", "mine");
+
+        AwsException exception = assertThrows(AwsException.class,
+                () -> createInstanceWithOptionGroup("mydb", "postgres", "16.3", "og1"));
+
+        assertEquals("InvalidParameterCombination", exception.getErrorCode());
+    }
+
+    @Test
+    void createDbInstanceAcceptsOptionGroupMatchingTheInstanceMajorEngineVersion() {
+        rdsService.createOptionGroup("og1", "mysql", "8.0", "mine");
+
+        DbInstance instance = createInstanceWithOptionGroup("mydb", "mysql", "8.0.36", "og1");
+
+        assertEquals("og1", instance.getOptionGroupName());
+    }
+
+    @Test
+    void createDbInstanceAcceptsPostgresOptionGroupRegardlessOfTheMinorVersion() {
+        rdsService.createOptionGroup("og1", "postgres", "16", "mine");
+
+        DbInstance instance = createInstanceWithOptionGroup("mydb", "postgres", "16.3", "og1");
+
+        assertEquals("og1", instance.getOptionGroupName());
+    }
+
+    @Test
+    void createDbInstanceAcceptsManagedDefaultOptionGroup() {
+        DbInstance instance =
+                createInstanceWithOptionGroup("mydb", "mysql", "8.0", "default:mysql-8-0");
+
+        assertEquals("default:mysql-8-0", instance.getOptionGroupName());
+    }
+
+    @Test
+    void optionGroupIsTaggableByArn() {
+        OptionGroup group = rdsService.createOptionGroup("og1", "mysql", "8.0", "mine");
+
+        rdsService.addTagsToResource(group.getOptionGroupArn(), Map.of("env", "dev"));
+
+        assertEquals(Map.of("env", "dev"),
+                rdsService.listTagsForResource(group.getOptionGroupArn()));
+    }
+
+    @Test
+    void defaultOptionGroupCannotBeTagged() {
+        AwsException exception = assertThrows(AwsException.class, () ->
+                rdsService.addTagsToResource(
+                        "arn:aws:rds:us-east-1:123456789012:og:default:mysql-8-0",
+                        Map.of("env", "dev")));
+
+        assertEquals("InvalidOptionGroupStateFault", exception.getErrorCode());
+    }
+
+    @Test
+    void modifyDbInstanceAttachesOptionGroup() {
+        rdsService.createOptionGroup("og1", "mysql", "8.0", "mine");
+        createInstanceWithOptionGroup("mydb", "mysql", "8.0", null);
+
+        DbInstance modified = rdsService.modifyDbInstance(
+                "mydb", null, null, null, List.of(), "og1", "us-east-1");
+
+        assertEquals("og1", modified.getOptionGroupName());
+        assertEquals("og1", rdsService.getDbInstance("mydb").getOptionGroupName());
+    }
+
+    @Test
+    void modifyDbInstanceRejectsOptionGroupForAnotherEngine() {
+        rdsService.createOptionGroup("og1", "postgres", "16", "mine");
+        createInstanceWithOptionGroup("mydb", "mysql", "8.0", null);
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                rdsService.modifyDbInstance(
+                        "mydb", null, null, null, List.of(), "og1", "us-east-1"));
+
+        assertEquals("InvalidParameterCombination", exception.getErrorCode());
+    }
+
+    @Test
+    void modifyDbInstanceRejectsOptionGroupForAnotherMajorEngineVersion() {
+        rdsService.createOptionGroup("og1", "mysql", "8.4", "mine");
+        createInstanceWithOptionGroup("mydb", "mysql", "8.0.36", null);
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                rdsService.modifyDbInstance(
+                        "mydb", null, null, null, List.of(), "og1", "us-east-1"));
+
+        assertEquals("InvalidParameterCombination", exception.getErrorCode());
+    }
+
+    @Test
+    void modifyDbInstanceAcceptsOptionGroupMatchingTheInstanceMajorEngineVersion() {
+        rdsService.createOptionGroup("og1", "mysql", "8.0", "mine");
+        createInstanceWithOptionGroup("mydb", "mysql", "8.0.36", null);
+
+        DbInstance modified = rdsService.modifyDbInstance(
+                "mydb", null, null, null, List.of(), "og1", "us-east-1");
+
+        assertEquals("og1", modified.getOptionGroupName());
+    }
+
+    @Test
+    void optionGroupsUseTheInjectedAccountAwareStorage() {
+        String accountId = "123456789012";
+        InMemoryStorage<String, OptionGroup> rawOptionGroups = new InMemoryStorage<>();
+        RdsService service = optionGroupStoreService(regionResolver,
+                new AccountAwareStorageBackend<>(rawOptionGroups, null, accountId));
+
+        service.createOptionGroup("og1", "mysql", "8.0", "mine", Map.of(), "us-east-1");
+
+        assertTrue(rawOptionGroups.get(accountId + "/us-east-1::og1").isPresent());
+    }
+
+    @Test
+    void sameNamedOptionGroupsInDifferentAccountsAreIsolated() {
+        String accountA = "111111111111";
+        String accountB = "222222222222";
+        InMemoryStorage<String, OptionGroup> rawOptionGroups = new InMemoryStorage<>();
+        RdsService serviceA = optionGroupStoreService(
+                new RegionResolver("us-east-1", accountA),
+                new AccountAwareStorageBackend<>(rawOptionGroups, null, accountA));
+        RdsService serviceB = optionGroupStoreService(
+                new RegionResolver("us-east-1", accountB),
+                new AccountAwareStorageBackend<>(rawOptionGroups, null, accountB));
+
+        serviceA.createOptionGroup("og1", "mysql", "8.0", "account a", Map.of(), "us-east-1");
+        serviceB.createOptionGroup("og1", "postgres", "16", "account b", Map.of(), "us-east-1");
+        serviceA.deleteOptionGroup("og1", "us-east-1");
+
+        assertThrows(AwsException.class, () -> serviceA.getOptionGroup("og1", "us-east-1"));
+        assertEquals("postgres", serviceB.getOptionGroup("og1", "us-east-1").getEngineName());
+    }
+
+    private RdsService optionGroupStoreService(
+            RegionResolver resolver, StorageBackend<String, OptionGroup> optionGroups) {
+        return new RdsService(containerManager, proxyManager, ec2Service, resolver, config,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), null, null, null,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), optionGroups, null);
+    }
+
+    private DbInstance createInstanceWithOptionGroup(
+            String id, String engine, String engineVersion, String optionGroupName) {
+        return rdsService.createDbInstance(id, engine, engineVersion, "admin", "password",
+                "dbname", "db.t3.micro", 20, false, null, null, null, null, false, false,
+                null, Map.of(), List.of(), optionGroupName, null, true);
     }
 
     private RdsService newService(RdsContainerManager containerManager,

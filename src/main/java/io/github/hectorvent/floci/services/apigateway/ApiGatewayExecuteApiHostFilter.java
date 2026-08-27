@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.apigateway;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2Service;
 import jakarta.annotation.Priority;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -18,6 +19,7 @@ import org.jboss.logging.Logger;
 
 import java.net.URI;
 import java.util.Locale;
+import java.util.Optional;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -37,13 +39,20 @@ public class ApiGatewayExecuteApiHostFilter implements ContainerRequestFilter {
     private final RegionResolver regionResolver;
     private final ApiGatewayExecuteRouteContext routeContext;
     private final String baseHostname;
+    private final RequestContext requestContext;
 
     @Inject
     public ApiGatewayExecuteApiHostFilter(ApiGatewayV2Service apiGatewayV2Service,
                                           RegionResolver regionResolver,
                                           ApiGatewayExecuteRouteContext routeContext,
-                                          EmulatorConfig config) {
+                                          EmulatorConfig config,
+                                          RequestContext requestContext) {
         this(new ApiGatewayLookup() {
+            @Override
+            public Optional<ApiGatewayV2Service.ApiOwner> findApiOwner(String apiId) {
+                return apiGatewayV2Service.findApiOwner(apiId);
+            }
+
             @Override
             public String resolveApiRegion(String preferredRegion, String apiId) {
                 return apiGatewayV2Service.resolveApiRegion(preferredRegion, apiId);
@@ -63,24 +72,31 @@ public class ApiGatewayExecuteApiHostFilter implements ContainerRequestFilter {
             public void requireStage(String region, String apiId, String stageName) {
                 apiGatewayV2Service.getStage(region, apiId, stageName);
             }
-        }, regionResolver, routeContext, config.hostname().orElse("localhost"));
+        }, regionResolver, routeContext, config.hostname().orElse("localhost"), requestContext);
     }
 
     ApiGatewayExecuteApiHostFilter(ApiGatewayLookup apiGatewayLookup, RegionResolver regionResolver) {
-        this(apiGatewayLookup, regionResolver, new ApiGatewayExecuteRouteContext(), "localhost");
+        this(apiGatewayLookup, regionResolver, new ApiGatewayExecuteRouteContext(), "localhost", null);
     }
 
     ApiGatewayExecuteApiHostFilter(ApiGatewayLookup apiGatewayLookup, RegionResolver regionResolver,
                                    ApiGatewayExecuteRouteContext routeContext) {
-        this(apiGatewayLookup, regionResolver, routeContext, "localhost");
+        this(apiGatewayLookup, regionResolver, routeContext, "localhost", null);
     }
 
     ApiGatewayExecuteApiHostFilter(ApiGatewayLookup apiGatewayLookup, RegionResolver regionResolver,
                                    ApiGatewayExecuteRouteContext routeContext, String baseHostname) {
+        this(apiGatewayLookup, regionResolver, routeContext, baseHostname, null);
+    }
+
+    ApiGatewayExecuteApiHostFilter(ApiGatewayLookup apiGatewayLookup, RegionResolver regionResolver,
+                                   ApiGatewayExecuteRouteContext routeContext, String baseHostname,
+                                   RequestContext requestContext) {
         this.apiGatewayLookup = apiGatewayLookup;
         this.regionResolver = regionResolver;
         this.routeContext = routeContext;
         this.baseHostname = baseHostname;
+        this.requestContext = requestContext;
     }
 
     @Override
@@ -94,15 +110,26 @@ public class ApiGatewayExecuteApiHostFilter implements ContainerRequestFilter {
         if (apiId == null) {
             return;
         }
-        // Region: the host label when it is a real AWS region (…execute-api.{region}.…), else the
-        // SigV4 credential scope. The cross-region apiId scan (resolveApiRegion) is the final
-        // fallback so an API created outside the default region still resolves — including on the
-        // regionless built-in suffixes, which carry no region label (issue #1871).
-        String hostRegion = regionResolver.resolveRegionFromHost(host);
-        String preferredRegion = hostRegion != null
-                ? hostRegion
-                : regionResolver.resolveRegionFromAuth(requestContext.getHeaderString("Authorization"));
-        String region = apiGatewayLookup.resolveApiRegion(preferredRegion, apiId);
+        Optional<ApiGatewayV2Service.ApiOwner> owner = apiGatewayLookup.findApiOwner(apiId);
+        String region;
+        if (owner.isPresent()) {
+            ApiGatewayV2Service.ApiOwner apiOwner = owner.get();
+            if (this.requestContext != null) {
+                this.requestContext.setAccountId(apiOwner.accountId());
+                this.requestContext.setRegion(apiOwner.region());
+            }
+            region = apiOwner.region();
+        } else {
+            // Region: the host label when it is a real AWS region (…execute-api.{region}.…), else
+            // the SigV4 credential scope. The cross-region apiId scan (resolveApiRegion) is the
+            // final fallback so an API created outside the default region still resolves —
+            // including on regionless built-in suffixes (issue #1871).
+            String hostRegion = regionResolver.resolveRegionFromHost(host);
+            String preferredRegion = hostRegion != null
+                    ? hostRegion
+                    : regionResolver.resolveRegionFromAuth(requestContext.getHeaderString("Authorization"));
+            region = apiGatewayLookup.resolveApiRegion(preferredRegion, apiId);
+        }
 
         URI originalUri = requestContext.getUriInfo().getRequestUri();
         String originalPath = originalUri.getRawPath();
@@ -175,6 +202,10 @@ public class ApiGatewayExecuteApiHostFilter implements ContainerRequestFilter {
     }
 
     interface ApiGatewayLookup {
+        default Optional<ApiGatewayV2Service.ApiOwner> findApiOwner(String apiId) {
+            return Optional.empty();
+        }
+
         String resolveApiRegion(String preferredRegion, String apiId);
 
         String protocolType(String region, String apiId);

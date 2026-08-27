@@ -36,11 +36,11 @@ class IamServiceTest {
         return iamService(seedDeployerPrincipal, new InMemoryStorage<>());
     }
 
-    private static IamService iamService(boolean seedDeployerPrincipal, InMemoryStorage<String, AccessKey> accessKeys) {
+    private static IamService iamService(boolean seedDeployerPrincipal, StorageBackend<String, AccessKey> accessKeys) {
         return iamService(seedDeployerPrincipal, accessKeys, new InMemoryStorage<>());
     }
 
-    private static IamService iamService(boolean seedDeployerPrincipal, InMemoryStorage<String, AccessKey> accessKeys,
+    private static IamService iamService(boolean seedDeployerPrincipal, StorageBackend<String, AccessKey> accessKeys,
                                          StorageBackend<String, SessionCredential> sessions) {
         return new IamService(
                 new InMemoryStorage<>(),
@@ -69,6 +69,30 @@ class IamServiceTest {
         assertTrue(user.getUserId().startsWith("AIDA"));
         assertEquals("arn:aws:iam::000000000000:user/alice", user.getArn());
         assertNotNull(user.getCreateDate());
+    }
+
+    @Test
+    void accountSummaryUsesAwsDefaultQuotasAndTracksProviders() {
+        Map<String, Long> empty = iamService.getAccountSummary();
+
+        assertEquals(300L, empty.get("GroupsQuota"));
+        assertEquals(1000L, empty.get("RolesQuota"));
+        assertEquals(1500L, empty.get("PoliciesQuota"));
+        assertEquals(1000L, empty.get("InstanceProfilesQuota"));
+        assertEquals(10L, empty.get("AttachedPoliciesPerUserQuota"));
+        assertEquals(10L, empty.get("AttachedPoliciesPerGroupQuota"));
+        assertEquals(20L, empty.get("AttachedPoliciesPerRoleQuota"));
+        assertEquals(6144L, empty.get("PolicySizeQuota"));
+        assertEquals(0L, empty.get("Providers"));
+        assertEquals(0L, empty.get("AccountAccessKeysPresent"));
+
+        iamService.createUser("summary-user", "/");
+        iamService.createAccessKey("summary-user");
+        iamService.createOpenIDConnectProvider(
+                "https://oidc.example.com/id/SUMMARY", List.of(), List.of("thumbprint"), Map.of());
+
+        assertEquals(1L, iamService.getAccountSummary().get("Providers"));
+        assertEquals(0L, iamService.getAccountSummary().get("AccountAccessKeysPresent"));
     }
 
     @Test
@@ -500,12 +524,28 @@ class IamServiceTest {
     }
 
     @Test
-    void resolveAccountIdDoesNotScanSessionsForLongTermAccessKey() {
-        CountingAccountAwareSessionStorage sessions = new CountingAccountAwareSessionStorage();
-        IamService service = iamService(false, new InMemoryStorage<>(), sessions);
+    void resolveAccountIdUsesLongTermAccessKeyOwnerAccount() {
+        AccountAwareStorageBackend<AccessKey> accessKeys = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "000000000000");
+        AccessKey accessKey = new AccessKey("AKIAIOSFODNN7EXAMPLE", "secret", "worker");
+        accessKeys.putForAccount("111122223333", accessKey.getAccessKeyId(), accessKey);
 
-        assertTrue(service.resolveAccountId("AKIAIOSFODNN7EXAMPLE").isEmpty());
-        assertEquals(0, sessions.scanAllAccountsAsMapCalls);
+        IamService service = iamService(false, accessKeys, new InMemoryStorage<>());
+
+        assertEquals("111122223333", service.resolveAccountId(accessKey.getAccessKeyId()).orElseThrow());
+    }
+
+    @Test
+    void resolveAccountIdIgnoresInactiveLongTermAccessKey() {
+        AccountAwareStorageBackend<AccessKey> accessKeys = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "000000000000");
+        AccessKey accessKey = new AccessKey("AKIAINACTIVEEXAMPLE", "secret", "worker");
+        accessKey.setStatus("Inactive");
+        accessKeys.putForAccount("111122223333", accessKey.getAccessKeyId(), accessKey);
+
+        IamService service = iamService(false, accessKeys, new InMemoryStorage<>());
+
+        assertTrue(service.resolveAccountId(accessKey.getAccessKeyId()).isEmpty());
     }
 
     private static final class CountingAccountAwareSessionStorage
@@ -555,6 +595,65 @@ class IamServiceTest {
         assertNull(service.resolveCallerContext(accessKeyId));
 
         assertTrue(sessions.getForAccount("111122223333", accessKeyId).isEmpty());
+    }
+
+    @Test
+    void lambdaExecutionRoleSessionUsesExplicitAccountAndHasNoExpiration() {
+        String accountId = "222233334444";
+        String accessKeyId = "ASIALAMBDAEXPLICIT";
+        AccountAwareStorageBackend<SessionCredential> sessions = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "000000000000");
+        IamService service = iamService(false, new InMemoryStorage<>(), sessions);
+
+        service.registerLambdaExecutionRoleSession(
+                accountId, accessKeyId, "lambda-secret",
+                "arn:aws:iam::222233334444:role/LambdaRole");
+
+        SessionCredential stored = sessions.getForAccount(accountId, accessKeyId).orElseThrow();
+        assertEquals(accountId, stored.getOriginAccountId());
+        assertNull(stored.getExpiration());
+        assertTrue(stored.isLambdaExecutionRole());
+        assertTrue(sessions.getForAccount("000000000000", accessKeyId).isEmpty());
+
+        service.unregisterSession(accountId, accessKeyId);
+        assertTrue(sessions.getForAccount(accountId, accessKeyId).isEmpty());
+    }
+
+    @Test
+    void temporarySessionUsesExplicitAccountNamespace() {
+        String accountId = "222233334444";
+        String accessKeyId = "ASIASIGNINEXPLICIT";
+        AccountAwareStorageBackend<SessionCredential> sessions = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "000000000000");
+        IamService service = iamService(false, new InMemoryStorage<>(), sessions);
+
+        service.registerSessionForAccount(
+                accountId, accessKeyId, "signin-secret",
+                "arn:aws:iam::222233334444:root", Instant.now().plusSeconds(900), null);
+
+        SessionCredential stored = sessions.getForAccount(accountId, accessKeyId).orElseThrow();
+        assertEquals(accountId, stored.getOriginAccountId());
+        assertEquals("signin-secret", stored.getSecretAccessKey());
+        assertTrue(sessions.getForAccount("000000000000", accessKeyId).isEmpty());
+        assertEquals(accountId, service.resolveAccountId(accessKeyId).orElseThrow());
+    }
+
+    @Test
+    void lambdaExecutionRoleSessionSweepPreservesStsSessions() {
+        AccountAwareStorageBackend<SessionCredential> sessions = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "000000000000");
+        IamService service = iamService(false, new InMemoryStorage<>(), sessions);
+        service.registerLambdaExecutionRoleSession(
+                "222233334444", "ASIALAMBDAORPHAN", "lambda-secret",
+                "arn:aws:iam::222233334444:role/LambdaRole");
+        service.registerSession(
+                "ASIASTSSESSION", "sts-secret", "arn:aws:iam::000000000000:role/StsRole",
+                Instant.now().plusSeconds(3600), null, "000000000000");
+
+        assertEquals(1, service.sweepOrphanedLambdaExecutionRoleSessions());
+
+        assertTrue(sessions.getForAccount("222233334444", "ASIALAMBDAORPHAN").isEmpty());
+        assertTrue(sessions.getForAccount("000000000000", "ASIASTSSESSION").isPresent());
     }
 
     // =========================================================================

@@ -25,8 +25,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
@@ -207,12 +207,21 @@ public class ContainerLogStreamer {
      */
     static final class LogReassemblyCallback extends ResultCallback.Adapter<Frame> {
 
-        private static final ScheduledExecutorService CLOSE_DRAIN_SCHEDULER =
-                Executors.newSingleThreadScheduledExecutor(runnable -> {
-                    Thread thread = new Thread(runnable, "floci-container-log-close");
-                    thread.setDaemon(true);
-                    return thread;
-                });
+        // The idle core thread must time out. A permanent thread would keep executing-class
+        // references alive and pin the whole application classloader after shutdown, which
+        // accumulates across the many app restarts of a profile-switching test run.
+        private static final ScheduledExecutorService CLOSE_DRAIN_SCHEDULER = closeDrainScheduler();
+
+        private static ScheduledExecutorService closeDrainScheduler() {
+            var scheduler = new ScheduledThreadPoolExecutor(1, runnable -> {
+                Thread thread = new Thread(runnable, "floci-container-log-close");
+                thread.setDaemon(true);
+                return thread;
+            });
+            scheduler.setKeepAliveTime(5, TimeUnit.SECONDS);
+            scheduler.allowCoreThreadTimeOut(true);
+            return scheduler;
+        }
         private static final long DEFAULT_CLOSE_GRACE_MILLIS = 2_000;
 
         private final Map<StreamType, LogLineBuffer> buffers = new EnumMap<>(StreamType.class);

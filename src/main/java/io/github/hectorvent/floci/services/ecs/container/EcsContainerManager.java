@@ -136,7 +136,9 @@ public class EcsContainerManager {
                     // own loopback.
                     .withHostDockerInternalOnLinux()
                     .withEmbeddedDns()
-                    .withLogRotation();
+                    .withLogRotation()
+                    .withLabels(ContainerStorageHelper.resourceIdentityLabels(
+                            "ecs", taskId, regionResolver.getAccountId(), region));
 
             // Add memory limit if specified
             if (def.getMemory() != null) {

@@ -927,6 +927,141 @@ class CloudFormationResourceConditionIntegrationTest {
         }
     }
 
+    @Test
+    void updateStack_deletesResourceWhenRemovedFromTemplate() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-rem-update-" + suffix;
+        String queueName = "removed-update-" + suffix;
+
+        String initialTemplate = """
+                {
+                  "Resources": {
+                    "OptionalQueue": {
+                      "Type": "AWS::SQS::Queue",
+                      "Properties": { "QueueName": "%s" }
+                    }
+                  }
+                }
+                """.formatted(queueName);
+        String updatedTemplate = """
+                {
+                  "Resources": {
+                    "DummyQueue": {
+                      "Type": "AWS::SQS::Queue",
+                      "Properties": { "QueueName": "dummy-%s" }
+                    }
+                  }
+                }
+                """.formatted(suffix);
+
+        createStack(stackName, initialTemplate);
+        try {
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "GetQueueUrl")
+                .formParam("QueueName", queueName)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString(queueName));
+
+            updateStack(stackName, updatedTemplate);
+
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "GetQueueUrl")
+                .formParam("QueueName", queueName)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("AWS.SimpleQueueService.NonExistentQueue"));
+
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DescribeStackResources")
+                .formParam("StackName", stackName)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(not(containsString("<LogicalResourceId>OptionalQueue</LogicalResourceId>")));
+        } finally {
+            deleteStack(stackName);
+        }
+    }
+
+    @Test
+    void updateStack_whenResourceRemovedFromTemplateWithNonEmptyBucket_keepsBucketAsDeleteFailedAndReclaimsOnDelete() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-rem-orphan-" + suffix;
+        String bucketName = "removed-orphan-" + suffix;
+
+        String initialTemplate = """
+                {
+                  "Resources": {
+                    "OptionalBucket": {
+                      "Type": "AWS::S3::Bucket",
+                      "Properties": { "BucketName": "%s" }
+                    }
+                  }
+                }
+                """.formatted(bucketName);
+        String updatedTemplate = """
+                {
+                  "Resources": {
+                  }
+                }
+                """;
+
+        createStack(stackName, initialTemplate);
+        try {
+            given().header("Host", bucketName + ".localhost").when().get("/").then().statusCode(200);
+            given()
+                .contentType("text/plain")
+                .body("prevent removed bucket deletion")
+            .when()
+                .put("/" + bucketName + "/object.txt")
+            .then()
+                .statusCode(200);
+
+            // Cleanup delete fails (bucket non-empty), but update completes; bucket stays under stack management as DELETE_FAILED.
+            updateStack(stackName, updatedTemplate);
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DescribeStacks")
+                .formParam("StackName", stackName)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("<StackStatus>UPDATE_COMPLETE</StackStatus>"))
+                .body(containsString("could not be deleted during update cleanup"));
+
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DescribeStackResources")
+                .formParam("StackName", stackName)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("<LogicalResourceId>OptionalBucket</LogicalResourceId>"))
+                .body(containsString("<ResourceStatus>DELETE_FAILED</ResourceStatus>"));
+
+            // Clear the blocker, then DeleteStack retries the DELETE_FAILED resource
+            given().header("Host", bucketName + ".localhost").delete("/object.txt").then().statusCode(204);
+            deleteStack(stackName);
+            awaitStackGone(stackName);
+            given().header("Host", bucketName + ".localhost").when().get("/").then().statusCode(404);
+        } finally {
+            given().header("Host", bucketName + ".localhost").delete("/object.txt");
+            given().header("Host", bucketName + ".localhost").delete("/");
+            deleteStack(stackName);
+        }
+    }
+
     private static void createStack(String stackName, String template) {
         given()
             .contentType("application/x-www-form-urlencoded")

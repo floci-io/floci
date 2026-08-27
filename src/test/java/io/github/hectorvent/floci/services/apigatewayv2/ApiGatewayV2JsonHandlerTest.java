@@ -98,7 +98,7 @@ class ApiGatewayV2JsonHandlerTest {
 
     @Test
     @Order(3)
-    void json11CreateDeploymentAndStage() {
+    void json11StageResponsesReturnTags() {
         deploymentId = given()
                 .contentType(AMZ_JSON)
                 .header("X-Amz-Target", TARGET_PREFIX + "CreateDeployment")
@@ -117,13 +117,55 @@ class ApiGatewayV2JsonHandlerTest {
                 .header("X-Amz-Target", TARGET_PREFIX + "CreateStage")
                 .header("Authorization", AUTH_HEADER)
                 .body("""
-                        {"ApiId":"%s","StageName":"prod","DeploymentId":"%s"}
+                        {"ApiId":"%s","StageName":"prod","DeploymentId":"%s","Tags":{"Environment":"test","Owner":"platform"}}
                         """.formatted(apiId, deploymentId))
                 .when().post("/")
                 .then()
                 .statusCode(201)
                 .body("StageName", equalTo("prod"))
-                .body("DeploymentId", equalTo(deploymentId));
+                .body("DeploymentId", equalTo(deploymentId))
+                .body("Tags.Environment", equalTo("test"))
+                .body("Tags.Owner", equalTo("platform"));
+
+        given()
+                .contentType(AMZ_JSON)
+                .header("X-Amz-Target", TARGET_PREFIX + "GetStage")
+                .header("Authorization", AUTH_HEADER)
+                .body("""
+                        {"ApiId":"%s","StageName":"prod"}
+                        """.formatted(apiId))
+                .when().post("/")
+                .then()
+                .statusCode(200)
+                .body("Tags.Environment", equalTo("test"))
+                .body("Tags.Owner", equalTo("platform"));
+
+        given()
+                .contentType(AMZ_JSON)
+                .header("X-Amz-Target", TARGET_PREFIX + "GetStages")
+                .header("Authorization", AUTH_HEADER)
+                .body("""
+                        {"ApiId":"%s"}
+                        """.formatted(apiId))
+                .when().post("/")
+                .then()
+                .statusCode(200)
+                .body("Items.find { it.StageName == 'prod' }.Tags.Environment", equalTo("test"))
+                .body("Items.find { it.StageName == 'prod' }.Tags.Owner", equalTo("platform"));
+
+        given()
+                .contentType(AMZ_JSON)
+                .header("X-Amz-Target", TARGET_PREFIX + "UpdateStage")
+                .header("Authorization", AUTH_HEADER)
+                .body("""
+                        {"ApiId":"%s","StageName":"prod","AutoDeploy":true}
+                        """.formatted(apiId))
+                .when().post("/")
+                .then()
+                .statusCode(200)
+                .body("AutoDeploy", equalTo(true))
+                .body("Tags.Environment", equalTo("test"))
+                .body("Tags.Owner", equalTo("platform"));
     }
 
     @Test

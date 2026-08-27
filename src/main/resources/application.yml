@@ -1,4 +1,8 @@
 quarkus:
+  jackson:
+    # Quarkus 3.37 stopped tolerating empty response beans; AWS StartApplication/
+    # StopApplication legitimately return {}, so keep the pre-3.37 behaviour.
+    fail-on-empty-beans: false
   log:
     console:
       format: "%d{yyyy-MM-dd HH:mm:ss,SSS} %-5p [%c{3.}] %s%e%n"
@@ -13,6 +17,11 @@ quarkus:
       max-body-size: ${floci.max-request-size}M
   datasource:
     active: false
+  kubernetes-client:
+    devservices:
+      # Never auto-start a test API server; the kubernetes Lambda executor
+      # connects to a real cluster (in-cluster config or kubeconfig) only.
+      enabled: false
   security:
      security-providers: BC
   shutdown:
@@ -59,6 +68,11 @@ quarkus:
       - --initialize-at-run-time=io.github.hectorvent.floci.services.emr.EmrService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.elasticbeanstalk.ElasticBeanstalkService
       - --initialize-at-run-time=graphql.util.IdGenerator
+      - --initialize-at-run-time=io.github.hectorvent.floci.services.lambda.launcher.LambdaExecutionRoleCredentials
+      # snappy-java (Firehose Snappy/HADOOP_SNAPPY delivery) extracts and loads a
+      # bundled JNI library from the static initializers of these two classes.
+      - --initialize-at-run-time=org.xerial.snappy.Snappy
+      - --initialize-at-run-time=org.xerial.snappy.SnappyLoader
 
 
 floci:
@@ -116,6 +130,8 @@ floci:
         flush-interval-ms: 5000
       s3vectors:
         flush-interval-ms: 5000
+      s3tables:
+        flush-interval-ms: 5000
       ecs:
         flush-interval-ms: 5000
       codebuild:
@@ -140,6 +156,17 @@ floci:
       appsync:
         flush-interval-ms: 5000
       rum:
+        flush-interval-ms: 5000
+      resourceexplorer2:
+        mode: hybrid
+        flush-interval-ms: 5000
+      fis:
+        flush-interval-ms: 5000
+      guardduty:
+        flush-interval-ms: 5000
+      emrserverless:
+        flush-interval-ms: 5000
+      lakeformation:
         flush-interval-ms: 5000
 
   dns:
@@ -192,6 +219,11 @@ floci:
     docker-host: unix:///var/run/docker.sock
     resource-namespace: ""          # FLOCI_DOCKER_RESOURCE_NAMESPACE; scopes child container/volume names
     docker-config-path: ""
+    # extra-labels:                 # Extra Docker labels applied to every Floci-created container and volume
+    #   - key: "com.example.project"  #   (FLOCI_DOCKER_EXTRA_LABELS_0__KEY / _0__VALUE; increment the index for more;
+    #     value: my-project           #   reserved keys floci, floci_emulator, floci_namespace are ignored)
+    #   - key: environment
+    #     value: dev
 
   services:
     ssm:
@@ -224,6 +256,14 @@ floci:
       unreserved-concurrency-min: 100
       # aws-config-path:                      # Host path to bind-mount (read-only) at /opt/aws-config for real credential discovery
       # extra-hosts:                          # Extra /etc/hosts entries for Lambda containers, "hostname:ip" ("host-gateway" allowed as ip)
+      # container-name-prefix: floci          # FLOCI_SERVICES_LAMBDA_CONTAINER_NAME_PREFIX — base name prefix for spawned containers and code volumes ([A-Za-z0-9][A-Za-z0-9_.-]*; invalid values fall back to "floci")
+      executor: docker                        # docker | kubernetes (run Lambda environments as pods)
+      # kubernetes:
+      #   namespace: default                  # Namespace Lambda pods are created in
+      #   labels:                             # Extra pod labels, key=value entries
+      #     - team=platform
+      #   floci-address:                      # Host/IP pods use to reach Floci; auto-detected in-cluster
+      #   init-image: busybox:1.36            # Init container image (needs sh, wget, unzip)
       hot-reload:
         enabled: false
     apigateway:
@@ -309,6 +349,8 @@ floci:
       enabled: true
     firehose:
       enabled: true
+      tick-interval-seconds: 10
+      flush-record-count: 0
     kms:
       enabled: true
     cognito:
@@ -316,6 +358,7 @@ floci:
     stepfunctions:
       enabled: true
       allow-plaintext-http: false
+      mock-config-file: ${SFN_MOCK_CONFIG:}
     swf:
       enabled: true
       timeout-sweep-enabled: true
@@ -361,6 +404,7 @@ floci:
       max-published-ports-per-instance: 20
       socat-image: alpine/socat
       mock: false
+      aws-faithful-private-ip: false
     ecs:
       enabled: true
       mock: false
@@ -441,6 +485,8 @@ floci:
     backup:
       enabled: true
       job-completion-delay-seconds: 3
+    fis:
+      enabled: true
     route53:
       enabled: true
     transfer:
@@ -464,7 +510,10 @@ floci:
     cloudtrail:
       enabled: true
     lightsail:
+      enabled: true
     cloudcontrol:
+      enabled: true
+    resourceexplorer2:
       enabled: true
     cloudfront:
       enabled: true
@@ -475,6 +524,8 @@ floci:
       schema-worker-shutdown-timeout-seconds: 30
     s3vectors:
       enabled: true
+    s3tables:
+      enabled: true
     iot:
       enabled: true
       mqtt:
@@ -484,5 +535,39 @@ floci:
         port: 1883
     iotdata:
       enabled: true
+    cloudhsmv2:
+      enabled: true
+    efs:
+      enabled: true
+    organizations:
+      enabled: true
     rum:
+      enabled: true
+    guardduty:
+      enabled: true
+    emrserverless:
+      enabled: true
+    controltower:
+      enabled: true
+    lakeformation:
+      enabled: true
+    tagging:
+      enabled: true
+    pipes:
+      enabled: true
+    configservice:
+      enabled: true
+    docdb:
+      enabled: true
+      mock: false
+      default-image: "mongo:7.0"
+    bedrock-agent-core:
+      enabled: true
+      # invoke-response: '{"output":"yes"}'   # Body returned by InvokeAgentRuntime
+      # validate-runtime-exists: false        # true = reject unknown runtime ARNs
+    bedrock-agent-core-control:
+      enabled: true
+    servicequotas:
+      enabled: true
+    ram:
       enabled: true

@@ -65,6 +65,16 @@ class ServiceCatalogRoutingIntegrationTest {
     }
 
     @Test
+    void fisResolvesAsRestJsonByCredentialScope() {
+        ServiceDescriptor descriptor = catalog.byCredentialScope("fis").orElseThrow();
+
+        assertEquals("fis", descriptor.externalKey());
+        assertEquals("fis", descriptor.storageKey());
+        assertEquals(ServiceProtocol.REST_JSON, descriptor.defaultProtocol());
+        assertTrue(descriptor.supportsProtocol(ServiceProtocol.REST_JSON));
+    }
+
+    @Test
     void unknownTargetsRemainUnresolved() {
         assertTrue(catalog.matchTarget("UnknownService.DoThing").isEmpty());
     }

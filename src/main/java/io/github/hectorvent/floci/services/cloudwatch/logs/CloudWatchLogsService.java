@@ -4,18 +4,22 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
+import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.LogEvent;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.LogGroup;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.LogStream;
+import io.github.hectorvent.floci.services.cloudwatch.logs.model.ResourcePolicy;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.SubscriptionFilter;
 import com.fasterxml.jackson.core.type.TypeReference;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -24,11 +28,17 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongSupplier;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
+import java.time.Instant;
+import java.util.Set;
 
 @ApplicationScoped
-public class CloudWatchLogsService {
+public class CloudWatchLogsService implements ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(CloudWatchLogsService.class);
 
@@ -47,6 +57,7 @@ public class CloudWatchLogsService {
     private final StorageBackend<String, LogStream> streamStore;
     private final StorageBackend<String, LogEvent> eventStore;
     private final StorageBackend<String, SubscriptionFilter> subscriptionFilterStore;
+    private final StorageBackend<String, ResourcePolicy> resourcePolicyStore;
     private final RegionResolver regionResolver;
     private final int maxEventsPerQuery;
     /**
@@ -60,6 +71,13 @@ public class CloudWatchLogsService {
     // Non-monotonic: a backward NTP step could briefly flip a Complete query back to Running — a rare,
     // self-healing emulator artifact we accept rather than complicate the injectable clock with nanoTime.
     private final LongSupplier clock;
+
+    /**
+     * DescribeLogStreams pagination snapshots keyed by the snapshot id embedded in nextToken.
+     * TTL-evicted on snapshot creation; see describeLogStreams for why pagination is
+     * snapshot-based rather than offset- or cursor-based.
+     */
+    private final ConcurrentHashMap<String, StreamPageSnapshot> streamPageSnapshots = new ConcurrentHashMap<>();
 
     /** Cached Logs Insights queries keyed by queryId, bounded with LRU-style eviction. */
     private static final int MAX_STORED_QUERIES = 100;
@@ -84,6 +102,8 @@ public class CloudWatchLogsService {
                         new TypeReference<>() {}),
                 storageFactory.create("cloudwatchlogs", "cwlogs-subscription-filters.json",
                         new TypeReference<>() {}),
+                storageFactory.create("cloudwatchlogs", "cwlogs-resource-policies.json",
+                        new TypeReference<>() {}),
                 config.services().cloudwatchlogs().maxEventsPerQuery(),
                 regionResolver,
                 config.services().cloudwatchlogs().queryCompletionDelayMs(),
@@ -97,7 +117,7 @@ public class CloudWatchLogsService {
                            StorageBackend<String, SubscriptionFilter> subscriptionFilterStore,
                            int maxEventsPerQuery,
                            RegionResolver regionResolver) {
-        this(groupStore, streamStore, eventStore, subscriptionFilterStore,
+        this(groupStore, streamStore, eventStore, subscriptionFilterStore, new InMemoryStorage<>(),
                 maxEventsPerQuery, regionResolver, 0L, System::currentTimeMillis);
     }
 
@@ -109,10 +129,24 @@ public class CloudWatchLogsService {
                            RegionResolver regionResolver,
                            long queryCompletionDelayMs,
                            LongSupplier clock) {
+        this(groupStore, streamStore, eventStore, subscriptionFilterStore, new InMemoryStorage<>(),
+                maxEventsPerQuery, regionResolver, queryCompletionDelayMs, clock);
+    }
+
+    CloudWatchLogsService(StorageBackend<String, LogGroup> groupStore,
+                           StorageBackend<String, LogStream> streamStore,
+                           StorageBackend<String, LogEvent> eventStore,
+                           StorageBackend<String, SubscriptionFilter> subscriptionFilterStore,
+                           StorageBackend<String, ResourcePolicy> resourcePolicyStore,
+                           int maxEventsPerQuery,
+                           RegionResolver regionResolver,
+                           long queryCompletionDelayMs,
+                           LongSupplier clock) {
         this.groupStore = groupStore;
         this.streamStore = streamStore;
         this.eventStore = eventStore;
         this.subscriptionFilterStore = subscriptionFilterStore;
+        this.resourcePolicyStore = resourcePolicyStore;
         this.maxEventsPerQuery = maxEventsPerQuery;
         this.regionResolver = regionResolver;
         long maxSequence = eventStore.scan(k -> true).stream()
@@ -305,11 +339,47 @@ public class CloudWatchLogsService {
         LOG.infov("Deleted log stream: {0}/{1}", groupName, streamName);
     }
 
+    public record DescribeLogStreamsResult(List<LogStream> logStreams, String nextToken) {}
+
     public List<LogStream> describeLogStreams(String groupName, String prefix, String region) {
+        return describeLogStreams(groupName, prefix, null, false, 0, null, region).logStreams();
+    }
+
+    public DescribeLogStreamsResult describeLogStreams(String groupName, String prefix, String orderBy,
+                                                       boolean descending, int limit, String nextToken,
+                                                       String region) {
+        boolean byLastEventTime = "LastEventTime".equals(orderBy);
+        if (orderBy != null && !orderBy.isBlank() && !byLastEventTime && !"LogStreamName".equals(orderBy)) {
+            throw new AwsException("InvalidParameterException",
+                    "1 validation error detected: Value '" + orderBy + "' at 'orderBy' failed to satisfy "
+                            + "constraint: Member must satisfy enum value set: [LogStreamName, LastEventTime]", 400);
+        }
+        // Matches real AWS: LastEventTime ordering cannot be combined with a name prefix.
+        if (byLastEventTime && prefix != null && !prefix.isBlank()) {
+            throw new AwsException("InvalidParameterException",
+                    "Cannot order by LastEventTime with a logStreamNamePrefix.", 400);
+        }
+
         // Verify group exists
         groupStore.get(groupKey(region, groupName))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "The specified log group does not exist: " + groupName, 400));
+
+        int maxResults = Math.min(limit > 0 ? limit : 50, 50);
+
+        // Pagination works over a snapshot of the ordering taken when the first page is
+        // served: the token names a stored snapshot plus a position in it. Re-sorting the
+        // live collection on every page (whether resumed by offset or by sort-key cursor)
+        // skips or repeats streams whenever creates, deletes or PutLogEvents reorder streams
+        // across a page boundary — e.g. an unreturned stream that receives a newer event
+        // between descending LastEventTime pages jumps ahead of any cursor and is never
+        // returned. The snapshot freezes membership and order; attributes are re-read live
+        // per page and streams deleted since the snapshot are dropped, so every stream that
+        // existed when pagination started is returned at most once, with current attributes.
+        if (nextToken != null && !nextToken.isBlank()) {
+            return resumeStreamPage(nextToken, groupName, prefix, byLastEventTime, descending,
+                    maxResults, region);
+        }
 
         String storagePrefix = streamKeyPrefix(region, groupName);
         List<LogStream> result = streamStore.scan(k -> {
@@ -322,8 +392,89 @@ public class CloudWatchLogsService {
             String streamName = k.substring(storagePrefix.length());
             return streamName.startsWith(prefix);
         });
-        result.sort(Comparator.comparing(LogStream::getLogStreamName));
-        return result;
+        // Streams that never received events have no lastEventTimestamp; sort them oldest,
+        // with the name as tie-break so the order stays deterministic.
+        Comparator<LogStream> base = byLastEventTime
+                ? Comparator.comparingLong((LogStream s) ->
+                                s.getLastEventTimestamp() == null ? Long.MIN_VALUE : s.getLastEventTimestamp())
+                        .thenComparing(LogStream::getLogStreamName)
+                : Comparator.comparing(LogStream::getLogStreamName);
+        result.sort(descending ? base.reversed() : base);
+
+        int end = Math.min(maxResults, result.size());
+        String token = null;
+        if (end < result.size()) {
+            String snapshotId = UUID.randomUUID().toString();
+            streamPageSnapshots.put(snapshotId, new StreamPageSnapshot(
+                    groupKey(region, groupName), prefix == null ? "" : prefix,
+                    byLastEventTime, descending,
+                    result.stream().map(LogStream::getLogStreamName).toList(),
+                    clock.getAsLong()));
+            evictExpiredStreamPageSnapshots();
+            token = encodeStreamPageToken(snapshotId, end);
+        }
+        return new DescribeLogStreamsResult(result.subList(0, end), token);
+    }
+
+    private DescribeLogStreamsResult resumeStreamPage(String nextToken, String groupName, String prefix,
+                                                      boolean byLastEventTime, boolean descending,
+                                                      int maxResults, String region) {
+        String[] parts;
+        try {
+            String raw = new String(Base64.getUrlDecoder().decode(nextToken), StandardCharsets.UTF_8);
+            parts = raw.split(":", 3);
+        } catch (IllegalArgumentException e) {
+            throw invalidNextToken();
+        }
+        int position;
+        if (parts.length != 3 || !"v2".equals(parts[0])) {
+            throw invalidNextToken();
+        }
+        try {
+            position = Integer.parseInt(parts[2]);
+        } catch (NumberFormatException e) {
+            throw invalidNextToken();
+        }
+        StreamPageSnapshot snapshot = streamPageSnapshots.get(parts[1]);
+        // A token replayed against a different group or query shape resumes at a meaningless
+        // position; reject it like an unknown or expired token.
+        if (snapshot == null
+                || position < 0
+                || !snapshot.groupKey().equals(groupKey(region, groupName))
+                || !snapshot.prefix().equals(prefix == null ? "" : prefix)
+                || snapshot.byLastEventTime() != byLastEventTime
+                || snapshot.descending() != descending) {
+            throw invalidNextToken();
+        }
+
+        List<LogStream> page = new ArrayList<>();
+        List<String> names = snapshot.streamNames();
+        int index = position;
+        while (index < names.size() && page.size() < maxResults) {
+            streamStore.get(streamKey(region, groupName, names.get(index))).ifPresent(page::add);
+            index++;
+        }
+        String token = index < names.size() ? encodeStreamPageToken(parts[1], index) : null;
+        return new DescribeLogStreamsResult(page, token);
+    }
+
+    private record StreamPageSnapshot(String groupKey, String prefix, boolean byLastEventTime,
+                                      boolean descending, List<String> streamNames, long createdAtMs) {}
+
+    private static final long STREAM_PAGE_SNAPSHOT_TTL_MS = 15 * 60 * 1000;
+
+    private void evictExpiredStreamPageSnapshots() {
+        long cutoff = clock.getAsLong() - STREAM_PAGE_SNAPSHOT_TTL_MS;
+        streamPageSnapshots.values().removeIf(s -> s.createdAtMs() < cutoff);
+    }
+
+    private static String encodeStreamPageToken(String snapshotId, int position) {
+        String raw = "v2:" + snapshotId + ":" + position;
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(raw.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static AwsException invalidNextToken() {
+        return new AwsException("InvalidParameterException", "The specified nextToken is invalid.", 400);
     }
 
     // ──────────────────────────── Log Events ────────────────────────────
@@ -428,7 +579,10 @@ public class CloudWatchLogsService {
         if (nextToken != null && nextToken.startsWith("f/")) {
             int offset = parseTokenIndex(nextToken, 2);
             pageStart = Math.min(offset, total);
-            pageEnd = Math.min(pageStart + maxEvents, total);
+            // Take the window out of what is left rather than adding to the offset, so a
+            // max-events cap configured near Integer.MAX_VALUE cannot overflow the end
+            // index negative once pagination has moved past the first page.
+            pageEnd = pageStart + Math.min(maxEvents, total - pageStart);
         } else if (nextToken != null && nextToken.startsWith("b/")) {
             int end = parseTokenIndex(nextToken, 2);
             pageEnd = Math.min(end, total);
@@ -460,10 +614,6 @@ public class CloudWatchLogsService {
         return index;
     }
 
-    private AwsException invalidNextToken() {
-        return new AwsException("InvalidParameterException", "The specified nextToken is invalid.", 400);
-    }
-
     /**
      * A FilterLogEvents match paired with the stream that emitted it. FilterLogEvents is the
      * cross-stream API, so the stream is what lets a caller attribute a hit; GetLogEvents needs
@@ -476,7 +626,7 @@ public class CloudWatchLogsService {
     public FilteredLogEventsResult filterLogEvents(String groupName, List<String> streamNames,
                                                     Long startTime, Long endTime,
                                                     String filterPattern, int limit,
-                                                    String region) {
+                                                    String nextToken, String region) {
         int maxEvents = Math.min(limit > 0 ? limit : Integer.MAX_VALUE,
                 maxEventsPerQuery);
 
@@ -501,16 +651,38 @@ public class CloudWatchLogsService {
 
         all.sort(Comparator.comparing(FilteredEvent::event, EVENT_ORDER));
 
-        List<FilteredEvent> result = all.stream()
+        List<FilteredEvent> matches = all.stream()
                 .filter(f -> (startTime == null || f.event().getTimestamp() >= startTime)
                         && (endTime == null || f.event().getTimestamp() <= endTime))
                 .filter(f -> filterPattern == null || filterPattern.isBlank()
                         || f.event().getMessage().contains(filterPattern))
-                .limit(maxEvents)
                 .toList();
 
-        String nextToken = result.size() >= maxEvents ? UUID.randomUUID().toString() : null;
-        return new FilteredLogEventsResult(result, nextToken);
+        // The cursor indexes matches rather than stored events, which is why the window is applied
+        // here instead of folded into the stream as a limit. Forward-only, so one prefix where
+        // GetLogEvents needs two.
+        int total = matches.size();
+        int pageStart;
+        if (nextToken != null && nextToken.startsWith("f/")) {
+            pageStart = Math.min(parseTokenIndex(nextToken, 2), total);
+        } else if (nextToken != null) {
+            throw invalidNextToken();
+        } else {
+            pageStart = 0;
+        }
+        // Subtracting from `total` rather than adding to `pageStart` keeps the arithmetic inside
+        // the list's own bounds, so a max-events cap configured near Integer.MAX_VALUE cannot
+        // overflow the end index negative.
+        int pageEnd = pageStart + Math.min(maxEvents, total - pageStart);
+
+        List<FilteredEvent> page = matches.subList(pageStart, pageEnd);
+
+        // Unlike GetLogEvents, which echoes its token back so an SDK paginator can stop on a repeat,
+        // FilterLogEvents signals exhaustion by omitting the token, and its paginators keep going
+        // while one is present. The second clause refuses a cursor that cannot advance, which a
+        // max-events cap of zero would otherwise produce.
+        String pageToken = pageEnd < total && pageEnd > pageStart ? "f/" + pageEnd : null;
+        return new FilteredLogEventsResult(page, pageToken);
     }
 
     // ──────────────────────────── Logs Insights Queries ────────────────────────────
@@ -743,6 +915,24 @@ public class CloudWatchLogsService {
         LOG.infov("Deleted subscription filter: {0} on log group: {1}", filterName, logGroupName);
     }
 
+    // ──────────────────────────── Resource Policies ────────────────────────────
+
+    public ResourcePolicy putResourcePolicy(String policyName, String policyDocument, String region) {
+        ResourcePolicy policy = new ResourcePolicy();
+        policy.setPolicyName(policyName);
+        policy.setPolicyDocument(policyDocument);
+        policy.setLastUpdatedTime(System.currentTimeMillis());
+        resourcePolicyStore.put(resourcePolicyKey(region, policyName), policy);
+        return policy;
+    }
+
+    public List<ResourcePolicy> describeResourcePolicies(String region) {
+        List<ResourcePolicy> policies = resourcePolicyStore.scan(
+                key -> key.startsWith(resourcePolicyKeyPrefix(region)));
+        policies.sort(Comparator.comparing(ResourcePolicy::getPolicyName));
+        return policies;
+    }
+
     // ──────────────────────────── Helpers ────────────────────────────
 
     private void deleteEventsForStream(String region, String groupName, String streamName) {
@@ -806,6 +996,14 @@ public class CloudWatchLogsService {
         return region + "::" + logGroupName + "::filter::" + filterName;
     }
 
+    private static String resourcePolicyKeyPrefix(String region) {
+        return region + "::policy::";
+    }
+
+    private static String resourcePolicyKey(String region, String policyName) {
+        return resourcePolicyKeyPrefix(region) + policyName;
+    }
+
     private static long toLong(Object value, long defaultValue) {
         if (value == null) {
             return defaultValue;
@@ -818,5 +1016,40 @@ public class CloudWatchLogsService {
         } catch (NumberFormatException e) {
             return defaultValue;
         }
+    }
+
+    // ─── Resource Explorer 2 ───────────────────────────────────────────────────
+
+    /**
+     * Log groups carry no Region of their own — the store keys them {@code region::name} — so the
+     * key is the only place the Region can come from.
+     */
+    @Override
+    public List<ExplorerResource> getResources() {
+        List<ExplorerResource> resources = new ArrayList<>();
+        for (String key : groupStore.keys()) {
+            int separator = key.indexOf("::");
+            if (separator < 0) {
+                continue;
+            }
+            LogGroup group = groupStore.get(key).orElse(null);
+            if (group == null || group.getLogGroupName() == null) {
+                continue;
+            }
+            String region = key.substring(0, separator);
+            resources.add(new ExplorerResource(
+                    "arn:aws:logs:" + region + ":" + regionResolver.getAccountId()
+                            + ":log-group:" + group.getLogGroupName() + ":*",
+                    "logs:log-group", "logs",
+                    region, regionResolver.getAccountId(),
+                    group.getCreatedTime() > 0 ? Instant.ofEpochMilli(group.getCreatedTime()) : Instant.now(),
+                    group.getTags() != null ? group.getTags() : Map.of()));
+        }
+        return resources;
+    }
+
+    @Override
+    public Set<SupportedResourceType> getSupportedResourceTypes() {
+        return Set.of(new SupportedResourceType("logs:log-group", "logs", true));
     }
 }

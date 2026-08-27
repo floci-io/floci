@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.services.elasticache.ElastiCacheQueryHandler;
 import io.github.hectorvent.floci.services.iam.IamQueryHandler;
 import io.github.hectorvent.floci.services.iam.StsQueryHandler;
 import io.github.hectorvent.floci.services.rds.RdsQueryHandler;
+import io.github.hectorvent.floci.services.rds.RdsService;
 import io.github.hectorvent.floci.services.sns.SnsQueryHandler;
 import io.github.hectorvent.floci.services.ses.SesQueryHandler;
 import io.github.hectorvent.floci.services.sqs.SqsQueryHandler;
@@ -181,6 +182,9 @@ public class AwsQueryController {
     private final NeptuneService neptuneService;
     private final DocDbQueryHandler docDbQueryHandler;
     private final DocDbService docDbService;
+    private final RdsService rdsService;
+    /** ARNs already reported as held by both services, so the warning is logged once each. */
+    private final java.util.Set<String> reportedArnCollisions = java.util.concurrent.ConcurrentHashMap.newKeySet();
     private final SqsQueryHandler sqsQueryHandler;
     private final SnsQueryHandler snsQueryHandler;
     private final SesQueryHandler sesQueryHandler;
@@ -203,6 +207,7 @@ public class AwsQueryController {
                               NeptuneService neptuneService,
                               DocDbQueryHandler docDbQueryHandler,
                               DocDbService docDbService,
+                              RdsService rdsService,
                               SqsQueryHandler sqsQueryHandler, SnsQueryHandler snsQueryHandler,
                               SesQueryHandler sesQueryHandler,
                               IamQueryHandler iamQueryHandler, StsQueryHandler stsQueryHandler,
@@ -221,6 +226,7 @@ public class AwsQueryController {
         this.neptuneService = neptuneService;
         this.docDbQueryHandler = docDbQueryHandler;
         this.docDbService = docDbService;
+        this.rdsService = rdsService;
         this.sqsQueryHandler = sqsQueryHandler;
         this.snsQueryHandler = snsQueryHandler;
         this.sesQueryHandler = sesQueryHandler;
@@ -283,14 +289,20 @@ public class AwsQueryController {
             case "sns" -> snsQueryHandler.handle(action, formParams, region);
             case "iam" -> iamQueryHandler.handle(action, formParams, authorization);
             case "sts" -> stsQueryHandler.handle(action, formParams);
-            case "elasticache" -> elastiCacheQueryHandler.handle(action, formParams);
-            case "rds" -> { 
+            case "elasticache" -> elastiCacheQueryHandler.handle(action, formParams, region);
+            case "rds" -> {
                 // Neptune signs requests with "rds" credential scope (same wire protocol).
                 // Route to Neptune when Engine=neptune (create ops) or when the cluster/instance
                 // already exists in Neptune storage (describe/modify/delete ops).
                 String engine = formParams.getFirst("Engine");
                 String clusterId = formParams.getFirst("DBClusterIdentifier");
                 String instanceId = formParams.getFirst("DBInstanceIdentifier");
+
+                Response identifierClash = rdsAlreadyHoldsIdentifier(action, formParams, region);
+                if (identifierClash != null) {
+                    yield identifierClash;
+                }
+
                 if ("neptune".equalsIgnoreCase(engine)
                         || neptuneService.hasCluster(clusterId)
                         || neptuneService.hasInstance(instanceId)) {
@@ -298,14 +310,20 @@ public class AwsQueryController {
                 }
 
                 if ("docdb".equalsIgnoreCase(engine)
-                       || docDbService.hasCluster(clusterId)
-                       || docDbService.hasInstance(instanceId)) {
+                       || docDbService.hasCluster(clusterId, region)
+                       || docDbService.hasInstance(instanceId, region)
+                       || namesDocDbResource(formParams.getFirst("ResourceName"), region)) {
                         yield docDbQueryHandler.handle(action, formParams);
                 }
                 yield rdsQueryHandler.handle(action, formParams, region);
             }
             case "neptune" -> neptuneQueryHandler.handle(action, formParams);
-            case "docdb" -> docDbQueryHandler.handle(action, formParams);
+            case "docdb" -> {
+                // The same check as on the rds scope: DocumentDB is reachable under either, and a
+                // create that skipped it here would put a second record under an ARN RDS owns.
+                Response clash = rdsAlreadyHoldsIdentifier(action, formParams, region);
+                yield clash != null ? clash : docDbQueryHandler.handle(action, formParams);
+            }
             case "email" -> sesQueryHandler.handle(action, formParams, region);
             case "monitoring" -> cloudWatchMetricsQueryHandler.handle(action, formParams, region);
             case "cloudformation" -> cloudFormationQueryHandler.handle(action, formParams, region);
@@ -317,6 +335,61 @@ public class AwsQueryController {
             default -> xmlErrorResponse("UnknownService",
                     "Unknown or unsupported service: " + service, 400);
         };
+    }
+
+    /**
+     * The AlreadyExists answer when a create names an identifier RDS already holds here, or null.
+     *
+     * <p>One identifier space covers the whole RDS family: a live account refuses to create an
+     * Aurora cluster named like an existing DocumentDB one. Answering that way is what stops two
+     * services holding one identifier in one region, which no ARN could then tell apart — so the
+     * check has to run on every route that reaches DocumentDB, not only the {@code rds} scope.
+     *
+     * <p>Only the identifier being created is checked: {@code CreateDBInstance} names its parent
+     * cluster too, and that cluster existing in RDS is the normal case rather than a clash.
+     */
+    private Response rdsAlreadyHoldsIdentifier(String action,
+                                               MultivaluedMap<String, String> formParams,
+                                               String region) {
+        if ("CreateDBCluster".equals(action) && rdsService.hasClusterOrInstance(
+                formParams.getFirst("DBClusterIdentifier"), null, region)) {
+            return xmlErrorResponse("DBClusterAlreadyExistsFault", "DB Cluster already exists", 400);
+        }
+        if ("CreateDBInstance".equals(action) && rdsService.hasClusterOrInstance(
+                null, formParams.getFirst("DBInstanceIdentifier"), region)) {
+            return xmlErrorResponse("DBInstanceAlreadyExists", "DB Instance already exists", 400);
+        }
+        return null;
+    }
+
+    /**
+     * Whether a tagging {@code ResourceName} names a DocumentDB cluster or instance.
+     *
+     * <p>The tag actions carry no engine or identifier to route on — only the ARN of the resource
+     * they address — so without reading it they reach the RDS handler, which does not hold
+     * DocumentDB's records. The whole ARN is matched, not its trailing name: RDS and DocumentDB
+     * share one ARN space, so a name both services use would otherwise be answered from the wrong
+     * store, and an RDS parameter group or option group could be resolved as a cluster. Anything
+     * DocumentDB does not hold under that exact ARN stays with RDS.
+     *
+     * <p>State persisted before creates were made to share one identifier space can still hold the
+     * same identifier in both stores. DocumentDB answers it, which is what the identifier checks
+     * above already do for every other action on that record — describe, modify and delete
+     * included — so one identifier keeps one answer. The collision is logged once, because the
+     * RDS record behind it is unreachable on this scope and only deleting one of the two fixes it.
+     */
+    private boolean namesDocDbResource(String resourceName, String region) {
+        if (!docDbService.hasResourceWithArn(resourceName)) {
+            return false;
+        }
+        String identifier = resourceName.substring(resourceName.lastIndexOf(':') + 1);
+        if (rdsService.hasClusterOrInstance(identifier, identifier, region)
+                && reportedArnCollisions.add(resourceName)) {
+            LOG.warnv("RDS and DocumentDB both hold {0}; DocumentDB answers for it, as it does for "
+                    + "every other action on that identifier. Delete one of the two records.",
+                    resourceName);
+        }
+        return true;
     }
 
     private Response handleCognitoQuery(String action, MultivaluedMap<String, String> formParams, String region) {
@@ -367,11 +440,17 @@ public class AwsQueryController {
             "CreateDBSubnetGroup", "DescribeDBSubnetGroups", "ModifyDBSubnetGroup", "DeleteDBSubnetGroup",
             "AddTagsToResource", "ListTagsForResource", "RemoveTagsFromResource",
             "CreateDBCluster", "DescribeDBClusters", "DeleteDBCluster", "ModifyDBCluster",
+            "DescribeGlobalClusters",
             "CreateDBParameterGroup", "DescribeDBParameterGroups",
             "DeleteDBParameterGroup", "ModifyDBParameterGroup", "DescribeDBParameters",
             "DescribeDBProxies", "CreateDBProxy", "ModifyDBProxy", "DeleteDBProxy",
             "RegisterDBProxyTargets", "DeregisterDBProxyTargets",
-            "DescribeDBProxyTargetGroups", "ModifyDBProxyTargetGroup", "DescribeDBProxyTargets"
+            "DescribeDBProxyTargetGroups", "ModifyDBProxyTargetGroup", "DescribeDBProxyTargets",
+            "CreateDBClusterParameterGroup", "DescribeDBClusterParameterGroups",
+            "ModifyDBClusterParameterGroup", "DeleteDBClusterParameterGroup",
+            "DescribeDBClusterParameters",
+            "CreateOptionGroup", "DescribeOptionGroups", "ModifyOptionGroup", "DeleteOptionGroup",
+            "DescribeDBSnapshots", "DescribeDBClusterSnapshots"
     );
 
     private static final Set<String> CLOUDFORMATION_ACTIONS = Set.of(

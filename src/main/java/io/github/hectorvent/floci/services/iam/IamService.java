@@ -5,6 +5,9 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.SessionAccountLookup;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
@@ -28,6 +31,7 @@ import org.jboss.logging.Logger;
 
 import java.time.Instant;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -48,7 +52,7 @@ import java.util.regex.Pattern;
  */
 @Startup
 @ApplicationScoped
-public class IamService implements SessionAccountLookup {
+public class IamService implements SessionAccountLookup, ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(IamService.class);
     private static final String CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
@@ -789,9 +793,9 @@ public class IamService implements SessionAccountLookup {
      * keys; quota values are cross-checked against AWS's published IAM service quotas
      * (docs.aws.amazon.com/general/latest/gr/iam-service.html), though floci itself enforces
      * only the 5-versions-per-policy cap in {@link #createPolicyVersion}. Resources floci does
-     * not track at all (MFA devices, SAML/OIDC providers, server certificates, account password -
-     * all stub-empty elsewhere in this handler) are reported as zero rather than omitted, so
-     * callers indexing into the full AWS field set don't hit a missing-key error.
+     * not track at all (MFA devices, SAML providers, server certificates, account password - all
+     * stub-empty elsewhere in this handler) are reported as zero rather than omitted, so callers
+     * indexing into the full AWS field set don't hit a missing-key error.
      */
     public Map<String, Long> getAccountSummary() {
         long localPolicyCount = 0;
@@ -823,7 +827,7 @@ public class IamService implements SessionAccountLookup {
         summary.put("InstanceProfilesQuota", 1000L);
         summary.put("AttachedPoliciesPerUserQuota", 10L);
         summary.put("AttachedPoliciesPerGroupQuota", 10L);
-        summary.put("AttachedPoliciesPerRoleQuota", 10L);
+        summary.put("AttachedPoliciesPerRoleQuota", 20L);
         summary.put("GroupPolicySizeQuota", 5120L);
         summary.put("UserPolicySizeQuota", 2048L);
         summary.put("RolePolicySizeQuota", 10240L);
@@ -831,10 +835,12 @@ public class IamService implements SessionAccountLookup {
         summary.put("SigningCertificatesPerUserQuota", 2L);
         summary.put("ServerCertificates", 0L);
         summary.put("ServerCertificatesQuota", 20L);
-        summary.put("Providers", 0L);
+        summary.put("Providers", (long) oidcProviders.scan(k -> true).size());
         summary.put("MFADevices", 0L);
         summary.put("MFADevicesInUse", 0L);
         summary.put("AccountMFAEnabled", 0L);
+        // AWS reports whether the root account has access keys, not whether IAM users do.
+        // Floci does not model root access keys, so this remains false even when user keys exist.
         summary.put("AccountAccessKeysPresent", 0L);
         summary.put("AccountSigningCertificatesPresent", 0L);
         summary.put("AccountPasswordPresent", 0L);
@@ -1269,6 +1275,43 @@ public class IamService implements SessionAccountLookup {
                 .toList();
     }
 
+    @Override
+    public List<ExplorerResource> getResources() {
+        List<ExplorerResource> resources = new ArrayList<>();
+        for (IamUser user : users.scan(k -> true)) {
+            addIamResource(resources, user.getArn(), "iam:user", user.getCreateDate(), user.getTags());
+        }
+        for (IamRole role : roles.scan(k -> true)) {
+            addIamResource(resources, role.getArn(), "iam:role", role.getCreateDate(), role.getTags());
+        }
+        return resources;
+    }
+
+    private void addIamResource(List<ExplorerResource> out, String arn, String type,
+                                Instant createDate, Map<String, String> tags) {
+        if (arn == null) {
+            return;
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        // IAM is a global service: its ARNs carry no region. Resource Explorer reports
+        // global resources with the region "global" (not an empty string).
+        String region = parsed.region() == null || parsed.region().isEmpty()
+                ? "global"
+                : parsed.region();
+        out.add(new ExplorerResource(
+                arn, type, "iam",
+                region, parsed.accountId(),
+                createDate != null ? createDate : Instant.now(),
+                tags != null ? tags : Map.of()));
+    }
+
+    @Override
+    public Set<SupportedResourceType> getSupportedResourceTypes() {
+        return Set.of(
+                new SupportedResourceType("iam:user", "iam", true),
+                new SupportedResourceType("iam:role", "iam", true));
+    }
+
     // =========================================================================
     // Account Aliases
     // ==================================================================
@@ -1576,16 +1619,92 @@ public class IamService implements SessionAccountLookup {
                         sessionPolicyDocument, originAccountId));
     }
 
+    /** Stores a temporary session in an explicit account namespace. */
+    public void registerSessionForAccount(String accountId, String sessionAccessKeyId, String secretAccessKey,
+                                          String roleArn, java.time.Instant expiration,
+                                          String sessionPolicyDocument) {
+        if (accountId == null || accountId.isBlank()) {
+            throw new IllegalArgumentException("Session account ID must not be blank");
+        }
+        SessionCredential session = new SessionCredential(
+                sessionAccessKeyId, secretAccessKey, roleArn, expiration, sessionPolicyDocument, accountId);
+        if (sessions instanceof AccountAwareStorageBackend<SessionCredential> aware) {
+            aware.putForAccount(accountId, sessionAccessKeyId, session);
+        } else {
+            sessions.put(sessionAccessKeyId, session);
+        }
+    }
+
     /**
-     * Resolves the account a temporary access key belongs to: the account encoded in the
-     * session's role (or federated-user) ARN when present, otherwise the caller account captured
-     * at mint time. Returns empty for unknown or expired sessions so callers fall back to the
-     * default account.
+     * Stores a non-expiring session for a Lambda execution role under the function's account.
+     * Lambda launches can happen outside request scope, so the account namespace must be explicit.
+     */
+    public void registerLambdaExecutionRoleSession(String accountId, String sessionAccessKeyId,
+                                                   String secretAccessKey, String roleArn) {
+        if (accountId == null || accountId.isBlank()) {
+            throw new IllegalArgumentException("Lambda function account ID must not be blank");
+        }
+        SessionCredential session = new SessionCredential(
+                sessionAccessKeyId, secretAccessKey, roleArn, null, null, accountId);
+        session.setLambdaExecutionRole(true);
+        if (sessions instanceof AccountAwareStorageBackend<SessionCredential> aware) {
+            aware.putForAccount(accountId, sessionAccessKeyId, session);
+        } else {
+            sessions.put(sessionAccessKeyId, session);
+        }
+        LOG.debugv("Registered Lambda execution-role session {0} under account {1} for {2}",
+                sessionAccessKeyId, accountId, roleArn);
+    }
+
+    /** Removes a session from an explicit account namespace. */
+    public void unregisterSession(String accountId, String sessionAccessKeyId) {
+        if (sessionAccessKeyId == null || sessionAccessKeyId.isBlank()) {
+            return;
+        }
+        if (accountId != null && !accountId.isBlank()
+                && sessions instanceof AccountAwareStorageBackend<SessionCredential> aware) {
+            aware.deleteForAccount(accountId, sessionAccessKeyId);
+        } else {
+            sessions.delete(sessionAccessKeyId);
+        }
+        LOG.debugv("Unregistered session {0} from account {1}", sessionAccessKeyId, accountId);
+    }
+
+    /**
+     * Removes persisted Lambda-owned sessions left behind by a previous process. No Lambda
+     * containers survive a Floci restart, so every marked session is orphaned at startup.
+     */
+    public int sweepOrphanedLambdaExecutionRoleSessions() {
+        List<SessionCredential> storedSessions = sessions instanceof AccountAwareStorageBackend<SessionCredential> aware
+                ? aware.scanAllAccounts()
+                : sessions.scan(key -> true);
+        int removed = 0;
+        for (SessionCredential session : storedSessions) {
+            if (!session.isLambdaExecutionRole()) {
+                continue;
+            }
+            deleteSession(session.getAccessKeyId(), session);
+            removed++;
+        }
+        return removed;
+    }
+
+    /**
+     * Resolves the account an IAM or temporary access key belongs to. Long-term IAM access keys
+     * resolve from their owning account namespace. Temporary credentials resolve from the account
+     * encoded in the session's role (or federated-user) ARN when present, otherwise the caller
+     * account captured at mint time. Returns empty for unknown, inactive, or expired credentials.
      */
     @Override
     public Optional<String> resolveAccountId(String accessKeyId) {
         if (!isTemporaryAccessKey(accessKeyId)) {
-            return Optional.empty();
+            if (accessKeyId == null || !(accessKeys instanceof AccountAwareStorageBackend<AccessKey> aware)) {
+                return Optional.empty();
+            }
+            return aware.scanAllAccountEntries(accessKeyId::equals).stream()
+                    .filter(entry -> "Active".equals(entry.value().getStatus()))
+                    .map(AccountAwareStorageBackend.AccountEntry::accountId)
+                    .findFirst();
         }
         Optional<SessionCredential> sessionOpt = findSessionAnyAccount(accessKeyId);
         if (sessionOpt.isEmpty()) {

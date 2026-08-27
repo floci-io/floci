@@ -81,7 +81,7 @@ aws lambda invoke --function-name my-function out.json
 
 ## Hot-Reload via Bind Mount
 
-For the tightest inner-loop development cycle, Floci supports a **bind-mount hot-reload** mode. Instead of packaging code into a ZIP and uploading it to S3, you point Floci directly at a directory on your host machine. The directory is bind-mounted into `/var/task` inside the container, so every invocation runs the files as they currently exist on disk — no upload, no redeploy.
+For the tightest inner-loop development cycle, Floci supports a **bind-mount hot-reload** mode. Instead of packaging code into a ZIP and uploading it to S3, you point Floci directly at a directory on your host machine. The directory is bind-mounted into `/var/task` inside the container, so every invocation runs the files as they currently exist on disk, with no upload or redeploy.
 
 This is enabled by using the magic bucket name `hot-reload` when creating a function:
 
@@ -101,7 +101,7 @@ The `S3Key` must be an **absolute path** reachable by the Docker daemon. When Fl
 
 1. `CreateFunction` with `S3Bucket=hot-reload` marks the function as a hot-reload function; `S3Key` is stored as the host-side path.
 2. On each invocation, Floci starts a **fresh ephemeral container** with the host path bind-mounted at `/var/task`.
-3. The container executes the files as they exist at invocation time — editing a file and immediately invoking picks up the change without any API call.
+3. The container executes the files as they exist at invocation time. Editing a file and immediately invoking picks up the change without any API call.
 4. After the invocation completes the container is stopped and removed, ensuring the next invocation always sees the current state of the directory.
 
 ### Configuration
@@ -115,7 +115,7 @@ FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ENABLED=true
 FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ALLOWED_PATHS=/home/user/projects,/tmp
 ```
 
-**Docker Compose setup** — enable the feature and share the Docker socket:
+**Docker Compose setup**: enable the feature and share the Docker socket:
 
 ```yaml
 services:
@@ -129,9 +129,9 @@ services:
 ### Limitations
 
 - The `S3Key` path is interpreted by the **Docker daemon**, not by Floci. When Floci itself runs inside Docker, the path must exist on the Docker host machine, not inside the Floci container.
-- Hot-reload containers are always ephemeral — there is no warm-container reuse. Each invocation pays a cold-start penalty.
+- Hot-reload containers are always ephemeral, so there is no warm-container reuse. Each invocation pays a cold-start penalty.
 - `UpdateFunctionCode` on a hot-reload function converts it back to a standard Zip function (the hot-reload bind-mount is removed).
-- S3 reactive sync is skipped for hot-reload functions — edits are picked up directly from disk.
+- S3 reactive sync is skipped for hot-reload functions because edits are picked up directly from disk.
 
 ### Difference from Reactive S3 Sync
 
@@ -146,7 +146,7 @@ services:
 !!! note "Concurrency enforcement"
     Reserved concurrency is enforced: invocations beyond the reserved value
     return `TooManyRequestsException` (HTTP 429). Functions without a reserved
-    value share a **per-region** pool — AWS Lambda's "account-level" limit is
+    value share a **per-region** pool. AWS Lambda's "account-level" limit is
     in fact a per-account-per-region quota, and Floci mirrors that by
     partitioning counters on the ARN's region segment. The pool size (default
     1000) is configurable via `floci.services.lambda.region-concurrency-limit`
@@ -157,20 +157,28 @@ services:
     and related provisioned-concurrency operations remain unimplemented.
 
     Reducing or clearing a function's reserved value does not kill
-    invocations that are already in flight — this matches AWS, which
+    invocations that are already in flight. This matches AWS, which
     applies changes only to new invocations. As a consequence, during the
     drain window `Σreserved-inflight + unreserved-inflight` can briefly
     exceed `region-concurrency-limit`.
 
 Function URLs are also reachable directly on `/{proxy:.*}` under the Lambda URL controller, which routes the request into the normal `Invoke` path.
 
-**Stubbed:** `ListLayers` and `ListLayerVersions` return empty arrays. No layer storage exists.
+**Layers:** `PublishLayerVersion`, `GetLayerVersion`, `ListLayerVersions`, `ListLayers`, and
+`DeleteLayerVersion` are implemented, with real local storage under
+`{lambda.codePath}/layers/{name}/{version}`. `CreateFunction`/`UpdateFunctionConfiguration`
+validate each `Layers` ARN eagerly against that storage, matching real AWS - an unresolvable ARN
+is rejected with `InvalidParameterValueException`, not silently accepted. Only resolves layers
+published into this same local Floci instance; a real AWS-owned layer ARN (e.g. the AWS AppConfig
+Extension or a Datadog-published layer) can never resolve here, since there's no mechanism in
+Floci for fetching real AWS content - publish your own copy of the layer's content locally under
+a name you control and reference that ARN instead.
 
 ## Not Implemented
 
 These AWS Lambda operations have no handler in Floci. Calls will return `404` or an error:
 
-- Layers (`PublishLayerVersion`, `DeleteLayerVersion`, `GetLayerVersion`, `GetLayerVersionByArn`, `AddLayerVersionPermission`, `RemoveLayerVersionPermission`, `GetLayerVersionPolicy`)
+- Layer permissions and cross-account ARN lookup (`GetLayerVersionByArn`, `AddLayerVersionPermission`, `RemoveLayerVersionPermission`, `GetLayerVersionPolicy`)
 - Provisioned concurrency (`PutProvisionedConcurrencyConfig`, `GetProvisionedConcurrencyConfig`, `ListProvisionedConcurrencyConfigs`, `DeleteProvisionedConcurrencyConfig`)
 - Dead-letter, async invoke config, and event invoke config operations
 - `InvokeWithResponseStream`
@@ -197,6 +205,25 @@ These AWS Lambda operations have no handler in Floci. Calls will return `404` or
 | `FLOCI_SERVICES_LAMBDA_DOCKER_NETWORK` | *(unset)* | Docker network to attach Lambda containers to (overrides `FLOCI_SERVICES_DOCKER_NETWORK`) |
 | `FLOCI_SERVICES_LAMBDA_EXTRA_HOSTS` | *(unset)* | Comma-separated `hostname:ip` entries added to each Lambda container's `/etc/hosts`; `ip` may be `host-gateway`, mirroring `docker run --add-host` |
 | `FLOCI_SERVICES_LAMBDA_DOCKER_HOST_OVERRIDE` | *(unset)* | Explicit host/IP that spawned Lambda containers use to reach Floci's Runtime API, bypassing auto-detection |
+| `FLOCI_SERVICES_LAMBDA_CONTAINER_NAME_PREFIX` | `floci` | Base name prefix for spawned Lambda containers and code volumes (e.g. `acme` → `acme-<function>-<id>` containers, `acme-code-<function>-<hash>` volumes). Must be a valid Docker name segment (`[A-Za-z0-9][A-Za-z0-9_.-]*`); invalid values are ignored with a warning |
+| `FLOCI_SERVICES_LAMBDA_EXECUTOR` | `docker` | Execution backend: `docker` (containers) or `kubernetes` (pods) |
+| `FLOCI_SERVICES_LAMBDA_KUBERNETES_NAMESPACE` | `default` | Namespace Lambda pods are created in |
+| `FLOCI_SERVICES_LAMBDA_KUBERNETES_LABELS` | *(unset)* | Extra pod labels as comma-separated `key=value` entries |
+| `FLOCI_SERVICES_LAMBDA_KUBERNETES_FLOCI_ADDRESS` | *(unset)* | Host/IP pods use to reach Floci; auto-detected when Floci runs in-cluster |
+| `FLOCI_SERVICES_LAMBDA_KUBERNETES_INIT_IMAGE` | `busybox:1.36` | Init-container image that downloads function code (needs `sh`, `wget`, `unzip`) |
+
+!!! note "Changing the container name prefix"
+    Code volumes are resolved by name, and a Floci process only manages resources under its
+    own prefix — deliberately, so multiple Floci processes with different prefixes can share
+    one Docker daemon without touching each other's containers and volumes. Restarting with a
+    different `container-name-prefix` therefore strands the code volumes (and their completion
+    markers) created under the previous prefix: they are no longer reused and no longer part of
+    automatic superseded-volume cleanup. They keep the prefix-independent `floci=true` label,
+    so reclaim them at any time with:
+
+    ```bash
+    docker volume prune --filter label=floci=true
+    ```
 
 ### Runtime API host override
 
@@ -206,7 +233,7 @@ for that callback (its own container IP on the shared network, or
 `host.docker.internal` when running on the host). In most setups this is
 correct and needs no configuration.
 
-On unusual network topologies — for example rootless Podman — auto-detection
+On unusual network topologies, for example rootless Podman, auto-detection
 can pick an address the Lambda container cannot reach, and invocations fail with
 `connect ECONNREFUSED <ip>:9200`. Set `FLOCI_SERVICES_LAMBDA_DOCKER_HOST_OVERRIDE`
 to the host or IP that containers can actually reach Floci on, and Floci uses it
@@ -221,7 +248,8 @@ for a full rootless Podman walkthrough.
 
 ### Docker socket requirement
 
-Lambda requires the Docker socket. Mount it in your compose file:
+With the default `docker` executor, Lambda requires the Docker socket. Mount it
+in your compose file:
 
 ```yaml
 services:
@@ -229,6 +257,169 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
 ```
+
+If mounting the Docker socket is not acceptable (for example on a hardened
+Kubernetes cluster), use the [Kubernetes executor](#kubernetes-executor)
+instead — it needs no privileged access and no socket.
+
+### Kubernetes executor
+
+Set `FLOCI_SERVICES_LAMBDA_EXECUTOR=kubernetes` to run each Lambda execution
+environment as a Kubernetes pod instead of a Docker container. This is designed
+for CI/CD clusters where privileged containers and `docker.sock` access are not
+allowed. Floci talks to the cluster through the standard Kubernetes API: when
+running inside the cluster it uses its ServiceAccount, and when running outside
+it uses your local kubeconfig.
+
+How an invocation works:
+
+1. On a cold start Floci creates a pod from the function's runtime image
+   (`public.ecr.aws/lambda/*`, same mapping as the Docker executor).
+2. An init container (`busybox` by default) downloads the function's deployment
+   package — and any layers — from Floci's S3 over HTTP and unpacks them into
+   shared `emptyDir` volumes at `/var/task` and `/opt`.
+3. The runtime container polls Floci's Lambda Runtime API
+   (`AWS_LAMBDA_RUNTIME_API`) exactly like a Docker container would.
+4. Warm pods are reused across invocations and reaped after
+   `FLOCI_SERVICES_LAMBDA_CONTAINER_IDLE_TIMEOUT_SECONDS` of inactivity.
+   Pods left behind by a crashed Floci are swept on startup via the
+   `app.kubernetes.io/managed-by=floci` label.
+
+Lambda pods connect **back** to Floci on the main port (4566) and the Runtime
+API port range (9200–9299), so those ports must be reachable from pods in the
+namespace. When Floci runs in-cluster this works out of the box (pod-to-pod
+traffic); when Floci runs outside the cluster, set
+`FLOCI_SERVICES_LAMBDA_KUBERNETES_FLOCI_ADDRESS` to an address the cluster's
+pods can reach (for example your machine's LAN IP for a `kind` cluster).
+
+#### Required RBAC
+
+The ServiceAccount Floci runs under needs these permissions in the Lambda
+namespace. The manifest below is complete, so applying it as-is (together
+with the Deployment in the next section) yields a working setup:
+
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: floci
+  namespace: floci
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: floci-lambda
+  namespace: floci
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create", "get", "list", "watch", "delete", "deletecollection"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get", "watch"]
+  # Only needed when FLOCI_TLS_ENABLED=true (CA cert is shared via a ConfigMap)
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create", "get", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: floci-lambda
+  namespace: floci
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: floci-lambda
+subjects:
+  - kind: ServiceAccount
+    name: floci
+    namespace: floci
+```
+
+#### Running Floci in-cluster
+
+A minimal Deployment (namespace `floci` assumed, RBAC from above bound to the
+`floci` ServiceAccount):
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: floci
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: floci }
+  template:
+    metadata:
+      labels: { app: floci }
+    spec:
+      serviceAccountName: floci
+      # Required when a Service named `floci` exists in the namespace: service
+      # links inject FLOCI_PORT=tcp://<ip>:4566, which collides with Floci's
+      # FLOCI_* configuration convention and fails startup.
+      enableServiceLinks: false
+      containers:
+        - name: floci
+          image: floci/floci:latest
+          env:
+            - name: FLOCI_SERVICES_LAMBDA_EXECUTOR
+              value: kubernetes
+            - name: FLOCI_SERVICES_LAMBDA_KUBERNETES_NAMESPACE
+              value: floci
+          ports:
+            - containerPort: 4566
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: floci
+spec:
+  selector: { app: floci }
+  ports:
+    - port: 4566
+      targetPort: 4566
+```
+
+Lambda pods reach Floci by pod IP, so the Runtime API ports need no Service
+entries; only clients of the emulator itself use port 4566.
+
+#### Limitations
+
+- Hot reload (both bind-mount and Reactive S3 Sync bind variants) and
+  `FLOCI_SERVICES_LAMBDA_AWS_CONFIG_PATH` rely on bind mounts and are not
+  supported; hot-reload functions fail to launch with a clear error.
+- `Image` package type URIs are passed to the kubelet unchanged. Images in
+  Floci's emulated ECR registry are not pullable by cluster nodes — pre-load
+  them onto the nodes (e.g. `kind load docker-image`) or use a real registry.
+- Lambda pods carry no `imagePullSecrets`. If your runtime or init images come
+  from an authenticated registry, attach the pull secret to the namespace's
+  `default` ServiceAccount
+  (`kubectl patch serviceaccount default -p '{"imagePullSecrets":[{"name":"<secret>"}]}'`)
+  so the kubelet uses it for every pod in the namespace.
+- A cold start waits up to 300 seconds for the pod to reach `Running` (broken
+  images and failing init containers are detected and reported much earlier).
+- The init container downloads code and layers over plain HTTP on the
+  emulator port even when `FLOCI_TLS_ENABLED=true`. busybox `wget` cannot
+  complete a TLS handshake with Floci, and the Runtime API traffic on the
+  same pod network is plain HTTP anyway. Use a NetworkPolicy if the pod
+  network is part of your threat model.
+- With `FLOCI_TLS_ENABLED=true`, AWS SDK calls made from inside the function
+  fail TLS verification when pods reach Floci by pod IP, because the
+  self-signed certificate carries no SAN for dynamic pod IPs. Set
+  `FLOCI_SERVICES_LAMBDA_KUBERNETES_FLOCI_ADDRESS` to a hostname covered by
+  the certificate, or provide your own certificate via `floci.tls.cert-path`.
+- Prefer an IP for `FLOCI_SERVICES_LAMBDA_KUBERNETES_FLOCI_ADDRESS`. With a
+  bare hostname, S3 SDKs inside functions may use virtual-hosted-style
+  addressing (`bucket.<hostname>`), and nothing in the cluster resolves those
+  subdomains.
+- IPv6-only clusters are not supported. Floci advertises an IPv4 address to
+  pods and fails fast when none is available.
+- Each Floci instance sweeps all `managed-by=floci` Lambda pods in its
+  namespace at startup; run multiple Floci instances in separate namespaces.
+- Layers published by Floci versions before this feature have no stored
+  archive; re-publish them once to make them downloadable by pods.
 
 ### S3 virtual-hosted-style addressing inside Lambda containers
 
@@ -238,7 +429,7 @@ AWS SDKs use **virtual-hosted-style** S3 addressing by default, forming URLs lik
 
 When Floci runs **inside Docker**, Lambda containers are on the same Docker
 network. Docker's embedded DNS resolves the exact alias `localhost.floci.io`
-correctly, but has no wildcard support — `my-bucket.localhost.floci.io`
+correctly, but has no wildcard support. `my-bucket.localhost.floci.io`
 falls through to public DNS and resolves to the wrong IP, causing the Lambda
 invocation to time out.
 
@@ -251,9 +442,47 @@ use it as their DNS resolver. The embedded DNS server:
   falling back to public resolvers so **public hostnames** (e.g.
   `business-api.tiktok.com`) resolve from inside Lambda containers
 
-No extra configuration or `cap_add` is needed — Docker containers have
+No extra configuration or `cap_add` is needed because Docker containers have
 `CAP_NET_BIND_SERVICE` in their default capability set, so Floci (running as a
 non-root user) can bind UDP/53 without any changes to your Compose file.
+
+### VpcConfig, SnapStart and LoggingConfig
+
+All three round-trip through `CreateFunction`, `UpdateFunctionConfiguration`,
+`GetFunctionConfiguration`, `GetFunction`, `ListFunctions` and `PublishVersion`.
+
+The response shapes are **not** the request shapes, and Floci follows the AWS model
+rather than echoing the request back:
+
+| Field | Request shape | Response shape | Extra members Floci fills in |
+|---|---|---|---|
+| `VpcConfig` | `VpcConfig` | `VpcConfigResponse` | `VpcId`, resolved from the first subnet via EC2 |
+| `SnapStart` | `SnapStart` | `SnapStartResponse` | `OptimizationStatus` — `On` only for a published version with `ApplyOn=PublishedVersions`, `Off` for `$LATEST` |
+| `LoggingConfig` | `LoggingConfig` | `LoggingConfig` | — |
+
+`SnapStart` and `LoggingConfig` are always present in a response, as on AWS: an
+unset function reads back `SnapStart={ApplyOn: None, OptimizationStatus: Off}` and
+`LoggingConfig={LogFormat: Text, LogGroup: /aws/lambda/<name>}`. With
+`LogFormat=JSON`, `ApplicationLogLevel` and `SystemLogLevel` are also returned,
+defaulting to `INFO`. Terraform treats these as `Computed` blocks, so a missing one
+is a permanent diff rather than a cosmetic omission.
+
+`LoggingConfig` is replaced wholesale on update, not merged — an update naming only
+`LogFormat` resets `LogGroup` to the default.
+
+`LogGroup` is validated against AWS's documented constraint: 1-512 characters matching
+`[.\-_/#A-Za-z0-9]+`. `ApplicationLogLevel` and `SystemLogLevel` are accepted with any
+`LogFormat` but are only ever stored — and therefore only ever returned — when the
+resolved format is `JSON`; supplying them with `LogFormat=Text` is not an error, it is
+simply a no-op, matching the fact that the response never surfaces them for Text.
+
+`VpcConfig` is omitted entirely while the function is not attached to a VPC.
+Subnets that EC2 does not know about are still accepted and returned; only `VpcId`
+is left off in that case.
+
+`RuntimeVersionConfig.RuntimeVersionArn` is returned for managed (non-image)
+runtimes. Its value is derived from the runtime name, so it is stable across
+restarts.
 
 ### File system configs
 
@@ -308,7 +537,7 @@ If your Lambda functions have `AWS_ENDPOINT_URL=http://localhost.localstack.clou
 hardcoded, add the LocalStack suffix to Floci's DNS resolver so it resolves to
 Floci's IP without any function-side changes:
 
-Via environment variable — use a comma-separated list for multiple suffixes:
+Via environment variable, use a comma-separated list for multiple suffixes:
 
 ```bash
 # Single suffix
@@ -320,9 +549,9 @@ FLOCI_DNS_EXTRA_SUFFIXES=localhost.localstack.cloud,localhost.example.internal
 
 ### Real AWS Credentials
 
-By default, Floci injects placeholder credentials (`test`/`test`/`test`) into Lambda containers. This is sufficient when all SDK calls target Floci's emulated services.
+By default, a Lambda function whose execution role exists in Floci's IAM store receives temporary credentials for that role. SDK calls made by the function identify as `assumed-role/<role>/floci-session`, and IAM enforcement evaluates the role's policies. If the role is unknown to Floci, the container keeps the compatibility fallback described below.
 
-For hybrid local/cloud testing — where some services are emulated and others hit real AWS — you can mount your host `~/.aws` directory into Lambda containers:
+For hybrid local/cloud testing, where some services are emulated and others hit real AWS, you can mount your host `~/.aws` directory into Lambda containers:
 
 ```yaml
 services:
@@ -340,7 +569,7 @@ When `aws-config-path` is set:
 - `AWS_SHARED_CREDENTIALS_FILE` and `AWS_CONFIG_FILE` env vars are set so the SDK discovers credentials regardless of the container's HOME directory
 - No `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` env vars are injected
 
-When unset (default), Floci reads credentials from its own environment and falls back to `test`/`test`/`test`.
+When unset (default), Floci injects execution-role credentials for a known role. For an unknown role, Floci reads credentials from its own environment and falls back to `test`/`test`/`test`.
 
 !!! tip "Routing specific services to real AWS"
     To keep some services on Floci while others hit real AWS, clear the global endpoint and set service-specific overrides in your function's `--environment`:
@@ -354,7 +583,7 @@ When unset (default), Floci reads credentials from its own environment and falls
     The AWS SDK supports `AWS_ENDPOINT_URL_<SERVICE>` natively. Services without an override will use real AWS endpoints.
 
 !!! note "Credential passthrough without mounting"
-    If you don't need the full `~/.aws` directory (e.g., you only have static credentials), you can pass them to Floci's environment directly. When `aws-config-path` is unset, Floci forwards its own `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_SESSION_TOKEN` env vars into Lambda containers:
+    For functions whose execution role is unknown to Floci, you can pass static credentials to Floci's environment directly. When `aws-config-path` is unset, Floci forwards its own `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_SESSION_TOKEN` env vars into those Lambda containers:
 
     ```yaml
     environment:
@@ -362,6 +591,16 @@ When unset (default), Floci reads credentials from its own environment and falls
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
       AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN}
     ```
+
+    A known execution role takes precedence over `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_SESSION_TOKEN` values in the function environment. Use `aws-config-path` when the function must use mounted credentials instead of its emulated execution role.
+
+    Passthrough is on whenever those three variables are set in Floci's own environment, so a
+    Floci started from a shell that exports real AWS credentials (`aws-vault exec`, a sourced
+    credentials file, a CI runner) hands them to any function whose role it does not know. An
+    `AWS_PROFILE` or an `aws sso login` alone does not do this: those populate config and cache
+    files, not the environment. Floci logs a `WARN` carrying the forwarded access-key prefix the
+    first time it happens. Give the function a role Floci knows, or set `aws-config-path`, to keep
+    host credentials out of the container.
 
 ### Private registry authentication
 
@@ -454,7 +693,7 @@ aws lambda create-event-source-mapping \
 
 Validation mirrors AWS: values outside 2–1000 are rejected with
 `InvalidParameterValueException`, and `ScalingConfig` on a non-SQS event
-source (Kinesis / DynamoDB Streams) is also rejected — those services
+source (Kinesis / DynamoDB Streams) is also rejected. Those services
 use `ParallelizationFactor` instead, which is a separate field.
 
 !!! note "Enforcement status"

@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.services.s3.model.ObjectAttributeName;
 import io.github.hectorvent.floci.services.s3.model.PutObjectOptions;
 import io.github.hectorvent.floci.services.s3.model.Bucket;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
+import io.github.hectorvent.floci.services.s3.model.WebsiteConfiguration;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -618,5 +619,361 @@ class S3ServiceTest {
         // Retrieve using the same literal key (S3 keys are opaque strings)
         S3Object got = s3Service.getObject("test-bucket", "docs/../file.txt");
         assertArrayEquals(data, got.getData());
+    }
+
+    // =========================================================================
+    // Website request resolution
+    //
+    // The HTTP rendering of these outcomes is covered end-to-end by
+    // S3WebsiteIntegrationTest; these pin the policy itself, with no HTTP layer.
+    // =========================================================================
+
+    private static final S3Service.RequestAuthorization UNSIGNED =
+            new S3Service.RequestAuthorization(false, null);
+
+    private void websiteBucket(String index, String errorDoc) {
+        s3Service.createBucket("site", "us-east-1");
+        s3Service.putBucketWebsite("site", new WebsiteConfiguration(index, errorDoc));
+    }
+
+    @Test
+    void resolveWebsiteRequestServesIndexForDirectoryRequest() {
+        websiteBucket("index.html", null);
+        s3Service.putObject("site", "docs/index.html", "hi".getBytes(), "text/html", null);
+
+        var resolution = s3Service.resolveWebsiteRequest("site", "docs", true, UNSIGNED);
+
+        var serve = assertInstanceOf(S3Service.WebsiteResolution.ServeObject.class, resolution);
+        assertEquals("docs/index.html", serve.key());
+    }
+
+    @Test
+    void resolveWebsiteRequestServesRootIndexWhenKeyIsEmpty() {
+        websiteBucket("index.html", null);
+        s3Service.putObject("site", "index.html", "root".getBytes(), "text/html", null);
+
+        // The site root is a directory request even though the caller saw no trailing slash.
+        var resolution = s3Service.resolveWebsiteRequest("site", "", false, UNSIGNED);
+
+        assertEquals("index.html",
+                assertInstanceOf(S3Service.WebsiteResolution.ServeObject.class, resolution).key());
+    }
+
+    @Test
+    void resolveWebsiteRequestRedirectsFolderWithoutTrailingSlash() {
+        websiteBucket("index.html", null);
+        s3Service.putObject("site", "docs/index.html", "hi".getBytes(), "text/html", null);
+
+        // No trailing slash, no object at "docs", but an index lives beneath it.
+        var resolution = s3Service.resolveWebsiteRequest("site", "docs", false, UNSIGNED);
+
+        assertInstanceOf(S3Service.WebsiteResolution.RedirectToDirectory.class, resolution);
+    }
+
+    @Test
+    void resolveWebsiteRequestPrefersExactObjectOverFolderRedirect() {
+        websiteBucket("index.html", null);
+        s3Service.putObject("site", "docs", "exact".getBytes(), "text/plain", null);
+        s3Service.putObject("site", "docs/index.html", "hi".getBytes(), "text/html", null);
+
+        // An exact object hit is served by the normal object path, not redirected.
+        var resolution = s3Service.resolveWebsiteRequest("site", "docs", false, UNSIGNED);
+
+        assertInstanceOf(S3Service.WebsiteResolution.NotAWebsite.class, resolution);
+    }
+
+    @Test
+    void resolveWebsiteRequestFallsBackToErrorDocumentWhenIndexMissing() {
+        websiteBucket("index.html", "error.html");
+        s3Service.putObject("site", "error.html", "oops".getBytes(), "text/html", null);
+
+        var resolution = s3Service.resolveWebsiteRequest("site", "missing", true, UNSIGNED);
+
+        var err = assertInstanceOf(S3Service.WebsiteResolution.ErrorDocument.class, resolution);
+        assertEquals(404, err.status());
+        assertArrayEquals("oops".getBytes(), err.object().getData());
+    }
+
+    @Test
+    void resolveWebsiteRequestFallsBackToDefaultErrorWhenNoErrorDocumentConfigured() {
+        websiteBucket("index.html", null);
+
+        var resolution = s3Service.resolveWebsiteRequest("site", "missing", true, UNSIGNED);
+
+        assertEquals(404,
+                assertInstanceOf(S3Service.WebsiteResolution.DefaultError.class, resolution).status());
+    }
+
+    @Test
+    void resolveWebsiteRequestFallsBackToDefaultErrorWhenErrorDocumentItselfMissing() {
+        // Configured but never uploaded: S3 serves its built-in page rather than 500-ing.
+        websiteBucket("index.html", "error.html");
+
+        var resolution = s3Service.resolveWebsiteRequest("site", "missing", true, UNSIGNED);
+
+        assertEquals(404,
+                assertInstanceOf(S3Service.WebsiteResolution.DefaultError.class, resolution).status());
+    }
+
+    @Test
+    void resolveWebsiteRequestIsNotAWebsiteWithoutConfiguration() {
+        s3Service.createBucket("plain", "us-east-1");
+
+        var resolution = s3Service.resolveWebsiteRequest("plain", "any", true, UNSIGNED);
+
+        assertInstanceOf(S3Service.WebsiteResolution.NotAWebsite.class, resolution);
+    }
+
+    @Test
+    void resolveWebsiteRequestPropagatesRealBucketErrors() {
+        // A missing bucket must surface as NoSuchBucket, not be masked as "not a website".
+        AwsException error = assertThrows(AwsException.class,
+                () -> s3Service.resolveWebsiteRequest("no-such-bucket", "any", true, UNSIGNED));
+        assertEquals("NoSuchBucket", error.getErrorCode());
+    }
+
+    @Test
+    void resolveWebsiteErrorReturnsNotAWebsiteWithoutConfiguration() {
+        s3Service.createBucket("plain", "us-east-1");
+
+        assertInstanceOf(S3Service.WebsiteResolution.NotAWebsite.class,
+                s3Service.resolveWebsiteError("plain", UNSIGNED, 404));
+    }
+
+    @Test
+    void resolveWebsiteErrorMapsForbiddenToItsOwnStatus() {
+        websiteBucket("index.html", "error.html");
+        s3Service.putObject("site", "error.html", "denied".getBytes(), "text/html", null);
+
+        // 403 keeps its status; everything else collapses to 404, matching S3.
+        assertEquals(403,
+                assertInstanceOf(S3Service.WebsiteResolution.ErrorDocument.class,
+                        s3Service.resolveWebsiteError("site", UNSIGNED, 403)).status());
+        assertEquals(404,
+                assertInstanceOf(S3Service.WebsiteResolution.ErrorDocument.class,
+                        s3Service.resolveWebsiteError("site", UNSIGNED, 500)).status());
+    }
+
+    @Test
+    void metricsConfigurationsOnABucketWithoutAnyBehaveAsEmpty() {
+        // A bucket persisted before this field existed deserializes with a null map, which is the
+        // same shape a freshly created bucket has, so neither may fault.
+        s3Service.createBucket("no-metrics", "us-east-1");
+
+        assertTrue(s3Service.listBucketMetricsConfigurations("no-metrics")
+                .contains("<IsTruncated>false</IsTruncated>"));
+        assertEquals("NoSuchConfiguration", assertThrows(AwsException.class,
+                () -> s3Service.getBucketMetricsConfiguration("no-metrics", "any")).getErrorCode());
+        assertEquals("NoSuchConfiguration", assertThrows(AwsException.class,
+                () -> s3Service.deleteBucketMetricsConfiguration("no-metrics", "any")).getErrorCode());
+
+        // And the first put still lands on it.
+        s3Service.putBucketMetricsConfiguration("no-metrics", "first", "<Id>first</Id>");
+        assertTrue(s3Service.getBucketMetricsConfiguration("no-metrics", "first")
+                .contains("<Id>first</Id>"));
+    }
+
+    @Test
+    void metricsConfigurationsDoNotOutliveTheirBucket() {
+        s3Service.createBucket("recycled", "us-east-1");
+        s3Service.putBucketMetricsConfiguration("recycled", "old", "<Id>old</Id>");
+        s3Service.deleteBucket("recycled");
+
+        s3Service.createBucket("recycled", "us-east-1");
+
+        assertEquals("NoSuchConfiguration", assertThrows(AwsException.class,
+                () -> s3Service.getBucketMetricsConfiguration("recycled", "old")).getErrorCode());
+    }
+
+    @Test
+    void metricsConfigurationsSurviveARestart() {
+        // Through the real storage layer rather than Jackson alone: written, flushed to disk, and
+        // read back by a second service over the same file, the way a restart does it.
+        Path bucketsFile = tempDir.resolve("s3-buckets.json");
+        var beforeRestart = new io.github.hectorvent.floci.core.storage.HybridStorage<String, Bucket>(
+                bucketsFile, new com.fasterxml.jackson.core.type.TypeReference<Map<String, Bucket>>() {}, 60000);
+        S3Service before = new S3Service(beforeRestart, new InMemoryStorage<>(), tempDir.resolve("s3a"), false);
+        before.createBucket("persisted-metrics", "us-east-1");
+        before.putBucketMetricsConfiguration("persisted-metrics", "EntireBucket", "<Id>EntireBucket</Id>");
+        beforeRestart.flush();
+        beforeRestart.shutdown();
+
+        var afterRestart = new io.github.hectorvent.floci.core.storage.HybridStorage<String, Bucket>(
+                bucketsFile, new com.fasterxml.jackson.core.type.TypeReference<Map<String, Bucket>>() {}, 60000);
+        afterRestart.load();
+        try {
+            S3Service after = new S3Service(afterRestart, new InMemoryStorage<>(), tempDir.resolve("s3a"), false);
+            assertTrue(after.getBucketMetricsConfiguration("persisted-metrics", "EntireBucket")
+                    .contains("<Id>EntireBucket</Id>"));
+        } finally {
+            afterRestart.shutdown();
+        }
+    }
+
+    @Test
+    void metricsConfigurationsSurviveAJacksonRoundTrip() throws Exception {
+        // Bucket records are persisted as JSON, so the configurations have to come back after a
+        // restart, and a record written before the field existed has to still load.
+        var mapper = new com.fasterxml.jackson.databind.ObjectMapper().findAndRegisterModules();
+        Bucket bucket = new Bucket("persisted");
+        bucket.setMetricsConfigurations(new java.util.LinkedHashMap<>(
+                Map.of("EntireBucket", "<Id>EntireBucket</Id>")));
+
+        Bucket reloaded = mapper.readValue(mapper.writeValueAsString(bucket), Bucket.class);
+        assertEquals("<Id>EntireBucket</Id>", reloaded.getMetricsConfigurations().get("EntireBucket"));
+
+        Bucket legacy = mapper.readValue("{\"name\":\"legacy\"}", Bucket.class);
+        assertNull(legacy.getMetricsConfigurations());
+    }
+
+    /**
+     * Waits for the thread to reach the bucket monitor. The store is a ConcurrentHashMap, so
+     * nothing else blocks it: this observes the interleaving rather than sleeping long enough to
+     * hope for it, which keeps the test both instant and immune to a slow machine.
+     */
+    private static void awaitBlockedOnMonitor(Thread thread) throws InterruptedException {
+        long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10);
+        while (thread.getState() != Thread.State.BLOCKED) {
+            if (System.nanoTime() > deadline) {
+                fail("thread never reached the bucket monitor");
+            }
+            Thread.onSpinWait();
+        }
+    }
+
+    @Test
+    void deleteBucketTakesTheBucketMonitor() throws Exception {
+        // Re-reading the record narrows the window but cannot close it: a delete landing between a
+        // mutation's re-read and its write would still be undone. That interleaving is too narrow
+        // to force from a test, so what is asserted here is the property that closes it — the
+        // delete waits for whoever holds the record's monitor.
+        var buckets = new InMemoryStorage<String, Bucket>();
+        S3Service service = new S3Service(buckets, new InMemoryStorage<>(), tempDir.resolve("s3-monitor"), false);
+        service.createBucket("monitor-bucket", "us-east-1");
+        Bucket record = buckets.get("monitor-bucket").orElseThrow();
+
+        Thread delete = new Thread(() -> service.deleteBucket("monitor-bucket"));
+        synchronized (record) {
+            delete.start();
+            long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10);
+            while (delete.getState() != Thread.State.BLOCKED) {
+                assertTrue(buckets.get("monitor-bucket").isPresent(),
+                        "DeleteBucket removed the record without waiting for the bucket monitor");
+                if (System.nanoTime() > deadline) {
+                    fail("DeleteBucket never reached the bucket monitor");
+                }
+                Thread.onSpinWait();
+            }
+        }
+        delete.join(30_000);
+
+        assertTrue(buckets.get("monitor-bucket").isEmpty());
+    }
+
+    @Test
+    void aMetricsPutRacingABucketDeleteCannotRestoreTheBucket() throws Exception {
+        // A put resolves the bucket record before it writes it back, so a delete landing in between
+        // would be undone by the write. The interleaving is forced rather than raced for: the test
+        // holds the bucket monitor, lets the put resolve the record and block on it, deletes the
+        // bucket from the same thread, and only then releases.
+        var buckets = new InMemoryStorage<String, Bucket>();
+        S3Service service = new S3Service(buckets, new InMemoryStorage<>(), tempDir.resolve("s3-race"), false);
+        service.createBucket("race-bucket", "us-east-1");
+        Bucket record = buckets.get("race-bucket").orElseThrow();
+
+        var putStarted = new java.util.concurrent.CountDownLatch(1);
+        var thrownByPut = new java.util.concurrent.atomic.AtomicReference<Exception>();
+        Thread put = new Thread(() -> {
+            putStarted.countDown();
+            try {
+                service.putBucketMetricsConfiguration("race-bucket", "id", "<Id>id</Id>");
+            } catch (Exception e) {
+                thrownByPut.set(e);
+            }
+        });
+
+        synchronized (record) {
+            put.start();
+            putStarted.await();
+            awaitBlockedOnMonitor(put);
+            service.deleteBucket("race-bucket");
+        }
+        put.join(30_000);
+
+        assertTrue(buckets.get("race-bucket").isEmpty(),
+                "the deleted bucket was restored by the concurrent metrics put");
+        assertEquals("NoSuchBucket",
+                assertInstanceOf(AwsException.class, thrownByPut.get()).getErrorCode());
+    }
+
+    @Test
+    void aMetricsPutCannotOverwriteABucketRecreatedWhileItWaited() throws Exception {
+        // Presence is not enough: deleted and recreated under the same name, the store holds a
+        // different record, and writing the resolved one back would replace the new bucket with
+        // the old one's state.
+        var buckets = new InMemoryStorage<String, Bucket>();
+        S3Service service = new S3Service(buckets, new InMemoryStorage<>(), tempDir.resolve("s3-recreate"), false);
+        service.createBucket("recreated-bucket", "us-east-1");
+        Bucket original = buckets.get("recreated-bucket").orElseThrow();
+
+        var putStarted = new java.util.concurrent.CountDownLatch(1);
+        var thrownByPut = new java.util.concurrent.atomic.AtomicReference<Exception>();
+        Thread put = new Thread(() -> {
+            putStarted.countDown();
+            try {
+                service.putBucketMetricsConfiguration("recreated-bucket", "stale", "<Id>stale</Id>");
+            } catch (Exception e) {
+                thrownByPut.set(e);
+            }
+        });
+
+        synchronized (original) {
+            put.start();
+            putStarted.await();
+            awaitBlockedOnMonitor(put);
+            service.deleteBucket("recreated-bucket");
+            service.createBucket("recreated-bucket", "us-east-1");
+        }
+        put.join(30_000);
+
+        assertEquals("NoSuchBucket",
+                assertInstanceOf(AwsException.class, thrownByPut.get()).getErrorCode());
+        assertNotSame(original, buckets.get("recreated-bucket").orElseThrow(),
+                "the recreated bucket was replaced by the record the put had resolved");
+        assertNull(buckets.get("recreated-bucket").orElseThrow().getMetricsConfigurations(),
+                "the recreated bucket inherited a configuration written against the old record");
+    }
+
+    @Test
+    void concurrentMetricsConfigurationPutsAllSurvive() throws Exception {
+        // Each put reads the configuration map, adds to it and writes it back, so without a shared
+        // monitor concurrent puts of different ids overwrite each other's work.
+        s3Service.createBucket("metrics-race", "us-east-1");
+        int count = 24;
+        var pool = java.util.concurrent.Executors.newFixedThreadPool(8);
+        var start = new java.util.concurrent.CountDownLatch(1);
+        try {
+            var submitted = new java.util.ArrayList<java.util.concurrent.Future<?>>();
+            for (int i = 0; i < count; i++) {
+                String id = "config-" + i;
+                submitted.add(pool.submit(() -> {
+                    start.await();
+                    s3Service.putBucketMetricsConfiguration("metrics-race", id, "<Id>" + id + "</Id>");
+                    return null;
+                }));
+            }
+            start.countDown();
+            for (var future : submitted) {
+                future.get(30, java.util.concurrent.TimeUnit.SECONDS);
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+
+        String listed = s3Service.listBucketMetricsConfigurations("metrics-race");
+        for (int i = 0; i < count; i++) {
+            assertTrue(listed.contains("<Id>config-" + i + "</Id>"),
+                    "configuration config-" + i + " was lost by a concurrent put");
+        }
     }
 }

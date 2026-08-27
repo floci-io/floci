@@ -6,7 +6,7 @@
 
     <groupId>io.github.hectorvent</groupId>
     <artifactId>floci</artifactId>
-    <version>1.6.0</version>
+    <version>1.7.0</version>
     <packaging>jar</packaging>
 
     <name>Floci</name>
@@ -15,10 +15,10 @@
     <properties>
         <maven.compiler.release>25</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <quarkus.platform.version>3.36.3</quarkus.platform.version>
-        <jackson.version>2.21.4</jackson.version>
+        <quarkus.platform.version>3.37.4</quarkus.platform.version>
+        <jackson.version>2.22.1</jackson.version>
         <apicurio.version>2.6.13.Final</apicurio.version>
-        <wire.version>6.3.0</wire.version>
+        <wire.version>6.4.5</wire.version>
     </properties>
 
     <dependencyManagement>
@@ -40,12 +40,12 @@
             <dependency>
                 <groupId>com.google.protobuf</groupId>
                 <artifactId>protobuf-java</artifactId>
-                <version>3.25.5</version>
+                <version>3.25.9</version>
             </dependency>
             <dependency>
                 <groupId>com.google.protobuf</groupId>
                 <artifactId>protobuf-java-util</artifactId>
-                <version>3.25.5</version>
+                <version>3.25.9</version>
             </dependency>
             <dependency>
                 <groupId>com.google.api.grpc</groupId>
@@ -55,7 +55,7 @@
             <dependency>
                 <groupId>com.h2database</groupId>
                 <artifactId>h2-mvstore</artifactId>
-                <version>2.3.232</version>
+                <version>2.4.240</version>
             </dependency>
             <dependency>
                 <groupId>com.squareup.wire</groupId>
@@ -136,9 +136,21 @@
         <dependency>
             <groupId>org.apache.kafka</groupId>
             <artifactId>kafka-clients</artifactId>
-            <version>4.3.0</version>
+            <version>4.3.1</version>
         </dependency>
 
+        <!-- Snappy for Firehose Snappy/HADOOP_SNAPPY delivery to S3: the only Java
+             library that writes the xerial stream format AWS uses. -->
+        <dependency>
+            <groupId>org.xerial.snappy</groupId>
+            <artifactId>snappy-java</artifactId>
+        </dependency>
+
+        <!-- Kubernetes client for the Lambda kubernetes executor -->
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-kubernetes-client</artifactId>
+        </dependency>
 
         <!-- Docker client for Lambda container lifecycle management -->
         <dependency>
@@ -184,12 +196,12 @@
         <dependency>
             <groupId>org.bouncycastle</groupId>
             <artifactId>bcprov-jdk18on</artifactId>
-            <version>1.84</version>
+            <version>1.85</version>
         </dependency>
         <dependency>
             <groupId>org.bouncycastle</groupId>
             <artifactId>bcpkix-jdk18on</artifactId>
-            <version>1.84</version>
+            <version>1.85</version>
         </dependency>
 
         <!-- JSONata expression engine (Step Functions) -->
@@ -224,7 +236,7 @@
         <dependency>
             <groupId>io.swagger.parser.v3</groupId>
             <artifactId>swagger-parser</artifactId>
-            <version>2.1.43</version>
+            <version>2.1.45</version>
         </dependency>
 
         <!-- Glue Schema Registry: Apicurio format utilities (parsing, canonicalization, compatibility) -->
@@ -272,7 +284,18 @@
         <dependency>
             <groupId>org.awaitility</groupId>
             <artifactId>awaitility</artifactId>
-            <version>4.2.2</version>
+            <version>4.3.0</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.fabric8</groupId>
+            <artifactId>kubernetes-server-mock</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.assertj</groupId>
+            <artifactId>assertj-core</artifactId>
+            <version>3.25.3</version>
             <scope>test</scope>
         </dependency>
         <dependency>
@@ -302,14 +325,14 @@
         <dependency>
             <groupId>com.h2database</groupId>
             <artifactId>h2</artifactId>
-            <version>2.3.232</version>
+            <version>2.4.240</version>
             <scope>test</scope>
         </dependency>
         <!-- openCypher/Bolt client for the Neptune neo4j db-type integration test -->
         <dependency>
             <groupId>org.neo4j.driver</groupId>
             <artifactId>neo4j-java-driver</artifactId>
-            <version>6.1.0</version>
+            <version>6.2.0</version>
             <scope>test</scope>
         </dependency>
     </dependencies>
@@ -344,6 +367,9 @@
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>3.5.6</version>
                 <configuration>
+                    <!-- The suite's end-of-run live set exceeds the 4g default heap of
+                         16g CI runners; a full GC near the end reclaims almost nothing. -->
+                    <argLine>-Xmx6g</argLine>
                     <systemPropertyVariables>
                         <java.util.logging.manager>org.jboss.logmanager.LogManager</java.util.logging.manager>
                     </systemPropertyVariables>

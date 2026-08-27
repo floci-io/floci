@@ -34,6 +34,8 @@ Floci supports both CloudWatch Logs and CloudWatch Metrics.
 | `PutSubscriptionFilter` | Create or update a subscription filter (stored only, see note below) |
 | `DescribeSubscriptionFilters` | List subscription filters on a log group |
 | `DeleteSubscriptionFilter` | Delete a subscription filter |
+| `PutResourcePolicy` | Create or update an account-level resource policy |
+| `DescribeResourcePolicies` | List account-level resource policies |
 | `GetDataProtectionPolicy` | Return the resolved log group identifier (see note below) |
 | `StartQuery` | Start a Logs Insights query (see [Logs Insights](#logs-insights)) |
 | `GetQueryResults` | Get the status and results of a Logs Insights query |
@@ -86,6 +88,23 @@ that the compound-filter case above produces no log line at all.
 For simple substring matching, `FilterLogEvents` is the more predictable option today. Note that
 Floci matches `--filter-pattern` as a plain substring of the message; the real filter-pattern
 syntax (`?ERROR ?WARN`, `{ $.level = "ERROR" }`, and so on) is not parsed.
+
+### Reading events past the limit
+
+`FilterLogEvents` and `GetLogEvents` both page, and they signal the end of the results differently
+because the AWS APIs do.
+
+`FilterLogEvents` pages forward only. Its `nextToken` is an `f/<index>` offset into the matched set,
+so the offset counts matches, not stored events: a request narrowed by `--filter-pattern`,
+`--start-time` or `--log-stream-names` pages through only what it matched. A missing token starts
+from the oldest match, and **a response with no `nextToken` means pagination is finished**, so the
+final page omits it. An unrecognized, non-numeric or negative token returns
+`InvalidParameterException` (400). `startFromHead` is not supported, so results always run oldest
+first.
+
+`GetLogEvents` pages in both directions with `f/<index>` and `b/<index>`, and always returns
+`nextForwardToken` and `nextBackwardToken`. It signals the end by returning the same token it was
+given rather than by omitting it, which is what its SDK paginators expect.
 
 ### Configuration
 

@@ -74,7 +74,9 @@ public class BatchDockerRunner implements ContainerTeardown {
                     .withDockerNetwork(config.services().batch().dockerNetwork())
                     .withHostDockerInternalOnLinux()
                     .withEmbeddedDns()
-                    .withLogRotation();
+                    .withLogRotation()
+                    .withLabels(ContainerStorageHelper.resourceIdentityLabels(
+                            "batch", job.getJobId(), job.getAccountId(), job.getRegion()));
 
             if (job.getResolvedCommand() != null && !job.getResolvedCommand().isEmpty()) {
                 builder.withCmd(job.getResolvedCommand());

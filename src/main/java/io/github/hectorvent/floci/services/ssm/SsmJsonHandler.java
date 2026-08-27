@@ -423,8 +423,15 @@ public class SsmJsonHandler {
         if (c.getComment() != null) node.put("Comment", c.getComment());
         if (c.getRequestedDateTime() != null) node.put("RequestedDateTime", c.getRequestedDateTime().toEpochMilli() / 1000.0);
         if (c.getExpiresAfter() != null) node.put("ExpiresAfter", c.getExpiresAfter().toEpochMilli() / 1000.0);
-        node.put("Status", c.getStatus());
-        node.put("StatusDetails", c.getStatusDetails());
+        // c is the same live, shared Command object SsmCommandService's writers (updateCommandStatus,
+        // cancelCommand) synchronize on before touching Status/StatusDetails together. Reading the
+        // pair here without the same lock would let this read straddle a concurrent writer's update -
+        // one field read before it, the other after - producing a Status/StatusDetails combination
+        // that was never actually true at any single instant.
+        synchronized (c) {
+            node.put("Status", c.getStatus());
+            node.put("StatusDetails", c.getStatusDetails());
+        }
         node.put("TargetCount", c.getTargetCount());
         node.put("CompletedCount", c.getCompletedCount());
         node.put("ErrorCount", c.getErrorCount());
@@ -454,8 +461,12 @@ public class SsmJsonHandler {
         node.put("DocumentName", inv.getDocumentName());
         if (inv.getDocumentVersion() != null) node.put("DocumentVersion", inv.getDocumentVersion());
         if (inv.getRequestedDateTime() != null) node.put("RequestedDateTime", inv.getRequestedDateTime().toEpochMilli() / 1000.0);
-        node.put("Status", inv.getStatus());
-        node.put("StatusDetails", inv.getStatusDetails());
+        // Same reasoning as commandToNode: inv is the same live, shared CommandInvocation object its
+        // writers (cancelCommand, direct/agent completion, timeout sweeps) now synchronize on.
+        synchronized (inv) {
+            node.put("Status", inv.getStatus());
+            node.put("StatusDetails", inv.getStatusDetails());
+        }
         return node;
     }
 

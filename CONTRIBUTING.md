@@ -120,6 +120,8 @@ wip: still working on this          # "wip" is not a recognised type
 
 Do not include `Co-Authored-By` trailers for AI tools in commit messages. Attribution should be limited to human contributors.
 
+CI enforces this: the **Commits omit AI attribution trailers** check fails a pull request whose commits carry a `Co-Authored-By` for an identity that is not a person — one whose GitHub address belongs to a bot account, or that uses a `noreply@` mailbox — along with the session and generator lines such tools add on their own. It never judges a co-author by name, so co-authoring a person is always fine; that trailer is how GitHub credits reviewers on a squash merge. `dependabot[bot]` is allowlisted. If the check fires, drop the offending lines with `git commit --amend` (or a rebase for several commits) and force-push.
+
 ## Architecture
 
 See [AGENTS.md](AGENTS.md) for a detailed description of the three-layer architecture (Controller → Service → Storage), the AWS wire protocol mapping, and conventions for adding new services.

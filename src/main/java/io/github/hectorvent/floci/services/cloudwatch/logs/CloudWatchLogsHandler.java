@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.LogEvent;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.LogGroup;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.LogStream;
+import io.github.hectorvent.floci.services.cloudwatch.logs.model.ResourcePolicy;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.SubscriptionFilter;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -55,6 +56,8 @@ public class CloudWatchLogsHandler {
             case "PutSubscriptionFilter" -> handlePutSubscriptionFilter(request, region);
             case "DescribeSubscriptionFilters" -> handleDescribeSubscriptionFilters(request, region);
             case "DeleteSubscriptionFilter" -> handleDeleteSubscriptionFilter(request, region);
+            case "PutResourcePolicy" -> handlePutResourcePolicy(request, region);
+            case "DescribeResourcePolicies" -> handleDescribeResourcePolicies(region);
             case "GetDataProtectionPolicy" -> handleGetDataProtectionPolicy(request, region);
             case "StartQuery" -> handleStartQuery(request, region);
             case "GetQueryResults" -> handleGetQueryResults(request, region);
@@ -118,6 +121,39 @@ public class CloudWatchLogsHandler {
         return Response.ok(response).build();
     }
 
+    private Response handlePutResourcePolicy(JsonNode request, String region) {
+        String policyName = request.path("policyName").asText(null);
+        if (policyName == null || policyName.isBlank()) {
+            throw new AwsException("InvalidParameterException", "policyName is required.", 400);
+        }
+        String policyDocument = request.path("policyDocument").asText(null);
+        if (policyDocument == null || policyDocument.isBlank()) {
+            throw new AwsException("InvalidParameterException", "policyDocument is required.", 400);
+        }
+
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("resourcePolicy", buildResourcePolicy(
+                logsService.putResourcePolicy(policyName, policyDocument, region)));
+        return Response.ok(response).build();
+    }
+
+    private Response handleDescribeResourcePolicies(String region) {
+        ArrayNode policies = objectMapper.createArrayNode();
+        logsService.describeResourcePolicies(region).forEach(
+                policy -> policies.add(buildResourcePolicy(policy)));
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("resourcePolicies", policies);
+        return Response.ok(response).build();
+    }
+
+    private ObjectNode buildResourcePolicy(ResourcePolicy policy) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("policyName", policy.getPolicyName());
+        node.put("policyDocument", policy.getPolicyDocument());
+        node.put("lastUpdatedTime", policy.getLastUpdatedTime());
+        return node;
+    }
+
     private Response handleCreateLogStream(JsonNode request, String region) {
         String groupName = request.path("logGroupName").asText();
         String streamName = request.path("logStreamName").asText();
@@ -135,12 +171,17 @@ public class CloudWatchLogsHandler {
     private Response handleDescribeLogStreams(JsonNode request, String region) {
         String groupName = resolveLogGroupName(request);
         String prefix = request.path("logStreamNamePrefix").asText(null);
-        List<LogStream> streams = logsService.describeLogStreams(groupName, prefix, region);
+        String orderBy = request.path("orderBy").asText(null);
+        boolean descending = request.path("descending").asBoolean(false);
+        int limit = request.path("limit").asInt(0);
+        String nextToken = request.has("nextToken") ? request.path("nextToken").asText(null) : null;
+        CloudWatchLogsService.DescribeLogStreamsResult result =
+                logsService.describeLogStreams(groupName, prefix, orderBy, descending, limit, nextToken, region);
 
         String logGroupArn = logsService.buildArn(groupName, region);
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode streamsArray = objectMapper.createArrayNode();
-        for (LogStream s : streams) {
+        for (LogStream s : result.logStreams()) {
             ObjectNode node = objectMapper.createObjectNode();
             node.put("logStreamName", s.getLogStreamName());
             node.put("arn", logGroupArn + ":log-stream:" + s.getLogStreamName());
@@ -157,6 +198,9 @@ public class CloudWatchLogsHandler {
             streamsArray.add(node);
         }
         response.set("logStreams", streamsArray);
+        if (result.nextToken() != null) {
+            response.put("nextToken", result.nextToken());
+        }
         return Response.ok(response).build();
     }
 
@@ -203,12 +247,14 @@ public class CloudWatchLogsHandler {
         Long endTime = request.has("endTime") ? request.path("endTime").asLong() : null;
         String filterPattern = request.path("filterPattern").asText(null);
         int limit = request.path("limit").asInt(0);
+        String nextToken = request.has("nextToken") ? request.path("nextToken").asText(null) : null;
 
         List<String> streamNames = new ArrayList<>();
         request.path("logStreamNames").forEach(n -> streamNames.add(resolveLogStreamName(n.asText(null))));
 
         CloudWatchLogsService.FilteredLogEventsResult result =
-                logsService.filterLogEvents(groupName, streamNames, startTime, endTime, filterPattern, limit, region);
+                logsService.filterLogEvents(groupName, streamNames, startTime, endTime, filterPattern, limit,
+                        nextToken, region);
 
         ObjectNode response = objectMapper.createObjectNode();
         response.set("events", buildFilteredEventsArray(result.events()));
