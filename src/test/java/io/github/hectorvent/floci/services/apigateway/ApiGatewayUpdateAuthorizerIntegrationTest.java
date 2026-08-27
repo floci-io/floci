@@ -146,4 +146,68 @@ class ApiGatewayUpdateAuthorizerIntegrationTest {
                 .then()
                 .statusCode(200);
     }
+
+    /**
+     * A PATCH is all-or-nothing: a valid op followed by an invalid one must reject the whole request
+     * without leaving the valid op's mutation visible.
+     */
+    @Test
+    void shouldRejectWholePatchAndLeaveNameUnchangedWhenALaterOpIsInvalid() {
+        Map<String, Object> createApiBody = new HashMap<>();
+        createApiBody.put("name", "partial-apply-api");
+
+        String apiId = given()
+                .contentType("application/json")
+                .body(createApiBody)
+                .when()
+                .post("/restapis")
+                .then()
+                .statusCode(201)
+                .extract()
+                .path("id");
+
+        Map<String, Object> createAuthorizerBody = new HashMap<>();
+        createAuthorizerBody.put("name", "original-name");
+        createAuthorizerBody.put("type", "TOKEN");
+        createAuthorizerBody.put("authorizerUri", "arn:aws:lambda:us-east-1:123456789012:function:my-authorizer");
+        createAuthorizerBody.put("identitySource", "method.request.header.Authorization");
+
+        String authorizerId = given()
+                .contentType("application/json")
+                .body(createAuthorizerBody)
+                .when()
+                .post("/restapis/" + apiId + "/authorizers")
+                .then()
+                .statusCode(201)
+                .extract()
+                .path("id");
+
+        Map<String, Object> validOp = new HashMap<>();
+        validOp.put("op", "replace");
+        validOp.put("path", "/name");
+        validOp.put("value", "renamed");
+
+        Map<String, Object> invalidOp = new HashMap<>();
+        invalidOp.put("op", "replace");
+        invalidOp.put("path", "/authorizerResultTtlInSeconds");
+        invalidOp.put("value", "not-a-number");
+
+        Map<String, Object> patchBody = new HashMap<>();
+        patchBody.put("patchOperations", new Object[]{validOp, invalidOp});
+
+        given()
+                .contentType("application/json")
+                .body(patchBody)
+                .when()
+                .patch("/restapis/" + apiId + "/authorizers/" + authorizerId)
+                .then()
+                .statusCode(400);
+
+        given()
+                .when()
+                .get("/restapis/" + apiId + "/authorizers/" + authorizerId)
+                .then()
+                .statusCode(200)
+                .body("name", equalTo("original-name"));
+    }
 }

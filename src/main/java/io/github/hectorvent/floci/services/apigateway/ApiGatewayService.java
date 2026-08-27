@@ -773,8 +773,17 @@ public class ApiGatewayService {
 
     public Authorizer updateAuthorizer(String region, String apiId, String authorizerId, List<Map<String, String>> patchOperations) {
         Authorizer authorizer = getAuthorizer(region, apiId, authorizerId);
+        // The store hands back live objects, so every op is validated against pending values first and
+        // only applied once the whole patch is known to be good.
+        String newName = authorizer.getName();
+        String newAuthorizerUri = authorizer.getAuthorizerUri();
+        String newIdentitySource = authorizer.getIdentitySource();
+        String newTtl = authorizer.getAuthorizerResultTtlInSeconds();
         if (patchOperations != null) {
         for (Map<String, String> op : patchOperations) {
+            if (op == null) {
+                throw new AwsException("BadRequestException", "Invalid patch operation", 400);
+            }
             String path = op.get("path");
             String value = op.get("value");
             String opType = op.get("op");
@@ -785,13 +794,13 @@ public class ApiGatewayService {
                 throw new AwsException("BadRequestException", "Missing path or value", 400);
             }
             if ("/name".equals(path)) {
-                authorizer.setName(value);
+                newName = value;
             } else if ("/authorizerUri".equals(path)) {
-                authorizer.setAuthorizerUri(value);
+                newAuthorizerUri = value;
             } else if ("/identitySource".equals(path)) {
-                authorizer.setIdentitySource(value);
+                newIdentitySource = value;
             } else if ("/authorizerResultTtlInSeconds".equals(path)) {
-                // Validate before writing: the store hands back live objects, and an unparseable TTL
+                // Validate before accepting: the store hands back live objects, and an unparseable TTL
                 // would break serialisation on every later GetAuthorizer/GetAuthorizers.
                 String ttl = value.trim();
                 try {
@@ -800,12 +809,16 @@ public class ApiGatewayService {
                     throw new AwsException("BadRequestException",
                             "authorizerResultTtlInSeconds must be an integer", 400);
                 }
-                authorizer.setAuthorizerResultTtlInSeconds(ttl);
+                newTtl = ttl;
             } else {
                 throw new AwsException("BadRequestException", "Unsupported path: " + path, 400);
             }
         }
         }
+        authorizer.setName(newName);
+        authorizer.setAuthorizerUri(newAuthorizerUri);
+        authorizer.setIdentitySource(newIdentitySource);
+        authorizer.setAuthorizerResultTtlInSeconds(newTtl);
         authorizerStore.put(authorizerKey(region, apiId, authorizerId), authorizer);
         return authorizer;
     }
@@ -998,6 +1011,11 @@ public class ApiGatewayService {
 
     public UsagePlan updateUsagePlan(String region, String usagePlanId, List<Map<String, String>> patchOperations) {
         UsagePlan plan = getUsagePlan(region, usagePlanId);
+        // The store hands back live objects, so every op is validated against pending values first and
+        // only applied once the whole patch is known to be good.
+        String newName = plan.getName();
+        String newDescription = plan.getDescription();
+        List<UsagePlan.ApiStage> newApiStages = new ArrayList<>(plan.getApiStages());
         if (patchOperations != null) {
             for (Map<String, String> op : patchOperations) {
                 if (op == null) {
@@ -1021,11 +1039,11 @@ public class ApiGatewayService {
                     }
                     UsagePlan.ApiStage stage = new UsagePlan.ApiStage(parts[0], parts[1]);
                     if ("add".equals(opType)) {
-                        if (!plan.getApiStages().contains(stage)) {
-                            plan.getApiStages().add(stage);
+                        if (!newApiStages.contains(stage)) {
+                            newApiStages.add(stage);
                         }
                     } else {
-                        plan.getApiStages().remove(stage);
+                        newApiStages.remove(stage);
                     }
                     continue;
                 }
@@ -1033,14 +1051,18 @@ public class ApiGatewayService {
                     throw new AwsException("BadRequestException", "Invalid operation", 400);
                 }
                 if ("/name".equals(path)) {
-                    plan.setName(value);
+                    newName = value;
                 } else if ("/description".equals(path)) {
-                    plan.setDescription(value);
+                    newDescription = value;
                 } else {
                     throw new AwsException("BadRequestException", "Unsupported path: " + path, 400);
                 }
             }
         }
+        plan.setName(newName);
+        plan.setDescription(newDescription);
+        plan.getApiStages().clear();
+        plan.getApiStages().addAll(newApiStages);
         usagePlanStore.put(usagePlanKey(region, usagePlanId), plan);
         return plan;
     }
@@ -1128,6 +1150,12 @@ public class ApiGatewayService {
             throw new AwsException("BadRequestException", "Invalid patch operation", 400);
         }
 
+        // The store hands back live objects, so every op is validated against pending values first and
+        // only applied once the whole patch is known to be good.
+        String newName = validator.getName();
+        boolean newValidateRequestBody = validator.isValidateRequestBody();
+        boolean newValidateRequestParameters = validator.isValidateRequestParameters();
+
         for (Map<String, String> operation : patchOperations) {
             if (operation == null) {
                 throw new AwsException("BadRequestException", "Invalid patch operation", 400);
@@ -1147,19 +1175,22 @@ public class ApiGatewayService {
 
             switch (path) {
                 case "/name":
-                    validator.setName(value);
+                    newName = value;
                     break;
                 case "/validateRequestBody":
-                    validator.setValidateRequestBody(Boolean.parseBoolean(value));
+                    newValidateRequestBody = Boolean.parseBoolean(value);
                     break;
                 case "/validateRequestParameters":
-                    validator.setValidateRequestParameters(Boolean.parseBoolean(value));
+                    newValidateRequestParameters = Boolean.parseBoolean(value);
                     break;
                 default:
                     throw new AwsException("BadRequestException", "Invalid patch operation", 400);
             }
         }
 
+        validator.setName(newName);
+        validator.setValidateRequestBody(newValidateRequestBody);
+        validator.setValidateRequestParameters(newValidateRequestParameters);
         requestValidatorStore.put(requestValidatorKey(region, apiId, validatorId), validator);
         return validator;
     }
@@ -1187,6 +1218,11 @@ public class ApiGatewayService {
 
     public Model updateModel(String region, String apiId, String modelName, List<Map<String, String>> patchOperations) {
         Model model = getModel(region, apiId, modelName);
+        // The store hands back live objects, so every op is validated against pending values first and
+        // only applied once the whole patch is known to be good.
+        String newDescription = model.getDescription();
+        String newSchema = model.getSchema();
+        String newContentType = model.getContentType();
         if (patchOperations != null) {
             for (Map<String, String> op : patchOperations) {
                 if (op == null) {
@@ -1202,11 +1238,11 @@ public class ApiGatewayService {
                     throw new AwsException("BadRequestException", "Missing path or value", 400);
                 }
                 if ("/description".equals(path)) {
-                    model.setDescription(value);
+                    newDescription = value;
                 } else if ("/schema".equals(path)) {
-                    model.setSchema(value);
+                    newSchema = value;
                 } else if ("/contentType".equals(path)) {
-                    model.setContentType(value);
+                    newContentType = value;
                 } else if ("/name".equals(path)) {
                     // AWS treats the model name as an immutable identifier.
                     throw new AwsException("BadRequestException",
@@ -1216,6 +1252,9 @@ public class ApiGatewayService {
                 }
             }
         }
+        model.setDescription(newDescription);
+        model.setSchema(newSchema);
+        model.setContentType(newContentType);
         modelStore.put(modelKey(region, apiId, modelName), model);
         return model;
     }
@@ -1312,7 +1351,18 @@ public class ApiGatewayService {
             domainStore.put(domainKey, domain);
             return domain;
         }
+        // The store hands back live objects, so every op is validated against pending values first and
+        // only applied once the whole patch is known to be good.
+        String newCertificateName = domain.getCertificateName();
+        String newCertificateArn = domain.getCertificateArn();
+        String newRegionalCertificateName = domain.getRegionalCertificateName();
+        String newRegionalCertificateArn = domain.getRegionalCertificateArn();
+        String newSecurityPolicy = domain.getSecurityPolicy();
+        String newEndpointConfigurationType = domain.getEndpointConfigurationType();
         for (Map<String, String> op : patchOperations) {
+            if (op == null) {
+                throw new AwsException("BadRequestException", "Invalid patch operation", 400);
+            }
             String operation = op.get("op");
             String path = op.get("path");
             String value = op.get("value");
@@ -1332,24 +1382,30 @@ public class ApiGatewayService {
             }
 
             if ("/certificateName".equals(path)) {
-                domain.setCertificateName(value);
+                newCertificateName = value;
             } else if ("/certificateArn".equals(path)) {
-                domain.setCertificateArn(value);
+                newCertificateArn = value;
             } else if ("/regionalCertificateName".equals(path)) {
-                domain.setRegionalCertificateName(value);
+                newRegionalCertificateName = value;
             } else if ("/regionalCertificateArn".equals(path)) {
-                domain.setRegionalCertificateArn(value);
+                newRegionalCertificateArn = value;
             } else if ("/securityPolicy".equals(path)) {
-                domain.setSecurityPolicy(value);
+                newSecurityPolicy = value;
             } else if ("/endpointConfiguration/types/REGIONAL".equals(path)) {
                 if (!"REGIONAL".equals(value) && !"EDGE".equals(value)) {
                     throw new AwsException("BadRequestException", "Invalid value for endpoint type: " + value, 400);
                 }
-                domain.setEndpointConfigurationType(value);
+                newEndpointConfigurationType = value;
             } else {
                 throw new AwsException("BadRequestException", "Unsupported path: " + path, 400);
             }
         }
+        domain.setCertificateName(newCertificateName);
+        domain.setCertificateArn(newCertificateArn);
+        domain.setRegionalCertificateName(newRegionalCertificateName);
+        domain.setRegionalCertificateArn(newRegionalCertificateArn);
+        domain.setSecurityPolicy(newSecurityPolicy);
+        domain.setEndpointConfigurationType(newEndpointConfigurationType);
         domainStore.put(domainKey, domain);
         return domain;
     }
@@ -1452,8 +1508,15 @@ public class ApiGatewayService {
 
         BasePathMapping mapping = getBasePathMapping(region, domainName, basePath);
 
+        // The store hands back live objects, so every op is validated against pending values first and
+        // only applied once the whole patch is known to be good.
+        String newRestApiId = mapping.getRestApiId();
+        String newStage = mapping.getStage();
         if (patchOperations != null) {
             for (Map<String, String> op : patchOperations) {
+                if (op == null) {
+                    throw new AwsException("BadRequestException", "Invalid patch operation", 400);
+                }
                 String path = op.get("path");
                 String value = op.get("value");
 
@@ -1466,15 +1529,17 @@ public class ApiGatewayService {
                 }
 
                 if ("/restApiId".equals(path)) {
-                    mapping.setRestApiId(value);
+                    newRestApiId = value;
                 } else if ("/stage".equals(path)) {
-                    mapping.setStage(value);
+                    newStage = value;
                 } else {
                     throw new AwsException("BadRequestException", "Unsupported path: " + path, 400);
                 }
             }
         }
 
+        mapping.setRestApiId(newRestApiId);
+        mapping.setStage(newStage);
         basePathMappingStore.put(mappingKey(region, domainName, normalizedPath), mapping);
         return mapping;
     }
