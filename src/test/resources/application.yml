@@ -344,6 +344,7 @@ floci:
     ssoadmin:
       enabled: true
     controltower:
+      enabled: true
     route53resolver:
       enabled: true
     lakeformation:
