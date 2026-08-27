@@ -5,7 +5,9 @@ import static org.hamcrest.Matchers.aMapWithSize;
 import static org.hamcrest.Matchers.anEmptyMap;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.empty;
+import static org.hamcrest.Matchers.emptyOrNullString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.hasKey;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.hasItems;
 import static org.hamcrest.Matchers.hasSize;
@@ -569,6 +571,47 @@ class NetworkFirewallIntegrationTest {
             .statusCode(200)
             .body("LoggingConfiguration.LogDestinationConfigs[0].LogDestinationType",
                     equalTo("CloudWatchLogs"));
+    }
+
+    @Test
+    void updateFirewallDescription_whenNeverSet_omitsTheFieldFromTheResponse() {
+        String name = "NoDescriptionFirewall";
+        createFirewall(name, "", "subnet-11111111111111115");
+
+        call("UpdateFirewallDescription", "{\"FirewallArn\":\"" + firewallArn(name) + "\"}")
+            .statusCode(200)
+            .body("FirewallArn", equalTo(firewallArn(name)))
+            .body("FirewallName", equalTo(name))
+            .body("UpdateToken", not(emptyOrNullString()))
+            .body("$", not(hasKey("Description")));
+    }
+
+    @Test
+    void updateFirewallAnalysisSettings_whenNeverSet_omitsTheFieldFromTheResponse() {
+        String name = "NoAnalysisSettingsFirewall";
+        createFirewall(name, "", "subnet-11111111111111116");
+
+        call("UpdateFirewallAnalysisSettings", "{\"FirewallArn\":\"" + firewallArn(name) + "\"}")
+            .statusCode(200)
+            .body("FirewallArn", equalTo(firewallArn(name)))
+            .body("FirewallName", equalTo(name))
+            .body("UpdateToken", not(emptyOrNullString()))
+            .body("$", not(hasKey("EnabledAnalysisTypes")));
+    }
+
+    @Test
+    void updateFirewallDescription_whenProvided_storesAndEchoesTheValue() {
+        String name = "DescribedFirewall";
+        createFirewall(name, "", "subnet-11111111111111117");
+
+        call("UpdateFirewallDescription", "{\"FirewallArn\":\"" + firewallArn(name) + "\","
+                + "\"Description\":\"managed by the accelerator\"}")
+            .statusCode(200)
+            .body("Description", equalTo("managed by the accelerator"));
+
+        call("DescribeFirewall", "{\"FirewallArn\":\"" + firewallArn(name) + "\"}")
+            .statusCode(200)
+            .body("Firewall.Description", equalTo("managed by the accelerator"));
     }
 
     private static String firewallArn(String name) {

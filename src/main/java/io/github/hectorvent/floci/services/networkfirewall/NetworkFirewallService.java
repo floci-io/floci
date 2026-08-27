@@ -171,7 +171,14 @@ public class NetworkFirewallService {
         ObjectNode response = objectMapper.createObjectNode();
         response.put("FirewallArn", existing.path("FirewallArn").asText());
         response.put("FirewallName", existing.path("FirewallName").asText());
-        response.set(field, existing.path(field).deepCopy());
+        // Description and EnabledAnalysisTypes are optional on their own update ops
+        // (botocore 2020-11-12 marks no required members), so a firewall created
+        // without one has nothing to echo -- omit the member rather than serialising
+        // the MissingNode that path() returns as an explicit null.
+        JsonNode current = existing.get(field);
+        if (current != null) {
+            response.set(field, current.deepCopy());
+        }
         response.put("UpdateToken", UUID.randomUUID().toString());
         return response;
     }
