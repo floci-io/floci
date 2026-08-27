@@ -47,6 +47,9 @@ idempotent on `CreatorRequestId`, as they are in real AWS: replaying a token ret
 resource it originally created instead of allocating a second one. The check runs after
 the request's own validation, so a replayed token never excuses a malformed body. A
 request without a `CreatorRequestId` opts out and always allocates a new resource.
+Idempotency is scoped per account and per region, matching this regional service: the same
+token replayed in another region creates that region's own resource rather than handing
+back the first region's.
 
 ## Limitations
 

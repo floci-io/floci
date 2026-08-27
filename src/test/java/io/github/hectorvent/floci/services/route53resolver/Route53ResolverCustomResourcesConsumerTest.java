@@ -30,6 +30,9 @@ class Route53ResolverCustomResourcesConsumerTest {
     private static final String CONTENT_TYPE = "application/x-amz-json-1.1";
     private static final String AUTH_HEADER =
             "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/route53resolver/aws4_request";
+    /** Same access key (so the same account) in a second region, for region-scoping tests. */
+    private static final String AUTH_HEADER_WEST =
+            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-west-2/route53resolver/aws4_request";
 
     @BeforeAll
     static void configureRestAssured() {
@@ -37,10 +40,14 @@ class Route53ResolverCustomResourcesConsumerTest {
     }
 
     private static Response call(String action, String body) {
+        return callAs(AUTH_HEADER, action, body);
+    }
+
+    private static Response callAs(String authHeader, String action, String body) {
         return given()
                 .contentType(CONTENT_TYPE)
                 .header("X-Amz-Target", "Route53Resolver." + action)
-                .header("Authorization", AUTH_HEADER)
+                .header("Authorization", authHeader)
                 .body(body)
             .when()
                 .post("/");
@@ -204,6 +211,74 @@ class Route53ResolverCustomResourcesConsumerTest {
                 .then().statusCode(200).extract().path("ResolverRule.Id");
 
         assertNotEquals(first, second);
+    }
+
+    // ---------- CreatorRequestId replay is scoped to one region ----------
+
+    @Test
+    void createFirewallDomainList_sameCreatorRequestIdInAnotherRegion_createsRegionalList() {
+        String body = "{\"Name\":\"ab-xregion-fdl\",\"CreatorRequestId\":\"tok-xregion-fdl\"}";
+
+        String east = callAs(AUTH_HEADER, "CreateFirewallDomainList", body)
+                .then().statusCode(200)
+                .body("FirewallDomainList.Arn", startsWith("arn:aws:route53resolver:us-east-1:"))
+                .extract().path("FirewallDomainList.Id");
+
+        callAs(AUTH_HEADER_WEST, "CreateFirewallDomainList", body)
+        .then()
+            .statusCode(200)
+            // A replay in another region must not hand back us-east-1's resource.
+            .body("FirewallDomainList.Id", not(equalTo(east)))
+            .body("FirewallDomainList.Arn", startsWith("arn:aws:route53resolver:us-west-2:"));
+    }
+
+    @Test
+    void createResolverEndpoint_sameCreatorRequestIdInAnotherRegion_createsRegionalEndpoint() {
+        String body = "{\"Name\":\"ab-xregion-endpoint\",\"Direction\":\"INBOUND\","
+                + "\"SecurityGroupIds\":[\"sg-abc123\"],\"IpAddressRequests\":[{\"SubnetId\":\"subnet-abc\","
+                + "\"Ip\":\"10.0.0.5\"}],\"CreatorRequestId\":\"tok-xregion-endpoint\"}";
+
+        String east = callAs(AUTH_HEADER, "CreateResolverEndpoint", body)
+                .then().statusCode(200)
+                .body("ResolverEndpoint.Arn", startsWith("arn:aws:route53resolver:us-east-1:"))
+                .extract().path("ResolverEndpoint.Id");
+
+        callAs(AUTH_HEADER_WEST, "CreateResolverEndpoint", body)
+        .then()
+            .statusCode(200)
+            .body("ResolverEndpoint.Id", not(equalTo(east)))
+            .body("ResolverEndpoint.Arn", startsWith("arn:aws:route53resolver:us-west-2:"));
+    }
+
+    @Test
+    void createResolverRule_sameCreatorRequestIdInAnotherRegion_createsRegionalRule() {
+        String body = "{\"Name\":\"ab-xregion-rule\",\"RuleType\":\"FORWARD\","
+                + "\"DomainName\":\"ab-xregion-rule.example.com.\","
+                + "\"TargetIps\":[{\"Ip\":\"10.0.0.1\",\"Port\":53}],"
+                + "\"CreatorRequestId\":\"tok-xregion-rule\"}";
+
+        String east = callAs(AUTH_HEADER, "CreateResolverRule", body)
+                .then().statusCode(200)
+                .body("ResolverRule.Arn", startsWith("arn:aws:route53resolver:us-east-1:"))
+                .extract().path("ResolverRule.Id");
+
+        callAs(AUTH_HEADER_WEST, "CreateResolverRule", body)
+        .then()
+            .statusCode(200)
+            .body("ResolverRule.Id", not(equalTo(east)))
+            .body("ResolverRule.Arn", startsWith("arn:aws:route53resolver:us-west-2:"));
+    }
+
+    @Test
+    void createFirewallDomainList_replayWithinTheSameRegion_stillReturnsTheOriginal() {
+        String body = "{\"Name\":\"ab-sameregion-fdl\",\"CreatorRequestId\":\"tok-sameregion-fdl\"}";
+
+        String first = callAs(AUTH_HEADER_WEST, "CreateFirewallDomainList", body)
+                .then().statusCode(200).extract().path("FirewallDomainList.Id");
+        String second = callAs(AUTH_HEADER_WEST, "CreateFirewallDomainList", body)
+                .then().statusCode(200).extract().path("FirewallDomainList.Id");
+
+        assertEquals(first, second);
     }
 
     // ---------- Resolver endpoints ----------

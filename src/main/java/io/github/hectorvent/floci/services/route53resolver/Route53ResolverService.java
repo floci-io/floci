@@ -93,7 +93,7 @@ public class Route53ResolverService {
 
     public synchronized ObjectNode createFirewallDomainList(JsonNode request, String region, String accountId) {
         String name = requireText(request, "Name");
-        java.util.Optional<ObjectNode> replay = replayOf(domainListStore, request);
+        java.util.Optional<ObjectNode> replay = replayOf(domainListStore, request, region);
         if (replay.isPresent()) {
             return replay.get();
         }
@@ -138,7 +138,7 @@ public class Route53ResolverService {
         if (!ipAddresses.isArray() || ipAddresses.isEmpty()) {
             throw new AwsException("InvalidParametersException", "IpAddressRequests is required", 400);
         }
-        java.util.Optional<ObjectNode> replay = replayOf(endpointStore, request);
+        java.util.Optional<ObjectNode> replay = replayOf(endpointStore, request, region);
         if (replay.isPresent()) {
             return replay.get();
         }
@@ -199,7 +199,7 @@ public class Route53ResolverService {
                     "TargetIps must contain at least one target address.", 400);
         }
         String domainName = text(request, "DomainName");
-        java.util.Optional<ObjectNode> replay = replayOf(ruleStore, request);
+        java.util.Optional<ObjectNode> replay = replayOf(ruleStore, request, region);
         if (replay.isPresent()) {
             return replay.get();
         }
@@ -307,19 +307,32 @@ public class Route53ResolverService {
      * token returns the resource it originally created rather than allocating a second
      * one. Called after the request's own validation so a replayed token never excuses a
      * malformed body. A blank/absent token opts out — those creates always allocate.
+     *
+     * <p>The scan-then-put pair is only atomic because every create method is
+     * {@code synchronized} — two overlapping retries with the same token would otherwise
+     * both miss the scan and persist twice.</p>
+     *
+     * <p>Idempotency is scoped to one region, as in AWS: Route 53 Resolver is regional, so
+     * the same token in {@code us-east-1} and {@code us-west-2} identifies two independent
+     * resources. The stores are account-partitioned by {@code AccountAwareStorageBackend}
+     * but carry no region in their keys, so the candidate's region comes from the ARN this
+     * service built for it — keeping the region off the wire response, which the modeled
+     * shapes have no field for. Same intent as {@code FisService.idempotencyKey} and
+     * {@code BedrockAgentCoreControlService.tokenKey}, which fold the region into the key.</p>
      */
-    /**
-     * The CreatorRequestId scan-then-put pair is only atomic because every create
-     * method is {@code synchronized} — two overlapping retries with the same token
-     * would otherwise both miss the scan and persist twice.
-     */
-    private java.util.Optional<ObjectNode> replayOf(StorageBackend<String, ObjectNode> store, JsonNode request) {
+    private java.util.Optional<ObjectNode> replayOf(StorageBackend<String, ObjectNode> store, JsonNode request,
+                                                    String region) {
         String creatorRequestId = text(request, "CreatorRequestId");
         if (creatorRequestId == null || creatorRequestId.isBlank()) {
             return java.util.Optional.empty();
         }
+        String regionPrefix = "arn:aws:route53resolver:" + region + ":";
         return store.scan(key -> true).stream()
                 .filter(existing -> creatorRequestId.equals(text(existing, "CreatorRequestId")))
+                .filter(existing -> {
+                    String arn = text(existing, "Arn");
+                    return arn != null && arn.startsWith(regionPrefix);
+                })
                 .findFirst()
                 .map(ObjectNode::deepCopy);
     }
