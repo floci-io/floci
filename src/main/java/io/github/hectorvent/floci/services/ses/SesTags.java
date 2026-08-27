@@ -5,7 +5,9 @@ import io.github.hectorvent.floci.services.ses.model.Tag;
 
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.regex.Pattern;
 
@@ -110,6 +112,24 @@ final class SesTags {
         if (mergedCount > MAX_TAGS) {
             throw new AwsException("BadRequestException", MAX_TAGS_MERGED_MESSAGE, 400);
         }
+    }
+
+    /**
+     * {@code TagResource} merge semantics: incoming keys overwrite existing values, insertion order
+     * is preserved, and the 50-tag ceiling applies to the merged result.
+     */
+    static List<Tag> merge(List<Tag> existing, List<Tag> incoming) {
+        Map<String, String> merged = new LinkedHashMap<>();
+        for (Tag t : existing) {
+            merged.put(t.key(), t.value());
+        }
+        for (Tag t : incoming) {
+            merged.put(t.key(), t.value());
+        }
+        validateMergedCount(merged.size());
+        List<Tag> out = new ArrayList<>();
+        merged.forEach((k, v) -> out.add(new Tag(k, v)));
+        return out;
     }
 
     // A null value counts as a character-set violation (AWS requires a string value; empty is allowed).

@@ -672,8 +672,9 @@ public interface EmulatorConfig {
         RumServiceConfig rum();
         GuardDutyServiceConfig guardduty();
         EmrServerlessServiceConfig emrserverless();
-
         Route53ResolverServiceConfig route53resolver();
+        ServiceQuotasServiceConfig servicequotas();
+        RamServiceConfig ram();
         ControlTowerServiceConfig controltower();
         LakeFormationServiceConfig lakeformation();
         EfsServiceConfig efs();
@@ -726,6 +727,16 @@ public interface EmulatorConfig {
     }
 
     interface Route53ResolverServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface ServiceQuotasServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface RamServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }
