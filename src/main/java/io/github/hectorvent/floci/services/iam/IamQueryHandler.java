@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.iam;
 
 import io.github.hectorvent.floci.core.common.*;
 import io.github.hectorvent.floci.services.iam.model.AccessKey;
+import io.github.hectorvent.floci.services.iam.model.AccountPasswordPolicy;
 import io.github.hectorvent.floci.services.iam.model.IamGroup;
 import io.github.hectorvent.floci.services.iam.model.IamPolicy;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
@@ -82,6 +83,11 @@ public class IamQueryHandler {
             case "ListAccountAliases" -> handleListAccountAliases(params);
             case "CreateAccountAlias" -> handleCreateAccountAlias(params);
             case "DeleteAccountAlias" -> handleDeleteAccountAlias(params);
+
+            // Account Password Policy
+            case "GetAccountPasswordPolicy" -> handleGetAccountPasswordPolicy(params);
+            case "UpdateAccountPasswordPolicy" -> handleUpdateAccountPasswordPolicy(params);
+            case "DeleteAccountPasswordPolicy" -> handleDeleteAccountPasswordPolicy(params);
 
             // Groups
             case "CreateGroup" -> handleCreateGroup(params);
@@ -429,6 +435,85 @@ public class IamQueryHandler {
     private Response handleDeleteAccountAlias(MultivaluedMap<String, String> params) {
         iamService.deleteAccountAlias(getParam(params, "AccountAlias"));
         return Response.ok(AwsQueryResponse.envelopeNoResult("DeleteAccountAlias", AwsNamespaces.IAM)).build();
+    }
+
+    // =========================================================================
+    // Account Password Policy
+    // =========================================================================
+
+    // AWS raises NoSuchEntity (404) when the account has never had a policy set — a documented,
+    // expected result, the same shape GetLoginProfile answers when a user has no console password.
+    private Response handleGetAccountPasswordPolicy(MultivaluedMap<String, String> params) {
+        AccountPasswordPolicy policy = iamService.getAccountPasswordPolicy()
+                .orElse(null);
+        if (policy == null) {
+            return AwsQueryResponse.error("NoSuchEntity",
+                    "The account policy with name PasswordPolicy cannot be found.", AwsNamespaces.IAM, 404);
+        }
+        return Response.ok(AwsQueryResponse.envelope(
+                "GetAccountPasswordPolicy", AwsNamespaces.IAM, passwordPolicyXml(policy))).build();
+    }
+
+    private Response handleUpdateAccountPasswordPolicy(MultivaluedMap<String, String> params) {
+        AccountPasswordPolicy policy = new AccountPasswordPolicy();
+        policy.setMinimumPasswordLength(getIntParam(params, "MinimumPasswordLength", 6));
+        policy.setRequireSymbols("true".equalsIgnoreCase(getParam(params, "RequireSymbols")));
+        policy.setRequireNumbers("true".equalsIgnoreCase(getParam(params, "RequireNumbers")));
+        policy.setRequireUppercaseCharacters(
+                "true".equalsIgnoreCase(getParam(params, "RequireUppercaseCharacters")));
+        policy.setRequireLowercaseCharacters(
+                "true".equalsIgnoreCase(getParam(params, "RequireLowercaseCharacters")));
+        policy.setAllowUsersToChangePassword(
+                "true".equalsIgnoreCase(getParam(params, "AllowUsersToChangePassword")));
+        policy.setMaxPasswordAge(getOptionalIntParam(params, "MaxPasswordAge"));
+        policy.setPasswordReusePrevention(getOptionalIntParam(params, "PasswordReusePrevention"));
+        String hardExpiry = getParam(params, "HardExpiry");
+        if (hardExpiry != null) {
+            policy.setHardExpiry(Boolean.parseBoolean(hardExpiry));
+        }
+        iamService.updateAccountPasswordPolicy(policy);
+        return Response.ok(AwsQueryResponse.envelopeNoResult("UpdateAccountPasswordPolicy", AwsNamespaces.IAM))
+                .build();
+    }
+
+    private Response handleDeleteAccountPasswordPolicy(MultivaluedMap<String, String> params) {
+        iamService.deleteAccountPasswordPolicy();
+        return Response.ok(AwsQueryResponse.envelopeNoResult("DeleteAccountPasswordPolicy", AwsNamespaces.IAM))
+                .build();
+    }
+
+    private String passwordPolicyXml(AccountPasswordPolicy policy) {
+        var xml = new XmlBuilder().start("PasswordPolicy")
+                .elem("MinimumPasswordLength", policy.getMinimumPasswordLength())
+                .elem("RequireSymbols", policy.isRequireSymbols())
+                .elem("RequireNumbers", policy.isRequireNumbers())
+                .elem("RequireUppercaseCharacters", policy.isRequireUppercaseCharacters())
+                .elem("RequireLowercaseCharacters", policy.isRequireLowercaseCharacters())
+                .elem("AllowUsersToChangePassword", policy.isAllowUsersToChangePassword())
+                .elem("ExpirePasswords", policy.isExpirePasswords());
+        if (policy.getMaxPasswordAge() != null) {
+            xml.elem("MaxPasswordAge", policy.getMaxPasswordAge());
+        }
+        if (policy.getPasswordReusePrevention() != null) {
+            xml.elem("PasswordReusePrevention", policy.getPasswordReusePrevention());
+        }
+        if (policy.getHardExpiry() != null) {
+            xml.elem("HardExpiry", policy.getHardExpiry());
+        }
+        return xml.end("PasswordPolicy").build();
+    }
+
+    /** Unlike {@link #getIntParam}, absence is meaningful here — it must not collapse to a default. */
+    private Integer getOptionalIntParam(MultivaluedMap<String, String> params, String name) {
+        String value = params.getFirst(name);
+        if (value == null) {
+            return null;
+        }
+        try {
+            return Integer.parseInt(value);
+        } catch (NumberFormatException e) {
+            throw new AwsException("ValidationError", "Invalid value for " + name + ": " + value, 400);
+        }
     }
 
     // =========================================================================

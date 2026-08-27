@@ -320,7 +320,7 @@ class IamManagedPolicyAccountScopeTest {
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
-                aliases, new InMemoryStorage<>(), new InMemoryStorage<>(),
+                aliases, new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new RegionResolver("us-east-1", DEFAULT_ACCT), false, null);
     }
 }

@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.iam.model.AccessKey;
+import io.github.hectorvent.floci.services.iam.model.AccountPasswordPolicy;
 import io.github.hectorvent.floci.services.iam.model.IamGroup;
 import io.github.hectorvent.floci.services.iam.model.IamPolicy;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
@@ -67,6 +68,14 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private static final int MAX_OIDC_CLIENT_IDS = 100;
     private static final int MAX_OIDC_THUMBPRINTS = 5;
     private static final int MAX_OIDC_URL_LENGTH = 255;
+    private static final String ACCOUNT_PASSWORD_POLICY_KEY = "account-password-policy";
+    /** AWS-documented bounds for the account password policy's numeric fields. */
+    private static final int MIN_PASSWORD_LENGTH_FLOOR = 6;
+    private static final int MIN_PASSWORD_LENGTH_CEILING = 128;
+    private static final int MAX_PASSWORD_AGE_FLOOR = 1;
+    private static final int MAX_PASSWORD_AGE_CEILING = 1095;
+    private static final int PASSWORD_REUSE_PREVENTION_FLOOR = 1;
+    private static final int PASSWORD_REUSE_PREVENTION_CEILING = 24;
 
     /** Guards the read-modify-write in the OIDC provider mutators. */
     private final Object oidcProviderLock = new Object();
@@ -99,6 +108,11 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * silently keeping only one. A single lock across accounts is enough: alias writes are rare.
      */
     private final Object accountAliasLock = new Object();
+    /**
+     * Holds at most one entry per account under {@link #ACCOUNT_PASSWORD_POLICY_KEY} — same
+     * single-value-per-account shape as {@link #accountAliases}.
+     */
+    private final StorageBackend<String, AccountPasswordPolicy> passwordPolicies;
     private final StorageBackend<String, OpenIDConnectProvider> oidcProviders;
     /** Deletion is synchronous, so an issued task id is a completed one; the value is its role. */
     private final StorageBackend<String, String> serviceLinkedRoleDeletions;
@@ -124,6 +138,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             storageFactory.create("iam", "iam-instance-profiles.json", new TypeReference<>() {}),
             storageFactory.create("iam", "iam-sessions.json", new TypeReference<>() {}),
             storageFactory.create("iam", "iam-account-aliases.json", new TypeReference<>() {}),
+            storageFactory.create("iam", "iam-password-policy.json", new TypeReference<>() {}),
             storageFactory.create("iam", "iam-oidc-providers.json", new TypeReference<>() {}),
             storageFactory.create("iam", "iam-slr-deletions.json", new TypeReference<>() {}),
             regionResolver,
@@ -153,7 +168,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                RegionResolver regionResolver,
                boolean seedDeployerPrincipal) {
         this(users, groups, roles, policies, accessKeys, instanceProfiles, sessions,
-                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 regionResolver, seedDeployerPrincipal, null);
     }
 
@@ -165,6 +180,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                StorageBackend<String, InstanceProfile> instanceProfiles,
                StorageBackend<String, SessionCredential> sessions,
                StorageBackend<String, String> accountAliases,
+               StorageBackend<String, AccountPasswordPolicy> passwordPolicies,
                StorageBackend<String, OpenIDConnectProvider> oidcProviders,
                StorageBackend<String, String> serviceLinkedRoleDeletions,
                RegionResolver regionResolver,
@@ -178,6 +194,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         this.instanceProfiles = instanceProfiles;
         this.sessions = sessions;
         this.accountAliases = accountAliases;
+        this.passwordPolicies = passwordPolicies;
         this.oidcProviders = oidcProviders;
         this.serviceLinkedRoleDeletions = serviceLinkedRoleDeletions;
         this.regionResolver = regionResolver;
@@ -1366,6 +1383,63 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                     "The specified value for accountAlias is invalid. It must be a minimum length of 3 "
                             + "characters and maximum length of 63 characters, contain only digits, lowercase "
                             + "letters, and hyphens (-), but cannot begin or end with a hyphen.", 400);
+        }
+    }
+
+    // =========================================================================
+    // Account Password Policy
+    // =========================================================================
+
+    public Optional<AccountPasswordPolicy> getAccountPasswordPolicy() {
+        return passwordPolicies.get(ACCOUNT_PASSWORD_POLICY_KEY);
+    }
+
+    /**
+     * Unlike the account alias, an account password policy is set wholesale — every call replaces
+     * the stored policy rather than merging into it, matching AWS: fields the caller omits reset to
+     * their documented defaults instead of carrying over the previous policy's value.
+     */
+    public AccountPasswordPolicy updateAccountPasswordPolicy(AccountPasswordPolicy policy) {
+        validateAccountPasswordPolicy(policy);
+        passwordPolicies.put(ACCOUNT_PASSWORD_POLICY_KEY, policy);
+        LOG.infov("Updated IAM account password policy");
+        return policy;
+    }
+
+    /**
+     * AWS raises NoSuchEntity when no custom policy has ever been set, rather than treating the
+     * delete as a no-op — DeleteAccountAlias's mismatch case is the same shape of "there is nothing
+     * here to remove."
+     */
+    public void deleteAccountPasswordPolicy() {
+        if (passwordPolicies.get(ACCOUNT_PASSWORD_POLICY_KEY).isEmpty()) {
+            throw new AwsException("NoSuchEntity",
+                    "The account policy with name PasswordPolicy cannot be found.", 404);
+        }
+        passwordPolicies.delete(ACCOUNT_PASSWORD_POLICY_KEY);
+        LOG.infov("Deleted IAM account password policy");
+    }
+
+    private void validateAccountPasswordPolicy(AccountPasswordPolicy policy) {
+        int minLength = policy.getMinimumPasswordLength();
+        if (minLength < MIN_PASSWORD_LENGTH_FLOOR || minLength > MIN_PASSWORD_LENGTH_CEILING) {
+            throw new AwsException("ValidationError",
+                    "MinimumPasswordLength must be between " + MIN_PASSWORD_LENGTH_FLOOR + " and "
+                            + MIN_PASSWORD_LENGTH_CEILING + ".", 400);
+        }
+        Integer maxAge = policy.getMaxPasswordAge();
+        if (maxAge != null && (maxAge < MAX_PASSWORD_AGE_FLOOR || maxAge > MAX_PASSWORD_AGE_CEILING)) {
+            throw new AwsException("ValidationError",
+                    "MaxPasswordAge must be between " + MAX_PASSWORD_AGE_FLOOR + " and "
+                            + MAX_PASSWORD_AGE_CEILING + ".", 400);
+        }
+        Integer reusePrevention = policy.getPasswordReusePrevention();
+        if (reusePrevention != null
+                && (reusePrevention < PASSWORD_REUSE_PREVENTION_FLOOR
+                        || reusePrevention > PASSWORD_REUSE_PREVENTION_CEILING)) {
+            throw new AwsException("ValidationError",
+                    "PasswordReusePrevention must be between " + PASSWORD_REUSE_PREVENTION_FLOOR + " and "
+                            + PASSWORD_REUSE_PREVENTION_CEILING + ".", 400);
         }
     }
 

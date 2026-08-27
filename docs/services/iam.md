@@ -176,6 +176,27 @@ no effect on later starts — the skip is logged at debug with both values. `/_f
 clears the alias without re-seeding it, as it does the optional deployer principal; the seed
 returns on restart.
 
+### Account Password Policy
+
+| Action | Description |
+|--------|-------------|
+| GetAccountPasswordPolicy | Returns the account's password policy. |
+| UpdateAccountPasswordPolicy | Replaces the account's password policy wholesale. |
+| DeleteAccountPasswordPolicy | Removes the account's password policy. |
+
+An account holds one password policy. `UpdateAccountPasswordPolicy` replaces it wholesale rather
+than merging — a field the caller omits resets to its AWS-documented default (`false` for the
+boolean requirements and `AllowUsersToChangePassword`, `6` for `MinimumPasswordLength`, unset for
+the optional `MaxPasswordAge`, `PasswordReusePrevention` and `HardExpiry`) rather than carrying
+over the previous value. `ExpirePasswords` is derived, not stored: it reports `true` exactly when
+`MaxPasswordAge` is set.
+
+`GetAccountPasswordPolicy` and `DeleteAccountPasswordPolicy` both return `NoSuchEntity` when no
+policy has ever been set — a documented, expected result the Terraform provider's
+`aws_iam_account_password_policy` resource branches on. `MinimumPasswordLength` must be 6–128,
+`MaxPasswordAge` 1–1095, and `PasswordReusePrevention` 1–24; a value outside those ranges is
+rejected with `ValidationError`.
+
 ### OIDC Identity Providers
 
 | Action | Description |
