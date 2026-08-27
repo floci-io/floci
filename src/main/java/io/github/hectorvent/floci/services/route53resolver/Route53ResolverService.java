@@ -153,7 +153,12 @@ public class Route53ResolverService {
         }
         java.util.Optional<ObjectNode> replay = replayOf(endpointStore, request, region);
         if (replay.isPresent()) {
-            return replay.get();
+            ObjectNode existing = replay.get();
+            requireReplayMatches(existing, request, "Name", "Direction", "SecurityGroupIds");
+            if (existing.path("IpAddressCount").asInt(-1) != ipAddresses.size()) {
+                throw replayConflict(request, existing, "IpAddressRequests");
+            }
+            return existing;
         }
         String id = id(idPrefix);
         ObjectNode endpoint = objectMapper.createObjectNode();
@@ -215,6 +220,8 @@ public class Route53ResolverService {
         String domainName = text(request, "DomainName");
         java.util.Optional<ObjectNode> replay = replayOf(ruleStore, request, region);
         if (replay.isPresent()) {
+            requireReplayMatches(replay.get(), request,
+                    "Name", "RuleType", "DomainName", "TargetIps", "ResolverEndpointId");
             return replay.get();
         }
         String id = id("rslvr-rr");
@@ -349,6 +356,41 @@ public class Route53ResolverService {
                 })
                 .findFirst()
                 .map(ObjectNode::deepCopy);
+    }
+
+    /**
+     * A retried create must describe the same resource it originally created. AWS models
+     * {@code ResourceExistsException} on {@code CreateResolverEndpoint} and
+     * {@code CreateResolverRule} for a {@code CreatorRequestId} replayed with different
+     * parameters, rather than returning the original and leaving the caller holding a
+     * success response whose attributes are not the ones it asked for.
+     *
+     * <p>Only members the retry actually supplies are compared, so omitting an optional
+     * one is not read as a disagreement.</p>
+     *
+     * <p>{@code CreateFirewallDomainList} deliberately does not call this: its modeled error
+     * list carries no conflict error at all, so there is nothing faithful to raise and the
+     * lenient replay stands. Tracked in
+     * {@code issues/route53resolver-firewall-domain-list-retry-conflict.md} and pinned by a
+     * test so it cannot drift silently.</p>
+     */
+    private void requireReplayMatches(ObjectNode existing, JsonNode request, String... fields) {
+        for (String field : fields) {
+            JsonNode requested = request.get(field);
+            if (requested == null || requested.isNull()) {
+                continue;
+            }
+            JsonNode stored = existing.get(field);
+            if (stored == null || !stored.equals(requested)) {
+                throw replayConflict(request, existing, field);
+            }
+        }
+    }
+
+    private AwsException replayConflict(JsonNode request, ObjectNode existing, String field) {
+        return new AwsException("ResourceExistsException",
+                "CreatorRequestId " + text(request, "CreatorRequestId") + " was already used to create "
+                        + text(existing, "Id") + " with a different " + field + ".", 400);
     }
 
     private ObjectNode require(StorageBackend<String, ObjectNode> store, String id, String type) {

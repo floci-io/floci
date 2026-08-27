@@ -56,6 +56,13 @@ Idempotency is scoped per account and per region, matching this regional service
 token replayed in another region creates that region's own resource rather than handing
 back the first region's.
 
+A token replayed with *different* parameters is a conflict, not a retry:
+`CreateResolverEndpoint` and `CreateResolverRule` compare the retry against the stored
+resource and raise `ResourceExistsException`, which both operations model.
+`CreateFirewallDomainList` is the deliberate exception — it models no conflict error at
+all, so a mismatched retry still returns the original list rather than an invented error
+code. See `issues/route53resolver-firewall-domain-list-retry-conflict.md`.
+
 ## Limitations
 
 - **All create/update operations complete synchronously.** Real AWS transitions a

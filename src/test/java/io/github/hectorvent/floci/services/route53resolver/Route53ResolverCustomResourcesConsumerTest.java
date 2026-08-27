@@ -224,6 +224,64 @@ class Route53ResolverCustomResourcesConsumerTest {
         assertNotEquals(first, second);
     }
 
+    // ---------- A replayed token with different parameters is a conflict ----------
+
+    @Test
+    void createResolverEndpoint_replayedCreatorRequestIdWithDifferentParameters_returnsResourceExists() {
+        String token = "tok-conflict-endpoint";
+        call("CreateResolverEndpoint", "{\"Name\":\"ab-conflict-endpoint\",\"Direction\":\"INBOUND\","
+                + "\"SecurityGroupIds\":[\"sg-abc123\"],\"IpAddressRequests\":[{\"SubnetId\":\"subnet-abc\","
+                + "\"Ip\":\"10.0.0.5\"}],\"CreatorRequestId\":\"" + token + "\"}")
+        .then().statusCode(200);
+
+        // Same token, same region, different (but individually valid) Name: AWS models
+        // ResourceExistsException for this rather than silently returning the original.
+        call("CreateResolverEndpoint", "{\"Name\":\"ab-conflict-endpoint-renamed\",\"Direction\":\"INBOUND\","
+                + "\"SecurityGroupIds\":[\"sg-abc123\"],\"IpAddressRequests\":[{\"SubnetId\":\"subnet-abc\","
+                + "\"Ip\":\"10.0.0.5\"}],\"CreatorRequestId\":\"" + token + "\"}")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ResourceExistsException"));
+    }
+
+    @Test
+    void createResolverRule_replayedCreatorRequestIdWithDifferentParameters_returnsResourceExists() {
+        String token = "tok-conflict-rule";
+        call("CreateResolverRule", "{\"Name\":\"ab-conflict-rule\",\"RuleType\":\"FORWARD\","
+                + "\"DomainName\":\"ab-conflict.example.com.\","
+                + "\"TargetIps\":[{\"Ip\":\"10.0.0.1\",\"Port\":53}],"
+                + "\"CreatorRequestId\":\"" + token + "\"}")
+        .then().statusCode(200);
+
+        call("CreateResolverRule", "{\"Name\":\"ab-conflict-rule\",\"RuleType\":\"FORWARD\","
+                + "\"DomainName\":\"ab-conflict-different.example.com.\","
+                + "\"TargetIps\":[{\"Ip\":\"10.0.0.1\",\"Port\":53}],"
+                + "\"CreatorRequestId\":\"" + token + "\"}")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ResourceExistsException"));
+    }
+
+    @Test
+    void createFirewallDomainList_replayedCreatorRequestIdWithDifferentParameters_returnsTheOriginal() {
+        // Deliberate divergence, pinned so it cannot drift silently: CreateFirewallDomainList
+        // models no conflict error at all (LimitExceeded / Validation / AccessDenied /
+        // InternalServiceError / Throttling only), so there is no faithful way to report a
+        // conflicting retry here. The lenient replay stands rather than inventing an error
+        // code. See issues/route53resolver-firewall-domain-list-retry-conflict.md.
+        String token = "tok-conflict-fdl";
+        String first = call("CreateFirewallDomainList",
+                "{\"Name\":\"ab-conflict-fdl\",\"CreatorRequestId\":\"" + token + "\"}")
+                .then().statusCode(200).extract().path("FirewallDomainList.Id");
+
+        call("CreateFirewallDomainList",
+                "{\"Name\":\"ab-conflict-fdl-renamed\",\"CreatorRequestId\":\"" + token + "\"}")
+        .then()
+            .statusCode(200)
+            .body("FirewallDomainList.Id", equalTo(first))
+            .body("FirewallDomainList.Name", equalTo("ab-conflict-fdl"));
+    }
+
     // ---------- CreatorRequestId replay is scoped to one region ----------
 
     @Test
