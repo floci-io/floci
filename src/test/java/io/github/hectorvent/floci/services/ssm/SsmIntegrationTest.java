@@ -640,9 +640,7 @@ class SsmIntegrationTest {
 
     @Test
     void documentOperations_nameViolatingPatternReturnsValidationException() {
-        for (String target : new String[]{
-                "GetDocument", "DescribeDocument", "DeleteDocument",
-                "CreateDocument", "UpdateDocument"}) {
+        for (String target : new String[]{"DeleteDocument", "CreateDocument", "UpdateDocument"}) {
             given()
                 .header("X-Amz-Target", "AmazonSSM." + target)
                 .contentType(SSM_CONTENT_TYPE)
@@ -650,6 +648,49 @@ class SsmIntegrationTest {
                     {
                         "Name": "/floci/test-doc",
                         "Content": "{\\"schemaVersion\\":\\"1.0\\"}"
+                    }
+                    """)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"));
+        }
+    }
+
+    // GetDocument/DescribeDocument model a wider Name pattern than the other five document
+    // operations (botocore: ^[a-zA-Z0-9_\-.:/]{3,128}$, vs ^[a-zA-Z0-9_\-.]{3,128}$ elsewhere) —
+    // DescribeDocument's own docs say Name is the document's ARN when reading a document shared
+    // from another account, so the read path must accept ARN shapes even though the other five
+    // reject them.
+    @Test
+    void getDocumentAndDescribeDocument_acceptArnShapedName() {
+        for (String target : new String[]{"GetDocument", "DescribeDocument"}) {
+            given()
+                .header("X-Amz-Target", "AmazonSSM." + target)
+                .contentType(SSM_CONTENT_TYPE)
+                .body("""
+                    {
+                        "Name": "arn:aws:ssm:us-east-1:000000000000:document/No-Such-Document"
+                    }
+                    """)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidDocument"));
+        }
+    }
+
+    @Test
+    void getDocumentAndDescribeDocument_stillRejectTrulyInvalidName() {
+        for (String target : new String[]{"GetDocument", "DescribeDocument"}) {
+            given()
+                .header("X-Amz-Target", "AmazonSSM." + target)
+                .contentType(SSM_CONTENT_TYPE)
+                .body("""
+                    {
+                        "Name": "not a valid name!"
                     }
                     """)
             .when()

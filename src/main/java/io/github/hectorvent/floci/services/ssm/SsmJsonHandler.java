@@ -293,13 +293,29 @@ public class SsmJsonHandler {
     /** Botocore's {@code DocumentName} pattern, verbatim from the model. */
     private static final Pattern DOCUMENT_NAME = Pattern.compile("^[a-zA-Z0-9_\\-.]{3,128}$");
 
+    /**
+     * {@code GetDocument} and {@code DescribeDocument} model a wider {@code Name} pattern than
+     * the other five document operations: botocore's {@code Name} member on these two allows
+     * {@code :} and {@code /}, because {@code DescribeDocument} accepts the document's full ARN
+     * when reading a document shared from another account. The other five reject that shape.
+     */
+    private static final Pattern DOCUMENT_NAME_OR_ARN = Pattern.compile("^[a-zA-Z0-9_\\-.:/]{3,128}$");
+
     private String requireDocumentName(JsonNode request) {
+        return requireDocumentName(request, DOCUMENT_NAME);
+    }
+
+    private String requireDocumentNameOrArn(JsonNode request) {
+        return requireDocumentName(request, DOCUMENT_NAME_OR_ARN);
+    }
+
+    private String requireDocumentName(JsonNode request, Pattern pattern) {
         JsonNode nameNode = request.path("Name");
         String name = nameNode.asText();
-        if (!nameNode.isTextual() || !DOCUMENT_NAME.matcher(name).matches()) {
+        if (!nameNode.isTextual() || !pattern.matcher(name).matches()) {
             throw new AwsException("ValidationException",
                     "1 validation error detected: Value '" + name + "' at 'name' failed to satisfy constraint: "
-                            + "Member must satisfy regular expression pattern: ^[a-zA-Z0-9_\\-.]{3,128}$",
+                            + "Member must satisfy regular expression pattern: " + pattern.pattern(),
                     400);
         }
         return name;
@@ -392,7 +408,7 @@ public class SsmJsonHandler {
     }
 
     private Response handleGetDocument(JsonNode request, String region) {
-        String name = requireDocumentName(request);
+        String name = requireDocumentNameOrArn(request);
         SsmDocument document = ssmService.getDocument(name, region);
 
         ObjectNode response = objectMapper.createObjectNode();
@@ -779,7 +795,7 @@ public class SsmJsonHandler {
     }
 
     private Response handleDescribeDocument(JsonNode request, String region) {
-        String name = requireDocumentName(request);
+        String name = requireDocumentNameOrArn(request);
         SsmDocument document = ssmService.getDocument(name, region);
 
         ObjectNode response = objectMapper.createObjectNode();
