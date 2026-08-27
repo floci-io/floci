@@ -292,3 +292,34 @@ FLOCI_STORAGE_HOST_PERSISTENT_PATH=/absolute/host/path/data
 The RDS auth proxy validates the master username and password at the proxy layer. All other database users are passed through directly to the backend engine — create them with standard SQL (`CREATE USER`) and connect as normal.
 
 IAM database authentication is also supported. Set `--enable-iam-database-authentication` at instance creation time and use `aws rds generate-db-auth-token` to obtain a token.
+
+## TLS / SSL
+
+The RDS auth proxy terminates TLS itself (the backend container stays plaintext) using a
+self-signed CA whose Subject Alternative Names cover every advertised host Floci has handed
+out for a DB instance, cluster, or RDS Proxy — the Docker bridge IP, `host.docker.internal`,
+`localhost`, or whatever `rds.endpointHost` resolves to. The CA is persisted at
+`{storage.persistent-path}/tls/rds-ca.crt` and grows its SAN list as new hosts appear, so the
+same root survives restarts and works for every local database, not just the one that
+generated it.
+
+Floci logs the certificate path (and the `PGSSLROOTCERT` hint) the first time it generates or
+loads it:
+
+```
+RDS proxy TLS: CA cert at ./data/tls/rds-ca.crt
+RDS proxy TLS: for sslmode=verify-full set PGSSLROOTCERT=./data/tls/rds-ca.crt
+```
+
+Because the SAN matches the address you actually connect to, `verify-full` (the same level
+Aurora enforces in AWS) works locally too — no need to fall back to `sslmode=disable` just to
+exercise the same connection-string settings you use in production:
+
+```bash
+# PostgreSQL
+PGSSLROOTCERT=./data/tls/rds-ca.crt psql "host=localhost port=7001 user=admin sslmode=verify-full"
+
+# MySQL / MariaDB
+mysql -h 127.0.0.1 -P 7002 -u root -psecret123 \
+  --ssl-mode=VERIFY_IDENTITY --ssl-ca=./data/tls/rds-ca.crt
+```

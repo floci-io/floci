@@ -620,6 +620,7 @@ public class RdsService implements Resettable, ResourceProvider {
             final String instanceRegion = regionFromArn(instance.getDbInstanceArn());
             proxyManager.startProxy(rdsResourceRelayKey(instance.getDbInstanceArn(), id),
                     engine, iamEnabled, proxyPort, backendHost, backendPort,
+                    instance.getEndpoint().address(),
                     masterUsername, masterPassword, dbName,
                     (user, pw) -> validateDbPasswordForScope(
                             accountId, instanceRegion, id, user, pw));
@@ -1075,6 +1076,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     instance.getEngine(),
                     instance.isIamDatabaseAuthenticationEnabled(),
                     instance.getProxyPort(), instance.getContainerHost(), instance.getContainerPort(),
+                    instance.getEndpoint().address(),
                     effectiveMasterUser, instance.getMasterPassword(), instance.getDbName(),
                     (user, pw) -> validateDbPasswordForScope(
                             accountId, instanceRegion, id, user, pw));
@@ -1269,6 +1271,7 @@ public class RdsService implements Resettable, ResourceProvider {
             proxyManager.startProxy(rdsResourceRelayKey(cluster.getDbClusterArn(), id),
                     engine, iamEnabled, proxyPort,
                     cluster.getContainerHost(), cluster.getContainerPort(),
+                    cluster.getEndpoint().address(),
                     effectiveMasterUser, masterPassword, databaseName,
                     (user, pw) -> validateDbClusterPasswordForScope(
                             accountId, clusterRegion, id, user, pw));
@@ -1878,8 +1881,8 @@ public class RdsService implements Resettable, ResourceProvider {
                 final boolean isCluster = "TRACKED_CLUSTER".equals(target.getType());
                 final String targetRegion = regionFromArn(proxy.getDbProxyArn());
                 proxyManager.startProxy(dbProxyRelayKey(proxy), engine, proxy.isIamAuth(),
-                        proxy.getProxyPort(), backendHost, backendPort, effectiveMasterUser,
-                        masterPassword, dbName,
+                        proxy.getProxyPort(), backendHost, backendPort, proxy.getEndpointHost(),
+                        effectiveMasterUser, masterPassword, dbName,
                         (user, pw) -> isCluster
                                 ? validateDbClusterPasswordForScope(
                                         proxyAccountId, targetRegion, targetId, user, pw)
@@ -3738,7 +3741,7 @@ public class RdsService implements Resettable, ResourceProvider {
         String effectiveMasterUser = masterUser != null ? masterUser : "root";
         String targetId = target.getRdsResourceId();
         proxyManager.startProxy(dbProxyRelayKey(proxy), engine, proxy.isIamAuth(), proxy.getProxyPort(),
-                backendHost, backendPort, effectiveMasterUser, masterPassword, dbName,
+                backendHost, backendPort, proxy.getEndpointHost(), effectiveMasterUser, masterPassword, dbName,
                 (user, password) -> clusterTarget
                         ? validateDbClusterPasswordForScope(
                                 accountId, proxyRegion, targetId, user, password)
@@ -3825,8 +3828,8 @@ public class RdsService implements Resettable, ResourceProvider {
                                 cluster.getDbClusterArn(), cluster.getDbClusterIdentifier()),
                         cluster.getEngine(),
                         cluster.isIamDatabaseAuthenticationEnabled(), proxyPort,
-                        restoredHandle.getHost(), restoredHandle.getPort(), effectiveMasterUser,
-                        cluster.getMasterPassword(), cluster.getDatabaseName(),
+                        restoredHandle.getHost(), restoredHandle.getPort(), cluster.getEndpoint().address(),
+                        effectiveMasterUser, cluster.getMasterPassword(), cluster.getDatabaseName(),
                         (user, pw) -> validateDbClusterPasswordForScope(
                                 accountId, clusterRegion,
                                 cluster.getDbClusterIdentifier(), user, pw));
@@ -3946,8 +3949,8 @@ public class RdsService implements Resettable, ResourceProvider {
                                 instance.getDbInstanceArn(), instance.getDbInstanceIdentifier()),
                         instance.getEngine(),
                         instance.isIamDatabaseAuthenticationEnabled(), proxyPort,
-                        backendHost, backendPort, effectiveMasterUser,
-                        instance.getMasterPassword(), instance.getDbName(),
+                        backendHost, backendPort, instance.getEndpoint().address(),
+                        effectiveMasterUser, instance.getMasterPassword(), instance.getDbName(),
                         (user, pw) -> validateDbPasswordForScope(
                                 accountId, instanceRegion,
                                 instance.getDbInstanceIdentifier(), user, pw));
