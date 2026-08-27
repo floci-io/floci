@@ -3,8 +3,10 @@ package io.github.hectorvent.floci.services.elasticache.model;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -27,6 +29,18 @@ public class ReplicationGroup {
     private int snapshotRetentionLimit;
     private String snapshotWindow;
     private Map<String, String> tags = new LinkedHashMap<>();
+    private boolean clusterEnabled;
+    private int numNodeGroups = 1;
+    private int replicasPerNodeGroup;
+    private int numCacheClusters = 1;
+    private String engine;
+    private String engineVersion;
+    private String cacheNodeType;
+    private String cacheParameterGroupName;
+    private String cacheSubnetGroupName;
+    private boolean automaticFailoverEnabled;
+    private boolean multiAzEnabled;
+    private List<ClusterNode> clusterNodes = new ArrayList<>();
 
     // Transient fields — not persisted, restored on container restart
     private transient String containerId;
@@ -105,4 +119,42 @@ public class ReplicationGroup {
 
     public String getRegion() { return region; }
     public void setRegion(String region) { this.region = region; }
+
+    public boolean isClusterEnabled() { return clusterEnabled; }
+    public void setClusterEnabled(boolean clusterEnabled) { this.clusterEnabled = clusterEnabled; }
+
+    public int getNumNodeGroups() { return numNodeGroups; }
+    public void setNumNodeGroups(int numNodeGroups) { this.numNodeGroups = numNodeGroups; }
+
+    public int getReplicasPerNodeGroup() { return replicasPerNodeGroup; }
+    public void setReplicasPerNodeGroup(int replicasPerNodeGroup) { this.replicasPerNodeGroup = replicasPerNodeGroup; }
+
+    public int getNumCacheClusters() { return numCacheClusters; }
+    public void setNumCacheClusters(int numCacheClusters) { this.numCacheClusters = numCacheClusters; }
+
+    public String getEngine() { return engine; }
+    public void setEngine(String engine) { this.engine = engine; }
+
+    public String getEngineVersion() { return engineVersion; }
+    public void setEngineVersion(String engineVersion) { this.engineVersion = engineVersion; }
+
+    public String getCacheNodeType() { return cacheNodeType; }
+    public void setCacheNodeType(String cacheNodeType) { this.cacheNodeType = cacheNodeType; }
+
+    public String getCacheParameterGroupName() { return cacheParameterGroupName; }
+    public void setCacheParameterGroupName(String cacheParameterGroupName) { this.cacheParameterGroupName = cacheParameterGroupName; }
+
+    public String getCacheSubnetGroupName() { return cacheSubnetGroupName; }
+    public void setCacheSubnetGroupName(String cacheSubnetGroupName) { this.cacheSubnetGroupName = cacheSubnetGroupName; }
+
+    public boolean isAutomaticFailoverEnabled() { return automaticFailoverEnabled; }
+    public void setAutomaticFailoverEnabled(boolean automaticFailoverEnabled) { this.automaticFailoverEnabled = automaticFailoverEnabled; }
+
+    public boolean isMultiAzEnabled() { return multiAzEnabled; }
+    public void setMultiAzEnabled(boolean multiAzEnabled) { this.multiAzEnabled = multiAzEnabled; }
+
+    public List<ClusterNode> getClusterNodes() { return clusterNodes; }
+    public void setClusterNodes(List<ClusterNode> clusterNodes) {
+        this.clusterNodes = clusterNodes != null ? clusterNodes : new ArrayList<>();
+    }
 }

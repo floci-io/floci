@@ -594,6 +594,16 @@ public class ContainerLifecycleManager {
     }
 
     /**
+     * Resolves the container's IP on its Docker network, independent of whether Floci runs
+     * natively or in a container. Used for addresses that sibling containers (not Floci itself)
+     * must dial — e.g. ElastiCache cluster-bus peering between Valkey nodes.
+     */
+    public String resolveContainerNetworkIp(String containerId, String preferredNetwork) {
+        InspectContainerResponse inspect = dockerClient.inspectContainerCmd(containerId).exec();
+        return resolveContainerIp(inspect, preferredNetwork);
+    }
+
+    /**
      * Returns the underlying DockerClient for operations not covered by this manager.
      * Prefer using manager methods when available.
      */

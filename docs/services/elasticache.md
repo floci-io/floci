@@ -35,6 +35,47 @@ Floci manages real Valkey/Redis Docker containers and proxies TCP connections to
 | `ListTagsForResource` | Tags on a parameter group ARN |
 <!-- floci:actions:end -->
 
+### Cluster Mode
+
+`CreateReplicationGroup` provisions a real sharded Valkey cluster when the request asks for one:
+`NumNodeGroups` greater than 1, a `default.*.cluster.on` parameter group, a custom parameter group
+with `cluster-enabled` set to `yes`, or `ClusterMode=enabled`.
+
+Floci starts one `--cluster-enabled` container per node — `NumNodeGroups × (1 + ReplicasPerNodeGroup)`
+in total — forms the cluster (config epochs, MEET, slot assignment, replica attachment), and fronts
+each node with its own auth-proxy port from the proxy port range. Nodes announce the proxy endpoint
+to clients via `cluster-announce-client-ipv4`/`cluster-announce-port`, so `CLUSTER SLOTS`,
+`CLUSTER SHARDS` and `MOVED`/`ASK` redirects point at addresses clients can actually reach, while
+the cluster bus keeps using the container network. Any cluster-aware Redis/Valkey client works
+against the reported `ConfigurationEndpoint`.
+
+`DescribeReplicationGroups` reports the topology honestly: `ClusterEnabled`, one `NodeGroup` per
+shard with its `Slots`, `NodeGroupMembers`, and `MemberClusters`. Each member also answers
+`DescribeCacheClusters` (as on AWS), which is what terraform-provider-aws reads node type, engine
+version and port from.
+
+Cluster mode requires a Valkey 8.1+ image (the default `valkey/valkey:8` qualifies) for
+`cluster-announce-client-ipv4` support. Each node consumes one port from the proxy range, so size
+`FLOCI_SERVICES_ELASTICACHE_PROXY_BASE_PORT`/`_MAX_PORT` to the number of nodes you need.
+
+```bash
+aws elasticache create-replication-group \
+  --replication-group-id my-sharded-cache \
+  --replication-group-description "Sharded dev cache" \
+  --engine valkey \
+  --cache-parameter-group-name default.valkey8.cluster.on \
+  --num-node-groups 2 \
+  --replicas-per-node-group 1 \
+  --endpoint-url $AWS_ENDPOINT_URL
+
+aws elasticache describe-replication-groups \
+  --replication-group-id my-sharded-cache \
+  --query 'ReplicationGroups[0].ConfigurationEndpoint' \
+  --endpoint-url $AWS_ENDPOINT_URL
+
+redis-cli -c -h localhost -p <configuration-endpoint-port> set mykey "hello"
+```
+
 ### Cache Subnet Groups
 
 A subnet group's VPC and each subnet's availability zone are read from the subnets themselves, as

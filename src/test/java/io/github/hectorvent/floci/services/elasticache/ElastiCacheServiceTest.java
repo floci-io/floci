@@ -12,7 +12,9 @@ import io.github.hectorvent.floci.services.kms.model.KmsKey;
 import io.github.hectorvent.floci.services.elasticache.model.ReplicationGroupSettings;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheContainerHandle;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheContainerManager;
+import io.github.hectorvent.floci.services.elasticache.container.ValkeyClusterFormation;
 import io.github.hectorvent.floci.services.elasticache.model.AuthMode;
+import io.github.hectorvent.floci.services.elasticache.model.ClusterNode;
 import io.github.hectorvent.floci.services.elasticache.model.ReplicationGroup;
 import io.github.hectorvent.floci.services.elasticache.proxy.ElastiCacheProxyManager;
 import org.junit.jupiter.api.BeforeEach;
@@ -36,6 +38,7 @@ import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -46,6 +49,7 @@ class ElastiCacheServiceTest {
     private ElastiCacheContainerManager containerManager;
     private ElastiCacheProxyManager proxyManager;
     private EmulatorConfig config;
+    private ValkeyClusterFormation clusterFormation;
 
     @BeforeEach
     void setUp() {
@@ -71,8 +75,10 @@ class ElastiCacheServiceTest {
         kmsService = org.mockito.Mockito.mock(KmsService.class);
         when(kmsService.describeKey(any(), any())).thenThrow(
                 new AwsException("NotFoundException", "Key not found", 404));
-        service = new ElastiCacheService(containerManager, proxyManager, storageFactory, config,
-                ec2Service, new RegionResolver("us-east-1", "000000000000"), kmsService);
+        clusterFormation = mock(ValkeyClusterFormation.class);
+        service = new ElastiCacheService(containerManager, proxyManager, clusterFormation,
+                storageFactory, config, ec2Service, new RegionResolver("us-east-1", "000000000000"),
+                kmsService);
     }
 
     @Test
@@ -97,8 +103,8 @@ class ElastiCacheServiceTest {
         when(cm.start(anyString(), anyString()))
                 .thenReturn(new ElastiCacheContainerHandle("cid", "grp", "localhost", 6379));
         doNothing().when(pm).startProxy(anyString(), any(), anyInt(), anyString(), anyInt(), any());
-        ElastiCacheService svc = new ElastiCacheService(cm, pm, sf, cfg,
-                org.mockito.Mockito.mock(Ec2Service.class),
+        ElastiCacheService svc = new ElastiCacheService(cm, pm, mock(ValkeyClusterFormation.class),
+                sf, cfg, org.mockito.Mockito.mock(Ec2Service.class),
                 new RegionResolver("us-east-1", "000000000000"),
                 org.mockito.Mockito.mock(KmsService.class));
 
@@ -205,6 +211,108 @@ class ElastiCacheServiceTest {
                 service.createReplicationGroup("grp2", "test", AuthMode.PASSWORD, null, "us-east-1");
         assertEquals(16379, recovered.getProxyPort(),
                 "Port from the failed create must be released so the next group reuses it");
+    }
+
+    private static ElastiCacheService.CreateReplicationGroupRequest clusterRequest(
+            String groupId, Integer numNodeGroups, Integer replicasPerNodeGroup) {
+        return new ElastiCacheService.CreateReplicationGroupRequest(groupId, "test",
+                AuthMode.NO_AUTH, null, "us-east-1", "valkey", "8.2", "cache.t4g.micro",
+                "default.valkey8.cluster.on", null, null, numNodeGroups, replicasPerNodeGroup,
+                null, true, null, ReplicationGroupSettings.defaults(), Map.of());
+    }
+
+    private void stubPerNodeContainers() {
+        when(containerManager.start(anyString(), anyString(), any())).thenAnswer(inv ->
+                new ElastiCacheContainerHandle("cid-" + inv.getArgument(0, String.class),
+                        inv.getArgument(0, String.class), "localhost", 6379));
+    }
+
+    @Test
+    void clusterModeCreateStartsOneContainerAndProxyPerNode() {
+        stubPerNodeContainers();
+
+        ReplicationGroup group = service.createReplicationGroup(clusterRequest("grp", 2, 1));
+
+        assertTrue(group.isClusterEnabled());
+        assertEquals(2, group.getNumNodeGroups());
+        assertEquals(1, group.getReplicasPerNodeGroup());
+        assertEquals(4, group.getClusterNodes().size());
+
+        List<ClusterNode> nodes = group.getClusterNodes();
+        assertEquals("grp-0001-001", nodes.get(0).getMemberClusterId());
+        assertEquals("grp-0001-002", nodes.get(1).getMemberClusterId());
+        assertEquals("grp-0002-001", nodes.get(2).getMemberClusterId());
+        assertEquals("grp-0002-002", nodes.get(3).getMemberClusterId());
+        assertTrue(nodes.get(0).isPrimary());
+        assertFalse(nodes.get(1).isPrimary());
+        assertEquals("0-8191", nodes.get(0).getSlots());
+        assertEquals("8192-16383", nodes.get(2).getSlots());
+        assertEquals(4, nodes.stream().map(ClusterNode::getProxyPort).distinct().count(),
+                "Each node must own its own proxy port");
+        assertEquals(16379, group.getConfigurationEndpoint().port());
+
+        verify(clusterFormation).form(eq("grp"), any(), eq(2));
+        verify(containerManager, times(4)).start(anyString(), anyString(), any());
+        verify(proxyManager, times(4)).startProxy(anyString(), any(), anyInt(), anyString(), anyInt(), any());
+    }
+
+    @Test
+    void clusterOnParameterGroupEnablesClusterModeForSingleShard() {
+        stubPerNodeContainers();
+
+        ReplicationGroup group = service.createReplicationGroup(clusterRequest("grp", 1, 0));
+
+        assertTrue(group.isClusterEnabled());
+        assertEquals(1, group.getClusterNodes().size());
+        assertEquals("0-16383", group.getClusterNodes().getFirst().getSlots());
+    }
+
+    @Test
+    void plainCreateStaysClusterModeDisabled() {
+        ReplicationGroup group =
+                service.createReplicationGroup("grp", "test", AuthMode.NO_AUTH, null, "us-east-1");
+
+        assertFalse(group.isClusterEnabled());
+        assertTrue(group.getClusterNodes().isEmpty());
+        assertEquals(List.of("grp-001"),
+                service.memberCacheClusters(group).stream()
+                        .map(ElastiCacheService.MemberCacheCluster::cacheClusterId).toList());
+        verify(containerManager, never()).start(anyString(), anyString(), any());
+    }
+
+    @Test
+    void clusterFormationFailureRollsBackAllNodesAndReleasesPorts() {
+        stubPerNodeContainers();
+        doThrow(new RuntimeException("formation boom"))
+                .when(clusterFormation).form(anyString(), any(), anyInt());
+
+        assertThrows(RuntimeException.class,
+                () -> service.createReplicationGroup(clusterRequest("grp", 2, 1)));
+
+        verify(containerManager, times(4)).stop(any());
+        verify(proxyManager, never()).startProxy(anyString(), any(), anyInt(), anyString(), anyInt(), any());
+
+        ReplicationGroup recovered =
+                service.createReplicationGroup("grp2", "test", AuthMode.PASSWORD, null, "us-east-1");
+        assertEquals(16379, recovered.getProxyPort(),
+                "Ports from the failed cluster create must be released for the next group");
+    }
+
+    @Test
+    void deleteClusterModeGroupStopsEveryNodeAndReleasesPorts() {
+        stubPerNodeContainers();
+        service.createReplicationGroup(clusterRequest("grp", 2, 0));
+
+        service.deleteReplicationGroup("grp");
+
+        verify(proxyManager).stopProxy("grp-0001-001");
+        verify(proxyManager).stopProxy("grp-0002-001");
+        verify(containerManager, times(2)).stop(any());
+
+        ReplicationGroup recovered =
+                service.createReplicationGroup("grp2", "test", AuthMode.PASSWORD, null, "us-east-1");
+        assertEquals(16379, recovered.getProxyPort(),
+                "Ports from the deleted cluster group must be released for the next group");
     }
 
     @Test
@@ -356,8 +464,9 @@ class ElastiCacheServiceTest {
                 .thenAnswer(inv -> new AccountAwareStorageBackend<>(pausing, null, "000000000000"));
         when(factory.create(anyString(), org.mockito.ArgumentMatchers.argThat(f -> !"elasticache-groups.json".equals(f)), any()))
                 .thenAnswer(inv -> AccountAwareStorageBackend.inMemory("000000000000"));
-        ElastiCacheService svc = new ElastiCacheService(containerManager, proxyManager, factory, config,
-                org.mockito.Mockito.mock(Ec2Service.class), new RegionResolver("us-east-1", "000000000000"), kmsService);
+        ElastiCacheService svc = new ElastiCacheService(containerManager, proxyManager, clusterFormation,
+                factory, config, org.mockito.Mockito.mock(Ec2Service.class),
+                new RegionResolver("us-east-1", "000000000000"), kmsService);
         svc.createReplicationGroup("g1", "d", AuthMode.NO_AUTH, null, "us-east-1");
 
         pausing.pauseOn(PausingStorageBackend.Call.PUT, "g1");

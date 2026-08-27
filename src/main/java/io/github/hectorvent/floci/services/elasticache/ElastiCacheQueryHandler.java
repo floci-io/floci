@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.services.elasticache.model.AuthMode;
 import io.github.hectorvent.floci.services.elasticache.model.CacheCluster;
 import io.github.hectorvent.floci.services.elasticache.model.CacheParameterGroup;
+import io.github.hectorvent.floci.services.elasticache.model.ClusterNode;
 import io.github.hectorvent.floci.services.elasticache.model.CacheSubnetGroup;
 import io.github.hectorvent.floci.services.elasticache.model.ElastiCacheUser;
 import io.github.hectorvent.floci.services.elasticache.model.Endpoint;
@@ -106,8 +107,25 @@ public class ElastiCacheQueryHandler {
 
         try {
             ReplicationGroup group = service.createReplicationGroup(
-                    groupId, description != null ? description : "", authMode, authToken, region,
-                    replicationGroupSettings(params), parseTags(params));
+                    new ElastiCacheService.CreateReplicationGroupRequest(
+                            groupId,
+                            description != null ? description : "",
+                            authMode,
+                            authToken,
+                            region,
+                            params.getFirst("Engine"),
+                            params.getFirst("EngineVersion"),
+                            params.getFirst("CacheNodeType"),
+                            params.getFirst("CacheParameterGroupName"),
+                            params.getFirst("CacheSubnetGroupName"),
+                            params.getFirst("ClusterMode"),
+                            intParam(params, "NumNodeGroups"),
+                            intParam(params, "ReplicasPerNodeGroup"),
+                            intParam(params, "NumCacheClusters"),
+                            boolParam(params, "AutomaticFailoverEnabled"),
+                            boolParam(params, "MultiAZEnabled"),
+                            replicationGroupSettings(params),
+                            parseTags(params)));
             String result = replicationGroupXml(group);
             return Response.ok(AwsQueryResponse.envelope("CreateReplicationGroup", AwsNamespaces.EC, result)).build();
         } catch (AwsException e) {
@@ -136,6 +154,28 @@ public class ElastiCacheQueryHandler {
             throw new AwsException("InvalidParameterValue", "Value " + value + " is not a valid integer.", 400);
         }
     }
+
+    private static Integer intParam(MultivaluedMap<String, String> params, String name) {
+        String value = params.getFirst(name);
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            return Integer.valueOf(value.trim());
+        } catch (NumberFormatException e) {
+            throw new AwsException("InvalidParameterValue",
+                    "The parameter " + name + " must be an integer.", 400);
+        }
+    }
+
+    private static Boolean boolParam(MultivaluedMap<String, String> params, String name) {
+        String value = params.getFirst(name);
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        return Boolean.parseBoolean(value.trim());
+    }
+
 
     private Response handleDescribeReplicationGroups(MultivaluedMap<String, String> params) {
         String filterId = params.getFirst("ReplicationGroupId");
@@ -295,17 +335,73 @@ public class ElastiCacheQueryHandler {
 
     private Response handleDescribeCacheClusters(MultivaluedMap<String, String> params) {
         String filterId = params.getFirst("CacheClusterId");
+        boolean showNodeInfo = "true".equalsIgnoreCase(params.getFirst("ShowCacheNodeInfo"));
         try {
-            Collection<CacheCluster> clusterList = memcachedService.listCacheClusters(filterId);
+            List<ElastiCacheService.MemberCacheCluster> members = service.listMemberCacheClusters(filterId);
+            Collection<CacheCluster> clusterList;
+            if (filterId != null && !filterId.isBlank() && !members.isEmpty()) {
+                clusterList = List.of();
+            } else {
+                clusterList = memcachedService.listCacheClusters(filterId);
+            }
             var xml = new XmlBuilder().start("CacheClusters");
             for (CacheCluster c : clusterList) {
                 xml.raw(cacheClusterXml(c));
+            }
+            for (ElastiCacheService.MemberCacheCluster member : members) {
+                xml.raw(memberCacheClusterXml(member, showNodeInfo));
             }
             xml.end("CacheClusters").start("Marker").end("Marker");
             return Response.ok(AwsQueryResponse.envelope("DescribeCacheClusters", AwsNamespaces.EC, xml.build())).build();
         } catch (AwsException e) {
             return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.EC, e.getHttpStatus());
         }
+    }
+
+    private String memberCacheClusterXml(ElastiCacheService.MemberCacheCluster member, boolean showNodeInfo) {
+        ReplicationGroup g = member.group();
+        boolean authTokenEnabled = g.getAuthMode() == AuthMode.PASSWORD;
+        var xml = new XmlBuilder()
+                .start("CacheCluster")
+                  .elem("CacheClusterId", member.cacheClusterId())
+                  .elem("CacheClusterStatus", "available")
+                  .elem("NumCacheNodes", 1L)
+                  .elem("ReplicationGroupId", g.getReplicationGroupId())
+                  .elem("AutoMinorVersionUpgrade", true)
+                  .elem("AuthTokenEnabled", authTokenEnabled)
+                  .elem("TransitEncryptionEnabled", authTokenEnabled)
+                  .elem("AtRestEncryptionEnabled", false);
+        if (g.getEngine() != null) {
+            xml.elem("Engine", g.getEngine());
+        }
+        if (g.getEngineVersion() != null) {
+            xml.elem("EngineVersion", g.getEngineVersion());
+        }
+        if (g.getCacheNodeType() != null) {
+            xml.elem("CacheNodeType", g.getCacheNodeType());
+        }
+        if (g.getCacheParameterGroupName() != null) {
+            xml.start("CacheParameterGroup")
+               .elem("CacheParameterGroupName", g.getCacheParameterGroupName())
+               .elem("ParameterApplyStatus", "in-sync")
+               .end("CacheParameterGroup");
+        }
+        if (g.getCacheSubnetGroupName() != null) {
+            xml.elem("CacheSubnetGroupName", g.getCacheSubnetGroupName());
+        }
+        if (showNodeInfo && g.getConfigurationEndpoint() != null) {
+            xml.start("CacheNodes")
+               .start("CacheNode")
+                 .elem("CacheNodeId", "0001")
+                 .elem("CacheNodeStatus", "available")
+                 .start("Endpoint")
+                   .elem("Address", g.getConfigurationEndpoint().address())
+                   .elem("Port", (long) member.port())
+                 .end("Endpoint")
+               .end("CacheNode")
+               .end("CacheNodes");
+        }
+        return xml.end("CacheCluster").build();
     }
 
     private Response handleDeleteCacheCluster(MultivaluedMap<String, String> params) {
@@ -640,6 +736,7 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
     private String replicationGroupXml(ReplicationGroup g) {
         Endpoint ep = g.getConfigurationEndpoint();
         boolean authTokenEnabled = g.getAuthMode() == AuthMode.PASSWORD;
+        List<ElastiCacheService.MemberCacheCluster> members = service.memberCacheClusters(g);
         var xml = new XmlBuilder()
                 .start("ReplicationGroup")
                   .elem("ReplicationGroupId", g.getReplicationGroupId())
@@ -648,18 +745,37 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
                   .elem("AuthTokenEnabled", authTokenEnabled)
                   .elem("TransitEncryptionEnabled", authTokenEnabled)
                   .elem("AtRestEncryptionEnabled", g.isAtRestEncryptionEnabled())
-                  .elem("ClusterEnabled", false)
-                  .elem("MultiAZ", "disabled")
-                  .elem("AutomaticFailover", "disabled")
+                  .elem("ClusterEnabled", g.isClusterEnabled())
+                  .elem("ClusterMode", g.isClusterEnabled() ? "enabled" : "disabled")
+                  .elem("MultiAZ", g.isMultiAzEnabled() ? "enabled" : "disabled")
+                  .elem("AutomaticFailover", g.isAutomaticFailoverEnabled() ? "enabled" : "disabled")
                   .elem("SnapshotRetentionLimit", (long) g.getSnapshotRetentionLimit());
         xml.elem("SnapshotWindow", g.getSnapshotWindow() != null
                 ? g.getSnapshotWindow() : ReplicationGroupSettings.DEFAULT_SNAPSHOT_WINDOW);
         if (g.getKmsKeyId() != null) {
             xml.elem("KmsKeyId", g.getKmsKeyId());
         }
+        if (g.getEngine() != null) {
+            xml.elem("Engine", g.getEngine());
+        }
+        if (g.getCacheNodeType() != null) {
+            xml.elem("CacheNodeType", g.getCacheNodeType());
+        }
         if (g.getArn() != null) {
             xml.elem("ARN", g.getArn());
         }
+        xml.start("MemberClusters");
+        for (ElastiCacheService.MemberCacheCluster member : members) {
+            xml.elem("ClusterId", member.cacheClusterId());
+        }
+        xml.end("MemberClusters");
+        xml.start("NodeGroups");
+        if (g.isClusterEnabled() && !g.getClusterNodes().isEmpty()) {
+            appendClusterModeNodeGroups(xml, g);
+        } else {
+            appendSingleNodeGroup(xml, g, members, ep);
+        }
+        xml.end("NodeGroups");
         if (ep != null) {
             xml.start("ConfigurationEndpoint")
                .elem("Address", ep.address())
@@ -667,6 +783,60 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
                .end("ConfigurationEndpoint");
         }
         return xml.end("ReplicationGroup").build();
+    }
+
+    private static void appendClusterModeNodeGroups(XmlBuilder xml, ReplicationGroup g) {
+        Map<String, List<ClusterNode>> byNodeGroup = new LinkedHashMap<>();
+        for (ClusterNode node : g.getClusterNodes()) {
+            byNodeGroup.computeIfAbsent(node.getNodeGroupId(), key -> new ArrayList<>()).add(node);
+        }
+        byNodeGroup.forEach((nodeGroupId, nodes) -> {
+            xml.start("NodeGroup")
+                    .elem("NodeGroupId", nodeGroupId)
+                    .elem("Status", "available")
+                    .elem("Slots", nodes.getFirst().getSlots())
+                    .start("NodeGroupMembers");
+            for (ClusterNode node : nodes) {
+                xml.start("NodeGroupMember")
+                        .elem("CacheClusterId", node.getMemberClusterId())
+                        .elem("CacheNodeId", "0001")
+                        .end("NodeGroupMember");
+            }
+            xml.end("NodeGroupMembers").end("NodeGroup");
+        });
+    }
+
+    private static void appendSingleNodeGroup(XmlBuilder xml, ReplicationGroup g,
+                                              List<ElastiCacheService.MemberCacheCluster> members,
+                                              Endpoint ep) {
+        xml.start("NodeGroup")
+                .elem("NodeGroupId", "0001")
+                .elem("Status", "available");
+        if (ep != null) {
+            xml.start("PrimaryEndpoint")
+                    .elem("Address", ep.address())
+                    .elem("Port", (long) ep.port())
+                    .end("PrimaryEndpoint")
+                    .start("ReaderEndpoint")
+                    .elem("Address", ep.address())
+                    .elem("Port", (long) ep.port())
+                    .end("ReaderEndpoint");
+        }
+        xml.start("NodeGroupMembers");
+        for (ElastiCacheService.MemberCacheCluster member : members) {
+            xml.start("NodeGroupMember")
+                    .elem("CacheClusterId", member.cacheClusterId())
+                    .elem("CacheNodeId", "0001")
+                    .elem("CurrentRole", member.primary() ? "primary" : "replica");
+            if (ep != null) {
+                xml.start("ReadEndpoint")
+                        .elem("Address", ep.address())
+                        .elem("Port", (long) member.port())
+                        .end("ReadEndpoint");
+            }
+            xml.end("NodeGroupMember");
+        }
+        xml.end("NodeGroupMembers").end("NodeGroup");
     }
 
     private String userXml(ElastiCacheUser u) {

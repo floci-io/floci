@@ -1,6 +1,11 @@
 package io.github.hectorvent.floci.services.elasticache;
 
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.services.elasticache.model.AuthMode;
+import io.github.hectorvent.floci.services.elasticache.model.ClusterNode;
+import io.github.hectorvent.floci.services.elasticache.model.Endpoint;
+import io.github.hectorvent.floci.services.elasticache.model.ReplicationGroup;
+import io.github.hectorvent.floci.services.elasticache.model.ReplicationGroupStatus;
 import io.github.hectorvent.floci.services.elasticache.proxy.SigV4Validator;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
@@ -19,8 +24,12 @@ import static org.mockito.Mockito.*;
 import org.mockito.ArgumentCaptor;
 import org.junit.jupiter.api.Test;
 
+import java.time.Instant;
+import java.util.List;
+
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /**
  * Verifies the empty-list read responses for the subnet/parameter group describes, so
@@ -65,6 +74,86 @@ class ElastiCacheQueryHandlerTest {
     }
 
     @Test
+    void describeReplicationGroups_reportsClusterModeTopology() {
+        ReplicationGroup group = new ReplicationGroup("grp", "d", ReplicationGroupStatus.AVAILABLE,
+                AuthMode.NO_AUTH, new Endpoint("localhost", 6379), Instant.now(), 6379);
+        group.setClusterEnabled(true);
+        group.setEngine("valkey");
+        group.setAutomaticFailoverEnabled(true);
+        group.setClusterNodes(List.of(
+                new ClusterNode("grp-0001-001", "0001", true, 6379, "0-8191"),
+                new ClusterNode("grp-0002-001", "0002", true, 6380, "8192-16383")));
+        when(service.listReplicationGroups("grp")).thenReturn(List.of(group));
+        when(service.memberCacheClusters(group)).thenReturn(List.of(
+                new ElastiCacheService.MemberCacheCluster(group, "grp-0001-001", 6379, true),
+                new ElastiCacheService.MemberCacheCluster(group, "grp-0002-001", 6380, true)));
+
+        MultivaluedMap<String, String> params = params();
+        params.putSingle("ReplicationGroupId", "grp");
+        Response response = handler.handle("DescribeReplicationGroups", params, "us-east-1");
+
+        assertEquals(200, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<ClusterEnabled>true</ClusterEnabled>"));
+        assertTrue(body.contains("<ClusterMode>enabled</ClusterMode>"));
+        assertTrue(body.contains("<AutomaticFailover>enabled</AutomaticFailover>"));
+        assertTrue(body.contains("<Engine>valkey</Engine>"));
+        assertTrue(body.contains("<ClusterId>grp-0001-001</ClusterId>"));
+        assertTrue(body.contains("<ClusterId>grp-0002-001</ClusterId>"));
+        assertTrue(body.contains("<NodeGroupId>0002</NodeGroupId>"));
+        assertTrue(body.contains("<Slots>8192-16383</Slots>"));
+        assertTrue(body.contains("<CacheClusterId>grp-0002-001</CacheClusterId>"));
+        assertFalse(body.contains("<PrimaryEndpoint>"),
+                "Cluster-mode node groups carry Slots, not a PrimaryEndpoint");
+    }
+
+    @Test
+    void describeReplicationGroups_reportsSingleNodeGroupWithPrimaryEndpoint() {
+        ReplicationGroup group = new ReplicationGroup("grp", "d", ReplicationGroupStatus.AVAILABLE,
+                AuthMode.NO_AUTH, new Endpoint("localhost", 6379), Instant.now(), 6379);
+        group.setEngine("valkey");
+        when(service.listReplicationGroups("grp")).thenReturn(List.of(group));
+        when(service.memberCacheClusters(group)).thenReturn(List.of(
+                new ElastiCacheService.MemberCacheCluster(group, "grp-001", 6379, true)));
+
+        MultivaluedMap<String, String> params = params();
+        params.putSingle("ReplicationGroupId", "grp");
+        Response response = handler.handle("DescribeReplicationGroups", params, "us-east-1");
+
+        assertEquals(200, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<ClusterEnabled>false</ClusterEnabled>"));
+        assertTrue(body.contains("<ClusterId>grp-001</ClusterId>"));
+        assertTrue(body.contains("<PrimaryEndpoint><Address>localhost</Address><Port>6379</Port></PrimaryEndpoint>"));
+        assertTrue(body.contains("<CurrentRole>primary</CurrentRole>"));
+    }
+
+    @Test
+    void describeCacheClusters_answersForReplicationGroupMembers() {
+        ReplicationGroup group = new ReplicationGroup("grp", "d", ReplicationGroupStatus.AVAILABLE,
+                AuthMode.NO_AUTH, new Endpoint("localhost", 6379), Instant.now(), 6379);
+        group.setEngine("valkey");
+        group.setEngineVersion("8.2");
+        group.setCacheNodeType("cache.t4g.micro");
+        when(service.listMemberCacheClusters("grp-0001-001")).thenReturn(List.of(
+                new ElastiCacheService.MemberCacheCluster(group, "grp-0001-001", 6379, true)));
+
+        MultivaluedMap<String, String> params = params();
+        params.putSingle("CacheClusterId", "grp-0001-001");
+        params.putSingle("ShowCacheNodeInfo", "true");
+        Response response = handler.handle("DescribeCacheClusters", params, "us-east-1");
+
+        assertEquals(200, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<CacheClusterId>grp-0001-001</CacheClusterId>"));
+        assertTrue(body.contains("<ReplicationGroupId>grp</ReplicationGroupId>"));
+        assertTrue(body.contains("<Engine>valkey</Engine>"));
+        assertTrue(body.contains("<EngineVersion>8.2</EngineVersion>"));
+        assertTrue(body.contains("<CacheNodeType>cache.t4g.micro</CacheNodeType>"));
+        assertTrue(body.contains("<Endpoint><Address>localhost</Address><Port>6379</Port></Endpoint>"));
+    }
+
+    @Test
     void unsupportedOperationStillReturnsQueryError() {
         Response response = handler.handle("NoSuchAction", params(), "us-east-1");
 
@@ -85,7 +174,7 @@ class ElastiCacheQueryHandlerTest {
 
     @Test
     void createReplicationGroup_passesSettingsAndTagsToService() {
-        when(service.createReplicationGroup(any(), any(), any(), any(), any(), any(), any()))
+        when(service.createReplicationGroup(any(ElastiCacheService.CreateReplicationGroupRequest.class)))
                 .thenReturn(group("g1"));
         MultivaluedMap<String, String> p = params();
         p.add("ReplicationGroupId", "g1");
@@ -99,15 +188,24 @@ class ElastiCacheQueryHandlerTest {
 
         assertEquals(200, handler.handle("CreateReplicationGroup", p, "us-east-1").getStatus());
 
-        verify(service).createReplicationGroup(eq("g1"), eq("d"), eq(AuthMode.NO_AUTH), isNull(), eq("us-east-1"),
-                eq(new ReplicationGroupSettings(true, "alias/cache", 7, "06:30-07:30")), eq(Map.of("Name", "g1")));
+        ArgumentCaptor<ElastiCacheService.CreateReplicationGroupRequest> captor =
+                ArgumentCaptor.forClass(ElastiCacheService.CreateReplicationGroupRequest.class);
+        verify(service).createReplicationGroup(captor.capture());
+        ElastiCacheService.CreateReplicationGroupRequest request = captor.getValue();
+        assertEquals("g1", request.replicationGroupId());
+        assertEquals("d", request.description());
+        assertEquals(AuthMode.NO_AUTH, request.authMode());
+        assertEquals("us-east-1", request.region());
+        assertEquals(new ReplicationGroupSettings(true, "alias/cache", 7, "06:30-07:30"), request.settings());
+        assertEquals(Map.of("Name", "g1"), request.tags());
     }
 
     @Test
     void createReplicationGroup_readsTheEncryptionFlagAsAwsDoes() {
-        when(service.createReplicationGroup(any(), any(), any(), any(), any(), any(), any()))
+        when(service.createReplicationGroup(any(ElastiCacheService.CreateReplicationGroupRequest.class)))
                 .thenReturn(group("g1"));
-        ArgumentCaptor<ReplicationGroupSettings> captor = ArgumentCaptor.forClass(ReplicationGroupSettings.class);
+        ArgumentCaptor<ElastiCacheService.CreateReplicationGroupRequest> captor =
+                ArgumentCaptor.forClass(ElastiCacheService.CreateReplicationGroupRequest.class);
         // a live account reads anything but "false" as true — probed with banana, yes and "TRUE "
         for (String value : new String[] {"true", "banana", "yes", "TRUE "}) {
             MultivaluedMap<String, String> p = params();
@@ -125,8 +223,9 @@ class ElastiCacheQueryHandlerTest {
         omitted.add("ReplicationGroupId", "g1");
         handler.handle("CreateReplicationGroup", omitted, "us-east-1");
 
-        verify(service, times(7)).createReplicationGroup(any(), any(), any(), any(), any(), captor.capture(), any());
-        List<Boolean> seen = captor.getAllValues().stream().map(ReplicationGroupSettings::atRestEncryptionEnabled).toList();
+        verify(service, times(7)).createReplicationGroup(captor.capture());
+        List<Boolean> seen = captor.getAllValues().stream()
+                .map(r -> r.settings().atRestEncryptionEnabled()).toList();
         assertEquals(java.util.Arrays.asList(true, true, true, true, false, false, null), seen);
     }
 
