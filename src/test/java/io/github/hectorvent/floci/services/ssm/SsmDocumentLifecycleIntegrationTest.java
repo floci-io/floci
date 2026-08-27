@@ -92,4 +92,24 @@ class SsmDocumentLifecycleIntegrationTest {
             .statusCode(400)
             .body("__type", equalTo("InvalidDocument"));
     }
+
+    @Test
+    @Order(4)
+    void createDocumentRejectsNonStringName() {
+        given()
+            .header("X-Amz-Target", "AmazonSSM.CreateDocument")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                {
+                    "Name": 123,
+                    "DocumentType": "Command",
+                    "Content": "{\\"schemaVersion\\":\\"2.2\\",\\"mainSteps\\":[]}"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
+    }
 }

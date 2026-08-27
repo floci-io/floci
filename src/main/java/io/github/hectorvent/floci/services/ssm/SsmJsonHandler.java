@@ -294,8 +294,9 @@ public class SsmJsonHandler {
     private static final Pattern DOCUMENT_NAME = Pattern.compile("^[a-zA-Z0-9_\\-.]{3,128}$");
 
     private String requireDocumentName(JsonNode request) {
-        String name = request.path("Name").asText();
-        if (name == null || !DOCUMENT_NAME.matcher(name).matches()) {
+        JsonNode nameNode = request.path("Name");
+        String name = nameNode.asText();
+        if (!nameNode.isTextual() || !DOCUMENT_NAME.matcher(name).matches()) {
             throw new AwsException("ValidationException",
                     "1 validation error detected: Value '" + name + "' at 'name' failed to satisfy constraint: "
                             + "Member must satisfy regular expression pattern: ^[a-zA-Z0-9_\\-.]{3,128}$",
