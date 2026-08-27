@@ -30,19 +30,16 @@ class SsmDocumentLifecycleIntegrationTest {
             .contentType(SSM_CONTENT_TYPE)
             .body("""
                 {
-                    "Name": "/floci/test-doc",
+                    "Name": "floci-test-doc",
                     "DocumentType": "Command",
-                    "Content": {
-                        "schemaVersion": "2.2",
-                        "mainSteps": []
-                    }
+                    "Content": "{\\"schemaVersion\\":\\"2.2\\",\\"mainSteps\\":[]}"
                 }
                 """)
         .when()
             .post("/")
         .then()
             .statusCode(200)
-            .body("DocumentDescription.Name", equalTo("/floci/test-doc"))
+            .body("DocumentDescription.Name", equalTo("floci-test-doc"))
             .body("DocumentDescription.DocumentType", equalTo("Command"));
 
         given()
@@ -50,14 +47,14 @@ class SsmDocumentLifecycleIntegrationTest {
             .contentType(SSM_CONTENT_TYPE)
             .body("""
                 {
-                    "Name": "/floci/test-doc"
+                    "Name": "floci-test-doc"
                 }
                 """)
         .when()
             .post("/")
         .then()
             .statusCode(200)
-            .body("Document.Name", equalTo("/floci/test-doc"))
+            .body("Document.Name", equalTo("floci-test-doc"))
             .body("Document.DocumentType", equalTo("Command"));
     }
 
@@ -69,7 +66,7 @@ class SsmDocumentLifecycleIntegrationTest {
             .contentType(SSM_CONTENT_TYPE)
             .body("""
                 {
-                    "Name": "/floci/test-doc"
+                    "Name": "floci-test-doc"
                 }
                 """)
         .when()
@@ -86,7 +83,7 @@ class SsmDocumentLifecycleIntegrationTest {
             .contentType(SSM_CONTENT_TYPE)
             .body("""
                 {
-                    "Name": "/floci/nonexistent-doc"
+                    "Name": "floci-nonexistent-doc"
                 }
                 """)
         .when()

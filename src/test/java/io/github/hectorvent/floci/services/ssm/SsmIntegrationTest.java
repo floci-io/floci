@@ -622,6 +622,28 @@ class SsmIntegrationTest {
     }
 
     @Test
+    void documentOperations_nameViolatingPatternReturnsValidationException() {
+        for (String target : new String[]{
+                "GetDocument", "DescribeDocument", "DeleteDocument",
+                "CreateDocument", "UpdateDocument"}) {
+            given()
+                .header("X-Amz-Target", "AmazonSSM." + target)
+                .contentType(SSM_CONTENT_TYPE)
+                .body("""
+                    {
+                        "Name": "/floci/test-doc",
+                        "Content": "{\\"schemaVersion\\":\\"1.0\\"}"
+                    }
+                    """)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"));
+        }
+    }
+
+    @Test
     void documentPermissionOperations_blankNameReturnsValidationException() {
         for (String target : new String[]{
                 "ModifyDocumentPermission", "DescribeDocumentPermission"}) {
