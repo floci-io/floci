@@ -14,8 +14,7 @@ public class PrometheusWorkspace {
     private String workspaceId;
     private String alias;
     private String arn;
-    // WorkspaceStatusCode: the emulator only ever stores ACTIVE (creation is instantaneous) and
-    // reports DELETING on the delete response itself.
+    // WorkspaceStatusCode: the emulator only ever stores ACTIVE (creation is instantaneous).
     private String status;
     private String prometheusEndpoint;
     private Instant createdAt;
