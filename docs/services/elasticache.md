@@ -43,11 +43,18 @@ with `cluster-enabled` set to `yes`, or `ClusterMode=enabled`.
 
 Floci starts one `--cluster-enabled` container per node — `NumNodeGroups × (1 + ReplicasPerNodeGroup)`
 in total — forms the cluster (config epochs, MEET, slot assignment, replica attachment), and fronts
-each node with its own auth-proxy port from the proxy port range. Nodes announce the proxy endpoint
-to clients via `cluster-announce-client-ipv4`/`cluster-announce-port`, so `CLUSTER SLOTS`,
-`CLUSTER SHARDS` and `MOVED`/`ASK` redirects point at addresses clients can actually reach, while
-the cluster bus keeps using the container network. Any cluster-aware Redis/Valkey client works
-against the reported `ConfigurationEndpoint`.
+each node with its own auth-proxy port from the proxy port range. Nodes announce Floci's configured
+hostname as their preferred endpoint (`cluster-announce-hostname` with
+`cluster-preferred-endpoint-type hostname`, plus `cluster-announce-client-ipv4`/
+`cluster-announce-port`), so `CLUSTER SLOTS`, `CLUSTER SHARDS` and `MOVED`/`ASK` redirects hand
+clients the same name the `ConfigurationEndpoint` reports, while the cluster bus keeps using the
+container network. Any cluster-aware Redis/Valkey client works against the reported
+`ConfigurationEndpoint`.
+
+With `persistent`, `hybrid` or `wal` storage, cluster-mode groups are re-provisioned from their
+persisted topology on startup: containers are restarted, the cluster is re-formed (caches restart
+empty, as on any Floci restart) and each node's proxy port is re-reserved. A group whose data plane
+cannot be brought back is reported with status `create-failed` instead of `available`.
 
 `DescribeReplicationGroups` reports the topology honestly: `ClusterEnabled`, one `NodeGroup` per
 shard with its `Slots`, `NodeGroupMembers`, and `MemberClusters`. Each member also answers

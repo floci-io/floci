@@ -741,7 +741,7 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
                 .start("ReplicationGroup")
                   .elem("ReplicationGroupId", g.getReplicationGroupId())
                   .elem("Description", g.getDescription())
-                  .elem("Status", g.getStatus().name().toLowerCase())
+                  .elem("Status", g.getStatus().wireName())
                   .elem("AuthTokenEnabled", authTokenEnabled)
                   .elem("TransitEncryptionEnabled", authTokenEnabled)
                   .elem("AtRestEncryptionEnabled", g.isAtRestEncryptionEnabled())

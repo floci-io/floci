@@ -246,7 +246,7 @@ public class ElastiCacheService implements ResourceProvider {
                 inFlightMemberId = node.getMemberClusterId();
                 ElastiCacheContainerHandle handle = containerManager.start(
                         node.getMemberClusterId(), image,
-                        clusterNodeFlags(announceIp, node.getProxyPort()));
+                        clusterNodeFlags(endpointHost, announceIp, node.getProxyPort()));
                 inFlightMemberId = null;
                 handles.add(handle);
                 node.setContainerId(handle.getContainerId());
@@ -291,7 +291,8 @@ public class ElastiCacheService implements ResourceProvider {
         } catch (RuntimeException e) {
             LOG.warnv("Cluster-mode replication group {0} provisioning failed, rolling back: {1}",
                     groupId, e.getMessage());
-            rollbackClusterModeGroup(groupId, startedProxyKeys, handles, inFlightMemberId, nodes);
+            rollbackClusterModeGroup(groupId, startedProxyKeys, handles, inFlightMemberId,
+                    nodes.stream().map(ClusterNode::getProxyPort).toList());
             throw e;
         }
     }
@@ -346,19 +347,22 @@ public class ElastiCacheService implements ResourceProvider {
         return request.numNodeGroups() != null && request.numNodeGroups() > 1;
     }
 
-    private static List<String> clusterNodeFlags(String announceIp, int proxyPort) {
+    /**
+     * Nodes announce the configured endpoint hostname as their preferred endpoint, so MOVED/ASK
+     * redirects and CLUSTER SLOTS hand clients the exact name floci reports as the configuration
+     * endpoint — how (or whether) that name resolves inside floci's own container is irrelevant.
+     * The best-effort IPv4 stays announced for consumers that read the address fields instead.
+     */
+    private static List<String> clusterNodeFlags(String endpointHost, String announceIp, int proxyPort) {
         return List.of(
                 "--cluster-enabled", "yes",
+                "--cluster-announce-hostname", endpointHost,
+                "--cluster-preferred-endpoint-type", "hostname",
                 "--cluster-announce-client-ipv4", announceIp,
                 "--cluster-announce-port", String.valueOf(proxyPort),
                 "--cluster-announce-bus-port", "16379");
     }
 
-    /**
-     * The IPv4 that MOVED redirects and CLUSTER SLOTS hand to clients. It must be the address
-     * clients dial, so it is the reported endpoint hostname resolved to IPv4 — not a container
-     * IP, which only the sibling nodes can reach.
-     */
     private static String resolveAnnounceIp(String endpointHost) {
         try {
             for (InetAddress address : InetAddress.getAllByName(endpointHost)) {
@@ -383,7 +387,7 @@ public class ElastiCacheService implements ResourceProvider {
 
     private void rollbackClusterModeGroup(String groupId, List<String> startedProxyKeys,
                                           List<ElastiCacheContainerHandle> handles,
-                                          String inFlightMemberId, List<ClusterNode> nodes) {
+                                          String inFlightMemberId, Collection<Integer> proxyPorts) {
         for (String proxyKey : startedProxyKeys) {
             try {
                 proxyManager.stopProxy(proxyKey);
@@ -408,8 +412,95 @@ public class ElastiCacheService implements ResourceProvider {
                         inFlightMemberId, groupId, e.getMessage());
             }
         }
-        for (ClusterNode node : nodes) {
-            releaseProxyPort(node.getProxyPort());
+        for (int port : proxyPorts) {
+            releaseProxyPort(port);
+        }
+    }
+
+    /**
+     * Brings the data plane back up for cluster-mode groups restored from disk. Invoked from
+     * {@code EmulatorLifecycle} after {@code storageFactory.loadAll()}, alongside the other
+     * services that restore persisted runtime. Only topology survives a restart — containers,
+     * proxies and port reservations are process-local — so each group is re-provisioned from
+     * its persisted node list, and a group whose data plane cannot come back is reported
+     * {@code create-failed} instead of available.
+     */
+    public void restorePersistedRuntime() {
+        for (ReplicationGroup group : groups.scan(k -> true)) {
+            if (!group.isClusterEnabled() || group.getClusterNodes().isEmpty()
+                    || group.getStatus() == ReplicationGroupStatus.DELETING) {
+                continue;
+            }
+            restoreClusterModeGroup(group);
+        }
+    }
+
+    private void restoreClusterModeGroup(ReplicationGroup group) {
+        String groupId = group.getReplicationGroupId();
+        String image = config.services().elasticache().defaultImage();
+        String endpointHost = resolveEndpointHost();
+        String announceIp = resolveAnnounceIp(endpointHost);
+        List<ClusterNode> nodes = group.getClusterNodes();
+
+        List<ElastiCacheContainerHandle> handles = new ArrayList<>();
+        List<String> startedProxyKeys = new ArrayList<>();
+        List<Integer> reservedPorts = new ArrayList<>();
+        String inFlightMemberId = null;
+        try {
+            for (ClusterNode node : nodes) {
+                node.setProxyPort(reserveOrAllocateProxyPort(node.getProxyPort()));
+                reservedPorts.add(node.getProxyPort());
+            }
+
+            List<ValkeyClusterFormation.Node> formationNodes = new ArrayList<>(nodes.size());
+            for (ClusterNode node : nodes) {
+                inFlightMemberId = node.getMemberClusterId();
+                ElastiCacheContainerHandle handle = containerManager.start(
+                        node.getMemberClusterId(), image,
+                        clusterNodeFlags(endpointHost, announceIp, node.getProxyPort()));
+                inFlightMemberId = null;
+                handles.add(handle);
+                node.setContainerId(handle.getContainerId());
+                node.setContainerHost(handle.getHost());
+                node.setContainerPort(handle.getPort());
+                String networkIp = handle.getNetworkIp() != null ? handle.getNetworkIp() : handle.getHost();
+                formationNodes.add(new ValkeyClusterFormation.Node(
+                        handle.getHost(), handle.getPort(), networkIp,
+                        Integer.parseInt(node.getNodeGroupId()) - 1, node.isPrimary()));
+            }
+
+            clusterFormation.form(groupId, formationNodes, group.getNumNodeGroups());
+
+            for (int i = 0; i < nodes.size(); i++) {
+                ClusterNode node = nodes.get(i);
+                ElastiCacheContainerHandle handle = handles.get(i);
+                proxyManager.startProxy(node.getMemberClusterId(), group.getAuthMode(), node.getProxyPort(),
+                        handle.getHost(), handle.getPort(),
+                        (username, password) -> validatePassword(groupId, username, password));
+                startedProxyKeys.add(node.getMemberClusterId());
+            }
+
+            group.setConfigurationEndpoint(new Endpoint(endpointHost, nodes.getFirst().getProxyPort()));
+            group.setStatus(ReplicationGroupStatus.AVAILABLE);
+            groups.put(groupId, group);
+            LOG.infov("Restored cluster-mode replication group {0}: {1} node(s), configuration endpoint={2}:{3}",
+                    groupId, String.valueOf(nodes.size()), endpointHost,
+                    String.valueOf(group.getConfigurationEndpoint().port()));
+        } catch (RuntimeException e) {
+            rollbackClusterModeGroup(groupId, startedProxyKeys, handles, inFlightMemberId, reservedPorts);
+            for (ClusterNode node : nodes) {
+                node.setContainerId(null);
+                node.setContainerHost(null);
+                node.setContainerPort(0);
+            }
+            group.setStatus(ReplicationGroupStatus.CREATE_FAILED);
+            group.setConfigurationEndpoint(null);
+            try {
+                groups.put(groupId, group);
+            } catch (RuntimeException persistFailure) {
+                e.addSuppressed(persistFailure);
+            }
+            LOG.warnv(e, "Failed to restore cluster-mode replication group {0}", groupId);
         }
     }
 
@@ -724,6 +815,13 @@ public class ElastiCacheService implements ResourceProvider {
 
     private void releaseProxyPort(int port) {
         usedPorts.remove(port);
+    }
+
+    private int reserveOrAllocateProxyPort(int persistedPort) {
+        if (persistedPort > 0 && usedPorts.add(persistedPort)) {
+            return persistedPort;
+        }
+        return allocateProxyPort();
     }
 
     // ── Cache Subnet Groups ───────────────────────────────────────────────────

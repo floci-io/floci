@@ -16,12 +16,15 @@ import io.github.hectorvent.floci.services.elasticache.container.ValkeyClusterFo
 import io.github.hectorvent.floci.services.elasticache.model.AuthMode;
 import io.github.hectorvent.floci.services.elasticache.model.ClusterNode;
 import io.github.hectorvent.floci.services.elasticache.model.ReplicationGroup;
+import io.github.hectorvent.floci.services.elasticache.model.ReplicationGroupStatus;
 import io.github.hectorvent.floci.services.elasticache.proxy.ElastiCacheProxyManager;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
@@ -313,6 +316,126 @@ class ElastiCacheServiceTest {
                 service.createReplicationGroup("grp2", "test", AuthMode.PASSWORD, null, "us-east-1");
         assertEquals(16379, recovered.getProxyPort(),
                 "Ports from the deleted cluster group must be released for the next group");
+    }
+
+    @Test
+    void clusterNodesAnnounceTheConfiguredHostnameAsPreferredEndpoint() {
+        stubPerNodeContainers();
+
+        service.createReplicationGroup(clusterRequest("grp", 1, 0));
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<String>> flags = ArgumentCaptor.forClass(List.class);
+        verify(containerManager).start(eq("grp-0001-001"), anyString(), flags.capture());
+        List<String> captured = flags.getValue();
+        assertEquals("localhost", flagValue(captured, "--cluster-announce-hostname"));
+        assertEquals("hostname", flagValue(captured, "--cluster-preferred-endpoint-type"));
+        assertEquals("16379", flagValue(captured, "--cluster-announce-port"));
+    }
+
+    private static String flagValue(List<String> flags, String flag) {
+        int index = flags.indexOf(flag);
+        assertTrue(index >= 0 && index + 1 < flags.size(), "Missing flag " + flag + " in " + flags);
+        return flags.get(index + 1);
+    }
+
+    private static StorageFactory sharedStorageFactory() {
+        StorageFactory storageFactory = mock(StorageFactory.class);
+        Map<String, Object> backends = new ConcurrentHashMap<>();
+        when(storageFactory.create(anyString(), anyString(), any())).thenAnswer(inv ->
+                backends.computeIfAbsent(inv.getArgument(1, String.class),
+                        key -> AccountAwareStorageBackend.inMemory("000000000000")));
+        return storageFactory;
+    }
+
+    private static ElastiCacheService serviceWith(StorageFactory storageFactory,
+                                                  ElastiCacheContainerManager containerManager,
+                                                  ElastiCacheProxyManager proxyManager,
+                                                  ValkeyClusterFormation clusterFormation) {
+        EmulatorConfig config = mock(EmulatorConfig.class);
+        EmulatorConfig.ServicesConfig servicesConfig = mock(EmulatorConfig.ServicesConfig.class);
+        EmulatorConfig.ElastiCacheServiceConfig ecConfig = mock(EmulatorConfig.ElastiCacheServiceConfig.class);
+        when(config.services()).thenReturn(servicesConfig);
+        when(servicesConfig.elasticache()).thenReturn(ecConfig);
+        when(ecConfig.proxyBasePort()).thenReturn(16379);
+        when(ecConfig.proxyMaxPort()).thenReturn(16399);
+        when(ecConfig.defaultImage()).thenReturn("valkey/valkey:8");
+        when(config.hostname()).thenReturn(java.util.Optional.of("localhost"));
+        return new ElastiCacheService(containerManager, proxyManager, clusterFormation,
+                storageFactory, config, mock(Ec2Service.class),
+                new RegionResolver("us-east-1", "000000000000"), mock(KmsService.class));
+    }
+
+    private static void stubPerNodeContainers(ElastiCacheContainerManager containerManager) {
+        when(containerManager.start(anyString(), anyString(), any())).thenAnswer(inv ->
+                new ElastiCacheContainerHandle("cid-" + inv.getArgument(0, String.class),
+                        inv.getArgument(0, String.class), "localhost", 6379));
+        when(containerManager.start(anyString(), anyString()))
+                .thenReturn(new ElastiCacheContainerHandle("cid", "grp", "localhost", 6379));
+    }
+
+    @Test
+    void restorePersistedRuntimeReprovisionsClusterModeGroups() {
+        StorageFactory storageFactory = sharedStorageFactory();
+        ElastiCacheContainerManager beforeRestart = mock(ElastiCacheContainerManager.class);
+        stubPerNodeContainers(beforeRestart);
+        serviceWith(storageFactory, beforeRestart, mock(ElastiCacheProxyManager.class),
+                mock(ValkeyClusterFormation.class))
+                .createReplicationGroup(clusterRequest("grp", 2, 1));
+
+        ElastiCacheContainerManager restartedContainers = mock(ElastiCacheContainerManager.class);
+        stubPerNodeContainers(restartedContainers);
+        ElastiCacheProxyManager restartedProxies = mock(ElastiCacheProxyManager.class);
+        ValkeyClusterFormation restartedFormation = mock(ValkeyClusterFormation.class);
+        ElastiCacheService restarted = serviceWith(storageFactory, restartedContainers,
+                restartedProxies, restartedFormation);
+
+        restarted.restorePersistedRuntime();
+
+        verify(restartedContainers, times(4)).start(anyString(), anyString(), any());
+        verify(restartedFormation).form(eq("grp"), any(), eq(2));
+        verify(restartedProxies, times(4)).startProxy(anyString(), any(), anyInt(), anyString(), anyInt(), any());
+        ReplicationGroup restored = restarted.getReplicationGroup("grp");
+        assertEquals(ReplicationGroupStatus.AVAILABLE, restored.getStatus());
+        assertEquals(16379, restored.getConfigurationEndpoint().port());
+        assertEquals("cid-grp-0001-001", restored.getClusterNodes().getFirst().getContainerId());
+
+        ReplicationGroup next =
+                restarted.createReplicationGroup("grp2", "test", AuthMode.NO_AUTH, null, "us-east-1");
+        assertEquals(16383, next.getProxyPort(),
+                "Restored node ports must be reserved again so new groups cannot take them");
+    }
+
+    @Test
+    void restoreFailureReportsCreateFailedAndReleasesPorts() {
+        StorageFactory storageFactory = sharedStorageFactory();
+        ElastiCacheContainerManager beforeRestart = mock(ElastiCacheContainerManager.class);
+        stubPerNodeContainers(beforeRestart);
+        serviceWith(storageFactory, beforeRestart, mock(ElastiCacheProxyManager.class),
+                mock(ValkeyClusterFormation.class))
+                .createReplicationGroup(clusterRequest("grp", 2, 0));
+
+        ElastiCacheContainerManager restartedContainers = mock(ElastiCacheContainerManager.class);
+        when(restartedContainers.start(anyString(), anyString(), any()))
+                .thenThrow(new RuntimeException("docker down"));
+        when(restartedContainers.start(anyString(), anyString()))
+                .thenReturn(new ElastiCacheContainerHandle("cid", "grp", "localhost", 6379));
+        ElastiCacheProxyManager restartedProxies = mock(ElastiCacheProxyManager.class);
+        ElastiCacheService restarted = serviceWith(storageFactory, restartedContainers,
+                restartedProxies, mock(ValkeyClusterFormation.class));
+
+        restarted.restorePersistedRuntime();
+
+        ReplicationGroup failed = restarted.getReplicationGroup("grp");
+        assertEquals(ReplicationGroupStatus.CREATE_FAILED, failed.getStatus());
+        assertNull(failed.getConfigurationEndpoint(),
+                "A group whose data plane is gone must not advertise an endpoint");
+        verify(restartedProxies, never()).startProxy(anyString(), any(), anyInt(), anyString(), anyInt(), any());
+
+        ReplicationGroup next =
+                restarted.createReplicationGroup("grp2", "test", AuthMode.NO_AUTH, null, "us-east-1");
+        assertEquals(16379, next.getProxyPort(),
+                "Ports from the failed restore must be released for the next group");
     }
 
     @Test

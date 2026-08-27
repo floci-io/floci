@@ -301,8 +301,9 @@ public class ValkeyClusterFormation {
         void closeQuietly() {
             try {
                 close();
-            } catch (IOException ignored) {
-                // Best-effort close of a formation-only connection.
+            } catch (IOException e) {
+                LOG.debugv("Ignoring close failure for formation connection to {0}: {1}",
+                        socket.getRemoteSocketAddress(), e.getMessage());
             }
         }
     }

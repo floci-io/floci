@@ -164,8 +164,8 @@ class ElastiCacheClusterIntegrationTest {
             String reply = readLine(socket);
             assertTrue(reply.startsWith("-MOVED 12182 "), "Expected MOVED redirect but got: " + reply);
             String target = reply.trim().substring("-MOVED 12182 ".length());
-            assertEquals("127.0.0.1:" + secondShardPort, target,
-                    "MOVED must point at the second shard primary's proxy port");
+            assertEquals("localhost:" + secondShardPort, target,
+                    "MOVED must point at the announced hostname and the second shard primary's proxy port");
         }
 
         try (Socket socket = openSocket(secondShardPort)) {

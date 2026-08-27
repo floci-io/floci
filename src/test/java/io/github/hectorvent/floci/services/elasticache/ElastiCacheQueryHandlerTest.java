@@ -154,6 +154,23 @@ class ElastiCacheQueryHandlerTest {
     }
 
     @Test
+    void describeReplicationGroups_reportsCreateFailedStatusInAwsWireForm() {
+        ReplicationGroup group = new ReplicationGroup("grp", "d", ReplicationGroupStatus.CREATE_FAILED,
+                AuthMode.NO_AUTH, null, Instant.now(), 6379);
+        when(service.listReplicationGroups("grp")).thenReturn(List.of(group));
+        when(service.memberCacheClusters(group)).thenReturn(List.of());
+
+        MultivaluedMap<String, String> params = params();
+        params.putSingle("ReplicationGroupId", "grp");
+        Response response = handler.handle("DescribeReplicationGroups", params, "us-east-1");
+
+        assertEquals(200, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<Status>create-failed</Status>"),
+                "AWS reports this status hyphenated, not as the enum constant");
+    }
+
+    @Test
     void unsupportedOperationStillReturnsQueryError() {
         Response response = handler.handle("NoSuchAction", params(), "us-east-1");
 
