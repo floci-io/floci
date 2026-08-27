@@ -1818,6 +1818,19 @@ public class ApiGatewayService {
                 }
                 switch (path) {
                     case "/type":
+                    case "/httpMethod":
+                    case "/uri":
+                    case "/passthroughBehavior":
+                        break;
+                    default:
+                        throw new AwsException("BadRequestException", "Unsupported path: " + path, 400);
+                }
+            }
+            for (Map<String, String> op : patchOperations) {
+                String path = op.get("path");
+                String value = op.get("value");
+                switch (path) {
+                    case "/type":
                         integration.setType(value);
                         break;
                     case "/httpMethod":
@@ -1830,7 +1843,7 @@ public class ApiGatewayService {
                         integration.setPassthroughBehavior(value);
                         break;
                     default:
-                        throw new AwsException("BadRequestException", "Unsupported path: " + path, 400);
+                        throw new IllegalStateException("Unreachable: validated above");
                 }
             }
         }
