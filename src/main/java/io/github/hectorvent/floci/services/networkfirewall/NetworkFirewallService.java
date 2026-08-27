@@ -206,7 +206,14 @@ public class NetworkFirewallService {
         return response;
     }
 
-    public ObjectNode associateSubnets(JsonNode request) {
+    /**
+     * The four association operations are synchronized because {@link #mappingsOf}
+     * hands out a detached copy and {@link #storeAndRespond} replaces the whole
+     * field with it: the read-modify-write is only atomic under a common lock, and
+     * without one the later of two overlapping calls silently discards the earlier
+     * caller's mapping.
+     */
+    public synchronized ObjectNode associateSubnets(JsonNode request) {
         ObjectNode firewall = firewallForChange(request, "SubnetChangeProtection", "subnet");
         ArrayNode requestedMappings = requiredArray(request, "SubnetMappings");
         ArrayNode mappings = mappingsOf(firewall, "SubnetMappings");
@@ -216,7 +223,8 @@ public class NetworkFirewallService {
         return storeAndRespond(firewall, "SubnetMappings", mappings);
     }
 
-    public ObjectNode disassociateSubnets(JsonNode request) {
+    /** @see #associateSubnets for why this is synchronized. */
+    public synchronized ObjectNode disassociateSubnets(JsonNode request) {
         ObjectNode firewall = firewallForChange(request, "SubnetChangeProtection", "subnet");
         ArrayNode requestedIds = requiredArray(request, "SubnetIds");
         ArrayNode mappings = mappingsOf(firewall, "SubnetMappings");
@@ -226,7 +234,8 @@ public class NetworkFirewallService {
         return storeAndRespond(firewall, "SubnetMappings", mappings);
     }
 
-    public ObjectNode associateAvailabilityZones(JsonNode request) {
+    /** @see #associateSubnets for why this is synchronized. */
+    public synchronized ObjectNode associateAvailabilityZones(JsonNode request) {
         ObjectNode firewall =
                 firewallForChange(request, "AvailabilityZoneChangeProtection", "Availability Zone");
         ArrayNode requestedMappings = requiredArray(request, "AvailabilityZoneMappings");
@@ -237,7 +246,8 @@ public class NetworkFirewallService {
         return storeAndRespond(firewall, "AvailabilityZoneMappings", mappings);
     }
 
-    public ObjectNode disassociateAvailabilityZones(JsonNode request) {
+    /** @see #associateSubnets for why this is synchronized. */
+    public synchronized ObjectNode disassociateAvailabilityZones(JsonNode request) {
         ObjectNode firewall =
                 firewallForChange(request, "AvailabilityZoneChangeProtection", "Availability Zone");
         ArrayNode requestedMappings = requiredArray(request, "AvailabilityZoneMappings");
