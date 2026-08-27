@@ -776,7 +776,7 @@ public class OrganizationsService {
      */
     public List<OrganizationAccount> listAccountsWithInvalidEffectivePolicy(String callerAccountId,
                                                                            String policyType) {
-        requireOrganizationForCaller(callerAccountId);
+        requireManagementOrDelegatedAdmin(callerAccountId);
         validateEffectivePolicyType(policyType);
         return List.of();
     }
@@ -1205,6 +1205,27 @@ public class OrganizationsService {
         Organization organization = requireOrganizationForCaller(callerAccountId);
         if (!organization.getMasterAccountId().equals(callerAccountId)) {
             throw accessDenied("This operation can be performed only by the management account of the organization.");
+        }
+        return organization;
+    }
+
+    /**
+     * {@code ListAccountsWithInvalidEffectivePolicy} is narrower than
+     * {@link #requireOrganizationForCaller}: AWS restricts it to the management account or a member
+     * account registered as a delegated administrator for some service, unlike
+     * {@code DescribeEffectivePolicy}, which any account in the organization may call.
+     */
+    Organization requireManagementOrDelegatedAdmin(String callerAccountId) {
+        Organization organization = requireOrganizationForCaller(callerAccountId);
+        if (organization.getMasterAccountId().equals(callerAccountId)) {
+            return organization;
+        }
+        boolean isDelegatedAdmin = accountsIn(organization).stream()
+                .anyMatch(account -> account.getId().equals(callerAccountId)
+                        && !account.getDelegatedServices().isEmpty());
+        if (!isDelegatedAdmin) {
+            throw accessDenied(
+                    "This operation can be performed only by the management account or a delegated administrator.");
         }
         return organization;
     }

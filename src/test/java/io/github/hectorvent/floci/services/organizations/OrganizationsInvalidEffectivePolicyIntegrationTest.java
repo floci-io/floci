@@ -13,6 +13,7 @@ import org.junit.jupiter.api.TestMethodOrder;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.matchesPattern;
 
 /**
  * ListAccountsWithInvalidEffectivePolicy takes a required PolicyType drawn from the
@@ -28,14 +29,20 @@ class OrganizationsInvalidEffectivePolicyIntegrationTest {
     private static final String TARGET_PREFIX = "AWSOrganizationsV20161128.";
     private static final String MANAGEMENT_ACCOUNT = "666666666666";
 
+    private String memberAccountId;
+
     @BeforeAll
     static void configureRestAssured() {
         RestAssuredJsonUtils.configureAwsContentTypes();
     }
 
     private RequestSpecification organizations(String action, String body) {
+        return organizations(MANAGEMENT_ACCOUNT, action, body);
+    }
+
+    private RequestSpecification organizations(String accountId, String action, String body) {
         return given()
-                .header("Authorization", "AWS4-HMAC-SHA256 Credential=" + MANAGEMENT_ACCOUNT
+                .header("Authorization", "AWS4-HMAC-SHA256 Credential=" + accountId
                         + "/20260822/us-east-1/organizations/aws4_request, SignedHeaders=host, Signature=abc")
                 .header("X-Amz-Target", TARGET_PREFIX + action)
                 .contentType(CONTENT_TYPE)
@@ -119,5 +126,57 @@ class OrganizationsInvalidEffectivePolicyIntegrationTest {
         .then()
             .statusCode(400)
             .body("__type", equalTo("InvalidInputException"));
+    }
+
+    @Test
+    @Order(7)
+    void createMemberAccount() {
+        var response = organizations("CreateAccount", "{\"Email\":\"member@example.com\",\"AccountName\":\"Member\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("CreateAccountStatus.AccountId", matchesPattern("\\d{12}"))
+            .extract().jsonPath();
+
+        memberAccountId = response.getString("CreateAccountStatus.AccountId");
+    }
+
+    /**
+     * AWS restricts this operation to the management account or a delegated administrator — unlike
+     * DescribeEffectivePolicy, which "you can call ... from any account in a organization" per the
+     * botocore model. An ordinary member must not get a reassuring empty list.
+     */
+    @Test
+    @Order(8)
+    void listAccountsWithInvalidEffectivePolicyRejectsAnOrdinaryMemberAccount() {
+        organizations(memberAccountId, "ListAccountsWithInvalidEffectivePolicy", "{\"PolicyType\":\"TAG_POLICY\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(403)
+            .body("__type", equalTo("AccessDeniedException"));
+    }
+
+    @Test
+    @Order(9)
+    void registerMemberAsDelegatedAdministrator() {
+        organizations(MANAGEMENT_ACCOUNT, "RegisterDelegatedAdministrator",
+                "{\"AccountId\":\"" + memberAccountId + "\",\"ServicePrincipal\":\"config.amazonaws.com\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    @Order(10)
+    void listAccountsWithInvalidEffectivePolicyAcceptsADelegatedAdministrator() {
+        organizations(memberAccountId, "ListAccountsWithInvalidEffectivePolicy", "{\"PolicyType\":\"TAG_POLICY\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Accounts", empty());
     }
 }
