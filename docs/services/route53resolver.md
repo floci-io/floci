@@ -40,7 +40,12 @@ the project's standard random-suffix convention (`rslvr-fdl-...`, `rslvr-in-...`
 `rslvr-out-...`, `rslvr-rr-...`, `rslvr-rrassoc-...`), distinct from the deterministic
 managed-list ids. Resolver endpoint ids are direction-aware as in AWS: `rslvr-in-` for
 `INBOUND` (and `INBOUND_DELEGATION`), `rslvr-out-` for `OUTBOUND`. Any other `Direction`
-is rejected with `InvalidParametersException`.
+is rejected with `InvalidParameterException`.
+
+Parameter rejections use the error code the operation actually models, which differs by
+family: the resolver endpoint, rule and association operations model the singular
+`InvalidParameterException`, while the DNS Firewall operations model `ValidationException`
+and do not list `InvalidParameterException` at all.
 
 `CreateFirewallDomainList`, `CreateResolverEndpoint` and `CreateResolverRule` are
 idempotent on `CreatorRequestId`, as they are in real AWS: replaying a token returns the

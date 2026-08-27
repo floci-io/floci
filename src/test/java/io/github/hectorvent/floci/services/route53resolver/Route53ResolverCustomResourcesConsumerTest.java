@@ -93,6 +93,17 @@ class Route53ResolverCustomResourcesConsumerTest {
             .statusCode(404);
     }
 
+    @Test
+    void createFirewallDomainList_missingName_returnsValidationException() {
+        // The DNS Firewall operations model ValidationException, not the resolver
+        // family's InvalidParameterException: CreateFirewallDomainList does not list
+        // InvalidParameterException among its errors at all.
+        call("CreateFirewallDomainList", "{\"CreatorRequestId\":\"tok-fdl-noname\"}")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
+    }
+
     // ---------- CreatorRequestId idempotency ----------
 
     @Test
@@ -169,7 +180,7 @@ class Route53ResolverCustomResourcesConsumerTest {
                 + "\"CreatorRequestId\":\"tok-idem-validate\"}")
         .then()
             .statusCode(400)
-            .body("__type", equalTo("InvalidParametersException"));
+            .body("__type", equalTo("InvalidParameterException"));
 
         // ... including an unrecognised Direction.
         call("CreateResolverEndpoint", "{\"Name\":\"ab-idem-validate\",\"Direction\":\"SIDEWAYS\","
@@ -177,7 +188,7 @@ class Route53ResolverCustomResourcesConsumerTest {
                 + "\"Ip\":\"10.0.0.5\"}],\"CreatorRequestId\":\"tok-idem-validate\"}")
         .then()
             .statusCode(400)
-            .body("__type", equalTo("InvalidParametersException"));
+            .body("__type", equalTo("InvalidParameterException"));
     }
 
     @Test
@@ -333,7 +344,7 @@ class Route53ResolverCustomResourcesConsumerTest {
                 + "\"Ip\":\"10.0.0.7\"}],\"CreatorRequestId\":\"tok-endpoint-sideways\"}")
         .then()
             .statusCode(400)
-            .body("__type", equalTo("InvalidParametersException"));
+            .body("__type", equalTo("InvalidParameterException"));
     }
 
     @Test
@@ -342,7 +353,7 @@ class Route53ResolverCustomResourcesConsumerTest {
                 + "\"SecurityGroupIds\":[\"sg-abc123\"],\"CreatorRequestId\":\"tok-noip\"}")
         .then()
             .statusCode(400)
-            .body("__type", equalTo("InvalidParametersException"));
+            .body("__type", equalTo("InvalidParameterException"));
     }
 
     @Test
@@ -395,7 +406,7 @@ class Route53ResolverCustomResourcesConsumerTest {
                 + "\",\"ResolverEndpointType\":\"IPV5\"}")
         .then()
             .statusCode(400)
-            .body("__type", equalTo("InvalidParametersException"));
+            .body("__type", equalTo("InvalidParameterException"));
 
         call("GetResolverEndpoint", "{\"ResolverEndpointId\":\"" + id + "\"}")
         .then()
@@ -450,7 +461,7 @@ class Route53ResolverCustomResourcesConsumerTest {
                 + "\"CreatorRequestId\":\"tok-rule-emptytargets\"}")
         .then()
             .statusCode(400)
-            .body("__type", equalTo("InvalidParametersException"));
+            .body("__type", equalTo("InvalidParameterException"));
     }
 
     @Test
@@ -463,7 +474,7 @@ class Route53ResolverCustomResourcesConsumerTest {
                 + "\"CreatorRequestId\":\"tok-rule-badtype\"}")
         .then()
             .statusCode(400)
-            .body("__type", equalTo("InvalidParametersException"));
+            .body("__type", equalTo("InvalidParameterException"));
 
         call("ListResolverRules", "{}")
         .then()

@@ -39,6 +39,19 @@ public class Route53ResolverService {
 
     public static final String MANAGED_OWNER_NAME = "Route 53 Resolver DNS Firewall";
 
+    /**
+     * Route 53 Resolver models two error vocabularies, and which one applies is per-operation.
+     * The resolver endpoint / rule / association operations list the singular
+     * {@code InvalidParameterException}; the later DNS Firewall operations list
+     * {@code ValidationException} and do not model {@code InvalidParameterException} at all
+     * (see {@code CreateFirewallDomainList} and {@code ListFirewallDomainLists} in botocore's
+     * route53resolver/2018-04-01 model). The plural {@code InvalidParametersException} this
+     * service used to raise belongs to Service Catalog and exists nowhere in this model.
+     */
+    private static final String INVALID_PARAMETER = "InvalidParameterException";
+    /** The DNS Firewall family's parameter-rejection error. See {@link #INVALID_PARAMETER}. */
+    private static final String VALIDATION = "ValidationException";
+
     /** The AWS-managed domain lists available in commercial regions. */
     static final List<String> AWS_MANAGED_DOMAIN_LIST_NAMES = List.of(
             "AWSManagedDomainsAggregateThreatList",
@@ -92,7 +105,7 @@ public class Route53ResolverService {
     // ---------- Custom firewall domain lists ----------
 
     public synchronized ObjectNode createFirewallDomainList(JsonNode request, String region, String accountId) {
-        String name = requireText(request, "Name");
+        String name = requireText(request, "Name", VALIDATION);
         java.util.Optional<ObjectNode> replay = replayOf(domainListStore, request, region);
         if (replay.isPresent()) {
             return replay.get();
@@ -131,12 +144,12 @@ public class Route53ResolverService {
     // ---------- Resolver endpoints ----------
 
     public synchronized ObjectNode createResolverEndpoint(JsonNode request, String region, String accountId) {
-        requireText(request, "Name");
-        String direction = requireText(request, "Direction");
+        requireText(request, "Name", INVALID_PARAMETER);
+        String direction = requireText(request, "Direction", INVALID_PARAMETER);
         String idPrefix = endpointIdPrefix(direction);
         JsonNode ipAddresses = request.path("IpAddressRequests");
         if (!ipAddresses.isArray() || ipAddresses.isEmpty()) {
-            throw new AwsException("InvalidParametersException", "IpAddressRequests is required", 400);
+            throw new AwsException(INVALID_PARAMETER, "IpAddressRequests is required", 400);
         }
         java.util.Optional<ObjectNode> replay = replayOf(endpointStore, request, region);
         if (replay.isPresent()) {
@@ -179,7 +192,7 @@ public class Route53ResolverService {
         ObjectNode endpoint = require(endpointStore, id, "resolver endpoint");
         String endpointType = text(request, "ResolverEndpointType");
         if (endpointType != null) {
-            requireEnum(endpointType, "ResolverEndpointType", ENDPOINT_TYPES);
+            requireEnum(endpointType, "ResolverEndpointType", ENDPOINT_TYPES, INVALID_PARAMETER);
         }
         copyIfPresent(request, endpoint, "Name", "ResolverEndpointType");
         endpoint.put("ModificationTime", Instant.now().toString());
@@ -190,12 +203,13 @@ public class Route53ResolverService {
     // ---------- Resolver rules ----------
 
     public synchronized ObjectNode createResolverRule(JsonNode request, String region, String accountId) {
-        requireEnum(requireText(request, "RuleType"), "RuleType", RULE_TYPES);
+        requireEnum(requireText(request, "RuleType", INVALID_PARAMETER), "RuleType", RULE_TYPES,
+                INVALID_PARAMETER);
         // TargetIps is modeled list min 1: present-but-empty is invalid, absent is
         // allowed (SYSTEM rules carry no targets).
         JsonNode targetIps = request.path("TargetIps");
         if (targetIps.isArray() && targetIps.isEmpty()) {
-            throw new AwsException("InvalidParametersException",
+            throw new AwsException(INVALID_PARAMETER,
                     "TargetIps must contain at least one target address.", 400);
         }
         String domainName = text(request, "DomainName");
@@ -249,8 +263,8 @@ public class Route53ResolverService {
     // ---------- Resolver rule associations ----------
 
     public ObjectNode associateResolverRule(JsonNode request) {
-        String ruleId = requireText(request, "ResolverRuleId");
-        String vpcId = requireText(request, "VPCId");
+        String ruleId = requireText(request, "ResolverRuleId", INVALID_PARAMETER);
+        String vpcId = requireText(request, "VPCId", INVALID_PARAMETER);
         require(ruleStore, ruleId, "resolver rule");
         String id = id("rslvr-rrassoc");
         ObjectNode association = objectMapper.createObjectNode();
@@ -264,8 +278,8 @@ public class Route53ResolverService {
     }
 
     public ObjectNode disassociateResolverRule(JsonNode request) {
-        String ruleId = requireText(request, "ResolverRuleId");
-        String vpcId = requireText(request, "VPCId");
+        String ruleId = requireText(request, "ResolverRuleId", INVALID_PARAMETER);
+        String vpcId = requireText(request, "VPCId", INVALID_PARAMETER);
         ObjectNode association = ruleAssociationStore.scan(key -> true).stream()
                 .filter(a -> ruleId.equals(text(a, "ResolverRuleId")) && vpcId.equals(text(a, "VPCId")))
                 .findFirst()
@@ -295,7 +309,7 @@ public class Route53ResolverService {
         return switch (direction) {
             case "INBOUND", "INBOUND_DELEGATION" -> "rslvr-in";
             case "OUTBOUND" -> "rslvr-out";
-            default -> throw new AwsException("InvalidParametersException",
+            default -> throw new AwsException(INVALID_PARAMETER,
                     "Direction must be one of INBOUND, OUTBOUND, INBOUND_DELEGATION: " + direction, 400);
         };
     }
@@ -347,23 +361,21 @@ public class Route53ResolverService {
      * stores a resource AWS would never have created — a rule whose {@code RuleType} is not
      * a {@code RuleTypeOption} is then handed back by Get/List as though it were real.
      *
-     * <p>Uses the same {@code InvalidParametersException} the {@code Direction} check above
-     * already returns, so every enum rejection in this service reports one error code. The
-     * botocore model actually names the singular {@code InvalidParameterException}; that
-     * divergence is service-wide here and pinned by tests, so it is left for one sweep
-     * rather than split across two error codes.</p>
+     * <p>The caller passes the error code its own operation models, because the two families
+     * in this service do not share one — see {@link #INVALID_PARAMETER} and
+     * {@link #VALIDATION}.</p>
      */
-    private static void requireEnum(String value, String field, List<String> allowed) {
+    private static void requireEnum(String value, String field, List<String> allowed, String errorCode) {
         if (!allowed.contains(value)) {
-            throw new AwsException("InvalidParametersException",
+            throw new AwsException(errorCode,
                     field + " must be one of " + String.join(", ", allowed) + ": " + value, 400);
         }
     }
 
-    private String requireText(JsonNode node, String field) {
+    private String requireText(JsonNode node, String field, String errorCode) {
         String value = text(node, field);
         if (value == null || value.isBlank()) {
-            throw new AwsException("InvalidParametersException", field + " is required", 400);
+            throw new AwsException(errorCode, field + " is required", 400);
         }
         return value;
     }
