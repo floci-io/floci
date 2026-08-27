@@ -93,11 +93,20 @@ public class IotMqttBrokerService {
             server = plaintextServer;
             tlsServer = secureServer;
         } catch (Exception e) {
-            plaintextServer.close();
-            if (secureServer != null) {
-                secureServer.close();
-            }
+            closeAndAwait(plaintextServer);
+            closeAndAwait(secureServer);
             throw new IllegalStateException("Failed to start IoT MQTT broker", e);
+        }
+    }
+
+    private void closeAndAwait(MqttServer mqttServer) {
+        if (mqttServer == null) {
+            return;
+        }
+        try {
+            mqttServer.close().toCompletionStage().toCompletableFuture().join();
+        } catch (Exception closeFailure) {
+            LOG.warnv("Failed to close IoT MQTT listener during startup rollback: {0}", closeFailure.getMessage());
         }
     }
 
