@@ -89,7 +89,7 @@ class Ec2IpamServiceTest {
         AwsException conflict = assertThrows(AwsException.class,
                 () -> orgService.enableIpamOrganizationAdminAccount("444444444444"),
                 "a non-management member account must not be able to change the org-wide delegation");
-        assertEquals("AccessDeniedException", conflict.getErrorCode());
+        assertEquals("UnauthorizedOperation", conflict.getErrorCode());
 
         caller.set("222222222222");
         AwsException error = assertThrows(AwsException.class,
@@ -119,7 +119,7 @@ class Ec2IpamServiceTest {
         AwsException error = assertThrows(AwsException.class,
                 () -> orgService.disableIpamOrganizationAdminAccount("333333333333"),
                 "a non-management member account must not be able to remove the org-wide delegation");
-        assertEquals("AccessDeniedException", error.getErrorCode());
+        assertEquals("UnauthorizedOperation", error.getErrorCode());
         assertEquals("333333333333", orgService.getIpamOrganizationAdminAccount().orElseThrow());
 
         caller.set("222222222222");

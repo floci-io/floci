@@ -130,11 +130,15 @@ public class Ec2IpamService {
      * account from, so the configured default account stands in for it — the same account
      * launched Lambdas resolve to when they call without an assumed role, which is how LZA's
      * Organization-stage custom resource invokes these operations.
+     *
+     * <p>{@code UnauthorizedOperation} is EC2 Query's permission-denied code: both operations
+     * model a {@code DryRun} member documented as returning {@code DryRunOperation} when the
+     * caller has permission and {@code UnauthorizedOperation} when it does not.</p>
      */
     private void requireManagementAccount() {
         String caller = callerAccountId();
         if (!caller.equals(config.defaultAccountId())) {
-            throw new AwsException("AccessDeniedException",
+            throw new AwsException("UnauthorizedOperation",
                     "Account " + caller + " is not authorized to modify the IPAM organization "
                             + "delegated administrator; only the organization's management account may.", 403);
         }
