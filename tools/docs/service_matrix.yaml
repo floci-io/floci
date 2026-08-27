@@ -17,6 +17,7 @@
 aliases:
   apigateway: api-gateway               # "API Gateway v1" row title
   apigatewayv2: api-gateway             # v2 facet, documented at api-gateway.md#v2
+  aps: managed-prometheus               # AMP's SigV4 signing name is "aps"
   kafka: msk                            # MSK's SigV4 signing name is "kafka"
   mq: amazonmq                          # Amazon MQ's SigV4 signing name is "mq"
   signin: iam                           # AWS Sign-In facet, at iam.md#aws-sign-in-login-credentials
