@@ -512,7 +512,7 @@ public class DynamoDbService implements ResourceProvider {
         final JsonNode normalizedItem = DynamoDbNumberUtils.normalizeNumbersInItem(item);
         DynamoDbItemSize.validateSize(normalizedItem);
         String itemKey = buildItemKey(table, normalizedItem);
-        validateIndexKeyTypes(table, normalizedItem);
+        validateIndexKeyTypes(table, normalizedItem, false);
 
         withItemLock(storageKey, itemKey, () -> {
             var tableItems = itemsByTable.computeIfAbsent(scopedItemsKey(storageKey), k -> new ConcurrentSkipListMap<>());
@@ -734,8 +734,8 @@ public class DynamoDbService implements ResourceProvider {
                 }
             }
 
-            // AWS validates index key types against the item the update produces.
-            validateIndexKeyTypes(table, item);
+            // AWS validates index key values against the item the update produces.
+            validateIndexKeyTypes(table, item, true);
 
             items.put(itemKey, item);
             persistItems(storageKey);
@@ -2572,13 +2572,12 @@ public class DynamoDbService implements ResourceProvider {
         return pk;
     }
 
-    private void validateKeyAttributeValue(TableDefinition table, JsonNode attr, String keyName, boolean isKeyArg) {
-        if (attr == null) {
-            return;
-        }
+    // A wire-format AttributeValue must be a JSON object with exactly one type member.
+    // AWS enforces this for every attribute value; floci additionally relies on it
+    // wherever a value becomes part of a storage or index key.
+    private void validateAttributeValueShape(JsonNode attr) {
         if (!attr.isObject()) {
-            // A wire-format AttributeValue is always a JSON object; AWS's protocol
-            // layer rejects anything else before validation runs.
+            // AWS's protocol layer rejects non-object values before validation runs.
             throw new AwsException("SerializationException", "Unexpected value type in payload", 400);
         }
         if (attr.isEmpty()) {
@@ -2590,6 +2589,13 @@ public class DynamoDbService implements ResourceProvider {
                     "Supplied AttributeValue has more than one datatypes set, "
                     + "must contain exactly one of the supported datatypes", 400);
         }
+    }
+
+    private void validateKeyAttributeValue(TableDefinition table, JsonNode attr, String keyName, boolean isKeyArg) {
+        if (attr == null) {
+            return;
+        }
+        validateAttributeValueShape(attr);
         String expectedType = keyAttributeType(table, keyName);
         if (expectedType != null && !attr.has(expectedType)) {
             // AWS words the type mismatch differently for a Key argument
@@ -2619,38 +2625,53 @@ public class DynamoDbService implements ResourceProvider {
                 .findFirst().orElse(null);
     }
 
-    // AWS validates GSI/LSI key attribute types on every write that produces the item,
+    // AWS validates GSI/LSI key attribute values on every write that produces the item,
     // but only when the attribute is present — sparse indexes allow it to be absent.
-    private void validateIndexKeyTypes(TableDefinition table, JsonNode item) {
+    private void validateIndexKeyTypes(TableDefinition table, JsonNode item, boolean isUpdate) {
         if (table.getGlobalSecondaryIndexes() != null) {
             for (GlobalSecondaryIndex gsi : table.getGlobalSecondaryIndexes()) {
-                validateIndexKeySchema(table, item, gsi.getIndexName(), gsi.getKeySchema());
+                validateIndexKeySchema(table, item, gsi.getIndexName(), gsi.getKeySchema(), isUpdate);
             }
         }
         if (table.getLocalSecondaryIndexes() != null) {
             for (LocalSecondaryIndex lsi : table.getLocalSecondaryIndexes()) {
-                validateIndexKeySchema(table, item, lsi.getIndexName(), lsi.getKeySchema());
+                validateIndexKeySchema(table, item, lsi.getIndexName(), lsi.getKeySchema(), isUpdate);
             }
         }
     }
 
     private void validateIndexKeySchema(TableDefinition table, JsonNode item,
-                                        String indexName, List<KeySchemaElement> keySchema) {
+                                        String indexName, List<KeySchemaElement> keySchema,
+                                        boolean isUpdate) {
         if (keySchema == null) {
             return;
         }
         for (KeySchemaElement element : keySchema) {
             String attrName = element.getAttributeName();
             JsonNode attr = item.get(attrName);
-            if (attr == null || !attr.isObject() || attr.size() != 1) {
+            if (attr == null) {
                 continue;
             }
+            validateAttributeValueShape(attr);
             String expectedType = keyAttributeType(table, attrName);
             if (expectedType != null && !attr.has(expectedType)) {
                 throw new AwsException("ValidationException",
                         "One or more parameter values were invalid: Type mismatch for Index Key " + attrName
                         + " Expected: " + expectedType + " Actual: " + attr.fieldNames().next()
                         + " IndexName: " + indexName, 400);
+            }
+            if (attr.has("S") && attr.get("S").asText().isEmpty()) {
+                // AWS uses different wording for UpdateItem than for writes of a whole item.
+                if (isUpdate) {
+                    throw new AwsException("ValidationException",
+                            "One or more parameter values are not valid. The update expression attempted to "
+                            + "update a secondary index key to a value that is not supported. "
+                            + "The AttributeValue for a key attribute cannot contain an empty string value.", 400);
+                }
+                throw new AwsException("ValidationException",
+                        "One or more parameter values are not valid. A value specified for a secondary "
+                        + "index key is not supported. The AttributeValue for a key attribute cannot "
+                        + "contain an empty string value. IndexName: " + indexName + ", IndexKey: " + attrName, 400);
             }
         }
     }

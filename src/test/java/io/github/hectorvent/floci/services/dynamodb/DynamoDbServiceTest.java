@@ -2274,6 +2274,82 @@ class DynamoDbServiceTest {
     }
 
     @Test
+    void putItemMultiTypeGsiKeyValueThrowsValidationException() {
+        String region = "eu-west-1";
+        createIndexedTable(region);
+
+        ObjectNode multiTypeGsiItem = item("customerId", "c1", "orderId", "o1");
+        multiTypeGsiItem.set("gsiKey", mapper.createObjectNode().put("S", "x").put("N", "1"));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.putItem("Indexed", multiTypeGsiItem, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("Supplied AttributeValue has more than one datatypes set, "
+                + "must contain exactly one of the supported datatypes", ex.getMessage());
+    }
+
+    @Test
+    void putItemEmptyObjectGsiKeyValueThrowsValidationException() {
+        String region = "eu-west-1";
+        createIndexedTable(region);
+
+        ObjectNode emptyGsiItem = item("customerId", "c1", "orderId", "o1");
+        emptyGsiItem.set("gsiKey", mapper.createObjectNode());
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.putItem("Indexed", emptyGsiItem, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("Supplied AttributeValue is empty, "
+                + "must contain exactly one of the supported datatypes", ex.getMessage());
+    }
+
+    @Test
+    void putItemNonObjectGsiKeyValueThrowsSerializationException() {
+        String region = "eu-west-1";
+        createIndexedTable(region);
+
+        ObjectNode rawGsiItem = item("customerId", "c1", "orderId", "o1");
+        rawGsiItem.put("gsiKey", "x");
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.putItem("Indexed", rawGsiItem, region));
+        assertEquals("SerializationException", ex.getErrorCode());
+    }
+
+    @Test
+    void putItemEmptyStringGsiKeyThrowsValidationException() {
+        String region = "eu-west-1";
+        createIndexedTable(region);
+
+        ObjectNode emptyStringGsiItem = item("customerId", "c1", "orderId", "o1", "gsiKey", "");
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.putItem("Indexed", emptyStringGsiItem, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("One or more parameter values are not valid. A value specified for a secondary "
+                + "index key is not supported. The AttributeValue for a key attribute cannot "
+                + "contain an empty string value. IndexName: gsi1, IndexKey: gsiKey", ex.getMessage());
+    }
+
+    @Test
+    void updateItemSettingEmptyStringGsiKeyThrowsValidationException() {
+        String region = "eu-west-1";
+        createIndexedTable(region);
+        service.putItem("Indexed", item("customerId", "c1", "orderId", "o1"), region);
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":v", attributeValue("S", ""));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.updateItem("Indexed", item("customerId", "c1", "orderId", "o1"), null,
+                        "SET gsiKey = :v", null, exprValues, null, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("One or more parameter values are not valid. The update expression attempted to "
+                + "update a secondary index key to a value that is not supported. "
+                + "The AttributeValue for a key attribute cannot contain an empty string value.", ex.getMessage());
+    }
+
+    @Test
     void updateItemNullPartitionKeyThrowsValidationException() {
         String region = "eu-west-1";
         createUsersTable(region);
