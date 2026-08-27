@@ -123,15 +123,24 @@ public class ServiceCatalogService {
         }
     }
 
+    /**
+     * AWS refuses to delete a portfolio that "has associated products, users, constraints, or
+     * shared accounts" rather than cascading. Every one of those rows carries the portfolio's
+     * id in {@code PortfolioId} — products, principals and constraints alike — so a single scan
+     * covers the documented list. Tag-option associations key off {@code ResourceId} instead and
+     * are deliberately not counted: they are absent from AWS's list, and the previous cascade
+     * never removed them either, so nothing is orphaned that was not orphaned before.
+     */
     public void deletePortfolio(String id) {
         require(portfolioStore, id, "portfolio");
+        boolean hasAssociations = associationStore.scan(key -> true).stream()
+                .anyMatch(value -> id.equals(text(value, "PortfolioId")));
+        boolean hasShares = shareStore.keys().stream().anyMatch(key -> key.startsWith(id + "|"));
+        if (hasAssociations || hasShares) {
+            throw inUse("portfolio", id,
+                    "it has associated products, users, constraints, or shared accounts");
+        }
         portfolioStore.delete(id);
-        associationStore.keys().stream()
-                .filter(key -> associationStore.get(key)
-                        .map(value -> id.equals(text(value, "PortfolioId"))).orElse(false))
-                .toList().forEach(associationStore::delete);
-        shareStore.keys().stream().filter(key -> key.startsWith(id + "|"))
-                .toList().forEach(shareStore::delete);
     }
 
     public ObjectNode createProduct(JsonNode request, String region, String accountId) {
@@ -357,9 +366,20 @@ public class ServiceCatalogService {
         return true;
     }
 
+    /**
+     * AWS refuses to delete a product that "is associated with a portfolio". Only the portfolio
+     * association blocks — a product carrying just service-action associations or constraints is
+     * still deletable, and those rows are cleaned up below as before.
+     */
     public void deleteProduct(String id) {
         ObjectNode product = requireProduct(id);
         String productId = text(product, "Id");
+        boolean inPortfolio = associationStore.scan(key -> true).stream()
+                .anyMatch(value -> "PRODUCT".equals(text(value, "Type"))
+                        && productMatches(value.path("ProductId").asText(), product));
+        if (inPortfolio) {
+            throw inUse("product", productId, "it is associated with a portfolio");
+        }
         productStore.delete(productId);
         associationStore.keys().stream()
                 .filter(key -> associationStore.get(key)
@@ -544,6 +564,12 @@ public class ServiceCatalogService {
 
     private AwsException notFound(String type, String id) {
         return new AwsException("ResourceNotFoundException", "Unknown " + type + ": " + id, 400);
+    }
+
+    /** 400 matches every other error this service raises; the shape models no status of its own. */
+    private AwsException inUse(String type, String id, String reason) {
+        return new AwsException("ResourceInUseException",
+                "Cannot delete " + type + " " + id + " because " + reason + ".", 400);
     }
 
     private String requireText(JsonNode node, String field) {
