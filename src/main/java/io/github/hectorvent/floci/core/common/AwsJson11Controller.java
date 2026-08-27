@@ -23,6 +23,7 @@ import io.github.hectorvent.floci.services.ce.CostExplorerJsonHandler;
 import io.github.hectorvent.floci.services.cloudtrail.CloudTrailJsonHandler;
 import io.github.hectorvent.floci.services.applicationautoscaling.ApplicationAutoScalingJsonHandler;
 import io.github.hectorvent.floci.services.cloudcontrol.CloudControlJsonHandler;
+import io.github.hectorvent.floci.services.ssoadmin.SsoAdminJsonHandler;
 import io.github.hectorvent.floci.services.configservice.ConfigServiceJsonHandler;
 import io.github.hectorvent.floci.services.cur.CurJsonHandler;
 import io.github.hectorvent.floci.services.pricing.PricingJsonHandler;
@@ -110,6 +111,7 @@ public class AwsJson11Controller {
     private final ApplicationAutoScalingJsonHandler applicationAutoScalingJsonHandler;
     private final CloudHsmV2JsonHandler cloudHsmV2JsonHandler;
     private final OrganizationsJsonHandler organizationsJsonHandler;
+    private final SsoAdminJsonHandler ssoAdminJsonHandler;
     private final ServiceQuotasJsonHandler serviceQuotasJsonHandler;
 
     @Inject
@@ -150,6 +152,7 @@ public class AwsJson11Controller {
                                ApplicationAutoScalingJsonHandler applicationAutoScalingJsonHandler,
                                CloudHsmV2JsonHandler cloudHsmV2JsonHandler,
                                OrganizationsJsonHandler organizationsJsonHandler,
+                               SsoAdminJsonHandler ssoAdminJsonHandler,
                                ServiceQuotasJsonHandler serviceQuotasJsonHandler) {
         this.objectMapper = objectMapper;
         this.strictBodyReader = objectMapper.reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
@@ -194,6 +197,7 @@ public class AwsJson11Controller {
         this.applicationAutoScalingJsonHandler = applicationAutoScalingJsonHandler;
         this.cloudHsmV2JsonHandler = cloudHsmV2JsonHandler;
         this.organizationsJsonHandler = organizationsJsonHandler;
+        this.ssoAdminJsonHandler = ssoAdminJsonHandler;
         this.serviceQuotasJsonHandler = serviceQuotasJsonHandler;
     }
 
@@ -272,6 +276,7 @@ public class AwsJson11Controller {
                 // action is authorized against the calling account, so pass that instead of region.
                 case "organizations" ->
                         organizationsJsonHandler.handle(action, request, regionResolver.getAccountId());
+                case "sso" -> ssoAdminJsonHandler.handle(action, request, regionResolver.getAccountId());
                 case "servicequotas" -> serviceQuotasJsonHandler.handle(
                         action, request, region, regionResolver.getAccountId());
                 default -> null;
