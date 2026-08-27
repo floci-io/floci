@@ -337,6 +337,8 @@ floci:
       enabled: true
     rum:
       enabled: true
+    servicecatalog:
+      enabled: true
     guardduty:
       enabled: true
     emrserverless:

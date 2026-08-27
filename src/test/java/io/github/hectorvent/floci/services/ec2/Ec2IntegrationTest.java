@@ -7,6 +7,8 @@ import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.endsWith;
 import static org.hamcrest.Matchers.emptyOrNullString;
 import static org.hamcrest.Matchers.containsInAnyOrder;
+import static org.hamcrest.Matchers.hasItems;
+import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.everyItem;
 import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.greaterThanOrEqualTo;
@@ -3965,4 +3967,173 @@ class Ec2IntegrationTest {
             .body("DescribeSecurityGroupRulesResponse.securityGroupRuleSet.item.securityGroupRuleId",
                     equalTo(ruleId));
     }
+
+    @Test
+    @Order(321)
+    void modifyIpamUpdatesDescriptionAndOperatingRegionsOverQuery() {
+        String ipamId = given()
+            .formParam("Action", "CreateIpam")
+            .formParam("Description", "initial-ipam")
+            .formParam("OperatingRegion.1.RegionName", "us-east-1")
+            .formParam("OperatingRegion.2.RegionName", "us-west-1")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("CreateIpamResponse.ipam.ipamId");
+
+        given()
+            .formParam("Action", "ModifyIpam")
+            .formParam("IpamId", ipamId)
+            .formParam("Description", "updated-ipam")
+            .formParam("AddOperatingRegion.1.RegionName", "us-west-2")
+            .formParam("RemoveOperatingRegion.1.RegionName", "us-east-1")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ModifyIpamResponse.ipam.ipamId", equalTo(ipamId))
+            .body("ModifyIpamResponse.ipam.description", equalTo("updated-ipam"))
+            .body("ModifyIpamResponse.ipam.operatingRegionSet.item.regionName",
+                    hasItems("us-west-1", "us-west-2"));
+
+        given()
+            .formParam("Action", "DescribeIpams")
+            .formParam("IpamId.1", ipamId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeIpamsResponse.ipamSet.item.description", equalTo("updated-ipam"))
+            .body("DescribeIpamsResponse.ipamSet.item.operatingRegionSet.item.regionName",
+                    hasItems("us-west-1", "us-west-2"))
+            .body("DescribeIpamsResponse.ipamSet.item.operatingRegionSet.item.regionName",
+                    not(hasItem("us-east-1")));
+    }
+
+    @Test
+    @Order(322)
+    void modifyIpamUnknownIdsReturnAwsErrorShape() {
+        given()
+            .formParam("Action", "ModifyIpam")
+            .formParam("IpamId", "ipam-doesnotexist")
+            .formParam("Description", "updated-ipam")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidIpamId.NotFound"));
+    }
+    @Test
+    @Order(323)
+    void associateIpamByoasnSuccess() {
+        given()
+            .formParam("Action", "AssociateIpamByoasn")
+            .formParam("Asn", "65000")
+            .formParam("Cidr", "10.0.0.0/16")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("AssociateIpamByoasnResponse.asnAssociation.asn", equalTo("65000"))
+            .body("AssociateIpamByoasnResponse.asnAssociation.cidr", equalTo("10.0.0.0/16"))
+            .body("AssociateIpamByoasnResponse.asnAssociation.state", equalTo("associated"))
+            .body("AssociateIpamByoasnResponse.asnAssociation.statusMessage", equalTo(""));
+    }
+
+    @Test
+    @Order(324)
+    void associateIpamByoasnDryRunThrows() {
+        given()
+            .formParam("Action", "AssociateIpamByoasn")
+            .formParam("Asn", "65000")
+            .formParam("Cidr", "10.0.0.0/16")
+            .formParam("DryRun", "true")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(412)
+            .body("Response.Errors.Error.Code", equalTo("DryRunOperation"));
+    }
+
+    @Test
+    @Order(325)
+    void createIpamFullFieldsRoundTrip() {
+        String id = given()
+            .formParam("Action", "CreateIpam")
+            .formParam("ClientToken", "create-ipam-full-325")
+            .formParam("Description", "full-ipam")
+            .formParam("EnablePrivateGua", "true")
+            .formParam("MeteredAccount", "resource-owner")
+            .formParam("Tier", "advanced")
+            .formParam("OperatingRegion.1.RegionName", "us-east-1")
+            .formParam("TagSpecification.1.ResourceType", "ipam")
+            .formParam("TagSpecification.1.Tag.1.Key", "Name")
+            .formParam("TagSpecification.1.Tag.1.Value", "full")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/").then().statusCode(200)
+            .body("CreateIpamResponse.ipam.enablePrivateGua", equalTo("true"))
+            .body("CreateIpamResponse.ipam.meteredAccount", equalTo("resource-owner"))
+            .body("CreateIpamResponse.ipam.tier", equalTo("advanced"))
+            .body("CreateIpamResponse.ipam.tagSet.item.key", equalTo("Name"))
+            .extract().path("CreateIpamResponse.ipam.ipamId");
+
+        given().formParam("Action", "DescribeIpams").formParam("IpamId.1", id)
+            .header("Authorization", AUTH_HEADER).when().post("/").then().statusCode(200)
+            .body("DescribeIpamsResponse.ipamSet.item.ipamId", equalTo(id))
+            .body("DescribeIpamsResponse.ipamSet.item.tagSet.item.value", equalTo("full"));
+    }
+
+    @Test
+    @Order(326)
+    void createIpamDryRunDoesNotMutate() {
+        given().formParam("Action", "CreateIpam").formParam("ClientToken", "dry-run-326")
+            .formParam("DryRun", "true").header("Authorization", AUTH_HEADER)
+        .when().post("/").then().statusCode(412)
+            .body("Response.Errors.Error.Code", equalTo("DryRunOperation"));
+        given().formParam("Action", "DescribeIpams").formParam("Filter.1.Name", "state")
+            .formParam("Filter.1.Value.1", "create-complete")
+            .header("Authorization", AUTH_HEADER).when().post("/").then().statusCode(200);
+    }
+
+    @Test
+    @Order(327)
+    void describeAndDisassociateIpamByoasn() {
+        given().formParam("Action", "AssociateIpamByoasn").formParam("Asn", "65001")
+            .formParam("Cidr", "10.1.0.0/16").header("Authorization", AUTH_HEADER)
+            .when().post("/").then().statusCode(200);
+        given().formParam("Action", "DescribeIpamByoasn").header("Authorization", AUTH_HEADER)
+            .when().post("/").then().statusCode(200)
+            .body("DescribeIpamByoasnResponse.byoasnSet.item.asn", hasItem("65001"));
+        given().formParam("Action", "DisassociateIpamByoasn").formParam("Asn", "65001")
+            .formParam("Cidr", "10.1.0.0/16").header("Authorization", AUTH_HEADER)
+            .when().post("/").then().statusCode(200)
+            .body("DisassociateIpamByoasnResponse.asnAssociation.state", equalTo("disassociated"));
+    }
+
+    @Test
+    @Order(328)
+    void enableIpamOrganizationAdminAccountSucceedsForTheDefaultAccountCredential() {
+        // LZA's Organization-stage custom resource calls this over the query protocol with the
+        // same style of credential every other test in this suite uses (a non-12-digit access
+        // key, which AccountContextFilter/AccountResolver resolve to the configured default
+        // account). The management-account gate added alongside this test must not deny that
+        // path — only a caller whose credential resolves to a DIFFERENT 12-digit account should
+        // be denied.
+        given().formParam("Action", "EnableIpamOrganizationAdminAccount")
+            .formParam("DelegatedAdminAccountId", "111111111111")
+            .header("Authorization", AUTH_HEADER)
+            .when().post("/").then().statusCode(200);
+        given().formParam("Action", "DisableIpamOrganizationAdminAccount")
+            .formParam("DelegatedAdminAccountId", "111111111111")
+            .header("Authorization", AUTH_HEADER)
+            .when().post("/").then().statusCode(200);
+    }
+
 }

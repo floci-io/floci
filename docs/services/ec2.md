@@ -207,6 +207,7 @@ Floci seeds the following resources on first use in each region so Terraform, th
 | AuthorizeSecurityGroupEgress | Adds outbound permissions, with the same source types as the inbound call. |
 | RevokeSecurityGroupIngress | Removes inbound permissions. Matches on protocol and port range only, so it removes every permission on that port regardless of source. |
 | RevokeSecurityGroupEgress | Removes outbound permissions, matched the same way as the inbound call. |
+| GetSecurityGroupsForVpc | Lists the security groups belonging to one VPC, with the same filters as the describe call. |
 | DescribeSecurityGroupRules | Lists stored security group rules. |
 | ModifySecurityGroupRules | Updates supported fields on security group rules. |
 | UpdateSecurityGroupRuleDescriptionsIngress | Updates descriptions on matching inbound security group rules. |
@@ -390,6 +391,7 @@ real AWS rejects; Floci does not model subnet IPv6 allocation.
 | DeleteTransitGatewayRoute | Removes a static route. |
 | ReplaceTransitGatewayRoute | Points an existing route at a different target, or writes it if absent. |
 | SearchTransitGatewayRoutes | Returns a route table's routes, static and propagated, filtered. |
+| ExportTransitGatewayRoutes | Reports the S3 object a route-table export would be written to. |
 
 A route table asked for by name is never a default one; only the table a gateway mints for itself
 carries `defaultAssociationRouteTable` or `defaultPropagationRouteTable`. Deleting a route table is
@@ -420,6 +422,8 @@ route table's own listings drop the route table id that the mutating calls inclu
 
 Route table ids follow the live API's own inconsistency: an id that does not exist is
 `InvalidRouteTableID.NotFound`, while one of the wrong shape is `InvalidRouteTableId.Malformed`.
+
+`ExportTransitGatewayRoutes` validates the route table and requires `S3Bucket`, then returns the `s3://` object key the export would occupy. No object is written and nothing is uploaded — the value is a caller that needs the call to succeed and the key to look right, not a readable export.
 
 ### NAT Gateways
 
@@ -487,6 +491,58 @@ Launch templates store versioned launch data. New template versions can be creat
 | CreateVolume | Creates an EBS volume record. |
 | DescribeVolumes | Lists or returns stored EBS volume records. |
 | DeleteVolume | Deletes an EBS volume record. |
+
+### EBS Encryption Defaults
+
+| Action | Description |
+|--------|-------------|
+| EnableEbsEncryptionByDefault | Turns on default encryption for new volumes in the region. |
+| DisableEbsEncryptionByDefault | Turns default encryption back off. |
+| GetEbsEncryptionByDefault | Reports whether default encryption is on. |
+| ModifyEbsDefaultKmsKeyId | Sets the KMS key used when a volume names none. |
+| GetEbsDefaultKmsKeyId | Reports the current default KMS key. |
+| ResetEbsDefaultKmsKeyId | Restores the AWS-managed default key. |
+
+These are account-level settings scoped per region, not per volume, and nothing here encrypts anything — no volume's stored bytes change. LZA's SecurityStack drives them through its `Custom::EnableEbsEncryptionByDefault` Lambda, which calls enable plus `ModifyEbsDefaultKmsKeyId` on create and disable on delete, then reads the state back with the two `Get` calls.
+
+An account that has never set a key reports `alias/aws/ebs`, the AWS-managed EBS key every account starts with, rather than an empty value — the module runner fails hard on a missing `KmsKeyId`, so the fallback is what keeps it running. `ResetEbsDefaultKmsKeyId` returns to that same alias. `ModifyEbsDefaultKmsKeyId` requires `KmsKeyId` and rejects a blank one with `MissingParameter`; the key is stored as given and is not checked against KMS.
+
+### IPAM
+
+| Action | Description |
+|--------|-------------|
+| EnableIpamOrganizationAdminAccount | Delegates IPAM administration to a member account. |
+| DisableIpamOrganizationAdminAccount | Removes the IPAM delegated administrator. |
+| CreateIpam | Creates an IPAM with its default private and public scopes. |
+| DescribeIpams | Lists or returns stored IPAMs. |
+| ModifyIpam | Updates an IPAM's description, tier, metered account and operating regions. |
+| DeleteIpam | Deletes an IPAM and, leniently, the pools that belong to it. |
+| CreateIpamPool | Creates a pool under a scope, optionally sourced from a parent pool. |
+| DescribeIpamPools | Lists or returns stored pools. |
+| ModifyIpamPool | Updates a pool's description, auto-import flag and netmask-length bounds. |
+| DeleteIpamPool | Deletes a pool. |
+| ProvisionIpamPoolCidr | Provisions a CIDR onto a pool, validated against its source pool. |
+| GetIpamPoolCidrs | Returns a pool's provisioned CIDRs. |
+| AllocateIpamPoolCidr | Allocates a CIDR from a pool, by explicit CIDR or by netmask length. |
+| ReleaseIpamPoolAllocation | Releases an allocation, returning its space to the pool. |
+| GetIpamPoolAllocations | Returns a pool's live allocations. |
+| AssociateIpamByoasn | Associates a BYOASN with a CIDR. |
+| DisassociateIpamByoasn | Removes a BYOASN association. |
+| DescribeIpamByoasn | Lists BYOASN associations in the region. |
+
+This is what LZA needs end to end: the Organization stage delegates the IPAM admin through `Custom::EnableIpamOrganizationAdminAccount`, the Network stages build the IPAM and pool hierarchy through CloudFormation, and the `get-ipam-subnet-cidr` custom-resource Lambda allocates subnet CIDRs from pools at Deploy time.
+
+Allocation is real rather than recorded. `AllocateIpamPoolCidr` by netmask length hands out the first free block that fits, skipping both live allocations and any space already provisioned onward to child pools, and reports `InsufficientCidrBlocks` when nothing fits. An explicit `Cidr` must fall inside a provisioned CIDR and must not overlap an existing allocation. `ProvisionIpamPoolCidr` on a pool with a source pool requires the CIDR to sit inside one of the parent's provisioned CIDRs. Releasing an allocation returns its space, so the next allocation of the same size reuses it.
+
+`CreateIpam`, `CreateIpamPool`, `ProvisionIpamPoolCidr` and `AllocateIpamPoolCidr` honour `ClientToken` — the four IPAM operations that model it. A replay returns what the first call produced rather than creating a second resource: the same pool, the same provisioned CIDR, the same allocation id and CIDR, with pool consumption unchanged. This matters most on `AllocateIpamPoolCidr`, which LZA's `get-ipam-subnet-cidr` Lambda retries; without it each retry would burn another distinct CIDR out of the pool. Parameter differences on a replay are ignored rather than rejected as `IdempotentParameterMismatch`, and the token is not echoed in the response, matching the AWS output shapes. A token is scoped to the account that used it.
+
+Pool lookups deliberately fall back to an id-only scan across accounts, so a RAM-shared pool resolves from a workload account and region. That fallback covers reads and allocation only: `AllocateIpamPoolCidr` from an account that does not own the pool succeeds and writes the allocation back to the owner's partition rather than forking a copy into the caller's. Mutations of the pool itself — `ModifyIpamPool`, `DeleteIpamPool`, `ProvisionIpamPoolCidr` — are owner-only, as are `ModifyIpam` and `DeleteIpam`, and a non-owner gets `InvalidIpamPoolId.NotFound` or `InvalidIpamId.NotFound`, which is what AWS returns for a resource you cannot act on. `ReleaseIpamPoolAllocation` stays on the cross-account path, since no per-allocation caller is tracked to check ownership against.
+
+The delegated administrator is stored organization-wide rather than per account, so every member account reads the same value and delegating a second, different account conflicts with `InvalidParameterValue` no matter which account asks.
+
+Omitting a required identifier is a modeled `MissingParameter` rather than a not-found: this covers `IpamPoolId` on every pool operation, and `IpamScopeId` on `CreateIpamPool`. A `CreateIpamPool` naming a scope no IPAM owns is rejected with `InvalidIpamScopeId.NotFound` instead of storing a pool with a null `ipamId`.
+
+State is reported settled rather than transitional, as elsewhere in this service: IPAMs and pools come back `create-complete` immediately and `delete-complete` on deletion, with no intermediate states. `DeleteIpam` cascades to the IPAM's pools, which real AWS requires `--cascade` to do. BYOASN associations are stored and echoed but nothing validates the ASN or advertises it.
 
 ## Configuration
 
