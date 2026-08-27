@@ -1671,8 +1671,9 @@ public class SesService {
 
     // Storage lives in SesDedicatedIpService; the facade forwards.
 
-    public DedicatedIpPool createDedicatedIpPool(String poolName, String scalingMode, String region) {
-        return dedicatedIpService.createDedicatedIpPool(poolName, scalingMode, region);
+    public DedicatedIpPool createDedicatedIpPool(String poolName, String scalingMode, List<Tag> tags,
+                                                 String region) {
+        return dedicatedIpService.createDedicatedIpPool(poolName, scalingMode, tags, region);
     }
 
     public DedicatedIpPool getDedicatedIpPool(String poolName, String region) {
@@ -2040,33 +2041,44 @@ public class SesService {
 
     public List<Tag> listResourceTags(String arn, String region) {
         ResourceRef ref = parseSesArn(arn);
-        return switch (ref.type()) {
-            case "configuration-set" -> listConfigurationSetTags(ref.name(), ref.region());
-            // AWS ListTagsForResource on template / identity ARNs uses the signing region
-            // for lookup (the ARN region is effectively ignored), unlike configuration-set
-            // which routes by the ARN's region.
+        requireCallerAccount(ref);
+        List<Tag> tags = switch (ref.type()) {
+            case "configuration-set" -> listConfigurationSetTags(ref.name(), region);
             case "template" -> listEmailTemplateTags(ref.name(), region);
             case "identity" -> listIdentityTags(ref.name(), region);
+            case "contact-list" -> contactService.listTags(ref.name(), region);
+            case "custom-verification-email-template" -> cvetService.listTags(ref.name(), region);
+            case "dedicated-ip-pool" -> dedicatedIpService.listTags(ref.name(), region);
             default -> throw new AwsException("NotFoundException",
                     "Resource " + arn + " was not found.", 404);
         };
+        // AWS checks existence against the signing region but keys the tag store by the literal
+        // ARN: a mismatched ARN region passes the existence check above yet addresses an ARN
+        // nothing was ever tagged under, so the result is empty (probe-confirmed across all six
+        // resource types).
+        if (!ref.region().equals(region)) {
+            return List.of();
+        }
+        return tags;
     }
 
     public void tagResource(String arn, String region, List<Tag> newTags) {
         ResourceRef ref = parseSesArn(arn);
+        requireCallerAccount(ref);
         if (!ref.region().equals(region)) {
             throw new AwsException("BadRequestException", "Failed to tag resource", 400);
         }
-        if (newTags == null || newTags.isEmpty()) {
-            throw new AwsException("BadRequestException",
-                    "1 validation error detected: Value at 'tags' failed to satisfy constraint: "
-                            + "Member must have length greater than or equal to 1", 400);
-        }
-        SesTags.validate(newTags);
+        // An empty Tags list is not an error: AWS still runs the account, region, and existence
+        // checks and then applies the empty merge as a no-op (probe-confirmed).
+        List<Tag> tags = newTags == null ? List.of() : newTags;
+        SesTags.validate(tags);
         switch (ref.type()) {
-            case "configuration-set" -> tagConfigurationSet(ref.name(), ref.region(), newTags);
-            case "template" -> tagEmailTemplate(ref.name(), ref.region(), newTags);
-            case "identity" -> tagIdentity(ref.name(), ref.region(), newTags);
+            case "configuration-set" -> tagConfigurationSet(ref.name(), region, tags);
+            case "template" -> tagEmailTemplate(ref.name(), region, tags);
+            case "identity" -> tagIdentity(ref.name(), region, tags);
+            case "contact-list" -> contactService.tag(ref.name(), region, tags);
+            case "custom-verification-email-template" -> cvetService.tag(ref.name(), region, tags);
+            case "dedicated-ip-pool" -> dedicatedIpService.tag(ref.name(), region, tags);
             default -> throw new AwsException("NotFoundException",
                     "Resource " + arn + " was not found.", 404);
         }
@@ -2074,29 +2086,25 @@ public class SesService {
 
     public void untagResource(String arn, String region, List<String> tagKeys) {
         ResourceRef ref = parseSesArn(arn);
+        requireCallerAccount(ref);
         if (tagKeys == null || tagKeys.isEmpty()) {
-            throw new AwsException("BadRequestException",
-                    "1 validation error detected: Value at 'tagKeys' failed to satisfy constraint: "
-                            + "Member must have length greater than or equal to 1", 400);
+            // AWS rejects a missing/empty TagKeys member with a message-less ValidationException
+            // (probe-confirmed: only the error-type header, empty body), after the account guard
+            // and before the region guard. The null message is deliberate — it surfaces through
+            // Floci's standard error body as "message":null, which restJson1 SDKs parse the same
+            // way as AWS's empty body since they read x-amzn-errortype first.
+            throw new AwsException("ValidationException", null, 400);
+        }
+        if (!ref.region().equals(region)) {
+            throw new AwsException("BadRequestException", "Failed to untag resource", 400);
         }
         switch (ref.type()) {
-            case "configuration-set" -> untagConfigurationSet(ref.name(), ref.region(), tagKeys);
-            case "template" -> {
-                // AWS UntagResource on template / identity ARNs strictly requires the ARN
-                // region to match the signing region (rejects mismatch with
-                // BadRequestException), unlike configuration-set which routes the lookup
-                // to the ARN's region.
-                if (!ref.region().equals(region)) {
-                    throw new AwsException("BadRequestException", "Failed to untag resource", 400);
-                }
-                untagEmailTemplate(ref.name(), region, tagKeys);
-            }
-            case "identity" -> {
-                if (!ref.region().equals(region)) {
-                    throw new AwsException("BadRequestException", "Failed to untag resource", 400);
-                }
-                untagIdentity(ref.name(), region, tagKeys);
-            }
+            case "configuration-set" -> untagConfigurationSet(ref.name(), region, tagKeys);
+            case "template" -> untagEmailTemplate(ref.name(), region, tagKeys);
+            case "identity" -> untagIdentity(ref.name(), region, tagKeys);
+            case "contact-list" -> contactService.untag(ref.name(), region, tagKeys);
+            case "custom-verification-email-template" -> cvetService.untag(ref.name(), region, tagKeys);
+            case "dedicated-ip-pool" -> dedicatedIpService.untag(ref.name(), region, tagKeys);
             default -> throw new AwsException("NotFoundException",
                     "Resource " + arn + " was not found.", 404);
         }
@@ -2114,7 +2122,7 @@ public class SesService {
         ConfigurationSet cs = configSetStore.get(key)
                 .orElseThrow(() -> new AwsException("NotFoundException",
                         "No ConfigurationSet present with name: " + name, 404));
-        cs.setTags(mergeTags(cs.getTags(), newTags));
+        cs.setTags(SesTags.merge(cs.getTags(), newTags));
         configSetStore.put(key, cs);
         LOG.infov("Tagged SES configuration set: {0} (region {1}, +{2} tags)", name, region, newTags.size());
     }
@@ -2125,7 +2133,10 @@ public class SesService {
                 .orElseThrow(() -> new AwsException("NotFoundException",
                         "No ConfigurationSet present with name: " + name, 404));
         Set<String> toRemove = new HashSet<>(tagKeys);
-        cs.getTags().removeIf(t -> toRemove.contains(t.key()));
+        // Copy-on-write: the stored list may be immutable, and unlocked readers iterate it.
+        List<Tag> remaining = new ArrayList<>(cs.getTags());
+        remaining.removeIf(t -> toRemove.contains(t.key()));
+        cs.setTags(remaining);
         configSetStore.put(key, cs);
         LOG.infov("Untagged SES configuration set: {0} (region {1}, -{2} keys)", name, region, tagKeys.size());
     }
@@ -2141,24 +2152,9 @@ public class SesService {
         EmailTemplate template = templateService.find(name, region)
                 .orElseThrow(() -> new AwsException("NotFoundException",
                         "No Template present with name: " + name, 404));
-        template.setTags(mergeTags(template.getTags(), newTags));
+        template.setTags(SesTags.merge(template.getTags(), newTags));
         templateService.save(template, region);
         LOG.infov("Tagged SES template: {0} (region {1}, +{2} tags)", name, region, newTags.size());
-    }
-
-    private static List<Tag> mergeTags(List<Tag> existing,
-                                                         List<Tag> incoming) {
-        Map<String, String> merged = new LinkedHashMap<>();
-        for (Tag t : existing) {
-            merged.put(t.key(), t.value());
-        }
-        for (Tag t : incoming) {
-            merged.put(t.key(), t.value());
-        }
-        SesTags.validateMergedCount(merged.size());
-        List<Tag> out = new ArrayList<>();
-        merged.forEach((k, v) -> out.add(new Tag(k, v)));
-        return out;
     }
 
     private List<Tag> listIdentityTags(String identityValue, String region) {
@@ -2173,7 +2169,7 @@ public class SesService {
         Identity identity = identityStore.get(key)
                 .orElseThrow(() -> new AwsException("NotFoundException",
                         "No EmailIdentity present with name: " + identityValue, 404));
-        identity.setTags(mergeTags(identity.getTags(), newTags));
+        identity.setTags(SesTags.merge(identity.getTags(), newTags));
         identityStore.put(key, identity);
         LOG.infov("Tagged SES identity: {0} (region {1}, +{2} tags)", identityValue, region, newTags.size());
     }
@@ -2184,7 +2180,10 @@ public class SesService {
                 .orElseThrow(() -> new AwsException("NotFoundException",
                         "No EmailIdentity present with name: " + identityValue, 404));
         Set<String> toRemove = new HashSet<>(tagKeys);
-        identity.getTags().removeIf(t -> toRemove.contains(t.key()));
+        // Copy-on-write: the stored list may be immutable, and unlocked readers iterate it.
+        List<Tag> remaining = new ArrayList<>(identity.getTags());
+        remaining.removeIf(t -> toRemove.contains(t.key()));
+        identity.setTags(remaining);
         identityStore.put(key, identity);
         LOG.infov("Untagged SES identity: {0} (region {1}, -{2} keys)", identityValue, region, tagKeys.size());
     }
@@ -2204,12 +2203,28 @@ public class SesService {
                 .orElseThrow(() -> new AwsException("NotFoundException",
                         "No Template present with name: " + name, 404));
         Set<String> toRemove = new HashSet<>(tagKeys);
-        template.getTags().removeIf(t -> toRemove.contains(t.key()));
+        // Copy-on-write: the stored list may be immutable, and unlocked readers iterate it.
+        List<Tag> remaining = new ArrayList<>(template.getTags());
+        remaining.removeIf(t -> toRemove.contains(t.key()));
+        template.setTags(remaining);
         templateService.save(template, region);
         LOG.infov("Untagged SES template: {0} (region {1}, -{2} keys)", name, region, tagKeys.size());
     }
 
-    private record ResourceRef(String region, String type, String name) {}
+    private record ResourceRef(String account, String region, String type, String name) {}
+
+    /**
+     * AWS rejects a tag operation whose ARN carries a different account id before any region or
+     * existence check (probe-confirmed): the account error wins even when the region is also
+     * mismatched or the resource doesn't exist anywhere.
+     */
+    private void requireCallerAccount(ResourceRef ref) {
+        String callerAccountId = regionResolver != null ? regionResolver.getAccountId() : defaultAccountId;
+        if (!ref.account().equals(callerAccountId)) {
+            throw new AwsException("BadRequestException",
+                    "Operations on a resource created in a different account is not allowed", 400);
+        }
+    }
 
     private static ResourceRef parseSesArn(String arn) {
         if (arn == null || arn.isBlank()) {
@@ -2234,7 +2249,8 @@ public class SesService {
         if (slash <= 0 || slash == resource.length() - 1) {
             throw new AwsException("BadRequestException", "Invalid ARN: " + arn, 400);
         }
-        return new ResourceRef(parsed.region(), resource.substring(0, slash), resource.substring(slash + 1));
+        return new ResourceRef(parsed.accountId(), parsed.region(),
+                resource.substring(0, slash), resource.substring(slash + 1));
     }
 
     // ──────────────────── Suppression (account attributes + list) ────────────────────

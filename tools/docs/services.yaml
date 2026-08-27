@@ -108,6 +108,10 @@ services:
     doc: docs/services/neptune.md
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/neptune/NeptuneQueryHandler.java, mode: switch }
+  - service: ram
+    doc: docs/services/ram.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/ram/RamController.java, mode: rest }
   - service: rds
     doc: docs/services/rds.md
     sources:
@@ -117,6 +121,10 @@ services:
     doc: docs/services/secrets-manager.md
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/secretsmanager/SecretsManagerJsonHandler.java, mode: switch }
+  - service: servicequotas
+    doc: docs/services/servicequotas.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/servicequotas/ServiceQuotasJsonHandler.java, mode: switch }
   - service: sqs
     doc: docs/services/sqs.md
     sources:
