@@ -1,7 +1,9 @@
 package io.github.hectorvent.floci.services.ram;
 
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectReader;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -43,12 +45,15 @@ public class RamController {
 
     private final RamService service;
     private final ObjectMapper objectMapper;
+    private final ObjectReader requestReader;
     private final RegionResolver regionResolver;
 
     @Inject
     public RamController(RamService service, ObjectMapper objectMapper, RegionResolver regionResolver) {
         this.service = service;
         this.objectMapper = objectMapper;
+        this.requestReader = objectMapper.reader()
+                .with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
         this.regionResolver = regionResolver;
     }
 
@@ -314,7 +319,9 @@ public class RamController {
         try {
             return (body == null || body.isBlank())
                     ? objectMapper.createObjectNode()
-                    : objectMapper.readTree(body);
+                    // Strict: Jackson's default stops at the first complete value, so
+                    // "{} not-json" would parse as an empty object and the request would run.
+                    : requestReader.readTree(body);
         } catch (IOException e) {
             throw new AwsException("SerializationException",
                     "The request could not be parsed as valid JSON.", 400);

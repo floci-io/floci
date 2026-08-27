@@ -170,6 +170,29 @@ class RamIntegrationTest {
             .body("clientToken", equalTo("idem-1"));
     }
 
+    /**
+     * Jackson's default readTree stops at the first complete value, so a body like
+     * {@code {} not-json} parsed as an empty object and the request executed. The JSON 1.0/1.1
+     * controllers and the FIS REST controller all read with FAIL_ON_TRAILING_TOKENS; RAM was the
+     * outlier.
+     */
+    @Test
+    void trailingContentAfterValidJsonIsSerializationException() {
+        for (String body : new String[] {
+                "{} not-json",
+                "{\"resourceOwner\":\"SELF\"}{\"second\":\"document\"}"}) {
+            given()
+                .contentType("application/json")
+                .header("Authorization", AUTH_HEADER)
+                .body(body)
+            .when()
+                .post("/getresourceshares")
+            .then()
+                .statusCode(400)
+                .body("__type", equalTo("SerializationException"));
+        }
+    }
+
     @Test
     void malformedBodyIsRejectedAsSerializationException() {
         // A body that is not JSON is a client error; without an explicit rejection the parse
