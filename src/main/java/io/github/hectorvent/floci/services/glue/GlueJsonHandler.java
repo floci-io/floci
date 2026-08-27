@@ -167,9 +167,9 @@ public class GlueJsonHandler {
             case "PutSchemaVersionMetadata" -> handlePutSchemaVersionMetadata(request);
             case "RemoveSchemaVersionMetadata" -> handleRemoveSchemaVersionMetadata(request);
             case "QuerySchemaVersionMetadata" -> handleQuerySchemaVersionMetadata(request);
-            case "TagResource" -> handleTagResource(request);
-            case "UntagResource" -> handleUntagResource(request);
-            case "GetTags" -> handleGetTags(request);
+            case "TagResource" -> handleTagResource(request, region);
+            case "UntagResource" -> handleUntagResource(request, region);
+            case "GetTags" -> handleGetTags(request, region);
             case "CreateJob" -> {
                 Job job = mapper.treeToValue(request, Job.class);
                 Map<String, String> tags = request.has("Tags") ? mapper.convertValue(request.get("Tags"), new TypeReference<>() {}) : null;
@@ -181,7 +181,10 @@ public class GlueJsonHandler {
                 yield Response.ok(Map.of("Job", glueService.getJob(name))).build();
             }
             case "GetJobs" -> {
-                yield Response.ok(Map.of("Jobs", glueService.getJobs())).build();
+                Integer maxResults = readMaxResults(request);
+                String nextToken = readNextToken(request);
+                GlueService.Page<Job> page = glueService.getJobs(maxResults, nextToken);
+                yield Response.ok(pageResponse("Jobs", page.items(), page.nextToken())).build();
             }
             case "UpdateJob" -> {
                 String name = request.get("JobName").asText();
@@ -205,7 +208,10 @@ public class GlueJsonHandler {
                 yield Response.ok(Map.of("Crawler", glueService.getCrawler(name))).build();
             }
             case "GetCrawlers" -> {
-                yield Response.ok(Map.of("Crawlers", glueService.getCrawlers())).build();
+                Integer maxResults = readMaxResults(request);
+                String nextToken = readNextToken(request);
+                GlueService.Page<Crawler> page = glueService.getCrawlers(maxResults, nextToken);
+                yield Response.ok(pageResponse("Crawlers", page.items(), page.nextToken())).build();
             }
             case "UpdateCrawler" -> {
                 Crawler update = mapper.treeToValue(request, Crawler.class);
@@ -746,28 +752,28 @@ public class GlueJsonHandler {
     }
 
     @SuppressWarnings("unchecked")
-    private Response handleTagResource(JsonNode request) {
+    private Response handleTagResource(JsonNode request, String region) {
         String arn = request.path("ResourceArn").asText(null);
         Map<String, String> tagsToAdd = request.has("TagsToAdd")
                 ? mapper.convertValue(request.get("TagsToAdd"), Map.class)
                 : null;
-        schemaRegistryService.tagResource(arn, tagsToAdd);
+        glueService.tagResource(arn, tagsToAdd, region);
         return Response.ok(Map.of()).build();
     }
 
     @SuppressWarnings("unchecked")
-    private Response handleUntagResource(JsonNode request) {
+    private Response handleUntagResource(JsonNode request, String region) {
         String arn = request.path("ResourceArn").asText(null);
         List<String> tagsToRemove = request.has("TagsToRemove")
                 ? mapper.convertValue(request.get("TagsToRemove"), List.class)
                 : null;
-        schemaRegistryService.untagResource(arn, tagsToRemove);
+        glueService.untagResource(arn, tagsToRemove, region);
         return Response.ok(Map.of()).build();
     }
 
-    private Response handleGetTags(JsonNode request) {
+    private Response handleGetTags(JsonNode request, String region) {
         String arn = request.path("ResourceArn").asText(null);
-        Map<String, String> tags = schemaRegistryService.getTags(arn);
+        Map<String, String> tags = glueService.getTags(arn, region);
         return Response.ok(Map.of("Tags", tags)).build();
     }
 }

@@ -8,10 +8,10 @@ public class DynamoDBTarget {
     @JsonProperty("Path")
     private String path;
 
-    @JsonProperty("scanAll")
+    @JsonProperty("ScanAll")
     private Boolean scanAll;
 
-    @JsonProperty("scanRate")
+    @JsonProperty("ScanRate")
     private Double scanRate;
 
     public DynamoDBTarget() {}

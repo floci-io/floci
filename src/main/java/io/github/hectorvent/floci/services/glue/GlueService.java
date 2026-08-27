@@ -1051,6 +1051,12 @@ public class GlueService {
         return jobStore.scan(k -> true);
     }
 
+    public Page<Job> getJobs(Integer maxResults, String nextToken) {
+        List<Job> all = jobStore.scan(k -> true);
+        all.sort(Comparator.comparing(Job::getName));
+        return paginate(all, maxResults, nextToken);
+    }
+
     public void updateJob(String name, JobUpdate update) {
         String normalizedName = normalizeName(name);
         Job existing = jobStore.get(normalizedName)
@@ -1090,6 +1096,9 @@ public class GlueService {
 
     public void deleteJob(String name, String region) {
         String normalizedName = normalizeName(name);
+        if (jobStore.get(normalizedName).isEmpty()) {
+            throw new AwsException("EntityNotFoundException", "Job " + name + " not found.", 400);
+        }
         jobStore.delete(normalizedName);
         resourceGroupsTaggingService.deleteResources(List.of(jobArn(region, normalizedName)), region);
         LOG.infov("Deleted Glue Job: {0}", name);
@@ -1123,6 +1132,12 @@ public class GlueService {
         return crawlerStore.scan(k -> true);
     }
 
+    public Page<Crawler> getCrawlers(Integer maxResults, String nextToken) {
+        List<Crawler> all = crawlerStore.scan(k -> true);
+        all.sort(Comparator.comparing(Crawler::getName));
+        return paginate(all, maxResults, nextToken);
+    }
+
     public void updateCrawler(Crawler update) {
         String name = normalizeName(update.getName());
         Crawler existing = crawlerStore.get(name)
@@ -1133,19 +1148,19 @@ public class GlueService {
         updated.setCreationTime(existing.getCreationTime());
         updated.setLastUpdated(Instant.now());
 
-        updated.setClassifiers(update.getClassifiers());
-        updated.setConfiguration(update.getConfiguration());
-        updated.setCrawlerSecurityConfiguration(update.getCrawlerSecurityConfiguration());
-        updated.setDatabaseName(update.getDatabaseName());
-        updated.setDescription(update.getDescription());
-        updated.setLakeFormationConfiguration(update.getLakeFormationConfiguration());
-        updated.setLineageConfiguration(update.getLineageConfiguration());
-        updated.setRecrawlPolicy(update.getRecrawlPolicy());
-        updated.setRole(update.getRole());
-        updated.setSchedule(update.getSchedule());
-        updated.setSchemaChangePolicy(update.getSchemaChangePolicy());
-        updated.setTablePrefix(update.getTablePrefix());
-        updated.setTargets(update.getTargets());
+        updated.setClassifiers(update.getClassifiers() != null ? update.getClassifiers() : existing.getClassifiers());
+        updated.setConfiguration(update.getConfiguration() != null ? update.getConfiguration() : existing.getConfiguration());
+        updated.setCrawlerSecurityConfiguration(update.getCrawlerSecurityConfiguration() != null ? update.getCrawlerSecurityConfiguration() : existing.getCrawlerSecurityConfiguration());
+        updated.setDatabaseName(update.getDatabaseName() != null ? update.getDatabaseName() : existing.getDatabaseName());
+        updated.setDescription(update.getDescription() != null ? update.getDescription() : existing.getDescription());
+        updated.setLakeFormationConfiguration(update.getLakeFormationConfiguration() != null ? update.getLakeFormationConfiguration() : existing.getLakeFormationConfiguration());
+        updated.setLineageConfiguration(update.getLineageConfiguration() != null ? update.getLineageConfiguration() : existing.getLineageConfiguration());
+        updated.setRecrawlPolicy(update.getRecrawlPolicy() != null ? update.getRecrawlPolicy() : existing.getRecrawlPolicy());
+        updated.setRole(update.getRole() != null ? update.getRole() : existing.getRole());
+        updated.setSchedule(update.getSchedule() != null ? update.getSchedule() : existing.getSchedule());
+        updated.setSchemaChangePolicy(update.getSchemaChangePolicy() != null ? update.getSchemaChangePolicy() : existing.getSchemaChangePolicy());
+        updated.setTablePrefix(update.getTablePrefix() != null ? update.getTablePrefix() : existing.getTablePrefix());
+        updated.setTargets(update.getTargets() != null ? update.getTargets() : existing.getTargets());
 
         crawlerStore.put(name, updated);
         LOG.infov("Updated Glue Crawler: {0}", name);
@@ -1153,8 +1168,64 @@ public class GlueService {
 
     public void deleteCrawler(String name, String region) {
         String normalizedName = normalizeName(name);
+        if (crawlerStore.get(normalizedName).isEmpty()) {
+            throw new AwsException("EntityNotFoundException", "Crawler " + name + " not found.", 400);
+        }
         crawlerStore.delete(normalizedName);
         resourceGroupsTaggingService.deleteResources(List.of(crawlerArn(region, normalizedName)), region);
         LOG.infov("Deleted Glue Crawler: {0}", name);
+    }
+
+    public void tagResource(String arn, Map<String, String> tags, String region) {
+        validateArn(arn);
+        if (arn.contains(":registry/") || arn.contains(":schema/")) {
+            schemaRegistryService.tagResource(arn, tags);
+        } else {
+            resourceGroupsTaggingService.tagResources(List.of(arn), tags, region);
+        }
+    }
+
+    public void untagResource(String arn, List<String> tagKeys, String region) {
+        validateArn(arn);
+        if (arn.contains(":registry/") || arn.contains(":schema/")) {
+            schemaRegistryService.untagResource(arn, tagKeys);
+        } else {
+            resourceGroupsTaggingService.untagResources(List.of(arn), tagKeys, region);
+        }
+    }
+
+    public Map<String, String> getTags(String arn, String region) {
+        validateArn(arn);
+        if (arn.contains(":registry/") || arn.contains(":schema/")) {
+            return schemaRegistryService.getTags(arn);
+        } else {
+            return resourceGroupsTaggingService.getTagsForResource(region, arn);
+        }
+    }
+
+    private void validateArn(String arn) {
+        if (arn == null || !arn.startsWith("arn:")) {
+            throw new AwsException("InvalidInputException", "Invalid ARN", 400);
+        }
+    }
+
+    public record Page<T>(List<T> items, String nextToken) {}
+
+    private <T> Page<T> paginate(List<T> all, Integer maxResults, String nextToken) {
+        int limit = maxResults == null ? 100 : maxResults;
+        int start = 0;
+        if (nextToken != null && !nextToken.isBlank()) {
+            try {
+                start = Integer.parseInt(nextToken);
+            } catch (NumberFormatException e) {
+                throw new AwsException("InvalidInputException", "Invalid NextToken", 400);
+            }
+        }
+        if (start < 0 || start > all.size()) {
+            throw new AwsException("InvalidInputException", "Invalid NextToken", 400);
+        }
+        int end = Math.min(start + limit, all.size());
+        String newToken = end < all.size() ? String.valueOf(end) : null;
+        return new Page<>(List.copyOf(all.subList(start, end)), newToken);
     }
 }
