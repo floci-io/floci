@@ -321,6 +321,23 @@ class SsmIntegrationTest {
             .body("__type", equalTo("ServiceSettingNotFound"));
     }
 
+    @Test
+    void serviceSettingOperations_missingSettingIdReturnsValidationException() {
+        for (String target : new String[]{"GetServiceSetting", "UpdateServiceSetting", "ResetServiceSetting"}) {
+            given()
+                .header("X-Amz-Target", "AmazonSSM." + target)
+                .contentType(SSM_CONTENT_TYPE)
+                .body("""
+                    { "SettingValue": "Enable" }
+                    """)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"));
+        }
+    }
+
     // ── Issue #956: DescribePatchBaselines / GetDefaultPatchBaseline (AWS-owned predefined) ──
 
     @Test

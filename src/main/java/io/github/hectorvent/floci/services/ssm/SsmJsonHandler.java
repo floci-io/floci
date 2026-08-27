@@ -566,8 +566,26 @@ public class SsmJsonHandler {
 
     // ── Service settings ───────────────────────────────────────────────────
 
-    private Response handleGetServiceSetting(JsonNode request, String region) {
+    /**
+     * Reads the required {@code SettingId} member shared by Get/Update/ResetServiceSetting.
+     * Botocore requires it on all three operations; an absent or blank value is a missing
+     * required member (ValidationException), not an unknown setting (ServiceSettingNotFound) —
+     * the same distinction the document operations draw between a missing {@code Name} and one
+     * that does not resolve.
+     */
+    private String requireSettingId(JsonNode request) {
         String settingId = request.path("SettingId").asText();
+        if (settingId == null || settingId.isBlank()) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value null at 'settingId' failed to satisfy "
+                            + "constraint: Member must not be null",
+                    400);
+        }
+        return settingId;
+    }
+
+    private Response handleGetServiceSetting(JsonNode request, String region) {
+        String settingId = requireSettingId(request);
         ServiceSetting setting = ssmService.getServiceSetting(settingId, region);
 
         ObjectNode response = objectMapper.createObjectNode();
@@ -576,14 +594,14 @@ public class SsmJsonHandler {
     }
 
     private Response handleUpdateServiceSetting(JsonNode request, String region) {
-        String settingId = request.path("SettingId").asText();
+        String settingId = requireSettingId(request);
         String settingValue = request.path("SettingValue").asText();
         ssmService.updateServiceSetting(settingId, settingValue, region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
     private Response handleResetServiceSetting(JsonNode request, String region) {
-        String settingId = request.path("SettingId").asText();
+        String settingId = requireSettingId(request);
         ServiceSetting setting = ssmService.resetServiceSetting(settingId, region);
 
         ObjectNode response = objectMapper.createObjectNode();
