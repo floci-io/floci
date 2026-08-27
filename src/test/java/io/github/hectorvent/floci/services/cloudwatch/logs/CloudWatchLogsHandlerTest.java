@@ -641,6 +641,45 @@ class CloudWatchLogsHandlerTest {
         assertEquals("ResourceNotFoundException", ex.getErrorCode());
     }
 
+    @Test
+    void createLogGroupWithKmsKeyIdIsEchoedBackByDescribeLogGroups() {
+        // CreateLogGroup models kmsKeyId (Required: No) as the normal way to create an
+        // encrypted group in one call; it must be stored and surfaced the same way
+        // AssociateKmsKey's result is.
+        String newGroup = "/aws/rds/instance/encrypted-at-creation/postgresql";
+        ObjectNode create = MAPPER.createObjectNode();
+        create.put("logGroupName", newGroup);
+        create.put("kmsKeyId", KEY_ARN);
+
+        assertEquals(200, handler.handle("CreateLogGroup", create, REGION).getStatus());
+
+        ObjectNode describeRequest = MAPPER.createObjectNode();
+        describeRequest.put("logGroupNamePrefix", newGroup);
+        Response response = handler.handle("DescribeLogGroups", describeRequest, REGION);
+        ArrayNode groups = (ArrayNode) ((ObjectNode) response.getEntity()).path("logGroups");
+        assertEquals(1, groups.size());
+        assertEquals(KEY_ARN, groups.get(0).path("kmsKeyId").asText());
+    }
+
+    @Test
+    void associateKmsKeyWithQueryResultResourceIdentifierIsRejectedAsUnsupported() {
+        // arn:...:query-result:* is a real, modeled resourceIdentifier form (account-wide
+        // GetQueryResults encryption), but it is a genuinely different feature from
+        // per-log-group encryption. extractLogGroupNameFromArn only recognizes :log-group:,
+        // so left unchecked this ARN falls through unchanged and becomes a log group NAME,
+        // producing a ResourceNotFoundException that names a log group the caller never
+        // specified. It must be rejected as unsupported instead.
+        ObjectNode associate = MAPPER.createObjectNode();
+        associate.put("resourceIdentifier",
+                "arn:aws:logs:" + REGION + ":" + ACCOUNT + ":query-result:*");
+        associate.put("kmsKeyId", KEY_ARN);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("AssociateKmsKey", associate, REGION));
+        assertEquals("InvalidParameterException", ex.getErrorCode());
+        assertThat(ex.getMessage(), containsString("query-result"));
+    }
+
     private JsonNode describeGroup() {
         ObjectNode request = MAPPER.createObjectNode();
         request.put("logGroupNamePrefix", GROUP);

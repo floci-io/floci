@@ -76,7 +76,8 @@ public class CloudWatchLogsHandler {
                 ? request.path("retentionInDays").asInt() : null;
         boolean deletionProtectionEnabled = request.path("deletionProtectionEnabled").asBoolean(false);
         Map<String, String> tags = extractTags(request.path("tags"));
-        logsService.createLogGroup(name, retentionInDays, tags, deletionProtectionEnabled, region);
+        String kmsKeyId = request.path("kmsKeyId").asText(null);
+        logsService.createLogGroup(name, retentionInDays, tags, deletionProtectionEnabled, kmsKeyId, region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
@@ -256,7 +257,7 @@ public class CloudWatchLogsHandler {
         String nextToken = request.has("nextToken") ? request.path("nextToken").asText(null) : null;
 
         List<String> streamNames = new ArrayList<>();
-        if (request.has("logStreamNames")) {
+        if (request.hasNonNull("logStreamNames")) {
             requireListSize(request.path("logStreamNames"), "logStreamNames", 1, 100);
         }
         request.path("logStreamNames").forEach(n -> streamNames.add(resolveLogStreamName(n.asText(null))));
@@ -393,6 +394,16 @@ public class CloudWatchLogsHandler {
         if (value.isBlank()) {
             throw new AwsException("InvalidParameterException",
                     (hasName ? "logGroupName" : "resourceIdentifier") + " must not be blank.", 400);
+        }
+        // resourceIdentifier also models the account-wide "arn:...:query-result:*" form,
+        // which targets encryption of future GetQueryResults output rather than a log
+        // group. That is a genuinely separate feature Floci does not implement; reject it
+        // explicitly rather than letting extractLogGroupNameFromArn (which only recognizes
+        // :log-group:) pass it through unchanged and turn it into a misleading
+        // ResourceNotFoundException naming a log group the caller never specified.
+        if (!hasName && value.contains(":query-result:")) {
+            throw new AwsException("InvalidParameterException",
+                    "resourceIdentifier of the query-result form is not supported.", 400);
         }
         return extractLogGroupNameFromArn(value);
     }
@@ -600,9 +611,8 @@ public class CloudWatchLogsHandler {
         return tags;
     }
 
-
     /** Enforces a modeled list min/max with the InvalidParameterException these operations model. */
-    private static void requireListSize(com.fasterxml.jackson.databind.JsonNode list,
+    private static void requireListSize(JsonNode list,
                                         String member, int min, int max) {
         int size = list == null || list.isNull() || !list.isArray() ? 0 : list.size();
         if (size < min || size > max) {

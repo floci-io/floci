@@ -70,6 +70,17 @@ class CloudWatchLogsInputConstraintTest {
     }
 
     @Test
+    void filterLogEvents_explicitNullStreamNames_isTreatedAsAbsent() {
+        // request.has("logStreamNames") is true for an explicit JSON null, and mapping
+        // NullNode to size 0 trips the min-1 bound below. AWS treats an explicit null on
+        // an optional member as absent, so this must succeed, not 400.
+        ObjectNode request = MAPPER.createObjectNode();
+        request.put("logGroupName", GROUP);
+        request.putNull("logStreamNames");
+        assertEquals(200, handler.handle("FilterLogEvents", request, REGION).getStatus());
+    }
+
+    @Test
     void putSubscriptionFilter_unknownDistribution_isRejected() {
         ObjectNode request = MAPPER.createObjectNode();
         request.put("logGroupName", GROUP).put("filterName", "f")

@@ -167,7 +167,12 @@ public class CloudWatchLogsService implements ResourceProvider {
 
     public void createLogGroup(String name, Integer retentionInDays, Map<String, String> tags,
                                boolean deletionProtectionEnabled, String region) {
-        createLogGroupForAccount(null, name, retentionInDays, tags, deletionProtectionEnabled, region);
+        createLogGroup(name, retentionInDays, tags, deletionProtectionEnabled, null, region);
+    }
+
+    public void createLogGroup(String name, Integer retentionInDays, Map<String, String> tags,
+                               boolean deletionProtectionEnabled, String kmsKeyId, String region) {
+        createLogGroupForAccount(null, name, retentionInDays, tags, deletionProtectionEnabled, kmsKeyId, region);
     }
 
     public void createLogGroupForAccount(
@@ -179,6 +184,12 @@ public class CloudWatchLogsService implements ResourceProvider {
     public void createLogGroupForAccount(
             String accountId, String name, Integer retentionInDays,
             Map<String, String> tags, boolean deletionProtectionEnabled, String region) {
+        createLogGroupForAccount(accountId, name, retentionInDays, tags, deletionProtectionEnabled, null, region);
+    }
+
+    public void createLogGroupForAccount(
+            String accountId, String name, Integer retentionInDays,
+            Map<String, String> tags, boolean deletionProtectionEnabled, String kmsKeyId, String region) {
         if (name == null || name.isBlank()) {
             throw new AwsException("InvalidParameterException", "logGroupName is required.", 400);
         }
@@ -192,6 +203,9 @@ public class CloudWatchLogsService implements ResourceProvider {
         group.setCreatedTime(System.currentTimeMillis());
         group.setRetentionInDays(retentionInDays);
         group.setDeletionProtectionEnabled(deletionProtectionEnabled);
+        if (kmsKeyId != null && !kmsKeyId.isBlank()) {
+            group.setKmsKeyId(kmsKeyId);
+        }
         if (tags != null) {
             group.setTags(new HashMap<>(tags));
         }
