@@ -242,4 +242,113 @@ class Ec2LaunchTemplateFieldsIntegrationTest {
             .body(DATA + "blockDeviceMappingSet.item.deviceName", equalTo("/dev/xvda"))
             .body(DATA + "blockDeviceMappingSet.item.ebs.volumeSize", equalTo("20"));
     }
+
+    @Test
+    void createLaunchTemplateVersionWithoutSourceVersionDoesNotInherit() {
+        // AWS documents "no SourceVersion" as "no inheritance" — the new version must start from
+        // an empty LaunchTemplateData, not merge onto the latest version the way an explicit
+        // SourceVersion does (see createLaunchTemplateVersionInheritsOptionsBlocksItDoesNotRestate
+        // above, which covers the explicit-SourceVersion case).
+        String name = uniqueName("no-source-lt");
+        given()
+            .formParam("Action", "CreateLaunchTemplate")
+            .formParam("LaunchTemplateName", name)
+            .formParam("LaunchTemplateData.ImageId", "ami-0abcdef1234567890")
+            .formParam("LaunchTemplateData.InstanceType", "t3.micro")
+            .formParam("LaunchTemplateData.KeyName", "app-key")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .formParam("Action", "CreateLaunchTemplateVersion")
+            .formParam("LaunchTemplateName", name)
+            // No SourceVersion parameter at all.
+            .formParam("LaunchTemplateData.InstanceType", "t3.small")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("CreateLaunchTemplateVersionResponse.launchTemplateVersion.launchTemplateData.instanceType",
+                    equalTo("t3.small"));
+
+        String body = describeBody(name);
+        assertFalse(body.contains("<imageId>"),
+                "an omitted SourceVersion must not inherit ImageId from the latest version");
+        assertFalse(body.contains("<keyName>"),
+                "an omitted SourceVersion must not inherit KeyName from the latest version");
+    }
+
+    @Test
+    void versionDescriptionRoundTripsThroughCreateAndDescribe() {
+        String name = uniqueName("described-lt");
+        given()
+            .formParam("Action", "CreateLaunchTemplate")
+            .formParam("LaunchTemplateName", name)
+            .formParam("LaunchTemplateData.ImageId", "ami-0abcdef1234567890")
+            .formParam("VersionDescription", "initial rollout")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("CreateLaunchTemplateResponse.launchTemplate.launchTemplateId", org.hamcrest.Matchers.notNullValue());
+
+        given()
+            .formParam("Action", "CreateLaunchTemplateVersion")
+            .formParam("LaunchTemplateName", name)
+            .formParam("SourceVersion", "1")
+            .formParam("LaunchTemplateData.InstanceType", "t3.small")
+            .formParam("VersionDescription", "bump instance type")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("CreateLaunchTemplateVersionResponse.launchTemplateVersion.versionDescription",
+                    equalTo("bump instance type"));
+
+        given()
+            .formParam("Action", "DescribeLaunchTemplateVersions")
+            .formParam("LaunchTemplateName", name)
+            .formParam("Versions.1", "1")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.versionDescription",
+                    equalTo("initial rollout"));
+
+        describeLatest(name)
+            .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.versionDescription",
+                    equalTo("bump instance type"));
+    }
+
+    @Test
+    void securityGroupsByNameAreAcceptedAndIgnored() {
+        // By-name SecurityGroups stay out of scope (see docs/services/ec2.md): resolving names to
+        // IDs would need lookup machinery no other EC2 action here has either. The request must
+        // still succeed, and SecurityGroupIds — the supported form — must be unaffected.
+        String name = uniqueName("sg-by-name-lt");
+        given()
+            .formParam("Action", "CreateLaunchTemplate")
+            .formParam("LaunchTemplateName", name)
+            .formParam("LaunchTemplateData.ImageId", "ami-0abcdef1234567890")
+            .formParam("LaunchTemplateData.SecurityGroup.1", "my-app-sg")
+            .formParam("LaunchTemplateData.SecurityGroupId.1", "sg-1111111111111111a")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        describeLatest(name)
+            .body(DATA + "securityGroupIdSet.item", equalTo("sg-1111111111111111a"));
+        assertFalse(describeBody(name).contains("my-app-sg"),
+                "SecurityGroups (by name) is accepted and ignored, not stored");
+    }
 }

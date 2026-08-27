@@ -257,6 +257,60 @@ class Ec2ServiceTest {
     }
 
     @Test
+    void launchTemplateVersionWithoutSourceVersionDoesNotInheritFromLatest() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+        LaunchTemplateData source = new LaunchTemplateData();
+        source.setImageId("ami-source");
+        source.setInstanceType("t3.micro");
+        source.setKeyName("app-key");
+        source.setSecurityGroupIds(List.of("sg-source"));
+        LaunchTemplate template = service.createLaunchTemplate("us-east-1", "no-source-template", source, List.of());
+
+        LaunchTemplateData override = new LaunchTemplateData();
+        override.setInstanceType("t3.small");
+        // No SourceVersion at all — AWS documents this as "no source specified, no inheritance",
+        // not as an implicit fallback onto the latest version.
+        service.createLaunchTemplateVersion("us-east-1", template.getLaunchTemplateId(), null, null, override);
+
+        LaunchTemplate version = service.describeLaunchTemplateVersions(
+                "us-east-1", template.getLaunchTemplateId(), null, List.of("2")).getFirst();
+        LaunchTemplateData data = version.getData();
+        assertEquals("t3.small", data.getInstanceType());
+        assertNull(data.getImageId(), "omitted SourceVersion must not inherit ImageId from version 1");
+        assertNull(data.getKeyName(), "omitted SourceVersion must not inherit KeyName from version 1");
+        assertEquals(List.of(), data.getSecurityGroupIds(),
+                "omitted SourceVersion must not inherit SecurityGroupIds from version 1");
+    }
+
+    @Test
+    void launchTemplateVersionDescriptionRoundTrips() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+        LaunchTemplateData source = new LaunchTemplateData();
+        source.setImageId("ami-source");
+        LaunchTemplate template = service.createLaunchTemplate(
+                "us-east-1", "described-template", source, List.of(), "initial version");
+
+        LaunchTemplateData override = new LaunchTemplateData();
+        override.setInstanceType("t3.small");
+        LaunchTemplate created = service.createLaunchTemplateVersion(
+                "us-east-1", template.getLaunchTemplateId(), null, "1", override, "second version");
+        assertEquals("second version", created.getVersionDescription());
+
+        LaunchTemplate v1 = service.describeLaunchTemplateVersions(
+                "us-east-1", template.getLaunchTemplateId(), null, List.of("1")).getFirst();
+        LaunchTemplate v2 = service.describeLaunchTemplateVersions(
+                "us-east-1", template.getLaunchTemplateId(), null, List.of("2")).getFirst();
+        assertEquals("initial version", v1.getVersionDescription());
+        assertEquals("second version", v2.getVersionDescription());
+    }
+
+    @Test
     void describeImagesAdvertisesCloudGuestWithoutChangingUbuntuDefault() {
         Ec2ImageCatalog imageCatalog = new Ec2ImageCatalog();
         AmiImageResolver amiImageResolver = new AmiImageResolver(imageCatalog);

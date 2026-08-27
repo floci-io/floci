@@ -3238,7 +3238,8 @@ public class Ec2QueryHandler {
                 region,
                 p.getFirst("LaunchTemplateName"),
                 parseLaunchTemplateData(p),
-                parseTagsForResource(p, "launch-template"));
+                parseTagsForResource(p, "launch-template"),
+                p.getFirst("VersionDescription"));
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateLaunchTemplateResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -3253,7 +3254,8 @@ public class Ec2QueryHandler {
                 p.getFirst("LaunchTemplateId"),
                 p.getFirst("LaunchTemplateName"),
                 p.getFirst("SourceVersion"),
-                parseLaunchTemplateData(p));
+                parseLaunchTemplateData(p),
+                p.getFirst("VersionDescription"));
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateLaunchTemplateVersionResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -3782,6 +3784,7 @@ public class Ec2QueryHandler {
             xml.elem("createTime", ISO_FMT.format(launchTemplate.getCreateTime()));
         }
         xml.elem("createdBy", launchTemplate.getCreatedBy())
+                .elem("versionDescription", launchTemplate.getVersionDescription())
                 .start("launchTemplateData")
                 .raw(launchTemplateDataXml(launchTemplate.getData()))
                 .end("launchTemplateData");
@@ -4010,6 +4013,11 @@ public class Ec2QueryHandler {
                     isSet(profileName) ? profileName : null));
         }
 
+        // SecurityGroups (the by-name form, as opposed to SecurityGroupId) is deliberately not
+        // parsed here. Resolving names to IDs would need real lookup machinery — scanning the
+        // security-group store, handling "not found", and handling ambiguity across VPCs — that
+        // RunInstances itself doesn't have today (it only accepts SecurityGroupId); see
+        // docs/services/ec2.md's launch-template section.
         data.setSecurityGroupIds(getList(p, prefix + ".SecurityGroupId"));
         data.setBlockDeviceMappings(parseLaunchTemplateBlockDeviceMappings(p, prefix));
         data.setNetworkInterfaces(parseLaunchTemplateNetworkInterfaces(p, prefix));

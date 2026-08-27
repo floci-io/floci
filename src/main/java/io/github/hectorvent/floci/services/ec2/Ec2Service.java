@@ -3832,6 +3832,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
 
     public LaunchTemplate createLaunchTemplate(String region, String name, LaunchTemplateData data,
                                                List<Tag> launchTemplateTags) {
+        return createLaunchTemplate(region, name, data, launchTemplateTags, null);
+    }
+
+    public LaunchTemplate createLaunchTemplate(String region, String name, LaunchTemplateData data,
+                                               List<Tag> launchTemplateTags, String versionDescription) {
         ensureDefaultResources(region);
         if (name == null || name.isBlank()) {
             throw new AwsException("MissingParameter", "The request must contain the parameter LaunchTemplateName", 400);
@@ -3855,22 +3860,48 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             tags.put(launchTemplate.getLaunchTemplateId(), new ArrayList<>(launchTemplateTags));
         }
         launchTemplate.getVersions().put("1", new LaunchTemplateData(launchTemplate.getData()));
+        if (versionDescription != null && !versionDescription.isBlank()) {
+            launchTemplate.getVersionDescriptions().put("1", versionDescription);
+            launchTemplate.setVersionDescription(versionDescription);
+        }
         launchTemplates.put(key(region, launchTemplate.getLaunchTemplateId()), launchTemplate);
         return launchTemplate;
     }
 
     public LaunchTemplate createLaunchTemplateVersion(String region, String id, String name,
                                                       String sourceVersion, LaunchTemplateData data) {
+        return createLaunchTemplateVersion(region, id, name, sourceVersion, data, null);
+    }
+
+    /**
+     * A {@code SourceVersion} that is null or absent does not fall back to the latest version —
+     * per the EC2 API, "no source specified" means the new version starts from an empty
+     * {@link LaunchTemplateData}, populated only by whatever fields this request itself supplies.
+     * Only an explicit {@code SourceVersion} (including {@code $Latest} / {@code $Default}) causes
+     * inheritance.
+     */
+    public LaunchTemplate createLaunchTemplateVersion(String region, String id, String name,
+                                                      String sourceVersion, LaunchTemplateData data,
+                                                      String versionDescription) {
         ensureDefaultResources(region);
         LaunchTemplate launchTemplate = findLaunchTemplate(region, id, name);
         ensureLaunchTemplateVersions(launchTemplate);
         int latestVersion = parseLaunchTemplateVersion(launchTemplate.getLatestVersionNumber()) + 1;
-        LaunchTemplateData source = versionData(launchTemplate,
-                resolveLaunchTemplateVersion(launchTemplate, sourceVersion, launchTemplate.getLatestVersionNumber()));
+        LaunchTemplateData source;
+        if (sourceVersion == null || sourceVersion.isBlank()) {
+            source = new LaunchTemplateData();
+        } else {
+            source = versionData(launchTemplate,
+                    resolveLaunchTemplateVersion(launchTemplate, sourceVersion, launchTemplate.getLatestVersionNumber()));
+        }
         LaunchTemplateData merged = source.mergedWith(data != null ? data : new LaunchTemplateData());
         launchTemplate.setLatestVersionNumber(String.valueOf(latestVersion));
         launchTemplate.getVersions().put(String.valueOf(latestVersion), merged);
         launchTemplate.setData(new LaunchTemplateData(merged));
+        if (versionDescription != null && !versionDescription.isBlank()) {
+            launchTemplate.getVersionDescriptions().put(String.valueOf(latestVersion), versionDescription);
+        }
+        launchTemplate.setVersionDescription(launchTemplate.getVersionDescriptions().get(String.valueOf(latestVersion)));
         launchTemplates.put(key(region, launchTemplate.getLaunchTemplateId()), launchTemplate);
         return launchTemplate;
     }
@@ -4035,6 +4066,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         copy.setRegion(source.getRegion());
         copy.setTags(source.getTags());
         copy.setData(new LaunchTemplateData(versionData(source, versionNumber)));
+        copy.setVersionDescription(source.getVersionDescriptions().get(versionNumber));
         return copy;
     }
 

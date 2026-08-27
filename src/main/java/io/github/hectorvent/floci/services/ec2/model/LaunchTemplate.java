@@ -31,6 +31,8 @@ public class LaunchTemplate {
     private List<Tag> tags = new ArrayList<>();
     private LaunchTemplateData data = new LaunchTemplateData();
     private Map<String, LaunchTemplateData> versions = new LinkedHashMap<>();
+    private String versionDescription;
+    private Map<String, String> versionDescriptions = new LinkedHashMap<>();
 
     public LaunchTemplate() {}
 
@@ -69,6 +71,21 @@ public class LaunchTemplate {
     public Map<String, LaunchTemplateData> getVersions() { return versions; }
     public void setVersions(Map<String, LaunchTemplateData> versions) {
         this.versions = versions != null ? new LinkedHashMap<>(versions) : new LinkedHashMap<>();
+    }
+
+    /** The {@code VersionDescription} of the version this instance represents — see {@link #getData()}. */
+    public String getVersionDescription() { return versionDescription; }
+    public void setVersionDescription(String versionDescription) { this.versionDescription = versionDescription; }
+
+    /**
+     * {@code VersionDescription} is a version-level field on {@code LaunchTemplateVersion}, not a
+     * member of {@code RequestLaunchTemplateData} / {@code ResponseLaunchTemplateData}, so it is
+     * tracked in this parallel map — keyed by version number, the same way {@link #versions} is —
+     * rather than inside {@link LaunchTemplateData} itself.
+     */
+    public Map<String, String> getVersionDescriptions() { return versionDescriptions; }
+    public void setVersionDescriptions(Map<String, String> versionDescriptions) {
+        this.versionDescriptions = versionDescriptions != null ? new LinkedHashMap<>(versionDescriptions) : new LinkedHashMap<>();
     }
 
     // ── Pre-unified-data schema migration ────────────────────────────────────────────────
