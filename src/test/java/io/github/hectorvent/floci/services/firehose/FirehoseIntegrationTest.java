@@ -205,7 +205,9 @@ class FirehoseIntegrationTest {
 
     @Test
     @Order(8)
-    void startDeliveryStreamEncryptionWithoutInputReturnsInvalidArgument() {
+    void startDeliveryStreamEncryptionWithoutInputDefaultsToAwsOwnedCmk() {
+        // DeliveryStreamEncryptionConfigurationInput is optional (Required: No) - omitting
+        // it is the documented way to enable SSE with the service-owned key, not an error.
         String encryptionStream = "encryption-noinput-" + System.currentTimeMillis();
         given()
             .contentType("application/x-amz-json-1.1")
@@ -223,8 +225,20 @@ class FirehoseIntegrationTest {
         .when()
             .post("/")
         .then()
-            .statusCode(400)
-            .body("__type", equalTo("InvalidArgumentException"));
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "Firehose_20150804.DescribeDeliveryStream")
+            .body("{ \"DeliveryStreamName\": \"" + encryptionStream + "\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DeliveryStreamDescription.DeliveryStreamEncryptionConfiguration.Status",
+                    equalTo("ENABLED"))
+            .body("DeliveryStreamDescription.DeliveryStreamEncryptionConfiguration.KeyType",
+                    equalTo("AWS_OWNED_CMK"));
 
         given()
             .contentType("application/x-amz-json-1.1")

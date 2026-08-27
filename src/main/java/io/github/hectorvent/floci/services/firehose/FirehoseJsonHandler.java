@@ -88,18 +88,20 @@ public class FirehoseJsonHandler {
             case "StartDeliveryStreamEncryption" -> {
                 String name = getDeliveryStreamName(request);
                 JsonNode input = request.get("DeliveryStreamEncryptionConfigurationInput");
-                // AWS models the input as required with a required KeyType — silently
-                // defaulting would enable encryption the caller never asked for.
-                if (input == null || input.isNull()) {
-                    throw new AwsException("InvalidArgumentException",
-                            "DeliveryStreamEncryptionConfigurationInput is required.", 400);
-                }
-                String keyType = input.has("KeyType") && !input.get("KeyType").isNull()
-                        ? input.get("KeyType").asText() : null;
-                String keyArn = input.has("KeyARN") && !input.get("KeyARN").isNull()
-                        ? input.get("KeyARN").asText() : null;
-                if (keyType == null || keyType.isBlank()) {
-                    throw new AwsException("InvalidArgumentException", "KeyType is required.", 400);
+                // DeliveryStreamEncryptionConfigurationInput is optional (Required: No):
+                // omitting it is the documented way to enable SSE with the service-owned
+                // key (KeyType defaults to AWS_OWNED_CMK). KeyType is only required when
+                // the input object itself is present.
+                String keyType = null;
+                String keyArn = null;
+                if (input != null && !input.isNull()) {
+                    keyType = input.has("KeyType") && !input.get("KeyType").isNull()
+                            ? input.get("KeyType").asText() : null;
+                    keyArn = input.has("KeyARN") && !input.get("KeyARN").isNull()
+                            ? input.get("KeyARN").asText() : null;
+                    if (keyType == null || keyType.isBlank()) {
+                        throw new AwsException("InvalidArgumentException", "KeyType is required.", 400);
+                    }
                 }
                 firehoseService.startDeliveryStreamEncryption(name, keyType, keyArn);
                 yield Response.ok(Map.of()).build();
