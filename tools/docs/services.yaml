@@ -146,6 +146,7 @@ services:
 # Switch handlers that exist but are intentionally not yet covered (see reasons).
 # A NEW switch handler not listed here and not registered above fails `--strict`.
 deferred_handlers:
+  - { path: src/main/java/io/github/hectorvent/floci/services/ssoadmin/SsoAdminJsonHandler.java }  # single-op Identity Center stub, no standalone doc page yet
   - { path: src/main/java/io/github/hectorvent/floci/services/apigatewayv2/ApiGatewayV2JsonHandler.java }  # non-tabular doc (grouped/inline)
   - { path: src/main/java/io/github/hectorvent/floci/services/autoscaling/AutoScalingQueryHandler.java }  # non-tabular doc (grouped/inline)
   - { path: src/main/java/io/github/hectorvent/floci/services/bcmdataexports/BcmDataExportsJsonHandler.java }  # no standalone action table yet

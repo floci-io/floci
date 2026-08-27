@@ -547,6 +547,8 @@ floci:
       enabled: true
     emrserverless:
       enabled: true
+    ssoadmin:
+      enabled: true
     controltower:
       enabled: true
     lakeformation:
