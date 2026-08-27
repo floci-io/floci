@@ -1190,5 +1190,26 @@ class GlueServiceTest {
         GlueService.Page<io.github.hectorvent.floci.services.glue.model.Crawler> crawlersNextPage = glueService.getCrawlers(10, crawlersPage.nextToken());
         assertEquals(2, crawlersNextPage.items().size());
         assertNull(crawlersNextPage.nextToken());
+
+        AwsException negativeMaxResultsJobs = assertThrows(AwsException.class, () -> glueService.getJobs(-1, null));
+        assertEquals("InvalidInputException", negativeMaxResultsJobs.getErrorCode());
+
+        AwsException zeroMaxResultsCrawlers = assertThrows(AwsException.class, () -> glueService.getCrawlers(0, null));
+        assertEquals("InvalidInputException", zeroMaxResultsCrawlers.getErrorCode());
+
+        AwsException hugeMaxResultsJobs = assertThrows(AwsException.class, () -> glueService.getJobs(1001, null));
+        assertEquals("InvalidInputException", hugeMaxResultsJobs.getErrorCode());
+    }
+
+    @Test
+    void taggingNonExistentJobOrCrawlerThrows() {
+        String fakeJobArn = "arn:aws:glue:" + REGION + ":" + ACCOUNT_ID + ":job/fake-job";
+        String fakeCrawlerArn = "arn:aws:glue:" + REGION + ":" + ACCOUNT_ID + ":crawler/fake-crawler";
+
+        AwsException jobTagEx = assertThrows(AwsException.class, () -> glueService.tagResource(fakeJobArn, Map.of("k", "v"), REGION));
+        assertEquals("EntityNotFoundException", jobTagEx.getErrorCode());
+
+        AwsException crawlerGetTagsEx = assertThrows(AwsException.class, () -> glueService.getTags(fakeCrawlerArn, REGION));
+        assertEquals("EntityNotFoundException", crawlerGetTagsEx.getErrorCode());
     }
 }

@@ -1181,6 +1181,7 @@ public class GlueService {
         if (arn.contains(":registry/") || arn.contains(":schema/")) {
             schemaRegistryService.tagResource(arn, tags);
         } else {
+            validateResourceExists(arn);
             resourceGroupsTaggingService.tagResources(List.of(arn), tags, region);
         }
     }
@@ -1190,6 +1191,7 @@ public class GlueService {
         if (arn.contains(":registry/") || arn.contains(":schema/")) {
             schemaRegistryService.untagResource(arn, tagKeys);
         } else {
+            validateResourceExists(arn);
             resourceGroupsTaggingService.untagResources(List.of(arn), tagKeys, region);
         }
     }
@@ -1199,6 +1201,7 @@ public class GlueService {
         if (arn.contains(":registry/") || arn.contains(":schema/")) {
             return schemaRegistryService.getTags(arn);
         } else {
+            validateResourceExists(arn);
             return resourceGroupsTaggingService.getTagsForResource(region, arn);
         }
     }
@@ -1209,9 +1212,24 @@ public class GlueService {
         }
     }
 
+    private void validateResourceExists(String arn) {
+        String[] parts = arn.split(":");
+        if (parts.length >= 6) {
+            String resource = parts[5];
+            if (resource.startsWith("job/")) {
+                getJob(resource.substring(4));
+            } else if (resource.startsWith("crawler/")) {
+                getCrawler(resource.substring(8));
+            }
+        }
+    }
+
     public record Page<T>(List<T> items, String nextToken) {}
 
     private <T> Page<T> paginate(List<T> all, Integer maxResults, String nextToken) {
+        if (maxResults != null && (maxResults < 1 || maxResults > 1000)) {
+            throw new AwsException("InvalidInputException", "MaxResults must be between 1 and 1000", 400);
+        }
         int limit = maxResults == null ? 100 : maxResults;
         int start = 0;
         if (nextToken != null && !nextToken.isBlank()) {
