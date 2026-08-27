@@ -245,6 +245,63 @@ class Route53ResolverCustomResourcesConsumerTest {
     }
 
     @Test
+    void createResolverEndpoint_replayedCreatorRequestIdWithDifferentIpValues_returnsResourceExists() {
+        String token = "tok-conflict-endpoint-ips";
+        call("CreateResolverEndpoint", "{\"Name\":\"ab-conflict-ips\",\"Direction\":\"INBOUND\","
+                + "\"SecurityGroupIds\":[\"sg-abc123\"],\"IpAddressRequests\":["
+                + "{\"SubnetId\":\"subnet-aaa\",\"Ip\":\"10.0.0.5\"},"
+                + "{\"SubnetId\":\"subnet-bbb\",\"Ip\":\"10.0.1.5\"}],"
+                + "\"CreatorRequestId\":\"" + token + "\"}")
+        .then().statusCode(200);
+
+        // Same COUNT of IP requests, different subnet and IP values. Comparing counts alone
+        // would read this as an equivalent replay and silently return the original endpoint.
+        call("CreateResolverEndpoint", "{\"Name\":\"ab-conflict-ips\",\"Direction\":\"INBOUND\","
+                + "\"SecurityGroupIds\":[\"sg-abc123\"],\"IpAddressRequests\":["
+                + "{\"SubnetId\":\"subnet-ccc\",\"Ip\":\"10.0.2.5\"},"
+                + "{\"SubnetId\":\"subnet-ddd\",\"Ip\":\"10.0.3.5\"}],"
+                + "\"CreatorRequestId\":\"" + token + "\"}")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ResourceExistsException"));
+    }
+
+    @Test
+    void createResolverEndpoint_replayedCreatorRequestIdWithIdenticalIps_returnsTheOriginal() {
+        String token = "tok-replay-endpoint-ips";
+        String body = "{\"Name\":\"ab-replay-ips\",\"Direction\":\"INBOUND\","
+                + "\"SecurityGroupIds\":[\"sg-abc123\"],\"IpAddressRequests\":["
+                + "{\"SubnetId\":\"subnet-aaa\",\"Ip\":\"10.0.0.5\"},"
+                + "{\"SubnetId\":\"subnet-bbb\",\"Ip\":\"10.0.1.5\"}],"
+                + "\"CreatorRequestId\":\"" + token + "\"}";
+
+        String first = call("CreateResolverEndpoint", body)
+                .then().statusCode(200).extract().path("ResolverEndpoint.Id");
+
+        // A genuine retry must still be idempotent — the stricter comparison must not turn
+        // every retry into a conflict.
+        call("CreateResolverEndpoint", body)
+        .then()
+            .statusCode(200)
+            .body("ResolverEndpoint.Id", equalTo(first));
+    }
+
+    @Test
+    void createResolverEndpoint_replayResponseOmitsInternalIpFingerprint() {
+        String token = "tok-replay-endpoint-nofingerprint";
+        call("CreateResolverEndpoint", "{\"Name\":\"ab-nofingerprint\",\"Direction\":\"INBOUND\","
+                + "\"SecurityGroupIds\":[\"sg-abc123\"],\"IpAddressRequests\":[{\"SubnetId\":\"subnet-aaa\","
+                + "\"Ip\":\"10.0.0.5\"}],\"CreatorRequestId\":\"" + token + "\"}")
+        .then()
+            .statusCode(200)
+            // ResolverEndpoint models IpAddressCount but no IP list, so whatever we retain to
+            // detect a changed IP set must not reach the wire.
+            .body("ResolverEndpoint.IpAddressCount", equalTo(1))
+            .body("ResolverEndpoint.any { it.key == 'IpAddressRequests' }", equalTo(false))
+            .body("ResolverEndpoint.any { it.key == 'IpAddresses' }", equalTo(false));
+    }
+
+    @Test
     void createResolverRule_replayedCreatorRequestIdWithDifferentParameters_returnsResourceExists() {
         String token = "tok-conflict-rule";
         call("CreateResolverRule", "{\"Name\":\"ab-conflict-rule\",\"RuleType\":\"FORWARD\","

@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.route53resolver;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
@@ -72,6 +73,14 @@ public class Route53ResolverService {
     private final StorageBackend<String, ObjectNode> endpointStore;
     private final StorageBackend<String, ObjectNode> ruleStore;
     private final StorageBackend<String, ObjectNode> ruleAssociationStore;
+    /**
+     * The {@code IpAddressRequests} each endpoint was created with, keyed by endpoint id.
+     * Kept beside the endpoint rather than on it: the modeled {@code ResolverEndpoint} shape
+     * carries {@code IpAddressCount} and no IP list, and the handlers return the stored node
+     * verbatim, so holding the addresses on the resource would put an unmodeled member on the
+     * wire. Only the CreatorRequestId conflict check reads this.
+     */
+    private final StorageBackend<String, ObjectNode> endpointIpRequestStore;
     private final ObjectMapper objectMapper;
 
     @Inject
@@ -84,6 +93,9 @@ public class Route53ResolverService {
                 new TypeReference<java.util.Map<String, ObjectNode>>() {});
         this.ruleAssociationStore = storageFactory.create("route53resolver",
                 "route53resolver-rule-associations.json", new TypeReference<java.util.Map<String, ObjectNode>>() {});
+        this.endpointIpRequestStore = storageFactory.create("route53resolver",
+                "route53resolver-endpoint-ip-requests.json",
+                new TypeReference<java.util.Map<String, ObjectNode>>() {});
         this.objectMapper = objectMapper;
     }
 
@@ -155,9 +167,7 @@ public class Route53ResolverService {
         if (replay.isPresent()) {
             ObjectNode existing = replay.get();
             requireReplayMatches(existing, request, "Name", "Direction", "SecurityGroupIds");
-            if (existing.path("IpAddressCount").asInt(-1) != ipAddresses.size()) {
-                throw replayConflict(request, existing, "IpAddressRequests");
-            }
+            requireSameIpRequests(existing, request, ipAddresses);
             return existing;
         }
         String id = id(idPrefix);
@@ -174,12 +184,15 @@ public class Route53ResolverService {
         endpoint.put("CreationTime", Instant.now().toString());
         endpoint.put("ModificationTime", Instant.now().toString());
         endpointStore.put(id, endpoint);
+        endpointIpRequestStore.put(id,
+                objectMapper.createObjectNode().set("IpAddressRequests", normalizedIpRequests(ipAddresses)));
         return endpoint.deepCopy();
     }
 
     public ObjectNode deleteResolverEndpoint(String id) {
         ObjectNode endpoint = require(endpointStore, id, "resolver endpoint");
         endpointStore.delete(id);
+        endpointIpRequestStore.delete(id);
         ObjectNode result = endpoint.deepCopy();
         result.put("Status", "DELETING");
         return result;
@@ -385,6 +398,40 @@ public class Route53ResolverService {
                 throw replayConflict(request, existing, field);
             }
         }
+    }
+
+    /**
+     * A retry that keeps the IP-request count but changes a subnet or address describes a
+     * different endpoint, so it is a conflict rather than a replay. Compared against the
+     * addresses recorded at create time, since the stored resource keeps only
+     * {@code IpAddressCount}.
+     *
+     * <p>Order is not significant — the request list is a set of addresses, and a retry that
+     * merely reorders it is the same request — so both sides are normalised before comparing.</p>
+     *
+     * <p>An endpoint created before this record existed has no entry; those fall back to the
+     * original count comparison rather than being reported as conflicts on every retry.</p>
+     */
+    private void requireSameIpRequests(ObjectNode existing, JsonNode request, JsonNode ipAddresses) {
+        JsonNode recorded = endpointIpRequestStore.get(text(existing, "Id"))
+                .map(node -> node.get("IpAddressRequests"))
+                .orElse(null);
+        boolean conflict = recorded == null
+                ? existing.path("IpAddressCount").asInt(-1) != ipAddresses.size()
+                : !recorded.equals(normalizedIpRequests(ipAddresses));
+        if (conflict) {
+            throw replayConflict(request, existing, "IpAddressRequests");
+        }
+    }
+
+    /** The IP requests in a stable order, so a reordered retry is not read as a change. */
+    private ArrayNode normalizedIpRequests(JsonNode ipAddresses) {
+        List<JsonNode> entries = new java.util.ArrayList<>();
+        ipAddresses.forEach(entries::add);
+        entries.sort(java.util.Comparator.comparing(JsonNode::toString));
+        ArrayNode normalized = objectMapper.createArrayNode();
+        entries.forEach(normalized::add);
+        return normalized;
     }
 
     private AwsException replayConflict(JsonNode request, ObjectNode existing, String field) {

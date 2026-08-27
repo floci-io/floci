@@ -63,6 +63,12 @@ resource and raise `ResourceExistsException`, which both operations model.
 all, so a mismatched retry still returns the original list rather than an invented error
 code. See `issues/route53resolver-firewall-domain-list-retry-conflict.md`.
 
+For `CreateResolverEndpoint` the comparison covers the actual `IpAddressRequests` entries,
+not just how many there are, so a retry that keeps the count but changes a subnet or
+address is a conflict. Order is not significant. The modelled `ResolverEndpoint` shape has
+`IpAddressCount` and no IP list, so the addresses are recorded in a side store rather than
+on the resource and never reach the response.
+
 ## Limitations
 
 - **All create/update operations complete synchronously.** Real AWS transitions a
