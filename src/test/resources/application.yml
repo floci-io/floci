@@ -343,6 +343,8 @@ floci:
       enabled: true
     controltower:
       enabled: true
+    aps:
+      enabled: true
     lakeformation:
       enabled: true
     tagging:

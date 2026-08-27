@@ -289,8 +289,17 @@ public interface EmulatorConfig {
 
         ControlTowerStorageConfig controltower();
 
+        ApsStorageConfig aps();
+
         LakeFormationStorageConfig lakeformation();
         EfsStorageConfig efs();
+    }
+
+    interface ApsStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
     }
 
     interface SsmStorageConfig {
@@ -675,8 +684,15 @@ public interface EmulatorConfig {
 
         ControlTowerServiceConfig controltower();
 
+        ApsServiceConfig aps();
+
         LakeFormationServiceConfig lakeformation();
         EfsServiceConfig efs();
+    }
+
+    interface ApsServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
     }
 
     interface IotServiceConfig {
