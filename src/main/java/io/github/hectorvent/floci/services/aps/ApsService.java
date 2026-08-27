@@ -1,6 +1,5 @@
 package io.github.hectorvent.floci.services.aps;
 
-import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
@@ -28,22 +27,19 @@ public class ApsService implements TagHandler {
     private static final int MAX_PAGE = 1000;
 
     private final StorageBackend<String, PrometheusWorkspace> storage;
-    private final EmulatorConfig config;
     private final RegionResolver regionResolver;
 
     @Inject
-    public ApsService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver) {
+    public ApsService(StorageFactory storageFactory, RegionResolver regionResolver) {
         this.storage = storageFactory.create("aps", "aps-workspaces.json",
                 new TypeReference<Map<String, PrometheusWorkspace>>() {});
-        this.config = config;
         this.regionResolver = regionResolver;
     }
 
     public PrometheusWorkspace createWorkspace(String alias, Map<String, String> tags, String kmsKeyArn) {
         String workspaceId = "ws-" + UUID.randomUUID();
-        String region = config.defaultRegion();
-        String arn = AwsArnUtils.Arn.of("aps", region, regionResolver.getAccountId(),
-                "workspace/" + workspaceId).toString();
+        String region = regionResolver.getRegion();
+        String arn = regionResolver.buildArn("aps", region, "workspace/" + workspaceId);
 
         PrometheusWorkspace workspace = new PrometheusWorkspace();
         workspace.setWorkspaceId(workspaceId);
@@ -83,19 +79,16 @@ public class ApsService implements TagHandler {
                 MAX_PAGE, "ValidationException");
     }
 
-    public PrometheusWorkspace deleteWorkspace(String workspaceId) {
-        PrometheusWorkspace workspace = describeWorkspace(workspaceId);
-        workspace.setStatus("DELETING");
+    public void deleteWorkspace(String workspaceId) {
+        describeWorkspace(workspaceId);
         storage.delete(workspaceId);
         LOG.infov("Deleted AMP workspace: {0}", workspaceId);
-        return workspace;
     }
 
-    public PrometheusWorkspace updateWorkspaceAlias(String workspaceId, String alias) {
+    public void updateWorkspaceAlias(String workspaceId, String alias) {
         PrometheusWorkspace workspace = describeWorkspace(workspaceId);
         workspace.setAlias(alias);
         storage.put(workspaceId, workspace);
-        return workspace;
     }
 
     // ── TagHandler: the shared /tags/{resourceArn} dispatcher routes aps ARNs here ──
@@ -137,10 +130,17 @@ public class ApsService implements TagHandler {
 
     private PrometheusWorkspace workspaceByArn(String arn) {
         // arn:aws:aps:<region>:<account>:workspace/<workspaceId>
-        int slash = arn.lastIndexOf('/');
-        if (slash < 0 || slash == arn.length() - 1) {
-            throw new AwsException("ValidationException", "Invalid AMP resource ARN: " + arn, 400);
+        String resource;
+        try {
+            resource = AwsArnUtils.parse(arn).resource();
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("ValidationException", "Invalid resource ARN: " + arn, 400);
         }
-        return describeWorkspace(arn.substring(slash + 1));
+        String prefix = "workspace/";
+        if (!resource.startsWith(prefix) || resource.length() == prefix.length()) {
+            throw new AwsException("ValidationException",
+                    "Tags are only supported on AMP workspaces: " + arn, 400);
+        }
+        return describeWorkspace(resource.substring(prefix.length()));
     }
 }

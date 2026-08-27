@@ -1,6 +1,5 @@
 package io.github.hectorvent.floci.services.aps;
 
-import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -27,10 +26,7 @@ class ApsServiceTest {
         when(storageFactory.create(Mockito.anyString(), Mockito.anyString(), Mockito.any()))
                 .thenAnswer(invocation -> AccountAwareStorageBackend.inMemory("000000000000"));
 
-        EmulatorConfig config = Mockito.mock(EmulatorConfig.class);
-        when(config.defaultRegion()).thenReturn("us-east-1");
-
-        service = new ApsService(storageFactory, config, new RegionResolver("us-east-1", "000000000000"));
+        service = new ApsService(storageFactory, new RegionResolver("us-east-1", "000000000000"));
     }
 
     @Test
