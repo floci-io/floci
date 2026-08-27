@@ -119,6 +119,33 @@ class ApiGatewayPatchOperationsBoundaryIntegrationTest {
                 .statusCode(400);
     }
 
+    /**
+     * A {@code null} element inside the patchOperations array must be rejected at the boundary. Every
+     * downstream handler assumes each element is a map and calls {@code .get("op")} on it directly, so
+     * letting a null through turns a client error into a 500 instead of the modelled 400.
+     */
+    @Test
+    void testNullElementInPatchOperationsArrayIsRejected() {
+        patchModelExpecting("{\"patchOperations\":[null]}", 400);
+    }
+
+    /**
+     * UpdateRestApi has no per-handler null guard of its own, unlike some of the newer handlers — this
+     * is the case that would 500 (NPE on {@code op.get("op")}) without the shared boundary rejecting
+     * the null element before it ever reaches the service layer.
+     */
+    @Test
+    void testNullElementInPatchOperationsArrayIsRejectedOnRestApi() {
+        String apiId = createApi("patch-boundary-restapi-null-op");
+
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"patchOperations\":[null]}")
+                .patch("/restapis/" + apiId)
+                .then()
+                .statusCode(400);
+    }
+
     /** The same boundary contract holds on a second handler, proving the parse is shared. */
     @Test
     void testMalformedEnvelopeOnRequestValidatorIsRejected() {

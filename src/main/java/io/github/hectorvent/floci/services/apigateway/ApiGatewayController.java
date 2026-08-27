@@ -108,7 +108,7 @@ public class ApiGatewayController {
         if (patchOperations != null) {
             for (Map<String, String> operation : patchOperations) {
                 if (operation == null) {
-                    continue;
+                    throw new AwsException("BadRequestException", "Invalid patch operation", 400);
                 }
                 String op = operation.get("op");
                 if (op != null && !PATCH_OPS.contains(op)) {
