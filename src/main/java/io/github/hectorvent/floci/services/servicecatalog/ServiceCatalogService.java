@@ -228,6 +228,14 @@ public class ServiceCatalogService {
         request.path("ProvisioningParameters").forEach(parameter ->
                 parameters.put(text(parameter, "Key"), text(parameter, "Value")));
         String email = parameters.get("AccountEmail");
+        if (email == null || email.isBlank()) {
+            // Without this, Organizations' validateEmail raises InvalidInputException — an
+            // Organizations shape a servicecatalog client cannot deserialize. Keep every error
+            // a Service Catalog caller sees inside the Service Catalog model, the same way the
+            // createAccount failure below is translated.
+            throw new AwsException("InvalidParametersException",
+                    "AccountEmail is required in ProvisioningParameters for " + CONTROL_TOWER_PRODUCT_NAME, 400);
+        }
         String accountName = parameters.getOrDefault("AccountName", name);
         OrganizationAccount account = organizationsService.listAccounts(accountId).stream()
                 .filter(candidate -> email != null && email.equalsIgnoreCase(candidate.getEmail()))

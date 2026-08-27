@@ -185,6 +185,48 @@ class ServiceCatalogProvisionProductValidationConsumerTest {
             .statusCode(200);
     }
 
+    /**
+     * Without {@code AccountEmail} the Account Factory path used to fall through to
+     * Organizations' {@code validateEmail}, which throws {@code InvalidInputException} — an
+     * Organizations shape, not a Service Catalog one, so a servicecatalog SDK client cannot
+     * deserialize it into a typed exception.
+     */
+    @Test
+    void provisionProduct_accountFactoryWithoutAccountEmail_returnsServiceCatalogInvalidParameters() {
+        ensureOrganization();
+
+        call("ProvisionProduct", "{\"ProductId\":\"" + ServiceCatalogService.CONTROL_TOWER_PRODUCT_ID + "\","
+                + "\"ProvisioningArtifactId\":\"" + ServiceCatalogService.CONTROL_TOWER_ARTIFACT_ID + "\","
+                + "\"ProvisionedProductName\":\"ab-provision-no-email\",\"ProvisionToken\":\"tok-no-email\","
+                + "\"ProvisioningParameters\":[{\"Key\":\"AccountName\",\"Value\":\"ab-provision-no-email\"}]}")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParametersException"));
+    }
+
+    /**
+     * The guard belongs on the Account Factory path only — a plain stored product needs no
+     * email at all, so provisioning one without {@code AccountEmail} must still succeed.
+     */
+    @Test
+    void provisionProduct_plainProductWithoutAccountEmail_stillSucceeds() {
+        String productId = createProduct("ab-provision-no-email-plain-product");
+        String artifactId = firstArtifactId(productId);
+
+        call("ProvisionProduct", "{\"ProductId\":\"" + productId + "\","
+                + "\"ProvisioningArtifactId\":\"" + artifactId + "\","
+                + "\"ProvisionedProductName\":\"ab-provision-no-email-plain\","
+                + "\"ProvisionToken\":\"tok-no-email-plain\"}")
+        .then()
+            .statusCode(200)
+            .body("RecordDetail.Status", equalTo("SUCCEEDED"));
+
+        call("TerminateProvisionedProduct", "{\"ProvisionedProductName\":\"ab-provision-no-email-plain\","
+                + "\"TerminateToken\":\"tok-terminate-no-email-plain\"}")
+        .then()
+            .statusCode(200);
+    }
+
     @Test
     void provisionProduct_accountFactoryProduct_stillCreatesAccount() {
         ensureOrganization();
