@@ -59,7 +59,7 @@ class MskControllerIntegrationTest {
             .get("/api/v2/clusters/{clusterArn}", clusterArn)
         .then()
             .statusCode(200)
-            .body("clusterInfo.currentBrokerSoftwareInfo.kafkaVersion", equalTo("3.5.1"));
+            .body("clusterInfo.provisioned.currentBrokerSoftwareInfo.kafkaVersion", equalTo("3.5.1"));
     }
 
     @Test
@@ -80,7 +80,7 @@ class MskControllerIntegrationTest {
             .get("/api/v2/clusters/{clusterArn}", clusterArn)
         .then()
             .statusCode(200)
-            .body("clusterInfo.currentBrokerSoftwareInfo.kafkaVersion", equalTo("3.6.0"));
+            .body("clusterInfo.provisioned.currentBrokerSoftwareInfo.kafkaVersion", equalTo("3.6.0"));
     }
 
     @Test
