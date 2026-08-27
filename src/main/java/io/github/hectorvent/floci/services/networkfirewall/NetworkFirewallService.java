@@ -153,6 +153,14 @@ public class NetworkFirewallService {
             "UpdateAvailabilityZoneChangeProtection", "AvailabilityZoneChangeProtection",
             "UpdateFirewallAnalysisSettings", "EnabledAnalysisTypes");
 
+    /**
+     * Botocore documents omission as removal for UpdateFirewallDescription alone:
+     * "If you omit this setting, Network Firewall removes the description for the
+     * firewall." EnabledAnalysisTypes carries no equivalent statement, so an omitted
+     * value there is preserved rather than inferring behaviour the model never states.
+     */
+    private static final Set<String> CLEARED_WHEN_OMITTED = Set.of("UpdateFirewallDescription");
+
     public ObjectNode updateFirewall(String action, JsonNode request, String region, String accountId) {
         String arn = textOrNull(request, "FirewallArn");
         String name = textOrNull(request, "FirewallName");
@@ -161,6 +169,8 @@ public class NetworkFirewallService {
         JsonNode value = request.get(field);
         if (value != null) {
             existing.set(field, value.deepCopy());
+        } else if (CLEARED_WHEN_OMITTED.contains(action)) {
+            existing.remove(field);
         }
         firewalls.put(existing.path("FirewallArn").asText(), existing);
 
@@ -603,9 +613,8 @@ public class NetworkFirewallService {
 
     public ObjectNode associateFirewallPolicy(JsonNode request, String region, String accountId) {
         String policyArn = requiredText(request, "FirewallPolicyArn");
-        String arn = textOrNull(request, "FirewallArn");
-        String name = textOrNull(request, "FirewallName");
-        ObjectNode firewall = require(firewalls, arn, name, "Firewall", "FirewallArn", "FirewallName");
+        ObjectNode firewall =
+                firewallForChange(request, "FirewallPolicyChangeProtection", "firewall policy");
         require(firewallPolicies, policyArn, null, "FirewallPolicy", "ResourceArn", "ResourceName");
         String firewallArn = firewall.path("FirewallArn").asText();
         firewall.put("FirewallPolicyArn", policyArn);

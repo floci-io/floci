@@ -163,6 +163,7 @@ class NetworkFirewallIntegrationTest {
             .body("{\"FirewallName\":\"AssocTestFirewall\","
                     + "\"FirewallPolicyArn\":\"" + initialPolicyArn + "\","
                     + "\"VpcId\":\"vpc-assoctest0000000000\","
+                    + "\"FirewallPolicyChangeProtection\":false,"
                     + "\"SubnetMappings\":[{\"SubnetId\":\"subnet-22222222222222222\"}]}")
         .when()
             .post("/")
@@ -612,6 +613,66 @@ class NetworkFirewallIntegrationTest {
         call("DescribeFirewall", "{\"FirewallArn\":\"" + firewallArn(name) + "\"}")
             .statusCode(200)
             .body("Firewall.Description", equalTo("managed by the accelerator"));
+    }
+
+    @Test
+    void associateFirewallPolicy_withPolicyChangeProtection_isRejected() {
+        String name = "PolicyProtectedFirewall";
+        String initialPolicyArn = "arn:aws:network-firewall:us-east-1:723679240095:"
+                + "firewall-policy/" + name + "-policy";
+        createFirewall(name, "\"FirewallPolicyChangeProtection\":true,", "subnet-11111111111111118");
+
+        call("CreateFirewallPolicy", "{\"FirewallPolicyName\":\"" + name + "-replacement\","
+                + "\"FirewallPolicy\":{\"StatelessDefaultActions\":[\"aws:pass\"],"
+                + "\"StatelessFragmentDefaultActions\":[\"aws:pass\"]}}")
+            .statusCode(200);
+
+        call("AssociateFirewallPolicy", "{\"FirewallArn\":\"" + firewallArn(name) + "\","
+                + "\"FirewallPolicyArn\":\"arn:aws:network-firewall:us-east-1:723679240095:"
+                + "firewall-policy/" + name + "-replacement\"}")
+            .statusCode(400)
+            .body("__type", equalTo("InvalidOperationException"));
+
+        call("DescribeFirewall", "{\"FirewallArn\":\"" + firewallArn(name) + "\"}")
+            .statusCode(200)
+            .body("Firewall.FirewallPolicyArn", equalTo(initialPolicyArn));
+    }
+
+    @Test
+    void updateFirewallDescription_omittingDescription_clearsTheStoredValue() {
+        String name = "ClearDescriptionFirewall";
+        createFirewall(name, "", "subnet-11111111111111119");
+
+        call("UpdateFirewallDescription", "{\"FirewallArn\":\"" + firewallArn(name) + "\","
+                + "\"Description\":\"initial description\"}")
+            .statusCode(200)
+            .body("Description", equalTo("initial description"));
+
+        call("UpdateFirewallDescription", "{\"FirewallArn\":\"" + firewallArn(name) + "\"}")
+            .statusCode(200)
+            .body("$", not(hasKey("Description")));
+
+        call("DescribeFirewall", "{\"FirewallArn\":\"" + firewallArn(name) + "\"}")
+            .statusCode(200)
+            .body("Firewall.Description", nullValue());
+    }
+
+    @Test
+    void updateFirewallAnalysisSettings_omittingTypes_preservesTheStoredValue() {
+        // Deliberate asymmetry with Description: botocore documents omission as removal for
+        // UpdateFirewallDescription only. EnabledAnalysisTypes carries no such statement, so
+        // the stored value is preserved rather than inferring AWS behaviour the model omits.
+        String name = "PreserveAnalysisFirewall";
+        createFirewall(name, "", "subnet-1111111111111111a");
+
+        call("UpdateFirewallAnalysisSettings", "{\"FirewallArn\":\"" + firewallArn(name) + "\","
+                + "\"EnabledAnalysisTypes\":[\"TLS_SNI\"]}")
+            .statusCode(200)
+            .body("EnabledAnalysisTypes", contains("TLS_SNI"));
+
+        call("UpdateFirewallAnalysisSettings", "{\"FirewallArn\":\"" + firewallArn(name) + "\"}")
+            .statusCode(200)
+            .body("EnabledAnalysisTypes", contains("TLS_SNI"));
     }
 
     private static String firewallArn(String name) {
