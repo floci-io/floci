@@ -64,6 +64,15 @@ public class MskCluster {
     @JsonProperty("loggingInfo")
     private LoggingInfo loggingInfo;
 
+    @JsonProperty("openMonitoring")
+    private OpenMonitoring openMonitoring;
+
+    @JsonProperty("storageMode")
+    private String storageMode;
+
+    @JsonProperty("rebalancing")
+    private Rebalancing rebalancing;
+
     // Internal bookkeeping: excluded from API responses by MskController's views, but
     // persisted, since GetBootstrapBrokers, the readiness poller and container/volume
     // teardown all need these back after a restart.
@@ -138,6 +147,15 @@ public class MskCluster {
 
     public LoggingInfo getLoggingInfo() { return loggingInfo; }
     public void setLoggingInfo(LoggingInfo loggingInfo) { this.loggingInfo = loggingInfo; }
+
+    public OpenMonitoring getOpenMonitoring() { return openMonitoring; }
+    public void setOpenMonitoring(OpenMonitoring openMonitoring) { this.openMonitoring = openMonitoring; }
+
+    public String getStorageMode() { return storageMode; }
+    public void setStorageMode(String storageMode) { this.storageMode = storageMode; }
+
+    public Rebalancing getRebalancing() { return rebalancing; }
+    public void setRebalancing(Rebalancing rebalancing) { this.rebalancing = rebalancing; }
 
     public String getBootstrapBrokers() { return bootstrapBrokers; }
     public void setBootstrapBrokers(String bootstrapBrokers) { this.bootstrapBrokers = bootstrapBrokers; }

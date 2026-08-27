@@ -45,14 +45,16 @@ When `mock` is set to `false` (default), Floci uses the Docker API to start a Re
 
 `CreateCluster` and `CreateClusterV2` persist the metadata you pass — broker node group
 (instance type, subnets, security groups, storage, connectivity), number of broker nodes,
-encryption, client authentication, enhanced monitoring, logging, configuration and tags —
+encryption, client authentication, enhanced monitoring, open monitoring, logging,
+configuration, storage mode, rebalancing and tags —
 and echo it back from `DescribeCluster`/`DescribeClusterV2` and the matching `List` calls.
 
 The two API versions return different shapes, matching AWS:
 
 - **v1** (`DescribeCluster`) returns a flat `ClusterInfo`: `brokerNodeGroupInfo`,
   `encryptionInfo`, `clientAuthentication`, `enhancedMonitoring`, `loggingInfo`,
-  `numberOfBrokerNodes` and `zookeeperConnectString` all sit directly on the cluster.
+  `openMonitoring`, `storageMode`, `rebalancing`, `numberOfBrokerNodes` and
+  `zookeeperConnectString` all sit directly on the cluster.
 - **v2** (`DescribeClusterV2`) nests all of those under `ClusterInfo.Provisioned`, alongside a
   top-level `ClusterType` of `PROVISIONED`. `ClusterArn`, `ClusterName`, `State`,
   `CreationTime`, `CurrentVersion` and `Tags` stay top-level.

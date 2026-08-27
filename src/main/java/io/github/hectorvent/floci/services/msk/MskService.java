@@ -116,6 +116,9 @@ public class MskService implements ResourceProvider {
         cluster.setBrokerNodeGroupInfo(request.getBrokerNodeGroupInfo());
         cluster.setClientAuthentication(request.getClientAuthentication());
         cluster.setLoggingInfo(request.getLoggingInfo());
+        cluster.setOpenMonitoring(request.getOpenMonitoring());
+        cluster.setStorageMode(request.getStorageMode());
+        cluster.setRebalancing(request.getRebalancing());
 
         // AWS applies these server-side when the member is absent, and echoes the resolved
         // value back on Describe. Leaving them unset instead is what keeps a terraform plan
@@ -157,6 +160,9 @@ public class MskService implements ResourceProvider {
             merged.setEnhancedMonitoring(request.getProvisioned().getEnhancedMonitoring());
             merged.setLoggingInfo(request.getProvisioned().getLoggingInfo());
             merged.setConfigurationInfo(request.getProvisioned().getConfigurationInfo());
+            merged.setOpenMonitoring(request.getProvisioned().getOpenMonitoring());
+            merged.setStorageMode(request.getProvisioned().getStorageMode());
+            merged.setRebalancing(request.getProvisioned().getRebalancing());
         }
         return createCluster(merged);
     }

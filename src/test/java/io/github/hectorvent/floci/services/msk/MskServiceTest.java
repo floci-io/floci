@@ -22,7 +22,11 @@ import io.github.hectorvent.floci.services.msk.model.CreateClusterRequest;
 import io.github.hectorvent.floci.services.msk.model.CreateClusterV2Request;
 import io.github.hectorvent.floci.services.msk.model.EncryptionInTransit;
 import io.github.hectorvent.floci.services.msk.model.EncryptionInfo;
+import io.github.hectorvent.floci.services.msk.model.JmxExporter;
 import io.github.hectorvent.floci.services.msk.model.LoggingInfo;
+import io.github.hectorvent.floci.services.msk.model.OpenMonitoring;
+import io.github.hectorvent.floci.services.msk.model.Prometheus;
+import io.github.hectorvent.floci.services.msk.model.Rebalancing;
 import io.github.hectorvent.floci.services.msk.model.MskCluster;
 import io.github.hectorvent.floci.services.msk.model.MskConfiguration;
 import io.github.hectorvent.floci.services.msk.model.ProvisionedRequest;
@@ -229,6 +233,34 @@ class MskServiceTest {
         assertEquals("arn:aws:kafka:us-east-1:123456789012:configuration/conf/9",
                 cluster.getCurrentBrokerSoftwareInfo().getConfigurationArn());
         assertEquals(4L, cluster.getCurrentBrokerSoftwareInfo().getConfigurationRevision());
+    }
+
+    @Test
+    void createClusterV2PersistsOpenMonitoringStorageModeAndRebalancing() {
+        CreateClusterV2Request request = new CreateClusterV2Request();
+        request.setClusterName("v2-open-monitoring-cluster");
+
+        JmxExporter jmxExporter = new JmxExporter();
+        jmxExporter.setEnabledInBroker(true);
+        Prometheus prometheus = new Prometheus();
+        prometheus.setJmxExporter(jmxExporter);
+        OpenMonitoring openMonitoring = new OpenMonitoring();
+        openMonitoring.setPrometheus(prometheus);
+        Rebalancing rebalancing = new Rebalancing();
+        rebalancing.setStatus("PAUSED");
+
+        ProvisionedRequest provisioned = new ProvisionedRequest();
+        provisioned.setKafkaVersion("3.6.0");
+        provisioned.setOpenMonitoring(openMonitoring);
+        provisioned.setStorageMode("TIERED");
+        provisioned.setRebalancing(rebalancing);
+        request.setProvisioned(provisioned);
+
+        MskCluster cluster = mskService.createCluster(request);
+
+        assertTrue(cluster.getOpenMonitoring().getPrometheus().getJmxExporter().getEnabledInBroker());
+        assertEquals("TIERED", cluster.getStorageMode());
+        assertEquals("PAUSED", cluster.getRebalancing().getStatus());
     }
 
     @Test

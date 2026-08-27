@@ -37,6 +37,15 @@ public class CreateClusterRequest {
     @JsonProperty("configurationInfo")
     private ConfigurationInfo configurationInfo;
 
+    @JsonProperty("openMonitoring")
+    private OpenMonitoring openMonitoring;
+
+    @JsonProperty("storageMode")
+    private String storageMode;
+
+    @JsonProperty("rebalancing")
+    private Rebalancing rebalancing;
+
     @JsonProperty("tags")
     private Map<String, String> tags;
 
@@ -68,6 +77,15 @@ public class CreateClusterRequest {
 
     public ConfigurationInfo getConfigurationInfo() { return configurationInfo; }
     public void setConfigurationInfo(ConfigurationInfo configurationInfo) { this.configurationInfo = configurationInfo; }
+
+    public OpenMonitoring getOpenMonitoring() { return openMonitoring; }
+    public void setOpenMonitoring(OpenMonitoring openMonitoring) { this.openMonitoring = openMonitoring; }
+
+    public String getStorageMode() { return storageMode; }
+    public void setStorageMode(String storageMode) { this.storageMode = storageMode; }
+
+    public Rebalancing getRebalancing() { return rebalancing; }
+    public void setRebalancing(Rebalancing rebalancing) { this.rebalancing = rebalancing; }
 
     public Map<String, String> getTags() { return tags; }
     public void setTags(Map<String, String> tags) { this.tags = tags; }

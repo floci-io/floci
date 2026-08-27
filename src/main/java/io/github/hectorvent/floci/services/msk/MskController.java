@@ -239,6 +239,9 @@ public class MskController {
         putIfPresent(view, "clientAuthentication", cluster.getClientAuthentication());
         putIfPresent(view, "enhancedMonitoring", cluster.getEnhancedMonitoring());
         putIfPresent(view, "loggingInfo", cluster.getLoggingInfo());
+        putIfPresent(view, "openMonitoring", cluster.getOpenMonitoring());
+        putIfPresent(view, "storageMode", cluster.getStorageMode());
+        putIfPresent(view, "rebalancing", cluster.getRebalancing());
         return view;
     }
 

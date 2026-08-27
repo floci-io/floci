@@ -288,6 +288,53 @@ class MskControllerIntegrationTest {
     }
 
     @Test
+    void createClusterEchoesOpenMonitoringStorageModeAndRebalancing() {
+        String clusterArn = given()
+            .contentType("application/json")
+            .body("""
+                {
+                  "clusterName": "v1-open-monitoring-test",
+                  "kafkaVersion": "3.6.0",
+                  "numberOfBrokerNodes": 1,
+                  "storageMode": "TIERED",
+                  "rebalancing": {"status": "ACTIVE"},
+                  "openMonitoring": {
+                    "prometheus": {
+                      "jmxExporter": {"enabledInBroker": true},
+                      "nodeExporter": {"enabledInBroker": false}
+                    }
+                  }
+                }
+                """)
+        .when()
+            .post("/v1/clusters")
+        .then()
+            .statusCode(200)
+            .extract().path("clusterArn");
+
+        given()
+        .when()
+            .get("/v1/clusters/{clusterArn}", clusterArn)
+        .then()
+            .statusCode(200)
+            .body("clusterInfo.storageMode", equalTo("TIERED"))
+            .body("clusterInfo.rebalancing.status", equalTo("ACTIVE"))
+            .body("clusterInfo.openMonitoring.prometheus.jmxExporter.enabledInBroker", equalTo(true))
+            .body("clusterInfo.openMonitoring.prometheus.nodeExporter.enabledInBroker", equalTo(false));
+
+        // and the v2 view nests them under provisioned, like every other provisioned member
+        given()
+        .when()
+            .get("/api/v2/clusters/{clusterArn}", clusterArn)
+        .then()
+            .statusCode(200)
+            .body("clusterInfo.provisioned.storageMode", equalTo("TIERED"))
+            .body("clusterInfo.provisioned.openMonitoring.prometheus.jmxExporter.enabledInBroker", equalTo(true))
+            .body("clusterInfo", not(hasKey("storageMode")))
+            .body("clusterInfo", not(hasKey("openMonitoring")));
+    }
+
+    @Test
     void listClustersV2NestsProvisionedMetadataTheSameWayDescribeDoes() {
         given()
             .contentType("application/json")
