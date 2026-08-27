@@ -151,6 +151,19 @@ class InstanceProfileTagsIntegrationTest {
     }
 
     @Test
+    void untagInstanceProfileMalformedNameReturnsValidationError() {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UntagInstanceProfile")
+            .formParam("InstanceProfileName", "not a valid name!")
+            .formParam("TagKeys.member.1", "team")
+            .header("Authorization", auth(ACCOUNT, "iam"))
+        .when().post("/")
+        .then().statusCode(400)
+            .body(containsString("ValidationError"));
+    }
+
+    @Test
     void tagNonexistentProfileReturnsNoSuchEntity() {
         String profile = "no-such-" + UUID.randomUUID().toString().substring(0, 8);
 

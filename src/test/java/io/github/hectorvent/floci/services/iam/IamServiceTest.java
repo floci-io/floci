@@ -416,6 +416,33 @@ class IamServiceTest {
     }
 
     @Test
+    void updateGroupMalformedNewGroupNameIsRejected() {
+        iamService.createGroup("orig-group", "/");
+        assertThrows(AwsException.class,
+                () -> iamService.updateGroup("orig-group", "not a valid name!", null));
+    }
+
+    @Test
+    void groupRenamePreservesPolicyResolutionForExistingMembers() {
+        iamService.createGroup("g-rename", "/");
+        iamService.putGroupPolicy("g-rename", "p",
+                "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"*\",\"Resource\":\"*\"}]}");
+        iamService.createUser("member-user", "/");
+        iamService.addUserToGroup("g-rename", "member-user");
+        AccessKey key = iamService.createAccessKey("member-user");
+
+        iamService.updateGroup("g-rename", "g-renamed", null);
+
+        List<String> policies = iamService.resolveCallerPolicies(key.getAccessKeyId());
+        assertNotNull(policies);
+        assertTrue(policies.stream().anyMatch(doc -> doc.contains("\"Resource\":\"*\"")),
+                "group policy should still resolve for the member after the group is renamed");
+        assertTrue(iamService.listGroupsForUser("member-user").stream()
+                        .anyMatch(g -> g.getGroupName().equals("g-renamed")),
+                "ListGroupsForUser should reflect the new group name");
+    }
+
+    @Test
     void instanceProfileSetTagsRejectsNullAndDefensivelyCopies() {
         InstanceProfile profile = new InstanceProfile("AIPAX", "p", "/", "arn:aws:iam::111111111111:instance-profile/p");
         profile.setTags(null);

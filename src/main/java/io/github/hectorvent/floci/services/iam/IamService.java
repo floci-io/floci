@@ -455,6 +455,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
 
     public void updateGroup(String groupName, String newGroupName, String newPath) {
         validateIamResourceName(groupName, "GroupName");
+        if (newGroupName != null) validateIamResourceName(newGroupName, "NewGroupName");
         validateIamPath(newPath, "NewPath");
         IamGroup group = getGroup(groupName);
         if (newGroupName != null && !newGroupName.equals(groupName)) {
@@ -467,6 +468,15 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             if (newPath != null) group.setPath(normalizePath(newPath));
             group.setArn(iamArn("group", group.getPath(), newGroupName));
             groups.put(newGroupName, group);
+            // Members still carry the old name in their own groupNames list — without this,
+            // ListGroupsForUser drops the renamed group and its policies stop resolving for them.
+            for (String memberName : group.getUserNames()) {
+                users.get(memberName).ifPresent(member -> {
+                    member.getGroupNames().remove(groupName);
+                    member.getGroupNames().add(newGroupName);
+                    users.put(memberName, member);
+                });
+            }
         } else {
             if (newPath != null) {
                 group.setPath(normalizePath(newPath));
@@ -2309,6 +2319,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public void untagInstanceProfile(String instanceProfileName, List<String> tagKeys) {
+        validateIamResourceName(instanceProfileName, "InstanceProfileName");
         if (tagKeys != null && tagKeys.size() > MAX_TAGS_PER_INSTANCE_PROFILE) {
             throw new AwsException("ValidationError",
                     "Value at 'tagKeys' failed to satisfy constraint: Member must have length "
