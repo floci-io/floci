@@ -41,6 +41,34 @@ When `mock` is set to `false` (default), Floci uses the Docker API to start a Re
 - **Persistence**: Each cluster gets a named Docker volume (`floci-msk-{volumeId}`). In memory mode the volume is removed on cluster delete; in persistent modes it is retained unless `FLOCI_STORAGE_PRUNE_VOLUMES_ON_DELETE=true`.
 - **Readiness**: The cluster state transitions to `ACTIVE` once the Redpanda `/ready` endpoint is reachable.
 
+## Cluster metadata
+
+`CreateCluster` and `CreateClusterV2` persist the metadata you pass — broker node group
+(instance type, subnets, security groups, storage, connectivity), number of broker nodes,
+encryption, client authentication, enhanced monitoring, logging, configuration and tags —
+and echo it back from `DescribeCluster`/`DescribeClusterV2` and the matching `List` calls.
+
+The two API versions return different shapes, matching AWS:
+
+- **v1** (`DescribeCluster`) returns a flat `ClusterInfo`: `brokerNodeGroupInfo`,
+  `encryptionInfo`, `clientAuthentication`, `enhancedMonitoring`, `loggingInfo`,
+  `numberOfBrokerNodes` and `zookeeperConnectString` all sit directly on the cluster.
+- **v2** (`DescribeClusterV2`) nests all of those under `ClusterInfo.Provisioned`, alongside a
+  top-level `ClusterType` of `PROVISIONED`. `ClusterArn`, `ClusterName`, `State`,
+  `CreationTime`, `CurrentVersion` and `Tags` stay top-level.
+
+Two details worth knowing:
+
+- `configurationInfo` is a *request-only* member. The configuration a cluster was created
+  with is reported back on `currentBrokerSoftwareInfo` as `configurationArn` and
+  `configurationRevision`, which is where the Terraform AWS provider reads it from.
+- Members AWS defaults server-side are defaulted here too, so a `terraform plan` converges:
+  `enhancedMonitoring` becomes `DEFAULT`, and `encryptionInfo.encryptionInTransit` becomes
+  `clientBroker: TLS_PLAINTEXT` / `inCluster: true` when the request omits them.
+
+Serverless clusters are not emulated; `CreateClusterV2` maps every request to a provisioned
+cluster and the `serverless` member is ignored.
+
 ## Examples
 
 ```bash
@@ -50,7 +78,7 @@ export AWS_ENDPOINT_URL=http://localhost:4566
 aws kafka create-cluster \
   --cluster-name my-cluster \
   --kafka-version "3.6.1" \
-  --numberOfBrokerNodes 1 \
+  --number-of-broker-nodes 1 \
   --broker-node-group-info '{"InstanceType":"kafka.m5.large","ClientSubnets":["subnet-1"]}' \
   --endpoint-url $AWS_ENDPOINT_URL
 

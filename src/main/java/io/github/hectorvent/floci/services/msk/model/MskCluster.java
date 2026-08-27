@@ -1,11 +1,24 @@
 package io.github.hectorvent.floci.services.msk.model;
 
-import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 import java.time.Instant;
 import java.util.Map;
 
+/**
+ * The persisted shape of an MSK cluster.
+ *
+ * <p>This model is what the storage backends serialize: {@code WalStorage},
+ * {@code PersistentStorage} and {@code HybridStorage} all write it with a plain
+ * {@code ObjectMapper}, so any field hidden here is hidden from the store too and does
+ * not survive a restart. Internal bookkeeping ({@code bootstrapBrokers},
+ * {@code containerId}, {@code accountId}, {@code volumeId}) therefore stays serializable.
+ *
+ * <p>Keeping those fields out of the API is the responsibility of the response views in
+ * {@code MskController} ({@code toClusterViewV1}/{@code toClusterViewV2}), which build the
+ * client-facing JSON explicitly rather than serializing this model directly - the same
+ * split {@code MskConfiguration} and {@code toConfigurationView} already use.
+ */
 @RegisterForReflection
 public class MskCluster {
 
@@ -51,22 +64,24 @@ public class MskCluster {
     @JsonProperty("loggingInfo")
     private LoggingInfo loggingInfo;
 
-    @JsonProperty("configurationInfo")
-    private ConfigurationInfo configurationInfo;
+    // Internal bookkeeping: excluded from API responses by MskController's views, but
+    // persisted, since GetBootstrapBrokers, the readiness poller and container/volume
+    // teardown all need these back after a restart.
 
-    // Internal field, not directly in AWS response but needed for GetBootstrapBrokers
-    @JsonIgnore
+    // Needed for GetBootstrapBrokers (and by Pipes, to resolve a Kafka source's brokers)
+    @JsonProperty("bootstrapBrokers")
     private String bootstrapBrokers;
 
     // Docker container ID for mock=false
-    @JsonIgnore
+    @JsonProperty("containerId")
     private String containerId;
 
-    @JsonIgnore
+    // Owning account, used by putCluster to write back to the right account partition
+    @JsonProperty("accountId")
     private String accountId;
 
     // 6-char hex generated once at creation for stable, collision-free volume/container naming
-    @JsonIgnore
+    @JsonProperty("volumeId")
     private String volumeId;
 
     public MskCluster() {}
@@ -124,22 +139,15 @@ public class MskCluster {
     public LoggingInfo getLoggingInfo() { return loggingInfo; }
     public void setLoggingInfo(LoggingInfo loggingInfo) { this.loggingInfo = loggingInfo; }
 
-    public ConfigurationInfo getConfigurationInfo() { return configurationInfo; }
-    public void setConfigurationInfo(ConfigurationInfo configurationInfo) { this.configurationInfo = configurationInfo; }
-
-    @JsonIgnore
     public String getBootstrapBrokers() { return bootstrapBrokers; }
     public void setBootstrapBrokers(String bootstrapBrokers) { this.bootstrapBrokers = bootstrapBrokers; }
 
-    @JsonIgnore
     public String getContainerId() { return containerId; }
     public void setContainerId(String containerId) { this.containerId = containerId; }
 
-    @JsonIgnore
     public String getAccountId() { return accountId; }
     public void setAccountId(String accountId) { this.accountId = accountId; }
 
-    @JsonIgnore
     public String getVolumeId() { return volumeId; }
     public void setVolumeId(String volumeId) { this.volumeId = volumeId; }
 }

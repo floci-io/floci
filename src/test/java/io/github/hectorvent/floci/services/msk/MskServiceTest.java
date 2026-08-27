@@ -174,8 +174,9 @@ class MskServiceTest {
         assertTrue(cluster.getClientAuthentication().getSasl().getScram().getEnabled());
         assertEquals("PER_BROKER", cluster.getEnhancedMonitoring());
         assertNotNull(cluster.getLoggingInfo());
-        assertEquals("arn:aws:kafka:us-east-1:123456789012:configuration/conf/1", cluster.getConfigurationInfo().getArn());
-        assertEquals(2L, cluster.getConfigurationInfo().getRevision());
+        assertEquals("arn:aws:kafka:us-east-1:123456789012:configuration/conf/1",
+                cluster.getCurrentBrokerSoftwareInfo().getConfigurationArn());
+        assertEquals(2L, cluster.getCurrentBrokerSoftwareInfo().getConfigurationRevision());
         assertEquals("example", cluster.getTags().get("Environment"));
 
         MskCluster described = mskService.describeCluster(cluster.getClusterArn());
@@ -207,6 +208,90 @@ class MskServiceTest {
         assertEquals("kafka.t3.small", cluster.getBrokerNodeGroupInfo().getInstanceType());
         assertEquals(List.of("subnet-ccc"), cluster.getBrokerNodeGroupInfo().getClientSubnets());
         assertEquals("data", cluster.getTags().get("Team"));
+    }
+
+    @Test
+    void createClusterV2MapsProvisionedConfigurationOntoCurrentBrokerSoftwareInfo() {
+        CreateClusterV2Request request = new CreateClusterV2Request();
+        request.setClusterName("v2-configuration-cluster");
+
+        ProvisionedRequest provisioned = new ProvisionedRequest();
+        provisioned.setKafkaVersion("3.6.0");
+        ConfigurationInfo configurationInfo = new ConfigurationInfo();
+        configurationInfo.setArn("arn:aws:kafka:us-east-1:123456789012:configuration/conf/9");
+        configurationInfo.setRevision(4L);
+        provisioned.setConfigurationInfo(configurationInfo);
+        request.setProvisioned(provisioned);
+
+        MskCluster cluster = mskService.createCluster(request);
+
+        assertEquals("arn:aws:kafka:us-east-1:123456789012:configuration/conf/9",
+                cluster.getCurrentBrokerSoftwareInfo().getConfigurationArn());
+        assertEquals(4L, cluster.getCurrentBrokerSoftwareInfo().getConfigurationRevision());
+    }
+
+    @Test
+    void createClusterAppliesServerSideDefaultsWhenMembersAreAbsent() {
+        CreateClusterRequest request = new CreateClusterRequest();
+        request.setClusterName("defaults-cluster");
+        request.setKafkaVersion("3.6.0");
+
+        MskCluster cluster = mskService.createCluster(request);
+
+        assertEquals("DEFAULT", cluster.getEnhancedMonitoring());
+        assertEquals("TLS_PLAINTEXT", cluster.getEncryptionInfo().getEncryptionInTransit().getClientBroker());
+        assertTrue(cluster.getEncryptionInfo().getEncryptionInTransit().getInCluster());
+    }
+
+    @Test
+    void createClusterDoesNotOverrideExplicitlyRequestedEncryptionInTransit() {
+        CreateClusterRequest request = new CreateClusterRequest();
+        request.setClusterName("explicit-encryption-cluster");
+        request.setKafkaVersion("3.6.0");
+        EncryptionInTransit inTransit = new EncryptionInTransit();
+        inTransit.setClientBroker("PLAINTEXT");
+        inTransit.setInCluster(false);
+        EncryptionInfo encryptionInfo = new EncryptionInfo();
+        encryptionInfo.setEncryptionInTransit(inTransit);
+        request.setEncryptionInfo(encryptionInfo);
+
+        MskCluster cluster = mskService.createCluster(request);
+
+        assertEquals("PLAINTEXT", cluster.getEncryptionInfo().getEncryptionInTransit().getClientBroker());
+        assertFalse(cluster.getEncryptionInfo().getEncryptionInTransit().getInCluster());
+    }
+
+    // MskCluster is the shape WalStorage/PersistentStorage/HybridStorage write, all with a
+    // plain ObjectMapper. Hiding the internal bookkeeping from the API by annotating the model
+    // would hide it from the store too, and a restart would come back with no bootstrap
+    // brokers (breaking GetBootstrapBrokers and the Pipes Kafka source) and no container or
+    // volume ID (orphaning the Docker resources). Responses stay clean via MskController's
+    // views instead - see MskControllerIntegrationTest#describeClusterDoesNotLeakInternalFields.
+    @Test
+    void clusterSurvivesAPlainObjectMapperRoundTripWithItsInternalFields() throws Exception {
+        CreateClusterRequest request = new CreateClusterRequest();
+        request.setClusterName("persistence-cluster");
+        request.setKafkaVersion("3.6.0");
+        request.setNumberOfBrokerNodes(3);
+        request.setTags(Map.of("Environment", "example"));
+        MskCluster cluster = mskService.createCluster(request);
+        cluster.setContainerId("container-abc");
+
+        ObjectMapper storageMapper = new ObjectMapper().registerModule(new JavaTimeModule());
+        MskCluster reloaded = storageMapper.readValue(storageMapper.writeValueAsString(cluster), MskCluster.class);
+
+        assertEquals(cluster.getBootstrapBrokers(), reloaded.getBootstrapBrokers());
+        assertNotNull(reloaded.getBootstrapBrokers());
+        assertEquals("container-abc", reloaded.getContainerId());
+        assertEquals(cluster.getVolumeId(), reloaded.getVolumeId());
+        assertNotNull(reloaded.getVolumeId());
+        assertEquals(cluster.getAccountId(), reloaded.getAccountId());
+        assertNotNull(reloaded.getAccountId());
+
+        // and the client-facing metadata survives too
+        assertEquals(3, reloaded.getNumberOfBrokerNodes());
+        assertEquals("example", reloaded.getTags().get("Environment"));
+        assertEquals("3.6.0", reloaded.getCurrentBrokerSoftwareInfo().getKafkaVersion());
     }
 
     @Test

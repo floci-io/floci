@@ -121,7 +121,7 @@ class MskControllerIntegrationTest {
     }
 
     @Test
-    void createClusterV1EchoesEncryptionClientAuthenticationLoggingAndConfiguration() {
+    void createClusterV1EchoesEncryptionClientAuthenticationAndLogging() {
         String clusterArn = given()
             .contentType("application/json")
             .body("""
@@ -142,8 +142,7 @@ class MskControllerIntegrationTest {
                     "tls": {"certificateAuthorityArnList": ["arn:aws:acm-pca:us-east-1:123456789012:certificate-authority/ca-1"], "enabled": true}
                   },
                   "enhancedMonitoring": "PER_BROKER",
-                  "loggingInfo": {"brokerLogs": {"s3": {"bucket": "msk-logs", "enabled": true, "prefix": "kafka"}}},
-                  "configurationInfo": {"arn": "arn:aws:kafka:us-east-1:123456789012:configuration/conf/1", "revision": 3}
+                  "loggingInfo": {"brokerLogs": {"s3": {"bucket": "msk-logs", "enabled": true, "prefix": "kafka"}}}
                 }
                 """)
         .when()
@@ -165,13 +164,74 @@ class MskControllerIntegrationTest {
             .body("clusterInfo.clientAuthentication.tls.enabled", equalTo(true))
             .body("clusterInfo.enhancedMonitoring", equalTo("PER_BROKER"))
             .body("clusterInfo.loggingInfo.brokerLogs.s3.bucket", equalTo("msk-logs"))
-            .body("clusterInfo.loggingInfo.brokerLogs.s3.prefix", equalTo("kafka"))
-            .body("clusterInfo.configurationInfo.arn", equalTo("arn:aws:kafka:us-east-1:123456789012:configuration/conf/1"))
-            .body("clusterInfo.configurationInfo.revision", equalTo(3));
+            .body("clusterInfo.loggingInfo.brokerLogs.s3.prefix", equalTo("kafka"));
     }
 
+    // configurationInfo is a CreateCluster request member with no matching response member:
+    // AWS reports the cluster's configuration on currentBrokerSoftwareInfo instead, which is
+    // where terraform-provider-aws reads it back from.
     @Test
-    void createClusterV2EchoesProvisionedMetadataAndTopLevelTags() {
+    void createClusterV1ReportsConfigurationOnCurrentBrokerSoftwareInfo() {
+        String clusterArn = given()
+            .contentType("application/json")
+            .body("""
+                {
+                  "clusterName": "v1-configuration-test",
+                  "kafkaVersion": "3.6.0",
+                  "numberOfBrokerNodes": 1,
+                  "configurationInfo": {
+                    "arn": "arn:aws:kafka:us-east-1:123456789012:configuration/conf/1",
+                    "revision": 3
+                  }
+                }
+                """)
+        .when()
+            .post("/v1/clusters")
+        .then()
+            .statusCode(200)
+            .extract().path("clusterArn");
+
+        given()
+        .when()
+            .get("/v1/clusters/{clusterArn}", clusterArn)
+        .then()
+            .statusCode(200)
+            .body("clusterInfo.currentBrokerSoftwareInfo.configurationArn",
+                    equalTo("arn:aws:kafka:us-east-1:123456789012:configuration/conf/1"))
+            .body("clusterInfo.currentBrokerSoftwareInfo.configurationRevision", equalTo(3))
+            .body("clusterInfo.currentBrokerSoftwareInfo.kafkaVersion", equalTo("3.6.0"))
+            .body("clusterInfo", not(hasKey("configurationInfo")));
+    }
+
+    // AWS resolves these server-side when CreateCluster omits them and echoes the resolved
+    // value back; returning null instead leaves a terraform plan permanently dirty.
+    @Test
+    void createClusterV1AppliesServerSideDefaultsForMonitoringAndEncryptionInTransit() {
+        String clusterArn = given()
+            .contentType("application/json")
+            .body("""
+                {"clusterName": "v1-defaults-test", "kafkaVersion": "3.6.0", "numberOfBrokerNodes": 1}
+                """)
+        .when()
+            .post("/v1/clusters")
+        .then()
+            .statusCode(200)
+            .extract().path("clusterArn");
+
+        given()
+        .when()
+            .get("/v1/clusters/{clusterArn}", clusterArn)
+        .then()
+            .statusCode(200)
+            .body("clusterInfo.enhancedMonitoring", equalTo("DEFAULT"))
+            .body("clusterInfo.encryptionInfo.encryptionInTransit.clientBroker", equalTo("TLS_PLAINTEXT"))
+            .body("clusterInfo.encryptionInfo.encryptionInTransit.inCluster", equalTo(true));
+    }
+
+    // The v2 ClusterInfo is not the flat v1 shape: everything provisioned-specific nests under
+    // "provisioned", which is the only place an AWS SDK v2 client looks for it.
+    @Test
+    void describeClusterV2NestsProvisionedMetadataAndKeepsTagsTopLevel() {
         String clusterArn = given()
             .contentType("application/json")
             .body("""
@@ -186,7 +246,11 @@ class MskControllerIntegrationTest {
                       "clientSubnets": ["subnet-ccc"]
                     },
                     "clientAuthentication": {"unauthenticated": {"enabled": true}},
-                    "loggingInfo": {"brokerLogs": {"cloudWatchLogs": {"enabled": true, "logGroup": "msk-logs"}}}
+                    "loggingInfo": {"brokerLogs": {"cloudWatchLogs": {"enabled": true, "logGroup": "msk-logs"}}},
+                    "configurationInfo": {
+                      "arn": "arn:aws:kafka:us-east-1:123456789012:configuration/conf/2",
+                      "revision": 7
+                    }
                   }
                 }
                 """)
@@ -194,6 +258,7 @@ class MskControllerIntegrationTest {
             .post("/api/v2/clusters")
         .then()
             .statusCode(200)
+            .body("clusterType", equalTo("PROVISIONED"))
             .extract().path("clusterArn");
 
         given()
@@ -201,13 +266,53 @@ class MskControllerIntegrationTest {
             .get("/api/v2/clusters/{clusterArn}", clusterArn)
         .then()
             .statusCode(200)
-            .body("clusterInfo.currentBrokerSoftwareInfo.kafkaVersion", equalTo("3.5.1"))
-            .body("clusterInfo.numberOfBrokerNodes", equalTo(3))
-            .body("clusterInfo.brokerNodeGroupInfo.instanceType", equalTo("kafka.t3.small"))
-            .body("clusterInfo.brokerNodeGroupInfo.clientSubnets", hasItem("subnet-ccc"))
-            .body("clusterInfo.clientAuthentication.unauthenticated.enabled", equalTo(true))
-            .body("clusterInfo.loggingInfo.brokerLogs.cloudWatchLogs.logGroup", equalTo("msk-logs"))
-            .body("clusterInfo.tags.Environment", equalTo("prod"));
+            .body("clusterInfo.clusterType", equalTo("PROVISIONED"))
+            .body("clusterInfo.clusterArn", equalTo(clusterArn))
+            .body("clusterInfo.tags.Environment", equalTo("prod"))
+            .body("clusterInfo.provisioned.numberOfBrokerNodes", equalTo(3))
+            .body("clusterInfo.provisioned.currentBrokerSoftwareInfo.kafkaVersion", equalTo("3.5.1"))
+            .body("clusterInfo.provisioned.currentBrokerSoftwareInfo.configurationArn",
+                    equalTo("arn:aws:kafka:us-east-1:123456789012:configuration/conf/2"))
+            .body("clusterInfo.provisioned.currentBrokerSoftwareInfo.configurationRevision", equalTo(7))
+            .body("clusterInfo.provisioned.brokerNodeGroupInfo.instanceType", equalTo("kafka.t3.small"))
+            .body("clusterInfo.provisioned.brokerNodeGroupInfo.clientSubnets", hasItem("subnet-ccc"))
+            .body("clusterInfo.provisioned.clientAuthentication.unauthenticated.enabled", equalTo(true))
+            .body("clusterInfo.provisioned.loggingInfo.brokerLogs.cloudWatchLogs.logGroup", equalTo("msk-logs"))
+            .body("clusterInfo.provisioned.zookeeperConnectString", notNullValue())
+            // the same members must NOT also appear flat, where a v2 client would not read them
+            .body("clusterInfo", not(hasKey("numberOfBrokerNodes")))
+            .body("clusterInfo", not(hasKey("brokerNodeGroupInfo")))
+            .body("clusterInfo", not(hasKey("currentBrokerSoftwareInfo")))
+            .body("clusterInfo", not(hasKey("clientAuthentication")))
+            .body("clusterInfo", not(hasKey("loggingInfo")));
+    }
+
+    @Test
+    void listClustersV2NestsProvisionedMetadataTheSameWayDescribeDoes() {
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                  "clusterName": "v2-list-test",
+                  "provisioned": {"kafkaVersion": "3.6.0", "numberOfBrokerNodes": 2}
+                }
+                """)
+        .when()
+            .post("/api/v2/clusters")
+        .then()
+            .statusCode(200);
+
+        given()
+        .when()
+            .get("/api/v2/clusters")
+        .then()
+            .statusCode(200)
+            .body("clusterInfoList.find { it.clusterName == 'v2-list-test' }.clusterType",
+                    equalTo("PROVISIONED"))
+            .body("clusterInfoList.find { it.clusterName == 'v2-list-test' }.provisioned.numberOfBrokerNodes",
+                    equalTo(2))
+            .body("clusterInfoList.find { it.clusterName == 'v2-list-test' }.provisioned.currentBrokerSoftwareInfo.kafkaVersion",
+                    equalTo("3.6.0"));
     }
 
     @Test
@@ -230,9 +335,24 @@ class MskControllerIntegrationTest {
             .statusCode(200)
             .body("clusterInfo", notNullValue())
             .body("clusterInfo.clusterArn", equalTo(clusterArn))
-            .body("clusterInfo.containsKey('bootstrapBrokers')", equalTo(false))
-            .body("clusterInfo.containsKey('containerId')", equalTo(false))
-            .body("clusterInfo.containsKey('volumeId')", equalTo(false));
+            .body("clusterInfo", not(hasKey("bootstrapBrokers")))
+            .body("clusterInfo", not(hasKey("containerId")))
+            .body("clusterInfo", not(hasKey("accountId")))
+            .body("clusterInfo", not(hasKey("volumeId")));
+
+        given()
+        .when()
+            .get("/api/v2/clusters/{clusterArn}", clusterArn)
+        .then()
+            .statusCode(200)
+            .body("clusterInfo", not(hasKey("bootstrapBrokers")))
+            .body("clusterInfo", not(hasKey("containerId")))
+            .body("clusterInfo", not(hasKey("accountId")))
+            .body("clusterInfo", not(hasKey("volumeId")))
+            .body("clusterInfo.provisioned", not(hasKey("bootstrapBrokers")))
+            .body("clusterInfo.provisioned", not(hasKey("containerId")))
+            .body("clusterInfo.provisioned", not(hasKey("accountId")))
+            .body("clusterInfo.provisioned", not(hasKey("volumeId")));
     }
 
     @Test

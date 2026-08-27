@@ -15,9 +15,12 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.msk.model.ClusterState;
 import io.github.hectorvent.floci.services.msk.model.ConfigurationRevision;
 import io.github.hectorvent.floci.services.msk.model.ConfigurationRevisionDetail;
+import io.github.hectorvent.floci.services.msk.model.ConfigurationInfo;
 import io.github.hectorvent.floci.services.msk.model.ConfigurationState;
 import io.github.hectorvent.floci.services.msk.model.CreateClusterRequest;
 import io.github.hectorvent.floci.services.msk.model.CreateClusterV2Request;
+import io.github.hectorvent.floci.services.msk.model.EncryptionInTransit;
+import io.github.hectorvent.floci.services.msk.model.EncryptionInfo;
 import io.github.hectorvent.floci.services.msk.model.MskCluster;
 import io.github.hectorvent.floci.services.msk.model.MskConfiguration;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -43,6 +46,8 @@ public class MskService implements ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(MskService.class);
     private static final String DEFAULT_KAFKA_VERSION = "3.6.0";
+    private static final String DEFAULT_ENHANCED_MONITORING = "DEFAULT";
+    private static final String DEFAULT_CLIENT_BROKER_ENCRYPTION = "TLS_PLAINTEXT";
     private static final int MAX_PAGE = 100;
     private final StorageBackend<String, MskCluster> storage;
     private final StorageBackend<String, MskConfiguration> configurationStorage;
@@ -109,11 +114,24 @@ public class MskService implements ResourceProvider {
         }
         cluster.setTags(request.getTags());
         cluster.setBrokerNodeGroupInfo(request.getBrokerNodeGroupInfo());
-        cluster.setEncryptionInfo(request.getEncryptionInfo());
         cluster.setClientAuthentication(request.getClientAuthentication());
-        cluster.setEnhancedMonitoring(request.getEnhancedMonitoring());
         cluster.setLoggingInfo(request.getLoggingInfo());
-        cluster.setConfigurationInfo(request.getConfigurationInfo());
+
+        // AWS applies these server-side when the member is absent, and echoes the resolved
+        // value back on Describe. Leaving them unset instead is what keeps a terraform plan
+        // permanently dirty: the provider's schema defaults them, so a null in the response
+        // reads as a drift against config the user never wrote.
+        cluster.setEnhancedMonitoring(request.getEnhancedMonitoring() != null
+                ? request.getEnhancedMonitoring() : DEFAULT_ENHANCED_MONITORING);
+        cluster.setEncryptionInfo(withEncryptionDefaults(request.getEncryptionInfo()));
+
+        // configurationInfo is a request-only member: the response carries the configuration
+        // on currentBrokerSoftwareInfo instead (see BrokerSoftwareInfo).
+        ConfigurationInfo configurationInfo = request.getConfigurationInfo();
+        if (configurationInfo != null) {
+            cluster.getCurrentBrokerSoftwareInfo().setConfigurationArn(configurationInfo.getArn());
+            cluster.getCurrentBrokerSoftwareInfo().setConfigurationRevision(configurationInfo.getRevision());
+        }
 
         if (config.services().msk().mock()) {
             cluster.setState(ClusterState.ACTIVE);
@@ -141,6 +159,29 @@ public class MskService implements ResourceProvider {
             merged.setConfigurationInfo(request.getProvisioned().getConfigurationInfo());
         }
         return createCluster(merged);
+    }
+
+    /**
+     * Fills in the encryption-in-transit defaults AWS applies when CreateCluster omits them:
+     * {@code clientBroker} defaults to TLS_PLAINTEXT and {@code inCluster} to true. An
+     * explicitly supplied value is never overwritten. {@code encryptionAtRest} is left alone -
+     * real MSK creates a KMS key for you there, which the emulator has no equivalent of, so
+     * inventing an ARN would be worse than omitting the member.
+     */
+    private EncryptionInfo withEncryptionDefaults(EncryptionInfo requested) {
+        EncryptionInfo encryptionInfo = requested != null ? requested : new EncryptionInfo();
+        EncryptionInTransit inTransit = encryptionInfo.getEncryptionInTransit();
+        if (inTransit == null) {
+            inTransit = new EncryptionInTransit();
+            encryptionInfo.setEncryptionInTransit(inTransit);
+        }
+        if (inTransit.getClientBroker() == null) {
+            inTransit.setClientBroker(DEFAULT_CLIENT_BROKER_ENCRYPTION);
+        }
+        if (inTransit.getInCluster() == null) {
+            inTransit.setInCluster(true);
+        }
+        return encryptionInfo;
     }
 
     public MskCluster describeCluster(String clusterArn) {
