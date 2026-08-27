@@ -514,6 +514,150 @@ class CloudFormationIntegrationTest {
     }
 
     @Test
+    void createStack_s3BucketWithVersioningConfiguration() {
+        String template = """
+            {
+              "Resources": {
+                "MyBucket": {
+                  "Type": "AWS::S3::Bucket",
+                  "Properties": {
+                    "BucketName": "cfn-versioning-test-bucket",
+                    "VersioningConfiguration": {
+                      "Status": "Enabled"
+                    }
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-versioning-stack")
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackId>"));
+
+        // The bucket's ?versioning subresource should reflect the CloudFormation VersioningConfiguration.
+        given()
+        .when()
+            .get("/cfn-versioning-test-bucket?versioning")
+        .then()
+            .statusCode(200)
+            .body(containsString("<Status>Enabled</Status>"));
+    }
+
+    @Test
+    void createStack_s3BucketWithoutVersioningConfigurationLeavesVersioningUnset() {
+        String template = """
+            {
+              "Resources": {
+                "MyBucket": {
+                  "Type": "AWS::S3::Bucket",
+                  "Properties": {
+                    "BucketName": "cfn-versioning-unset-bucket"
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-versioning-unset-stack")
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // No VersioningConfiguration in the template → versioning must stay unset (no <Status> element),
+        // matching real AWS behavior for a bucket that was never versioned.
+        given()
+        .when()
+            .get("/cfn-versioning-unset-bucket?versioning")
+        .then()
+            .statusCode(200)
+            .body(not(containsString("<Status>")));
+    }
+
+    @Test
+    void updateStack_s3BucketVersioningConfigurationIsReconciled() {
+        String stackName = "cfn-versioning-update-stack";
+        String bucketName = "cfn-versioning-update-bucket";
+        String enabled = """
+            {
+              "Resources": {
+                "MyBucket": {
+                  "Type": "AWS::S3::Bucket",
+                  "Properties": {
+                    "BucketName": "%s",
+                    "VersioningConfiguration": {
+                      "Status": "Enabled"
+                    }
+                  }
+                }
+              }
+            }
+            """.formatted(bucketName);
+        String suspended = """
+            {
+              "Resources": {
+                "MyBucket": {
+                  "Type": "AWS::S3::Bucket",
+                  "Properties": {
+                    "BucketName": "%s",
+                    "VersioningConfiguration": {
+                      "Status": "Suspended"
+                    }
+                  }
+                }
+              }
+            }
+            """.formatted(bucketName);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", enabled)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+        .when()
+            .get("/" + bucketName + "?versioning")
+        .then()
+            .statusCode(200)
+            .body(containsString("<Status>Enabled</Status>"));
+
+        // Update: Status changes to Suspended → versioning is reconciled to match the template.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", suspended)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+        .when()
+            .get("/" + bucketName + "?versioning")
+        .then()
+            .statusCode(200)
+            .body(containsString("<Status>Suspended</Status>"));
+    }
+
+    @Test
     void createStack_lambdaWithS3Code() {
         byte[] zipBytes = buildHandlerZip();
 

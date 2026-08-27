@@ -677,6 +677,7 @@ public class CloudFormationResourceProvisioner {
         }
         s3Service.createBucket(bucketName, region);
         applyBucketCorsConfiguration(bucketName, props, engine);
+        applyBucketVersioningConfiguration(bucketName, props, engine);
         r.setPhysicalId(bucketName);
         r.getAttributes().put("Arn", AwsArnUtils.Arn.of("s3", "", "", bucketName).toString());
         r.getAttributes().put("DomainName", bucketName + ".s3.amazonaws.com");
@@ -720,6 +721,18 @@ public class CloudFormationResourceProvisioner {
         }
         xml.end("CORSConfiguration");
         s3Service.putBucketCors(bucketName, xml.build());
+    }
+
+    private void applyBucketVersioningConfiguration(String bucketName, JsonNode props,
+                                                     CloudFormationTemplateEngine engine) {
+        if (props == null || !props.has("VersioningConfiguration")
+                || props.get("VersioningConfiguration").isNull()) {
+            return;
+        }
+        String status = resolveOptional(props.get("VersioningConfiguration"), "Status", engine);
+        if (status != null && !status.isBlank()) {
+            s3Service.putBucketVersioning(bucketName, status);
+        }
     }
 
     private void appendCorsRuleElements(XmlBuilder xml, JsonNode values, String elementName,
