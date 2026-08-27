@@ -263,6 +263,7 @@ public interface EmulatorConfig {
         ElastiCacheStorageConfig elasticache();
         MemoryDbStorageConfig memorydb();
         RdsStorageConfig rds();
+        RedshiftStorageConfig redshift();
         Ec2StorageConfig ec2();
         NeptuneStorageConfig neptune();
         BackupStorageConfig backup();
@@ -390,6 +391,10 @@ public interface EmulatorConfig {
 
         @WithDefault("5000")
         long flushIntervalMs();
+    }
+
+    interface RedshiftStorageConfig {
+        Optional<String> mode();
     }
 
     interface RdsStorageConfig {
@@ -600,6 +605,7 @@ public interface EmulatorConfig {
         ElastiCacheServiceConfig elasticache();
         MemoryDbServiceConfig memorydb();
         RdsServiceConfig rds();
+        RedshiftServiceConfig redshift();
         RdsDataServiceConfig rdsData();
         EventBridgeServiceConfig eventbridge();
         CloudMapServiceConfig cloudmap();
@@ -1028,6 +1034,16 @@ public interface EmulatorConfig {
         String defaultImage();
 
         /** Docker network to attach MemoryDB containers to. Empty = default bridge. */
+        Optional<String> dockerNetwork();
+    }
+
+    interface RedshiftServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+        @WithDefault("5439")
+        int defaultPort();
+        @WithDefault("postgres:15-alpine")
+        String imageVersion();
         Optional<String> dockerNetwork();
     }
 
