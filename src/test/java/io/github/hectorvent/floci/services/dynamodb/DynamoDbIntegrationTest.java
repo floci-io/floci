@@ -3436,6 +3436,80 @@ given()
         deleteTable(tableName);
     }
 
+    @Test
+    void nullTypedKeyAttributeIsRejected() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "NullKeyTable",
+                    "KeySchema": [{"AttributeName": "id", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [{"AttributeName": "id", "AttributeType": "S"}],
+                    "BillingMode": "PAY_PER_REQUEST"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // PutItem: mismatch is reported against the item body.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.PutItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "NullKeyTable",
+                    "Item": {"id": {"NULL": true}, "name": {"S": "created"}}
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("One or more parameter values were invalid: "
+                    + "Type mismatch for key id expected: S actual: NULL"));
+
+        // UpdateItem: mismatch in the Key argument uses the key-schema wording.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "NullKeyTable",
+                    "Key": {"id": {"NULL": true}},
+                    "UpdateExpression": "SET #n = :v",
+                    "ExpressionAttributeNames": {"#n": "name"},
+                    "ExpressionAttributeValues": {":v": {"S": "updated"}}
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("The provided key element does not match the schema"));
+
+        // Control: NULL is a valid type for a non-key attribute.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.PutItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "NullKeyTable",
+                    "Item": {"id": {"S": "1"}, "name": {"NULL": true}}
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        deleteTable("NullKeyTable");
+    }
+
     private void deleteTable(String tableName) {
         given()
             .header("X-Amz-Target", "DynamoDB_20120810.DeleteTable")
