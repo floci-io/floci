@@ -2711,10 +2711,13 @@ public class S3Controller {
                 .elem("ETag", obj.getETag())
                 .end("PostResponse")
                 .build();
-        return Response.status(204)
+        var response = Response.status(204)
                 .header("ETag", obj.getETag())
-                .header("Location", bucket + "/" + key)
-                .build();
+                .header("Location", bucket + "/" + key);
+        if (obj.getVersionId() != null) {
+            response.header("x-amz-version-id", obj.getVersionId());
+        }
+        return response.build();
     }
 
     private void validatePolicyConditions(String policyBase64, String bucket,
