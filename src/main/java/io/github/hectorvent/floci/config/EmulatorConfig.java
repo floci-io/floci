@@ -673,6 +673,7 @@ public interface EmulatorConfig {
         GuardDutyServiceConfig guardduty();
         EmrServerlessServiceConfig emrserverless();
         Route53ResolverServiceConfig route53resolver();
+        NetworkFirewallServiceConfig networkfirewall();
         ServiceCatalogServiceConfig servicecatalog();
         SsoAdminServiceConfig ssoadmin();
         ServiceQuotasServiceConfig servicequotas();
@@ -734,6 +735,11 @@ public interface EmulatorConfig {
     }
 
     interface Route53ResolverServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface NetworkFirewallServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }

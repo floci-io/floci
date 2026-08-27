@@ -155,12 +155,14 @@ floci:
       enforcement-enabled: false        # Set to true to enforce IAM policies on all requests
       seed-deployer-principal: false    # Set to true to create a local floci-deployer admin principal
 
+    networkfirewall:
+      enabled: true
+
     servicequotas:
       enabled: true
 
     ram:
       enabled: true
-
 
     elasticache:
       enabled: true

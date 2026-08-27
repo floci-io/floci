@@ -70,6 +70,113 @@ class S3PresignedPostIntegrationTest {
     }
 
     @Test
+    @Order(15)
+    void presignedPostEmitsPostNotification() {
+        String postQueueName = "presigned-post-notification-queue";
+        String putQueueName = "presigned-put-notification-queue";
+        String wildcardQueueName = "presigned-wildcard-notification-queue";
+        String postQueueUrl = createQueue(postQueueName);
+        String putQueueUrl = createQueue(putQueueName);
+        String wildcardQueueUrl = createQueue(wildcardQueueName);
+
+        try {
+            given()
+                .contentType("application/xml")
+                .queryParam("notification", "")
+                .body("""
+                    <NotificationConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+                        <QueueConfiguration>
+                            <Id>post-notification</Id>
+                            <Queue>arn:aws:sqs:us-east-1:000000000000:%s</Queue>
+                            <Event>s3:ObjectCreated:Post</Event>
+                        </QueueConfiguration>
+                        <QueueConfiguration>
+                            <Id>put-notification</Id>
+                            <Queue>arn:aws:sqs:us-east-1:000000000000:%s</Queue>
+                            <Event>s3:ObjectCreated:Put</Event>
+                        </QueueConfiguration>
+                        <QueueConfiguration>
+                            <Id>wildcard-notification</Id>
+                            <Queue>arn:aws:sqs:us-east-1:000000000000:%s</Queue>
+                            <Event>s3:ObjectCreated:*</Event>
+                        </QueueConfiguration>
+                    </NotificationConfiguration>
+                    """.formatted(postQueueName, putQueueName, wildcardQueueName))
+            .when()
+                .put("/" + BUCKET)
+            .then()
+                .statusCode(200);
+
+            given()
+                .multiPart("key", "uploads/notified.txt")
+                .multiPart("file", "notified.txt", "notified".getBytes(StandardCharsets.UTF_8), "text/plain")
+            .when()
+                .post("/" + BUCKET)
+            .then()
+                .statusCode(204);
+
+            assertQueueContainsPostNotification(postQueueUrl);
+            assertQueueContainsPostNotification(wildcardQueueUrl);
+
+            String putQueueResponse = given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "ReceiveMessage")
+                .formParam("QueueUrl", putQueueUrl)
+                .formParam("MaxNumberOfMessages", "1")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .extract().body().asString();
+            assertThat(putQueueResponse, not(containsString("<Message>")));
+        } finally {
+            given()
+                .contentType("application/xml")
+                .queryParam("notification", "")
+                .body("<NotificationConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"/>")
+                .put("/" + BUCKET);
+
+            deleteQueue(postQueueUrl);
+            deleteQueue(putQueueUrl);
+            deleteQueue(wildcardQueueUrl);
+        }
+    }
+
+    private String createQueue(String queueName) {
+        return given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateQueue")
+            .formParam("QueueName", queueName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath().getString("CreateQueueResponse.CreateQueueResult.QueueUrl");
+    }
+
+    private void assertQueueContainsPostNotification(String queueUrl) {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ReceiveMessage")
+            .formParam("QueueUrl", queueUrl)
+            .formParam("MaxNumberOfMessages", "1")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ReceiveMessageResponse.ReceiveMessageResult.Message.Body",
+                containsString("\"eventName\":\"ObjectCreated:Post\""));
+    }
+
+    private void deleteQueue(String queueUrl) {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteQueue")
+            .formParam("QueueUrl", queueUrl)
+            .post("/");
+    }
+
+    @Test
     @Order(20)
     void presignedPostWithBinaryData() {
         String key = "uploads/binary-data.bin";
@@ -515,6 +622,7 @@ class S3PresignedPostIntegrationTest {
     void cleanupBucket() {
         // Delete all objects
         given().delete("/" + BUCKET + "/uploads/test-file.txt");
+        given().delete("/" + BUCKET + "/uploads/notified.txt");
         given().delete("/" + BUCKET + "/uploads/binary-data.bin");
         given().delete("/" + BUCKET + "/uploads/no-policy.txt");
         given().delete("/" + BUCKET + "/uploads/typed-file.json");

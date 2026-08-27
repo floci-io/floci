@@ -108,6 +108,10 @@ services:
     doc: docs/services/neptune.md
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/neptune/NeptuneQueryHandler.java, mode: switch }
+  - service: networkfirewall
+    doc: docs/services/network-firewall.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/networkfirewall/NetworkFirewallJsonHandler.java, mode: switch }
   - service: ram
     doc: docs/services/ram.md
     sources:

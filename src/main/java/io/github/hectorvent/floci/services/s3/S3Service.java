@@ -343,8 +343,24 @@ public class S3Service implements Resettable, ResourceProvider {
 
     public S3Object putObject(String bucketName, String key, byte[] data,
                               String contentType, Map<String, String> metadata, PutObjectOptions options) {
+        return createObject(bucketName, key, data, contentType, metadata, options, "ObjectCreated:Put");
+    }
+
+    public S3Object postObject(String bucketName, String key, byte[] data,
+                               String contentType, Map<String, String> metadata) {
+        return postObject(bucketName, key, data, contentType, metadata, new PutObjectOptions());
+    }
+
+    public S3Object postObject(String bucketName, String key, byte[] data,
+                               String contentType, Map<String, String> metadata, PutObjectOptions options) {
+        return createObject(bucketName, key, data, contentType, metadata, options, "ObjectCreated:Post");
+    }
+
+    private S3Object createObject(String bucketName, String key, byte[] data,
+                                  String contentType, Map<String, String> metadata,
+                                  PutObjectOptions options, String eventName) {
         S3Object object = storeObject(bucketName, key, data, contentType, metadata, null, null, options);
-        fireNotifications(bucketName, key, "ObjectCreated:Put", object);
+        fireNotifications(bucketName, key, eventName, object);
         return object;
     }
 

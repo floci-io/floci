@@ -2698,7 +2698,7 @@ public class S3Controller {
             }
         }
 
-        S3Object obj = s3Service.putObject(bucket, key, fileData, objectContentType,
+        S3Object obj = s3Service.postObject(bucket, key, fileData, objectContentType,
                 metadata.isEmpty() ? null : metadata);
         LOG.infov("Presigned POST upload: {0}/{1} ({2} bytes)", bucket, key, fileData.length);
 
