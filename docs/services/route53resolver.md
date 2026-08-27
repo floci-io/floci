@@ -67,7 +67,10 @@ For `CreateResolverEndpoint` the comparison covers the actual `IpAddressRequests
 not just how many there are, so a retry that keeps the count but changes a subnet or
 address is a conflict. Order is not significant. The modelled `ResolverEndpoint` shape has
 `IpAddressCount` and no IP list, so the addresses are recorded in a side store rather than
-on the resource and never reach the response.
+on the resource and never reach the response. If that record is ever missing for a stored
+endpoint, the retry is reported as a conflict rather than compared on count alone — with
+nothing to compare against, sameness cannot be established, and a loud error is preferable
+to a success that may not match the request.
 
 ## Limitations
 

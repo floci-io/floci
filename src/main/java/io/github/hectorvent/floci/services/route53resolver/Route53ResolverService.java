@@ -99,6 +99,23 @@ public class Route53ResolverService {
         this.objectMapper = objectMapper;
     }
 
+    // Package-private for hermetic tests: pass in-memory StorageBackends directly, so a test
+    // can put a store into a state the public API cannot produce (e.g. an endpoint whose
+    // IpAddressRequests record is missing).
+    Route53ResolverService(StorageBackend<String, ObjectNode> domainListStore,
+                           StorageBackend<String, ObjectNode> endpointStore,
+                           StorageBackend<String, ObjectNode> ruleStore,
+                           StorageBackend<String, ObjectNode> ruleAssociationStore,
+                           StorageBackend<String, ObjectNode> endpointIpRequestStore,
+                           ObjectMapper objectMapper) {
+        this.domainListStore = domainListStore;
+        this.endpointStore = endpointStore;
+        this.ruleStore = ruleStore;
+        this.ruleAssociationStore = ruleAssociationStore;
+        this.endpointIpRequestStore = endpointIpRequestStore;
+        this.objectMapper = objectMapper;
+    }
+
     public List<FirewallDomainList> listFirewallDomainLists(String region) {
         return AWS_MANAGED_DOMAIN_LIST_NAMES.stream()
                 .map(name -> managedList(region, name))
@@ -409,17 +426,22 @@ public class Route53ResolverService {
      * <p>Order is not significant — the request list is a set of addresses, and a retry that
      * merely reorders it is the same request — so both sides are normalised before comparing.</p>
      *
-     * <p>An endpoint created before this record existed has no entry; those fall back to the
-     * original count comparison rather than being reported as conflicts on every retry.</p>
+     * <p>A stored endpoint with no recorded addresses is reported as a conflict rather than
+     * waved through. Falling back to comparing {@code IpAddressCount} would accept a retry
+     * that kept the count but changed a subnet or address — the precise case this check
+     * exists to catch — so the weaker comparison is not a lenient version of this check, it
+     * is a silently wrong one. With nothing to compare against, the honest answer is that
+     * sameness cannot be established: a spurious {@code ResourceExistsException} is loud and
+     * recoverable, a wrong success is neither. No released build can reach this state — the
+     * endpoint store itself is new in the same change as this record — so the only ways in
+     * are a write interrupted between the two stores, or state left by an intermediate build
+     * of this branch.</p>
      */
     private void requireSameIpRequests(ObjectNode existing, JsonNode request, JsonNode ipAddresses) {
         JsonNode recorded = endpointIpRequestStore.get(text(existing, "Id"))
                 .map(node -> node.get("IpAddressRequests"))
                 .orElse(null);
-        boolean conflict = recorded == null
-                ? existing.path("IpAddressCount").asInt(-1) != ipAddresses.size()
-                : !recorded.equals(normalizedIpRequests(ipAddresses));
-        if (conflict) {
+        if (recorded == null || !recorded.equals(normalizedIpRequests(ipAddresses))) {
             throw replayConflict(request, existing, "IpAddressRequests");
         }
     }
