@@ -195,7 +195,9 @@ over the previous value. `ExpirePasswords` is derived, not stored: it reports `t
 policy has ever been set — a documented, expected result the Terraform provider's
 `aws_iam_account_password_policy` resource branches on. `MinimumPasswordLength` must be 6–128,
 `MaxPasswordAge` 1–1095, and `PasswordReusePrevention` 1–24; a value outside those ranges is
-rejected with `ValidationError`.
+rejected with `ValidationError`. The boolean parameters accept only `true`/`false`
+(case-insensitive, matching the numeric fields); any other value is rejected with
+`ValidationError` rather than silently treated as `false`.
 
 ### OIDC Identity Providers
 

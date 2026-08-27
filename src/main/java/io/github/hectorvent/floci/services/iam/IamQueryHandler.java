@@ -457,20 +457,14 @@ public class IamQueryHandler {
     private Response handleUpdateAccountPasswordPolicy(MultivaluedMap<String, String> params) {
         AccountPasswordPolicy policy = new AccountPasswordPolicy();
         policy.setMinimumPasswordLength(getIntParam(params, "MinimumPasswordLength", 6));
-        policy.setRequireSymbols("true".equalsIgnoreCase(getParam(params, "RequireSymbols")));
-        policy.setRequireNumbers("true".equalsIgnoreCase(getParam(params, "RequireNumbers")));
-        policy.setRequireUppercaseCharacters(
-                "true".equalsIgnoreCase(getParam(params, "RequireUppercaseCharacters")));
-        policy.setRequireLowercaseCharacters(
-                "true".equalsIgnoreCase(getParam(params, "RequireLowercaseCharacters")));
-        policy.setAllowUsersToChangePassword(
-                "true".equalsIgnoreCase(getParam(params, "AllowUsersToChangePassword")));
+        policy.setRequireSymbols(getBooleanParam(params, "RequireSymbols", false));
+        policy.setRequireNumbers(getBooleanParam(params, "RequireNumbers", false));
+        policy.setRequireUppercaseCharacters(getBooleanParam(params, "RequireUppercaseCharacters", false));
+        policy.setRequireLowercaseCharacters(getBooleanParam(params, "RequireLowercaseCharacters", false));
+        policy.setAllowUsersToChangePassword(getBooleanParam(params, "AllowUsersToChangePassword", false));
         policy.setMaxPasswordAge(getOptionalIntParam(params, "MaxPasswordAge"));
         policy.setPasswordReusePrevention(getOptionalIntParam(params, "PasswordReusePrevention"));
-        String hardExpiry = getParam(params, "HardExpiry");
-        if (hardExpiry != null) {
-            policy.setHardExpiry(Boolean.parseBoolean(hardExpiry));
-        }
+        policy.setHardExpiry(getOptionalBooleanParam(params, "HardExpiry"));
         iamService.updateAccountPasswordPolicy(policy);
         return Response.ok(AwsQueryResponse.envelopeNoResult("UpdateAccountPasswordPolicy", AwsNamespaces.IAM))
                 .build();
@@ -514,6 +508,35 @@ public class IamQueryHandler {
         } catch (NumberFormatException e) {
             throw new AwsException("ValidationError", "Invalid value for " + name + ": " + value, 400);
         }
+    }
+
+    // Unlike getIntParam's silent fallback, a boolean parameter that is present but not "true"/
+    // "false" is a caller mistake, not an absence — it must be rejected rather than coerced to false.
+    private boolean getBooleanParam(MultivaluedMap<String, String> params, String name, boolean defaultValue) {
+        String value = params.getFirst(name);
+        if (value == null) {
+            return defaultValue;
+        }
+        return parseStrictBoolean(name, value);
+    }
+
+    /** Unlike {@link #getBooleanParam}, absence is meaningful here — it must not collapse to a default. */
+    private Boolean getOptionalBooleanParam(MultivaluedMap<String, String> params, String name) {
+        String value = params.getFirst(name);
+        if (value == null) {
+            return null;
+        }
+        return parseStrictBoolean(name, value);
+    }
+
+    private boolean parseStrictBoolean(String name, String value) {
+        if ("true".equalsIgnoreCase(value)) {
+            return true;
+        }
+        if ("false".equalsIgnoreCase(value)) {
+            return false;
+        }
+        throw new AwsException("ValidationError", "Invalid value for " + name + ": " + value, 400);
     }
 
     // =========================================================================

@@ -180,6 +180,34 @@ class IamAccountPasswordPolicyIntegrationTest {
     }
 
     @Test
+    @Order(6)
+    void updateWithMalformedRequireSymbolsIsRejected() {
+        given()
+            .formParam("Action", "UpdateAccountPasswordPolicy")
+            .formParam("RequireSymbols", "banana")
+            .header("Authorization", IAM_CREDENTIAL)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("ValidationError"));
+    }
+
+    @Test
+    @Order(6)
+    void updateWithMalformedHardExpiryIsRejected() {
+        given()
+            .formParam("Action", "UpdateAccountPasswordPolicy")
+            .formParam("HardExpiry", "banana")
+            .header("Authorization", IAM_CREDENTIAL)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("ValidationError"));
+    }
+
+    @Test
     @Order(7)
     void deleteRemovesThePolicy() {
         given()
