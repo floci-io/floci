@@ -170,4 +170,21 @@ class ApiGatewayImportApiKeysIntegrationTest {
                 .then()
                 .statusCode(400);
     }
+
+    /**
+     * A malformed CSV (unterminated quote) fails inside {@code ApiKeyCsvParser.parse} with an
+     * {@code IllegalArgumentException}, which no exception mapper handles — only {@code AwsException}
+     * is mapped. The request must still answer the modelled 400, not a 500 that escapes the AWS
+     * error boundary.
+     */
+    @Test
+    void testMalformedCsvWithUnterminatedQuoteIsRejectedAsBadRequest() {
+        given()
+                .contentType("text/csv")
+                .body("Name,Key\n\"unterminated,secret-value\n")
+                .when()
+                .post("/apikeys?mode=import&format=csv&failonwarnings=false")
+                .then()
+                .statusCode(400);
+    }
 }

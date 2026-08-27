@@ -869,7 +869,12 @@ public class ApiGatewayService {
      * position, and {@code value} is accepted as an alias for {@code Key}.
      */
     public ImportApiKeysResult importApiKeys(String region, String csv) {
-        List<List<String>> rows = ApiKeyCsvParser.parse(csv);
+        List<List<String>> rows;
+        try {
+            rows = ApiKeyCsvParser.parse(csv);
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("BadRequestException", "Invalid CSV: " + e.getMessage(), 400);
+        }
         if (rows.isEmpty()) {
             throw new AwsException("BadRequestException", "CSV body is empty", 400);
         }
