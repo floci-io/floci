@@ -49,6 +49,16 @@ public class LambdaFunction {
     private List<String> layers = new ArrayList<>();
     private String kmsKeyArn;
     private Map<String, Object> vpcConfig;
+    /**
+     * Resolved at attach time from the first VpcConfig subnet. Response-only: the AWS model's
+     * VpcConfigResponse carries VpcId, while the VpcConfig request shape does not.
+     */
+    private String vpcId;
+    private String snapStartApplyOn = "None";
+    private String logFormat = "Text";
+    private String applicationLogLevel;
+    private String systemLogLevel;
+    private String logGroup;
     private List<LambdaFileSystemConfig> fileSystemConfigs = new ArrayList<>();
     private String codeSha256;
 
@@ -168,6 +178,24 @@ public class LambdaFunction {
 
     public Map<String, Object> getVpcConfig() { return vpcConfig; }
     public void setVpcConfig(Map<String, Object> vpcConfig) { this.vpcConfig = vpcConfig; }
+
+    public String getVpcId() { return vpcId; }
+    public void setVpcId(String vpcId) { this.vpcId = vpcId; }
+
+    public String getSnapStartApplyOn() { return snapStartApplyOn; }
+    public void setSnapStartApplyOn(String snapStartApplyOn) { this.snapStartApplyOn = snapStartApplyOn; }
+
+    public String getLogFormat() { return logFormat; }
+    public void setLogFormat(String logFormat) { this.logFormat = logFormat; }
+
+    public String getApplicationLogLevel() { return applicationLogLevel; }
+    public void setApplicationLogLevel(String applicationLogLevel) { this.applicationLogLevel = applicationLogLevel; }
+
+    public String getSystemLogLevel() { return systemLogLevel; }
+    public void setSystemLogLevel(String systemLogLevel) { this.systemLogLevel = systemLogLevel; }
+
+    public String getLogGroup() { return logGroup; }
+    public void setLogGroup(String logGroup) { this.logGroup = logGroup; }
 
     public List<LambdaFileSystemConfig> getFileSystemConfigs() { return fileSystemConfigs; }
     public void setFileSystemConfigs(List<LambdaFileSystemConfig> fileSystemConfigs) {

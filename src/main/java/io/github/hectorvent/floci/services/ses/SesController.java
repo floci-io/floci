@@ -722,7 +722,11 @@ public class SesController {
     public Response createCustomVerificationEmailTemplate(@Context HttpHeaders headers, String body) {
         String region = regionResolver.resolveRegion(headers);
         try {
-            CustomVerificationEmailTemplate t = parseCvet(objectMapper.readTree(body));
+            JsonNode request = objectMapper.readTree(body);
+            CustomVerificationEmailTemplate t = parseCvet(request);
+            // Tags exist only on the create request; UpdateCustomVerificationEmailTemplate has no
+            // Tags member and preserves the stored ones.
+            t.setTags(parseTagsArray(request.path("Tags")));
             sesService.createCustomVerificationEmailTemplate(t, region);
             return Response.ok(objectMapper.createObjectNode()).build();
         } catch (AwsException e) {
@@ -1468,7 +1472,8 @@ public class SesController {
             } else {
                 scalingMode = scalingNode.asText();
             }
-            sesService.createDedicatedIpPool(poolName, scalingMode, region);
+            List<Tag> tags = parseTagsArray(request.path("Tags"));
+            sesService.createDedicatedIpPool(poolName, scalingMode, tags, region);
             LOG.infov("SES V2 CreateDedicatedIpPool: {0}", poolName);
             return Response.ok(objectMapper.createObjectNode()).build();
         } catch (AwsException e) {
@@ -1495,7 +1500,11 @@ public class SesController {
         String region = regionResolver.resolveRegion(headers);
         DedicatedIpPool pool = sesService.getDedicatedIpPool(poolName, region);
         ObjectNode result = objectMapper.createObjectNode();
-        result.set("DedicatedIpPool", objectMapper.valueToTree(pool));
+        // Built explicitly: the AWS DedicatedIpPool shape carries only PoolName and ScalingMode;
+        // the model's tags are exposed via ListTagsForResource, not here.
+        ObjectNode poolNode = result.putObject("DedicatedIpPool");
+        poolNode.put("PoolName", pool.getPoolName());
+        poolNode.put("ScalingMode", pool.getScalingMode());
         return Response.ok(result).build();
     }
 

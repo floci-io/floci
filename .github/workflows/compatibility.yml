@@ -10,6 +10,7 @@ on:
       - 'docker/entrypoint.sh'
       - 'docker/localstack-parity.sh'
       - 'compatibility-tests/**'
+      - '.github/ci/compat-timing-report.py'
       - '.github/workflows/compatibility.yml'
 
 permissions:
@@ -179,7 +180,9 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7.0.1
         with:
-          sparse-checkout: compatibility-tests
+          sparse-checkout: |
+            compatibility-tests
+            .github/ci
 
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
@@ -229,6 +232,25 @@ jobs:
         uses: test-summary/action@37b508cfee6d4d080eedd00b5bb240a6a784a6a5 # v2
         with:
           paths: test-results/*.xml
+
+      # The test body inside the container runs its build tool quietly, so the
+      # job log carries no per-class timings and the slow legs (sdk-test-java,
+      # ~10 min) are a black box. Surface the timings from the junit XMLs the
+      # suites already export, and upload the raw XMLs so the numbers are
+      # machine-readable across runs.
+      - name: Report slowest test classes
+        if: always() && steps.tests.outcome != 'skipped'
+        # Measurement-only: a reporting bug must never fail an otherwise-green leg.
+        continue-on-error: true
+        run: python3 .github/ci/compat-timing-report.py test-results
+
+      - name: Upload test results
+        if: always() && steps.tests.outcome != 'skipped'
+        uses: actions/upload-artifact@v7
+        with:
+          name: compat-results-${{ matrix.test }}
+          path: test-results/
+          if-no-files-found: warn
 
       - name: Dump floci logs
         if: failure()

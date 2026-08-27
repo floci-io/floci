@@ -4,6 +4,9 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
+import java.util.ArrayList;
+import java.util.List;
+
 /**
  * A custom verification email template: the branded email SES sends when verifying a new
  * sender email address (as opposed to {@link EmailTemplate}, which is for the emails a caller
@@ -31,6 +34,9 @@ public class CustomVerificationEmailTemplate {
     @JsonProperty("FailureRedirectionURL")
     private String failureRedirectionURL;
 
+    @JsonProperty("Tags")
+    private List<Tag> tags = new ArrayList<>();
+
     public CustomVerificationEmailTemplate() {}
 
     public String getTemplateName() { return templateName; }
@@ -53,5 +59,10 @@ public class CustomVerificationEmailTemplate {
     public String getFailureRedirectionURL() { return failureRedirectionURL; }
     public void setFailureRedirectionURL(String failureRedirectionURL) {
         this.failureRedirectionURL = failureRedirectionURL;
+    }
+
+    public List<Tag> getTags() { return tags; }
+    public void setTags(List<Tag> tags) {
+        this.tags = tags == null ? new ArrayList<>() : tags;
     }
 }

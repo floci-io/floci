@@ -569,3 +569,7 @@ floci:
       # validate-runtime-exists: false        # true = reject unknown runtime ARNs
     bedrock-agent-core-control:
       enabled: true
+    servicequotas:
+      enabled: true
+    ram:
+      enabled: true

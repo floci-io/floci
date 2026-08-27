@@ -158,6 +158,12 @@ floci:
     networkfirewall:
       enabled: true
 
+    servicequotas:
+      enabled: true
+
+    ram:
+      enabled: true
+
     elasticache:
       enabled: true
       proxy-base-port: 6379

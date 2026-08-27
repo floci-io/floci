@@ -74,8 +74,9 @@ public class SesTemplateService {
                         "Template " + template.getTemplateName() + " does not exist.", 400));
         template.setCreatedTimestamp(existing.getCreatedTimestamp());
         template.setLastUpdatedTimestamp(Instant.now());
-        // Tags are managed exclusively via Tag/UntagResource — preserve them on update.
-        template.setTags(existing.getTags());
+        // Tags are managed exclusively via Tag/UntagResource — preserve them on update (copied,
+        // so the two objects never share a list instance).
+        template.setTags(new ArrayList<>(existing.getTags()));
         templateStore.put(key, template);
         LOG.infov("Updated SES template: {0} in region {1}", template.getTemplateName(), region);
         return template;
