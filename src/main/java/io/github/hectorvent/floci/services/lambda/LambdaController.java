@@ -303,8 +303,9 @@ public class LambdaController {
 
     @GET
     @Path("/event-source-mappings")
-    public Response listEventSourceMappings(@QueryParam("FunctionName") String functionArn) {
-        List<EventSourceMapping> esms = lambdaService.listEventSourceMappings(functionArn);
+    public Response listEventSourceMappings(@QueryParam("FunctionName") String functionArn,
+                                            @QueryParam("EventSourceArn") String eventSourceArn) {
+        List<EventSourceMapping> esms = lambdaService.listEventSourceMappings(functionArn, eventSourceArn);
         ObjectNode root = objectMapper.createObjectNode();
         ArrayNode items = root.putArray("EventSourceMappings");
         for (EventSourceMapping esm : esms) {

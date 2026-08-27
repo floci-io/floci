@@ -63,9 +63,36 @@ public class LambdaService implements ResourceProvider {
     private static final Pattern FILE_SYSTEM_LOCAL_MOUNT_PATH = Pattern.compile("^/mnt/[A-Za-z0-9._-]+$");
     private static final Pattern LOG_GROUP_PATTERN = Pattern.compile("[.\\-_/#A-Za-z0-9]+");
     private static final Pattern ROLE_ARN_PATTERN = Pattern.compile(
-            "arn:(aws[a-zA-Z-]*)?:iam::\\d{12}:role/?[a-zA-Z_0-9+=,.@\\-_/]+");
-    private static final Pattern HANDLER_PATTERN = Pattern.compile("\\S+");
+            "^arn:(aws[a-zA-Z-]*)?:iam::\\d{12}:role/?[a-zA-Z_0-9+=,.@\\-_/]+$");
+    private static final Pattern HANDLER_PATTERN = Pattern.compile("^[^\\s]+$");
     private static final int MAX_HANDLER_LENGTH = 128;
+    private static final Pattern KMS_KEY_ARN_PATTERN = Pattern.compile(
+            "^(arn:(aws[a-zA-Z-]*)?:[a-z0-9-.]+:.*)?$");
+    private static final Pattern LAYER_VERSION_ARN_PATTERN = Pattern.compile(
+            "^arn:(aws[a-zA-Z-]*)?:lambda:[a-z0-9-]+:\\d{12}:layer:[a-zA-Z0-9-_]+:[0-9]+$");
+    private static final Pattern ALIAS_NAME_PATTERN = Pattern.compile("^(?!^[0-9]+$)([a-zA-Z0-9-_]+)$");
+    private static final Pattern FUNCTION_URL_QUALIFIER_PATTERN = Pattern.compile("^(?!^\\d+$)[0-9a-zA-Z-_]+$");
+    private static final Pattern EVENT_SOURCE_ARN_PATTERN = Pattern.compile(
+            "^arn:(aws[a-zA-Z0-9-]*):([a-zA-Z0-9-]+):([a-z]{2}(-gov|-iso[a-z]?)?-[a-z]+-\\d)?:(\\d{12})?:(.*)$");
+    private static final Pattern LIST_ESM_FUNCTION_NAME_PATTERN = Pattern.compile(
+            "^(arn:(aws[a-zA-Z-]*)?:lambda:)?([a-z]{2}(-gov|-iso[a-z]?)?-[a-z]+-\\d:)?(\\d{12}:)?(function:)?"
+                    + "([a-zA-Z0-9-_]+)(:(\\$LATEST|[a-zA-Z0-9-_]+))?$");
+
+    /** botocore lambda/2015-03-31 Runtime shape enum, kept in sync with service-2.json. */
+    static final List<String> RUNTIME_VALUES = List.of(
+            "nodejs", "nodejs4.3", "nodejs6.10", "nodejs8.10", "nodejs10.x", "nodejs12.x", "nodejs14.x",
+            "nodejs16.x", "nodejs18.x", "nodejs20.x", "nodejs22.x", "nodejs24.x", "nodejs26.x",
+            "java8", "java8.al2", "java11", "java17", "java21", "java25",
+            "python2.7", "python3.6", "python3.7", "python3.8", "python3.9", "python3.10", "python3.11",
+            "python3.12", "python3.13", "python3.14", "python3.15",
+            "dotnetcore1.0", "dotnetcore2.0", "dotnetcore2.1", "dotnetcore3.1", "dotnet6", "dotnet8", "dotnet10",
+            "nodejs4.3-edge", "go1.x", "ruby2.5", "ruby2.7", "ruby3.2", "ruby3.3", "ruby3.4", "ruby4.0",
+            "provided", "provided.al2", "provided.al2023",
+            "java8.al2023", "java11.al2023", "java17.al2023");
+    static final List<String> ARCHITECTURE_VALUES = List.of("x86_64", "arm64");
+    private static final List<String> FUNCTION_URL_AUTH_TYPE_VALUES = List.of("NONE", "AWS_IAM");
+    private static final List<String> INVOKE_MODE_VALUES = List.of("BUFFERED", "RESPONSE_STREAM");
+    private static final List<String> FUNCTION_RESPONSE_TYPE_VALUES = List.of("ReportBatchItemFailures");
 
     private final LambdaFunctionStore functionStore;
     private final LambdaExecutorService executorService;
@@ -313,12 +340,17 @@ public class LambdaService implements ResourceProvider {
         if (role == null || role.isBlank()) {
             throw new AwsException("InvalidParameterValueException", "Role is required", 400);
         }
+        validatePattern(role, "role", ROLE_ARN_PATTERN);
         if ("Zip".equals(packageType) && (handler == null || handler.isBlank())) {
             throw new AwsException("InvalidParameterValueException", "Handler is required", 400);
         }
+        validatePattern(handler, "handler", HANDLER_PATTERN);
+        validateMaxLength(handler, "handler", 128);
         if ("Zip".equals(packageType) && (runtime == null || runtime.isBlank())) {
             throw new AwsException("InvalidParameterValueException", "Runtime is required for Zip package type", 400);
         }
+        validateEnum(runtime, "runtime", RUNTIME_VALUES);
+        validateMaxLength(description, "description", 256);
 
         if (functionStore.get(region, functionName).isPresent()) {
             throw new AwsException("ResourceConflictException",
@@ -358,6 +390,7 @@ public class LambdaService implements ResourceProvider {
         @SuppressWarnings("unchecked")
         List<String> architectures = request.get("Architectures") instanceof List
                 ? (List<String>) request.get("Architectures") : null;
+        validateEnumList(architectures, "architectures", ARCHITECTURE_VALUES, 1);
         if (architectures != null && !architectures.isEmpty()) {
             fn.setArchitectures(new ArrayList<>(architectures));
         }
@@ -382,13 +415,16 @@ public class LambdaService implements ResourceProvider {
         @SuppressWarnings("unchecked")
         List<String> layers = request.get("Layers") instanceof List
                 ? (List<String>) request.get("Layers") : null;
+        validateArnList(layers, "layers", LAYER_VERSION_ARN_PATTERN, 5);
         if (layers != null) {
             validateLayersResolvable(layers);
             fn.setLayers(new ArrayList<>(layers));
         }
 
         if (request.containsKey("KMSKeyArn")) {
-            fn.setKmsKeyArn((String) request.get("KMSKeyArn"));
+            Object kmsKeyArn = request.get("KMSKeyArn");
+            validatePattern(kmsKeyArn, "kMSKeyArn", KMS_KEY_ARN_PATTERN);
+            fn.setKmsKeyArn((String) kmsKeyArn);
         }
 
         if (request.get("VpcConfig") instanceof Map<?, ?>) {
@@ -516,6 +552,16 @@ public class LambdaService implements ResourceProvider {
             }
         }
 
+        if (request.containsKey("Architectures")) {
+            @SuppressWarnings("unchecked")
+            List<String> architectures = request.get("Architectures") instanceof List
+                    ? (List<String>) request.get("Architectures") : null;
+            validateEnumList(architectures, "architectures", ARCHITECTURE_VALUES, 1);
+            if (architectures != null && !architectures.isEmpty()) {
+                fn.setArchitectures(new ArrayList<>(architectures));
+            }
+        }
+
         fn.setLastModified(System.currentTimeMillis());
         fn.setRevisionId(UUID.randomUUID().toString());
 
@@ -539,7 +585,11 @@ public class LambdaService implements ResourceProvider {
         List<String> layerList = request.containsKey("Layers") && request.get("Layers") instanceof List
                 ? (List<String>) request.get("Layers") : null;
         if (request.containsKey("Layers")) {
+            validateArnList(layerList, "layers", LAYER_VERSION_ARN_PATTERN, 5);
             validateLayersResolvable(layerList);
+        }
+        if (request.containsKey("Runtime")) {
+            validateEnum(request.get("Runtime"), "runtime", RUNTIME_VALUES);
         }
         if (request.containsKey("SnapStart")) {
             validateSnapStart(request.get("SnapStart"));
@@ -901,8 +951,10 @@ public class LambdaService implements ResourceProvider {
         boolean enabled = !Boolean.FALSE.equals(request.get("Enabled"));
 
         @SuppressWarnings("unchecked")
-        List<String> functionResponseTypes = request.get("FunctionResponseTypes") instanceof List
-                ? (List<String>) request.get("FunctionResponseTypes")
+        Object rawFunctionResponseTypes = request.get("FunctionResponseTypes");
+        validateEnumList(rawFunctionResponseTypes, "functionResponseTypes", FUNCTION_RESPONSE_TYPE_VALUES, 1);
+        List<String> functionResponseTypes = rawFunctionResponseTypes instanceof List
+                ? (List<String>) rawFunctionResponseTypes
                 : new ArrayList<>();
 
         ScalingConfig scalingConfig = parseScalingConfig(request, eventSourceArn);
@@ -1099,13 +1151,27 @@ public class LambdaService implements ResourceProvider {
     }
 
     public List<EventSourceMapping> listEventSourceMappings(String functionArn) {
+        return listEventSourceMappings(functionArn, null);
+    }
+
+    public List<EventSourceMapping> listEventSourceMappings(String functionArn, String eventSourceArn) {
+        validatePattern(functionArn, "functionName", LIST_ESM_FUNCTION_NAME_PATTERN);
+        validatePattern(eventSourceArn, "eventSourceArn", EVENT_SOURCE_ARN_PATTERN);
+        List<EventSourceMapping> mappings;
         if (functionArn != null && !functionArn.isBlank()) {
             // Accept bare name, partial ARN, or full ARN. The store matches
             // entries by their canonical short name, so normalize first.
             String shortName = LambdaArnUtils.resolve(functionArn).name();
-            return esmStore.listByFunction(shortName);
+            mappings = esmStore.listByFunction(shortName);
+        } else {
+            mappings = esmStore.list();
         }
-        return esmStore.list();
+        if (eventSourceArn != null && !eventSourceArn.isBlank()) {
+            mappings = mappings.stream()
+                    .filter(esm -> eventSourceArn.equals(esm.getEventSourceArn()))
+                    .toList();
+        }
+        return mappings;
     }
 
     public EventSourceMapping updateEventSourceMapping(String uuid, Map<String, Object> request) {
@@ -1134,6 +1200,16 @@ public class LambdaService implements ResourceProvider {
 
         if (request.containsKey("DestinationConfig")) {
             esm.setDestinationConfig(parseDestinationConfig(request));
+        }
+
+        if (request.containsKey("FunctionResponseTypes")) {
+            Object rawFunctionResponseTypes = request.get("FunctionResponseTypes");
+            validateEnumList(rawFunctionResponseTypes, "functionResponseTypes", FUNCTION_RESPONSE_TYPE_VALUES, 1);
+            @SuppressWarnings("unchecked")
+            List<String> functionResponseTypes = rawFunctionResponseTypes instanceof List
+                    ? (List<String>) rawFunctionResponseTypes
+                    : new ArrayList<>();
+            esm.setFunctionResponseTypes(functionResponseTypes);
         }
 
         esm.setLastModified(System.currentTimeMillis());
@@ -1376,7 +1452,7 @@ public class LambdaService implements ResourceProvider {
         validateLogGroup(logging.get("LogGroup"));
     }
 
-    private static void validateEnum(Object value, String field, List<String> allowed) {
+    static void validateEnum(Object value, String field, List<String> allowed) {
         if (value == null || allowed.contains(value)) {
             return;
         }
@@ -1384,6 +1460,57 @@ public class LambdaService implements ResourceProvider {
                 "1 validation error detected: Value '" + value + "' at '" + field + "' failed to satisfy "
                         + "constraint: Member must satisfy enum value set: ["
                         + String.join(", ", allowed) + "]", 400);
+    }
+
+    /** Validates every element of a request-supplied list against an enum, and its max size. */
+    static void validateEnumList(Object value, String field, List<String> allowed, int maxItems) {
+        if (!(value instanceof List<?> list)) {
+            return;
+        }
+        if (list.size() > maxItems) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value at '" + field + "' failed to satisfy constraint: "
+                            + "Member must have length less than or equal to " + maxItems, 400);
+        }
+        for (Object item : list) {
+            validateEnum(item, field + ".member", allowed);
+        }
+    }
+
+    /** Validates a request-supplied string against a botocore regex constraint, when present. */
+    private static void validatePattern(Object value, String field, Pattern pattern) {
+        if (!(value instanceof String s) || s.isEmpty()) {
+            return;
+        }
+        if (!pattern.matcher(s).matches()) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value '" + s + "' at '" + field + "' failed to satisfy "
+                            + "constraint: Member must satisfy regular expression pattern: " + pattern.pattern(), 400);
+        }
+    }
+
+    /** Validates every element of a request-supplied string list against a pattern, and its max size. */
+    private static void validateArnList(Object value, String field, Pattern pattern, int maxItems) {
+        if (!(value instanceof List<?> list)) {
+            return;
+        }
+        if (list.size() > maxItems) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value at '" + field + "' failed to satisfy constraint: "
+                            + "Member must have length less than or equal to " + maxItems, 400);
+        }
+        for (Object item : list) {
+            validatePattern(item, field + ".member", pattern);
+        }
+    }
+
+    private static void validateMaxLength(Object value, String field, int maxLength) {
+        if (!(value instanceof String s) || s.length() <= maxLength) {
+            return;
+        }
+        throw new AwsException("ValidationException",
+                "1 validation error detected: Value at '" + field + "' failed to satisfy constraint: "
+                        + "Member must have length less than or equal to " + maxLength, 400);
     }
 
     /**
@@ -1547,6 +1674,7 @@ public class LambdaService implements ResourceProvider {
     }
 
     public void deleteAlias(String region, String functionName, String aliasName) {
+        validatePattern(aliasName, "name", ALIAS_NAME_PATTERN);
         String canonical = canonicalFunctionName(region, functionName);
         getAlias(region, canonical, aliasName); // verify it exists
         if (aliasStore != null) aliasStore.delete(region, canonical, aliasName);
@@ -1556,13 +1684,18 @@ public class LambdaService implements ResourceProvider {
     // ──────────────────────────── Function URL Config ────────────────────────────
 
     public LambdaUrlConfig createFunctionUrlConfig(String region, String functionName, String qualifier, Map<String, Object> request) {
+        validatePattern(qualifier, "qualifier", FUNCTION_URL_QUALIFIER_PATTERN);
         LambdaArnUtils.ResolvedFunctionRef ref = resolveWithRegion(region, functionName, qualifier);
         functionName = ref.name();
         qualifier = ref.qualifier();
+        Object authType = request.getOrDefault("AuthType", "NONE");
+        validateEnum(authType, "authType", FUNCTION_URL_AUTH_TYPE_VALUES);
+        Object invokeMode = request.get("InvokeMode");
+        validateEnum(invokeMode, "invokeMode", INVOKE_MODE_VALUES);
         LambdaUrlConfig urlConfig = new LambdaUrlConfig();
-        urlConfig.setAuthType((String) request.getOrDefault("AuthType", "NONE"));
-        if (request.containsKey("InvokeMode")) {
-            urlConfig.setInvokeMode((String) request.get("InvokeMode"));
+        urlConfig.setAuthType((String) authType);
+        if (invokeMode != null) {
+            urlConfig.setInvokeMode((String) invokeMode);
         }
 
         String accountId = regionResolver.getAccountId();
@@ -1633,16 +1766,21 @@ public class LambdaService implements ResourceProvider {
     }
 
     public LambdaUrlConfig updateFunctionUrlConfig(String region, String functionName, String qualifier, Map<String, Object> request) {
+        validatePattern(qualifier, "qualifier", FUNCTION_URL_QUALIFIER_PATTERN);
         LambdaArnUtils.ResolvedFunctionRef ref = resolveWithRegion(region, functionName, qualifier);
         functionName = ref.name();
         qualifier = ref.qualifier();
         LambdaUrlConfig urlConfig = getFunctionUrlConfig(region, functionName, qualifier);
 
         if (request.containsKey("AuthType")) {
-            urlConfig.setAuthType((String) request.get("AuthType"));
+            Object authType = request.get("AuthType");
+            validateEnum(authType, "authType", FUNCTION_URL_AUTH_TYPE_VALUES);
+            urlConfig.setAuthType((String) authType);
         }
         if (request.containsKey("InvokeMode")) {
-            urlConfig.setInvokeMode((String) request.get("InvokeMode"));
+            Object invokeMode = request.get("InvokeMode");
+            validateEnum(invokeMode, "invokeMode", INVOKE_MODE_VALUES);
+            urlConfig.setInvokeMode((String) invokeMode);
         }
 
         String now = DateTimeFormatter.ISO_INSTANT.format(Instant.now().atOffset(ZoneOffset.UTC));
