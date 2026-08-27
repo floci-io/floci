@@ -773,10 +773,17 @@ public class OrganizationsService {
      * Floci does not evaluate effective policies, so no account can be reported as carrying an
      * invalid one. The operation still has to validate its required PolicyType before it can
      * honestly answer "none".
+     *
+     * <p>The model restricts this to the management account or a delegated administrator, but
+     * names no service that delegation must be scoped to and {@code EffectivePolicyType} maps to
+     * none — there is nothing to check a delegated admin's registration against. Management-only
+     * is stricter than the model text, matching how every other operation carrying this same
+     * boilerplate phrase is gated here ({@link #attachPolicy}, {@link #enablePolicyType},
+     * {@link #registerDelegatedAdministrator}, {@link #listDelegatedAdministrators}).
      */
     public List<OrganizationAccount> listAccountsWithInvalidEffectivePolicy(String callerAccountId,
                                                                            String policyType) {
-        requireManagementOrDelegatedAdmin(callerAccountId);
+        requireManagementAccount(callerAccountId);
         validateEffectivePolicyType(policyType);
         return List.of();
     }
@@ -1209,26 +1216,6 @@ public class OrganizationsService {
         return organization;
     }
 
-    /**
-     * {@code ListAccountsWithInvalidEffectivePolicy} is narrower than
-     * {@link #requireOrganizationForCaller}: AWS restricts it to the management account or a member
-     * account registered as a delegated administrator for some service, unlike
-     * {@code DescribeEffectivePolicy}, which any account in the organization may call.
-     */
-    Organization requireManagementOrDelegatedAdmin(String callerAccountId) {
-        Organization organization = requireOrganizationForCaller(callerAccountId);
-        if (organization.getMasterAccountId().equals(callerAccountId)) {
-            return organization;
-        }
-        boolean isDelegatedAdmin = accountsIn(organization).stream()
-                .anyMatch(account -> account.getId().equals(callerAccountId)
-                        && !account.getDelegatedServices().isEmpty());
-        if (!isDelegatedAdmin) {
-            throw accessDenied(
-                    "This operation can be performed only by the management account or a delegated administrator.");
-        }
-        return organization;
-    }
 
     /**
      * The management account that owns the given organization, root, OU, account, policy or

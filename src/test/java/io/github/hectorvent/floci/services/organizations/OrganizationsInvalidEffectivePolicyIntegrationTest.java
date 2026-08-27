@@ -169,14 +169,20 @@ class OrganizationsInvalidEffectivePolicyIntegrationTest {
             .statusCode(200);
     }
 
+    /**
+     * The model names no service that a delegated administrator must be scoped to for this
+     * operation, and EffectivePolicyType maps to none — there is nothing to check a registration
+     * against. Rather than accept delegation for an unrelated service (config.amazonaws.com here),
+     * this stays management-only, matching every other operation gated on this boilerplate phrase.
+     */
     @Test
     @Order(10)
-    void listAccountsWithInvalidEffectivePolicyAcceptsADelegatedAdministrator() {
+    void listAccountsWithInvalidEffectivePolicyRejectsADelegatedAdministratorForAnUnrelatedService() {
         organizations(memberAccountId, "ListAccountsWithInvalidEffectivePolicy", "{\"PolicyType\":\"TAG_POLICY\"}")
         .when()
             .post("/")
         .then()
-            .statusCode(200)
-            .body("Accounts", empty());
+            .statusCode(403)
+            .body("__type", equalTo("AccessDeniedException"));
     }
 }
