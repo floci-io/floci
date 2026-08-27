@@ -545,6 +545,8 @@ floci:
       enabled: true
     networkfirewall:
       enabled: true
+    servicecatalog:
+      enabled: true
     guardduty:
       enabled: true
     emrserverless:

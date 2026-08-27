@@ -1892,6 +1892,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         return applyRouteFilters(routes, filters);
     }
 
+    /** No real S3 write — returns a location string (unique random suffix) matching the export naming AWS uses. */
+    public String exportTransitGatewayRoutes(String region, String routeTableId, String s3Bucket) {
+        getRequiredTransitGatewayRouteTable(region, routeTableId);
+        if (s3Bucket == null || s3Bucket.isBlank()) {
+            throw new AwsException("MissingParameter", "S3Bucket is required.", 400);
+        }
+        return "s3://" + s3Bucket + "/" + routeTableId + "-" + randomHex(8) + ".csv";
+    }
+
     /**
      * The route search filters, as the live API applies them. The three CIDR relationship filters
      * differ in the value they take, which is not something the reference spells out:
@@ -2871,6 +2880,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 .collect(Collectors.toList());
     }
 
+
     public List<VpcEndpoint> deleteVpcEndpoints(String region, List<String> endpointIds) {
         ensureDefaultResources(region);
         List<VpcEndpoint> deleted = new ArrayList<>();
@@ -3071,6 +3081,17 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 .filter(sg -> sg.getRegion().equals(region))
                 .filter(sg -> groupIds.isEmpty() || groupIds.contains(sg.getGroupId()))
                 .filter(sg -> groupNames.isEmpty() || groupNames.contains(sg.getGroupName()))
+                .filter(sg -> matchesFilters(sg, filters, region))
+                .collect(Collectors.toList());
+    }
+
+    public List<SecurityGroup> getSecurityGroupsForVpc(String region, String vpcId,
+                                                        Map<String, List<String>> filters) {
+        ensureDefaultResources(region);
+        getRequiredVpc(region, vpcId);
+        return securityGroups.scan(k -> true).stream()
+                .filter(sg -> sg.getRegion().equals(region))
+                .filter(sg -> vpcId.equals(sg.getVpcId()))
                 .filter(sg -> matchesFilters(sg, filters, region))
                 .collect(Collectors.toList());
     }

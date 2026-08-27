@@ -43,6 +43,7 @@ import io.github.hectorvent.floci.services.kms.KmsJsonHandler;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerJsonHandler;
 import io.github.hectorvent.floci.services.organizations.OrganizationsJsonHandler;
 import io.github.hectorvent.floci.services.networkfirewall.NetworkFirewallJsonHandler;
+import io.github.hectorvent.floci.services.servicecatalog.ServiceCatalogJsonHandler;
 import io.github.hectorvent.floci.services.servicequotas.ServiceQuotasJsonHandler;
 import io.github.hectorvent.floci.services.ssm.Ec2MessagesJsonHandler;
 import io.github.hectorvent.floci.services.ssm.SsmJsonHandler;
@@ -107,6 +108,7 @@ public class AwsJson11Controller {
     private final CloudTrailJsonHandler cloudTrailJsonHandler;
     private final LightsailJsonHandler lightsailJsonHandler;
     private final NetworkFirewallJsonHandler networkFirewallJsonHandler;
+    private final ServiceCatalogJsonHandler serviceCatalogJsonHandler;
     private final CloudControlJsonHandler cloudControlJsonHandler;
     private final ApplicationAutoScalingJsonHandler applicationAutoScalingJsonHandler;
     private final CloudHsmV2JsonHandler cloudHsmV2JsonHandler;
@@ -148,6 +150,7 @@ public class AwsJson11Controller {
                                CloudTrailJsonHandler cloudTrailJsonHandler,
                                LightsailJsonHandler lightsailJsonHandler,
                                NetworkFirewallJsonHandler networkFirewallJsonHandler,
+                               ServiceCatalogJsonHandler serviceCatalogJsonHandler,
                                CloudControlJsonHandler cloudControlJsonHandler,
                                ApplicationAutoScalingJsonHandler applicationAutoScalingJsonHandler,
                                CloudHsmV2JsonHandler cloudHsmV2JsonHandler,
@@ -193,6 +196,7 @@ public class AwsJson11Controller {
         this.cloudTrailJsonHandler = cloudTrailJsonHandler;
         this.lightsailJsonHandler = lightsailJsonHandler;
         this.networkFirewallJsonHandler = networkFirewallJsonHandler;
+        this.serviceCatalogJsonHandler = serviceCatalogJsonHandler;
         this.cloudControlJsonHandler = cloudControlJsonHandler;
         this.applicationAutoScalingJsonHandler = applicationAutoScalingJsonHandler;
         this.cloudHsmV2JsonHandler = cloudHsmV2JsonHandler;
@@ -270,6 +274,8 @@ public class AwsJson11Controller {
                 case "application-autoscaling" -> applicationAutoScalingJsonHandler.handle(action, request, region);
                 case "lightsail" -> lightsailJsonHandler.handle(action, request, region);
                 case "network-firewall" -> networkFirewallJsonHandler.handle(
+                        action, request, region, regionResolver.getAccountId());
+                case "servicecatalog" -> serviceCatalogJsonHandler.handle(
                         action, request, region, regionResolver.getAccountId());
                 case "cloudcontrol" -> cloudControlJsonHandler.handle(action, request, region);
                 case "cloudhsmv2" -> cloudHsmV2JsonHandler.handle(action, request, region);
