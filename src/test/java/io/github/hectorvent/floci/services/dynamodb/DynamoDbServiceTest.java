@@ -2091,6 +2091,111 @@ class DynamoDbServiceTest {
     }
 
     @Test
+    void putItemNullPartitionKeyThrowsTypeMismatch() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode nullKeyItem = mapper.createObjectNode();
+        nullKeyItem.set("userId", mapper.createObjectNode().put("NULL", true));
+        nullKeyItem.set("name", attributeValue("S", "created"));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.putItem("Users", nullKeyItem, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("One or more parameter values were invalid: "
+                + "Type mismatch for key userId expected: S actual: NULL", ex.getMessage());
+    }
+
+    @Test
+    void putItemWrongScalarTypePartitionKeyThrowsTypeMismatch() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode numberKeyItem = mapper.createObjectNode();
+        numberKeyItem.set("userId", attributeValue("N", "42"));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.putItem("Users", numberKeyItem, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("One or more parameter values were invalid: "
+                + "Type mismatch for key userId expected: S actual: N", ex.getMessage());
+    }
+
+    @Test
+    void putItemNullSortKeyThrowsTypeMismatch() {
+        String region = "eu-west-1";
+        createOrdersTable(region);
+
+        ObjectNode nullSkItem = item("customerId", "c1");
+        nullSkItem.set("orderId", mapper.createObjectNode().put("NULL", true));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.putItem("Orders", nullSkItem, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("One or more parameter values were invalid: "
+                + "Type mismatch for key orderId expected: S actual: NULL", ex.getMessage());
+    }
+
+    @Test
+    void putItemNullNonKeyAttributeIsAccepted() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode nullAttrItem = item("userId", "u1");
+        nullAttrItem.set("name", mapper.createObjectNode().put("NULL", true));
+        service.putItem("Users", nullAttrItem, region);
+
+        JsonNode stored = service.getItem("Users", item("userId", "u1"), region);
+        assertNotNull(stored);
+        assertTrue(stored.get("name").get("NULL").asBoolean());
+    }
+
+    @Test
+    void updateItemNullPartitionKeyThrowsValidationException() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode nullKey = mapper.createObjectNode();
+        nullKey.set("userId", mapper.createObjectNode().put("NULL", true));
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":val", attributeValue("S", "updated"));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.updateItem("Users", nullKey, null,
+                        "SET name = :val", null, exprValues, null, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("The provided key element does not match the schema", ex.getMessage());
+    }
+
+    @Test
+    void getItemNullPartitionKeyThrowsValidationException() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode nullKey = mapper.createObjectNode();
+        nullKey.set("userId", mapper.createObjectNode().put("NULL", true));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.getItem("Users", nullKey, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("The provided key element does not match the schema", ex.getMessage());
+    }
+
+    @Test
+    void deleteItemNullPartitionKeyThrowsValidationException() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode nullKey = mapper.createObjectNode();
+        nullKey.set("userId", mapper.createObjectNode().put("NULL", true));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.deleteItem("Users", nullKey, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("The provided key element does not match the schema", ex.getMessage());
+    }
+
+    @Test
     void updateExpressionAcceptsNewlineBetweenSetAndAdd() {
         String region = "eu-west-1";
         // "SET ... \n ADD ..." — previously both clauses were silently dropped:

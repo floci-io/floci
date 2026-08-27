@@ -2548,7 +2548,7 @@ public class DynamoDbService implements ResourceProvider {
             throw new AwsException("ValidationException",
                     "One of the required keys was not given a value", 400);
         }
-        validateKeyAttributeValue(pkAttr, pkName);
+        validateKeyAttributeValue(table, pkAttr, pkName, isKeyArg);
 
         String pk = extractScalarValue(pkAttr);
         String skName = table.getSortKeyName();
@@ -2562,18 +2562,40 @@ public class DynamoDbService implements ResourceProvider {
                 throw new AwsException("ValidationException",
                         "One of the required keys was not given a value", 400);
             }
-            validateKeyAttributeValue(skAttr, skName);
+            validateKeyAttributeValue(table, skAttr, skName, isKeyArg);
             return pk + "#" + extractScalarValue(skAttr);
         }
         return pk;
     }
 
-    private void validateKeyAttributeValue(JsonNode attr, String keyName) {
-        if (attr != null && attr.has("S") && attr.get("S").asText().isEmpty()) {
+    private void validateKeyAttributeValue(TableDefinition table, JsonNode attr, String keyName, boolean isKeyArg) {
+        if (attr == null) return;
+        String expectedType = keyAttributeType(table, keyName);
+        if (expectedType != null && attr.isObject() && attr.size() == 1
+                && !attr.has(expectedType)) {
+            // AWS words the type mismatch differently for a Key argument
+            // (Get/Delete/Update) than for a PutItem item body.
+            if (isKeyArg) {
+                throw new AwsException("ValidationException",
+                        "The provided key element does not match the schema", 400);
+            }
+            throw new AwsException("ValidationException",
+                    "One or more parameter values were invalid: Type mismatch for key " + keyName
+                    + " expected: " + expectedType + " actual: " + attr.fieldNames().next(), 400);
+        }
+        if (attr.has("S") && attr.get("S").asText().isEmpty()) {
             throw new AwsException("ValidationException",
                     "One or more parameter values were invalid: "
                     + "The AttributeValue for a key attribute cannot contain an empty string value. Key: " + keyName, 400);
         }
+    }
+
+    private String keyAttributeType(TableDefinition table, String keyName) {
+        if (table.getAttributeDefinitions() == null) return null;
+        return table.getAttributeDefinitions().stream()
+                .filter(def -> keyName.equals(def.getAttributeName()))
+                .map(AttributeDefinition::getAttributeType)
+                .findFirst().orElse(null);
     }
 
     private String buildItemKeyFromNode(JsonNode item, String pkName, String skName) {
