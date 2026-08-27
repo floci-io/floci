@@ -400,6 +400,22 @@ class IamServiceTest {
     }
 
     @Test
+    void createPolicyVersionAfterDeletingHighestSurvivingIdDoesNotReuseIt() {
+        // Deleting the HIGHEST surviving version (not the oldest, as above) is the case that
+        // breaks a "derive from the live keys" implementation: with v5 gone, the live max is v4,
+        // so a naive next-id computation reissues v5 rather than advancing to v6.
+        IamPolicy policy = iamService.createPolicy("P", "/", null, "{}", null);
+        String arn = policy.getArn();
+        for (int i = 2; i <= 5; i++) {
+            iamService.createPolicyVersion(arn, "{\"v\":" + i + "}", false);
+        }
+        iamService.deletePolicyVersion(arn, "v5");
+        PolicyVersion next = iamService.createPolicyVersion(arn, "{\"v\":6}", false);
+        assertEquals("v6", next.getVersionId());
+        assertEquals("{\"v\":4}", iamService.getPolicyVersion(arn, "v4").getDocument());
+    }
+
+    @Test
     void deletePolicyWithAttachmentsFails() {
         iamService.createUser("alice", "/");
         IamPolicy policy = iamService.createPolicy("P", "/", null, "{}", null);

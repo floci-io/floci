@@ -20,6 +20,13 @@ public class IamPolicy {
     private String description;
     private String defaultVersionId = "v1";
     private int attachmentCount = 0;
+    /**
+     * High-water mark for issued version numbers, so a deleted version's id is never reissued.
+     * Defensive at the call site too (never trusted below the live keys' own max + 1): a policy
+     * persisted before this field existed rehydrates it at the initializer value below, which
+     * could otherwise be lower than versions already on disk.
+     */
+    private int nextVersionNumber = 2;
     private Instant createDate;
     private Instant updateDate;
     private Map<String, String> tags = new ConcurrentHashMap<>();
@@ -66,6 +73,9 @@ public class IamPolicy {
 
     public int getAttachmentCount() { return attachmentCount; }
     public void setAttachmentCount(int attachmentCount) { this.attachmentCount = attachmentCount; }
+
+    public int getNextVersionNumber() { return nextVersionNumber; }
+    public void setNextVersionNumber(int nextVersionNumber) { this.nextVersionNumber = nextVersionNumber; }
 
     public Instant getCreateDate() { return createDate; }
     public void setCreateDate(Instant createDate) { this.createDate = createDate; }

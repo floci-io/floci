@@ -960,11 +960,15 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 throw new AwsException("LimitExceeded",
                         "A managed policy can have up to 5 versions.", 409);
             }
-            // AWS version ids are monotonic and never reissued after a DeletePolicyVersion,
-            // so derive the next id from the highest surviving one, not the version count.
-            int nextVersionNum = versions.keySet().stream()
+            // AWS version ids are monotonic and never reissued after a DeletePolicyVersion.
+            // The live keys' own max is only a floor, not the source of truth: deleting the
+            // highest-numbered surviving version would otherwise let a "derive from what's left"
+            // computation reissue its id. The stored high-water mark is the real counter; the
+            // live-key floor only guards a policy rehydrated from before this field existed.
+            int highestSurviving = versions.keySet().stream()
                     .mapToInt(id -> Integer.parseInt(id.substring(1)))
-                    .max().orElse(0) + 1;
+                    .max().orElse(0);
+            int nextVersionNum = Math.max(policy.getNextVersionNumber(), highestSurviving + 1);
             String versionId = "v" + nextVersionNum;
             version = new PolicyVersion(versionId, document, setAsDefault);
             if (setAsDefault) {
@@ -972,6 +976,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 policy.setDefaultVersionId(versionId);
             }
             versions.put(versionId, version);
+            policy.setNextVersionNumber(nextVersionNum + 1);
         }
         policy.setUpdateDate(Instant.now());
         policies.put(policyArn, policy);
