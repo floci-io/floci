@@ -290,9 +290,19 @@ public class OrganizationsJsonHandler {
      * a reassuring "no invalid accounts".
      */
     private Response listAccountsWithInvalidEffectivePolicy(JsonNode request, String caller) {
+        String policyType = text(request, "PolicyType");
         List<OrganizationAccount> accounts =
-                service.listAccountsWithInvalidEffectivePolicy(caller, text(request, "PolicyType"));
-        return accountsResponse(page(accounts, OrganizationAccount::getId, request));
+                service.listAccountsWithInvalidEffectivePolicy(caller, policyType);
+        PaginatedResult<OrganizationAccount> page = page(accounts, OrganizationAccount::getId, request);
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode accountsNode = response.putArray("Accounts");
+        page.items().forEach(account -> accountsNode.add(accountNode(account)));
+        putNextToken(response, page.nextToken());
+        // PolicyType is the only field this operation's response can carry any
+        // information in - Accounts is always empty by design (see javadoc above) - so
+        // echoing the validated request value back is required, not cosmetic.
+        response.put("PolicyType", policyType);
+        return Response.ok(response).build();
     }
 
     private Response accountsResponse(PaginatedResult<OrganizationAccount> page) {

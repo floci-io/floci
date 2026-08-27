@@ -776,9 +776,14 @@ public class OrganizationsService {
      *
      * <p>The model restricts this to the management account or a delegated administrator, but
      * names no service that delegation must be scoped to and {@code EffectivePolicyType} maps to
-     * none — there is nothing to check a delegated admin's registration against. Management-only
-     * is stricter than the model text, matching how every other operation carrying this same
-     * boilerplate phrase is gated here ({@link #attachPolicy}, {@link #enablePolicyType},
+     * none — there is nothing to check a delegated admin's registration against, because
+     * delegated administration of Organizations' own operations is granted through the
+     * organization's resource-based delegation policy ({@code PutResourcePolicy}), not through
+     * {@code RegisterDelegatedAdministrator}'s per-service map. Floci exposes the resource-policy
+     * CRUD but nothing reads it for authorization yet, so the concept genuinely isn't modelled
+     * here — if it ever is, the resource policy is the hook. Management-only is stricter than the
+     * model text, matching how every other operation carrying this same boilerplate phrase is
+     * gated here ({@link #attachPolicy}, {@link #enablePolicyType},
      * {@link #registerDelegatedAdministrator}, {@link #listDelegatedAdministrators}).
      */
     public List<OrganizationAccount> listAccountsWithInvalidEffectivePolicy(String callerAccountId,
@@ -1215,7 +1220,6 @@ public class OrganizationsService {
         }
         return organization;
     }
-
 
     /**
      * The management account that owns the given organization, root, OU, account, policy or

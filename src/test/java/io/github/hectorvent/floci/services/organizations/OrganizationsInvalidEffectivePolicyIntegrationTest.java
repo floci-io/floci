@@ -67,7 +67,10 @@ class OrganizationsInvalidEffectivePolicyIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("Accounts", empty());
+            .body("Accounts", empty())
+            // PolicyType is echoed back per the model's response shape - with Accounts
+            // always empty by design, it's the only field this response can inform on.
+            .body("PolicyType", equalTo("TAG_POLICY"));
     }
 
     /**
