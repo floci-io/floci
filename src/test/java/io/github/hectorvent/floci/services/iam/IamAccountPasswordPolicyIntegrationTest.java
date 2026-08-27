@@ -134,7 +134,11 @@ class IamAccountPasswordPolicyIntegrationTest {
             .body("GetAccountPasswordPolicyResponse.GetAccountPasswordPolicyResult.PasswordPolicy."
                     + "RequireSymbols", equalTo("false"))
             // MaxPasswordAge was set previously; omitted here it must not be echoed back at all.
-            .body(not(containsString("MaxPasswordAge")));
+            .body(not(containsString("MaxPasswordAge")))
+            // HardExpiry was true from the previous update; omitted here it must reset to its
+            // AWS-documented default of false, not be echoed back as true nor omitted entirely.
+            .body("GetAccountPasswordPolicyResponse.GetAccountPasswordPolicyResult.PasswordPolicy."
+                    + "HardExpiry", equalTo("false"));
     }
 
     @Test
@@ -205,6 +209,77 @@ class IamAccountPasswordPolicyIntegrationTest {
         .then()
             .statusCode(400)
             .body("ErrorResponse.Error.Code", equalTo("ValidationError"));
+    }
+
+    @Test
+    @Order(6)
+    void updateWithMalformedMinimumPasswordLengthIsRejected() {
+        // A non-numeric MinimumPasswordLength must be rejected outright, not silently coerced
+        // to the field's default (6) — that would let a caller's typo succeed with 200 while
+        // quietly ignoring the value they asked for.
+        given()
+            .formParam("Action", "UpdateAccountPasswordPolicy")
+            .formParam("MinimumPasswordLength", "abc")
+            .header("Authorization", IAM_CREDENTIAL)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("ValidationError"));
+    }
+
+    @Test
+    @Order(6)
+    void updateWithMalformedMaxPasswordAgeIsRejected() {
+        given()
+            .formParam("Action", "UpdateAccountPasswordPolicy")
+            .formParam("MaxPasswordAge", "abc")
+            .header("Authorization", IAM_CREDENTIAL)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("ValidationError"));
+    }
+
+    @Test
+    @Order(6)
+    void updateWithMalformedPasswordReusePreventionIsRejected() {
+        given()
+            .formParam("Action", "UpdateAccountPasswordPolicy")
+            .formParam("PasswordReusePrevention", "abc")
+            .header("Authorization", IAM_CREDENTIAL)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("ValidationError"));
+    }
+
+    @Test
+    @Order(6)
+    void updateWithHardExpiryOmittedDefaultsToFalseInResponse() {
+        // HardExpiry has no "optional/absent" state on the wire — AWS documents it as a boolean
+        // that always defaults to false, unlike MaxPasswordAge/PasswordReusePrevention which stay
+        // absent when unset.
+        given()
+            .formParam("Action", "UpdateAccountPasswordPolicy")
+            .formParam("MinimumPasswordLength", "10")
+            .header("Authorization", IAM_CREDENTIAL)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .formParam("Action", "GetAccountPasswordPolicy")
+            .header("Authorization", IAM_CREDENTIAL)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("GetAccountPasswordPolicyResponse.GetAccountPasswordPolicyResult.PasswordPolicy."
+                    + "HardExpiry", equalTo("false"));
     }
 
     @Test

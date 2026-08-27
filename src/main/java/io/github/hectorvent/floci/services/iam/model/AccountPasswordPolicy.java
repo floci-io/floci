@@ -5,9 +5,11 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 
 /**
  * An account holds at most one password policy — this is the whole shape of it, not a
- * per-resource record. Unset optional fields ({@code maxPasswordAge}, {@code
- * passwordReusePrevention}, {@code hardExpiry}) are {@code null} rather than defaulted, matching
- * AWS: {@code GetAccountPasswordPolicy} omits the element entirely when the caller never set it.
+ * per-resource record. Unset optional integer fields ({@code maxPasswordAge}, {@code
+ * passwordReusePrevention}) are {@code null} rather than defaulted, matching AWS:
+ * {@code GetAccountPasswordPolicy} omits the element entirely when the caller never set it.
+ * {@code hardExpiry} is different — AWS documents it as a boolean that always defaults to
+ * {@code false}, so unlike the two integer fields it is never absent from the response.
  */
 @RegisterForReflection
 @JsonIgnoreProperties(ignoreUnknown = true)
@@ -21,7 +23,7 @@ public class AccountPasswordPolicy {
     private boolean allowUsersToChangePassword;
     private Integer maxPasswordAge;
     private Integer passwordReusePrevention;
-    private Boolean hardExpiry;
+    private boolean hardExpiry;
 
     public AccountPasswordPolicy() {}
 
@@ -59,8 +61,8 @@ public class AccountPasswordPolicy {
         this.passwordReusePrevention = passwordReusePrevention;
     }
 
-    public Boolean getHardExpiry() { return hardExpiry; }
-    public void setHardExpiry(Boolean hardExpiry) { this.hardExpiry = hardExpiry; }
+    public boolean isHardExpiry() { return hardExpiry; }
+    public void setHardExpiry(boolean hardExpiry) { this.hardExpiry = hardExpiry; }
 
     /** AWS derives ExpirePasswords from whether a max age is set — it is never stored directly. */
     public boolean isExpirePasswords() { return maxPasswordAge != null; }
