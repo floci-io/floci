@@ -287,6 +287,33 @@ class Route53ResolverCustomResourcesConsumerTest {
     }
 
     @Test
+    void createResolverEndpoint_replayedWithReorderedFieldsWithinIpRequests_returnsTheOriginal() {
+        // Same two IP requests, but the members are written in a different order inside each
+        // object. JSON object member order is not significant, so this is the same request.
+        // The pair is chosen so that ordering the entries by their serialised form flips:
+        // by SubnetId, subnet-aaa sorts first; by Ip, 10.0.0.1 sorts first — opposite entries.
+        String token = "tok-field-order";
+        String subnetFirst = "{\"Name\":\"ab-field-order\",\"Direction\":\"INBOUND\","
+                + "\"SecurityGroupIds\":[\"sg-abc123\"],\"IpAddressRequests\":["
+                + "{\"SubnetId\":\"subnet-zzz\",\"Ip\":\"10.0.0.1\"},"
+                + "{\"SubnetId\":\"subnet-aaa\",\"Ip\":\"10.9.9.9\"}],"
+                + "\"CreatorRequestId\":\"" + token + "\"}";
+        String ipFirst = "{\"Name\":\"ab-field-order\",\"Direction\":\"INBOUND\","
+                + "\"SecurityGroupIds\":[\"sg-abc123\"],\"IpAddressRequests\":["
+                + "{\"Ip\":\"10.0.0.1\",\"SubnetId\":\"subnet-zzz\"},"
+                + "{\"Ip\":\"10.9.9.9\",\"SubnetId\":\"subnet-aaa\"}],"
+                + "\"CreatorRequestId\":\"" + token + "\"}";
+
+        String first = call("CreateResolverEndpoint", subnetFirst)
+                .then().statusCode(200).extract().path("ResolverEndpoint.Id");
+
+        call("CreateResolverEndpoint", ipFirst)
+        .then()
+            .statusCode(200)
+            .body("ResolverEndpoint.Id", equalTo(first));
+    }
+
+    @Test
     void createResolverEndpoint_replayResponseOmitsInternalIpFingerprint() {
         String token = "tok-replay-endpoint-nofingerprint";
         call("CreateResolverEndpoint", "{\"Name\":\"ab-nofingerprint\",\"Direction\":\"INBOUND\","

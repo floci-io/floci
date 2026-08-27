@@ -441,19 +441,50 @@ public class Route53ResolverService {
         JsonNode recorded = endpointIpRequestStore.get(text(existing, "Id"))
                 .map(node -> node.get("IpAddressRequests"))
                 .orElse(null);
-        if (recorded == null || !recorded.equals(normalizedIpRequests(ipAddresses))) {
+        // Both sides are re-normalised here rather than trusting the stored order, so a record
+        // written before the ordering was corrected still compares as equal.
+        if (recorded == null
+                || !normalizedIpRequests(recorded).equals(normalizedIpRequests(ipAddresses))) {
             throw replayConflict(request, existing, "IpAddressRequests");
         }
     }
 
-    /** The IP requests in a stable order, so a reordered retry is not read as a change. */
+    /**
+     * The IP requests in a stable order, so a reordered retry is not read as a change.
+     *
+     * <p>Ordered by {@link #canonicalKey}, not by {@code toString}: a node serialises its
+     * members in insertion order, so two requests carrying the same addresses written with
+     * their members in a different order sort differently and compare unequal — an
+     * equivalent retry rejected as a conflict. JSON member order is not significant, so the
+     * key must not depend on it.</p>
+     */
     private ArrayNode normalizedIpRequests(JsonNode ipAddresses) {
         List<JsonNode> entries = new java.util.ArrayList<>();
         ipAddresses.forEach(entries::add);
-        entries.sort(java.util.Comparator.comparing(JsonNode::toString));
+        entries.sort(java.util.Comparator.comparing(Route53ResolverService::canonicalKey));
         ArrayNode normalized = objectMapper.createArrayNode();
         entries.forEach(normalized::add);
         return normalized;
+    }
+
+    /** A node's contents as a string that does not depend on the order its members were written in. */
+    private static String canonicalKey(JsonNode node) {
+        if (node.isObject()) {
+            List<String> names = new java.util.ArrayList<>();
+            node.fieldNames().forEachRemaining(names::add);
+            java.util.Collections.sort(names);
+            StringBuilder key = new StringBuilder("{");
+            for (String name : names) {
+                key.append(name).append('=').append(canonicalKey(node.get(name))).append(';');
+            }
+            return key.append('}').toString();
+        }
+        if (node.isArray()) {
+            StringBuilder key = new StringBuilder("[");
+            node.forEach(element -> key.append(canonicalKey(element)).append(';'));
+            return key.append(']').toString();
+        }
+        return node.asText();
     }
 
     private AwsException replayConflict(JsonNode request, ObjectNode existing, String field) {
