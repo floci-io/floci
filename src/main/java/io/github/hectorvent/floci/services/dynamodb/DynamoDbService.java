@@ -512,6 +512,7 @@ public class DynamoDbService implements ResourceProvider {
         final JsonNode normalizedItem = DynamoDbNumberUtils.normalizeNumbersInItem(item);
         DynamoDbItemSize.validateSize(normalizedItem);
         String itemKey = buildItemKey(table, normalizedItem);
+        validateIndexKeyTypes(table, normalizedItem);
 
         withItemLock(storageKey, itemKey, () -> {
             var tableItems = itemsByTable.computeIfAbsent(scopedItemsKey(storageKey), k -> new ConcurrentSkipListMap<>());
@@ -732,6 +733,9 @@ public class DynamoDbService implements ResourceProvider {
                             + ". This attribute is part of the key", 400);
                 }
             }
+
+            // AWS validates index key types against the item the update produces.
+            validateIndexKeyTypes(table, item);
 
             items.put(itemKey, item);
             persistItems(storageKey);
@@ -2569,10 +2573,25 @@ public class DynamoDbService implements ResourceProvider {
     }
 
     private void validateKeyAttributeValue(TableDefinition table, JsonNode attr, String keyName, boolean isKeyArg) {
-        if (attr == null) return;
+        if (attr == null) {
+            return;
+        }
+        if (!attr.isObject()) {
+            // A wire-format AttributeValue is always a JSON object; AWS's protocol
+            // layer rejects anything else before validation runs.
+            throw new AwsException("SerializationException", "Unexpected value type in payload", 400);
+        }
+        if (attr.isEmpty()) {
+            throw new AwsException("ValidationException",
+                    "Supplied AttributeValue is empty, must contain exactly one of the supported datatypes", 400);
+        }
+        if (attr.size() > 1) {
+            throw new AwsException("ValidationException",
+                    "Supplied AttributeValue has more than one datatypes set, "
+                    + "must contain exactly one of the supported datatypes", 400);
+        }
         String expectedType = keyAttributeType(table, keyName);
-        if (expectedType != null && attr.isObject() && attr.size() == 1
-                && !attr.has(expectedType)) {
+        if (expectedType != null && !attr.has(expectedType)) {
             // AWS words the type mismatch differently for a Key argument
             // (Get/Delete/Update) than for a PutItem item body.
             if (isKeyArg) {
@@ -2591,11 +2610,49 @@ public class DynamoDbService implements ResourceProvider {
     }
 
     private String keyAttributeType(TableDefinition table, String keyName) {
-        if (table.getAttributeDefinitions() == null) return null;
+        if (table.getAttributeDefinitions() == null) {
+            return null;
+        }
         return table.getAttributeDefinitions().stream()
                 .filter(def -> keyName.equals(def.getAttributeName()))
                 .map(AttributeDefinition::getAttributeType)
                 .findFirst().orElse(null);
+    }
+
+    // AWS validates GSI/LSI key attribute types on every write that produces the item,
+    // but only when the attribute is present — sparse indexes allow it to be absent.
+    private void validateIndexKeyTypes(TableDefinition table, JsonNode item) {
+        if (table.getGlobalSecondaryIndexes() != null) {
+            for (GlobalSecondaryIndex gsi : table.getGlobalSecondaryIndexes()) {
+                validateIndexKeySchema(table, item, gsi.getIndexName(), gsi.getKeySchema());
+            }
+        }
+        if (table.getLocalSecondaryIndexes() != null) {
+            for (LocalSecondaryIndex lsi : table.getLocalSecondaryIndexes()) {
+                validateIndexKeySchema(table, item, lsi.getIndexName(), lsi.getKeySchema());
+            }
+        }
+    }
+
+    private void validateIndexKeySchema(TableDefinition table, JsonNode item,
+                                        String indexName, List<KeySchemaElement> keySchema) {
+        if (keySchema == null) {
+            return;
+        }
+        for (KeySchemaElement element : keySchema) {
+            String attrName = element.getAttributeName();
+            JsonNode attr = item.get(attrName);
+            if (attr == null || !attr.isObject() || attr.size() != 1) {
+                continue;
+            }
+            String expectedType = keyAttributeType(table, attrName);
+            if (expectedType != null && !attr.has(expectedType)) {
+                throw new AwsException("ValidationException",
+                        "One or more parameter values were invalid: Type mismatch for Index Key " + attrName
+                        + " Expected: " + expectedType + " Actual: " + attr.fieldNames().next()
+                        + " IndexName: " + indexName, 400);
+            }
+        }
     }
 
     private String buildItemKeyFromNode(JsonNode item, String pkName, String skName) {
