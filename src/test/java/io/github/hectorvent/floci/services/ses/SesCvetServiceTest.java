@@ -3,6 +3,9 @@ package io.github.hectorvent.floci.services.ses;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.ses.model.CustomVerificationEmailTemplate;
+import io.github.hectorvent.floci.services.ses.model.Tag;
+
+import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -64,6 +67,29 @@ class SesCvetServiceTest {
 
         service.deleteCustomVerificationEmailTemplate("t1", REGION);
         assertTrue(service.find("t1", REGION).isEmpty());
+    }
+
+    @Test
+    void create_invalidTags_isAtomic_templateNotPersisted() {
+        CustomVerificationEmailTemplate t = template("t1");
+        t.setTags(List.of(new Tag("dup", "1"), new Tag("dup", "2")));
+        assertThrows(AwsException.class,
+                () -> service.createCustomVerificationEmailTemplate(t, REGION));
+        assertTrue(service.find("t1", REGION).isEmpty());
+    }
+
+    @Test
+    void update_preservesTags() {
+        service.createCustomVerificationEmailTemplate(template("t1"), REGION);
+        service.tag("t1", REGION, List.of(new Tag("env", "dev")));
+
+        CustomVerificationEmailTemplate replacement = template("t1");
+        replacement.setTemplateSubject("Verify again");
+        service.updateCustomVerificationEmailTemplate(replacement, REGION);
+
+        CustomVerificationEmailTemplate updated = service.getCustomVerificationEmailTemplate("t1", REGION);
+        assertEquals("Verify again", updated.getTemplateSubject());
+        assertEquals(List.of(new Tag("env", "dev")), updated.getTags());
     }
 
     @Test

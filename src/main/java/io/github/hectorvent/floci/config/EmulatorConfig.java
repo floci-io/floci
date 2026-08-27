@@ -673,6 +673,8 @@ public interface EmulatorConfig {
         GuardDutyServiceConfig guardduty();
         EmrServerlessServiceConfig emrserverless();
         ServiceCatalogServiceConfig servicecatalog();
+        ServiceQuotasServiceConfig servicequotas();
+        RamServiceConfig ram();
         ControlTowerServiceConfig controltower();
         LakeFormationServiceConfig lakeformation();
         EfsServiceConfig efs();
@@ -725,6 +727,16 @@ public interface EmulatorConfig {
     }
 
     interface ServiceCatalogServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface ServiceQuotasServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface RamServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }
