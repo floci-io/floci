@@ -187,7 +187,14 @@ public class MskService implements ResourceProvider {
         merged.setTags(request.getTags());
         if (request.getProvisioned() != null) {
             merged.setKafkaVersion(request.getProvisioned().getKafkaVersion());
-            merged.setNumberOfBrokerNodes(request.getProvisioned().getNumberOfBrokerNodes());
+            // A malformed numberOfBrokerNodes carries no int value to copy (see BrokerCount),
+            // so its "malformed" state has to be propagated explicitly rather than lost when
+            // getNumberOfBrokerNodes() returns null the same way "absent" would.
+            if (request.getProvisioned().isNumberOfBrokerNodesMalformed()) {
+                merged.markNumberOfBrokerNodesMalformed();
+            } else {
+                merged.setNumberOfBrokerNodes(request.getProvisioned().getNumberOfBrokerNodes());
+            }
             merged.setBrokerNodeGroupInfo(request.getProvisioned().getBrokerNodeGroupInfo());
             merged.setEncryptionInfo(request.getProvisioned().getEncryptionInfo());
             merged.setClientAuthentication(request.getProvisioned().getClientAuthentication());
@@ -222,6 +229,13 @@ public class MskService implements ResourceProvider {
         if (clusterName.length() > MAX_CLUSTER_NAME_LENGTH) {
             throw badRequest("clusterName",
                     "clusterName must be between 1 and " + MAX_CLUSTER_NAME_LENGTH + " characters.");
+        }
+
+        // A fractional or otherwise non-integral numberOfBrokerNodes (e.g. 2.7, or a literal
+        // like 1.0000000000000001 that only looks whole once collapsed into a double) is
+        // malformed rather than something to round - see BrokerCountDeserializer/BrokerCount.
+        if (request.isNumberOfBrokerNodesMalformed()) {
+            throw badRequest("numberOfBrokerNodes", "numberOfBrokerNodes must be a whole number.");
         }
 
         Integer brokerNodes = request.getNumberOfBrokerNodes();

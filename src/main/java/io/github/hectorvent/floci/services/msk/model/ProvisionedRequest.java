@@ -1,7 +1,9 @@
 package io.github.hectorvent.floci.services.msk.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 @RegisterForReflection
@@ -11,8 +13,12 @@ public class ProvisionedRequest {
     @JsonProperty("kafkaVersion")
     private String kafkaVersion;
 
+    // See BrokerCountDeserializer: binding straight to Integer would let Jackson (or a later
+    // double comparison) silently narrow a fractional or precision-collapsed value. BrokerCount
+    // carries "malformed" as a value rather than throwing during binding - see that class.
     @JsonProperty("numberOfBrokerNodes")
-    private Integer numberOfBrokerNodes;
+    @JsonDeserialize(using = BrokerCountDeserializer.class)
+    private BrokerCount numberOfBrokerNodes;
 
     @JsonProperty("brokerNodeGroupInfo")
     private BrokerNodeGroupInfo brokerNodeGroupInfo;
@@ -46,8 +52,18 @@ public class ProvisionedRequest {
     public String getKafkaVersion() { return kafkaVersion; }
     public void setKafkaVersion(String kafkaVersion) { this.kafkaVersion = kafkaVersion; }
 
-    public Integer getNumberOfBrokerNodes() { return numberOfBrokerNodes; }
-    public void setNumberOfBrokerNodes(Integer numberOfBrokerNodes) { this.numberOfBrokerNodes = numberOfBrokerNodes; }
+    // See CreateClusterRequest's identical accessors for why these are @JsonIgnore'd.
+    @JsonIgnore
+    public Integer getNumberOfBrokerNodes() { return numberOfBrokerNodes != null ? numberOfBrokerNodes.value() : null; }
+    @JsonIgnore
+    public void setNumberOfBrokerNodes(Integer numberOfBrokerNodes) {
+        this.numberOfBrokerNodes = numberOfBrokerNodes != null ? BrokerCount.of(numberOfBrokerNodes) : null;
+    }
+
+    /** True when the request supplied a numberOfBrokerNodes that isn't an exact whole number. */
+    public boolean isNumberOfBrokerNodesMalformed() {
+        return numberOfBrokerNodes != null && numberOfBrokerNodes.isMalformed();
+    }
 
     public BrokerNodeGroupInfo getBrokerNodeGroupInfo() { return brokerNodeGroupInfo; }
     public void setBrokerNodeGroupInfo(BrokerNodeGroupInfo brokerNodeGroupInfo) { this.brokerNodeGroupInfo = brokerNodeGroupInfo; }

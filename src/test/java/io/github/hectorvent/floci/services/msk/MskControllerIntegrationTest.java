@@ -1048,6 +1048,102 @@ class MskControllerIntegrationTest {
             .body("clusterInfo.numberOfBrokerNodes", equalTo(30));
     }
 
+    /**
+     * A fractional count must not be narrowed into a plausible one: Jackson's default
+     * float-to-int coercion would otherwise turn 2.7 into 2 and report a cluster the caller
+     * never asked for.
+     */
+    @Test
+    void createClusterRejectsAFractionalBrokerCountInsteadOfTruncatingIt() {
+        given()
+            .contentType("application/json")
+            .body("""
+                {"clusterName": "v1-brokers-fractional-test", "kafkaVersion": "3.6.0",
+                 "numberOfBrokerNodes": 2.7}
+                """)
+        .when()
+            .post("/v1/clusters")
+        .then()
+            .statusCode(400)
+            .body("invalidParameter", equalTo("numberOfBrokerNodes"));
+
+        // ...and nothing was created under that name.
+        given()
+        .when()
+            .get("/v1/clusters")
+        .then()
+            .statusCode(200)
+            .body("clusterInfoList.clusterName", not(hasItem("v1-brokers-fractional-test")));
+    }
+
+    /**
+     * A literal like 1.0000000000000001 has no exact double representation - parsing it as a
+     * double collapses it to precisely 1.0, so a d == Math.rint(d) check performed after that
+     * conversion would wrongly accept it as whole. This value must still be rejected: reading
+     * the token as a BigDecimal (see BrokerCountDeserializer) catches the fractional part a
+     * double comparison already lost.
+     */
+    @Test
+    void createClusterRejectsABrokerCountThatOnlyLooksWholeAsADouble() {
+        given()
+            .contentType("application/json")
+            .body("""
+                {"clusterName": "v1-brokers-precision-test", "kafkaVersion": "3.6.0",
+                 "numberOfBrokerNodes": 1.0000000000000001}
+                """)
+        .when()
+            .post("/v1/clusters")
+        .then()
+            .statusCode(400)
+            .body("invalidParameter", equalTo("numberOfBrokerNodes"));
+
+        given()
+        .when()
+            .get("/v1/clusters")
+        .then()
+            .statusCode(200)
+            .body("clusterInfoList.clusterName", not(hasItem("v1-brokers-precision-test")));
+    }
+
+    /** A whole number written with a decimal point (e.g. 3.0) is not fractional and is accepted. */
+    @Test
+    void createClusterAcceptsAWholeNumberBrokerCountWrittenAsADecimal() {
+        String clusterArn = given()
+            .contentType("application/json")
+            .body("""
+                {"clusterName": "v1-brokers-whole-decimal-test", "kafkaVersion": "3.6.0",
+                 "numberOfBrokerNodes": 3.0}
+                """)
+        .when()
+            .post("/v1/clusters")
+        .then()
+            .statusCode(200)
+            .extract().path("clusterArn");
+
+        given()
+        .when()
+            .get("/v1/clusters/{clusterArn}", clusterArn)
+        .then()
+            .statusCode(200)
+            .body("clusterInfo.numberOfBrokerNodes", equalTo(3));
+    }
+
+    /** The V2 path nests the count under provisioned and must reject a fractional value too. */
+    @Test
+    void createClusterV2RejectsAFractionalBrokerCount() {
+        given()
+            .contentType("application/json")
+            .body("""
+                {"clusterName": "v2-brokers-fractional-test",
+                 "provisioned": {"kafkaVersion": "3.6.0", "numberOfBrokerNodes": 2.7}}
+                """)
+        .when()
+            .post("/api/v2/clusters")
+        .then()
+            .statusCode(400)
+            .body("invalidParameter", equalTo("numberOfBrokerNodes"));
+    }
+
     // ── Serverless clusters ──────────────────────────────────────────────────────────────
 
     @Test
