@@ -165,4 +165,23 @@ class InstanceProfileTagsIntegrationTest {
         .then().statusCode(404)
             .body(containsString("NoSuchEntity"));
     }
+
+    /**
+     * {@code instanceProfileNameType} is {@code [\w+=,.@-]{1,128}}, so a name outside that shape
+     * is a request-shape failure, checked before the profile is resolved — otherwise a malformed
+     * name would surface as NoSuchEntity instead of the ValidationError AWS returns.
+     */
+    @Test
+    void tagInstanceProfileMalformedNameReturnsValidationError() {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "TagInstanceProfile")
+            .formParam("InstanceProfileName", "not a valid name!")
+            .formParam("Tags.member.1.Key", "team")
+            .formParam("Tags.member.1.Value", "platform")
+            .header("Authorization", auth(ACCOUNT, "iam"))
+        .when().post("/")
+        .then().statusCode(400)
+            .body(containsString("ValidationError"));
+    }
 }

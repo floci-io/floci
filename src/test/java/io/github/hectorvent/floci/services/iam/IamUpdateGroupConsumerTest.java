@@ -84,4 +84,22 @@ class IamUpdateGroupConsumerTest {
         .then()
             .statusCode(404);
     }
+
+    @Test
+    void updateGroup_malformedGroupName_returnsValidationError() {
+        call("UpdateGroup", "GroupName", "not a valid name!", "NewPath", "/x/")
+        .then()
+            .statusCode(400)
+            .body(containsString("ValidationError"));
+    }
+
+    @Test
+    void updateGroup_malformedNewPath_returnsValidationError() {
+        createGroup("ab-update-group-bad-path");
+
+        call("UpdateGroup", "GroupName", "ab-update-group-bad-path", "NewPath", "no-leading-slash")
+        .then()
+            .statusCode(400)
+            .body(containsString("ValidationError"));
+    }
 }

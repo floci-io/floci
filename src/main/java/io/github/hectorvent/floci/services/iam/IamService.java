@@ -93,6 +93,11 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     /** CustomSuffix as AWS constrains it: 1-64 characters of {@code [\w+=,.@-]}. */
     private static final Pattern CUSTOM_SUFFIX_PATTERN = Pattern.compile("[\\w+=,.@-]{1,64}");
     private static final int ROLE_NAME_MAX_LENGTH = 64;
+    /** groupNameType / instanceProfileNameType: 1-128 characters of {@code [\w+=,.@-]}. */
+    private static final Pattern IAM_RESOURCE_NAME_PATTERN = Pattern.compile("[\\w+=,.@-]{1,128}");
+    /** pathType: a bare slash, or a slash-delimited run of {@code !}-{@code ~}. */
+    private static final Pattern IAM_PATH_PATTERN = Pattern.compile("(/)|(/[\\x21-\\x7E]+/)");
+    private static final int IAM_PATH_MAX_LENGTH = 512;
     /** {@code tagListType} / {@code tagKeyListType} are both {@code max: 50}. */
     private static final int MAX_TAGS_PER_INSTANCE_PROFILE = 50;
     private static final String ROOT_FEATURES_KEY = "org-root-features";
@@ -449,6 +454,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public void updateGroup(String groupName, String newGroupName, String newPath) {
+        validateIamResourceName(groupName, "GroupName");
+        validateIamPath(newPath, "NewPath");
         IamGroup group = getGroup(groupName);
         if (newGroupName != null && !newGroupName.equals(groupName)) {
             if (groups.get(newGroupName).isPresent()) {
@@ -1570,6 +1577,23 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         }
     }
 
+    private void validateIamResourceName(String value, String paramName) {
+        if (value == null || !IAM_RESOURCE_NAME_PATTERN.matcher(value).matches()) {
+            throw new AwsException("ValidationError",
+                    paramName + " must be 1-128 characters matching [\\w+=,.@-].", 400);
+        }
+    }
+
+    private void validateIamPath(String value, String paramName) {
+        if (value == null) return;
+        if (value.length() > IAM_PATH_MAX_LENGTH || !IAM_PATH_PATTERN.matcher(value).matches()) {
+            throw new AwsException("ValidationError",
+                    paramName + " must be at most " + IAM_PATH_MAX_LENGTH
+                            + " characters, either a bare forward slash or a string that begins and ends "
+                            + "with a forward slash.", 400);
+        }
+    }
+
     // OIDC Identity Providers
     // =========================================================================
 
@@ -2262,6 +2286,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
 
     public void tagInstanceProfile(String instanceProfileName, Map<String, String> newTags) {
         // Request shape before resource lookup, matching untagInstanceProfile and AWS's order.
+        validateIamResourceName(instanceProfileName, "InstanceProfileName");
         if (newTags != null && newTags.size() > MAX_TAGS_PER_INSTANCE_PROFILE) {
             throw new AwsException("ValidationError",
                     "Value at 'tags' failed to satisfy constraint: Member must have length "
