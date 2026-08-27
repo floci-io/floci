@@ -321,6 +321,42 @@ class SsmIntegrationTest {
             .body("__type", equalTo("ServiceSettingNotFound"));
     }
 
+    // ── SettingValue (botocore: ServiceSettingValue, required, min 1 / max 4096) ──
+
+    @Test
+    void updateServiceSetting_missingSettingValueReturnsValidationException() {
+        given()
+            .header("X-Amz-Target", "AmazonSSM.UpdateServiceSetting")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                { "SettingId": "/ssm/documents/console/public-sharing-permission" }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
+    }
+
+    @Test
+    void updateServiceSetting_settingValueOverMaxLengthReturnsValidationException() {
+        String tooLong = "x".repeat(4097);
+        given()
+            .header("X-Amz-Target", "AmazonSSM.UpdateServiceSetting")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                {
+                    "SettingId": "/ssm/documents/console/public-sharing-permission",
+                    "SettingValue": "%s"
+                }
+                """.formatted(tooLong))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
+    }
+
     @Test
     void serviceSettingOperations_missingSettingIdReturnsValidationException() {
         for (String target : new String[]{"GetServiceSetting", "UpdateServiceSetting", "ResetServiceSetting"}) {
@@ -1136,6 +1172,43 @@ class SsmIntegrationTest {
         .then()
             .statusCode(400)
             .body("__type", equalTo("ValidationException"));
+    }
+
+    // ── ModifyDocumentPermission: at least one of AccountIdsToAdd/AccountIdsToRemove
+    // required (botocore: documented on both members, not a JSON `required` or shape
+    // constraint — "You must specify a value for this parameter or the
+    // AccountIdsToRemove/AccountIdsToAdd parameter.") ──
+
+    @Test
+    void modifyDocumentPermission_neitherAccountListSpecifiedReturnsValidationException() {
+        createSharableDocument("No-Account-Lists-Document");
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.ModifyDocumentPermission")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                {
+                    "Name": "No-Account-Lists-Document",
+                    "PermissionType": "Share"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.DescribeDocumentPermission")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                { "Name": "No-Account-Lists-Document", "PermissionType": "Share" }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("AccountIds", empty());
     }
 
     private static void createSharableDocument(String name) {
