@@ -405,16 +405,35 @@ public class SsmJsonHandler {
 
     private Response handleCreateDocument(JsonNode request, String region) {
         String name = requireDocumentName(request);
-        String content = request.path("Content").asText();
+        String content = requireDocumentContent(request);
         String documentType = requireDocumentType(request);
 
         SsmDocument document = ssmService.createDocument(name, content, documentType, region);
         return Response.ok(documentDescriptionResponse(document)).build();
     }
 
+    /**
+     * Reads the required {@code Content} member of CreateDocument/UpdateDocument. Botocore
+     * models {@code DocumentContent} as a string with {@code min: 1}, and both operations
+     * require it. {@code JsonNode.path(...).asText()} silently yields {@code ""} for either
+     * an absent member or a non-textual one (e.g. a JSON object sent instead of a JSON- or
+     * YAML-encoded string), so without this guard a malformed request stores or overwrites a
+     * document's content with an empty string instead of failing.
+     */
+    private String requireDocumentContent(JsonNode request) {
+        JsonNode contentNode = request.path("Content");
+        if (!contentNode.isTextual() || contentNode.asText().isBlank()) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value null at 'content' failed to satisfy "
+                            + "constraint: Member must not be null",
+                    400);
+        }
+        return contentNode.asText();
+    }
+
     private Response handleUpdateDocument(JsonNode request, String region) {
         String name = requireDocumentName(request);
-        String content = request.path("Content").asText();
+        String content = requireDocumentContent(request);
 
         SsmDocument document = ssmService.updateDocument(name, content, region);
         return Response.ok(documentDescriptionResponse(document)).build();

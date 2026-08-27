@@ -661,6 +661,80 @@ class SsmIntegrationTest {
         }
     }
 
+    @Test
+    void createDocument_missingContentReturnsValidationException() {
+        given()
+            .header("X-Amz-Target", "AmazonSSM.CreateDocument")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                { "Name": "Floci-Missing-Content-Doc" }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
+    }
+
+    @Test
+    void createDocument_nonTextContentReturnsValidationException() {
+        given()
+            .header("X-Amz-Target", "AmazonSSM.CreateDocument")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                {
+                    "Name": "Floci-Object-Content-Doc",
+                    "Content": {"schemaVersion": "2.2", "mainSteps": []}
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
+    }
+
+    @Test
+    void updateDocument_missingContentReturnsValidationExceptionWithoutErasingExistingContent() {
+        given()
+            .header("X-Amz-Target", "AmazonSSM.CreateDocument")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                {
+                    "Name": "Floci-Update-Missing-Content-Doc",
+                    "Content": "{\\"schemaVersion\\":\\"1.0\\"}"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.UpdateDocument")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                { "Name": "Floci-Update-Missing-Content-Doc" }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.GetDocument")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                { "Name": "Floci-Update-Missing-Content-Doc" }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Content", containsString("schemaVersion"));
+    }
+
     // ── PermissionType (botocore: required, enum with the single value "Share") ──
 
     @Test
