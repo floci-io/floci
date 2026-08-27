@@ -309,10 +309,10 @@ class SesTagsV2IntegrationTest {
         .then()
             .statusCode(400)
             .header("X-Amzn-Errortype", containsString("ValidationException"))
-            .body("__type", equalTo("ValidationException"))
-            // Raw-body match: GPath's nullValue() also passes when the member is absent, so it
-            // can't pin that the body carries an explicit "message":null.
-            .body(containsString("\"message\":null"));
+            // Exact raw-body match: GPath member assertions can't distinguish an absent member
+            // from an explicit JSON null, and a substring can't reject extra members — this
+            // pins the documented shape wholesale.
+            .body(equalTo("{\"__type\":\"ValidationException\",\"message\":null}"));
     }
 
     @Test
