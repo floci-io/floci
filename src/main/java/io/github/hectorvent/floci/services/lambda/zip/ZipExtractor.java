@@ -141,13 +141,33 @@ public class ZipExtractor {
             moveIntoPlace(staging, absTarget);
         } catch (IOException e) {
             if (previous != null) {
-                // Put the working package back before giving up.
-                moveIntoPlace(previous, absTarget);
+                try {
+                    // Put the working package back before giving up.
+                    moveIntoPlace(previous, absTarget);
+                } catch (IOException restoreFailed) {
+                    // Both renames failed, so the function has no code at the canonical path and
+                    // the working package is sitting under a generated name nobody will look for.
+                    // Keep the original failure as the one thrown, attach this one, and say
+                    // exactly where the package went so it can be put back by hand.
+                    e.addSuppressed(restoreFailed);
+                    LOG.errorv("Could not restore the previous deployment at {0}. The working "
+                            + "package is stranded at {1}; move it back to recover.",
+                            absTarget, previous);
+                }
             }
             throw e;
         }
         if (previous != null) {
-            deleteRecursively(previous);
+            // Best effort from here. The new package is already live, so failing to drop the
+            // superseded tree must not be reported as a failed deployment: the caller would skip
+            // its metadata and warm pool updates while the new code is already serving. Leaving
+            // the tree behind costs disk and is recoverable; lying about the outcome is not.
+            try {
+                deleteRecursively(previous);
+            } catch (IOException e) {
+                LOG.warnv("Installed {0} but could not remove the superseded package at {1}: {2}",
+                        absTarget, previous, e.getMessage());
+            }
         }
     }
 

@@ -8,6 +8,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.zip.CRC32;
@@ -431,6 +432,40 @@ class ZipExtractorTest {
         try (var entries = Files.list(codeStore)) {
             assertEquals(List.of("fn"), entries.map(p -> p.getFileName().toString()).sorted().toList(),
                     "neither the staging tree nor the superseded package may survive");
+        }
+    }
+
+    @Test
+    void aFailureToDropTheSupersededPackageDoesNotFailTheDeployment(@TempDir Path codeStore)
+            throws IOException {
+        // Once the new tree is installed the deployment has happened. Reporting failure because
+        // the superseded copy could not be deleted would make the caller skip its metadata and
+        // warm pool updates while the new code is already serving, which is worse than leaving a
+        // directory behind. Deletion is blocked by removing write permission on a subdirectory,
+        // so its contents cannot be unlinked.
+        Path target = Files.createDirectories(codeStore.resolve("fn"));
+        Files.writeString(target.resolve("index.js"), "v1");
+        Path locked = Files.createDirectories(target.resolve("locked"));
+        Files.writeString(locked.resolve("held.txt"), "cannot be removed");
+        Files.setPosixFilePermissions(locked, PosixFilePermissions.fromString("r-xr-xr-x"));
+
+        Path staging = Files.createDirectories(codeStore.resolve("fn.floci-staging-x"));
+        Files.writeString(staging.resolve("index.js"), "v2");
+
+        try {
+            ZipExtractor.install(staging, target);
+
+            assertEquals("v2", Files.readString(target.resolve("index.js")),
+                    "the new package must be installed even though the old one could not be removed");
+        } finally {
+            try (var stream = Files.list(codeStore)) {
+                for (Path p : stream.toList()) {
+                    Path stuck = p.resolve("locked");
+                    if (Files.isDirectory(stuck)) {
+                        Files.setPosixFilePermissions(stuck, PosixFilePermissions.fromString("rwxr-xr-x"));
+                    }
+                }
+            }
         }
     }
 }
