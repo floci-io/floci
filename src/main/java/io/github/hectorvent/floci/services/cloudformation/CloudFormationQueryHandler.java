@@ -141,7 +141,8 @@ public class CloudFormationQueryHandler {
         String stackName = params.getFirst("StackName");
         String templateBody = params.getFirst("TemplateBody");
         String templateUrl = params.getFirst("TemplateURL");
-        Map<String, String> parameters = extractParameters(params);
+        Map<String, String> parameters =
+                extractParameters(params, cfnService.currentParameters(stackName, region));
         List<String> capabilities = extractList(params, "Capabilities.member.");
 
         ChangeSet cs = cfnService.createChangeSet(stackName, "update-" + UUID.randomUUID().toString().substring(0, 8),
@@ -206,7 +207,8 @@ public class CloudFormationQueryHandler {
         String changeSetType = params.getFirst("ChangeSetType");
         String templateBody = params.getFirst("TemplateBody");
         String templateUrl = params.getFirst("TemplateURL");
-        Map<String, String> parameters = extractParameters(params);
+        Map<String, String> parameters =
+                extractParameters(params, cfnService.currentParameters(stackName, region));
         List<String> capabilities = extractList(params, "Capabilities.member.");
         Map<String, String> tags = extractTags(params);
 
@@ -647,13 +649,27 @@ public class CloudFormationQueryHandler {
     }
 
     private Map<String, String> extractParameters(MultivaluedMap<String, String> params) {
+        return extractParameters(params, Map.of());
+    }
+
+    /**
+     * @param previousParameters the stack's currently deployed parameters, consulted when a member
+     *                           sets {@code UsePreviousValue=true} instead of a {@code ParameterValue}
+     */
+    private Map<String, String> extractParameters(
+            MultivaluedMap<String, String> params, Map<String, String> previousParameters) {
         Map<String, String> result = new HashMap<>();
         int i = 1;
         while (true) {
             String key = params.getFirst("Parameters.member." + i + ".ParameterKey");
-            String value = params.getFirst("Parameters.member." + i + ".ParameterValue");
             if (key == null) {
                 break;
+            }
+            String value;
+            if (Boolean.parseBoolean(params.getFirst("Parameters.member." + i + ".UsePreviousValue"))) {
+                value = previousParameters.get(key);
+            } else {
+                value = params.getFirst("Parameters.member." + i + ".ParameterValue");
             }
             result.put(key, value != null ? value : "");
             i++;

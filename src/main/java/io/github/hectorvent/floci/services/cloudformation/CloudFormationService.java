@@ -154,6 +154,16 @@ public class CloudFormationService implements ResourceProvider {
                 .toList();
     }
 
+    /**
+     * The stack's current parameter values, or an empty map if it does not exist (yet). Used to
+     * resolve {@code UsePreviousValue} on an update before the stack lookup that
+     * {@code createChangeSet}/{@code executeChangeSet} would otherwise perform.
+     */
+    public Map<String, String> currentParameters(String stackName, String region) {
+        Stack stack = resolveStack(stackName, region);
+        return stack != null ? stack.getParameters() : Map.of();
+    }
+
     // ── CreateChangeSet ───────────────────────────────────────────────────────
 
     public ChangeSet createChangeSet(String stackName, String changeSetName, String changeSetType,

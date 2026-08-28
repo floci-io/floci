@@ -104,6 +104,66 @@ class CloudFormationChangeSetDiffIntegrationTest {
     }
 
     @Test
+    void usePreviousValueParameter_isNotReportedAsAChange() {
+        String stackName = "cs-diff-use-previous-value-stack";
+        stacksToDelete.add(stackName);
+
+        String template = """
+            {
+              "Parameters": {
+                "Suffix": {"Type": "String"}
+              },
+              "Resources": {
+                "Q": {
+                  "Type": "AWS::SQS::Queue",
+                  "Properties": {
+                    "QueueName": {"Fn::Sub": "cs-diff-upv-${Suffix}"}
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+            .formParam("Parameters.member.1.ParameterKey", "Suffix")
+            .formParam("Parameters.member.1.ParameterValue", "one")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // Same template, and the parameter says UsePreviousValue instead of resubmitting its value.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateChangeSet")
+            .formParam("StackName", stackName)
+            .formParam("ChangeSetName", "use-previous-value-cs")
+            .formParam("ChangeSetType", "UPDATE")
+            .formParam("TemplateBody", template)
+            .formParam("Parameters.member.1.ParameterKey", "Suffix")
+            .formParam("Parameters.member.1.UsePreviousValue", "true")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeChangeSet")
+            .formParam("StackName", stackName)
+            .formParam("ChangeSetName", "use-previous-value-cs")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(not(containsString("<Action>Modify</Action>")));
+    }
+
+    @Test
     void samStackNoOpUpdate_doesNotReportSpuriousChanges() {
         String stackName = "cs-diff-sam-noop-stack";
         stacksToDelete.add(stackName);
