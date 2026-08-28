@@ -230,7 +230,7 @@ public class Route53Controller {
     @Path("/hostedzone/{Id}/disassociatevpc")
     public Response disassociateVpcFromHostedZone(@PathParam("Id") String id, String body) {
         try {
-            VpcAssociation vpc = requireVpcAssociation(body);
+            VpcAssociation vpc = requireVpcAssociationWithoutRegionCheck(body);
             String comment = XmlParser.extractFirst(body, "Comment", null);
             ChangeInfo change = service.disassociateVpcFromHostedZone(id, vpc, comment);
             String xml = new XmlBuilder()
@@ -300,7 +300,8 @@ public class Route53Controller {
             if (vpcRegion == null || vpcRegion.isEmpty()) {
                 throw new AwsException("InvalidInput", "VPCRegion is required.", 400);
             }
-            requireModelledVpcRegion(vpcRegion);
+            // Deliberately not enum-gated: an association persisted under a region since
+            // retired from VPC_REGIONS (or from before this check existed) must remain listable.
 
             if (maxItems <= 0) {
                 throw new AwsException("InvalidInput", "MaxItems must be a positive integer.", 400);
@@ -832,11 +833,22 @@ public class Route53Controller {
      * required member — unlike CreateHostedZone, where its absence just means a public zone.
      */
     private VpcAssociation requireVpcAssociation(String body) {
+        VpcAssociation vpc = requireVpcAssociationWithoutRegionCheck(body);
+        requireModelledVpcRegion(vpc.getVpcRegion());
+        return vpc;
+    }
+
+    /**
+     * Same as {@link #requireVpcAssociation}, but skips the enum check: used by disassociate,
+     * where the target may be a legacy-persisted association whose region has since left
+     * VPC_REGIONS (or predates the enum check entirely). Rejecting the lookup here would strand
+     * that association — impossible to remove without deleting the whole hosted zone.
+     */
+    private VpcAssociation requireVpcAssociationWithoutRegionCheck(String body) {
         VpcAssociation vpc = parseVpcAssociation(body);
         if (vpc == null) {
             throw new AwsException("InvalidInput", "VPC is required.", 400);
         }
-        requireModelledVpcRegion(vpc.getVpcRegion());
         return vpc;
     }
 

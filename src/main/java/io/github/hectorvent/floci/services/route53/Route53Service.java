@@ -209,7 +209,13 @@ public class Route53Service {
                 matches.add(zone);
             }
         }
-        matches.sort((a, b) -> a.getName().compareTo(b.getName()));
+        // Tie-break by id: name alone leaves equal-named zones ordered by the backing store's
+        // own iteration, which can differ between the page-1 and page-2 scans and desync the
+        // id-based NextToken continuation point (skipping or repeating an entry).
+        matches.sort((a, b) -> {
+            int cmp = a.getName().compareTo(b.getName());
+            return cmp != 0 ? cmp : a.getId().compareTo(b.getId());
+        });
         return matches;
     }
 
