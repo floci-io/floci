@@ -14,6 +14,7 @@ import java.util.HashMap;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -236,15 +237,62 @@ class CodePipelineCfnProvisionerTest {
         when(service.handle(eq("UpdatePipeline"), any(), any(), any()))
                 .thenReturn(mapper.createObjectNode().set("pipeline",
                         mapper.createObjectNode().put("version", 2)));
-        // This stack never disabled "Gate" (no tracking attribute recorded) -- some outside
-        // actor (a manual gate, a human) disabled it, and an unrelated update must not touch it.
+        // This stack has run the tracking code since it was created and never disabled "Gate"
+        // itself (empty, non-null attribute) -- some outside actor (a manual gate, a human)
+        // disabled it, and an unrelated update must not touch it.
+        ObjectNode props = pipelineProps("gated");
+        StackResource r = resource("AWS::CodePipeline::Pipeline");
+        r.setPhysicalId("gated");
+        r.getAttributes().put("__FlociCodePipelineDisabledStages", "");
+
+        provisioner.provision(r, props, ctx());
+
+        verify(service, never()).handle(eq("EnableStageTransition"), any(), any(), any());
+    }
+
+    @Test
+    void legacyResourcePredatingTrackingAttributeReconcilesAllDeclaredStages() {
+        when(service.handle(eq("UpdatePipeline"), any(), any(), any()))
+                .thenReturn(mapper.createObjectNode().set("pipeline",
+                        mapper.createObjectNode().put("version", 2)));
+        // A resource stored by a provisioner version predating DISABLED_STAGES_ATTR has no
+        // tracking attribute at all -- the very first post-upgrade update must still reconcile
+        // (fall back to every declared stage) instead of leaving a removed entry stuck disabled.
         ObjectNode props = pipelineProps("gated");
         StackResource r = resource("AWS::CodePipeline::Pipeline");
         r.setPhysicalId("gated");
 
         provisioner.provision(r, props, ctx());
 
-        verify(service, never()).handle(eq("EnableStageTransition"), any(), any(), any());
+        ArgumentCaptor<JsonNode> request = ArgumentCaptor.forClass(JsonNode.class);
+        verify(service).handle(eq("EnableStageTransition"), request.capture(), eq("us-east-1"), eq("000000000000"));
+        assertEquals("Gate", request.getValue().path("stageName").asText());
+    }
+
+    @Test
+    void failedTransitionReconciliationDeletesTheNewlyCreatedReplacementPipeline() {
+        when(service.handle(eq("CreatePipeline"), any(), any(), any()))
+                .thenReturn(mapper.createObjectNode().set("pipeline",
+                        mapper.createObjectNode().put("version", 1)));
+        when(service.handle(eq("DisableStageTransition"), any(), any(), any()))
+                .thenThrow(new RuntimeException("boom"));
+        StackResource r = resource("AWS::CodePipeline::Pipeline");
+        r.setPhysicalId("old-name");
+        ObjectNode props = pipelineProps("new-name");
+        props.putArray("DisableInboundStageTransitions").addObject()
+                .put("StageName", "Gate").put("Reason", "hold");
+
+        RuntimeException thrown = org.junit.jupiter.api.Assertions.assertThrows(RuntimeException.class,
+                () -> provisioner.provision(r, props, ctx()));
+        assertEquals("boom", thrown.getMessage());
+
+        ArgumentCaptor<JsonNode> deleteRequest = ArgumentCaptor.forClass(JsonNode.class);
+        verify(service).handle(eq("DeletePipeline"), deleteRequest.capture(), any(), any());
+        assertEquals("new-name", deleteRequest.getValue().path("name").asText());
+        // The old pipeline must survive an aborted replacement -- it's still the resource
+        // CloudFormation will keep tracking after reverting this failed update.
+        verify(service, never()).handle(eq("DeletePipeline"),
+                argThat(n -> "old-name".equals(n.path("name").asText())), any(), any());
     }
 
     @Test

@@ -124,14 +124,31 @@ public class CodePipelineCfnProvisioner implements CfnResourceProvisioner {
                 desiredDisabledStages.add(transition.path("stageName").asText());
             }
         }
-        // DisableInboundStageTransitions is declarative, but only for the stages CloudFormation
-        // itself disabled: a stage disabled externally (e.g. a manual gate) and never listed here
-        // must be left alone. Re-enable only stages this resource previously disabled and has now
-        // dropped from the list, tracked via DISABLED_STAGES_ATTR across deployments.
-        if (!create) {
-            String previouslyManaged = r.getAttributes().get(DISABLED_STAGES_ATTR);
-            if (previouslyManaged != null && !previouslyManaged.isBlank()) {
-                for (String stageName : previouslyManaged.split(",")) {
+        try {
+            // DisableInboundStageTransitions is declarative, but only for the stages CloudFormation
+            // itself disabled: a stage disabled externally (e.g. a manual gate) and never listed here
+            // must be left alone. Re-enable only stages this resource previously disabled and has now
+            // dropped from the list, tracked via DISABLED_STAGES_ATTR across deployments.
+            if (!create) {
+                String previouslyManaged = r.getAttributes().get(DISABLED_STAGES_ATTR);
+                Iterable<String> candidateStages;
+                if (previouslyManaged != null) {
+                    candidateStages = previouslyManaged.isBlank()
+                            ? java.util.List.of() : java.util.Arrays.asList(previouslyManaged.split(","));
+                } else {
+                    // A resource stored before DISABLED_STAGES_ATTR existed has no record of what it
+                    // previously disabled. Fall back to reconciling every declared stage rather than
+                    // skipping reconciliation outright, which would leave a removed entry disabled
+                    // forever after this one legacy update.
+                    java.util.List<String> declaredStages = new java.util.ArrayList<>();
+                    if (declaration.path("stages").isArray()) {
+                        for (JsonNode stage : declaration.path("stages")) {
+                            declaredStages.add(stage.path("name").asText());
+                        }
+                    }
+                    candidateStages = declaredStages;
+                }
+                for (String stageName : candidateStages) {
                     if (!desiredDisabledStages.contains(stageName)) {
                         codePipelineService.handle("EnableStageTransition", mapper.createObjectNode()
                                         .put("pipelineName", name)
@@ -141,21 +158,35 @@ public class CodePipelineCfnProvisioner implements CfnResourceProvisioner {
                     }
                 }
             }
-        }
-        for (String stageName : desiredDisabledStages) {
-            JsonNode transition = null;
-            for (JsonNode candidate : transitions) {
-                if (stageName.equals(candidate.path("stageName").asText())) {
-                    transition = candidate;
-                    break;
+            for (String stageName : desiredDisabledStages) {
+                JsonNode transition = null;
+                for (JsonNode candidate : transitions) {
+                    if (stageName.equals(candidate.path("stageName").asText())) {
+                        transition = candidate;
+                        break;
+                    }
+                }
+                codePipelineService.handle("DisableStageTransition", mapper.createObjectNode()
+                                .put("pipelineName", name)
+                                .put("stageName", stageName)
+                                .put("transitionType", "Inbound")
+                                .put("reason", transition.path("reason").asText("Disabled by CloudFormation")),
+                        ctx.region(), ctx.accountId());
+            }
+        } catch (RuntimeException e) {
+            if (create) {
+                // The pipeline was just created (fresh, or as a rename's replacement) and stage
+                // reconciliation then failed. CloudFormation reverts this resource to its previous
+                // physicalId on a failed update, so the half-provisioned pipeline must be torn down
+                // now, or a corrected retry hits PipelineNameInUseException on the same name.
+                try {
+                    codePipelineService.handle("DeletePipeline",
+                            mapper.createObjectNode().put("name", name), ctx.region(), ctx.accountId());
+                } catch (RuntimeException cleanupFailure) {
+                    e.addSuppressed(cleanupFailure);
                 }
             }
-            codePipelineService.handle("DisableStageTransition", mapper.createObjectNode()
-                            .put("pipelineName", name)
-                            .put("stageName", stageName)
-                            .put("transitionType", "Inbound")
-                            .put("reason", transition.path("reason").asText("Disabled by CloudFormation")),
-                    ctx.region(), ctx.accountId());
+            throw e;
         }
         r.getAttributes().put(DISABLED_STAGES_ATTR, String.join(",", desiredDisabledStages));
 
