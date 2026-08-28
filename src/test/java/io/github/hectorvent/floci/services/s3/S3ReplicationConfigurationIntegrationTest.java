@@ -178,7 +178,7 @@ class S3ReplicationConfigurationIntegrationTest {
      * later GetBucketReplication with a document AWS would never have accepted.
      */
     @Test
-    @Order(7)
+    @Order(8)
     void putReplicationRejectsARuleStatusOutsideTheEnum() {
         given()
             .body("""
@@ -207,7 +207,7 @@ class S3ReplicationConfigurationIntegrationTest {
     }
 
     @Test
-    @Order(7)
+    @Order(9)
     void putReplicationRejectsARuleWithNoStatus() {
         given()
             .body("""
@@ -234,8 +234,47 @@ class S3ReplicationConfigurationIntegrationTest {
             .body(not(containsString("no-status")));
     }
 
+    /**
+     * Each {@code Rule} requires its own {@code Destination/Bucket}; a document-wide check that
+     * only looks for one {@code Bucket} anywhere in the XML is satisfied when just one of several
+     * rules has a destination, so a rule missing one round-trips as a configuration AWS would
+     * have rejected as {@code MalformedXML}.
+     */
     @Test
-    @Order(8)
+    @Order(10)
+    void putReplicationRejectsARuleWithoutItsOwnDestinationBucket() {
+        given()
+            .body("""
+                    <ReplicationConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+                        <Role>arn:aws:iam::000000000000:role/replication-role</Role>
+                        <Rule>
+                            <ID>has-destination</ID>
+                            <Status>Enabled</Status>
+                            <Destination>
+                                <Bucket>arn:aws:s3:::replication-config-int-test-target</Bucket>
+                            </Destination>
+                        </Rule>
+                        <Rule>
+                            <ID>missing-destination</ID>
+                            <Status>Enabled</Status>
+                        </Rule>
+                    </ReplicationConfiguration>
+                    """)
+        .when()
+            .put("/" + BUCKET + "?replication")
+        .then()
+            .statusCode(400)
+            .body(containsString("MalformedXML"));
+        given()
+        .when()
+            .get("/" + BUCKET + "?replication")
+        .then()
+            .statusCode(200)
+            .body(not(containsString("missing-destination")));
+    }
+
+    @Test
+    @Order(11)
     void putReplicationOnMissingBucketReturns404() {
         given()
             .body(REPLICATION_XML)
@@ -247,7 +286,7 @@ class S3ReplicationConfigurationIntegrationTest {
     }
 
     @Test
-    @Order(9)
+    @Order(12)
     void getReplicationOnMissingBucketReturns404() {
         given()
         .when()
@@ -264,7 +303,7 @@ class S3ReplicationConfigurationIntegrationTest {
      * /{bucket}?replication} would have fallen through to {@code DeleteBucket}.
      */
     @Test
-    @Order(10)
+    @Order(13)
     void deleteReplicationClearsTheStoredConfiguration() {
         given()
         .when()
@@ -286,7 +325,7 @@ class S3ReplicationConfigurationIntegrationTest {
 
     /** Matching real S3, deleting an already-absent configuration still answers 204. */
     @Test
-    @Order(11)
+    @Order(14)
     void deleteReplicationWithoutConfigurationStillReturns204() {
         given()
         .when()
@@ -296,7 +335,7 @@ class S3ReplicationConfigurationIntegrationTest {
     }
 
     @Test
-    @Order(12)
+    @Order(15)
     void deleteReplicationOnMissingBucketReturns404() {
         given()
         .when()
@@ -314,7 +353,7 @@ class S3ReplicationConfigurationIntegrationTest {
      * the two.
      */
     @Test
-    @Order(13)
+    @Order(16)
     void accelerateAndReplicationPrecedenceFollowsEachMethodsDispatchOrder() {
         String bucket = "replication-precedence-test";
         given()

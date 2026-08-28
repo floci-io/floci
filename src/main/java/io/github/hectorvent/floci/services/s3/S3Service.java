@@ -2542,11 +2542,17 @@ public class S3Service implements Resettable, ResourceProvider {
                         400);
             }
             String role = XmlParser.extractFirst(replicationXml, "Role", null);
-            String destinationBucket = XmlParser.extractFirst(replicationXml, "Bucket", null);
             List<Map<String, List<String>>> rules = XmlParser.extractGroupsMulti(replicationXml, "Rule");
+            // Destination is nested inside each Rule, so its Bucket child is not a leaf of Rule
+            // and extractGroupsMulti("Rule") never sees it. Destination elements appear in the
+            // same document order as their owning Rule and nowhere else, so pairing them
+            // position-for-position with the Rule list validates each rule has its own
+            // Destination/Bucket instead of one Bucket anywhere in the document satisfying every
+            // rule.
+            List<Map<String, List<String>>> destinations = XmlParser.extractGroupsMulti(replicationXml, "Destination");
             if (role == null || role.isBlank()
-                    || destinationBucket == null || destinationBucket.isBlank()
-                    || rules.isEmpty()) {
+                    || rules.isEmpty()
+                    || destinations.size() != rules.size()) {
                 throw new AwsException("MalformedXML",
                         "The XML you provided was not well-formed or did not validate against our published schema.",
                         400);
@@ -2557,6 +2563,15 @@ public class S3Service implements Resettable, ResourceProvider {
             for (Map<String, List<String>> rule : rules) {
                 List<String> statuses = rule.getOrDefault("Status", List.of());
                 if (statuses.size() != 1 || !REPLICATION_RULE_STATUSES.contains(statuses.get(0))) {
+                    throw new AwsException("MalformedXML",
+                            "The XML you provided was not well-formed or did not validate against "
+                                    + "our published schema.", 400);
+                }
+            }
+            // ReplicationRuleAndOperator/Destination.Bucket is Required: Yes.
+            for (Map<String, List<String>> destination : destinations) {
+                List<String> buckets = destination.getOrDefault("Bucket", List.of());
+                if (buckets.size() != 1 || buckets.get(0).isBlank()) {
                     throw new AwsException("MalformedXML",
                             "The XML you provided was not well-formed or did not validate against "
                                     + "our published schema.", 400);
