@@ -87,13 +87,14 @@ final class InlineZipPackager {
                     'Data': responseData,
                 })
                 print("Response body:", response_body)
+                body_bytes = response_body.encode('utf-8')
                 parsed = urllib.parse.urlparse(response_url)
                 conn_class = http.client.HTTPSConnection if parsed.scheme == 'https' \\
                     else http.client.HTTPConnection
                 conn = conn_class(parsed.hostname, parsed.port)
                 path = parsed.path + ('?' + parsed.query if parsed.query else '')
-                conn.request('PUT', path, body=response_body,
-                             headers={'content-type': '', 'content-length': str(len(response_body))})
+                conn.request('PUT', path, body=body_bytes,
+                             headers={'content-type': '', 'content-length': str(len(body_bytes))})
                 response = conn.getresponse()
                 print("Status code:", response.status)
             """;
