@@ -477,7 +477,7 @@ public class SchedulerController {
     private EcsParameters parseEcsParameters(JsonNode node) {
         EcsParameters ecs = new EcsParameters();
         if (node.has("CapacityProviderStrategy") && node.get("CapacityProviderStrategy").isArray()) {
-            ecs.setCapacityProviderStrategy(mapList(node.get("CapacityProviderStrategy")));
+            ecs.setCapacityProviderStrategy(mapList("CapacityProviderStrategy", node.get("CapacityProviderStrategy")));
         }
         if (node.has("EnableECSManagedTags") && !node.get("EnableECSManagedTags").isNull()) {
             ecs.setEnableECSManagedTags(node.get("EnableECSManagedTags").asBoolean());
@@ -495,10 +495,10 @@ public class SchedulerController {
             ecs.setLaunchType(node.get("LaunchType").asText());
         }
         if (node.has("PlacementConstraints") && node.get("PlacementConstraints").isArray()) {
-            ecs.setPlacementConstraints(mapList(node.get("PlacementConstraints")));
+            ecs.setPlacementConstraints(mapList("PlacementConstraints", node.get("PlacementConstraints")));
         }
         if (node.has("PlacementStrategy") && node.get("PlacementStrategy").isArray()) {
-            ecs.setPlacementStrategy(mapList(node.get("PlacementStrategy")));
+            ecs.setPlacementStrategy(mapList("PlacementStrategy", node.get("PlacementStrategy")));
         }
         if (node.has("TaskCount") && !node.get("TaskCount").isNull()) {
             ecs.setTaskCount(node.get("TaskCount").asInt());
@@ -513,7 +513,7 @@ public class SchedulerController {
             ecs.setReferenceId(node.get("ReferenceId").asText());
         }
         if (node.has("Tags") && node.get("Tags").isArray()) {
-            ecs.setTags(mapList(node.get("Tags")));
+            ecs.setTags(mapList("Tags", node.get("Tags")));
         }
         if (node.has("NetworkConfiguration") && !node.get("NetworkConfiguration").isNull()) {
             ecs.setNetworkConfiguration(parseNetworkConfiguration(node.get("NetworkConfiguration")));
@@ -521,10 +521,20 @@ public class SchedulerController {
         return ecs;
     }
 
-    private List<Map<String, Object>> mapList(JsonNode node) {
-        return objectMapper.convertValue(node,
-                objectMapper.getTypeFactory().constructCollectionType(List.class,
-                        objectMapper.getTypeFactory().constructMapType(Map.class, String.class, Object.class)));
+    /**
+     * Reads one of the {@code EcsParameters} lists of objects. An element that is not an object is a
+     * malformed body, which AWS answers with {@code ValidationException}, so the conversion failure
+     * is named here instead of escaping as a server error.
+     */
+    private List<Map<String, Object>> mapList(String field, JsonNode node) {
+        try {
+            return objectMapper.convertValue(node,
+                    objectMapper.getTypeFactory().constructCollectionType(List.class,
+                            objectMapper.getTypeFactory().constructMapType(Map.class, String.class, Object.class)));
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("ValidationException",
+                    "EcsParameters " + field + " must be a list of objects.", 400);
+        }
     }
 
     private NetworkConfiguration parseNetworkConfiguration(JsonNode node) {

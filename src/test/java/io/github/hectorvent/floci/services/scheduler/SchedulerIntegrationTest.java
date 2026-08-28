@@ -1005,4 +1005,31 @@ class SchedulerIntegrationTest {
         .then()
             .statusCode(405);
     }
+
+    @Test
+    @Order(39)
+    void createScheduleWithNonObjectCapacityProviderStrategyReturns400() {
+        // CapacityProviderStrategy is a list of objects. A list of scalars is a malformed body,
+        // which AWS answers with ValidationException, not with a server error.
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "ScheduleExpression": "rate(1 hour)",
+                    "FlexibleTimeWindow": {"Mode": "OFF"},
+                    "Target": {
+                        "Arn": "arn:aws:ecs:us-east-1:000000000000:cluster/batch",
+                        "RoleArn": "arn:aws:iam::000000000000:role/scheduler-role",
+                        "EcsParameters": {
+                            "TaskDefinitionArn": "arn:aws:ecs:us-east-1:000000000000:task-definition/proof:1",
+                            "CapacityProviderStrategy": ["FARGATE"]
+                        }
+                    }
+                }
+                """)
+        .when()
+            .post("/schedules/ecs-scalar-capacity-provider")
+        .then()
+            .statusCode(400);
+    }
 }
