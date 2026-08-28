@@ -16,6 +16,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -189,10 +190,13 @@ class CodePipelineCfnProvisionerTest {
         when(service.handle(eq("UpdatePipeline"), any(), any(), any()))
                 .thenReturn(mapper.createObjectNode().set("pipeline",
                         mapper.createObjectNode().put("version", 2)));
-        // Previously deployed with "Gate" disabled; this update's template no longer lists it.
+        // Previously deployed by this stack with "Gate" disabled; this update's template no
+        // longer lists it, so it must be re-enabled (tracked via the stack-owned attribute,
+        // never an externally-disabled stage this resource never claimed).
         ObjectNode props = pipelineProps("gated");
         StackResource r = resource("AWS::CodePipeline::Pipeline");
         r.setPhysicalId("gated");
+        r.getAttributes().put("__FlociCodePipelineDisabledStages", "Gate");
 
         provisioner.provision(r, props, ctx());
 
@@ -225,5 +229,61 @@ class CodePipelineCfnProvisionerTest {
         provisioner.provision(r, props, ctx);
 
         verify(service).handle(eq("RegisterWebhookWithThirdParty"), any(), any(), any());
+    }
+
+    @Test
+    void externallyDisabledStageIsNeverReEnabled() {
+        when(service.handle(eq("UpdatePipeline"), any(), any(), any()))
+                .thenReturn(mapper.createObjectNode().set("pipeline",
+                        mapper.createObjectNode().put("version", 2)));
+        // This stack never disabled "Gate" (no tracking attribute recorded) -- some outside
+        // actor (a manual gate, a human) disabled it, and an unrelated update must not touch it.
+        ObjectNode props = pipelineProps("gated");
+        StackResource r = resource("AWS::CodePipeline::Pipeline");
+        r.setPhysicalId("gated");
+
+        provisioner.provision(r, props, ctx());
+
+        verify(service, never()).handle(eq("EnableStageTransition"), any(), any(), any());
+    }
+
+    @Test
+    void pipelineRenameReplacesRatherThanUpdatingWrongResource() {
+        when(service.handle(eq("CreatePipeline"), any(), any(), any()))
+                .thenReturn(mapper.createObjectNode().set("pipeline",
+                        mapper.createObjectNode().put("version", 1)));
+        StackResource r = resource("AWS::CodePipeline::Pipeline");
+        r.setPhysicalId("old-name");
+
+        provisioner.provision(r, pipelineProps("new-name"), ctx());
+
+        verify(service, never()).handle(eq("UpdatePipeline"), any(), any(), any());
+        ArgumentCaptor<JsonNode> createRequest = ArgumentCaptor.forClass(JsonNode.class);
+        verify(service).handle(eq("CreatePipeline"), createRequest.capture(), any(), any());
+        assertEquals("new-name", createRequest.getValue().path("pipeline").path("name").asText());
+        ArgumentCaptor<JsonNode> deleteRequest = ArgumentCaptor.forClass(JsonNode.class);
+        verify(service).handle(eq("DeletePipeline"), deleteRequest.capture(), any(), any());
+        assertEquals("old-name", deleteRequest.getValue().path("name").asText());
+        assertEquals("new-name", r.getPhysicalId());
+    }
+
+    @Test
+    void webhookRenameDeletesTheOldNameInsteadOfOrphaningIt() {
+        when(service.handle(eq("PutWebhook"), any(), any(), any()))
+                .thenReturn(mapper.createObjectNode().set("webhook",
+                        mapper.createObjectNode().put("url", "http://localhost/new-hook")));
+        ObjectNode props = mapper.createObjectNode();
+        props.put("Name", "new-hook");
+        props.put("TargetPipeline", "the-pipeline");
+        props.put("TargetAction", "Source");
+        StackResource r = resource("AWS::CodePipeline::Webhook");
+        r.setPhysicalId("old-hook");
+
+        provisioner.provision(r, props, ctx());
+
+        ArgumentCaptor<JsonNode> deleteRequest = ArgumentCaptor.forClass(JsonNode.class);
+        verify(service).handle(eq("DeleteWebhook"), deleteRequest.capture(), any(), any());
+        assertEquals("old-hook", deleteRequest.getValue().path("name").asText());
+        assertEquals("new-hook", r.getPhysicalId());
     }
 }

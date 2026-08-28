@@ -82,63 +82,86 @@ public class CodePipelineCfnProvisioner implements CfnResourceProvisioner {
         }
     }
 
+    private static final String DISABLED_STAGES_ATTR = "__FlociCodePipelineDisabledStages";
+
     private void provisionPipeline(StackResource r, JsonNode props, ProvisionContext ctx) {
         ObjectNode declaration = (ObjectNode) lowerKeys(ctx.engine().resolveNode(props));
         JsonNode transitions = declaration.remove("disableInboundStageTransitions");
         JsonNode tags = declaration.remove("tags");
         declaration.remove("restartExecutionOnUpdate");
 
-        boolean update = r.getPhysicalId() != null && !r.getPhysicalId().isBlank();
-        String name = declaration.path("name").asText(null);
-        if (name == null || name.isBlank()) {
-            name = update ? r.getPhysicalId() : ctx.generatePhysicalName(r.getLogicalId(), 100, false);
+        String previousPhysicalId = r.getPhysicalId();
+        boolean update = previousPhysicalId != null && !previousPhysicalId.isBlank();
+        String explicitName = declaration.path("name").asText(null);
+        // Name is part of a pipeline's identity -- CodePipeline has no rename operation, so a
+        // template Name that differs from the tracked physical ID is a replacement, not an
+        // in-place update (UpdatePipeline would otherwise target/overwrite the wrong pipeline).
+        boolean rename = update && explicitName != null && !explicitName.isBlank()
+                && !explicitName.equals(previousPhysicalId);
+        boolean create = !update || rename;
+        String name = explicitName != null && !explicitName.isBlank()
+                ? explicitName
+                : (update ? previousPhysicalId : ctx.generatePhysicalName(r.getLogicalId(), 100, false));
+        if (explicitName == null || explicitName.isBlank()) {
             declaration.put("name", name);
         }
 
         ObjectNode request = mapper.createObjectNode();
         request.set("pipeline", declaration);
         JsonNode response;
-        if (update) {
-            response = codePipelineService.handle("UpdatePipeline", request, ctx.region(), ctx.accountId());
-        } else {
+        if (create) {
             if (tags != null && tags.isArray() && !tags.isEmpty()) {
                 request.set("tags", tags);
             }
             response = codePipelineService.handle("CreatePipeline", request, ctx.region(), ctx.accountId());
+        } else {
+            response = codePipelineService.handle("UpdatePipeline", request, ctx.region(), ctx.accountId());
         }
 
-        java.util.Set<String> disabledStages = new java.util.LinkedHashSet<>();
+        java.util.Set<String> desiredDisabledStages = new java.util.LinkedHashSet<>();
         if (transitions != null && transitions.isArray()) {
             for (JsonNode transition : transitions) {
-                disabledStages.add(transition.path("stageName").asText());
+                desiredDisabledStages.add(transition.path("stageName").asText());
             }
         }
-        // DisableInboundStageTransitions is a fully declarative list: a stage transition that
-        // was disabled by a previous deployment but is absent from this one must be re-enabled,
-        // not merely left alone, or it stays stuck disabled after UPDATE_COMPLETE.
-        if (update && declaration.path("stages").isArray()) {
-            for (JsonNode stage : declaration.path("stages")) {
-                String stageName = stage.path("name").asText();
-                if (!disabledStages.contains(stageName)) {
-                    codePipelineService.handle("EnableStageTransition", mapper.createObjectNode()
-                                    .put("pipelineName", name)
-                                    .put("stageName", stageName)
-                                    .put("transitionType", "Inbound"),
-                            ctx.region(), ctx.accountId());
+        // DisableInboundStageTransitions is declarative, but only for the stages CloudFormation
+        // itself disabled: a stage disabled externally (e.g. a manual gate) and never listed here
+        // must be left alone. Re-enable only stages this resource previously disabled and has now
+        // dropped from the list, tracked via DISABLED_STAGES_ATTR across deployments.
+        if (!create) {
+            String previouslyManaged = r.getAttributes().get(DISABLED_STAGES_ATTR);
+            if (previouslyManaged != null && !previouslyManaged.isBlank()) {
+                for (String stageName : previouslyManaged.split(",")) {
+                    if (!desiredDisabledStages.contains(stageName)) {
+                        codePipelineService.handle("EnableStageTransition", mapper.createObjectNode()
+                                        .put("pipelineName", name)
+                                        .put("stageName", stageName)
+                                        .put("transitionType", "Inbound"),
+                                ctx.region(), ctx.accountId());
+                    }
                 }
             }
         }
-        if (transitions != null && transitions.isArray()) {
-            for (JsonNode transition : transitions) {
-                codePipelineService.handle("DisableStageTransition", mapper.createObjectNode()
-                                .put("pipelineName", name)
-                                .put("stageName", transition.path("stageName").asText())
-                                .put("transitionType", "Inbound")
-                                .put("reason", transition.path("reason").asText("Disabled by CloudFormation")),
-                        ctx.region(), ctx.accountId());
+        for (String stageName : desiredDisabledStages) {
+            JsonNode transition = null;
+            for (JsonNode candidate : transitions) {
+                if (stageName.equals(candidate.path("stageName").asText())) {
+                    transition = candidate;
+                    break;
+                }
             }
+            codePipelineService.handle("DisableStageTransition", mapper.createObjectNode()
+                            .put("pipelineName", name)
+                            .put("stageName", stageName)
+                            .put("transitionType", "Inbound")
+                            .put("reason", transition.path("reason").asText("Disabled by CloudFormation")),
+                    ctx.region(), ctx.accountId());
         }
+        r.getAttributes().put(DISABLED_STAGES_ATTR, String.join(",", desiredDisabledStages));
 
+        if (rename) {
+            delete("AWS::CodePipeline::Pipeline", previousPhysicalId, ctx.region());
+        }
         r.setPhysicalId(name);
         r.getAttributes().put("Version",
                 String.valueOf(response.path("pipeline").path("version").asInt(1)));
@@ -167,10 +190,12 @@ public class CodePipelineCfnProvisioner implements CfnResourceProvisioner {
         ObjectNode webhook = (ObjectNode) lowerKeys(ctx.engine().resolveNode(props));
         JsonNode registerNode = webhook.remove("registerWithThirdParty");
         boolean register = registerNode != null && registerNode.asBoolean(false);
+        String previousPhysicalId = r.getPhysicalId();
+        boolean update = previousPhysicalId != null && !previousPhysicalId.isBlank();
         String name = webhook.path("name").asText(null);
+        boolean rename = update && name != null && !name.isBlank() && !name.equals(previousPhysicalId);
         if (name == null || name.isBlank()) {
-            name = r.getPhysicalId() != null && !r.getPhysicalId().isBlank()
-                    ? r.getPhysicalId() : ctx.generatePhysicalName(r.getLogicalId(), 100, false);
+            name = update ? previousPhysicalId : ctx.generatePhysicalName(r.getLogicalId(), 100, false);
             webhook.put("name", name);
         }
         JsonNode response = codePipelineService.handle("PutWebhook",
@@ -178,6 +203,11 @@ public class CodePipelineCfnProvisioner implements CfnResourceProvisioner {
         if (register) {
             codePipelineService.handle("RegisterWebhookWithThirdParty",
                     mapper.createObjectNode().put("webhookName", name), ctx.region(), ctx.accountId());
+        }
+        // Name is this resource's identity; PutWebhook upserts under the new name unconditionally,
+        // so a rename must also clean up the webhook the stack previously owned or it's orphaned.
+        if (rename) {
+            delete("AWS::CodePipeline::Webhook", previousPhysicalId, ctx.region());
         }
         r.setPhysicalId(name);
         r.getAttributes().put("Url", response.path("webhook").path("url").asText(""));
