@@ -90,6 +90,24 @@ class LambdaAccountScopedCodeTest {
                 "the migrated legacy entry must not linger and be adopted twice");
     }
 
+    @Test
+    void updateFunctionCodeRemovesAPreAccountScopedLegacyDirectory(@TempDir Path baseDir) throws Exception {
+        // A function created before account-scoping left its code at baseDir/<functionName>.
+        // Updating its code after the upgrade re-extracts to the new account-scoped path but
+        // must also reclaim the old directory, or it lingers on disk forever.
+        CodeStore codeStore = new CodeStore(baseDir);
+        LambdaService svc = serviceFor(ACCOUNT_A, codeStore);
+        svc.createFunction(REGION, zipRequest("legacy-fn", "A"));
+        Path legacyPath = codeStore.getLegacyCodePath("legacy-fn");
+        Files.createDirectories(legacyPath);
+        Files.writeString(legacyPath.resolve("index.js"), "stale");
+
+        svc.updateFunctionCode(REGION, "legacy-fn",
+                Map.of("ZipFile", zipBase64("index.js", "B")));
+
+        assertFalse(Files.exists(legacyPath), "the pre-account-scoped directory must be reclaimed on update");
+    }
+
     private LambdaFunction functionOwnedBy(String accountId) {
         LambdaFunction fn = new LambdaFunction();
         fn.setAccountId(accountId);

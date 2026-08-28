@@ -74,6 +74,22 @@ class CodeStoreTest {
                 "a bare '.' function segment must not collapse to the account directory itself");
     }
 
+    @Test
+    void deleteAlsoRemovesAPreAccountScopedLegacyDirectory(@TempDir Path baseDir) throws IOException {
+        // Before account-scoping, code extracted to baseDir/<functionName> directly. delete()
+        // only targeted the new baseDir/<accountId>/<functionName> path, so a function created
+        // before the migration would leave its old directory (and disk usage) behind forever.
+        CodeStore store = new CodeStore(baseDir);
+        Path legacyPath = baseDir.resolve("legacy-fn");
+        writeHandler(legacyPath, "legacy");
+        writeHandler(store.getCodePath(ACCOUNT_A, "legacy-fn"), "current");
+
+        store.delete(ACCOUNT_A, "legacy-fn");
+
+        assertFalse(Files.exists(legacyPath), "the pre-account-scoped directory must be cleaned up too");
+        assertFalse(store.exists(ACCOUNT_A, "legacy-fn"));
+    }
+
     private void writeHandler(Path codePath, String content) throws IOException {
         Files.createDirectories(codePath);
         Files.writeString(codePath.resolve("index.js"), content);

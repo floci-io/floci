@@ -1859,6 +1859,9 @@ public class LambdaService implements ResourceProvider {
             // Deploy succeeded: keep the exact package so GetFunction can serve
             // a real Code.Location.
             storeDeploymentPackage(fn, zipBytes, region);
+            // Reclaim a directory left behind by a function created before account-scoping;
+            // codePath above is already the new location, so this is a no-op once migrated.
+            codeStore.deleteLegacy(fn.getFunctionName());
         } catch (AwsException e) {
             throw e;
         } catch (IOException e) {

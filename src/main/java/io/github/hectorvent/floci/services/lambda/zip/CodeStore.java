@@ -37,8 +37,27 @@ public class CodeStore {
         return baseDir.resolve(sanitizeName(accountId)).resolve(sanitizeName(functionName));
     }
 
+    /**
+     * The pre-account-scoped path a function's code would have extracted to before this class
+     * added an account segment. Retained so {@link #delete} and code re-extraction can reclaim a
+     * directory left behind by a function created before that migration.
+     */
+    public Path getLegacyCodePath(String functionName) {
+        return baseDir.resolve(sanitizeName(functionName));
+    }
+
     public void delete(String accountId, String functionName) {
         deleteDirectory(getCodePath(accountId, functionName), functionName);
+        deleteLegacy(functionName);
+    }
+
+    /**
+     * Best-effort removal of a function's pre-account-scoped directory, independent of its
+     * current account-scoped one. Called after a successful code update re-extracts to the new
+     * path, so an upgraded deployment reclaims the old directory instead of leaving it orphaned.
+     */
+    public void deleteLegacy(String functionName) {
+        deleteDirectory(getLegacyCodePath(functionName), functionName);
     }
 
     private void deleteDirectory(Path path, String functionName) {
