@@ -24,8 +24,9 @@ import java.util.regex.Pattern;
  * the synthetic sending status, and the name validation so they can't be bypassed; the controller
  * only parses the REST JSON. Reached through the {@code SesService} facade, which delegates here.
  *
- * <p>Account-aware: the caller's account (resolved per request via {@code RegionResolver}) is threaded
- * in and used for both the store key and the ARN, so tenants of different accounts don't collide.
+ * <p>Account isolation comes from the account-aware store returned by {@code StorageFactory}: keys
+ * built here carry only region and tenant name. The caller's account is used for the ARN (and the
+ * AlreadyExists message), not the key.
  *
  * <p>This is Phase 1 (tenant CRUD); resource associations, tenant suppression, and tenant-scoped
  * sending are separate follow-ups.
