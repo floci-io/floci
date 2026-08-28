@@ -5077,11 +5077,16 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     }
 
     public void deleteVpcPeeringConnection(String region, String vpcPeeringConnectionId) {
-        OwnedVpcPeeringConnection owned = getRequiredOwnedVpcPeeringConnection(vpcPeeringConnectionId);
-        if (!visibleToAccount(owned.pcx(), callerAccountId()) || !visibleFromRegion(owned.pcx(), region)) {
-            throw vpcPeeringConnectionNotFound(vpcPeeringConnectionId);
+        // Same lock accept/modify take: without it, delete can run between one of those loading
+        // the connection and saving it back, and that unconditional save resurrects the row this
+        // call just removed.
+        synchronized (lockFor(vpcPeeringConnectionId)) {
+            OwnedVpcPeeringConnection owned = getRequiredOwnedVpcPeeringConnection(vpcPeeringConnectionId);
+            if (!visibleToAccount(owned.pcx(), callerAccountId()) || !visibleFromRegion(owned.pcx(), region)) {
+                throw vpcPeeringConnectionNotFound(vpcPeeringConnectionId);
+            }
+            deleteVpcPeeringConnection(owned);
         }
-        deleteVpcPeeringConnection(owned);
     }
 
     /** A peering connection together with the account partition its storage entry lives under. */
