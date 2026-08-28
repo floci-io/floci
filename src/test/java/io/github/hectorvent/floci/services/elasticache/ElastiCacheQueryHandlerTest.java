@@ -146,11 +146,32 @@ class ElastiCacheQueryHandlerTest {
         assertEquals(200, response.getStatus());
         String body = (String) response.getEntity();
         assertTrue(body.contains("<CacheClusterId>grp-0001-001</CacheClusterId>"));
+        assertTrue(body.contains("<CacheClusterStatus>available</CacheClusterStatus>"));
         assertTrue(body.contains("<ReplicationGroupId>grp</ReplicationGroupId>"));
         assertTrue(body.contains("<Engine>valkey</Engine>"));
         assertTrue(body.contains("<EngineVersion>8.2</EngineVersion>"));
         assertTrue(body.contains("<CacheNodeType>cache.t4g.micro</CacheNodeType>"));
         assertTrue(body.contains("<Endpoint><Address>localhost</Address><Port>6379</Port></Endpoint>"));
+    }
+
+    @Test
+    void describeCacheClusters_membersOfFailedGroupReportRestoreFailed() {
+        ReplicationGroup group = new ReplicationGroup("grp", "d", ReplicationGroupStatus.CREATE_FAILED,
+                AuthMode.NO_AUTH, null, Instant.now(), 6379);
+        when(service.listMemberCacheClusters("grp-0001-001")).thenReturn(List.of(
+                new ElastiCacheService.MemberCacheCluster(group, "grp-0001-001", 6379, true)));
+
+        MultivaluedMap<String, String> params = params();
+        params.putSingle("CacheClusterId", "grp-0001-001");
+        params.putSingle("ShowCacheNodeInfo", "true");
+        Response response = handler.handle("DescribeCacheClusters", params, "us-east-1");
+
+        assertEquals(200, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<CacheClusterStatus>restore-failed</CacheClusterStatus>"),
+                "CacheClusterStatus has no create-failed; the documented failure value is restore-failed: " + body);
+        assertFalse(body.contains("<CacheNodes>"),
+                "A failed group has no endpoint, so members must not hand out node endpoints");
     }
 
     @Test

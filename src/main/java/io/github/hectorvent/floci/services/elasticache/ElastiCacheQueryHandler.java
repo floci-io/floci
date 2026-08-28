@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.services.elasticache.model.ElastiCacheUser;
 import io.github.hectorvent.floci.services.elasticache.model.Endpoint;
 import io.github.hectorvent.floci.services.elasticache.model.ReplicationGroup;
 import io.github.hectorvent.floci.services.elasticache.model.ReplicationGroupSettings;
+import io.github.hectorvent.floci.services.elasticache.model.ReplicationGroupStatus;
 import io.github.hectorvent.floci.services.elasticache.proxy.SigV4Validator;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -364,7 +365,7 @@ public class ElastiCacheQueryHandler {
         var xml = new XmlBuilder()
                 .start("CacheCluster")
                   .elem("CacheClusterId", member.cacheClusterId())
-                  .elem("CacheClusterStatus", "available")
+                  .elem("CacheClusterStatus", memberCacheClusterStatus(g))
                   .elem("NumCacheNodes", 1L)
                   .elem("ReplicationGroupId", g.getReplicationGroupId())
                   .elem("AutoMinorVersionUpgrade", true)
@@ -402,6 +403,17 @@ public class ElastiCacheQueryHandler {
                .end("CacheNodes");
         }
         return xml.end("CacheCluster").build();
+    }
+
+    /**
+     * Members mirror the group's status, except {@code create-failed}: that value is only legal
+     * on ReplicationGroup.Status, so members report the documented {@code restore-failed}.
+     */
+    private static String memberCacheClusterStatus(ReplicationGroup g) {
+        if (g.getStatus() == ReplicationGroupStatus.CREATE_FAILED) {
+            return "restore-failed";
+        }
+        return g.getStatus().wireName();
     }
 
     private Response handleDeleteCacheCluster(MultivaluedMap<String, String> params) {

@@ -271,6 +271,16 @@ class ElastiCacheServiceTest {
     }
 
     @Test
+    void numNodeGroupsBeyondQuotaSurfacesModeledQuotaFault() {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.createReplicationGroup(clusterRequest("grp", 501, 0)));
+
+        assertEquals("NodeGroupsPerReplicationGroupQuotaExceeded", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        verify(containerManager, never()).start(anyString(), anyString(), any());
+    }
+
+    @Test
     void plainCreateStaysClusterModeDisabled() {
         ReplicationGroup group =
                 service.createReplicationGroup("grp", "test", AuthMode.NO_AUTH, null, "us-east-1");

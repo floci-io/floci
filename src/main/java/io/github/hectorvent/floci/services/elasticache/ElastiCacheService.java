@@ -214,7 +214,7 @@ public class ElastiCacheService implements ResourceProvider {
         String groupId = request.replicationGroupId();
         AuthMode authMode = request.authMode();
         int numNodeGroups = request.numNodeGroups() != null
-                ? validateRange("NumNodeGroups", request.numNodeGroups(), 1, 500)
+                ? validateNumNodeGroups(request.numNodeGroups())
                 : 1;
         int replicasPerNodeGroup = request.replicasPerNodeGroup() != null
                 ? validateRange("ReplicasPerNodeGroup", request.replicasPerNodeGroup(), 0, 5)
@@ -326,7 +326,9 @@ public class ElastiCacheService implements ResourceProvider {
 
     /**
      * Cluster mode follows AWS's signal — the parameter group — plus the request shapes that
-     * imply it: an explicit ClusterMode, or more than one node group.
+     * imply it: an explicit ClusterMode, or more than one node group. ClusterMode
+     * {@code compatible} — the mid-migration state — is deliberately not modelled; it enables
+     * cluster mode only when one of the other signals also does.
      */
     private boolean resolveClusterEnabled(CreateReplicationGroupRequest request) {
         if ("enabled".equalsIgnoreCase(request.clusterMode())) {
@@ -385,6 +387,19 @@ public class ElastiCacheService implements ResourceProvider {
         return value;
     }
 
+    /** 500 is AWS's raised NumNodeGroups quota (the default is 90; 500 with a limit increase). */
+    private static final int MAX_NODE_GROUPS = 500;
+
+    private static int validateNumNodeGroups(int value) {
+        if (value > MAX_NODE_GROUPS) {
+            throw new AwsException("NodeGroupsPerReplicationGroupQuotaExceeded",
+                    "The request cannot be processed because it would exceed the maximum allowed"
+                            + " number of node groups (shards) in a single replication group."
+                            + " The maximum is " + MAX_NODE_GROUPS + ".", 400);
+        }
+        return validateRange("NumNodeGroups", value, 1, MAX_NODE_GROUPS);
+    }
+
     private void rollbackClusterModeGroup(String groupId, List<String> startedProxyKeys,
                                           List<ElastiCacheContainerHandle> handles,
                                           String inFlightMemberId, Collection<Integer> proxyPorts) {
@@ -423,7 +438,9 @@ public class ElastiCacheService implements ResourceProvider {
      * services that restore persisted runtime. Only topology survives a restart — containers,
      * proxies and port reservations are process-local — so each group is re-provisioned from
      * its persisted node list, and a group whose data plane cannot come back is reported
-     * {@code create-failed} instead of available.
+     * {@code create-failed} instead of available. Cluster-mode-disabled groups are deliberately
+     * out of scope: they keep their pre-existing behaviour of reporting available after a
+     * restart without a restored runtime.
      */
     public void restorePersistedRuntime() {
         for (ReplicationGroup group : groups.scan(k -> true)) {
