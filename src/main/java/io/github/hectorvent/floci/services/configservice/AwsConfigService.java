@@ -360,6 +360,11 @@ public class AwsConfigService {
                 .computeIfAbsent(ruleName, r -> new ConcurrentHashMap<>());
         for (ConfigEvaluation evaluation : newEvaluations) {
             String key = resourceKey(evaluation.complianceResourceType(), evaluation.complianceResourceId());
+            ConfigEvaluation current = ruleEvaluations.get(key);
+            if (current != null && current.orderingTimestamp() != null
+                    && evaluation.orderingTimestamp() < current.orderingTimestamp()) {
+                continue;
+            }
             ruleEvaluations.put(key, new ConfigEvaluation(
                     evaluation.complianceResourceType(),
                     evaluation.complianceResourceId(),

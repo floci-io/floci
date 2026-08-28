@@ -505,6 +505,46 @@ class ComplianceEvaluationIntegrationTest {
 
     @Test
     @Order(17)
+    void staleEvaluationDoesNotOverwriteNewerResult() {
+        given()
+            .header("X-Amz-Target", TARGET_PREFIX + "PutEvaluations")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {
+                    "ResultToken": "%s:stale",
+                    "Evaluations": [
+                        {
+                            "ComplianceResourceType": "AWS::S3::Bucket",
+                            "ComplianceResourceId": "bucket-1",
+                            "ComplianceType": "COMPLIANT",
+                            "OrderingTimestamp": 1700000150.0
+                        }
+                    ]
+                }
+                """.formatted(LAMBDA_RULE))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", TARGET_PREFIX + "GetComplianceDetailsByConfigRule")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {"ConfigRuleName": "%s"}
+                """.formatted(LAMBDA_RULE))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("EvaluationResults.find { it.EvaluationResultIdentifier.EvaluationResultQualifier.ResourceId == 'bucket-1' }.ComplianceType",
+                    equalTo("NOT_APPLICABLE"))
+            .body("EvaluationResults.find { it.EvaluationResultIdentifier.EvaluationResultQualifier.ResourceId == 'bucket-1' }.EvaluationResultIdentifier.OrderingTimestamp",
+                    equalTo(1700000200.0f));
+    }
+
+    @Test
+    @Order(18)
     void evaluationStatusReflectsRecordedEvaluations() {
         given()
             .header("X-Amz-Target", TARGET_PREFIX + "DescribeConfigRuleEvaluationStatus")
@@ -522,7 +562,7 @@ class ComplianceEvaluationIntegrationTest {
     }
 
     @Test
-    @Order(18)
+    @Order(19)
     void cleanupRules() {
         for (String ruleName : new String[]{LAMBDA_RULE, EXTERNAL_RULE}) {
             given()
