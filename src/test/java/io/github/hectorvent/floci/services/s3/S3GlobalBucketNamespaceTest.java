@@ -167,4 +167,41 @@ class S3GlobalBucketNamespaceTest {
         caller.set(DEFAULT_ACCT);
         assertEquals(xml, globalNs.getBucketReplication("elb-access-logs-bucket-2"));
     }
+
+    /**
+     * Bucket-policy operations were left on the direct {@code bucketStore.get}/{@code put} path when
+     * global namespace resolution was added — unlike replication and object read/write, they never got
+     * wired through {@code resolveBucket}/{@code mutateBucket}. A management-account caller (as the LZA
+     * Logging stage's policy-application step runs) must be able to put/get/delete a policy on a bucket
+     * owned by a member account.
+     */
+    @Test
+    void bucketPolicyResolvesAndPersistsCrossAccount() {
+        Instance<RequestContext> ctx = mutableContext();
+        AccountAwareStorageBackend<Bucket> buckets =
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), ctx, DEFAULT_ACCT);
+        AccountAwareStorageBackend<S3Object> objects =
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), ctx, DEFAULT_ACCT);
+        S3Service globalNs = new S3Service(buckets, objects, Path.of("s3-gns-policy-test"), true, true);
+
+        caller.set(ACCOUNT_A);
+        globalNs.createBucket("central-logs-bucket", "us-east-1");
+
+        caller.set(DEFAULT_ACCT);
+        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[]}";
+        assertDoesNotThrow(() -> globalNs.putBucketPolicy("central-logs-bucket", policy));
+        assertEquals(policy, globalNs.getBucketPolicy("central-logs-bucket"));
+
+        // Persisted on the OWNER's bucket (account A), not forked into the caller's partition.
+        Bucket owned = buckets.getForAccount(ACCOUNT_A, "central-logs-bucket")
+                .orElseThrow(() -> new AssertionError("bucket vanished from owner partition"));
+        assertEquals(policy, owned.getPolicy());
+        assertTrue(buckets.getForAccount(DEFAULT_ACCT, "central-logs-bucket").isEmpty(),
+                "cross-account putBucketPolicy must not fork a bucket into the caller's account");
+
+        assertDoesNotThrow(() -> globalNs.deleteBucketPolicy("central-logs-bucket"));
+        AwsException notFound = assertThrows(AwsException.class,
+                () -> globalNs.getBucketPolicy("central-logs-bucket"));
+        assertEquals("NoSuchBucketPolicy", notFound.getErrorCode());
+    }
 }

@@ -2186,7 +2186,7 @@ public class S3Service implements Resettable, ResourceProvider {
     // ──────────────────────────── Policy, CORS, Lifecycle, ACL ────────────────────────────
 
     public String getBucketPolicy(String bucketName) {
-        Bucket bucket = bucketStore.get(bucketName)
+        Bucket bucket = resolveBucket(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
         if (bucket.getPolicy() == null) {
             throw new AwsException("NoSuchBucketPolicy", "The bucket policy does not exist", 404);
@@ -2195,17 +2195,11 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     public void putBucketPolicy(String bucketName, String policy) {
-        Bucket bucket = bucketStore.get(bucketName)
-                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
-        bucket.setPolicy(policy);
-        bucketStore.put(bucketName, bucket);
+        mutateBucket(bucketName, bucket -> bucket.setPolicy(policy));
     }
 
     public void deleteBucketPolicy(String bucketName) {
-        Bucket bucket = bucketStore.get(bucketName)
-                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
-        bucket.setPolicy(null);
-        bucketStore.put(bucketName, bucket);
+        mutateBucket(bucketName, bucket -> bucket.setPolicy(null));
     }
 
     public String getBucketCors(String bucketName) {
