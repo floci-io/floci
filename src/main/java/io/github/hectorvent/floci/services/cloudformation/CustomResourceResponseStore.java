@@ -129,6 +129,7 @@ public class CustomResourceResponseStore implements CustomResourceLiveness {
                     // This slice elapsed. A concurrent touch may have pushed lastActivity forward,
                     // in which case the next slice is positive again and the wait continues; if
                     // nothing touched, the guard above fails on the very next pass.
+                    LOG.tracev("Custom-resource wait slice elapsed for token {0}; rechecking liveness", token);
                 }
             }
         } catch (TimeoutException e) {

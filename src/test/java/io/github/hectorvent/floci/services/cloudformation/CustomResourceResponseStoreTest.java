@@ -12,6 +12,7 @@ import java.util.concurrent.TimeoutException;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
 /**
@@ -134,5 +135,46 @@ class CustomResourceResponseStoreTest {
         // Polls can outlive their await (timeout, rollback). Liveness for a token nobody is waiting
         // on is not an error — it is the normal tail of a resource that already failed.
         assertDoesNotThrow(() -> store.touch("no-such-token"));
+    }
+
+    @Test
+    void toleratedWaitSliceTimeoutIsLogged() throws Exception {
+        // Every slice of the poll loop below the outer budget hits an internal TimeoutException that
+        // is intentionally swallowed and retried. Per the repo's logging convention, a caught
+        // exception that is deliberately tolerated must still be logged (at trace level, since this
+        // is the normal, expected tail of every wait) rather than disappearing silently.
+        java.util.logging.Logger julLogger =
+                java.util.logging.Logger.getLogger(CustomResourceResponseStore.class.getName());
+        julLogger.setLevel(java.util.logging.Level.ALL);
+        java.util.List<java.util.logging.LogRecord> records = new java.util.ArrayList<>();
+        java.util.logging.Handler handler = new java.util.logging.Handler() {
+            @Override
+            public void publish(java.util.logging.LogRecord record) {
+                records.add(record);
+            }
+
+            @Override
+            public void flush() {
+            }
+
+            @Override
+            public void close() {
+            }
+        };
+        handler.setLevel(java.util.logging.Level.ALL);
+        julLogger.addHandler(handler);
+        try {
+            String token = store.register();
+            Thread waiter = waiterPolling(token, 9, true);
+
+            store.await(token, Duration.ofMillis(300));
+            waiter.join(2_000);
+        } finally {
+            julLogger.removeHandler(handler);
+        }
+
+        assertTrue(records.stream().anyMatch(r -> r.getMessage() != null
+                        && r.getMessage().toLowerCase().contains("wait slice")),
+                "expected a log record for a tolerated wait-slice timeout, got: " + records);
     }
 }
