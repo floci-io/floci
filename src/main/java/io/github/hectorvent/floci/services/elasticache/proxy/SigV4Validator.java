@@ -101,7 +101,12 @@ public class SigV4Validator {
             String service = credParts[3];
             String credentialScope = date + "/" + region + "/" + service + "/aws4_request";
 
-            String secretKey = iamService.findSecretKey(accessKeyId).orElse(accessKeyId);
+            // A bare 12-digit account ID that isn't a registered access key is Floci's own
+            // owning-account placeholder (see LaunchedContainerAwsEnv, for a Lambda that never
+            // assumes an execution role but has a known owning account), always paired with the
+            // "test" secret. Any other unregistered access key falls back to itself, unchanged.
+            String secretKey = iamService.findSecretKey(accessKeyId)
+                    .orElseGet(() -> accessKeyId.matches("\\d{12}") ? "test" : accessKeyId);
 
             String canonicalQueryString = Arrays.stream(rawPairs)
                     .filter(p -> !rawParamName(p).equals("X-Amz-Signature"))

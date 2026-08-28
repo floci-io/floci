@@ -1,12 +1,36 @@
 package io.github.hectorvent.floci.services.s3;
 
+import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.testutil.IamServiceTestHelper;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Method;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 class PreSignedUrlFilterTest {
+
+    /**
+     * A launched container that never assumes an execution role but has a known owning
+     * account is given AWS_ACCESS_KEY_ID=&lt;ownerAccountId&gt; (see LaunchedContainerAwsEnv),
+     * unregistered in IAM the same way the literal "test" placeholder is. It must resolve to
+     * the same "test" placeholder secret so presigned URLs it generates still validate.
+     */
+    private static String resolveSecretKey(PreSignedUrlFilter filter, String accessKeyId) throws Exception {
+        Method method = PreSignedUrlFilter.class.getDeclaredMethod("resolveSecretKey", String.class);
+        method.setAccessible(true);
+        return (String) method.invoke(filter, accessKeyId);
+    }
+
+    @Test
+    void resolveSecretKeyTreatsUnregisteredOwnerAccountIdLikeLegacyTestKey() throws Exception {
+        IamService iamService = IamServiceTestHelper.iamServiceWithAccessKey("AKIDUNRELATED", "unrelated-secret");
+        PreSignedUrlFilter filter = new PreSignedUrlFilter(null, null, iamService);
+
+        assertEquals("test", resolveSecretKey(filter, "123456789012"));
+    }
 
     private static MultivaluedMap<String, String> params() {
         return new MultivaluedHashMap<>();

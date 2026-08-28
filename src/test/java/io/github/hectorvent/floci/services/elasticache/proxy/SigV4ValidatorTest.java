@@ -116,6 +116,30 @@ class SigV4ValidatorTest {
         assertFalse(validator.validate(token, "cache-cluster-01", "default"));
     }
 
+    /**
+     * A launched container that never assumes an execution role but has a known owning
+     * account is given AWS_ACCESS_KEY_ID=&lt;ownerAccountId&gt; (see LaunchedContainerAwsEnv),
+     * unregistered in IAM the same way the "test" placeholder is. It must still validate
+     * against the "test" placeholder secret the same way the literal "test" access key does,
+     * or every IAM-authenticated ElastiCache connection from such a Lambda breaks.
+     */
+    @Test
+    void validateAcceptsUnregisteredOwnerAccountIdPairedWithPlaceholderSecret() throws Exception {
+        IamService iamService = IamServiceTestHelper.iamServiceWithAccessKey("AKIDCACHE", "secret-cache");
+
+        SigV4Validator validator = new SigV4Validator(iamService);
+        String token = SigV4TokenTestHelper.createElastiCacheToken(
+                "cache-cluster-01",
+                "default",
+                "123456789012",
+                "test",
+                Instant.now().minusSeconds(60),
+                900
+        );
+
+        assertTrue(validator.validate(token, "cache-cluster-01", "default"));
+    }
+
     @Test
     void validateRejectsTokenForWrongUser() throws Exception {
         IamService iamService = IamServiceTestHelper.iamServiceWithAccessKey("AKIDCACHE", "secret-cache");

@@ -19,6 +19,8 @@ import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Optional;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @Provider
@@ -27,6 +29,8 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
     private static final Logger LOG = Logger.getLogger(PreSignedUrlFilter.class);
     private static final String LEGACY_ACCESS_KEY_ID = "test";
     private static final String LEGACY_SECRET_KEY = "test";
+    /** Matches AccountResolver's "12-digit access key ID is an owning account" convention. */
+    private static final Pattern ACCOUNT_ID_PATTERN = Pattern.compile("\\d{12}");
 
     private final PreSignedUrlGenerator presignGenerator;
     private final S3Service s3Service;
@@ -218,7 +222,18 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
             return LEGACY_SECRET_KEY;
         }
         if (iamService != null) {
-            return iamService.findSecretKey(accessKeyId).orElse(null);
+            Optional<String> registered = iamService.findSecretKey(accessKeyId);
+            if (registered.isPresent()) {
+                return registered.get();
+            }
+            // A bare 12-digit account ID that isn't a registered access key is still one of
+            // Floci's own placeholders: a Lambda without an execution role but with a known
+            // owning account is given that account ID as AWS_ACCESS_KEY_ID (see
+            // LaunchedContainerAwsEnv), always paired with the "test" secret. Fall back the same
+            // way the legacy literal does, rather than failing validation for every such Lambda.
+            // Any other unregistered key is genuinely unknown and must still report
+            // InvalidAccessKeyId, not fall through to a signature check.
+            return ACCOUNT_ID_PATTERN.matcher(accessKeyId).matches() ? LEGACY_SECRET_KEY : null;
         }
         return null;
     }

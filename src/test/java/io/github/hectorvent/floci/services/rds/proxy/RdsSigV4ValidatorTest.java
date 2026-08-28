@@ -126,6 +126,31 @@ class RdsSigV4ValidatorTest {
         assertFalse(validator.validate(token, "admin"));
     }
 
+    /**
+     * A launched container that never assumes an execution role but has a known owning
+     * account is given AWS_ACCESS_KEY_ID=&lt;ownerAccountId&gt; (see LaunchedContainerAwsEnv),
+     * unregistered in IAM the same way the "test" placeholder is. It must still validate
+     * against the "test" placeholder secret the same way the literal "test" access key does,
+     * or every IAM-authenticated RDS connection from such a Lambda breaks.
+     */
+    @Test
+    void validateAcceptsUnregisteredOwnerAccountIdPairedWithPlaceholderSecret() throws Exception {
+        IamService iamService = IamServiceTestHelper.iamServiceWithAccessKey("AKIDRDS", "secret-rds");
+
+        RdsSigV4Validator validator = new RdsSigV4Validator(iamService);
+        String token = SigV4TokenTestHelper.createRdsToken(
+                "db.example.local",
+                5432,
+                "admin",
+                "123456789012",
+                "test",
+                Instant.now().minusSeconds(60),
+                900
+        );
+
+        assertTrue(validator.validate(token, "admin"));
+    }
+
     @Test
     void validateRejectsTokenMissingDbUser() throws Exception {
         IamService iamService = IamServiceTestHelper.iamServiceWithAccessKey("AKIDRDS", "secret-rds");
