@@ -311,22 +311,44 @@ public class CloudFormationService implements ResourceProvider {
     public List<ResourceChange> computeChangeSetChanges(ChangeSet cs, String region) {
         Stack stack = getStackOrThrow(cs.getStackName(), region);
         try {
-            JsonNode newResources = parseTemplate(cs.getTemplateBody()).path("Resources");
+            JsonNode newTemplate = parseTemplate(cs.getTemplateBody());
+            if (samTransformProcessor.hasSamTransform(newTemplate)) {
+                // The deployed stack's template is always the SAM-expanded form (see
+                // executeTemplate); comparing the change set's raw SAM source against it would
+                // report every SAM-generated resource as Add/Remove even on a no-op update.
+                newTemplate = samTransformProcessor.expandSamTemplate(newTemplate);
+            }
+            JsonNode newResources = newTemplate.path("Resources");
             boolean createType = "CREATE".equalsIgnoreCase(cs.getChangeSetType())
                     || stack.getTemplateBody() == null;
             JsonNode oldResources = createType
                     ? objectMapper.createObjectNode()
                     : parseTemplate(stack.getTemplateBody()).path("Resources");
+
+            Map<String, String> oldParams = stack.getParameters() != null
+                    ? stack.getParameters() : Map.of();
+            Map<String, String> newParams = cs.getParameters() != null
+                    ? cs.getParameters() : Map.of();
+            Set<String> changedParams = new HashSet<>();
+            newParams.forEach((k, v) -> {
+                if (!Objects.equals(v, oldParams.get(k))) {
+                    changedParams.add(k);
+                }
+            });
+
             List<ResourceChange> changes = new ArrayList<>();
             newResources.fields().forEachRemaining(e -> {
                 String logicalId = e.getKey();
-                String resourceType = e.getValue().path("Type").asText();
+                JsonNode newDef = e.getValue();
+                String resourceType = newDef.path("Type").asText();
                 JsonNode oldDef = oldResources.get(logicalId);
                 if (oldDef == null) {
                     changes.add(new ResourceChange("Add", logicalId, null, resourceType, null));
-                } else if (!oldDef.equals(e.getValue())) {
+                } else if (!oldDef.equals(newDef) || referencesAnyParameter(newDef, changedParams)) {
+                    boolean typeChanged = !oldDef.path("Type").asText().equals(resourceType);
                     changes.add(new ResourceChange("Modify", logicalId,
-                            resourcePhysicalId(stack, logicalId), resourceType, "False"));
+                            resourcePhysicalId(stack, logicalId), resourceType,
+                            typeChanged ? "True" : "False"));
                 }
             });
             oldResources.fields().forEachRemaining(e -> {
@@ -344,6 +366,20 @@ public class CloudFormationService implements ResourceProvider {
                     "Unable to compute changes for change set " + cs.getChangeSetName()
                             + ": " + e.getMessage(), 400);
         }
+    }
+
+    /** True if a resource's definition references any of the given (changed) parameter names. */
+    private boolean referencesAnyParameter(JsonNode resourceDef, Set<String> parameterNames) {
+        if (parameterNames.isEmpty()) {
+            return false;
+        }
+        String json = resourceDef.toString();
+        for (String name : parameterNames) {
+            if (json.contains("\"Ref\":\"" + name + "\"") || json.contains("${" + name + "}")) {
+                return true;
+            }
+        }
+        return false;
     }
 
     public record ResourceChange(String action, String logicalResourceId, String physicalResourceId,
