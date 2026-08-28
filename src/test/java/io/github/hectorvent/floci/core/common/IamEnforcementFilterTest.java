@@ -319,12 +319,14 @@ class IamEnforcementFilterTest {
     }
 
     // The realistic baseline guardrail from .temp/org-functional-test.sh: DenyLeaveOrg plus a
-    // DenyRootUser that fires only when aws:PrincipalArn matches the account root. floci never
-    // populates aws:PrincipalArn (IamConditionContextResolver only sets s3 list keys), so a plain
-    // StringLike on that absent key fails the condition block (IamPolicyEvaluator, absent-key path)
-    // and the DenyRootUser statement is inert. This test locks that in: making the account-root
-    // principal enforced must NOT turn a common baseline SCP into a total denial of all workload
-    // activity — a normal action still passes while LeaveOrganization is still denied.
+    // DenyRootUser that fires when aws:PrincipalArn matches the account root. floci now populates
+    // aws:PrincipalArn as arn:aws:iam::<account>:root for the synthesized account-root principal
+    // (the same principal SCPs already enforce against), so this guardrail's DenyRootUser
+    // statement fires for every action the account-root principal takes — not just the one
+    // DenyLeaveOrg explicitly targets. This test locks in that faithful behavior: a maintainer
+    // review (pgermosen, PR #2637) flagged the earlier inert-DenyRootUser behavior as an
+    // inconsistency, since SCPs already treat this principal as root but the condition context
+    // didn't reflect it.
     private static final String WORKLOAD_GUARDRAILS =
             "{\"Version\":\"2012-10-17\",\"Statement\":["
             + "{\"Sid\":\"DenyLeaveOrg\",\"Effect\":\"Deny\","
@@ -333,10 +335,11 @@ class IamEnforcementFilterTest {
             + "\"Condition\":{\"StringLike\":{\"aws:PrincipalArn\":\"arn:aws:iam::*:root\"}}}]}";
 
     @Test
-    void workloadGuardrailScpDeniesLeaveButDenyRootUserStaysInertForAccountRoot() {
-        // A non-denied action must still succeed under the two-statement baseline guardrail: the
-        // DenyRootUser statement cannot fire because aws:PrincipalArn is never in the context.
-        ContainerRequestContext allowed = mock(ContainerRequestContext.class);
+    void workloadGuardrailDenyRootUserFiresForAccountRootPrincipal() {
+        // A non-DenyLeaveOrg action is now ALSO denied under the two-statement baseline guardrail:
+        // DenyRootUser's blanket Action:"*" fires because aws:PrincipalArn now matches the
+        // synthesized account-root ARN.
+        ContainerRequestContext otherAction = mock(ContainerRequestContext.class);
         String account = "111122223333";
         String auth = "AWS4-HMAC-SHA256 Credential=" + account
                 + "/20260629/us-east-1/organizations/aws4_request, SignedHeaders=host, Signature=abc";
@@ -345,13 +348,14 @@ class IamEnforcementFilterTest {
 
         when(accountResolver.extractAccessKeyId(auth)).thenReturn(account);
         when(accountResolver.resolve(auth)).thenReturn(account);
-        when(allowed.getHeaderString("Authorization")).thenReturn(auth);
-        when(actionRegistry.resolve("organizations", allowed))
+        when(otherAction.getHeaderString("Authorization")).thenReturn(auth);
+        when(otherAction.getMediaType()).thenReturn(MediaType.valueOf("application/x-amz-json-1.1"));
+        when(actionRegistry.resolve("organizations", otherAction))
                 .thenReturn("organizations:DescribeOrganization");
         when(iamService.resolveCallerContext(account)).thenReturn(null);
-        when(arnBuilder.build(eq("organizations"), eq(allowed), eq("us-east-1"), eq(account)))
+        when(arnBuilder.build(eq("organizations"), eq(otherAction), eq("us-east-1"), eq(account)))
                 .thenReturn("*");
-        when(conditionContextResolver.resolve(eq("organizations"), anyString(), eq(allowed)))
+        when(conditionContextResolver.resolve(eq("organizations"), anyString(), eq(otherAction)))
                 .thenReturn(null);
 
         ScpProvider scp = mock(ScpProvider.class);
@@ -359,13 +363,12 @@ class IamEnforcementFilterTest {
                 List.of(FULL_AWS_ACCESS),
                 List.of(FULL_AWS_ACCESS, WORKLOAD_GUARDRAILS)));
 
-        newFilterWithScp(scp).filter(allowed);
+        ArgumentCaptor<Response> otherCaptor = ArgumentCaptor.forClass(Response.class);
+        newFilterWithScp(scp).filter(otherAction);
+        verify(otherAction).abortWith(otherCaptor.capture());
+        assertEquals(403, otherCaptor.getValue().getStatus());
 
-        // DenyRootUser is inert (aws:PrincipalArn absent) → FullAWSAccess baseline allows.
-        verify(allowed, never()).abortWith(any());
-        verify(arnBuilder).build(eq("organizations"), eq(allowed), eq("us-east-1"), eq(account));
-
-        // ...and the same guardrail still denies the action it explicitly targets.
+        // ...and the action DenyLeaveOrg explicitly targets is denied too (doubly so now).
         ContainerRequestContext denied = mock(ContainerRequestContext.class);
         when(denied.getHeaderString("Authorization")).thenReturn(auth);
         when(denied.getMediaType()).thenReturn(MediaType.valueOf("application/x-amz-json-1.1"));
@@ -379,6 +382,41 @@ class IamEnforcementFilterTest {
         ArgumentCaptor<Response> captor = ArgumentCaptor.forClass(Response.class);
         newFilterWithScp(scp).filter(denied);
         verify(denied).abortWith(captor.capture());
+        assertEquals(403, captor.getValue().getStatus());
+    }
+
+    @Test
+    void accountRootPrincipalPopulatesRootPrincipalArnInConditionContext() {
+        // Direct assertion that aws:PrincipalArn is set to the AWS root-ARN shape for the
+        // synthesized account-root principal: an SCP level that allows everything except an
+        // action explicitly conditioned on the exact root ARN must deny only that action.
+        String account = "444455556666";
+        String rootArnDeny = "{\"Version\":\"2012-10-17\",\"Statement\":["
+                + "{\"Effect\":\"Deny\",\"Action\":\"s3:ListBucket\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:PrincipalArn\":\"arn:aws:iam::"
+                + account + ":root\"}}}]}";
+        String auth = "AWS4-HMAC-SHA256 Credential=" + account
+                + "/20260629/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=abc";
+        requestContext.setAccountId(account);
+        requestContext.setRegion("us-east-1");
+
+        ContainerRequestContext ctx = mock(ContainerRequestContext.class);
+        when(ctx.getHeaderString("Authorization")).thenReturn(auth);
+        when(ctx.getMediaType()).thenReturn(MediaType.valueOf("application/x-amz-json-1.1"));
+        when(accountResolver.extractAccessKeyId(auth)).thenReturn(account);
+        when(accountResolver.resolve(auth)).thenReturn(account);
+        when(actionRegistry.resolve("s3", ctx)).thenReturn("s3:ListBucket");
+        when(iamService.resolveCallerContext(account)).thenReturn(null);
+        when(arnBuilder.build(eq("s3"), eq(ctx), eq("us-east-1"), eq(account))).thenReturn("*");
+        when(conditionContextResolver.resolve(eq("s3"), anyString(), eq(ctx))).thenReturn(null);
+
+        ScpProvider scp = mock(ScpProvider.class);
+        when(scp.effectiveScpLevels(account)).thenReturn(List.of(
+                List.of(FULL_AWS_ACCESS), List.of(FULL_AWS_ACCESS, rootArnDeny)));
+
+        ArgumentCaptor<Response> captor = ArgumentCaptor.forClass(Response.class);
+        newFilterWithScp(scp).filter(ctx);
+        verify(ctx).abortWith(captor.capture());
         assertEquals(403, captor.getValue().getStatus());
     }
 

@@ -152,6 +152,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                 ? scpProvider.get().effectiveScpLevels(accountId)
                 : null;
 
+        boolean accountRootPrincipal = false;
         CallerContext caller = iamService.resolveCallerContext(akid);
         if (caller == null) {
             // A bare 12-digit account-id key is floci's account-root principal: not a registered
@@ -162,6 +163,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                 return; // unknown access key or no SCP ceiling → bypass (backward-compat)
             }
             caller = CallerContext.of(List.of(ROOT_ALLOW_ALL));
+            accountRootPrincipal = true;
         }
         if (scpLevels != null) {
             caller = caller.withScpLevels(scpLevels);
@@ -171,11 +173,15 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
 
         Map<String, String> conditionContext = conditionContextResolver.resolve(credentialScope, action, ctx);
 
-        // aws:PrincipalArn is populated only for principals whose ARN is known — IAM users and
-        // assumed-role sessions. resolveCallerArn returns empty for the bare account-id key
-        // (floci's account root), so a principal-scoped condition (e.g. a DenyRootUser guardrail
-        // keyed on aws:PrincipalArn) stays absent for the account root and does not fire against it.
-        Optional<String> principalArn = iamService.resolveCallerArn(akid);
+        // aws:PrincipalArn is populated for every principal this filter can identify — IAM users,
+        // assumed-role sessions, and now the synthesized account-root principal above, using AWS's
+        // own root ARN shape (arn:aws:iam::<account>:root). Real AWS populates this key for the
+        // root user, so a DenyRootUser guardrail keyed on it must fire against floci's account-root
+        // stand-in the same way it enforces SCPs against it (the account-root SCP change above);
+        // leaving it absent here would have made the two forms of root enforcement inconsistent.
+        Optional<String> principalArn = accountRootPrincipal
+                ? Optional.of("arn:aws:iam::" + accountId + ":root")
+                : iamService.resolveCallerArn(akid);
         if (principalArn.isPresent()) {
             conditionContext = conditionContext == null ? new HashMap<>() : new HashMap<>(conditionContext);
             conditionContext.put("aws:PrincipalArn", principalArn.get());

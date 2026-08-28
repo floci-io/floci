@@ -399,14 +399,16 @@ floci populates:
 
 - `s3:prefix`, `s3:delimiter`, `s3:max-keys` — from the S3 request parameters.
 - `aws:PrincipalArn` — the caller's ARN, resolved from the signing access key. It is the
-  IAM-user ARN for a user access key and the assumed-role ARN for an STS session. It is
-  **absent** for the bare account-id key (floci's account root) and for unknown keys.
+  IAM-user ARN for a user access key, the assumed-role ARN for an STS session, and
+  `arn:aws:iam::<account>:root` for the bare account-id key (floci's account-root principal),
+  matching the ARN shape AWS itself reports for the account root. It is **absent** only for
+  unknown keys, where nothing about the caller can be resolved.
 
 **Any other condition key is absent from the request context.** A plain (non-`IfExists`)
 operator on an absent key makes the whole statement *not apply* — it neither matches nor
-blocks. This is why a `DenyRootUser`-style guardrail keyed on `aws:PrincipalArn` stays
-**inert against the account root**: the account root has no resolvable ARN, so the key is
-absent and the `Deny` never fires. It does fire for real IAM-user and assumed-role callers.
+blocks. A `DenyRootUser`-style guardrail keyed on `aws:PrincipalArn` therefore fires against
+the account root the same way it does on real AWS, consistent with the account root already
+being bounded by SCPs (below): both forms of root enforcement now agree.
 
 **Caveat:** `resolveCallerArn` hardcodes the assumed-role session name as `floci-session`,
 so `aws:PrincipalArn` for an assumed-role caller will not match a condition that pins a
@@ -463,9 +465,10 @@ identity policy — it behaves as allow-everything bounded only by the SCP ceili
 **identity-policy** enforcement, use account-routable credentials for the member instead, most
 naturally the `ASIA…` session from assuming its `OrganizationAccountAccessRole`.
 
-Note that `aws:PrincipalArn` is populated only for principals whose ARN is known — IAM users and
-assumed-role sessions. It stays absent for the bare account-id key, so a principal-scoped guardrail
-keyed on `aws:PrincipalArn` does not fire against the account root.
+Note that `aws:PrincipalArn` is populated for the account-root principal too, as
+`arn:aws:iam::<account>:root`, so a principal-scoped guardrail keyed on `aws:PrincipalArn`
+(for example a `DenyRootUser` statement matching `arn:aws:iam::*:root`) fires against it —
+consistent with the account root already being bounded by SCPs above.
 
 A level containing an SCP document that fails to parse denies every action at that level. The
 ceiling cannot tell what an unreadable guardrail would have said, and every target also carries
