@@ -131,20 +131,27 @@ public class LaunchedContainerAwsEnv {
             var ak = hostEnv.apply("AWS_ACCESS_KEY_ID");
             var sk = hostEnv.apply("AWS_SECRET_ACCESS_KEY");
             var st = hostEnv.apply("AWS_SESSION_TOKEN");
-            if ((ak != null || sk != null || st != null) && hostCredentialsWarned.compareAndSet(false, true)) {
+            boolean hasOwnerAccountId = ownerAccountId != null && ACCOUNT_ID_PATTERN.matcher(ownerAccountId).matches();
+            if (!hasOwnerAccountId && (ak != null || sk != null || st != null)
+                    && hostCredentialsWarned.compareAndSet(false, true)) {
                 // The container runs workload code, so surface that it is being handed the
                 // credentials Floci itself was started with (an exported key pair, aws-vault, a
                 // CI runner) rather than placeholders. Mount ~/.aws via aws-config-path, or give
                 // the workload a role Floci knows, to keep host credentials out of it.
                 // Once per process: ephemeral containers relaunch per invocation, and a warning
-                // repeated on every launch is one people learn to scroll past.
+                // repeated on every launch is one people learn to scroll past. Only fires when
+                // Floci's own ambient credentials are actually forwarded — the owner-account
+                // branch below never forwards them, so the warning would otherwise be false.
                 LOG.warnf("Forwarding Floci's own AWS credentials from the environment "
                         + "(AWS_ACCESS_KEY_ID=%s...) into launched containers", abbreviate(ak));
             }
-            boolean hasOwnerAccountId = ownerAccountId != null && ACCOUNT_ID_PATTERN.matcher(ownerAccountId).matches();
+            // The numeric owner-account access key is only ever validated (by the S3, RDS and
+            // ElastiCache SigV4 checks) when paired with the literal "test" secret and session
+            // token — never with Floci's own ambient secret, which those checks know nothing
+            // about and which would produce a credential pair nothing can verify.
             env.add("AWS_ACCESS_KEY_ID=" + (hasOwnerAccountId ? ownerAccountId : (ak != null ? ak : "test")));
-            env.add("AWS_SECRET_ACCESS_KEY=" + (sk != null ? sk : "test"));
-            env.add("AWS_SESSION_TOKEN=" + (st != null ? st : "test"));
+            env.add("AWS_SECRET_ACCESS_KEY=" + (hasOwnerAccountId ? "test" : (sk != null ? sk : "test")));
+            env.add("AWS_SESSION_TOKEN=" + (hasOwnerAccountId ? "test" : (st != null ? st : "test")));
         }
         env.add("FLOCI_HOSTNAME=" + URI.create(flociEndpoint).getHost());
         env.add("FLOCI_ENDPOINT=" + flociEndpoint);

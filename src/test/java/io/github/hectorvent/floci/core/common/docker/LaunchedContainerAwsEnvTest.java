@@ -146,6 +146,25 @@ class LaunchedContainerAwsEnvTest {
     }
 
     @Test
+    void ownerAccountIdForcesTestSecretEvenWithNonTestAmbientSecret() {
+        // The numeric owner-account access key is only ever validated by Floci's S3/RDS/
+        // ElastiCache SigV4 checks when paired with the literal "test" secret (see
+        // LaunchedContainerAwsEnv's class javadoc and the matching validators). If Floci itself
+        // was started with a real, non-test AWS_SECRET_ACCESS_KEY (an exported key pair,
+        // aws-vault, a CI runner), that ambient secret must never be paired with the numeric
+        // owner-account key — the SDK would sign with a pair nothing can verify.
+        LaunchedContainerAwsEnv awsEnv = awsEnvWithHostEnv("http://localhost:4566",
+                Map.of("AWS_ACCESS_KEY_ID", "test", "AWS_SECRET_ACCESS_KEY", "AKIAREALAMBIENTSECRET",
+                        "AWS_SESSION_TOKEN", "real-ambient-session-token"));
+
+        List<String> env = awsEnv.sdkBaselineEnv("us-east-1", Optional.empty(), Optional.empty(), "041922743467");
+
+        assertTrue(env.contains("AWS_ACCESS_KEY_ID=041922743467"));
+        assertTrue(env.contains("AWS_SECRET_ACCESS_KEY=test"));
+        assertTrue(env.contains("AWS_SESSION_TOKEN=test"));
+    }
+
+    @Test
     void injectsOwnerAccountIdAsAccessKeyWhenHostEnvNotSet() {
         LaunchedContainerAwsEnv awsEnv = awsEnvWithHostEnv("http://localhost:4566", Map.of());
 
