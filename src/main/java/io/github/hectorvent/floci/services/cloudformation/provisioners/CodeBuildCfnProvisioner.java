@@ -74,8 +74,16 @@ public class CodeBuildCfnProvisioner implements CfnResourceProvisioner {
 
     private JsonNode handle(String action, ObjectNode request, String region, String account) {
         try {
-            Object entity = codeBuildJsonHandler.handle(action, request, region, account).getEntity();
-            return entity instanceof JsonNode node ? node : mapper.createObjectNode();
+            jakarta.ws.rs.core.Response response =
+                    codeBuildJsonHandler.handle(action, request, region, account);
+            try {
+                // The handler returns Response.ok(Map.of(...)) for every JSON action, never a
+                // JsonNode directly, so the entity must be converted rather than downcast.
+                Object entity = response.getEntity();
+                return entity instanceof JsonNode node ? node : mapper.valueToTree(entity);
+            } finally {
+                response.close();
+            }
         } catch (AwsException e) {
             throw e;
         } catch (Exception e) {

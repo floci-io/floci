@@ -91,4 +91,27 @@ class CodeBuildCfnProvisionerTest {
 
         verify(handler).handle(eq("UpdateProject"), any(), eq("us-east-1"), eq("000000000000"));
     }
+
+    @Test
+    void mapEntityFromHandlerIsConvertedNotDropped() throws Exception {
+        // The real handler returns Response.ok(Map.of(...)) — a Map/POJO entity, never a JsonNode —
+        // so a plain instanceof check silently drops the project and falls back to the guessed ARN.
+        java.util.Map<String, Object> project = new java.util.HashMap<>();
+        project.put("arn", "arn:aws:codebuild:us-east-1:000000000000:project/from-handler");
+        java.util.Map<String, Object> entity = java.util.Map.of("project", project);
+        when(handler.handle(eq("CreateProject"), any(), eq("us-east-1"), eq("000000000000")))
+                .thenReturn(Response.ok(entity).build());
+
+        ObjectNode props = mapper.createObjectNode();
+        props.put("Name", "installer");
+        StackResource r = new StackResource();
+        r.setLogicalId("Installer");
+        r.setResourceType("AWS::CodeBuild::Project");
+        r.setAttributes(new HashMap<>());
+
+        provisioner.provision(r, props, ctx());
+
+        assertEquals("arn:aws:codebuild:us-east-1:000000000000:project/from-handler",
+                r.getAttributes().get("Arn"));
+    }
 }
