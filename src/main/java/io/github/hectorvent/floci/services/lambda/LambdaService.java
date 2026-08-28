@@ -62,6 +62,10 @@ public class LambdaService implements ResourceProvider {
                     + "\\d{12}:access-point/fsap-[a-f0-9]{17}$");
     private static final Pattern FILE_SYSTEM_LOCAL_MOUNT_PATH = Pattern.compile("^/mnt/[A-Za-z0-9._-]+$");
     private static final Pattern LOG_GROUP_PATTERN = Pattern.compile("[.\\-_/#A-Za-z0-9]+");
+    private static final Pattern ROLE_ARN_PATTERN = Pattern.compile(
+            "arn:(aws[a-zA-Z-]*)?:iam::\\d{12}:role/?[a-zA-Z_0-9+=,.@\\-_/]+");
+    private static final Pattern HANDLER_PATTERN = Pattern.compile("\\S+");
+    private static final int MAX_HANDLER_LENGTH = 128;
 
     private final LambdaFunctionStore functionStore;
     private final LambdaExecutorService executorService;
@@ -542,6 +546,12 @@ public class LambdaService implements ResourceProvider {
         }
         if (request.containsKey("LoggingConfig")) {
             validateLoggingConfig(request.get("LoggingConfig"));
+        }
+        if (request.containsKey("Role")) {
+            validateRoleArn((String) request.get("Role"));
+        }
+        if (request.containsKey("Handler")) {
+            validateHandler((String) request.get("Handler"));
         }
 
         Map<String, Object> requestedVpcConfig = fn.getVpcConfig();
@@ -1360,6 +1370,36 @@ public class LambdaService implements ResourceProvider {
                     "1 validation error detected: Value '" + group + "' at 'loggingConfig.logGroup' failed to "
                             + "satisfy constraint: Member must satisfy regular expression pattern: "
                             + "[.\\-_/#A-Za-z0-9]+ or member must have length less than or equal to 512", 400);
+        }
+    }
+
+    /**
+     * Role must be an IAM role ARN ({@code arn:aws*:iam::ACCOUNT:role/NAME}); blank/absent is
+     * only valid because callers gate this on {@code containsKey("Role")} beforehand.
+     */
+    private static void validateRoleArn(String role) {
+        if (role == null || !ROLE_ARN_PATTERN.matcher(role).matches()) {
+            throw new AwsException("InvalidParameterValueException",
+                    "1 validation error detected: Value '" + role + "' at 'role' failed to satisfy "
+                            + "constraint: Member must satisfy regular expression pattern: "
+                            + ROLE_ARN_PATTERN.pattern(), 400);
+        }
+    }
+
+    /**
+     * Handler must be 0-128 characters with no whitespace; a blank value clears it, matching
+     * how {@code Description} is handled elsewhere in this update.
+     */
+    private static void validateHandler(String handler) {
+        if (handler == null || handler.isEmpty()) {
+            return;
+        }
+        if (handler.length() > MAX_HANDLER_LENGTH || !HANDLER_PATTERN.matcher(handler).matches()) {
+            throw new AwsException("InvalidParameterValueException",
+                    "1 validation error detected: Value '" + handler + "' at 'handler' failed to satisfy "
+                            + "constraint: Member must satisfy regular expression pattern: "
+                            + HANDLER_PATTERN.pattern() + " or member must have length less than or equal to "
+                            + MAX_HANDLER_LENGTH, 400);
         }
     }
 

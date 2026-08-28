@@ -24,6 +24,8 @@ class LambdaArnUtilsTest {
             "arn:aws:lambda:us-east-1:000000000000:function:my-fn:prod, my-fn, prod, us-east-1",
             "arn:aws:lambda:us-east-1:000000000000:function:my-fn:$LATEST, my-fn, $LATEST, us-east-1",
             "arn:aws:lambda:us-east-1:000000000000:function:my_fn-1, my_fn-1, , us-east-1",
+            "my.fn.v2, my.fn.v2, , ",
+            "arn:aws:lambda:us-east-1:000000000000:function:my.fn.v2, my.fn.v2, , us-east-1",
     })
     void resolveAcceptsValidForms(String input, String expectedName, String expectedQualifier, String expectedRegion) {
         LambdaArnUtils.ResolvedFunctionRef ref = LambdaArnUtils.resolve(input);
@@ -54,6 +56,21 @@ class LambdaArnUtilsTest {
         AwsException ex = assertThrows(AwsException.class, () -> LambdaArnUtils.resolve(input));
         assertEquals("InvalidParameterValueException", ex.getErrorCode());
         assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void resolveRejectsNameLongerThan256Chars() {
+        String tooLong = "a".repeat(257);
+        AwsException ex = assertThrows(AwsException.class, () -> LambdaArnUtils.resolve(tooLong));
+        assertEquals("InvalidParameterValueException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void resolveAccepts256CharName() {
+        String maxLen = "a".repeat(256);
+        LambdaArnUtils.ResolvedFunctionRef ref = LambdaArnUtils.resolve(maxLen);
+        assertEquals(maxLen, ref.name());
     }
 
     @Test
