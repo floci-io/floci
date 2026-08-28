@@ -4975,9 +4975,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
      * unrelated third account.
      */
     private static boolean visibleToAccount(VpcPeeringConnection pcx, String callerAccountId) {
-        String requesterOwnerId = pcx.getRequesterVpcInfo() != null ? pcx.getRequesterVpcInfo().getOwnerId() : null;
-        String accepterOwnerId = pcx.getAccepterVpcInfo() != null ? pcx.getAccepterVpcInfo().getOwnerId() : null;
-        return callerAccountId.equals(requesterOwnerId) || callerAccountId.equals(accepterOwnerId);
+        return callerAccountId.equals(ownerId(pcx.getRequesterVpcInfo()))
+                || callerAccountId.equals(ownerId(pcx.getAccepterVpcInfo()));
+    }
+
+    private static String ownerId(VpcPeeringConnectionVpcInfo side) {
+        return side != null ? side.getOwnerId() : null;
     }
 
     public List<VpcPeeringConnection> describeVpcPeeringConnections(String region, List<String> ids,
@@ -5025,6 +5028,22 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             VpcPeeringConnection current = owned.pcx();
             if (!visibleToAccount(current, callerAccountId()) || !visibleFromRegion(current, region)) {
                 throw vpcPeeringConnectionNotFound(vpcPeeringConnectionId);
+            }
+            String caller = callerAccountId();
+            // Each side's options block is that side's own VPC setting: only its owner may change
+            // it. A participant setting only its own side (the normal case) never trips this; it
+            // rejects the cross-account case where one side reaches into the other's block.
+            if (accepterAllowRemoteVpcDnsResolution != null
+                    && !caller.equals(ownerId(current.getAccepterVpcInfo()))) {
+                throw new AwsException("OperationNotPermitted",
+                        "You do not have permission to modify accepterPeeringConnectionOptions on "
+                                + vpcPeeringConnectionId + "; only the accepter VPC's owner may.", 400);
+            }
+            if (requesterAllowRemoteVpcDnsResolution != null
+                    && !caller.equals(ownerId(current.getRequesterVpcInfo()))) {
+                throw new AwsException("OperationNotPermitted",
+                        "You do not have permission to modify requesterPeeringConnectionOptions on "
+                                + vpcPeeringConnectionId + "; only the requester VPC's owner may.", 400);
             }
             if (accepterAllowRemoteVpcDnsResolution != null) {
                 current.setAccepterAllowRemoteVpcDnsResolution(accepterAllowRemoteVpcDnsResolution);

@@ -298,12 +298,67 @@ class Ec2VpcPeeringConnectionCrossAccountIntegrationTest {
     }
 
     /**
+     * Each side's DNS-resolution option is that side's own setting: being a legitimate
+     * participant in the connection is not enough to change the *other* side's option, only
+     * your own — same as AWS, where accepterPeeringConnectionOptions is the accepter VPC
+     * owner's setting and requesterPeeringConnectionOptions is the requester VPC owner's.
+     */
+    @Test
+    @Order(9)
+    void aParticipantCannotModifyTheOppositeEndpointsOptions() {
+        // The requester may set its own side...
+        given()
+            .formParam("Action", "ModifyVpcPeeringConnectionOptions")
+            .formParam("VpcPeeringConnectionId", pcxId)
+            .formParam("RequesterPeeringConnectionOptions.AllowDnsResolutionFromRemoteVpc", "true")
+            .header("Authorization", REQUESTER_AUTH)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // ...but not the accepter's side, even though it is a legitimate participant.
+        given()
+            .formParam("Action", "ModifyVpcPeeringConnectionOptions")
+            .formParam("VpcPeeringConnectionId", pcxId)
+            .formParam("AccepterPeeringConnectionOptions.AllowDnsResolutionFromRemoteVpc", "true")
+            .header("Authorization", REQUESTER_AUTH)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("OperationNotPermitted"));
+
+        // Symmetrically, the accepter may set its own side but not the requester's.
+        given()
+            .formParam("Action", "ModifyVpcPeeringConnectionOptions")
+            .formParam("VpcPeeringConnectionId", pcxId)
+            .formParam("AccepterPeeringConnectionOptions.AllowDnsResolutionFromRemoteVpc", "true")
+            .header("Authorization", ACCEPTER_AUTH)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .formParam("Action", "ModifyVpcPeeringConnectionOptions")
+            .formParam("VpcPeeringConnectionId", pcxId)
+            .formParam("RequesterPeeringConnectionOptions.AllowDnsResolutionFromRemoteVpc", "false")
+            .header("Authorization", ACCEPTER_AUTH)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("OperationNotPermitted"));
+    }
+
+    /**
      * Accept, modify and delete must enforce the same regional-visibility invariant Describe
      * does: an endpoint in a region belonging to neither side must not be able to act on the
      * connection, even when the caller's account is a legitimate participant.
      */
     @Test
-    @Order(9)
+    @Order(10)
     void mutationsFromAnUnrelatedRegionAreRejected() {
         given()
             .formParam("Action", "ModifyVpcPeeringConnectionOptions")
