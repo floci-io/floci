@@ -28,6 +28,7 @@ import org.jboss.logging.Logger;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegions;
@@ -36,6 +37,7 @@ import io.github.hectorvent.floci.core.common.ContainerTeardown;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
 import io.github.hectorvent.floci.core.resource.SupportedResourceType;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -100,6 +102,7 @@ import jakarta.annotation.PostConstruct;
 import io.github.hectorvent.floci.services.ec2.model.LaunchSpecification;
 import io.github.hectorvent.floci.services.ec2.model.SpotInstanceRequest;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.context.ContextNotActiveException;
 import jakarta.inject.Inject;
 
 @ApplicationScoped
@@ -126,6 +129,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     private static final long CONTAINER_LAUNCH_POLL_MILLIS = 50;
 
     private final String accountId;
+    private final jakarta.enterprise.inject.Instance<RequestContext> requestContextInstance;
     private final EmulatorConfig config;
     private final Ec2ContainerManager containerManager;
     private final Ec2PortForwardManager portForwardManager;
@@ -167,11 +171,22 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     // subnetId → counter for IP assignment (runtime-only, not persisted)
     private final Map<String, AtomicInteger> subnetIpCounters = new ConcurrentHashMap<>();
 
-    @Inject
+    // Public, no request context — for callers (and tests) that construct this service directly
+    // without CDI. Caller-identity resolution falls back to the configured default account.
     public Ec2Service(EmulatorConfig config, Ec2ContainerManager containerManager,
                       Ec2PortForwardManager portForwardManager,
                       AmiImageResolver amiImageResolver, Ec2ImageCatalog imageCatalog,
                       Ec2InstanceTypeCatalog instanceTypeCatalog, StorageFactory storageFactory) {
+        this(config, containerManager, portForwardManager, amiImageResolver, imageCatalog,
+                instanceTypeCatalog, storageFactory, null);
+    }
+
+    @Inject
+    public Ec2Service(EmulatorConfig config, Ec2ContainerManager containerManager,
+                      Ec2PortForwardManager portForwardManager,
+                      AmiImageResolver amiImageResolver, Ec2ImageCatalog imageCatalog,
+                      Ec2InstanceTypeCatalog instanceTypeCatalog, StorageFactory storageFactory,
+                      jakarta.enterprise.inject.Instance<RequestContext> requestContextInstance) {
         this(config, containerManager, portForwardManager, amiImageResolver, imageCatalog, instanceTypeCatalog,
                 storageFactory.create("ec2", "ec2-vpcs.json", new TypeReference<Map<String, Vpc>>() {}),
                 storageFactory.create("ec2", "ec2-subnets.json", new TypeReference<Map<String, Subnet>>() {}),
@@ -202,7 +217,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 storageFactory.create("ec2", "ec2-transit-gateway-routes.json",
                         new TypeReference<Map<String, TransitGatewayRoute>>() {}),
                 storageFactory.create("ec2", "ec2-vpc-peering-connections.json",
-                        new TypeReference<Map<String, VpcPeeringConnection>>() {}));
+                        new TypeReference<Map<String, VpcPeeringConnection>>() {}),
+                requestContextInstance);
     }
 
     // Package-private for hermetic tests (pass in-memory or temp-dir-backed StorageBackends directly).
@@ -234,7 +250,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 addresses, instances, volumes, registeredImages, snapshots, launchTemplates, vpcEndpoints,
                 natGateways, spotInstanceRequests, networkAcls, managedPrefixLists, tags,
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), null);
     }
 
     // Package-private for hermetic tests, transit-gateway-aware. The shorter overload above keeps its
@@ -268,7 +284,48 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                StorageBackend<String, TransitGatewayRouteTablePropagation> transitGatewayPropagations,
                StorageBackend<String, TransitGatewayRoute> transitGatewayRoutes,
                StorageBackend<String, VpcPeeringConnection> vpcPeeringConnections) {
+        this(config, containerManager, portForwardManager, amiImageResolver, imageCatalog, instanceTypeCatalog,
+                vpcs, subnets, securityGroups, securityGroupRules, internetGateways, routeTables, keyPairs,
+                addresses, instances, volumes, registeredImages, snapshots, launchTemplates, vpcEndpoints,
+                natGateways, spotInstanceRequests, networkAcls, managedPrefixLists, tags,
+                transitGateways, transitGatewayRouteTables, transitGatewayVpcAttachments,
+                transitGatewayPropagations, transitGatewayRoutes, vpcPeeringConnections, null);
+    }
+
+    // Package-private for hermetic tests that also need to control which account a caller resolves
+    // to (e.g. cross-account VPC peering scenarios), without touching every other test fixture's arity.
+    Ec2Service(EmulatorConfig config, Ec2ContainerManager containerManager,
+               Ec2PortForwardManager portForwardManager,
+               AmiImageResolver amiImageResolver, Ec2ImageCatalog imageCatalog,
+               Ec2InstanceTypeCatalog instanceTypeCatalog,
+               StorageBackend<String, Vpc> vpcs,
+               StorageBackend<String, Subnet> subnets,
+               StorageBackend<String, SecurityGroup> securityGroups,
+               StorageBackend<String, SecurityGroupRule> securityGroupRules,
+               StorageBackend<String, InternetGateway> internetGateways,
+               StorageBackend<String, RouteTable> routeTables,
+               StorageBackend<String, KeyPair> keyPairs,
+               StorageBackend<String, Address> addresses,
+               StorageBackend<String, Instance> instances,
+               StorageBackend<String, Volume> volumes,
+               StorageBackend<String, Image> registeredImages,
+               StorageBackend<String, Snapshot> snapshots,
+               StorageBackend<String, LaunchTemplate> launchTemplates,
+               StorageBackend<String, VpcEndpoint> vpcEndpoints,
+               StorageBackend<String, NatGateway> natGateways,
+               StorageBackend<String, SpotInstanceRequest> spotInstanceRequests,
+               StorageBackend<String, NetworkAcl> networkAcls,
+               StorageBackend<String, ManagedPrefixList> managedPrefixLists,
+               StorageBackend<String, List<Tag>> tags,
+               StorageBackend<String, TransitGateway> transitGateways,
+               StorageBackend<String, TransitGatewayRouteTable> transitGatewayRouteTables,
+               StorageBackend<String, TransitGatewayVpcAttachment> transitGatewayVpcAttachments,
+               StorageBackend<String, TransitGatewayRouteTablePropagation> transitGatewayPropagations,
+               StorageBackend<String, TransitGatewayRoute> transitGatewayRoutes,
+               StorageBackend<String, VpcPeeringConnection> vpcPeeringConnections,
+               jakarta.enterprise.inject.Instance<RequestContext> requestContextInstance) {
         this.accountId = config.defaultAccountId();
+        this.requestContextInstance = requestContextInstance;
         this.config = config;
         this.containerManager = containerManager;
         this.portForwardManager = portForwardManager;
@@ -4723,6 +4780,25 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         }
     }
 
+    /**
+     * A peering connection is a target in its own right, same as an egress-only gateway. Without
+     * this check CreateRoute would silently accept both a gateway/NAT-gateway target and a
+     * VpcPeeringConnectionId on the same route, storing an AWS-invalid multi-target route that
+     * DescribeRouteTables would then echo back and ReplaceRoute could never reconcile.
+     */
+    private static void requireVpcPeeringConnectionIsTheOnlyTarget(String gatewayId, String natGatewayId,
+                                                                    String egressOnlyInternetGatewayId,
+                                                                    String vpcPeeringConnectionId) {
+        if (!isSet(vpcPeeringConnectionId)) {
+            return;
+        }
+        if (isSet(gatewayId) || isSet(natGatewayId) || isSet(egressOnlyInternetGatewayId)) {
+            throw new AwsException("InvalidParameterCombination",
+                    "VpcPeeringConnectionId cannot be combined with GatewayId, NatGatewayId or "
+                            + "EgressOnlyInternetGatewayId; a route takes one target.", 400);
+        }
+    }
+
     public void createRoute(String region, String routeTableId, String destinationCidrBlock,
                             String destinationIpv6CidrBlock, String destinationPrefixListId,
                             String gatewayId, String natGatewayId,
@@ -4730,6 +4806,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         requireExactlyOneDestination("CreateRoute", destinationCidrBlock, destinationIpv6CidrBlock,
                 destinationPrefixListId);
         requireEgressOnlyGatewayIsTheOnlyTarget(gatewayId, natGatewayId, egressOnlyInternetGatewayId);
+        requireVpcPeeringConnectionIsTheOnlyTarget(gatewayId, natGatewayId, egressOnlyInternetGatewayId,
+                vpcPeeringConnectionId);
         final String canonicalDestinationCidrBlock = canonicalizeIpv4Cidr(destinationCidrBlock);
         ensureDefaultResources(region);
         synchronized (lockFor(key(region, routeTableId))) {
@@ -4761,17 +4839,19 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
 
     public void replaceRoute(String region, String routeTableId, String destinationCidrBlock,
                              String destinationIpv6CidrBlock, String destinationPrefixListId,
-                             String gatewayId, String natGatewayId) {
+                             String gatewayId, String natGatewayId, String vpcPeeringConnectionId) {
         requireExactlyOneDestination("ReplaceRoute", destinationCidrBlock, destinationIpv6CidrBlock,
                 destinationPrefixListId);
         // AWS takes exactly one target. Rejecting both-or-neither also keeps the targets this
-        // emulator cannot model (transit gateway, network interface, peering connection, ...) from
-        // silently clearing the route and reporting success.
+        // emulator cannot model (transit gateway, network interface, ...) from silently clearing
+        // the route and reporting success.
         boolean hasGateway = isSet(gatewayId);
         boolean hasNatGateway = isSet(natGatewayId);
-        if (hasGateway == hasNatGateway) {
+        boolean hasPeeringConnection = isSet(vpcPeeringConnectionId);
+        if ((hasGateway ? 1 : 0) + (hasNatGateway ? 1 : 0) + (hasPeeringConnection ? 1 : 0) != 1) {
             throw new AwsException("InvalidParameterCombination",
-                    "ReplaceRoute takes exactly one target, and only GatewayId or NatGatewayId is supported.", 400);
+                    "ReplaceRoute takes exactly one target, and only GatewayId, NatGatewayId or "
+                            + "VpcPeeringConnectionId is supported.", 400);
         }
         final String canonicalDestinationCidrBlock = canonicalizeIpv4Cidr(destinationCidrBlock);
 
@@ -4795,6 +4875,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             replacement.setDestinationIpv6CidrBlock(destinationIpv6CidrBlock);
             replacement.setDestinationPrefixListId(destinationPrefixListId);
             replacement.setNatGatewayId(hasNatGateway ? natGatewayId : null);
+            replacement.setVpcPeeringConnectionId(hasPeeringConnection ? vpcPeeringConnectionId : null);
             next.set(next.indexOf(existing), replacement);
             current.setRoutes(next);
             routeTables.put(key(region, routeTableId), current);
@@ -4875,10 +4956,36 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         return pcx;
     }
 
+    /**
+     * A peering connection is visible from a region only if that region is the requester's or the
+     * accepter's — same as real AWS, where a cross-region connection shows up in exactly the two
+     * endpoints that are actually party to it. An unfiltered Describe against every other region
+     * must not leak it.
+     */
+    private static boolean visibleFromRegion(VpcPeeringConnection pcx, String region) {
+        String requesterRegion = pcx.getRequesterVpcInfo() != null ? pcx.getRequesterVpcInfo().getRegion() : null;
+        String accepterRegion = pcx.getAccepterVpcInfo() != null ? pcx.getAccepterVpcInfo().getRegion() : null;
+        return region.equals(requesterRegion) || region.equals(accepterRegion);
+    }
+
+    /**
+     * A peering connection is visible to an account only if that account is the requester or the
+     * accepter — same as real AWS, where a connection never shows up in a describe issued by an
+     * unrelated third account.
+     */
+    private static boolean visibleToAccount(VpcPeeringConnection pcx, String callerAccountId) {
+        String requesterOwnerId = pcx.getRequesterVpcInfo() != null ? pcx.getRequesterVpcInfo().getOwnerId() : null;
+        String accepterOwnerId = pcx.getAccepterVpcInfo() != null ? pcx.getAccepterVpcInfo().getOwnerId() : null;
+        return callerAccountId.equals(requesterOwnerId) || callerAccountId.equals(accepterOwnerId);
+    }
+
     public List<VpcPeeringConnection> describeVpcPeeringConnections(String region, List<String> ids,
                                                                      Map<String, List<String>> filters) {
         ensureDefaultResources(region);
-        return vpcPeeringConnections.scan(k -> true).stream()
+        String caller = callerAccountId();
+        return allVpcPeeringConnections().stream()
+                .filter(pcx -> visibleToAccount(pcx, caller))
+                .filter(pcx -> visibleFromRegion(pcx, region))
                 .filter(pcx -> ids.isEmpty() || ids.contains(pcx.getVpcPeeringConnectionId()))
                 .filter(pcx -> matchesFilters(pcx, filters, region))
                 .collect(Collectors.toList());
@@ -4886,7 +4993,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
 
     public VpcPeeringConnection acceptVpcPeeringConnection(String region, String vpcPeeringConnectionId) {
         synchronized (lockFor(vpcPeeringConnectionId)) {
-            VpcPeeringConnection current = getRequiredVpcPeeringConnection(vpcPeeringConnectionId);
+            OwnedVpcPeeringConnection owned = getRequiredOwnedVpcPeeringConnection(vpcPeeringConnectionId);
+            VpcPeeringConnection current = owned.pcx();
+            String accepterOwnerId = current.getAccepterVpcInfo() != null
+                    ? current.getAccepterVpcInfo().getOwnerId() : null;
+            if (!callerAccountId().equals(accepterOwnerId)) {
+                // Reported as absent, not as a permission error: AWS does not confirm the
+                // existence of a connection the caller cannot see.
+                throw vpcPeeringConnectionNotFound(vpcPeeringConnectionId);
+            }
             String code = current.getStatus() != null ? current.getStatus().getCode() : null;
             if (!"pending-acceptance".equals(code)) {
                 throw new AwsException("InvalidStateTransition",
@@ -4894,7 +5009,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                                 + " is not eligible for acceptance (state: " + code + ")", 400);
             }
             current.setStatus(new VpcPeeringConnectionStateReason("active", "Active"));
-            vpcPeeringConnections.put(vpcPeeringConnectionId, current);
+            saveVpcPeeringConnection(owned);
             return current;
         }
     }
@@ -4903,27 +5018,112 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                                                                    Boolean accepterAllowRemoteVpcDnsResolution,
                                                                    Boolean requesterAllowRemoteVpcDnsResolution) {
         synchronized (lockFor(vpcPeeringConnectionId)) {
-            VpcPeeringConnection current = getRequiredVpcPeeringConnection(vpcPeeringConnectionId);
+            OwnedVpcPeeringConnection owned = getRequiredOwnedVpcPeeringConnection(vpcPeeringConnectionId);
+            VpcPeeringConnection current = owned.pcx();
+            if (!visibleToAccount(current, callerAccountId())) {
+                throw vpcPeeringConnectionNotFound(vpcPeeringConnectionId);
+            }
             if (accepterAllowRemoteVpcDnsResolution != null) {
                 current.setAccepterAllowRemoteVpcDnsResolution(accepterAllowRemoteVpcDnsResolution);
             }
             if (requesterAllowRemoteVpcDnsResolution != null) {
                 current.setRequesterAllowRemoteVpcDnsResolution(requesterAllowRemoteVpcDnsResolution);
             }
-            vpcPeeringConnections.put(vpcPeeringConnectionId, current);
+            saveVpcPeeringConnection(owned);
             return current;
         }
     }
 
     public void deleteVpcPeeringConnection(String region, String vpcPeeringConnectionId) {
-        getRequiredVpcPeeringConnection(vpcPeeringConnectionId);
-        vpcPeeringConnections.delete(vpcPeeringConnectionId);
+        OwnedVpcPeeringConnection owned = getRequiredOwnedVpcPeeringConnection(vpcPeeringConnectionId);
+        if (!visibleToAccount(owned.pcx(), callerAccountId())) {
+            throw vpcPeeringConnectionNotFound(vpcPeeringConnectionId);
+        }
+        deleteVpcPeeringConnection(owned);
     }
 
-    private VpcPeeringConnection getRequiredVpcPeeringConnection(String vpcPeeringConnectionId) {
-        return vpcPeeringConnections.get(vpcPeeringConnectionId).orElseThrow(() -> new AwsException(
-                "InvalidVpcPeeringConnectionID.NotFound",
-                "The VPC peering connection ID '" + vpcPeeringConnectionId + "' does not exist", 400));
+    /** A peering connection together with the account partition its storage entry lives under. */
+    private record OwnedVpcPeeringConnection(String storageAccountId, VpcPeeringConnection pcx) {}
+
+    /**
+     * A peering connection is a globally-addressable id, like an S3 bucket name, but is stored
+     * under whichever account created it (see the class Javadoc on {@link #vpcPeeringConnections}).
+     * The accepter — and, cross-region, either side — can be a different account than the one that
+     * created it, so lookups by id must search every account's partition rather than only the
+     * caller's own, the same pattern {@code Ec2IpamService} uses for RAM-shared IPAM resources.
+     */
+    private List<VpcPeeringConnection> allVpcPeeringConnections() {
+        if (vpcPeeringConnections instanceof AccountAwareStorageBackend<?> rawAccountAware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<VpcPeeringConnection> accountAware =
+                    (AccountAwareStorageBackend<VpcPeeringConnection>) rawAccountAware;
+            return accountAware.scanAllAccounts();
+        }
+        return vpcPeeringConnections.scan(k -> true);
+    }
+
+    private OwnedVpcPeeringConnection getRequiredOwnedVpcPeeringConnection(String vpcPeeringConnectionId) {
+        if (vpcPeeringConnections instanceof AccountAwareStorageBackend<?> rawAccountAware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<VpcPeeringConnection> accountAware =
+                    (AccountAwareStorageBackend<VpcPeeringConnection>) rawAccountAware;
+            var entry = accountAware.findAnyAccountEntry(vpcPeeringConnectionId)
+                    .orElseThrow(() -> vpcPeeringConnectionNotFound(vpcPeeringConnectionId));
+            return new OwnedVpcPeeringConnection(entry.account(), entry.value());
+        }
+        VpcPeeringConnection pcx = vpcPeeringConnections.get(vpcPeeringConnectionId)
+                .orElseThrow(() -> vpcPeeringConnectionNotFound(vpcPeeringConnectionId));
+        return new OwnedVpcPeeringConnection(null, pcx);
+    }
+
+    private void saveVpcPeeringConnection(OwnedVpcPeeringConnection owned) {
+        if (owned.storageAccountId() != null
+                && vpcPeeringConnections instanceof AccountAwareStorageBackend<?> rawAccountAware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<VpcPeeringConnection> accountAware =
+                    (AccountAwareStorageBackend<VpcPeeringConnection>) rawAccountAware;
+            accountAware.putForAccount(owned.storageAccountId(), owned.pcx().getVpcPeeringConnectionId(), owned.pcx());
+            return;
+        }
+        vpcPeeringConnections.put(owned.pcx().getVpcPeeringConnectionId(), owned.pcx());
+    }
+
+    private void deleteVpcPeeringConnection(OwnedVpcPeeringConnection owned) {
+        if (owned.storageAccountId() != null
+                && vpcPeeringConnections instanceof AccountAwareStorageBackend<?> rawAccountAware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<VpcPeeringConnection> accountAware =
+                    (AccountAwareStorageBackend<VpcPeeringConnection>) rawAccountAware;
+            accountAware.deleteForAccount(owned.storageAccountId(), owned.pcx().getVpcPeeringConnectionId());
+            return;
+        }
+        vpcPeeringConnections.delete(owned.pcx().getVpcPeeringConnectionId());
+    }
+
+    private static AwsException vpcPeeringConnectionNotFound(String vpcPeeringConnectionId) {
+        return new AwsException("InvalidVpcPeeringConnectionID.NotFound",
+                "The VPC peering connection ID '" + vpcPeeringConnectionId + "' does not exist", 400);
+    }
+
+    /**
+     * The account making the current request, resolved the same way {@code AccountAwareStorageBackend}
+     * derives its key prefix, so an identity comparison against a resolved peering connection's
+     * requester/accepter owner id is meaningful both in and out of a request scope.
+     */
+    private String callerAccountId() {
+        if (requestContextInstance != null) {
+            try {
+                String caller = requestContextInstance.get().getAccountId();
+                if (caller != null) {
+                    return caller;
+                }
+            } catch (ContextNotActiveException e) {
+                // Tolerated: callers outside a request scope (startup, internal provisioning)
+                // legitimately fall through to the default account.
+                LOG.debugv("No active request context — resolving caller as default account {0}", accountId);
+            }
+        }
+        return accountId;
     }
 
     // ─── NAT Gateways ─────────────────────────────────────────────────────────

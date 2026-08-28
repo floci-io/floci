@@ -229,7 +229,7 @@ class Ec2ServicePersistenceTest {
 
         // (c) ReplaceRoute against the legacy route's original, non-canonical spelling finds the
         // same route rather than throwing InvalidRoute.NotFound.
-        restarted.replaceRoute(REGION, routeTableId, "100.68.0.18/18", null, null, "igw-replaced0000000", null);
+        restarted.replaceRoute(REGION, routeTableId, "100.68.0.18/18", null, null, "igw-replaced0000000", null, null);
         RouteTable afterReplace =
                 restarted.describeRouteTables(REGION, List.of(routeTableId), Map.of()).getFirst();
         assertEquals(1, afterReplace.getRoutes().size(), "replace must update the existing route in place");

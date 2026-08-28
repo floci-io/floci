@@ -288,6 +288,13 @@ The accepter VPC named by `PeerVpcId` may belong to another account or region an
 in this store at all (a cross-account or "external" peer). Its `cidrBlock` is reported only when
 that VPC happens to exist locally; the request still succeeds either way, and no CIDR is fabricated.
 
+A connection's storage entry lives under whichever account's request created it, but lookups
+(`AcceptVpcPeeringConnection`, `DescribeVpcPeeringConnections`, `ModifyVpcPeeringConnectionOptions`,
+`DeleteVpcPeeringConnection`) resolve it across every account's partition, the same pattern used for
+RAM-shared IPAM resources. `AcceptVpcPeeringConnection` additionally enforces that the caller is the
+connection's accepter — reporting a connection it cannot see as absent, not as a permission error,
+matching how AWS itself responds.
+
 ### Network ACLs
 
 | Action | Description |
