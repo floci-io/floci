@@ -358,14 +358,20 @@ public class KinesisService implements ResourceProvider {
             String start = parent.getHashKeyRange().startingHashKey();
             String end = parent.getHashKeyRange().endingHashKey();
 
-            KinesisShard child1 = new KinesisShard(nextShardId(stream), start, subtractOne(newStartingHashKey), String.valueOf(sequenceGenerator.get()));
+            // Derive both child ids from the base size WITHOUT relying on the first add: nextShardId
+            // is size-based, so two sequential adds would either collide (both ids computed pre-add)
+            // or expose a half-published topology (child1 visible before child2). Compute base+0 and
+            // base+1 up front so the ids stay distinct, then publish BOTH children in one atomic
+            // CopyOnWriteArrayList.addAll — a lock-free reader can never observe {parent, child1}
+            // without child2.
+            int base = stream.getShards().size();
+            KinesisShard child1 = new KinesisShard(String.format("shardId-%012d", base), start, subtractOne(newStartingHashKey), String.valueOf(sequenceGenerator.get()));
             child1.setParentShardId(shardId);
 
-            KinesisShard child2 = new KinesisShard(nextShardId(stream), newStartingHashKey, end, String.valueOf(sequenceGenerator.get()));
+            KinesisShard child2 = new KinesisShard(String.format("shardId-%012d", base + 1), newStartingHashKey, end, String.valueOf(sequenceGenerator.get()));
             child2.setParentShardId(shardId);
 
-            stream.getShards().add(child1);
-            stream.getShards().add(child2);
+            stream.getShards().addAll(List.of(child1, child2));
             store.put(key, stream);
             LOG.infov("Split shard {0} in stream {1}", shardId, streamName);
         }

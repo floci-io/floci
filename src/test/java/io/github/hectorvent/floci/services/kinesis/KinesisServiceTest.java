@@ -16,6 +16,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -300,7 +301,127 @@ class KinesisServiceTest {
 
         KinesisStream updated = kinesisService.describeStream("my-stream", REGION);
         assertEquals(3, updated.getShards().size());
-        assertTrue(updated.getShards().getFirst().isClosed());
+        KinesisShard parent = updated.getShards().getFirst();
+        assertTrue(parent.isClosed());
+
+        // Both children must get distinct shard ids. nextShardId is size-based, so computing both
+        // ids before adding either child assigns the same id to both (regression guard).
+        List<String> shardIds = updated.getShards().stream().map(KinesisShard::getShardId).toList();
+        assertEquals(shardIds.size(), new HashSet<>(shardIds).size(), "shard ids must be unique after split");
+
+        // The single atomic addAll must publish a COMPLETE topology: both children present, each
+        // pointing at the parent, together tiling the parent's whole hash range with no gap/overlap.
+        List<KinesisShard> children = updated.getShards().stream()
+                .filter(s -> shardId.equals(s.getParentShardId()))
+                .toList();
+        assertEquals(2, children.size(), "a split must publish exactly two children");
+        KinesisShard child1 = children.get(0);
+        KinesisShard child2 = children.get(1);
+        assertEquals(parent.getHashKeyRange().startingHashKey(), child1.getHashKeyRange().startingHashKey());
+        assertEquals("170141183460469231731687303715884105727", child1.getHashKeyRange().endingHashKey());
+        assertEquals("170141183460469231731687303715884105728", child2.getHashKeyRange().startingHashKey());
+        assertEquals(parent.getHashKeyRange().endingHashKey(), child2.getHashKeyRange().endingHashKey());
+    }
+
+    /**
+     * A lock-free reader must never observe a half-published split — a closed parent with only one of
+     * its two children. splitShard publishes both children in one atomic CopyOnWriteArrayList.addAll,
+     * so every snapshot holds either zero or both split-children of any given parent.
+     *
+     * <p>Fail-without-fix: reverting the addAll to two sequential {@code add()} calls opens a window
+     * (between the two adds — widened by the child2 shard construction) in which the list holds child1
+     * but not child2; the hammering reader below catches it and records a violation.
+     */
+    @RepeatedTest(3)
+    void splitShard_concurrentReaderNeverSeesHalfPublishedTopology() throws Exception {
+        kinesisService.createStream("my-stream", 1, REGION);
+        KinesisStream stream = kinesisService.describeStream("my-stream", REGION);
+
+        AtomicReference<String> violation = new AtomicReference<>();
+        AtomicBoolean done = new AtomicBoolean(false);
+
+        Thread reader = new Thread(() -> {
+            while (!done.get()) {
+                // A fresh snapshot of the live list, exactly as a lock-free DescribeStream/ListShards sees it.
+                List<KinesisShard> snapshot = new ArrayList<>(stream.getShards());
+                Map<String, Integer> splitChildCount = new java.util.HashMap<>();
+                for (KinesisShard s : snapshot) {
+                    // Split children carry a parent but no adjacent-parent (that marks a merge child).
+                    if (s.getParentShardId() != null && s.getAdjacentParentShardId() == null) {
+                        splitChildCount.merge(s.getParentShardId(), 1, Integer::sum);
+                    }
+                }
+                for (Map.Entry<String, Integer> e : splitChildCount.entrySet()) {
+                    if (e.getValue() != 2) {
+                        violation.compareAndSet(null,
+                                "parent " + e.getKey() + " observed with " + e.getValue()
+                                        + " split-children (expected 0 or 2)");
+                        return;
+                    }
+                }
+            }
+        });
+        reader.start();
+
+        // Split an open shard repeatedly; each split is one control-plane resharding with its own
+        // publish window. Always split an open shard so open shards remain available.
+        for (int i = 0; i < 3000 && violation.get() == null; i++) {
+            // Split the widest open shard so ranges never narrow to the point splitting is impossible;
+            // this keeps every one of the 3000 iterations a real split with its own publish window.
+            KinesisShard open = stream.getShards().stream()
+                    .filter(s -> !s.isClosed())
+                    .max(java.util.Comparator.comparing(s ->
+                            new java.math.BigInteger(s.getHashKeyRange().endingHashKey())
+                                    .subtract(new java.math.BigInteger(s.getHashKeyRange().startingHashKey()))))
+                    .orElseThrow();
+            java.math.BigInteger start = new java.math.BigInteger(open.getHashKeyRange().startingHashKey());
+            java.math.BigInteger end = new java.math.BigInteger(open.getHashKeyRange().endingHashKey());
+            java.math.BigInteger mid = start.add(end).divide(java.math.BigInteger.TWO);
+            if (mid.compareTo(start) <= 0 || mid.compareTo(end) >= 0) {
+                break; // range too narrow to split further
+            }
+            kinesisService.splitShard("my-stream", open.getShardId(), mid.toString(), REGION);
+        }
+        done.set(true);
+        reader.join(TimeUnit.SECONDS.toMillis(10));
+        assertFalse(reader.isAlive(), "reader thread did not terminate");
+
+        assertNull(violation.get(), () -> "half-published split observed: " + violation.get());
+    }
+
+    @Test
+    void getShards_readerMidIteration_survivesConcurrentSplit() {
+        // Two shards so the snapshot the reader opens still has an element left to read AFTER the
+        // concurrent split; a single-shard snapshot would be exhausted by the first next() and the
+        // second next() would throw NoSuchElementException even under COWAL.
+        kinesisService.createStream("my-stream", 2, REGION);
+        // describeStream returns the same KinesisStream instance the store holds, so these iterators
+        // are over the exact backing list splitShard mutates.
+        KinesisStream stream = kinesisService.describeStream("my-stream", REGION);
+        String shardId = stream.getShards().getFirst().getShardId();
+
+        // A second iterator opened before the split, used to assert the pre-split snapshot is fixed.
+        Iterator<KinesisShard> preSplitSnapshot = stream.getShards().iterator();
+        Iterator<KinesisShard> reader = stream.getShards().iterator();
+        reader.next();
+
+        kinesisService.splitShard("my-stream", shardId, "170141183460469231731687303715884105728", REGION);
+
+        // A plain ArrayList iterator throws ConcurrentModificationException here; COWAL keeps reading
+        // its fixed pre-split snapshot.
+        assertDoesNotThrow(reader::next);
+
+        // The snapshot opened before the split still reflects exactly the original two shards,
+        // regardless of the two children the split appended afterwards.
+        int snapshotSize = 0;
+        while (preSplitSnapshot.hasNext()) {
+            preSplitSnapshot.next();
+            snapshotSize++;
+        }
+        assertEquals(2, snapshotSize);
+
+        // A fresh read observes the completed reshard: 2 original shards + 2 children.
+        assertEquals(4, kinesisService.describeStream("my-stream", REGION).getShards().size());
     }
 
     @Test
