@@ -784,10 +784,12 @@ public class CloudFormationQueryHandler {
 
     private Response updateStackSet(MultivaluedMap<String, String> params) {
         try {
+            String stackSetName = params.getFirst("StackSetName");
+            Map<String, String> previousParameters = stackSetService.describeStackSet(stackSetName).getParameters();
             StackSetOperation op = stackSetService.updateStackSet(
-                    params.getFirst("StackSetName"),
+                    stackSetName,
                     cfnService.resolveTemplateBody(params.getFirst("TemplateBody"), params.getFirst("TemplateURL")),
-                    extractParameters(params),
+                    extractParameters(params, previousParameters),
                     extractList(params, "Capabilities.member."),
                     extractTags(params),
                     params.getFirst("Description"));
