@@ -636,6 +636,37 @@ class AutoScalingServiceTest {
                 java.util.Map.of(), java.util.Map.of());
     }
 
+    @Test
+    void putLifecycleHookRejectsNameOutsideModeledPattern() {
+        AwsException ex = assertThrows(AwsException.class, () -> service.putLifecycleHook(REGION, "test-asg",
+                "bad name!", "autoscaling:EC2_INSTANCE_LAUNCHING", null, null, null, null, null));
+        assertEquals("ValidationError", ex.getErrorCode());
+    }
+
+    @Test
+    void deleteLifecycleHookRejectsNameOutsideModeledPattern() {
+        assertThrows(AwsException.class,
+                () -> service.deleteLifecycleHook(REGION, "test-asg", "bad name!"));
+    }
+
+    @Test
+    void completeLifecycleActionRejectsNameOutsideModeledPattern() {
+        assertThrows(AwsException.class,
+                () -> service.completeLifecycleAction(REGION, "test-asg", "bad name!",
+                        "i-0123456789abcdef0", "CONTINUE", "12345678-1234-1234-1234-123456789012"));
+    }
+
+    @Test
+    void completeLifecycleActionRejectsTokenOfWrongLength() {
+        service.putLifecycleHook(REGION, "test-asg", "hook-1", "autoscaling:EC2_INSTANCE_LAUNCHING",
+                null, null, null, null, null);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.completeLifecycleAction(REGION, "test-asg", "hook-1",
+                        "i-0123456789abcdef0", "CONTINUE", "not-a-uuid"));
+        assertEquals("ValidationError", ex.getErrorCode());
+    }
+
     private static final class AutoScalingGroupFixture {
         private static void addInstance(AutoScalingService service, String region, String name, String instanceId,
                 String lifecycleState, String launchTemplateId, String launchTemplateVersion) {

@@ -601,6 +601,7 @@ public class AutoScalingService {
                                   String roleArn, String notificationMetadata,
                                   Integer heartbeatTimeout, String defaultResult) {
         requireGroup(region, asgName);
+        validateLifecycleHookName(hookName);
         String key = hookKey(region, asgName, hookName);
         LifecycleHook hook = hooks.computeIfAbsent(key, k -> new LifecycleHook());
         hook.setLifecycleHookName(hookName);
@@ -615,6 +616,7 @@ public class AutoScalingService {
     }
 
     public void deleteLifecycleHook(String region, String asgName, String hookName) {
+        validateLifecycleHookName(hookName);
         hooks.remove(hookKey(region, asgName, hookName));
     }
 
@@ -657,6 +659,30 @@ public class AutoScalingService {
                                          String instanceId, String actionResult, String token) {
         // Stored-only — Phase 2 reconciler observes this via the instance lifecycle state
         requireGroup(region, asgName);
+        validateLifecycleHookName(hookName);
+        validateLifecycleActionToken(token);
+    }
+
+    /** LifecycleHookName pattern/length from the Auto Scaling model (autoscaling/2011-01-01/service-2.json). */
+    private static final java.util.regex.Pattern LIFECYCLE_HOOK_NAME_PATTERN =
+            java.util.regex.Pattern.compile("^[A-Za-z0-9\\-_/]+$");
+
+    private static void validateLifecycleHookName(String hookName) {
+        if (hookName == null || hookName.length() > 255 || !LIFECYCLE_HOOK_NAME_PATTERN.matcher(hookName).matches()) {
+            throw new AwsException("ValidationError",
+                    "1 validation error detected: Value '" + hookName
+                            + "' at 'lifecycleHookName' failed to satisfy constraint: Member must satisfy "
+                            + "regular expression pattern: [A-Za-z0-9\\-_/]+", 400);
+        }
+    }
+
+    /** LifecycleActionToken is modeled as a fixed 36-character token (autoscaling/2011-01-01/service-2.json). */
+    private static void validateLifecycleActionToken(String token) {
+        if (token == null || token.length() != 36) {
+            throw new AwsException("ValidationError",
+                    "1 validation error detected: Value at 'lifecycleActionToken' failed to satisfy constraint: "
+                            + "Member must have length equal to 36", 400);
+        }
     }
 
     // ── Scaling policies ───────────────────────────────────────────────────────
