@@ -17,6 +17,7 @@ import jakarta.inject.Inject;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @ApplicationScoped
@@ -373,25 +374,36 @@ public class AutoScalingService {
 
     public void setInstanceProtection(String region, String groupName, List<String> instanceIds,
                                       boolean protectedFromScaleIn) {
-        AutoScalingGroup asg = requireGroup(region, groupName);
         if (instanceIds == null || instanceIds.isEmpty()) {
             throw new AwsException("ValidationError", "At least one instance ID is required.", 400);
         }
+        AutoScalingGroup asg = requireGroup(region, groupName);
         Set<String> requested = new HashSet<>(instanceIds);
-        List<AsgInstance> matches = asg.getInstances().stream()
-                .filter(instance -> requested.contains(instance.getInstanceId()))
-                .toList();
-        if (matches.size() != requested.size()) {
-            Set<String> found = matches.stream().map(AsgInstance::getInstanceId).collect(Collectors.toSet());
-            String missing = requested.stream().filter(id -> !found.contains(id)).findFirst().orElse("unknown");
+        Set<String> found = asg.getInstances().stream()
+                .map(AsgInstance::getInstanceId)
+                .filter(requested::contains)
+                .collect(Collectors.toSet());
+        if (!found.containsAll(requested)) {
+            String missing = requested.stream()
+                    .filter(id -> !found.contains(id))
+                    .collect(Collectors.joining(", "));
             throw new AwsException("ValidationError",
-                    "Instance '" + missing + "' is not part of Auto Scaling group '" + groupName + "'.", 400);
+                    "Instance(s) '" + missing + "' is/are not part of Auto Scaling group '" + groupName + "'.", 400);
         }
-        matches.forEach(instance -> instance.setProtectedFromScaleIn(protectedFromScaleIn));
+        asg.getInstances().stream()
+                .filter(instance -> requested.contains(instance.getInstanceId()))
+                .forEach(instance -> instance.setProtectedFromScaleIn(protectedFromScaleIn));
         groups.put(asgKey(region, groupName), asg);
     }
 
-    public void setInstanceHealth(String region, String instanceId, String healthStatus) {
+    /**
+     * {@code shouldRespectGracePeriod} is parsed and accepted for wire fidelity (2011-01-01 model)
+     * but not yet enforced — floci does not currently track instance launch time against
+     * {@link AutoScalingGroup#getHealthCheckGracePeriod()}, so the health status change below always
+     * applies immediately regardless of the flag.
+     */
+    public void setInstanceHealth(String region, String instanceId, String healthStatus,
+                                   boolean shouldRespectGracePeriod) {
         if (!"Healthy".equals(healthStatus) && !"Unhealthy".equals(healthStatus)) {
             throw new AwsException("ValidationError",
                     "HealthStatus must be Healthy or Unhealthy.", 400);
@@ -406,9 +418,7 @@ public class AutoScalingService {
         asg.getInstances().stream()
                 .filter(instance -> instanceId.equals(instance.getInstanceId()))
                 .findFirst()
-                .orElseThrow(() -> new AwsException("ValidationError",
-                        "Instance '" + instanceId + "' not found in Auto Scaling group.", 400))
-                .setHealthStatus(healthStatus);
+                .ifPresent(instance -> instance.setHealthStatus(healthStatus));
         groups.put(asgKey(region, asg.getAutoScalingGroupName()), asg);
     }
 
@@ -629,6 +639,11 @@ public class AutoScalingService {
         if (hookName == null) {
             return;
         }
+        // The physical id was only ever assigned from a name that already passed this check
+        // (see putLifecycleHook), so this call for parity with deleteLifecycleHook should never
+        // reject a hook created through the normal path — it exists to fail loudly, not silently
+        // no-op, if a corrupted or hand-authored physical id ever reaches this delete path.
+        validateLifecycleHookName(hookName);
         List<String> keys = new ArrayList<>();
         for (Map.Entry<String, LifecycleHook> entry : hooks.entrySet()) {
             LifecycleHook hook = entry.getValue();
@@ -664,11 +679,22 @@ public class AutoScalingService {
     }
 
     /** LifecycleHookName pattern/length from the Auto Scaling model (autoscaling/2011-01-01/service-2.json). */
-    private static final java.util.regex.Pattern LIFECYCLE_HOOK_NAME_PATTERN =
-            java.util.regex.Pattern.compile("^[A-Za-z0-9\\-_/]+$");
+    private static final Pattern LIFECYCLE_HOOK_NAME_PATTERN =
+            Pattern.compile("^[A-Za-z0-9\\-_/]+$");
 
     private static void validateLifecycleHookName(String hookName) {
-        if (hookName == null || hookName.length() > 255 || !LIFECYCLE_HOOK_NAME_PATTERN.matcher(hookName).matches()) {
+        if (hookName == null) {
+            throw new AwsException("ValidationError",
+                    "1 validation error detected: Value null at 'lifecycleHookName' failed to satisfy constraint: "
+                            + "Member must not be null", 400);
+        }
+        if (hookName.length() > 255) {
+            throw new AwsException("ValidationError",
+                    "1 validation error detected: Value '" + hookName
+                            + "' at 'lifecycleHookName' failed to satisfy constraint: Member must have length "
+                            + "less than or equal to 255", 400);
+        }
+        if (!LIFECYCLE_HOOK_NAME_PATTERN.matcher(hookName).matches()) {
             throw new AwsException("ValidationError",
                     "1 validation error detected: Value '" + hookName
                             + "' at 'lifecycleHookName' failed to satisfy constraint: Member must satisfy "

@@ -50,8 +50,8 @@ public class AutoScalingQueryHandler {
                 case "DeleteTags"                   -> handleDeleteTags(p, region);
                 // Instances
                 case "DescribeAutoScalingInstances" -> handleDescribeAutoScalingInstances(p, region);
-                case "SetInstanceProtection"         -> handleSetInstanceProtection(p, region);
-                case "SetInstanceHealth"              -> handleSetInstanceHealth(p, region);
+                case "SetInstanceProtection"        -> handleSetInstanceProtection(p, region);
+                case "SetInstanceHealth"            -> handleSetInstanceHealth(p, region);
                 case "AttachInstances"              -> handleAttachInstances(p, region);
                 case "DetachInstances"              -> handleDetachInstances(p, region);
                 case "TerminateInstanceInAutoScalingGroup" -> handleTerminateInstance(p, region);
@@ -477,7 +477,7 @@ public class AutoScalingQueryHandler {
     private Response handleSetInstanceProtection(MultivaluedMap<String, String> p, String region) {
         String groupName = p.getFirst("AutoScalingGroupName");
         List<String> instanceIds = memberList(p, "InstanceIds");
-        boolean protectedFromScaleIn = Boolean.parseBoolean(p.getFirst("ProtectedFromScaleIn"));
+        boolean protectedFromScaleIn = requiredBoolParam(p, "ProtectedFromScaleIn");
         service.setInstanceProtection(region, groupName, instanceIds, protectedFromScaleIn);
         return ok(new XmlBuilder()
                 .start("SetInstanceProtectionResponse", NS)
@@ -489,7 +489,10 @@ public class AutoScalingQueryHandler {
     private Response handleSetInstanceHealth(MultivaluedMap<String, String> p, String region) {
         String instanceId = p.getFirst("InstanceId");
         String healthStatus = p.getFirst("HealthStatus");
-        service.setInstanceHealth(region, instanceId, healthStatus);
+        // Defaults to true per the 2011-01-01 model: absent means "respect the grace period".
+        boolean shouldRespectGracePeriod = Boolean.parseBoolean(
+                Optional.ofNullable(p.getFirst("ShouldRespectGracePeriod")).orElse("true"));
+        service.setInstanceHealth(region, instanceId, healthStatus, shouldRespectGracePeriod);
         return ok(new XmlBuilder()
                 .start("SetInstanceHealthResponse", NS)
                 .raw(AwsQueryResponse.responseMetadata())
@@ -1156,6 +1159,22 @@ public class AutoScalingQueryHandler {
     private Boolean nullableBoolParam(MultivaluedMap<String, String> p, String key) {
         String val = p.getFirst(key);
         if (val == null || val.isBlank()) { return null; }
+        return Boolean.parseBoolean(val);
+    }
+
+    /** A required boolean member must be present and exactly "true"/"false" — never silently coerced to false. */
+    private boolean requiredBoolParam(MultivaluedMap<String, String> p, String key) {
+        String val = p.getFirst(key);
+        if (val == null || val.isBlank()) {
+            throw new AwsException("ValidationError",
+                    "1 validation error detected: Value null at '" + key
+                            + "' failed to satisfy constraint: Member must not be null", 400);
+        }
+        if (!"true".equalsIgnoreCase(val) && !"false".equalsIgnoreCase(val)) {
+            throw new AwsException("ValidationError",
+                    "1 validation error detected: Value '" + val + "' at '" + key
+                            + "' failed to satisfy constraint: Member must be a valid boolean", 400);
+        }
         return Boolean.parseBoolean(val);
     }
 
