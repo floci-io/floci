@@ -9,14 +9,17 @@ import org.junit.jupiter.api.Test;
 import java.lang.reflect.Method;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 
 class PreSignedUrlFilterTest {
 
     /**
-     * A launched container that never assumes an execution role but has a known owning
-     * account is given AWS_ACCESS_KEY_ID=&lt;ownerAccountId&gt; (see LaunchedContainerAwsEnv),
-     * unregistered in IAM the same way the literal "test" placeholder is. It must resolve to
-     * the same "test" placeholder secret so presigned URLs it generates still validate.
+     * A bare 12-digit access key ID that isn't registered in IAM must be rejected like any
+     * other unknown key, not resolved to the well-known "test" secret. That fallback would let
+     * a client sign an arbitrary account's X-Amz-Credential with the public "test" secret and
+     * have account resolution treat the forged value as the request's account — an
+     * authentication bypass under S3 auth enforcement (see AccountResolver, which reads a
+     * 12-digit access key ID as the account directly).
      */
     private static String resolveSecretKey(PreSignedUrlFilter filter, String accessKeyId) throws Exception {
         Method method = PreSignedUrlFilter.class.getDeclaredMethod("resolveSecretKey", String.class);
@@ -25,11 +28,11 @@ class PreSignedUrlFilterTest {
     }
 
     @Test
-    void resolveSecretKeyTreatsUnregisteredOwnerAccountIdLikeLegacyTestKey() throws Exception {
+    void resolveSecretKeyRejectsUnregisteredNumericAccessKeyId() throws Exception {
         IamService iamService = IamServiceTestHelper.iamServiceWithAccessKey("AKIDUNRELATED", "unrelated-secret");
         PreSignedUrlFilter filter = new PreSignedUrlFilter(null, null, iamService);
 
-        assertEquals("test", resolveSecretKey(filter, "123456789012"));
+        assertNull(resolveSecretKey(filter, "123456789012"));
     }
 
     private static MultivaluedMap<String, String> params() {

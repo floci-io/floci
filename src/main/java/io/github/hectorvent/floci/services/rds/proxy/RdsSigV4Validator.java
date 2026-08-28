@@ -101,12 +101,12 @@ public class RdsSigV4Validator {
             String service = credParts[3];
             String credentialScope = date + "/" + region + "/" + service + "/aws4_request";
 
-            // A bare 12-digit account ID that isn't a registered access key is Floci's own
-            // owning-account placeholder (see LaunchedContainerAwsEnv, for a Lambda that never
-            // assumes an execution role but has a known owning account), always paired with the
-            // "test" secret. Any other unregistered access key falls back to itself, unchanged.
-            String secretKey = iamService.findSecretKey(accessKeyId)
-                    .orElseGet(() -> accessKeyId.matches("\\d{12}") ? "test" : accessKeyId);
+            // Deliberately no fallback for a bare 12-digit account ID here: trusting an
+            // unregistered numeric access key paired with the well-known "test" secret would
+            // let any client forge an IAM-auth token for an arbitrary account and authenticate
+            // as any matching database user. An unregistered key falls back to itself, unchanged
+            // (never a valid secret), so it always fails the signature check below.
+            String secretKey = iamService.findSecretKey(accessKeyId).orElse(accessKeyId);
 
             // Canonical query string: sorted pairs, excluding X-Amz-Signature
             String canonicalQueryString = Arrays.stream(rawPairs)

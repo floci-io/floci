@@ -20,7 +20,6 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
-import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @Provider
@@ -29,8 +28,6 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
     private static final Logger LOG = Logger.getLogger(PreSignedUrlFilter.class);
     private static final String LEGACY_ACCESS_KEY_ID = "test";
     private static final String LEGACY_SECRET_KEY = "test";
-    /** Matches AccountResolver's "12-digit access key ID is an owning account" convention. */
-    private static final Pattern ACCOUNT_ID_PATTERN = Pattern.compile("\\d{12}");
 
     private final PreSignedUrlGenerator presignGenerator;
     private final S3Service s3Service;
@@ -226,14 +223,14 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
             if (registered.isPresent()) {
                 return registered.get();
             }
-            // A bare 12-digit account ID that isn't a registered access key is still one of
-            // Floci's own placeholders: a Lambda without an execution role but with a known
-            // owning account is given that account ID as AWS_ACCESS_KEY_ID (see
-            // LaunchedContainerAwsEnv), always paired with the "test" secret. Fall back the same
-            // way the legacy literal does, rather than failing validation for every such Lambda.
-            // Any other unregistered key is genuinely unknown and must still report
-            // InvalidAccessKeyId, not fall through to a signature check.
-            return ACCOUNT_ID_PATTERN.matcher(accessKeyId).matches() ? LEGACY_SECRET_KEY : null;
+            // Deliberately no fallback for a bare 12-digit account ID here: AccountResolver
+            // reads a 12-digit access key ID as the request's account directly, so trusting an
+            // unregistered numeric key paired with the well-known "test" secret would let any
+            // client forge a signed request for an arbitrary account under S3 auth enforcement.
+            // A launched container's owning-account placeholder credentials (see
+            // LaunchedContainerAwsEnv) are therefore not honored by this enforced path either;
+            // they only work where no signature is required (auth enforcement disabled).
+            return null;
         }
         return null;
     }
