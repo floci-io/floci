@@ -267,25 +267,73 @@ class ZipExtractorTest {
     }
 
     @Test
-    void leavesNoStagedArchiveInTheCodeStore(@TempDir Path codeStore) throws IOException {
-        // ZipFile needs a seekable file, so the archive is staged on disk next to the target
-        // rather than in the shared java.io.tmpdir. That puts a stray file one level above the
-        // function's code directory, so pin that none survives: a leaked staging archive would
-        // sit in the code store indefinitely, and one leaked *inside* a function directory
-        // would be tar-copied into that function's container at launch.
-        Path target = codeStore.resolve("fn");
-        extractor.extractTo(zipWith("index.js", "v1"), target);
-        assertNoStagedFiles(codeStore);
+    void rejectsAnEntryWhoseCompressionMethodCannotBeRead(@TempDir Path target) throws IOException {
+        // java.util.zip.ZipFile throws on an unknown compression method; Commons Compress
+        // instead reports the entry as unreadable and would hand back an empty stream, which
+        // would write a zero-byte file and deploy a function whose code silently vanished.
+        // Method 99 is WinZip AES — structurally valid, not decodable here.
+        byte[] zip = zipWithCompressionMethod(99, "secret.js", "exports.handler = () => 1;");
 
-        byte[] corrupt = corruptedPayloadZip("index.js", "v2-but-corrupted-in-transit");
-        assertThrows(IOException.class, () -> extractor.extractTo(corrupt, target));
-        assertNoStagedFiles(codeStore);
+        ZipException thrown = assertThrows(ZipException.class, () -> extractor.extractTo(zip, target));
+        assertTrue(thrown.getMessage().contains("Unsupported compression"),
+                "unreadable entry must be rejected, was: " + thrown.getMessage());
+        assertFalse(Files.exists(target.resolve("secret.js")),
+                "an unreadable entry must not be written out as an empty file");
     }
 
-    private static void assertNoStagedFiles(Path codeStore) throws IOException {
-        try (var entries = Files.list(codeStore)) {
-            assertEquals(List.of("fn"), entries.map(p -> p.getFileName().toString()).sorted().toList(),
-                    "no staged archive may survive extraction, successful or failed");
-        }
+    /** A structurally valid archive declaring an arbitrary compression method. */
+    private static byte[] zipWithCompressionMethod(int method, String entryName, String content)
+            throws IOException {
+        byte[] name = entryName.getBytes(StandardCharsets.UTF_8);
+        byte[] data = content.getBytes(StandardCharsets.UTF_8);
+        CRC32 crc = new CRC32();
+        crc.update(data);
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+
+        int localOffset = out.size();
+        le32(out, 0x04034b50L);
+        le16(out, 20);
+        le16(out, 0);
+        le16(out, method);
+        le16(out, 0);
+        le16(out, 0);
+        le32(out, crc.getValue());
+        le32(out, data.length);
+        le32(out, data.length);
+        le16(out, name.length);
+        le16(out, 0);
+        out.write(name);
+        out.write(data);
+
+        int centralOffset = out.size();
+        le32(out, 0x02014b50L);
+        le16(out, 20);
+        le16(out, 20);
+        le16(out, 0);
+        le16(out, method);
+        le16(out, 0);
+        le16(out, 0);
+        le32(out, crc.getValue());
+        le32(out, data.length);
+        le32(out, data.length);
+        le16(out, name.length);
+        le16(out, 0);
+        le16(out, 0);
+        le16(out, 0);
+        le16(out, 0);
+        le32(out, 0);
+        le32(out, localOffset);
+        out.write(name);
+        int centralSize = out.size() - centralOffset;
+
+        le32(out, 0x06054b50L);
+        le16(out, 0);
+        le16(out, 0);
+        le16(out, 1);
+        le16(out, 1);
+        le32(out, centralSize);
+        le32(out, centralOffset);
+        le16(out, 0);
+        return out.toByteArray();
     }
 }

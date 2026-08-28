@@ -158,6 +158,14 @@
             <artifactId>docker-java-core</artifactId>
             <version>3.7.1</version>
         </dependency>
+        <!-- Central-directory ZIP reading for Lambda deployment packages. Already present
+             transitively via docker-java-core; declared explicitly because ZipExtractor uses
+             it directly and must not break if that transitive path ever changes. -->
+        <dependency>
+            <groupId>org.apache.commons</groupId>
+            <artifactId>commons-compress</artifactId>
+            <version>1.28.0</version>
+        </dependency>
         <dependency>
             <groupId>com.github.docker-java</groupId>
             <artifactId>docker-java-transport-httpclient5</artifactId>
