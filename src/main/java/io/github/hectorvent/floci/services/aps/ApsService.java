@@ -23,7 +23,8 @@ import java.util.UUID;
 public class ApsService implements TagHandler {
 
     private static final Logger LOG = Logger.getLogger(ApsService.class);
-    // AMP's ListWorkspacesRequest declares maxResults with a maximum of 1000.
+    // AMP's ListWorkspacesRequest declares maxResults with a default of 100 and a maximum of 1000.
+    private static final int DEFAULT_PAGE = 100;
     private static final int MAX_PAGE = 1000;
 
     private final StorageBackend<String, PrometheusWorkspace> storage;
@@ -36,14 +37,14 @@ public class ApsService implements TagHandler {
         this.regionResolver = regionResolver;
     }
 
-    public PrometheusWorkspace createWorkspace(String alias, Map<String, String> tags, String kmsKeyArn) {
+    public PrometheusWorkspace createWorkspace(String region, String alias, Map<String, String> tags,
+                                               String kmsKeyArn) {
         String workspaceId = "ws-" + UUID.randomUUID();
-        String region = regionResolver.getRegion();
         String arn = regionResolver.buildArn("aps", region, "workspace/" + workspaceId);
 
         PrometheusWorkspace workspace = new PrometheusWorkspace();
         workspace.setWorkspaceId(workspaceId);
-        workspace.setAlias(alias);
+        workspace.setAlias(stripAlias(alias));
         workspace.setArn(arn);
         // Real AMP answers the create 202 with status CREATING; the emulator provisions nothing,
         // so the workspace is ACTIVE from birth and the terraform/pulumi provider's create waiter
@@ -57,38 +58,40 @@ public class ApsService implements TagHandler {
             workspace.getTags().putAll(tags);
         }
 
-        storage.put(workspaceId, workspace);
-        LOG.infov("Created AMP workspace: {0}", workspaceId);
+        storage.put(key(region, workspaceId), workspace);
+        LOG.infov("Created AMP workspace: {0} in {1}", workspaceId, region);
         return workspace;
     }
 
-    public PrometheusWorkspace describeWorkspace(String workspaceId) {
-        return storage.get(workspaceId)
+    public PrometheusWorkspace describeWorkspace(String region, String workspaceId) {
+        return storage.get(key(region, workspaceId))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "Workspace not found: " + workspaceId, 404));
     }
 
     // The alias parameter is a prefix filter, not an exact match: the terraform provider's
     // aws_prometheus_workspaces data source exposes it as alias_prefix.
-    public PaginatedResult<PrometheusWorkspace> listWorkspaces(String aliasPrefix, Integer maxResults, String nextToken) {
-        List<PrometheusWorkspace> all = storage.scan(k -> true).stream()
-                .filter(w -> aliasPrefix == null || aliasPrefix.isEmpty()
-                        || (w.getAlias() != null && w.getAlias().startsWith(aliasPrefix)))
+    public PaginatedResult<PrometheusWorkspace> listWorkspaces(String region, String aliasPrefix,
+                                                               Integer maxResults, String nextToken) {
+        String prefix = stripAlias(aliasPrefix);
+        List<PrometheusWorkspace> all = storage.scan(k -> k.startsWith(keyPrefix(region))).stream()
+                .filter(w -> prefix == null || prefix.isEmpty()
+                        || (w.getAlias() != null && w.getAlias().startsWith(prefix)))
                 .toList();
         return Pagination.paginate(all, PrometheusWorkspace::getWorkspaceId, maxResults, nextToken,
-                MAX_PAGE, "ValidationException");
+                DEFAULT_PAGE, MAX_PAGE, "ValidationException");
     }
 
-    public void deleteWorkspace(String workspaceId) {
-        describeWorkspace(workspaceId);
-        storage.delete(workspaceId);
-        LOG.infov("Deleted AMP workspace: {0}", workspaceId);
+    public void deleteWorkspace(String region, String workspaceId) {
+        describeWorkspace(region, workspaceId);
+        storage.delete(key(region, workspaceId));
+        LOG.infov("Deleted AMP workspace: {0} in {1}", workspaceId, region);
     }
 
-    public void updateWorkspaceAlias(String workspaceId, String alias) {
-        PrometheusWorkspace workspace = describeWorkspace(workspaceId);
-        workspace.setAlias(alias);
-        storage.put(workspaceId, workspace);
+    public void updateWorkspaceAlias(String region, String workspaceId, String alias) {
+        PrometheusWorkspace workspace = describeWorkspace(region, workspaceId);
+        workspace.setAlias(stripAlias(alias));
+        storage.put(key(region, workspaceId), workspace);
     }
 
     // ── TagHandler: the shared /tags/{resourceArn} dispatcher routes aps ARNs here ──
@@ -111,24 +114,29 @@ public class ApsService implements TagHandler {
 
     @Override
     public Map<String, String> listTags(String region, String arn) {
-        return Map.copyOf(workspaceByArn(arn).getTags());
+        return Map.copyOf(workspaceByArn(region, arn).getTags());
     }
 
     @Override
     public void tagResource(String region, String arn, Map<String, String> tags) {
-        PrometheusWorkspace workspace = workspaceByArn(arn);
+        // Per AMP's TagResource: keys must not begin with the reserved "aws:" prefix.
+        tags.keySet().stream().filter(k -> k.startsWith("aws:")).findFirst().ifPresent(k -> {
+            throw new AwsException("ValidationException",
+                    "Tag keys must not begin with aws:. Offending key: " + k, 400);
+        });
+        PrometheusWorkspace workspace = workspaceByArn(region, arn);
         workspace.getTags().putAll(tags);
-        storage.put(workspace.getWorkspaceId(), workspace);
+        storage.put(key(region, workspace.getWorkspaceId()), workspace);
     }
 
     @Override
     public void untagResource(String region, String arn, List<String> tagKeys) {
-        PrometheusWorkspace workspace = workspaceByArn(arn);
+        PrometheusWorkspace workspace = workspaceByArn(region, arn);
         tagKeys.forEach(workspace.getTags()::remove);
-        storage.put(workspace.getWorkspaceId(), workspace);
+        storage.put(key(region, workspace.getWorkspaceId()), workspace);
     }
 
-    private PrometheusWorkspace workspaceByArn(String arn) {
+    private PrometheusWorkspace workspaceByArn(String region, String arn) {
         // arn:aws:aps:<region>:<account>:workspace/<workspaceId>
         String resource;
         try {
@@ -141,6 +149,21 @@ public class ApsService implements TagHandler {
             throw new AwsException("ValidationException",
                     "Tags are only supported on AMP workspaces: " + arn, 400);
         }
-        return describeWorkspace(resource.substring(prefix.length()));
+        return describeWorkspace(region, resource.substring(prefix.length()));
+    }
+
+    // AMP is regional ("You can have one or more workspaces in each Region in your account"), so
+    // the store is partitioned by request region, like CloudWatchLogsService's groupKey.
+    private static String key(String region, String workspaceId) {
+        return region + "::" + workspaceId;
+    }
+
+    private static String keyPrefix(String region) {
+        return region + "::";
+    }
+
+    // AMP strips leading/trailing blanks from every alias it accepts, including the list filter.
+    private static String stripAlias(String alias) {
+        return alias == null ? null : alias.strip();
     }
 }

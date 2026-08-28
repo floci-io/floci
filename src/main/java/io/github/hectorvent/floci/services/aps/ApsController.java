@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.aps;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.aps.model.PrometheusWorkspace;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -15,6 +16,8 @@ import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.QueryParam;
+import jakarta.ws.rs.core.Context;
+import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 
@@ -37,24 +40,27 @@ import java.util.Map;
 public class ApsController {
 
     private final ApsService service;
+    private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
 
     @Inject
-    public ApsController(ApsService service, ObjectMapper objectMapper) {
+    public ApsController(ApsService service, RegionResolver regionResolver, ObjectMapper objectMapper) {
         this.service = service;
+        this.regionResolver = regionResolver;
         this.objectMapper = objectMapper;
     }
 
     @POST
     @Path("/workspaces")
-    public Response createWorkspace(Map<String, Object> request) {
+    public Response createWorkspace(@Context HttpHeaders headers, Map<String, Object> request) {
         Map<String, Object> body = request != null ? request : Map.of();
         String alias = asString(body.get("alias"), "alias");
         String kmsKeyArn = asString(body.get("kmsKeyArn"), "kmsKeyArn");
         Map<String, String> tags = asStringMap(body.get("tags"), "tags");
         // clientToken is accepted and ignored: creates are not deduplicated.
 
-        PrometheusWorkspace workspace = service.createWorkspace(alias, tags, kmsKeyArn);
+        PrometheusWorkspace workspace =
+                service.createWorkspace(regionResolver.resolveRegion(headers), alias, tags, kmsKeyArn);
 
         ObjectNode response = objectMapper.createObjectNode();
         response.put("workspaceId", workspace.getWorkspaceId());
@@ -69,10 +75,12 @@ public class ApsController {
 
     @GET
     @Path("/workspaces")
-    public Response listWorkspaces(@QueryParam("alias") String alias,
+    public Response listWorkspaces(@Context HttpHeaders headers,
+                                   @QueryParam("alias") String alias,
                                    @QueryParam("maxResults") String maxResultsParam,
                                    @QueryParam("nextToken") String nextToken) {
-        PaginatedResult<PrometheusWorkspace> result = service.listWorkspaces(alias,
+        PaginatedResult<PrometheusWorkspace> result = service.listWorkspaces(
+                regionResolver.resolveRegion(headers), alias,
                 Pagination.parseMaxResults(maxResultsParam, "ValidationException"), nextToken);
 
         Map<String, Object> response = new HashMap<>();
@@ -85,8 +93,10 @@ public class ApsController {
 
     @GET
     @Path("/workspaces/{workspaceId}")
-    public Response describeWorkspace(@PathParam("workspaceId") String workspaceId) {
-        PrometheusWorkspace workspace = service.describeWorkspace(workspaceId);
+    public Response describeWorkspace(@Context HttpHeaders headers,
+                                      @PathParam("workspaceId") String workspaceId) {
+        PrometheusWorkspace workspace =
+                service.describeWorkspace(regionResolver.resolveRegion(headers), workspaceId);
         ObjectNode response = objectMapper.createObjectNode();
         response.set("workspace", toWorkspaceDescription(workspace));
         return Response.ok(response).build();
@@ -94,18 +104,21 @@ public class ApsController {
 
     @DELETE
     @Path("/workspaces/{workspaceId}")
-    public Response deleteWorkspace(@PathParam("workspaceId") String workspaceId) {
-        service.deleteWorkspace(workspaceId);
-        return Response.status(202).entity(objectMapper.createObjectNode()).build();
+    public Response deleteWorkspace(@Context HttpHeaders headers,
+                                    @PathParam("workspaceId") String workspaceId) {
+        service.deleteWorkspace(regionResolver.resolveRegion(headers), workspaceId);
+        // The model documents "an HTTP 202 response with an empty HTTP body".
+        return Response.status(202).build();
     }
 
     @POST
     @Path("/workspaces/{workspaceId}/alias")
-    public Response updateWorkspaceAlias(@PathParam("workspaceId") String workspaceId,
+    public Response updateWorkspaceAlias(@Context HttpHeaders headers,
+                                         @PathParam("workspaceId") String workspaceId,
                                          Map<String, Object> request) {
         Map<String, Object> body = request != null ? request : Map.of();
         String alias = asString(body.get("alias"), "alias");
-        service.updateWorkspaceAlias(workspaceId, alias);
+        service.updateWorkspaceAlias(regionResolver.resolveRegion(headers), workspaceId, alias);
         return Response.status(204).build();
     }
 
