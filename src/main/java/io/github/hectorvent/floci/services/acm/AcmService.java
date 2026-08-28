@@ -511,7 +511,7 @@ public class AcmService implements ResourceProvider {
         Certificate cert = getCertificateByArn(certificateArn, region);
         boolean exportEnabled = cert.getCertOptions() != null && "ENABLED".equals(cert.getCertOptions().export());
         if (!exportEnabled) {
-            throw new AwsException("InvalidStateException",
+            throw new AwsException("ValidationException",
                 "Certificate " + certificateArn + " cannot be revoked because it is not export-enabled.", 400);
         }
         cert.setStatus(CertificateStatus.REVOKED);

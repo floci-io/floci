@@ -50,6 +50,6 @@ class AcmRevokeCertificateGuardTest {
             .post("/")
         .then()
             .statusCode(400)
-            .body("__type", equalTo("InvalidStateException"));
+            .body("__type", equalTo("ValidationException"));
     }
 }
