@@ -1008,9 +1008,10 @@ class SchedulerIntegrationTest {
 
     @Test
     @Order(39)
-    void createScheduleWithNonObjectCapacityProviderStrategyReturns400() {
-        // CapacityProviderStrategy is a list of objects. A list of scalars is a malformed body,
-        // which AWS answers with ValidationException, not with a server error.
+    void createScheduleWithMalformedEcsParameterListsReturns400() {
+        // CapacityProviderStrategy is a list of objects and Subnets a list of strings. An element of
+        // the wrong shape is a malformed body, which AWS answers with ValidationException rather
+        // than with a server error.
         given()
             .contentType("application/json")
             .body("""
@@ -1029,6 +1030,29 @@ class SchedulerIntegrationTest {
                 """)
         .when()
             .post("/schedules/ecs-scalar-capacity-provider")
+        .then()
+            .statusCode(400);
+
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "ScheduleExpression": "rate(1 hour)",
+                    "FlexibleTimeWindow": {"Mode": "OFF"},
+                    "Target": {
+                        "Arn": "arn:aws:ecs:us-east-1:000000000000:cluster/batch",
+                        "RoleArn": "arn:aws:iam::000000000000:role/scheduler-role",
+                        "EcsParameters": {
+                            "TaskDefinitionArn": "arn:aws:ecs:us-east-1:000000000000:task-definition/proof:1",
+                            "NetworkConfiguration": {
+                                "awsvpcConfiguration": {"Subnets": [{"Id": "subnet-a"}]}
+                            }
+                        }
+                    }
+                }
+                """)
+        .when()
+            .post("/schedules/ecs-object-subnet")
         .then()
             .statusCode(400);
     }

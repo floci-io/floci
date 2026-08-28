@@ -537,6 +537,17 @@ public class SchedulerController {
         }
     }
 
+    /** {@link #mapList(String, JsonNode)} for the {@code awsvpcConfiguration} lists of strings. */
+    private List<String> stringList(String field, JsonNode node) {
+        try {
+            return objectMapper.convertValue(node,
+                    objectMapper.getTypeFactory().constructCollectionType(List.class, String.class));
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("ValidationException",
+                    "EcsParameters " + field + " must be a list of strings.", 400);
+        }
+    }
+
     private NetworkConfiguration parseNetworkConfiguration(JsonNode node) {
         NetworkConfiguration network = new NetworkConfiguration();
         if (node.has("awsvpcConfiguration") && !node.get("awsvpcConfiguration").isNull()) {
@@ -548,10 +559,10 @@ public class SchedulerController {
     private AwsVpcConfiguration parseAwsVpcConfiguration(JsonNode node) {
         AwsVpcConfiguration vpc = new AwsVpcConfiguration();
         if (node.has("Subnets") && node.get("Subnets").isArray()) {
-            vpc.setSubnets(objectMapper.convertValue(node.get("Subnets"), objectMapper.getTypeFactory().constructCollectionType(List.class, String.class)));
+            vpc.setSubnets(stringList("Subnets", node.get("Subnets")));
         }
         if (node.has("SecurityGroups") && node.get("SecurityGroups").isArray()) {
-            vpc.setSecurityGroups(objectMapper.convertValue(node.get("SecurityGroups"), objectMapper.getTypeFactory().constructCollectionType(List.class, String.class)));
+            vpc.setSecurityGroups(stringList("SecurityGroups", node.get("SecurityGroups")));
         }
         if (node.has("AssignPublicIp") && !node.get("AssignPublicIp").isNull()) {
             vpc.setAssignPublicIp(node.get("AssignPublicIp").asText());
