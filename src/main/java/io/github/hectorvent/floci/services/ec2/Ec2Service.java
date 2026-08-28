@@ -4934,16 +4934,22 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         requester.setCidrBlock(vpc.getCidrBlock());
         pcx.setRequesterVpcInfo(requester);
 
-        String accepterOwnerId = isSet(peerOwnerId) ? peerOwnerId : callerAccountId;
         String accepterRegion = isSet(peerRegion) ? peerRegion : region;
+        // The accepter VPC may be a cross-account or "external" peer that this store never seeded
+        // (vpc-peering-cross-accounts, vpc-peering-external), in which case there is nothing to
+        // validate PeerOwnerId against and the caller's claim is trusted. But when the peer VPC
+        // *is* known locally, its storage partition — not the requester-supplied PeerOwnerId — is
+        // authoritative: otherwise a requester could name another account's VPC and claim itself
+        // as that account, which AcceptVpcPeeringConnection would then let it self-authorize.
+        Optional<AccountAwareStorageBackend.OwnedEntry<Vpc>> accepterVpcEntry =
+                findAnyVpcEntry(accepterRegion, peerVpcId);
+        String accepterOwnerId = accepterVpcEntry.map(AccountAwareStorageBackend.OwnedEntry::account)
+                .orElseGet(() -> isSet(peerOwnerId) ? peerOwnerId : callerAccountId);
+        Vpc accepterVpc = accepterVpcEntry.map(AccountAwareStorageBackend.OwnedEntry::value).orElse(null);
         VpcPeeringConnectionVpcInfo accepter = new VpcPeeringConnectionVpcInfo();
         accepter.setVpcId(peerVpcId);
         accepter.setOwnerId(accepterOwnerId);
         accepter.setRegion(accepterRegion);
-        // The accepter VPC may be a cross-account or "external" peer that this store never seeded
-        // (vpc-peering-cross-accounts, vpc-peering-external); report its CIDR only when we
-        // actually have it on file, rather than failing the request or fabricating one.
-        Vpc accepterVpc = vpcs.get(key(accepterRegion, peerVpcId)).orElse(null);
         accepter.setCidrBlock(accepterVpc != null ? accepterVpc.getCidrBlock() : null);
         pcx.setAccepterVpcInfo(accepter);
 
@@ -4981,6 +4987,20 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
 
     private static String ownerId(VpcPeeringConnectionVpcInfo side) {
         return side != null ? side.getOwnerId() : null;
+    }
+
+    /**
+     * Resolves a VPC across every account's partition, the same pattern used to resolve a
+     * peering connection by id — {@code vpcs} is otherwise scoped to the caller's own account,
+     * so a plain {@code get} could never find a peer VPC that belongs to a different account.
+     */
+    private Optional<AccountAwareStorageBackend.OwnedEntry<Vpc>> findAnyVpcEntry(String region, String vpcId) {
+        if (vpcs instanceof AccountAwareStorageBackend<?> rawAccountAware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<Vpc> accountAware = (AccountAwareStorageBackend<Vpc>) rawAccountAware;
+            return accountAware.findAnyAccountEntry(key(region, vpcId));
+        }
+        return vpcs.get(key(region, vpcId)).map(v -> new AccountAwareStorageBackend.OwnedEntry<>(null, v));
     }
 
     public List<VpcPeeringConnection> describeVpcPeeringConnections(String region, List<String> ids,

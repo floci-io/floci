@@ -392,4 +392,78 @@ class Ec2VpcPeeringConnectionCrossAccountIntegrationTest {
             .statusCode(200)
             .body("DeleteVpcPeeringConnectionResponse.return", equalTo("true"));
     }
+
+    /**
+     * A requester cannot forge accepter ownership by naming another account's real VPC while
+     * claiming a different PeerOwnerId (e.g. its own account) — the peer VPC's actual storage
+     * partition must win, or the requester could self-authorize AcceptVpcPeeringConnection for a
+     * connection it does not actually control.
+     */
+    @Test
+    @Order(11)
+    void creationCannotForgeAccepterOwnershipForALocallyKnownPeerVpc() {
+        String victimAccount = "000000000199";
+        String victimAuth =
+                "AWS4-HMAC-SHA256 Credential=" + victimAccount + "/20260215/us-east-1/ec2/aws4_request";
+
+        String victimVpcId = given()
+            .formParam("Action", "CreateVpc")
+            .formParam("CidrBlock", "10.70.0.0/16")
+            .header("Authorization", victimAuth)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("CreateVpcResponse.vpc.vpcId");
+
+        String forgingVpcId = given()
+            .formParam("Action", "CreateVpc")
+            .formParam("CidrBlock", "10.71.0.0/16")
+            .header("Authorization", OTHER_ACCOUNT_AUTH)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("CreateVpcResponse.vpc.vpcId");
+
+        // OTHER_ACCOUNT names the victim's real VPC but falsely claims itself as PeerOwnerId.
+        String forgedPcxId = given()
+            .formParam("Action", "CreateVpcPeeringConnection")
+            .formParam("VpcId", forgingVpcId)
+            .formParam("PeerVpcId", victimVpcId)
+            .formParam("PeerOwnerId", OTHER_ACCOUNT)
+            .header("Authorization", OTHER_ACCOUNT_AUTH)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            // The recorded accepter owner is the VPC's real account, not the claimed one.
+            .body("CreateVpcPeeringConnectionResponse.vpcPeeringConnection.accepterVpcInfo.ownerId",
+                    equalTo(victimAccount))
+            .body("CreateVpcPeeringConnectionResponse.vpcPeeringConnection.accepterVpcInfo.cidrBlock",
+                    equalTo("10.70.0.0/16"))
+            .extract().path("CreateVpcPeeringConnectionResponse.vpcPeeringConnection.vpcPeeringConnectionId");
+
+        // The requester cannot self-authorize acceptance despite its false claim.
+        given()
+            .formParam("Action", "AcceptVpcPeeringConnection")
+            .formParam("VpcPeeringConnectionId", forgedPcxId)
+            .header("Authorization", OTHER_ACCOUNT_AUTH)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidVpcPeeringConnectionID.NotFound"));
+
+        // The real owner of the peer VPC can accept it.
+        given()
+            .formParam("Action", "AcceptVpcPeeringConnection")
+            .formParam("VpcPeeringConnectionId", forgedPcxId)
+            .header("Authorization", victimAuth)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("AcceptVpcPeeringConnectionResponse.vpcPeeringConnection.status.code", equalTo("active"));
+    }
 }
