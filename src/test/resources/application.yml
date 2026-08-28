@@ -239,6 +239,7 @@ floci:
       socat-image: alpine/socat
       mock: true
       aws-faithful-private-ip: false
+      # container-ips-routable: true  # see src/main/resources/application.yml
     ecs:
       enabled: true
       mock: true

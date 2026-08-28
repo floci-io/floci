@@ -66,6 +66,10 @@ public class Ec2ContainerManager {
     /** Base64 alphabet plus the line breaks base64-encoded UserData is commonly wrapped at. */
     private static final Pattern BASE64_BODY = Pattern.compile("[A-Za-z0-9+/\\s]+={0,2}");
     private static final int MAX_USER_DATA_DECODE_ROUNDS = 3;
+    /** Mirrors AwsJsonCborController.decodeBody's cap: no AWS service should need more than
+     *  10 MB decompressed, and it bounds how much a caller-controlled gzip stream can expand
+     *  to in the shared emulator JVM. */
+    private static final int MAX_DECOMPRESSED_USER_DATA_BYTES = 10 * 1024 * 1024;
 
     static int containerBridgeIpAttempts = 30;
     static long containerBridgeIpPollMillis = 500;
@@ -947,8 +951,24 @@ public class Ec2ContainerManager {
         if (payload.length < 2 || (payload[0] & 0xff) != 0x1f || (payload[1] & 0xff) != 0x8b) {
             return null;
         }
+        // Bounded the same way AwsJsonCborController.decodeBody is: a crafted payload can
+        // otherwise expand to gigabytes of image-heap while the launch worker holds it, since
+        // UserData is caller-controlled and this runs in the shared emulator JVM.
+        byte[] buffer = new byte[64 * 1024];
+        int totalRead = 0;
+        ByteArrayOutputStream decompressed = new ByteArrayOutputStream();
         try (GZIPInputStream gzip = new GZIPInputStream(new ByteArrayInputStream(payload))) {
-            return gzip.readAllBytes();
+            int read;
+            while ((read = gzip.read(buffer)) != -1) {
+                totalRead += read;
+                if (totalRead > MAX_DECOMPRESSED_USER_DATA_BYTES) {
+                    LOG.warnv("UserData decompressed past {0} bytes; discarding as oversized",
+                            MAX_DECOMPRESSED_USER_DATA_BYTES);
+                    return null;
+                }
+                decompressed.write(buffer, 0, read);
+            }
+            return decompressed.toByteArray();
         } catch (IOException e) {
             LOG.warnv("UserData starts with the gzip magic bytes but could not be decompressed: {0}", e.getMessage());
             return null;

@@ -232,6 +232,18 @@ class Ec2ContainerManagerTest {
     }
 
     @Test
+    void userDataShellScriptsDiscardsGzipBombRatherThanExhaustingHeap() throws Exception {
+        // A highly-compressible payload well past the 10 MB decompressed cap this guards
+        // against: ~50 MB of a repeated character gzips down to a few KB on the wire, so an
+        // Auto Scaling launch configuration can smuggle it through in a single UserData field.
+        // Without the bound, GZIPInputStream#readAllBytes materializes the full expansion in
+        // the shared emulator JVM. With it, decoding gives up and no scripts are extracted.
+        String bomb = "A".repeat(50 * 1024 * 1024);
+
+        assertEquals(List.of(), Ec2ContainerManager.userDataShellScripts(gzipBase64(bomb)));
+    }
+
+    @Test
     void userDataShellScriptsDecodesPlainBase64ShellScript() {
         String script = "#!/bin/bash\necho ready\n";
         String encoded = java.util.Base64.getEncoder().encodeToString(script.getBytes(StandardCharsets.UTF_8));

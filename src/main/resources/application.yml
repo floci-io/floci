@@ -405,6 +405,10 @@ floci:
       socat-image: alpine/socat
       mock: false
       aws-faithful-private-ip: false
+      # container-ips-routable: true  # Auto-detected by default (a throwaway TCP probe toward
+                                       # the container network). Set explicitly when the probe
+                                       # can't speak for your clients, e.g. Floci itself running
+                                       # containerized. FLOCI_SERVICES_EC2_CONTAINER_IPS_ROUTABLE
     ecs:
       enabled: true
       mock: false
