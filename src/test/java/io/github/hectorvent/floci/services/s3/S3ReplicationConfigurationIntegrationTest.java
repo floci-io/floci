@@ -416,4 +416,49 @@ class S3ReplicationConfigurationIntegrationTest {
             .statusCode(404)
             .body(containsString("ReplicationConfigurationNotFoundError"));
     }
+
+    /**
+     * A document-wide count of Rule elements against Destination elements can't distinguish a
+     * well-formed document from one where a rule improperly carries two Destinations and another
+     * rule carries none — the totals still balance (2 rules, 2 destinations) even though the
+     * second rule has no destination of its own and the first has one too many.
+     */
+    @Test
+    @Order(17)
+    void putReplicationRejectsWhenDestinationsAreNotOnePerRule() {
+        given()
+            .body("""
+                    <ReplicationConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+                        <Role>arn:aws:iam::000000000000:role/replication-role</Role>
+                        <Rule>
+                            <ID>two-destinations</ID>
+                            <Status>Enabled</Status>
+                            <Destination>
+                                <Bucket>arn:aws:s3:::replication-config-int-test-target</Bucket>
+                            </Destination>
+                            <Destination>
+                                <Bucket>arn:aws:s3:::replication-config-int-test-target-2</Bucket>
+                            </Destination>
+                        </Rule>
+                        <Rule>
+                            <ID>zero-destinations</ID>
+                            <Status>Enabled</Status>
+                        </Rule>
+                    </ReplicationConfiguration>
+                    """)
+        .when()
+            .put("/" + BUCKET + "?replication")
+        .then()
+            .statusCode(400)
+            .body(containsString("MalformedXML"));
+        // BUCKET has no configuration at this point in the ordered sequence (cleared by
+        // deleteReplicationClearsTheStoredConfiguration, @Order(13)), so the rejected PUT above
+        // must not have stored anything either.
+        given()
+        .when()
+            .get("/" + BUCKET + "?replication")
+        .then()
+            .statusCode(404)
+            .body(containsString("ReplicationConfigurationNotFoundError"));
+    }
 }

@@ -2543,16 +2543,16 @@ public class S3Service implements Resettable, ResourceProvider {
             }
             String role = XmlParser.extractFirst(replicationXml, "Role", null);
             List<Map<String, List<String>>> rules = XmlParser.extractGroupsMulti(replicationXml, "Rule");
-            // Destination is nested inside each Rule, so its Bucket child is not a leaf of Rule
-            // and extractGroupsMulti("Rule") never sees it. Destination elements appear in the
-            // same document order as their owning Rule and nowhere else, so pairing them
-            // position-for-position with the Rule list validates each rule has its own
-            // Destination/Bucket instead of one Bucket anywhere in the document satisfying every
-            // rule.
-            List<Map<String, List<String>>> destinations = XmlParser.extractGroupsMulti(replicationXml, "Destination");
-            if (role == null || role.isBlank()
-                    || rules.isEmpty()
-                    || destinations.size() != rules.size()) {
+            // A document-wide count of Rule vs Destination elements can't tell a well-formed
+            // document from one where a rule has two Destinations and another has none (the
+            // totals still balance). Destination is a direct child of Rule, so walking the parsed
+            // element tree and inspecting each Rule's own children is the only way to require
+            // that every rule carries exactly its own destination.
+            XmlParser.XmlElement root = XmlParser.extractElementTree(replicationXml, "ReplicationConfiguration");
+            List<XmlParser.XmlElement> ruleElements = root == null
+                    ? List.of()
+                    : root.children().stream().filter(c -> "Rule".equals(c.name())).toList();
+            if (role == null || role.isBlank() || ruleElements.isEmpty()) {
                 throw new AwsException("MalformedXML",
                         "The XML you provided was not well-formed or did not validate against our published schema.",
                         400);
@@ -2568,10 +2568,15 @@ public class S3Service implements Resettable, ResourceProvider {
                                     + "our published schema.", 400);
                 }
             }
-            // ReplicationRuleAndOperator/Destination.Bucket is Required: Yes.
-            for (Map<String, List<String>> destination : destinations) {
-                List<String> buckets = destination.getOrDefault("Bucket", List.of());
-                if (buckets.size() != 1 || buckets.get(0).isBlank()) {
+            // Destination is Required: Yes on Rule, and ReplicationRuleAndOperator/Destination.Bucket
+            // is Required: Yes on Destination — checked against each rule's own children, not the
+            // document as a whole.
+            for (XmlParser.XmlElement ruleElement : ruleElements) {
+                List<XmlParser.XmlElement> ruleDestinations = ruleElement.children().stream()
+                        .filter(c -> "Destination".equals(c.name())).toList();
+                XmlParser.XmlElement bucketElement = ruleDestinations.size() == 1
+                        ? ruleDestinations.get(0).child("Bucket") : null;
+                if (bucketElement == null || bucketElement.text().isBlank()) {
                     throw new AwsException("MalformedXML",
                             "The XML you provided was not well-formed or did not validate against "
                                     + "our published schema.", 400);
