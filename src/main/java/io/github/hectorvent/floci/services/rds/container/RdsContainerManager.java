@@ -17,8 +17,11 @@ import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
+import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.jboss.logging.Logger;
 
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.io.IOException;
@@ -167,11 +170,14 @@ public class RdsContainerManager {
             cleanupContainerId = containerName;
             String createdContainerId = lifecycleManager.create(spec);
             cleanupContainerId = createdContainerId;
+            if (needsMasterGrant(engine, masterUsername)) {
+                installMasterGrantInitScript(createdContainerId, masterUsername);
+            }
             ContainerInfo info = lifecycleManager.startCreated(createdContainerId, spec);
             EndpointInfo endpoint = info.getEndpoint(enginePort);
 
             LOG.infov("RDS backend for instance {0}: {1}", instanceId, endpoint);
-            initializeEngine(containerName, info.containerId(), engine, masterUsername, masterPassword);
+            initializeEngine(containerName, info.containerId(), engine, masterUsername);
 
             handle = new RdsContainerHandle(
                     info.containerId(), effectiveRuntimeId, instanceId,
@@ -371,13 +377,9 @@ public class RdsContainerManager {
         return Integer.parseInt(tag.substring(0, end));
     }
 
-    private void initializeEngine(String containerName, String containerId, DatabaseEngine engine,
-                                  String masterUsername, String masterPassword) {
+    private void initializeEngine(String containerName, String containerId, DatabaseEngine engine, String masterUsername) {
         if (engine == DatabaseEngine.POSTGRES) {
             initializePostgresIamRole(containerName, containerId, masterUsername);
-        } else if (needsMasterGrant(engine, masterUsername)) {
-            execUntilSuccess(containerName, containerId,
-                    masterGrantCommand(engine, masterUsername, masterPassword), "master-user grants");
         }
     }
 
@@ -416,17 +418,42 @@ public class RdsContainerManager {
                 && masterUsername != null && !masterUsername.isBlank() && !"root".equals(masterUsername);
     }
 
-    static String[] masterGrantCommand(DatabaseEngine engine, String masterUsername, String masterPassword) {
-        // MariaDB images ≥10.4 (Floci's floor is 10.11) ship only the `mariadb` client binary.
-        String client = engine == DatabaseEngine.MARIADB ? "mariadb" : "mysql";
-        return new String[]{client, "-uroot", "-p" + masterPassword, "-e", mysqlMasterGrantSql(masterUsername)};
-    }
-
     static String mysqlMasterGrantSql(String masterUsername) {
         // Real RDS grants the master user a near-global privilege list (withholding SUPER, FILE
         // and SHUTDOWN); the emulator grants ALL for simplicity, mirroring how POSTGRES_USER is
-        // already a superuser. MasterUsername is API-constrained to word characters, safe to inline.
-        return "GRANT ALL PRIVILEGES ON *.* TO '" + masterUsername + "'@'%' WITH GRANT OPTION;";
+        // already a superuser. Floci does not enforce AWS's MasterUsername charset, so the name
+        // is escaped rather than trusted — this SQL runs as root inside the container.
+        String escaped = masterUsername.replace("\\", "\\\\").replace("'", "\\'");
+        return "GRANT ALL PRIVILEGES ON *.* TO '" + escaped + "'@'%' WITH GRANT OPTION;";
+    }
+
+    /**
+     * Delivered as a {@code /docker-entrypoint-initdb.d} script installed between container create
+     * and start, rather than a post-start root exec: the images run init scripts exactly once —
+     * against an empty data directory, as root, after creating the master user. A reboot on a
+     * reused volume therefore never re-runs it, which matters because the volume's real root
+     * password survives a ModifyDBInstance master-password rotation (MYSQL_ROOT_PASSWORD only
+     * takes effect on first initialization), so any post-start root exec would fail there.
+     */
+    private void installMasterGrantInitScript(String containerId, String masterUsername) {
+        byte[] sql = mysqlMasterGrantSql(masterUsername).getBytes(StandardCharsets.UTF_8);
+        try (ByteArrayOutputStream bos = new ByteArrayOutputStream()) {
+            try (TarArchiveOutputStream tar = new TarArchiveOutputStream(bos)) {
+                TarArchiveEntry entry = new TarArchiveEntry("floci-master-grants.sql");
+                entry.setSize(sql.length);
+                entry.setMode(0644);
+                tar.putArchiveEntry(entry);
+                tar.write(sql);
+                tar.closeArchiveEntry();
+            }
+            lifecycleManager.getDockerClient().copyArchiveToContainerCmd(containerId)
+                    .withRemotePath("/docker-entrypoint-initdb.d")
+                    .withTarInputStream(new ByteArrayInputStream(bos.toByteArray()))
+                    .exec();
+        } catch (IOException e) {
+            throw new IllegalStateException(
+                    "Failed to install the master-grant init script into container " + containerId, e);
+        }
     }
 
     private void execUntilSuccess(String containerName, String containerId, String[] cmd, String description) {
