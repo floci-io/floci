@@ -461,4 +461,41 @@ class S3ReplicationConfigurationIntegrationTest {
             .statusCode(404)
             .body(containsString("ReplicationConfigurationNotFoundError"));
     }
+
+    /**
+     * {@code Destination.Bucket} is a required <em>scalar</em> member (botocore
+     * s3/2006-03-01/service-2.json: {@code "Bucket":{"shape":"BucketName"}}, not a list) — a
+     * Destination with two Bucket children is not a valid alternative encoding, it is malformed.
+     * Selecting only the first Bucket child would silently accept the second as if it never
+     * existed and store a document AWS would reject.
+     */
+    @Test
+    @Order(18)
+    void putReplicationRejectsADestinationWithMultipleBucketElements() {
+        given()
+            .body("""
+                    <ReplicationConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+                        <Role>arn:aws:iam::000000000000:role/replication-role</Role>
+                        <Rule>
+                            <ID>two-buckets</ID>
+                            <Status>Enabled</Status>
+                            <Destination>
+                                <Bucket>arn:aws:s3:::replication-config-int-test-target</Bucket>
+                                <Bucket>arn:aws:s3:::replication-config-int-test-target-2</Bucket>
+                            </Destination>
+                        </Rule>
+                    </ReplicationConfiguration>
+                    """)
+        .when()
+            .put("/" + BUCKET + "?replication")
+        .then()
+            .statusCode(400)
+            .body(containsString("MalformedXML"));
+        given()
+        .when()
+            .get("/" + BUCKET + "?replication")
+        .then()
+            .statusCode(404)
+            .body(containsString("ReplicationConfigurationNotFoundError"));
+    }
 }

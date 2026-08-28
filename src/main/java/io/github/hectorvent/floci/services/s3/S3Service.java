@@ -2574,8 +2574,16 @@ public class S3Service implements Resettable, ResourceProvider {
             for (XmlParser.XmlElement ruleElement : ruleElements) {
                 List<XmlParser.XmlElement> ruleDestinations = ruleElement.children().stream()
                         .filter(c -> "Destination".equals(c.name())).toList();
-                XmlParser.XmlElement bucketElement = ruleDestinations.size() == 1
-                        ? ruleDestinations.get(0).child("Bucket") : null;
+                // Bucket is a required *scalar* member of Destination (botocore
+                // s3/2006-03-01/service-2.json: "Bucket":{"shape":"BucketName"}), not a list.
+                // child("Bucket") returns only the first match, so a Destination with two Bucket
+                // elements must be counted explicitly rather than silently accepting the first.
+                List<XmlParser.XmlElement> bucketElements = ruleDestinations.size() == 1
+                        ? ruleDestinations.get(0).children().stream()
+                                .filter(c -> "Bucket".equals(c.name())).toList()
+                        : List.of();
+                XmlParser.XmlElement bucketElement = bucketElements.size() == 1
+                        ? bucketElements.get(0) : null;
                 if (bucketElement == null || bucketElement.text().isBlank()) {
                     throw new AwsException("MalformedXML",
                             "The XML you provided was not well-formed or did not validate against "
