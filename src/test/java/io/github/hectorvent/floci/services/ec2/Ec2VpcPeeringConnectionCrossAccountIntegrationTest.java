@@ -25,18 +25,23 @@ import io.quarkus.test.junit.QuarkusTest;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class Ec2VpcPeeringConnectionCrossAccountIntegrationTest {
 
+    // 000000000000 is the emulator's configured default account — distinct from every account
+    // below, so it stands in for "an unrelated account that happens to be the default".
+    private static final String DEFAULT_ACCOUNT = "000000000000";
     private static final String REQUESTER_ACCOUNT = "000000000101";
     private static final String ACCEPTER_ACCOUNT = "000000000102";
     private static final String OTHER_ACCOUNT = "000000000103";
 
+    private static final String DEFAULT_ACCOUNT_AUTH =
+            "AWS4-HMAC-SHA256 Credential=" + DEFAULT_ACCOUNT + "/20260215/us-east-1/ec2/aws4_request";
     private static final String REQUESTER_AUTH =
             "AWS4-HMAC-SHA256 Credential=" + REQUESTER_ACCOUNT + "/20260215/us-east-1/ec2/aws4_request";
     private static final String ACCEPTER_AUTH =
             "AWS4-HMAC-SHA256 Credential=" + ACCEPTER_ACCOUNT + "/20260215/us-east-1/ec2/aws4_request";
     private static final String OTHER_ACCOUNT_AUTH =
             "AWS4-HMAC-SHA256 Credential=" + OTHER_ACCOUNT + "/20260215/us-east-1/ec2/aws4_request";
-    // Same requester account, different region — used to prove a describe in a region unrelated
-    // to either side of the connection does not see it.
+    // Same requester account, different region — used to prove a describe (and, below, a
+    // mutation) issued from a region unrelated to either side of the connection does not see it.
     private static final String REQUESTER_AUTH_OTHER_REGION =
             "AWS4-HMAC-SHA256 Credential=" + REQUESTER_ACCOUNT + "/20260215/us-west-2/ec2/aws4_request";
 
@@ -236,5 +241,100 @@ class Ec2VpcPeeringConnectionCrossAccountIntegrationTest {
             .body("DescribeRouteTablesResponse.routeTableSet.item.routeSet.item"
                     + ".find { it.destinationCidrBlock == '10.60.0.0/16' }.vpcPeeringConnectionId",
                     equalTo(pcxId));
+    }
+
+    /**
+     * The requester account (not the emulator's configured default account) must be able to
+     * describe and modify the connection it created. Recording requesterVpcInfo.ownerId as the
+     * fixed default account, rather than the account that actually made the request, would deny
+     * the real requester while handing an unrelated account participant-level access.
+     */
+    @Test
+    @Order(8)
+    void theRequesterAccountCanManageItsOwnConnectionButTheDefaultAccountCannot() {
+        given()
+            .formParam("Action", "DescribeVpcPeeringConnections")
+            .formParam("VpcPeeringConnectionId.1", pcxId)
+            .header("Authorization", REQUESTER_AUTH)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeVpcPeeringConnectionsResponse.vpcPeeringConnectionSet.item.vpcPeeringConnectionId",
+                    equalTo(pcxId));
+
+        given()
+            .formParam("Action", "DescribeVpcPeeringConnections")
+            .formParam("VpcPeeringConnectionId.1", pcxId)
+            .header("Authorization", DEFAULT_ACCOUNT_AUTH)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeVpcPeeringConnectionsResponse.vpcPeeringConnectionSet", emptyOrNullString());
+
+        given()
+            .formParam("Action", "ModifyVpcPeeringConnectionOptions")
+            .formParam("VpcPeeringConnectionId", pcxId)
+            .formParam("RequesterPeeringConnectionOptions.AllowDnsResolutionFromRemoteVpc", "true")
+            .header("Authorization", REQUESTER_AUTH)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ModifyVpcPeeringConnectionOptionsResponse.requesterPeeringConnectionOptions"
+                    + ".allowDnsResolutionFromRemoteVpc", equalTo("true"));
+
+        given()
+            .formParam("Action", "ModifyVpcPeeringConnectionOptions")
+            .formParam("VpcPeeringConnectionId", pcxId)
+            .formParam("RequesterPeeringConnectionOptions.AllowDnsResolutionFromRemoteVpc", "false")
+            .header("Authorization", DEFAULT_ACCOUNT_AUTH)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidVpcPeeringConnectionID.NotFound"));
+    }
+
+    /**
+     * Accept, modify and delete must enforce the same regional-visibility invariant Describe
+     * does: an endpoint in a region belonging to neither side must not be able to act on the
+     * connection, even when the caller's account is a legitimate participant.
+     */
+    @Test
+    @Order(9)
+    void mutationsFromAnUnrelatedRegionAreRejected() {
+        given()
+            .formParam("Action", "ModifyVpcPeeringConnectionOptions")
+            .formParam("VpcPeeringConnectionId", pcxId)
+            .formParam("RequesterPeeringConnectionOptions.AllowDnsResolutionFromRemoteVpc", "true")
+            .header("Authorization", REQUESTER_AUTH_OTHER_REGION)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidVpcPeeringConnectionID.NotFound"));
+
+        given()
+            .formParam("Action", "DeleteVpcPeeringConnection")
+            .formParam("VpcPeeringConnectionId", pcxId)
+            .header("Authorization", REQUESTER_AUTH_OTHER_REGION)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidVpcPeeringConnectionID.NotFound"));
+
+        // Still there, and still manageable from the correct region.
+        given()
+            .formParam("Action", "DeleteVpcPeeringConnection")
+            .formParam("VpcPeeringConnectionId", pcxId)
+            .header("Authorization", REQUESTER_AUTH)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DeleteVpcPeeringConnectionResponse.return", equalTo("true"));
     }
 }

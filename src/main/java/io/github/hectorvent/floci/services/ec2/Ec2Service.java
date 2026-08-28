@@ -4926,14 +4926,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         pcx.setVpcPeeringConnectionId(pcxId);
         pcx.setRegion(region);
 
+        String callerAccountId = callerAccountId();
         VpcPeeringConnectionVpcInfo requester = new VpcPeeringConnectionVpcInfo();
         requester.setVpcId(vpcId);
-        requester.setOwnerId(accountId);
+        requester.setOwnerId(callerAccountId);
         requester.setRegion(region);
         requester.setCidrBlock(vpc.getCidrBlock());
         pcx.setRequesterVpcInfo(requester);
 
-        String accepterOwnerId = isSet(peerOwnerId) ? peerOwnerId : accountId;
+        String accepterOwnerId = isSet(peerOwnerId) ? peerOwnerId : callerAccountId;
         String accepterRegion = isSet(peerRegion) ? peerRegion : region;
         VpcPeeringConnectionVpcInfo accepter = new VpcPeeringConnectionVpcInfo();
         accepter.setVpcId(peerVpcId);
@@ -4997,9 +4998,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             VpcPeeringConnection current = owned.pcx();
             String accepterOwnerId = current.getAccepterVpcInfo() != null
                     ? current.getAccepterVpcInfo().getOwnerId() : null;
-            if (!callerAccountId().equals(accepterOwnerId)) {
-                // Reported as absent, not as a permission error: AWS does not confirm the
-                // existence of a connection the caller cannot see.
+            // Reported as absent, not as a permission error: AWS does not confirm the existence
+            // of a connection the caller cannot see, whether that's because it belongs to another
+            // account or because this endpoint's region isn't party to it (same invariant Describe
+            // enforces).
+            if (!callerAccountId().equals(accepterOwnerId) || !visibleFromRegion(current, region)) {
                 throw vpcPeeringConnectionNotFound(vpcPeeringConnectionId);
             }
             String code = current.getStatus() != null ? current.getStatus().getCode() : null;
@@ -5020,7 +5023,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         synchronized (lockFor(vpcPeeringConnectionId)) {
             OwnedVpcPeeringConnection owned = getRequiredOwnedVpcPeeringConnection(vpcPeeringConnectionId);
             VpcPeeringConnection current = owned.pcx();
-            if (!visibleToAccount(current, callerAccountId())) {
+            if (!visibleToAccount(current, callerAccountId()) || !visibleFromRegion(current, region)) {
                 throw vpcPeeringConnectionNotFound(vpcPeeringConnectionId);
             }
             if (accepterAllowRemoteVpcDnsResolution != null) {
@@ -5036,7 +5039,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
 
     public void deleteVpcPeeringConnection(String region, String vpcPeeringConnectionId) {
         OwnedVpcPeeringConnection owned = getRequiredOwnedVpcPeeringConnection(vpcPeeringConnectionId);
-        if (!visibleToAccount(owned.pcx(), callerAccountId())) {
+        if (!visibleToAccount(owned.pcx(), callerAccountId()) || !visibleFromRegion(owned.pcx(), region)) {
             throw vpcPeeringConnectionNotFound(vpcPeeringConnectionId);
         }
         deleteVpcPeeringConnection(owned);
