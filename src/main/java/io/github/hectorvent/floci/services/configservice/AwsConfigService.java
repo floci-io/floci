@@ -360,19 +360,20 @@ public class AwsConfigService {
                 .computeIfAbsent(ruleName, r -> new ConcurrentHashMap<>());
         for (ConfigEvaluation evaluation : newEvaluations) {
             String key = resourceKey(evaluation.complianceResourceType(), evaluation.complianceResourceId());
-            ConfigEvaluation current = ruleEvaluations.get(key);
-            if (current != null && current.orderingTimestamp() != null
-                    && evaluation.orderingTimestamp() < current.orderingTimestamp()) {
-                continue;
-            }
-            ruleEvaluations.put(key, new ConfigEvaluation(
-                    evaluation.complianceResourceType(),
-                    evaluation.complianceResourceId(),
-                    evaluation.complianceType(),
-                    evaluation.annotation(),
-                    evaluation.orderingTimestamp(),
-                    recordedTime,
-                    recordedTime));
+            ruleEvaluations.compute(key, (ignoredKey, current) -> {
+                if (current != null && current.orderingTimestamp() != null
+                        && evaluation.orderingTimestamp() < current.orderingTimestamp()) {
+                    return current;
+                }
+                return new ConfigEvaluation(
+                        evaluation.complianceResourceType(),
+                        evaluation.complianceResourceId(),
+                        evaluation.complianceType(),
+                        evaluation.annotation(),
+                        evaluation.orderingTimestamp(),
+                        recordedTime,
+                        recordedTime);
+            });
         }
         ruleLastInvokedTime.put(ruleKey(region, ruleName), recordedTime);
         persistRegion(evaluations, region);
