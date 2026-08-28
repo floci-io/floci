@@ -353,7 +353,8 @@ public class CloudWatchMetricsQueryHandler {
         MetricAlarm a = new MetricAlarm();
         a.setAlarmName(params.getFirst("AlarmName"));
         a.setAlarmDescription(params.getFirst("AlarmDescription"));
-        a.setActionsEnabled(Boolean.parseBoolean(params.getFirst("ActionsEnabled")));
+        String actionsEnabled = params.getFirst("ActionsEnabled");
+        a.setActionsEnabled(actionsEnabled == null || Boolean.parseBoolean(actionsEnabled));
         a.setMetricName(params.getFirst("MetricName"));
         a.setNamespace(params.getFirst("Namespace"));
         a.setStatistic(params.getFirst("Statistic"));
