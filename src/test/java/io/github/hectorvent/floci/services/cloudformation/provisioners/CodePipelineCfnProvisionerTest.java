@@ -160,4 +160,70 @@ class CodePipelineCfnProvisionerTest {
 
         assertEquals("Build|Custom|MyBuilder|2", r.getPhysicalId());
     }
+
+    @Test
+    void customActionTypeIdentityChangeCreatesNewAndDeletesOld() {
+        when(service.handle(eq("CreateCustomActionType"), any(), any(), any()))
+                .thenReturn(mapper.createObjectNode());
+        ObjectNode props = mapper.createObjectNode();
+        props.put("Category", "Build");
+        props.put("Provider", "MyBuilder");
+        props.put("Version", "3");
+        StackResource r = resource("AWS::CodePipeline::CustomActionType");
+        // Previously provisioned under Version "2" — an update to Version "3" changes identity.
+        r.setPhysicalId("Build|Custom|MyBuilder|2");
+
+        provisioner.provision(r, props, ctx());
+
+        verify(service).handle(eq("CreateCustomActionType"), any(), eq("us-east-1"), eq("000000000000"));
+        ArgumentCaptor<JsonNode> deleteRequest = ArgumentCaptor.forClass(JsonNode.class);
+        verify(service).handle(eq("DeleteCustomActionType"), deleteRequest.capture(), any(), any());
+        assertEquals("Build", deleteRequest.getValue().path("category").asText());
+        assertEquals("MyBuilder", deleteRequest.getValue().path("provider").asText());
+        assertEquals("2", deleteRequest.getValue().path("version").asText());
+        assertEquals("Build|Custom|MyBuilder|3", r.getPhysicalId());
+    }
+
+    @Test
+    void removedTransitionRestrictionIsReEnabledOnUpdate() {
+        when(service.handle(eq("UpdatePipeline"), any(), any(), any()))
+                .thenReturn(mapper.createObjectNode().set("pipeline",
+                        mapper.createObjectNode().put("version", 2)));
+        // Previously deployed with "Gate" disabled; this update's template no longer lists it.
+        ObjectNode props = pipelineProps("gated");
+        StackResource r = resource("AWS::CodePipeline::Pipeline");
+        r.setPhysicalId("gated");
+
+        provisioner.provision(r, props, ctx());
+
+        ArgumentCaptor<JsonNode> request = ArgumentCaptor.forClass(JsonNode.class);
+        verify(service).handle(eq("EnableStageTransition"), request.capture(), eq("us-east-1"), eq("000000000000"));
+        assertEquals("Gate", request.getValue().path("stageName").asText());
+    }
+
+    @Test
+    void registerWithThirdPartyReadsResolvedValueNotRawIntrinsic() {
+        when(service.handle(eq("PutWebhook"), any(), any(), any()))
+                .thenReturn(mapper.createObjectNode().set("webhook",
+                        mapper.createObjectNode().put("url", "http://localhost/hook")));
+        ObjectNode props = mapper.createObjectNode();
+        props.put("Name", "hook");
+        props.put("TargetPipeline", "the-pipeline");
+        props.put("TargetAction", "Source");
+        // Simulate an unresolved intrinsic (e.g. Fn::If) that only resolves to true —
+        // raw props must never be consulted directly for this boolean.
+        props.putObject("RegisterWithThirdParty").put("Fn::If", "SomeCondition");
+        StackResource r = resource("AWS::CodePipeline::Webhook");
+        var engine = mock(io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine.class);
+        when(engine.resolveNode(any())).thenAnswer(inv -> {
+            ObjectNode resolved = ((ObjectNode) inv.getArgument(0)).deepCopy();
+            resolved.put("RegisterWithThirdParty", true);
+            return resolved;
+        });
+        ProvisionContext ctx = new ProvisionContext(engine, "us-east-1", "000000000000", "cfn-stack");
+
+        provisioner.provision(r, props, ctx);
+
+        verify(service).handle(eq("RegisterWebhookWithThirdParty"), any(), any(), any());
+    }
 }

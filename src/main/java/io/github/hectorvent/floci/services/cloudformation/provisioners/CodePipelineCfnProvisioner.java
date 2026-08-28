@@ -107,6 +107,27 @@ public class CodePipelineCfnProvisioner implements CfnResourceProvisioner {
             response = codePipelineService.handle("CreatePipeline", request, ctx.region(), ctx.accountId());
         }
 
+        java.util.Set<String> disabledStages = new java.util.LinkedHashSet<>();
+        if (transitions != null && transitions.isArray()) {
+            for (JsonNode transition : transitions) {
+                disabledStages.add(transition.path("stageName").asText());
+            }
+        }
+        // DisableInboundStageTransitions is a fully declarative list: a stage transition that
+        // was disabled by a previous deployment but is absent from this one must be re-enabled,
+        // not merely left alone, or it stays stuck disabled after UPDATE_COMPLETE.
+        if (update && declaration.path("stages").isArray()) {
+            for (JsonNode stage : declaration.path("stages")) {
+                String stageName = stage.path("name").asText();
+                if (!disabledStages.contains(stageName)) {
+                    codePipelineService.handle("EnableStageTransition", mapper.createObjectNode()
+                                    .put("pipelineName", name)
+                                    .put("stageName", stageName)
+                                    .put("transitionType", "Inbound"),
+                            ctx.region(), ctx.accountId());
+                }
+            }
+        }
         if (transitions != null && transitions.isArray()) {
             for (JsonNode transition : transitions) {
                 codePipelineService.handle("DisableStageTransition", mapper.createObjectNode()
@@ -128,16 +149,24 @@ public class CodePipelineCfnProvisioner implements CfnResourceProvisioner {
         request.remove("tags");
         String physicalId = request.path("category").asText() + "|Custom|"
                 + request.path("provider").asText() + "|" + request.path("version").asText("1");
-        if (r.getPhysicalId() == null || r.getPhysicalId().isBlank()) {
+        String previousPhysicalId = r.getPhysicalId();
+        // Category/Provider/Version are this resource's identity — CodePipeline has no update
+        // operation for a custom action type, so a change to any of them is a replacement:
+        // create the new identity, then best-effort delete the old one it superseded.
+        if (previousPhysicalId == null || previousPhysicalId.isBlank()
+                || !previousPhysicalId.equals(physicalId)) {
             codePipelineService.handle("CreateCustomActionType", request, ctx.region(), ctx.accountId());
+            if (previousPhysicalId != null && !previousPhysicalId.isBlank()) {
+                delete("AWS::CodePipeline::CustomActionType", previousPhysicalId, ctx.region());
+            }
         }
         r.setPhysicalId(physicalId);
     }
 
     private void provisionWebhook(StackResource r, JsonNode props, ProvisionContext ctx) {
         ObjectNode webhook = (ObjectNode) lowerKeys(ctx.engine().resolveNode(props));
-        boolean register = webhook.remove("registerWithThirdParty") != null
-                && props.path("RegisterWithThirdParty").asBoolean(false);
+        JsonNode registerNode = webhook.remove("registerWithThirdParty");
+        boolean register = registerNode != null && registerNode.asBoolean(false);
         String name = webhook.path("name").asText(null);
         if (name == null || name.isBlank()) {
             name = r.getPhysicalId() != null && !r.getPhysicalId().isBlank()
