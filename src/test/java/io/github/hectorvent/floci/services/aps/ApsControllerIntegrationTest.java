@@ -17,8 +17,10 @@ import static org.hamcrest.Matchers.startsWith;
 class ApsControllerIntegrationTest {
 
     // Region comes from the SigV4 credential scope; requests without the header use the default us-east-1.
-    private static final String AUTH_EU_WEST_1 =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260827/eu-west-1/aps/aws4_request, SignedHeaders=host, Signature=abc";
+    private static String auth(String region) {
+        return "AWS4-HMAC-SHA256 Credential=AKID/20260827/" + region
+                + "/aps/aws4_request, SignedHeaders=host, Signature=abc";
+    }
 
     private String createWorkspace(String alias) {
         return given()
@@ -134,7 +136,7 @@ class ApsControllerIntegrationTest {
 
         // The same workspace id does not exist when the request is signed for another region.
         given()
-            .header("Authorization", AUTH_EU_WEST_1)
+            .header("Authorization", auth("eu-west-1"))
         .when()
             .get("/workspaces/{workspaceId}", workspaceId)
         .then()
@@ -142,7 +144,7 @@ class ApsControllerIntegrationTest {
             .header("X-Amzn-Errortype", equalTo("ResourceNotFoundException"));
 
         given()
-            .header("Authorization", AUTH_EU_WEST_1)
+            .header("Authorization", auth("eu-west-1"))
         .when()
             .get("/workspaces")
         .then()
@@ -150,7 +152,7 @@ class ApsControllerIntegrationTest {
             .body("workspaces.workspaceId", not(hasItem(workspaceId)));
 
         given()
-            .header("Authorization", AUTH_EU_WEST_1)
+            .header("Authorization", auth("eu-west-1"))
         .when()
             .delete("/workspaces/{workspaceId}", workspaceId)
         .then()
@@ -233,8 +235,7 @@ class ApsControllerIntegrationTest {
         // The shared /tags route resolves the error-header protocol from the SigV4 credential
         // scope, so this request carries one the way a real SDK call would.
         given()
-            .header("Authorization",
-                    "AWS4-HMAC-SHA256 Credential=AKID/20260827/us-east-1/aps/aws4_request, SignedHeaders=host, Signature=abc")
+            .header("Authorization", auth("us-east-1"))
             .contentType("application/json")
             .body("{\"tags\": {\"aws:cloudformation:stack\": \"x\"}}")
         .when()

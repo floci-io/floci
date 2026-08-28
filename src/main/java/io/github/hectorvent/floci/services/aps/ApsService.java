@@ -74,7 +74,8 @@ public class ApsService implements TagHandler {
     public PaginatedResult<PrometheusWorkspace> listWorkspaces(String region, String aliasPrefix,
                                                                Integer maxResults, String nextToken) {
         String prefix = stripAlias(aliasPrefix);
-        List<PrometheusWorkspace> all = storage.scan(k -> k.startsWith(keyPrefix(region))).stream()
+        String regionPrefix = keyPrefix(region);
+        List<PrometheusWorkspace> all = storage.scan(k -> k.startsWith(regionPrefix)).stream()
                 .filter(w -> prefix == null || prefix.isEmpty()
                         || (w.getAlias() != null && w.getAlias().startsWith(prefix)))
                 .toList();
@@ -119,11 +120,14 @@ public class ApsService implements TagHandler {
 
     @Override
     public void tagResource(String region, String arn, Map<String, String> tags) {
-        // Per AMP's TagResource: keys must not begin with the reserved "aws:" prefix.
-        tags.keySet().stream().filter(k -> k.startsWith("aws:")).findFirst().ifPresent(k -> {
-            throw new AwsException("ValidationException",
-                    "Tag keys must not begin with aws:. Offending key: " + k, 400);
-        });
+        // Per AMP's TagResource: keys must not begin with the reserved "aws:" prefix
+        // (case-insensitive, matching the sibling checks in FisService and BatchService).
+        for (String tagKey : tags.keySet()) {
+            if (tagKey.regionMatches(true, 0, "aws:", 0, 4)) {
+                throw new AwsException("ValidationException",
+                        "Tag keys must not begin with aws:. Offending key: " + tagKey, 400);
+            }
+        }
         PrometheusWorkspace workspace = workspaceByArn(region, arn);
         workspace.getTags().putAll(tags);
         storage.put(key(region, workspace.getWorkspaceId()), workspace);
@@ -155,7 +159,7 @@ public class ApsService implements TagHandler {
     // AMP is regional ("You can have one or more workspaces in each Region in your account"), so
     // the store is partitioned by request region, like CloudWatchLogsService's groupKey.
     private static String key(String region, String workspaceId) {
-        return region + "::" + workspaceId;
+        return keyPrefix(region) + workspaceId;
     }
 
     private static String keyPrefix(String region) {
