@@ -1387,11 +1387,18 @@ public class LambdaService implements ResourceProvider {
     }
 
     /**
-     * Handler must be 0-128 characters with no whitespace; a blank value clears it, matching
-     * how {@code Description} is handled elsewhere in this update.
+     * Handler must be a 0-128 character string with no whitespace; unlike {@code Description},
+     * a caller-supplied {@code null} is rejected rather than treated as "clear it" — {@code null}
+     * is not a string at all, and Handler names the file AWS invokes, so silently nulling it out
+     * would break every subsequent invocation instead of failing the request that caused it.
      */
     private static void validateHandler(String handler) {
-        if (handler == null || handler.isEmpty()) {
+        if (handler == null) {
+            throw new AwsException("InvalidParameterValueException",
+                    "1 validation error detected: Value 'null' at 'handler' failed to satisfy "
+                            + "constraint: Member must not be null", 400);
+        }
+        if (handler.isEmpty()) {
             return;
         }
         if (handler.length() > MAX_HANDLER_LENGTH || !HANDLER_PATTERN.matcher(handler).matches()) {

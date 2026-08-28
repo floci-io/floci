@@ -270,6 +270,21 @@ class LambdaServiceTest {
     }
 
     @Test
+    void updateFunctionConfigurationRejectsExplicitNullHandler() {
+        service.createFunction(REGION, baseRequest("update-handler-null-function"));
+        Map<String, Object> request = new java.util.HashMap<>();
+        request.put("Handler", null);
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.updateFunctionConfiguration(REGION, "update-handler-null-function", request));
+
+        assertEquals("InvalidParameterValueException", error.getErrorCode());
+        assertEquals("index.handler",
+                service.getFunction(REGION, "update-handler-null-function").getHandler(),
+                "an explicit null must not silently clear the handler");
+    }
+
+    @Test
     void createFunctionFailsWhenMissingFunctionName() {
         Map<String, Object> req = baseRequest("x");
         req.remove("FunctionName");
