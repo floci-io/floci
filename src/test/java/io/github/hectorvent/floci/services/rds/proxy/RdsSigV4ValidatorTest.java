@@ -307,4 +307,29 @@ class RdsSigV4ValidatorTest {
         assertFalse(validator.validate(token, "admin"),
                 "Validator must reject STS token signed with wrong secret");
     }
+
+    @Test
+    void validateRejectsTokenSelfSignedWithUnregisteredAccessKeyAsSecret() throws Exception {
+        // Only "AKIDRDS" is registered; the attacker picks an arbitrary, unregistered
+        // access key and signs using that same access key as the secret. If the validator
+        // ever falls back to accessKeyId as the signing secret for unknown keys, this forged
+        // token would be accepted for any DB user the attacker chooses.
+        IamService iamService = IamServiceTestHelper.iamServiceWithAccessKey("AKIDRDS", "secret-rds");
+
+        RdsSigV4Validator validator = new RdsSigV4Validator(iamService);
+        String forgedAccessKeyId = "AKIDFORGEDBYATTACKER";
+        String token = SigV4TokenTestHelper.createRdsToken(
+                "db.example.local",
+                5432,
+                "admin",
+                forgedAccessKeyId,
+                forgedAccessKeyId,
+                Instant.now().minusSeconds(60),
+                900
+        );
+
+        assertFalse(validator.validate(token, "admin"),
+                "A token self-signed with secret == accessKeyId for an unregistered access key "
+                        + "must never validate; unregistered keys must fail closed");
+    }
 }

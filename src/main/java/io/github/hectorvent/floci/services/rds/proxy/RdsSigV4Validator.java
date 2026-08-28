@@ -15,6 +15,7 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.Arrays;
+import java.util.Optional;
 import java.util.stream.Collectors;
 
 /**
@@ -101,12 +102,12 @@ public class RdsSigV4Validator {
             String service = credParts[3];
             String credentialScope = date + "/" + region + "/" + service + "/aws4_request";
 
-            // Deliberately no fallback for a bare 12-digit account ID here: trusting an
-            // unregistered numeric access key paired with the well-known "test" secret would
-            // let any client forge an IAM-auth token for an arbitrary account and authenticate
-            // as any matching database user. An unregistered key falls back to itself, unchanged
-            // (never a valid secret), so it always fails the signature check below.
-            String secretKey = iamService.findSecretKey(accessKeyId).orElse(accessKeyId);
+            Optional<String> registeredSecretKey = iamService.findSecretKey(accessKeyId);
+            if (registeredSecretKey.isEmpty()) {
+                LOG.debugv("RDS IAM token references unregistered access key={0}", accessKeyId);
+                return false;
+            }
+            String secretKey = registeredSecretKey.get();
 
             // Canonical query string: sorted pairs, excluding X-Amz-Signature
             String canonicalQueryString = Arrays.stream(rawPairs)

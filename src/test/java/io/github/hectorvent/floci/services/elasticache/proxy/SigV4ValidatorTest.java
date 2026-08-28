@@ -230,4 +230,48 @@ class SigV4ValidatorTest {
 
         assertFalse(validator.validate(withoutSignature, "cache-cluster-01", "default"));
     }
+
+    @Test
+    void validateRejectsTokenSelfSignedWithUnregisteredAccessKeyAsSecret() throws Exception {
+        // Only "AKIDCACHE" is registered; the attacker picks an arbitrary, unregistered
+        // access key and signs using that same access key as the secret. If the validator
+        // ever falls back to accessKeyId as the signing secret for unknown keys, this forged
+        // token would be accepted for any cluster/user the attacker chooses.
+        IamService iamService = IamServiceTestHelper.iamServiceWithAccessKey("AKIDCACHE", "secret-cache");
+
+        SigV4Validator validator = new SigV4Validator(iamService);
+        String forgedAccessKeyId = "AKIDFORGEDBYATTACKER";
+        String token = SigV4TokenTestHelper.createElastiCacheToken(
+                "cache-cluster-01",
+                "default",
+                forgedAccessKeyId,
+                forgedAccessKeyId,
+                Instant.now().minusSeconds(60),
+                900
+        );
+
+        assertFalse(validator.validate(token, "cache-cluster-01", "default"),
+                "A token self-signed with secret == accessKeyId for an unregistered access key "
+                        + "must never validate; unregistered keys must fail closed");
+    }
+
+    @Test
+    void validateRejectsTokenMissingUserParameterWhenUsernameExpected() throws Exception {
+        // A validly-signed token that simply never includes User as a query param (the
+        // attacker controls exactly what they sign) must not bypass the expectedUsername
+        // identity check just because User is absent.
+        IamService iamService = IamServiceTestHelper.iamServiceWithAccessKey("AKIDCACHE", "secret-cache");
+
+        SigV4Validator validator = new SigV4Validator(iamService);
+        String token = SigV4TokenTestHelper.createElastiCacheTokenWithoutUser(
+                "cache-cluster-01",
+                "AKIDCACHE",
+                "secret-cache",
+                Instant.now().minusSeconds(60),
+                900
+        );
+
+        assertFalse(validator.validate(token, "cache-cluster-01", "default"),
+                "Omitting User from the token must not bypass the expectedUsername identity check");
+    }
 }
