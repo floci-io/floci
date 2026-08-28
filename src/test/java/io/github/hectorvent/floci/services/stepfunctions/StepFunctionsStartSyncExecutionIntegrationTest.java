@@ -95,7 +95,8 @@ class StepFunctionsStartSyncExecutionIntegrationTest {
                       "Output": {
                         "status": "{% $states.result.Status %}",
                         "childOutput": "{% $states.result.Output %}",
-                        "childArn": "{% $states.result.StateMachineArn %}"
+                        "childArn": "{% $states.result.StateMachineArn %}",
+                        "startDate": "{% $states.result.StartDate %}"
                       },
                       "End": true
                     }
@@ -109,6 +110,11 @@ class StepFunctionsStartSyncExecutionIntegrationTest {
         var output = mapper.readTree(describe.jsonPath().getString("output"));
         assertEquals("SUCCEEDED", output.path("status").asText());
         assertEquals(succeedingChildArn, output.path("childArn").asText());
+
+        // The SDK renders a timestamp as ISO-8601, where the wire response carries epoch seconds.
+        assertTrue(output.path("startDate").asText()
+                        .matches("\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z"),
+                "StartDate is not the SDK's ISO-8601 rendering: " + output.path("startDate"));
 
         // Output arrives as a JSON string, the way the AWS SDK integration returns it.
         var childOutput = mapper.readTree(output.path("childOutput").asText());
@@ -174,7 +180,7 @@ class StepFunctionsStartSyncExecutionIntegrationTest {
 
         var describe = waitForTerminalState(startExecution(parentArn, "{}"));
         assertEquals("FAILED", describe.jsonPath().getString("status"));
-        assertEquals("Sfn.StateMachineTypeNotSupported", describe.jsonPath().getString("error"));
+        assertEquals("Sfn.StateMachineTypeNotSupportedException", describe.jsonPath().getString("error"));
         assertTrue(describe.jsonPath().getString("cause").contains("only supported for EXPRESS"));
     }
 

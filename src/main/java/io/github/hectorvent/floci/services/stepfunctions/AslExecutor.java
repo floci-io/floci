@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.services.cloudformation.CloudFormationQueryHan
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbJsonHandler;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.eventbridge.EventBridgeHandler;
 import io.github.hectorvent.floci.services.ecs.EcsJsonHandler;
 import io.github.hectorvent.floci.services.ecs.EcsService;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
@@ -19,6 +20,10 @@ import io.github.hectorvent.floci.services.ecs.model.NetworkConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import io.github.hectorvent.floci.services.ecs.model.LaunchType;
 import io.github.hectorvent.floci.services.s3.S3Service;
+import io.github.hectorvent.floci.services.scheduler.SchedulerController;
+import io.github.hectorvent.floci.services.scheduler.SchedulerService;
+import io.github.hectorvent.floci.services.scheduler.model.Schedule;
+import io.github.hectorvent.floci.services.scheduler.model.ScheduleRequest;
 import io.github.hectorvent.floci.services.lambda.LambdaExecutorService;
 import io.github.hectorvent.floci.services.lambda.LambdaFunctionStore;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
@@ -60,6 +65,9 @@ import org.jboss.logging.Logger;
 
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -106,6 +114,17 @@ public class AslExecutor {
     private static final long ECS_SYNC_POLL_INTERVAL_MS = 100;
 
     private static final String QUERY_LANGUAGE_JSONATA = "JSONata";
+    private static final String AWS_SDK_SFN_PREFIX = "arn:aws:states:::aws-sdk:sfn:";
+    private static final String AWS_SDK_SCHEDULER_PREFIX = "arn:aws:states:::aws-sdk:scheduler:";
+
+    /**
+     * A timestamp inside an {@code aws-sdk:} Task result is the SDK's ISO-8601 rendering of an
+     * {@code Instant} — {@code 2026-08-28T20:34:59.712Z} — where the same field on the wire
+     * response of the underlying API carries epoch seconds.
+     */
+    private static final DateTimeFormatter SDK_TIMESTAMP =
+            DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'").withZone(ZoneOffset.UTC);
+
     private static final Set<String> HTTP_ALLOWED_METHODS = Set.of(
             "GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD");
     private static final Set<String> HTTP_FORBIDDEN_HEADERS = Set.of(
@@ -152,6 +171,9 @@ public class AslExecutor {
     private final S3Service s3Service;
     private final EcsService ecsService;
     private final EcsJsonHandler ecsJsonHandler;
+    private final EventBridgeHandler eventBridgeHandler;
+    private final SchedulerService schedulerService;
+    private final SchedulerController schedulerController;
     private final ObjectMapper objectMapper;
     private final JsonataEvaluator jsonataEvaluator;
     private final Instance<StepFunctionsService> sfnService;
@@ -170,6 +192,8 @@ public class AslExecutor {
                        SqsJsonHandler sqsJsonHandler, CloudFormationQueryHandler cloudFormationHandler,
                        Ec2Service ec2Service, S3Service s3Service,
                        EcsService ecsService, EcsJsonHandler ecsJsonHandler,
+                       EventBridgeHandler eventBridgeHandler, SchedulerService schedulerService,
+                       SchedulerController schedulerController,
                        ObjectMapper objectMapper, JsonataEvaluator jsonataEvaluator,
                        Instance<StepFunctionsService> sfnService, EmulatorConfig config, Vertx vertx) {
         this.lambdaExecutor = lambdaExecutor;
@@ -182,6 +206,9 @@ public class AslExecutor {
         this.s3Service = s3Service;
         this.ecsService = ecsService;
         this.ecsJsonHandler = ecsJsonHandler;
+        this.eventBridgeHandler = eventBridgeHandler;
+        this.schedulerService = schedulerService;
+        this.schedulerController = schedulerController;
         this.objectMapper = objectMapper;
         this.jsonataEvaluator = jsonataEvaluator;
         this.sfnService = sfnService;
@@ -798,10 +825,24 @@ public class AslExecutor {
             return invokeEcsRunTask(mode, input, region);
         }
 
-        // AWS SDK service integration: Step Functions StartSyncExecution
-        if (resource.equals("arn:aws:states:::aws-sdk:sfn:startSyncExecution")) {
+        // AWS SDK service integrations: Step Functions
+        if (resource.startsWith(AWS_SDK_SFN_PREFIX)) {
+            String action = resource.substring(AWS_SDK_SFN_PREFIX.length());
             String region = extractRegionFromArn(sm.getStateMachineArn());
-            return invokeAwsSdkSfnStartSyncExecution(input, region);
+            return invokeAwsSdkSfn(action, input, region);
+        }
+
+        // AWS SDK service integrations: EventBridge Scheduler
+        if (resource.startsWith(AWS_SDK_SCHEDULER_PREFIX)) {
+            String action = resource.substring(AWS_SDK_SCHEDULER_PREFIX.length());
+            String region = extractRegionFromArn(sm.getStateMachineArn());
+            return invokeAwsSdkScheduler(action, input, region);
+        }
+
+        // EventBridge optimized integration
+        if (resource.equals("arn:aws:states:::events:putEvents")) {
+            String region = extractRegionFromArn(sm.getStateMachineArn());
+            return invokeOptimizedPutEvents(input, region);
         }
 
         // Nested state machine integration
@@ -929,6 +970,146 @@ public class AslExecutor {
     }
 
     /**
+     * The {@code arn:aws:states:::aws-sdk:sfn:*} family. Every one of these calls Step Functions'
+     * own API and returns its raw response, which is what separates
+     * {@code aws-sdk:sfn:startExecution} from the optimized {@code states:startExecution}
+     * handled by {@link #invokeNestedStateMachine}.
+     */
+    private JsonNode invokeAwsSdkSfn(String action, JsonNode input, String region) throws Exception {
+        return switch (action) {
+            case "startExecution" -> invokeAwsSdkSfnStartExecution(input, region);
+            case "startSyncExecution" -> invokeAwsSdkSfnStartSyncExecution(input, region);
+            case "sendTaskSuccess" -> invokeAwsSdkSfnSendTaskSuccess(input);
+            case "sendTaskFailure" -> invokeAwsSdkSfnSendTaskFailure(input);
+            default -> throw new FailStateException("States.TaskFailed",
+                    "Unsupported resource: " + AWS_SDK_SFN_PREFIX + action);
+        };
+    }
+
+    /**
+     * An {@code aws-sdk:} Task failure carries the name of the SDK exception class, which always
+     * ends in {@code Exception}. AWS answers a missing state machine with
+     * {@code Sfn.StateMachineDoesNotExistException}, while the StartExecution wire response names
+     * that same error {@code StateMachineDoesNotExist}.
+     */
+    private static String sdkExceptionName(String service, String errorCode) {
+        return errorCode.endsWith("Exception")
+                ? service + "." + errorCode
+                : service + "." + errorCode + "Exception";
+    }
+
+    private static String sdkTimestamp(double epochSeconds) {
+        return SDK_TIMESTAMP.format(Instant.ofEpochMilli(Math.round(epochSeconds * 1000)));
+    }
+
+    /**
+     * Reads an SDK payload argument such as {@code Input} or {@code Output}. Its AWS type is a JSON
+     * string; AWS also accepts the object form and serializes it, and an absent one is an empty
+     * object.
+     */
+    private String sdkPayload(JsonNode node) throws Exception {
+        if (node.isMissingNode() || node.isNull()) {
+            return "{}";
+        }
+        return node.isTextual() ? node.asText() : objectMapper.writeValueAsString(node);
+    }
+
+    /**
+     * AWS SDK integration for {@code sfn:startExecution}. Unlike the optimized
+     * {@code states:startExecution}, which returns {@code executionArn} and {@code startDate} in
+     * the casing of the wire response, this one returns the SDK's own {@code ExecutionArn} and an
+     * ISO-8601 {@code StartDate}. Neither waits for the child.
+     */
+    private JsonNode invokeAwsSdkSfnStartExecution(JsonNode input, String region) throws Exception {
+        String smArn = input.path("StateMachineArn").asText(null);
+        if (smArn == null || smArn.isBlank()) {
+            throw new FailStateException("Sfn.InvalidArnException",
+                    "StateMachineArn is required for StartExecution");
+        }
+        io.github.hectorvent.floci.services.stepfunctions.model.Execution exec;
+        try {
+            exec = sfnService.get().startExecution(smArn, input.path("Name").asText(null),
+                    sdkPayload(input.path("Input")), region);
+        } catch (AwsException e) {
+            throw new FailStateException(sdkExceptionName("Sfn", e.getErrorCode()), e.getMessage());
+        }
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("ExecutionArn", exec.getExecutionArn());
+        response.put("StartDate", sdkTimestamp(exec.getStartDate()));
+        return response;
+    }
+
+    /**
+     * AWS SDK integration for {@code sfn:sendTaskSuccess}. AWS fails the calling task with
+     * {@code Sfn.InvalidTokenException} when the token names no waiting task, so a token that
+     * resolved nothing is never reported as a delivered result.
+     */
+    private JsonNode invokeAwsSdkSfnSendTaskSuccess(JsonNode input) throws Exception {
+        String taskToken = input.path("TaskToken").asText(null);
+        if (!sfnService.get().sendTaskSuccess(taskToken, sdkPayload(input.path("Output")))) {
+            throw new FailStateException("Sfn.InvalidTokenException", "Invalid Token: 'Invalid token'");
+        }
+        return objectMapper.createObjectNode();
+    }
+
+    /** AWS SDK integration for {@code sfn:sendTaskFailure}, token semantics as in SendTaskSuccess. */
+    private JsonNode invokeAwsSdkSfnSendTaskFailure(JsonNode input) {
+        String taskToken = input.path("TaskToken").asText(null);
+        if (!sfnService.get().sendTaskFailure(taskToken, input.path("Cause").asText(null),
+                input.path("Error").asText(null))) {
+            throw new FailStateException("Sfn.InvalidTokenException", "Invalid Token: 'Invalid token'");
+        }
+        return objectMapper.createObjectNode();
+    }
+
+    /**
+     * AWS SDK integrations for {@code scheduler:createSchedule} and {@code scheduler:updateSchedule}.
+     * The Task {@code Arguments} are the CreateSchedule body with {@code Name} folded in, so they go
+     * through the controller's parse, and both actions answer with the schedule ARN alone.
+     */
+    private JsonNode invokeAwsSdkScheduler(String action, JsonNode input, String region) {
+        boolean creating = "createSchedule".equals(action);
+        if (!creating && !"updateSchedule".equals(action)) {
+            throw new FailStateException("States.TaskFailed",
+                    "Unsupported resource: " + AWS_SDK_SCHEDULER_PREFIX + action);
+        }
+        ScheduleRequest request = schedulerController.parseScheduleRequest(input);
+        request.setName(input.path("Name").asText(null));
+        try {
+            Schedule schedule = creating
+                    ? schedulerService.createSchedule(request, region)
+                    : schedulerService.updateSchedule(request, region);
+            ObjectNode response = objectMapper.createObjectNode();
+            response.put("ScheduleArn", schedule.getArn());
+            return response;
+        } catch (AwsException e) {
+            throw new FailStateException(sdkExceptionName("Scheduler", e.getErrorCode()), e.getMessage());
+        }
+    }
+
+    /**
+     * Optimized EventBridge integration for {@code events:putEvents}. The task result is the
+     * PutEvents response itself, and one failed entry fails the whole task with
+     * {@code EventBridge.FailedEntry}, carrying the response as the cause so the caller can see
+     * which entry it was.
+     */
+    private JsonNode invokeOptimizedPutEvents(JsonNode input, String region) throws Exception {
+        jakarta.ws.rs.core.Response response;
+        try {
+            response = eventBridgeHandler.handle("PutEvents", input, region);
+        } catch (AwsException e) {
+            throw new FailStateException(sdkExceptionName("EventBridge", e.getErrorCode()), e.getMessage());
+        }
+        if (!(response.getEntity() instanceof JsonNode result)) {
+            throw new FailStateException("EventBridge.SdkClientException", "PutEvents returned no response body");
+        }
+        if (result.path("FailedEntryCount").asInt() > 0) {
+            throw new FailStateException("EventBridge.FailedEntry", objectMapper.writeValueAsString(result));
+        }
+        return result;
+    }
+
+    /**
      * AWS SDK integration for {@code sfn:startSyncExecution}, the way an EXPRESS child workflow is
      * called. It differs from the optimized {@code states:startExecution.sync} integration in three
      * ways: the child must be EXPRESS, the response envelope uses PascalCase field names with
@@ -941,22 +1122,12 @@ public class AslExecutor {
             throw new FailStateException("Sfn.InvalidArnException",
                     "StateMachineArn is required for StartSyncExecution");
         }
-        JsonNode inputNode = input.path("Input");
-        String childInput;
-        if (inputNode.isMissingNode()) {
-            childInput = "{}";
-        } else if (inputNode.isTextual()) {
-            childInput = inputNode.asText();
-        } else {
-            childInput = objectMapper.writeValueAsString(inputNode);
-        }
-
         io.github.hectorvent.floci.services.stepfunctions.model.Execution exec;
         try {
             exec = sfnService.get().startSyncExecution(smArn, input.path("Name").asText(null),
-                    childInput, region);
+                    sdkPayload(input.path("Input")), region);
         } catch (AwsException e) {
-            throw new FailStateException("Sfn." + e.getErrorCode(), e.getMessage());
+            throw new FailStateException(sdkExceptionName("Sfn", e.getErrorCode()), e.getMessage());
         }
 
         ObjectNode envelope = objectMapper.createObjectNode();
@@ -964,9 +1135,9 @@ public class AslExecutor {
         envelope.put("StateMachineArn", exec.getStateMachineArn());
         envelope.put("Name", exec.getName());
         envelope.put("Status", exec.getStatus());
-        envelope.put("StartDate", exec.getStartDate());
+        envelope.put("StartDate", sdkTimestamp(exec.getStartDate()));
         if (exec.getStopDate() != null) {
-            envelope.put("StopDate", exec.getStopDate());
+            envelope.put("StopDate", sdkTimestamp(exec.getStopDate()));
         }
         if (exec.getInput() != null) {
             envelope.put("Input", exec.getInput());

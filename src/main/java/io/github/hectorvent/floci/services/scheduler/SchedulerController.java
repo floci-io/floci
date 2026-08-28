@@ -354,7 +354,12 @@ public class SchedulerController {
         return null;
     }
 
-    private ScheduleRequest parseScheduleRequest(JsonNode node) {
+    /**
+     * Reads the PascalCase CreateSchedule / UpdateSchedule body. The Step Functions
+     * {@code aws-sdk:scheduler:*} Task integrations pass the same shape as {@code Arguments},
+     * so they parse it here instead of restating the mapping.
+     */
+    public ScheduleRequest parseScheduleRequest(JsonNode node) {
         ScheduleRequest req = new ScheduleRequest();
         req.setGroupName(textField(node, "GroupName"));
         req.setScheduleExpression(textField(node, "ScheduleExpression"));

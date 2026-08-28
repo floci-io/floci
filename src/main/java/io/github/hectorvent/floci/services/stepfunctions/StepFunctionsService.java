@@ -727,26 +727,37 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
 
     // ──────────────────────────── Tasks ────────────────────────────
 
-    public void sendTaskSuccess(String taskToken, String output) {
-        CompletableFuture<JsonNode> future = pendingTaskTokens.remove(taskToken);
-        if (future != null) {
-            try {
-                future.complete(objectMapper.readTree(output));
-            } catch (Exception e) {
-                future.completeExceptionally(new RuntimeException("Invalid JSON output: " + e.getMessage()));
-            }
-        } else {
+    /**
+     * @return whether the token named a task that was waiting for it. The
+     *         {@code aws-sdk:sfn:sendTaskSuccess} Task integration fails the calling state when it
+     *         did not, the way AWS answers an unknown token with {@code InvalidToken}.
+     */
+    public boolean sendTaskSuccess(String taskToken, String output) {
+        CompletableFuture<JsonNode> future = taskToken != null ? pendingTaskTokens.remove(taskToken) : null;
+        if (future == null) {
             LOG.warnv("SendTaskSuccess: no pending task for token {0}", taskToken);
+            return false;
         }
+        try {
+            future.complete(objectMapper.readTree(output));
+        } catch (Exception e) {
+            future.completeExceptionally(new RuntimeException("Invalid JSON output: " + e.getMessage()));
+        }
+        return true;
     }
 
-    public void sendTaskFailure(String taskToken, String cause, String error) {
-        CompletableFuture<JsonNode> future = pendingTaskTokens.remove(taskToken);
-        if (future != null) {
-            future.completeExceptionally(new AslExecutor.FailStateException(error, cause));
-        } else {
+    /**
+     * @return whether the token named a task that was waiting for it, as in
+     *         {@link #sendTaskSuccess(String, String)}.
+     */
+    public boolean sendTaskFailure(String taskToken, String cause, String error) {
+        CompletableFuture<JsonNode> future = taskToken != null ? pendingTaskTokens.remove(taskToken) : null;
+        if (future == null) {
             LOG.warnv("SendTaskFailure: no pending task for token {0}", taskToken);
+            return false;
         }
+        future.completeExceptionally(new AslExecutor.FailStateException(error, cause));
+        return true;
     }
 
     public void sendTaskHeartbeat(String taskToken) {
