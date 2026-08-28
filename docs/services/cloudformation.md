@@ -192,6 +192,51 @@ Resources provisioned by `CreateStack` / `UpdateStack` land in the **caller's ac
 (determined from the request's access key — see [Multi-Account Isolation](../configuration/multi-account.md)).
 Deleting the stack removes them from that same account.
 
+Stacks, change sets, and **exports are scoped to the caller account**. `ListExports` returns only the
+exports created by that account's stacks, and `Fn::ImportValue` resolves against the same account's
+export table — so two accounts can each own an export with the same name without colliding, mirroring
+how CloudFormation isolates exports per account and region. This is what lets a multi-account LZA
+deployment reuse identical export names across its member accounts.
+
+## Template Parameters
+
+Parameters passed to `CreateStack` / `UpdateStack` (and echoed back by `DescribeStacks`) are resolved
+before provisioning:
+
+- **`String`, `Number`, `CommaDelimitedList`, and `List<...>`** parameter types are accepted and
+  substituted into resource properties via `Ref`.
+- **`AWS::SSM::Parameter::Value<String>`-typed parameters** are resolved at deploy time: the value the
+  caller supplies is treated as an SSM parameter *name*, and floci substitutes the current value of
+  that SSM parameter into the template. This is the pattern CDK uses to pull bootstrap values (image
+  tags, bucket names) from Parameter Store.
+- `AWS::SSM::Parameter::Value<List<String>>` and `AWS::SSM::Parameter::Name` typed parameters are
+  **not yet** resolved — they are passed through as their literal input.
+
+The `AWS::SSM::Parameter` **resource** type exposes `Value`, `Type`, and `Name` attributes through
+`Ref` / `Fn::GetAtt` so downstream resources can consume a parameter the same stack creates.
+
+## Conditions
+
+Template `Conditions` are evaluated before provisioning. A resource whose `Condition` evaluates to
+**false is skipped** — it is never provisioned, does not appear in `DescribeStackResources`, and its
+`Ref` / `Fn::GetAtt` are not required to resolve. This matches CloudFormation and is required for the
+condition-heavy templates CDK and LZA emit.
+
+## Custom Resources and the CDK Provider Framework
+
+`AWS::CloudFormation::CustomResource` and `Custom::*` resources are backed by their `ServiceToken`
+Lambda. floci supports two shapes:
+
+- **Direct custom resources** — floci invokes the handler Lambda with the CloudFormation custom-resource
+  event and waits for it to `PUT` its `SUCCESS`/`FAILED` result to the response URL. Inline `ZipFile`
+  handlers get the `cfn-response` / `cfnresponse` module bundled in (see the Lambda row in
+  [Supported Resource Types](#supported-resource-types)), so Solutions-style handlers work unmodified.
+- **CDK Provider framework** — when the `ServiceToken` points at a CDK `framework.onEvent` function,
+  floci drives the asynchronous provider protocol: `onEvent` starts the work and `framework.isComplete`
+  is polled (via Step Functions [`Retry`](step-functions.md)) until it reports done, at which point the
+  ResponseURL callback fires. The wait is bounded by an async custom-resource timeout (3 minutes by
+  default); a resource that never completes fails the stack rather than hanging.
+
 ## Deletion Policies
 
 A resource's [`DeletionPolicy`](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-attribute-deletionpolicy.html)

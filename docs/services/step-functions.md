@@ -61,6 +61,11 @@ and each retrier keeps its own attempt counter. `Retry` is evaluated before `Cat
 `$$.State.RetryCount` increments per attempt. Attempt counts, defaults, and backoff
 timing were verified against real AWS Step Functions.
 
+A state with no `Retry` array runs exactly once. This is what makes CDK-generated provider-framework
+workflows converge: the `framework-isComplete-task` throws on every not-yet-complete poll and relies on
+`Retry` to poll again until the custom resource reports done — see
+[CloudFormation custom resources](cloudformation.md#custom-resources-and-the-cdk-provider-framework).
+
 `JitterStrategy` supports `NONE` (the default) and `FULL`. `FULL` draws the delay
 uniformly between zero and the computed delay, as on AWS. One deviation. The delay
 between attempts is capped at 30 seconds, the same cap Floci applies to `Wait` states,
