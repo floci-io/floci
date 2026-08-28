@@ -30,21 +30,45 @@ public interface CustomResourceLiveness {
      * @return the token, or empty for the overwhelming majority of invokes, which are ordinary
      *         Lambda calls with no custom-resource event in them
      */
+    byte[] RESPONSE_PATH_ASCII = RESPONSE_PATH.getBytes(StandardCharsets.US_ASCII);
+
     static Optional<String> tokenIn(byte[] payload) {
         if (payload == null || payload.length == 0) {
             return Optional.empty();
         }
-        String body = new String(payload, StandardCharsets.UTF_8);
-        int start = body.indexOf(RESPONSE_PATH);
+        // Scans the raw bytes for the ASCII marker instead of materializing the whole payload as a
+        // String: this runs on every Lambda invoke once liveness is wired in, and the overwhelming
+        // majority of invokes carry no callback URL at all, so the common case should cost nothing
+        // beyond the scan itself.
+        int start = indexOfMarker(payload);
         if (start < 0) {
             return Optional.empty();
         }
-        start += RESPONSE_PATH.length();
+        start += RESPONSE_PATH_ASCII.length;
         int end = start;
         // The token is a UUID; stop at whatever JSON punctuation closes the URL.
-        while (end < body.length() && (Character.isLetterOrDigit(body.charAt(end)) || body.charAt(end) == '-')) {
+        while (end < payload.length && isTokenByte(payload[end])) {
             end++;
         }
-        return end > start ? Optional.of(body.substring(start, end)) : Optional.empty();
+        return end > start ? Optional.of(new String(payload, start, end - start, StandardCharsets.US_ASCII))
+                : Optional.empty();
+    }
+
+    private static int indexOfMarker(byte[] payload) {
+        byte[] marker = RESPONSE_PATH_ASCII;
+        outer:
+        for (int i = 0; i <= payload.length - marker.length; i++) {
+            for (int j = 0; j < marker.length; j++) {
+                if (payload[i + j] != marker[j]) {
+                    continue outer;
+                }
+            }
+            return i;
+        }
+        return -1;
+    }
+
+    private static boolean isTokenByte(byte b) {
+        return (b >= '0' && b <= '9') || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || b == '-';
     }
 }
