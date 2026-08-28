@@ -17,6 +17,7 @@ import org.jboss.logging.Logger;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
@@ -47,6 +48,17 @@ public class KinesisService implements ResourceProvider {
     private final StorageBackend<String, KinesisConsumer> consumerStore;
     private final RegionResolver regionResolver;
     private final AtomicLong sequenceGenerator = new AtomicLong(System.currentTimeMillis());
+    // One monitor per stream key. Serializes sequence allocation + shard append + persist so the
+    // in-memory log, the assigned sequence order, and the WAL write order all agree.
+    private final ConcurrentHashMap<String, Object> streamAppendLocks = new ConcurrentHashMap<>();
+    // Package-private test seam, run inside the append critical section after the sequence is
+    // allocated and before the record is appended. Default no-op in production.
+    Runnable putRecordAppendHook = () -> {};
+    // Package-private test seam, run after the pre-lock resolve/validation and before the append
+    // lock is acquired. Lets a test deterministically wedge a producer in the window where a
+    // concurrent deleteStream can win the lock first, exercising the in-lock re-resolve guard.
+    // Default no-op in production.
+    Runnable putRecordBeforeLockHook = () -> {};
 
     @Inject
     public KinesisService(StorageFactory factory, RegionResolver regionResolver) {
@@ -193,7 +205,15 @@ public class KinesisService implements ResourceProvider {
 
     public void deleteStream(String streamName, String region) {
         String storageKey = regionKey(region, streamName);
-        store.delete(storageKey);
+        // Delete under the same per-stream monitor that appends and topology ops use, so a delete
+        // is serialized with any in-flight append/split/merge on this stream. The monitor is left
+        // in the map on purpose (a single stable monitor per key, a bounded leak): removing it here
+        // would let a producer that already resolved the stream re-create a fresh monitor and
+        // append+persist a stale, deleted instance under it — resurrecting the stream.
+        Object lock = streamAppendLocks.computeIfAbsent(storageKey, k -> new Object());
+        synchronized (lock) {
+            store.delete(storageKey);
+        }
         LOG.infov("Deleted Kinesis stream: {0}", streamName);
     }
 
@@ -313,73 +333,87 @@ public class KinesisService implements ResourceProvider {
     }
 
     public void splitShard(String streamName, String shardId, String newStartingHashKey, String region) {
-        KinesisStream stream = resolveStream(streamName, region);
-        KinesisShard parent = stream.getShards().stream()
-                .filter(s -> s.getShardId().equals(shardId))
-                .findFirst()
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Shard " + shardId + " not found", 400));
+        String key = regionKey(region, streamName);
+        // Share the producer critical section so a split can't race an append: selectShard runs
+        // under the same lock, so a producer never appends to a parent a completed split has closed.
+        Object lock = streamAppendLocks.computeIfAbsent(key, k -> new Object());
+        synchronized (lock) {
+            // Resolve under the lock so a concurrent deleteStream (same monitor) cannot leave us
+            // mutating and re-persisting a stale, deleted instance.
+            KinesisStream stream = resolveStream(streamName, region);
+            KinesisShard parent = stream.getShards().stream()
+                    .filter(s -> s.getShardId().equals(shardId))
+                    .findFirst()
+                    .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Shard " + shardId + " not found", 400));
 
-        if (parent.isClosed()) {
-            throw new AwsException("InvalidArgumentException", "Shard " + shardId + " is already closed", 400);
+            if (parent.isClosed()) {
+                throw new AwsException("InvalidArgumentException", "Shard " + shardId + " is already closed", 400);
+            }
+
+            parent.setClosed(true);
+            parent.setSequenceNumberRange(new KinesisShard.SequenceNumberRange(
+                    parent.getSequenceNumberRange().startingSequenceNumber(),
+                    String.valueOf(sequenceGenerator.get())));
+
+            String start = parent.getHashKeyRange().startingHashKey();
+            String end = parent.getHashKeyRange().endingHashKey();
+
+            KinesisShard child1 = new KinesisShard(nextShardId(stream), start, subtractOne(newStartingHashKey), String.valueOf(sequenceGenerator.get()));
+            child1.setParentShardId(shardId);
+
+            KinesisShard child2 = new KinesisShard(nextShardId(stream), newStartingHashKey, end, String.valueOf(sequenceGenerator.get()));
+            child2.setParentShardId(shardId);
+
+            stream.getShards().add(child1);
+            stream.getShards().add(child2);
+            store.put(key, stream);
+            LOG.infov("Split shard {0} in stream {1}", shardId, streamName);
         }
-
-        parent.setClosed(true);
-        parent.setSequenceNumberRange(new KinesisShard.SequenceNumberRange(
-                parent.getSequenceNumberRange().startingSequenceNumber(),
-                String.valueOf(sequenceGenerator.get())));
-
-        String start = parent.getHashKeyRange().startingHashKey();
-        String end = parent.getHashKeyRange().endingHashKey();
-
-        KinesisShard child1 = new KinesisShard(nextShardId(stream), start, subtractOne(newStartingHashKey), String.valueOf(sequenceGenerator.get()));
-        child1.setParentShardId(shardId);
-
-        KinesisShard child2 = new KinesisShard(nextShardId(stream), newStartingHashKey, end, String.valueOf(sequenceGenerator.get()));
-        child2.setParentShardId(shardId);
-
-        stream.getShards().add(child1);
-        stream.getShards().add(child2);
-        store.put(regionKey(region, streamName), stream);
-        LOG.infov("Split shard {0} in stream {1}", shardId, streamName);
     }
 
     public void mergeShards(String streamName, String shardId, String adjacentShardId, String region) {
-        KinesisStream stream = resolveStream(streamName, region);
-        KinesisShard shard1 = stream.getShards().stream()
-                .filter(s -> s.getShardId().equals(shardId))
-                .findFirst()
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Shard " + shardId + " not found", 400));
-        KinesisShard shard2 = stream.getShards().stream()
-                .filter(s -> s.getShardId().equals(adjacentShardId))
-                .findFirst()
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Shard " + adjacentShardId + " not found", 400));
+        String key = regionKey(region, streamName);
+        Object lock = streamAppendLocks.computeIfAbsent(key, k -> new Object());
+        synchronized (lock) {
+            // Resolve under the lock so a concurrent deleteStream (same monitor) cannot leave us
+            // mutating and re-persisting a stale, deleted instance.
+            KinesisStream stream = resolveStream(streamName, region);
+            KinesisShard shard1 = stream.getShards().stream()
+                    .filter(s -> s.getShardId().equals(shardId))
+                    .findFirst()
+                    .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Shard " + shardId + " not found", 400));
+            KinesisShard shard2 = stream.getShards().stream()
+                    .filter(s -> s.getShardId().equals(adjacentShardId))
+                    .findFirst()
+                    .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Shard " + adjacentShardId + " not found", 400));
 
-        if (shard1.isClosed() || shard2.isClosed()) {
-            throw new AwsException("InvalidArgumentException", "One or both shards are already closed", 400);
+            if (shard1.isClosed() || shard2.isClosed()) {
+                throw new AwsException("InvalidArgumentException", "One or both shards are already closed", 400);
+            }
+
+            shard1.setClosed(true);
+            shard2.setClosed(true);
+            String seq = String.valueOf(sequenceGenerator.get());
+            shard1.setSequenceNumberRange(new KinesisShard.SequenceNumberRange(shard1.getSequenceNumberRange().startingSequenceNumber(), seq));
+            shard2.setSequenceNumberRange(new KinesisShard.SequenceNumberRange(shard2.getSequenceNumberRange().startingSequenceNumber(), seq));
+
+            // Combine hash ranges (assuming they are adjacent)
+            java.math.BigInteger s1Start = new java.math.BigInteger(shard1.getHashKeyRange().startingHashKey());
+            java.math.BigInteger s2Start = new java.math.BigInteger(shard2.getHashKeyRange().startingHashKey());
+
+            String start = s1Start.min(s2Start).toString();
+            java.math.BigInteger s1End = new java.math.BigInteger(shard1.getHashKeyRange().endingHashKey());
+            java.math.BigInteger s2End = new java.math.BigInteger(shard2.getHashKeyRange().endingHashKey());
+            String end = s1End.max(s2End).toString();
+
+            KinesisShard child = new KinesisShard(nextShardId(stream), start, end, seq);
+            child.setParentShardId(shardId);
+            child.setAdjacentParentShardId(adjacentShardId);
+
+            stream.getShards().add(child);
+            store.put(key, stream);
+            LOG.infov("Merged shards {0} and {1} in stream {2}", shardId, adjacentShardId, streamName);
         }
-
-        shard1.setClosed(true);
-        shard2.setClosed(true);
-        String seq = String.valueOf(sequenceGenerator.get());
-        shard1.setSequenceNumberRange(new KinesisShard.SequenceNumberRange(shard1.getSequenceNumberRange().startingSequenceNumber(), seq));
-        shard2.setSequenceNumberRange(new KinesisShard.SequenceNumberRange(shard2.getSequenceNumberRange().startingSequenceNumber(), seq));
-
-        // Combine hash ranges (assuming they are adjacent)
-        java.math.BigInteger s1Start = new java.math.BigInteger(shard1.getHashKeyRange().startingHashKey());
-        java.math.BigInteger s2Start = new java.math.BigInteger(shard2.getHashKeyRange().startingHashKey());
-        
-        String start = s1Start.min(s2Start).toString();
-        java.math.BigInteger s1End = new java.math.BigInteger(shard1.getHashKeyRange().endingHashKey());
-        java.math.BigInteger s2End = new java.math.BigInteger(shard2.getHashKeyRange().endingHashKey());
-        String end = s1End.max(s2End).toString();
-
-        KinesisShard child = new KinesisShard(nextShardId(stream), start, end, seq);
-        child.setParentShardId(shardId);
-        child.setAdjacentParentShardId(adjacentShardId);
-
-        stream.getShards().add(child);
-        store.put(regionKey(region, streamName), stream);
-        LOG.infov("Merged shards {0} and {1} in stream {2}", shardId, adjacentShardId, streamName);
     }
 
     private String nextShardId(KinesisStream stream) {
@@ -470,17 +504,29 @@ public class KinesisService implements ResourceProvider {
     }
 
     public PutRecordResult putRecordWithShardId(String streamName, byte[] data, String partitionKey, String region) {
+        String key = regionKey(region, streamName);
         KinesisStream stream = resolveStream(streamName, region);
         validateRecordSize(stream, data, partitionKey);
-        KinesisShard shard = selectShard(stream, partitionKey);
+        putRecordBeforeLockHook.run();
 
-        String sequenceNumber = String.valueOf(sequenceGenerator.incrementAndGet());
-        KinesisRecord record = new KinesisRecord(data, partitionKey, sequenceNumber, Instant.now());
-
-        shard.getRecords().add(record);
-        store.put(regionKey(region, streamName), stream);
-
-        return new PutRecordResult(sequenceNumber, shard.getShardId());
+        // Serialize shard selection, sequence allocation, append and persistence per stream so
+        // concurrent producers can neither lose an append (plain ArrayList) nor store records
+        // out of sequence order (which would break AT_/AFTER_SEQUENCE_NUMBER scans and WAL replay).
+        Object lock = streamAppendLocks.computeIfAbsent(key, k -> new Object());
+        synchronized (lock) {
+            // Re-resolve under the lock. deleteStream holds this same monitor, so a stream deleted
+            // between the resolve above and here is now absent from the store. Appending to and
+            // persisting the stale pre-delete instance would resurrect a deleted stream, so bind to
+            // the instance currently in the store and fail like any missing stream if it is gone.
+            KinesisStream current = resolveStream(streamName, region);
+            KinesisShard shard = selectShard(current, partitionKey);
+            String sequenceNumber = String.valueOf(sequenceGenerator.incrementAndGet());
+            putRecordAppendHook.run();
+            KinesisRecord record = new KinesisRecord(data, partitionKey, sequenceNumber, Instant.now());
+            shard.addRecord(record);
+            store.put(key, current);
+            return new PutRecordResult(sequenceNumber, shard.getShardId());
+        }
     }
 
     public String getShardIterator(String streamName, String shardId, String type, String sequenceNumber, String region) {
@@ -527,7 +573,7 @@ public class KinesisService implements ResourceProvider {
                 .findFirst()
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Shard not found", 400));
         // LATEST resumes from the tip snapshot taken now; other types resolve in getRecords.
-        return "LATEST".equals(type) ? shard.getRecords().size() : 0;
+        return "LATEST".equals(type) ? shard.recordCount() : 0;
     }
 
     private int parseIteratorIndex(String value) {

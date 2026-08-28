@@ -1,13 +1,19 @@
 package io.github.hectorvent.floci.services.dynamodb;
 
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
+import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.dynamodb.model.AttributeDefinition;
 import io.github.hectorvent.floci.services.dynamodb.model.ConditionalCheckFailedException;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
+import io.github.hectorvent.floci.services.dynamodb.model.KinesisStreamingDestination;
 import io.github.hectorvent.floci.services.dynamodb.model.StreamDescription;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
+import io.github.hectorvent.floci.services.kinesis.KinesisService;
+import io.github.hectorvent.floci.services.kinesis.model.KinesisRecord;
+import io.github.hectorvent.floci.services.kinesis.model.KinesisStream;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -17,6 +23,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -29,6 +36,10 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /**
  * Concurrency compatibility suite for {@link DynamoDbService}.
@@ -479,6 +490,89 @@ class DynamoDbConcurrencyIntegrationTest {
             previous = current;
         }
         assertEquals(ops, previous, "final event must reflect final counter value");
+    }
+
+    /**
+     * End-to-end CDC wiring: concurrent putItem must forward EVERY record to the attached Kinesis
+     * destination, with no loss and per-shard sequence order preserved. This is the gap the suite's
+     * production wiring left uncovered (the shared {@code service} field wires {@code forwarder=null}).
+     * See issue #571 (Kinesis append race).
+     */
+    @RepeatedTest(REPEATS)
+    void concurrent_putItem_forwards_every_cdc_record_to_kinesis() throws Exception {
+        String region = "us-east-1";
+        StorageBackend<String, TableDefinition> tableStore = new InMemoryStorage<>();
+        // Public KinesisService ctor via a mocked StorageFactory that hands out in-memory
+        // backends keyed by file name (the FirehoseServiceTest pattern), because the
+        // package-private ctor is not visible from this package.
+        Map<String, AccountAwareStorageBackend<?>> backends = new HashMap<>();
+        StorageFactory storageFactory = mock(StorageFactory.class);
+        when(storageFactory.create(anyString(), anyString(), any()))
+                .thenAnswer(inv -> backends.computeIfAbsent(
+                        inv.getArgument(0) + "/" + inv.getArgument(1),
+                        k -> AccountAwareStorageBackend.inMemory("000000000000")));
+        KinesisService kinesis = new KinesisService(storageFactory,
+                new RegionResolver("us-east-1", "000000000000"));
+        KinesisStreamingForwarder forwarder = new KinesisStreamingForwarder(kinesis, mapper);
+        DynamoDbService svc = new DynamoDbService(
+                tableStore, new InMemoryStorage<>(),
+                new RegionResolver("us-east-1", "000000000000"), null, forwarder);
+
+        KinesisStream stream = kinesis.createStream("cdc-stream", 1, region);
+        TableDefinition table = svc.createTable("Events",
+                List.of(new KeySchemaElement("pk", "HASH"), new KeySchemaElement("sk", "RANGE")),
+                List.of(new AttributeDefinition("pk", "S"), new AttributeDefinition("sk", "S")),
+                5L, 5L, region);
+        table.getKinesisStreamingDestinations().add(
+                new KinesisStreamingDestination(stream.getStreamArn()));
+
+        int threads = 16;
+        int opsPerThread = 25;
+        int expected = threads * opsPerThread; // 400
+        AtomicInteger idSource = new AtomicInteger();
+
+        List<Throwable> errors = runConcurrently(threads, () -> {
+            for (int i = 0; i < opsPerThread; i++) {
+                int id = idSource.getAndIncrement();
+                ObjectNode item = mapper.createObjectNode();
+                item.set("pk", stringAttr("fixed"));
+                item.set("sk", stringAttr("t-" + id));
+                svc.putItem("Events", item, region);
+            }
+        });
+        assertTrue(errors.isEmpty(), () -> "unexpected errors: " + errors);
+
+        // Paginated drain of the single shard.
+        String shardId = kinesis.describeStream("cdc-stream", region).getShards().getFirst().getShardId();
+        String iterator = kinesis.getShardIterator("cdc-stream", shardId, "TRIM_HORIZON", null, region);
+        List<KinesisRecord> drained = new ArrayList<>();
+        while (true) {
+            Map<String, Object> page = kinesis.getRecords(iterator, 1000, region);
+            @SuppressWarnings("unchecked")
+            List<KinesisRecord> records = (List<KinesisRecord>) page.get("Records");
+            if (records.isEmpty()) break;
+            drained.addAll(records);
+            iterator = (String) page.get("NextShardIterator");
+        }
+
+        assertEquals(expected, drained.size(), "every CDC event must reach Kinesis");
+
+        Set<String> sortKeys = new HashSet<>();
+        long previousSeq = Long.MIN_VALUE;
+        for (KinesisRecord record : drained) {
+            JsonNode payload = mapper.readTree(record.getData());
+            sortKeys.add(payload.get("dynamodb").get("Keys").get("sk").get("S").asText());
+            long seq = Long.parseLong(record.getSequenceNumber());
+            assertTrue(seq > previousSeq, "per-shard sequence numbers must be strictly increasing");
+            previousSeq = seq;
+        }
+
+        Set<String> expectedKeys = new HashSet<>();
+        for (int i = 0; i < expected; i++) {
+            expectedKeys.add("t-" + i);
+        }
+        assertEquals(expectedKeys, sortKeys, "the forwarded sk set must match exactly, with no gaps");
+        assertEquals(0L, forwarder.getForwardFailureCount(), "no CDC event may be dropped");
     }
 
     @Test
