@@ -66,7 +66,17 @@ public class AcmJsonHandler {
         if (certificateArn == null || certificateArn.isBlank() || domain == null || domain.isBlank() || validationDomain == null || validationDomain.isBlank()) {
             return Response.status(400).entity(new AwsErrorResponse("ValidationException", "Required parameter is missing")).build();
         }
-        service.describeCertificate(certificateArn, region);
+        Certificate cert = service.describeCertificate(certificateArn, region);
+        boolean domainMatchesCertificate = domain.equalsIgnoreCase(cert.getDomainName())
+            || cert.getSubjectAlternativeNames().stream().anyMatch(domain::equalsIgnoreCase);
+        boolean validationDomainIsSuperdomain = domain.equalsIgnoreCase(validationDomain)
+            || domain.toLowerCase(java.util.Locale.ROOT).endsWith("." + validationDomain.toLowerCase(java.util.Locale.ROOT));
+        if (!domainMatchesCertificate || !validationDomainIsSuperdomain) {
+            return Response.status(400)
+                .entity(new AwsErrorResponse("InvalidDomainValidationOptionsException",
+                    "One or more values in the DomainValidationOption structure is incorrect."))
+                .build();
+        }
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
