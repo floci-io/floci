@@ -657,6 +657,7 @@ public interface EmulatorConfig {
         Route53ServiceConfig route53();
         TransferServiceConfig transfer();
         TextractServiceConfig textract();
+        ComprehendServiceConfig comprehend();
         PricingServiceConfig pricing();
         DuckConfig duck();
         TranscribeServiceConfig transcribe();
@@ -1487,6 +1488,11 @@ public interface EmulatorConfig {
     }
 
     interface TextractServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface ComprehendServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }

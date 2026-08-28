@@ -498,6 +498,8 @@ floci:
       enabled: true
     textract:
       enabled: true
+    comprehend:
+      enabled: true
     pricing:
       enabled: true
     transcribe:
