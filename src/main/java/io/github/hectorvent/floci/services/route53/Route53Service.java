@@ -168,6 +168,14 @@ public class Route53Service {
                             + "Public hosted zones can't be associated with a VPC.", 400);
         }
         if (findAssociation(zone, vpc) == null) {
+            for (HostedZone other : listHostedZonesByVpc(vpc.getVpcId(), vpc.getVpcRegion())) {
+                if (!other.getId().equals(zoneId) && other.getName().equals(zone.getName())) {
+                    throw new AwsException("ConflictingDomainExists",
+                            "The VPC that you chose, " + vpc.getVpcId() + " in region " + vpc.getVpcRegion()
+                                    + ", is already associated with another hosted zone that has the same name.",
+                            400);
+                }
+            }
             zone.getVpcAssociations().add(vpc);
             zoneStore.put(zoneId, zone);
         }

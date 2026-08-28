@@ -317,7 +317,8 @@ public class Route53Controller {
                     }
                 }
                 if (idx < 0) {
-                    throw new AwsException("InvalidInput", "Invalid value for NextToken: " + nextToken, 400);
+                    throw new AwsException("InvalidPaginationToken",
+                            "Invalid value for NextToken: " + nextToken, 400);
                 }
                 zones = zones.subList(idx, zones.size());
             }

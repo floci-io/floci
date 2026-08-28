@@ -281,14 +281,33 @@ class Route53VpcAssociationIntegrationTest {
     }
 
     @Test
-    void listHostedZonesByVpcWithAnUnknownNextTokenIsInvalidInput() {
+    void listHostedZonesByVpcWithAnUnknownNextTokenIsInvalidPaginationToken() {
         String zoneId = createPrivateZone("badtoken.internal.", "vpc-assoc-bad-token", "vpc-badtoken-primary");
 
         given().get("/2013-04-01/hostedzonesbyvpc?vpcid=vpc-badtoken-primary&vpcregion=us-east-1"
                         + "&nexttoken=" + zoneId + "-does-not-exist")
                 .then().statusCode(400)
-                .body(containsString("<Code>InvalidInput</Code>"))
+                .body(containsString("<Code>InvalidPaginationToken</Code>"))
                 .body(containsString("NextToken"));
+    }
+
+    @Test
+    void associateWithAVpcAlreadyOnAnotherZoneOfTheSameNameIsConflictingDomainExists() {
+        String shared = "vpc-domain-conflict-shared";
+        String firstZone = createPrivateZone("domainconflict.internal.", "vpc-assoc-domain-conflict-a", shared);
+        String secondZone = createPrivateZone("domainconflict.internal.", "vpc-assoc-domain-conflict-b",
+                "vpc-domain-conflict-other");
+
+        given().contentType(XML)
+                .body(vpcRequest("AssociateVPCWithHostedZoneRequest", shared, ""))
+                .post("/2013-04-01/hostedzone/" + secondZone + "/associatevpc")
+                .then().statusCode(400)
+                .body(containsString("<Code>ConflictingDomainExists</Code>"));
+
+        // The rejected association must not have been stored on the second zone.
+        given().get("/2013-04-01/hostedzone/" + secondZone)
+                .then().statusCode(200)
+                .body(not(containsString("<VPCId>" + shared + "</VPCId>")));
     }
 
     @Test
