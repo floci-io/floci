@@ -337,8 +337,11 @@ public class CloudFormationService implements ResourceProvider {
 
             Map<String, String> oldParams = stack.getParameters() != null
                     ? stack.getParameters() : Map.of();
-            Map<String, String> newParams = cs.getParameters() != null
-                    ? cs.getParameters() : Map.of();
+            // A parameter omitted from the update falls back to the template's Default when
+            // ExecuteChangeSet actually runs it, so the preview must resolve the same defaults or
+            // it will under-report changes to resources that depend on that fallback value.
+            Map<String, String> newParams = resolveDefaultParameters(newTemplate,
+                    cs.getParameters() != null ? cs.getParameters() : Map.of());
             Set<String> changedParams = new HashSet<>();
             newParams.forEach((k, v) -> {
                 if (!Objects.equals(v, oldParams.get(k))) {

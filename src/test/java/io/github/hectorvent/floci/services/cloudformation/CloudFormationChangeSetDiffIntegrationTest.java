@@ -164,6 +164,66 @@ class CloudFormationChangeSetDiffIntegrationTest {
     }
 
     @Test
+    void omittedParameterFallingBackToDefault_isReportedAsAChange() {
+        String stackName = "cs-diff-omitted-param-default-stack";
+        stacksToDelete.add(stackName);
+
+        String template = """
+            {
+              "Parameters": {
+                "Suffix": {"Type": "String", "Default": "fallback"}
+              },
+              "Resources": {
+                "Q": {
+                  "Type": "AWS::SQS::Queue",
+                  "Properties": {
+                    "QueueName": {"Fn::Sub": "cs-diff-omit-${Suffix}"}
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+            .formParam("Parameters.member.1.ParameterKey", "Suffix")
+            .formParam("Parameters.member.1.ParameterValue", "override")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // Same template, but the update omits Suffix entirely - real CloudFormation falls back to
+        // the template Default ("fallback"), which differs from the deployed value ("override").
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateChangeSet")
+            .formParam("StackName", stackName)
+            .formParam("ChangeSetName", "omitted-param-cs")
+            .formParam("ChangeSetType", "UPDATE")
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeChangeSet")
+            .formParam("StackName", stackName)
+            .formParam("ChangeSetName", "omitted-param-cs")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<LogicalResourceId>Q</LogicalResourceId>"))
+            .body(containsString("<Action>Modify</Action>"));
+    }
+
+    @Test
     void samStackNoOpUpdate_doesNotReportSpuriousChanges() {
         String stackName = "cs-diff-sam-noop-stack";
         stacksToDelete.add(stackName);
