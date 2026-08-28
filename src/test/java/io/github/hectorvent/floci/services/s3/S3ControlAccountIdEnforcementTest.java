@@ -111,6 +111,31 @@ class S3ControlAccountIdEnforcementTest {
         assertTrue(response.getEntity().toString().contains("<Code>InvalidRequest</Code>"));
     }
 
+    /**
+     * {@code PublicAccessBlockConfiguration} is a required member of {@code PutPublicAccessBlockRequest}.
+     * Block Public Access is a security control, so an empty, unparseable, or wrong-root body must
+     * be rejected as {@code MalformedXML} rather than silently normalized into a configuration with
+     * every flag defaulted to false — which would look like the caller deliberately disabled every
+     * protection.
+     */
+    @Test
+    void putRejectsAMalformedOrWrongRootBody() {
+        S3ControlController owner = controllerFor(GOVERNED_ACCOUNT);
+        owner.putPublicAccessBlock(GOVERNED_ACCOUNT, CONFIG_XML);
+
+        for (String body : new String[] {null, "", "not xml",
+                "<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>"}) {
+            Response response = owner.putPublicAccessBlock(GOVERNED_ACCOUNT, body);
+            assertEquals(400, response.getStatus(), "expected rejection for body: " + body);
+            assertTrue(response.getEntity().toString().contains("<Code>MalformedXML</Code>"),
+                    "expected MalformedXML for body: " + body);
+        }
+
+        // The existing configuration must survive a rejected write.
+        Response read = owner.getPublicAccessBlock(GOVERNED_ACCOUNT);
+        assertTrue(read.getEntity().toString().contains("<BlockPublicAcls>true</BlockPublicAcls>"));
+    }
+
     private S3ControlController controllerFor(String callerAccountId) {
         RequestContext context = new RequestContext();
         context.setAccountId(callerAccountId);

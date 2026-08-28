@@ -145,6 +145,11 @@ public class S3ControlController {
             String body) {
         try {
             requireCallerMayActOnAccount(accountId);
+            if (!"PublicAccessBlockConfiguration".equals(XmlParser.rootElementName(body))) {
+                throw new AwsException("MalformedXML",
+                        "The XML you provided was not well-formed or did not validate against our published schema.",
+                        400);
+            }
             s3Service.putAccountPublicAccessBlock(accountId, canonicalPublicAccessBlockXml(body));
             return Response.ok().build();
         } catch (AwsException e) {
