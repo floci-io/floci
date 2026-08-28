@@ -63,6 +63,32 @@ class ComprehendIntegrationTest {
             .body("__type", equalTo("UnsupportedLanguageException"));
     }
     @Test
+    void detectSentiment_nonStringText_returnsSerializationException() {
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "Comprehend_20171127.DetectSentiment")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"Text\":12345,\"LanguageCode\":\"en\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("SerializationException"));
+    }
+    @Test
+    void detectSentiment_nonStringLanguageCode_returnsSerializationException() {
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "Comprehend_20171127.DetectSentiment")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"Text\":\"hello\",\"LanguageCode\":true}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("SerializationException"));
+    }
+    @Test
     void detectKeyPhrases_returnsStubPhrase() {
         given()
             .contentType(CONTENT_TYPE)

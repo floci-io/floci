@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.comprehend;
 import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
+import io.github.hectorvent.floci.core.common.AwsException;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
@@ -44,8 +45,24 @@ public class ComprehendJsonHandler {
                     .build();
         };
     }
+    /**
+     * Extracts a string-typed field. A present-but-wrong-typed value (e.g. a number
+     * or boolean where the modeled shape is a string) is a shape/marshalling
+     * mismatch caught at the protocol layer, before any operation-specific business
+     * validation runs — matching {@code JsonErrorResponseUtils.createSerializationErrorResponse()}'s
+     * treatment of a malformed JSON body. It must not be silently coerced via
+     * {@code asText()}, nor conflated with a missing field (a modeled business error
+     * specific to each operation, handled downstream in {@link ComprehendService}).
+     */
     private String getStringField(JsonNode node, String field) {
         JsonNode value = node == null ? null : node.get(field);
-        return (value != null && !value.isNull()) ? value.asText() : null;
+        if (value == null || value.isNull()) {
+            return null;
+        }
+        if (!value.isTextual()) {
+            throw new AwsException("SerializationException",
+                    "Unable to unmarshal request; the value for '" + field + "' is not a string.", 400);
+        }
+        return value.asText();
     }
 }
