@@ -148,6 +148,32 @@ class KubernetesPodLauncherTest {
     }
 
     @Test
+    void launchDoesNotLetAPartialUserCredentialEnvironmentSplitTheBaselineTuple() {
+        // This launcher never has execution-role credentials, so every pod rides the
+        // owner-account/placeholder baseline. If the function's own Environment config defines
+        // only AWS_ACCESS_KEY_ID (no matching secret or session token), that partial value must
+        // not override just the baseline's access key and leave its secret/token in place.
+        markPodPhaseInBackground("floci-lambda-my-fn-", "Running");
+        lenient().when(awsEnv.sdkBaselineEnv(anyString(), any(), anyString(), any(), anyString()))
+                .thenReturn(List.of(
+                        "AWS_ACCESS_KEY_ID=000000000000",
+                        "AWS_SECRET_ACCESS_KEY=test",
+                        "AWS_SESSION_TOKEN=test"));
+        var fn = function();
+        fn.setEnvironment(Map.of("AWS_ACCESS_KEY_ID", "user-partial-key"));
+
+        launcher.launch(fn);
+
+        var pod = client.pods().inNamespace("default").list().getItems().stream()
+                .filter(p -> p.getMetadata().getName().startsWith("floci-lambda-my-fn-"))
+                .findFirst().orElseThrow();
+        var envVars = pod.getSpec().getContainers().getFirst().getEnv();
+        assertThat(envVars).extracting(EnvVar::getName, EnvVar::getValue)
+                .contains(tuple("AWS_ACCESS_KEY_ID", "000000000000"))
+                .doesNotContain(tuple("AWS_ACCESS_KEY_ID", "user-partial-key"));
+    }
+
+    @Test
     void launchCreatesPodAndReturnsHandle() {
         markPodPhaseInBackground("floci-lambda-my-fn-", "Running");
 

@@ -195,7 +195,17 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
                     Optional.empty(), AwsArnUtils.accountOrDefault(fn.getFunctionArn(), config.defaultAccountId())));
             env.addAll(ContainerLauncher.flociCaEnv(caCert));
             if (fn.getEnvironment() != null) {
-                fn.getEnvironment().forEach((k, v) -> env.add(k + "=" + v));
+                // Same all-or-nothing rule as ContainerLauncher: this launcher never has
+                // execution-role credentials, so the function's own Environment may only supply
+                // AWS credential vars when it defines the full triad — a partial set must never
+                // join the owner-account baseline and split its credential tuple.
+                boolean userDefinesFullCredentialTriad =
+                        ContainerLauncher.definesFullCredentialTriad(fn.getEnvironment());
+                fn.getEnvironment().forEach((k, v) -> {
+                    if (!ContainerLauncher.isAwsCredentialVariable(k) || userDefinesFullCredentialTriad) {
+                        env.add(k + "=" + v);
+                    }
+                });
             }
 
             var imageConfig = imagePackage

@@ -377,6 +377,35 @@ class ContainerLauncherTest {
     }
 
     @Test
+    void launchFunction_partialUserCredentialEnvironmentDoesNotSplitOwnerAccountTuple() throws Exception {
+        // A Lambda with no execution role falls onto the owner-account placeholder tuple. If the
+        // function's own Environment config defines only AWS_ACCESS_KEY_ID (no matching secret or
+        // session token), that partial value must not leak in and override just the access key —
+        // it would pair the user's key with the owner-account's "test" secret/token, a tuple
+        // nothing can verify. The injection must be all-or-nothing: since the function does not
+        // define the full triad, none of its credential vars should reach the container.
+        Path codePath = Files.createDirectory(tempDir.resolve("creds-partial"));
+
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("partial-creds-fn");
+        fn.setRuntime("nodejs20.x");
+        fn.setHandler("index.handler");
+        fn.setCodeLocalPath(codePath.toString());
+        fn.setFunctionArn("arn:aws:lambda:us-east-1:111122223333:function:partial-creds-fn");
+        fn.setEnvironment(Map.of("AWS_ACCESS_KEY_ID", "user-partial-key"));
+
+        launcher.launch(fn);
+
+        List<String> env = captureRealContainerSpec().env();
+        assertEquals(1, env.stream().filter(e -> e.startsWith("AWS_ACCESS_KEY_ID=")).count(),
+                "the owner-account access key must not be joined by a second, user-supplied one");
+        assertTrue(env.contains("AWS_ACCESS_KEY_ID=111122223333"),
+                "the owner-account access key must win when the function's own triad is incomplete");
+        assertTrue(env.stream().noneMatch("AWS_ACCESS_KEY_ID=user-partial-key"::equals),
+                "a partial user-supplied access key must never override the owner-account baseline");
+    }
+
+    @Test
     void launchFunction_injectsConfiguredDefaultRegionWhenArnMissing() throws Exception {
         Path codePath = Files.createDirectory(tempDir.resolve("region-default"));
         when(config.defaultRegion()).thenReturn("eu-central-1");
