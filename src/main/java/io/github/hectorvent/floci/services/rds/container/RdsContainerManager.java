@@ -171,7 +171,7 @@ public class RdsContainerManager {
             EndpointInfo endpoint = info.getEndpoint(enginePort);
 
             LOG.infov("RDS backend for instance {0}: {1}", instanceId, endpoint);
-            initializeEngine(containerName, info.containerId(), engine, masterUsername);
+            initializeEngine(containerName, info.containerId(), engine, masterUsername, masterPassword);
 
             handle = new RdsContainerHandle(
                     info.containerId(), effectiveRuntimeId, instanceId,
@@ -371,9 +371,13 @@ public class RdsContainerManager {
         return Integer.parseInt(tag.substring(0, end));
     }
 
-    private void initializeEngine(String containerName, String containerId, DatabaseEngine engine, String masterUsername) {
+    private void initializeEngine(String containerName, String containerId, DatabaseEngine engine,
+                                  String masterUsername, String masterPassword) {
         if (engine == DatabaseEngine.POSTGRES) {
             initializePostgresIamRole(containerName, containerId, masterUsername);
+        } else if (needsMasterGrant(engine, masterUsername)) {
+            execUntilSuccess(containerName, containerId,
+                    masterGrantCommand(engine, masterUsername, masterPassword), "master-user grants");
         }
     }
 
@@ -398,13 +402,41 @@ public class RdsContainerManager {
                 "-d", "postgres",
                 "-c", postgresIamRoleInitSql()
         };
+        execUntilSuccess(containerName, containerId, cmd, "PostgreSQL IAM role");
+    }
+
+    /**
+     * The stock mysql/mariadb images grant {@code MYSQL_USER} only {@code ALL} on
+     * {@code MYSQL_DATABASE}, so a master user cannot {@code CREATE DATABASE}, {@code CREATE USER}
+     * or {@code GRANT} — operations real RDS master users perform routinely. A root master needs
+     * nothing (and the images create no separate user for it).
+     */
+    static boolean needsMasterGrant(DatabaseEngine engine, String masterUsername) {
+        return (engine == DatabaseEngine.MYSQL || engine == DatabaseEngine.MARIADB)
+                && masterUsername != null && !masterUsername.isBlank() && !"root".equals(masterUsername);
+    }
+
+    static String[] masterGrantCommand(DatabaseEngine engine, String masterUsername, String masterPassword) {
+        // MariaDB images ≥10.4 (Floci's floor is 10.11) ship only the `mariadb` client binary.
+        String client = engine == DatabaseEngine.MARIADB ? "mariadb" : "mysql";
+        return new String[]{client, "-uroot", "-p" + masterPassword, "-e", mysqlMasterGrantSql(masterUsername)};
+    }
+
+    static String mysqlMasterGrantSql(String masterUsername) {
+        // Real RDS grants the master user a near-global privilege list (withholding SUPER, FILE
+        // and SHUTDOWN); the emulator grants ALL for simplicity, mirroring how POSTGRES_USER is
+        // already a superuser. MasterUsername is API-constrained to word characters, safe to inline.
+        return "GRANT ALL PRIVILEGES ON *.* TO '" + masterUsername + "'@'%' WITH GRANT OPTION;";
+    }
+
+    private void execUntilSuccess(String containerName, String containerId, String[] cmd, String description) {
         String lastOutput = "";
         for (int attempt = 1; attempt <= 60; attempt++) {
             try {
                 ContainerExecResult result = execInContainer(containerId, cmd, 5);
                 lastOutput = result.output();
                 if (result.exitCode() == 0) {
-                    LOG.infov("Initialized PostgreSQL IAM role in RDS container {0}", containerName);
+                    LOG.infov("Initialized {0} in RDS container {1}", description, containerName);
                     return;
                 }
             } catch (Exception e) {
@@ -414,10 +446,10 @@ public class RdsContainerManager {
                 TimeUnit.SECONDS.sleep(1);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                throw new IllegalStateException("Interrupted initializing PostgreSQL IAM role in " + containerName, e);
+                throw new IllegalStateException("Interrupted initializing " + description + " in " + containerName, e);
             }
         }
-        throw new IllegalStateException("Timed out initializing PostgreSQL IAM role in " + containerName + ": " + lastOutput);
+        throw new IllegalStateException("Timed out initializing " + description + " in " + containerName + ": " + lastOutput);
     }
 
     private ContainerExecResult execInContainer(String containerId, String[] cmd, int timeoutSeconds) throws Exception {

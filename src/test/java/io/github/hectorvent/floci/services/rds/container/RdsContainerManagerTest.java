@@ -55,6 +55,52 @@ class RdsContainerManagerTest {
     }
 
     @Test
+    void mysqlMasterGrantSqlGrantsGlobalPrivilegesWithGrantOption() {
+        String sql = RdsContainerManager.mysqlMasterGrantSql("admin");
+
+        assertTrue(sql.contains("GRANT ALL PRIVILEGES ON *.*"));
+        assertTrue(sql.contains("'admin'@'%'"));
+        assertTrue(sql.contains("WITH GRANT OPTION"));
+    }
+
+    @Test
+    void masterGrantCommandUsesTheEngineClientBinary() {
+        assertEquals("mysql",
+                RdsContainerManager.masterGrantCommand(DatabaseEngine.MYSQL, "admin", "pw")[0]);
+        assertEquals("mariadb",
+                RdsContainerManager.masterGrantCommand(DatabaseEngine.MARIADB, "admin", "pw")[0]);
+    }
+
+    @Test
+    void needsMasterGrantSkipsRootAndPostgres() {
+        assertTrue(RdsContainerManager.needsMasterGrant(DatabaseEngine.MYSQL, "admin"));
+        assertTrue(RdsContainerManager.needsMasterGrant(DatabaseEngine.MARIADB, "admin"));
+        assertFalse(RdsContainerManager.needsMasterGrant(DatabaseEngine.MYSQL, "root"));
+        assertFalse(RdsContainerManager.needsMasterGrant(DatabaseEngine.POSTGRES, "admin"));
+        assertFalse(RdsContainerManager.needsMasterGrant(DatabaseEngine.MYSQL, null));
+    }
+
+    @Test
+    void mysqlRootMasterStartDoesNotExecIntoTheContainer() {
+        EmulatorConfig config = config(tempDir.resolve("host-root"));
+        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+        stubStarts(lifecycleManager, new ContainerLifecycleManager.ContainerInfo(
+                "container-id", Map.of(3306, new ContainerLifecycleManager.EndpointInfo("db1", 3306))));
+        ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
+        lenient().when(logStreamer.generateLogStreamName(any())).thenReturn("log-stream");
+
+        RdsContainerManager manager = new RdsContainerManager(
+                new ContainerBuilder(config, mock(DockerHostResolver.class), mock(EmbeddedDnsServer.class)),
+                lifecycleManager, logStreamer, mock(ContainerDetector.class), config,
+                new RegionResolver("us-east-1", "000000000000"),
+                mock(ServiceConfigAccess.class));
+
+        manager.start("db1", "vol1", DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db");
+
+        verify(lifecycleManager, never()).getDockerClient();
+    }
+
+    @Test
     void postgres18UsesParentDataMount() {
         assertEquals("/var/lib/postgresql",
                 RdsContainerManager.engineDefaultDataPath(DatabaseEngine.POSTGRES, "postgres:18.4-alpine"));
