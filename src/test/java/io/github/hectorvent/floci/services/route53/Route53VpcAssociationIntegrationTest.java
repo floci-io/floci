@@ -256,6 +256,41 @@ class Route53VpcAssociationIntegrationTest {
                 .body(containsString("<AssociateVPCWithHostedZoneResponse"));
     }
 
+    @Test
+    void createHostedZoneRejectsAnUnmodelledVpcRegion() {
+        String create = """
+                <CreateHostedZoneRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
+                  <Name>createregion.internal.</Name>
+                  <CallerReference>vpc-assoc-create-bad-region</CallerReference>
+                  <VPC><VPCRegion>us-east-99</VPCRegion><VPCId>vpc-createregion-primary</VPCId></VPC>
+                </CreateHostedZoneRequest>
+                """;
+        given().contentType(XML).body(create)
+                .post("/2013-04-01/hostedzone")
+                .then().statusCode(400)
+                .body(containsString("<Code>InvalidInput</Code>"))
+                .body(containsString("VPCRegion"));
+    }
+
+    @Test
+    void listHostedZonesByVpcWithAnUnknownNextTokenIsInvalidInput() {
+        String zoneId = createPrivateZone("badtoken.internal.", "vpc-assoc-bad-token", "vpc-badtoken-primary");
+
+        given().get("/2013-04-01/hostedzonesbyvpc?vpcid=vpc-badtoken-primary&vpcregion=us-east-1"
+                        + "&nexttoken=" + zoneId + "-does-not-exist")
+                .then().statusCode(400)
+                .body(containsString("<Code>InvalidInput</Code>"))
+                .body(containsString("NextToken"));
+    }
+
+    @Test
+    void listHostedZonesByVpcWithANonPositiveMaxItemsIsInvalidInput() {
+        given().get("/2013-04-01/hostedzonesbyvpc?vpcid=vpc-anything&vpcregion=us-east-1&maxitems=0")
+                .then().statusCode(400)
+                .body(containsString("<Code>InvalidInput</Code>"))
+                .body(containsString("MaxItems"));
+    }
+
     private static String createPrivateZone(String name, String callerReference, String vpcId) {
         String create = """
                 <CreateHostedZoneRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/">

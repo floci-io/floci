@@ -85,6 +85,9 @@ public class Route53Controller {
             String callerRef = XmlParser.extractFirst(body, "CallerReference", null);
             String comment = XmlParser.extractFirst(body, "Comment", null);
             VpcAssociation vpcAssociation = parseVpcAssociation(body);
+            if (vpcAssociation != null) {
+                requireModelledVpcRegion(vpcAssociation.getVpcRegion());
+            }
 
             if (name == null || callerRef == null) {
                 throw new AwsException("InvalidInput", "Name and CallerReference are required.", 400);
@@ -264,7 +267,10 @@ public class Route53Controller {
         }
     }
 
-    /** Counterpart to {@link #createVpcAssociationAuthorization}; AWS returns an empty body. */
+    /**
+     * Counterpart to {@link #createVpcAssociationAuthorization}; the response has no members,
+     * so this returns the response's root element with nothing inside it.
+     */
     @POST
     @Path("/hostedzone/{Id}/deauthorizevpcassociation")
     public Response deleteVpcAssociationAuthorization(@PathParam("Id") String id, String body) {
@@ -296,18 +302,25 @@ public class Route53Controller {
             }
             requireModelledVpcRegion(vpcRegion);
 
+            if (maxItems <= 0) {
+                throw new AwsException("InvalidInput", "MaxItems must be a positive integer.", 400);
+            }
+
             List<HostedZone> zones = service.listHostedZonesByVpc(vpcId, vpcRegion);
             if (nextToken != null && !nextToken.isEmpty()) {
-                int idx = 0;
+                int idx = -1;
                 for (int i = 0; i < zones.size(); i++) {
                     if (zones.get(i).getId().equals(nextToken)) {
                         idx = i + 1;
                         break;
                     }
                 }
+                if (idx < 0) {
+                    throw new AwsException("InvalidInput", "Invalid value for NextToken: " + nextToken, 400);
+                }
                 zones = zones.subList(idx, zones.size());
             }
-            boolean truncated = maxItems > 0 && zones.size() > maxItems;
+            boolean truncated = zones.size() > maxItems;
             if (truncated) {
                 zones = zones.subList(0, maxItems);
             }
