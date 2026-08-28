@@ -194,7 +194,10 @@ public class EmulatorLifecycle {
         pipesService.startPersistedPollers();
         rdsService.restorePersistedRuntime();
         if (config.services().elasticache().enabled()) {
-            elastiCacheService.restorePersistedRuntime();
+            elastiCacheService.restorePersistedRuntime().exceptionally(ex -> {
+                LOG.warnv("ElastiCache cluster-mode restore failed: {0}", ex.getMessage());
+                return null;
+            });
         }
         if (config.services().elbv2().enabled()) {
             elbV2Service.restorePersistedRuntime();

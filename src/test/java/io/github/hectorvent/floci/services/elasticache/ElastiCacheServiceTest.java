@@ -24,6 +24,7 @@ import org.mockito.ArgumentCaptor;
 
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -415,7 +416,7 @@ class ElastiCacheServiceTest {
         ElastiCacheService restarted = serviceWith(storageFactory, restartedContainers,
                 restartedProxies, restartedFormation);
 
-        restarted.restorePersistedRuntime();
+        restarted.restorePersistedRuntime().join();
 
         verify(restartedContainers, times(4)).start(anyString(), anyString(), any());
         verify(restartedFormation).form(eq("grp"), any(), eq(2));
@@ -449,7 +450,7 @@ class ElastiCacheServiceTest {
         ElastiCacheService restarted = serviceWith(storageFactory, restartedContainers,
                 restartedProxies, mock(ValkeyClusterFormation.class));
 
-        restarted.restorePersistedRuntime();
+        restarted.restorePersistedRuntime().join();
 
         ReplicationGroup failed = restarted.getReplicationGroup("grp");
         assertEquals(ReplicationGroupStatus.CREATE_FAILED, failed.getStatus());
@@ -461,6 +462,38 @@ class ElastiCacheServiceTest {
                 restarted.createReplicationGroup("grp2", "test", AuthMode.NO_AUTH, null, "us-east-1");
         assertEquals(16379, next.getProxyPort(),
                 "Ports from the failed restore must be released for the next group");
+    }
+
+    @Test
+    void restoreRunsInBackgroundAndReportsCreatingUntilDone() throws InterruptedException {
+        StorageFactory storageFactory = sharedStorageFactory();
+        ElastiCacheContainerManager beforeRestart = mock(ElastiCacheContainerManager.class);
+        stubPerNodeContainers(beforeRestart);
+        serviceWith(storageFactory, beforeRestart, mock(ElastiCacheProxyManager.class),
+                mock(ValkeyClusterFormation.class))
+                .createReplicationGroup(clusterRequest("grp", 2, 0));
+
+        ElastiCacheContainerManager restartedContainers = mock(ElastiCacheContainerManager.class);
+        CountDownLatch restoreStarted = new CountDownLatch(1);
+        CountDownLatch releaseRestore = new CountDownLatch(1);
+        when(restartedContainers.start(anyString(), anyString(), any())).thenAnswer(inv -> {
+            restoreStarted.countDown();
+            releaseRestore.await(5, TimeUnit.SECONDS);
+            return new ElastiCacheContainerHandle("cid-" + inv.getArgument(0, String.class),
+                    inv.getArgument(0, String.class), "localhost", 6379);
+        });
+        ElastiCacheService restarted = serviceWith(storageFactory, restartedContainers,
+                mock(ElastiCacheProxyManager.class), mock(ValkeyClusterFormation.class));
+
+        CompletableFuture<Void> restore = restarted.restorePersistedRuntime();
+
+        assertTrue(restoreStarted.await(5, TimeUnit.SECONDS));
+        assertFalse(restore.isDone(), "Restore must not block the caller while the data plane comes up");
+        assertEquals(ReplicationGroupStatus.CREATING, restarted.getReplicationGroup("grp").getStatus(),
+                "Groups must report creating while their restore is in flight");
+        releaseRestore.countDown();
+        restore.join();
+        assertEquals(ReplicationGroupStatus.AVAILABLE, restarted.getReplicationGroup("grp").getStatus());
     }
 
     @Test

@@ -180,6 +180,8 @@ class EmulatorLifecycleTest {
     void shouldRestoreElastiCachePersistedRuntimeAfterStorageLoad() {
         stubStorageConfig();
         when(elastiCacheServiceConfig.enabled()).thenReturn(true);
+        when(elastiCacheService.restorePersistedRuntime())
+                .thenReturn(java.util.concurrent.CompletableFuture.completedFuture(null));
         when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
         when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
 

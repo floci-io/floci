@@ -42,6 +42,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Pattern;
 
@@ -441,15 +442,43 @@ public class ElastiCacheService implements ResourceProvider {
      * {@code create-failed} instead of available. Cluster-mode-disabled groups are deliberately
      * out of scope: they keep their pre-existing behaviour of reporting available after a
      * restart without a restored runtime.
+     *
+     * <p>Container restarts and cluster formation can take a readiness timeout and a formation
+     * timeout per group, so the data-plane work runs in the background and must not delay
+     * emulator readiness. Groups are marked {@code creating} synchronously — each node's proxy
+     * port is reserved at the same time, before any request can claim it — and flip to
+     * {@code available} or {@code create-failed} as their restoration finishes.
      */
-    public void restorePersistedRuntime() {
+    public CompletableFuture<Void> restorePersistedRuntime() {
+        List<ReplicationGroup> toRestore = new ArrayList<>();
         for (ReplicationGroup group : groups.scan(k -> true)) {
             if (!group.isClusterEnabled() || group.getClusterNodes().isEmpty()
                     || group.getStatus() == ReplicationGroupStatus.DELETING) {
                 continue;
             }
-            restoreClusterModeGroup(group);
+            List<Integer> reserved = new ArrayList<>();
+            try {
+                for (ClusterNode node : group.getClusterNodes()) {
+                    node.setProxyPort(reserveOrAllocateProxyPort(node.getProxyPort()));
+                    reserved.add(node.getProxyPort());
+                }
+                group.setStatus(ReplicationGroupStatus.CREATING);
+                toRestore.add(group);
+            } catch (RuntimeException e) {
+                reserved.forEach(this::releaseProxyPort);
+                group.setStatus(ReplicationGroupStatus.CREATE_FAILED);
+                group.setConfigurationEndpoint(null);
+                LOG.warnv(e, "Failed to restore cluster-mode replication group {0}",
+                        group.getReplicationGroupId());
+            }
+            groups.put(group.getReplicationGroupId(), group);
         }
+        if (toRestore.isEmpty()) {
+            return CompletableFuture.completedFuture(null);
+        }
+        LOG.infov("Restoring {0} cluster-mode replication group(s) in the background",
+                String.valueOf(toRestore.size()));
+        return CompletableFuture.runAsync(() -> toRestore.forEach(this::restoreClusterModeGroup));
     }
 
     private void restoreClusterModeGroup(ReplicationGroup group) {
@@ -461,14 +490,9 @@ public class ElastiCacheService implements ResourceProvider {
 
         List<ElastiCacheContainerHandle> handles = new ArrayList<>();
         List<String> startedProxyKeys = new ArrayList<>();
-        List<Integer> reservedPorts = new ArrayList<>();
+        List<Integer> reservedPorts = nodes.stream().map(ClusterNode::getProxyPort).toList();
         String inFlightMemberId = null;
         try {
-            for (ClusterNode node : nodes) {
-                node.setProxyPort(reserveOrAllocateProxyPort(node.getProxyPort()));
-                reservedPorts.add(node.getProxyPort());
-            }
-
             List<ValkeyClusterFormation.Node> formationNodes = new ArrayList<>(nodes.size());
             for (ClusterNode node : nodes) {
                 inFlightMemberId = node.getMemberClusterId();

@@ -62,10 +62,12 @@ then announce that name and report it as their `ConfigurationEndpoint`.
 
 With `persistent`, `hybrid` or `wal` storage, cluster-mode groups are re-provisioned from their
 persisted topology on startup: containers are restarted, the cluster is re-formed (caches restart
-empty, as on any Floci restart) and each node's proxy port is re-reserved. A group whose data plane
-cannot be brought back is reported with status `create-failed` instead of `available`, and its
-member clusters answer `DescribeCacheClusters` with `restore-failed` (`CacheClusterStatus` has no
-`create-failed` value).
+empty, as on any Floci restart) and each node's proxy port is re-reserved. Ports are re-reserved
+and groups marked `creating` before Floci reports ready; the container restarts and cluster
+formation run in the background so a slow Docker daemon cannot delay readiness, and each group
+flips to `available` once its data plane is back. A group whose data plane cannot be brought back
+is reported with status `create-failed` instead of `available`, and its member clusters answer
+`DescribeCacheClusters` with `restore-failed` (`CacheClusterStatus` has no `create-failed` value).
 
 `DescribeReplicationGroups` reports the topology honestly: `ClusterEnabled`, one `NodeGroup` per
 shard with its `Slots`, `NodeGroupMembers`, and `MemberClusters`. Each member also answers
