@@ -61,7 +61,7 @@ class AslExecutorMockedResponsesTest {
                 mock(io.github.hectorvent.floci.services.ecs.EcsJsonHandler.class),
                 objectMapper,
                 new JsonataEvaluator(objectMapper),
-                mock(Instance.class), mock(EmulatorConfig.class), vertx);
+                mock(Instance.class), mock(EmulatorConfig.class), vertx, null);
     }
 
     @Test

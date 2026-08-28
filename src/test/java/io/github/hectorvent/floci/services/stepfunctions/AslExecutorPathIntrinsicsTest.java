@@ -46,6 +46,7 @@ class AslExecutorPathIntrinsicsTest {
                 new JsonataEvaluator(mapper),
                 mock(Instance.class),
                 mock(EmulatorConfig.class),
+                null,
                 null);
     }
 
