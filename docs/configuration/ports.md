@@ -12,7 +12,6 @@
 | `7001–7099` | TCP | RDS proxy (inside Floci) | Yes |
 | `8182–8282` | TCP | Neptune Gremlin proxy (inside Floci) | Yes |
 | `8700–8799` | HTTP | MWAA Airflow webserver proxy (inside Floci) | Yes |
-| `9200–9299` | HTTP | Lambda Runtime API (internal, Docker-network only) | **No** |
 | `9400–9499` | HTTP | OpenSearch data-plane — bound directly by each OpenSearch container | **No** |
 | `12000–12499` | HTTP | Lambda Runtime API (internal, Docker-network only) | **No** |
 
