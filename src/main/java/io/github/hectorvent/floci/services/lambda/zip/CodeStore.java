@@ -48,13 +48,13 @@ public class CodeStore {
 
     public void delete(String accountId, String functionName) {
         deleteDirectory(getCodePath(accountId, functionName), functionName);
-        deleteLegacy(functionName);
     }
 
     /**
-     * Best-effort removal of a function's pre-account-scoped directory, independent of its
-     * current account-scoped one. Called after a successful code update re-extracts to the new
-     * path, so an upgraded deployment reclaims the old directory instead of leaving it orphaned.
+     * Best-effort removal of a function's pre-account-scoped directory. Deliberately NOT called
+     * automatically from {@link #delete}: the pre-account-scoped layout gave every account's
+     * same-named function the exact same directory, so it is only safe to remove once the caller
+     * (see {@code LambdaService}) has confirmed no other account's function still references it.
      */
     public void deleteLegacy(String functionName) {
         deleteDirectory(getLegacyCodePath(functionName), functionName);

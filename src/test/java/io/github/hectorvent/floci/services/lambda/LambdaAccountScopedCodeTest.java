@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.lambda;
 
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import io.github.hectorvent.floci.services.lambda.zip.CodeStore;
@@ -106,6 +107,58 @@ class LambdaAccountScopedCodeTest {
                 Map.of("ZipFile", zipBase64("index.js", "B")));
 
         assertFalse(Files.exists(legacyPath), "the pre-account-scoped directory must be reclaimed on update");
+    }
+
+    @Test
+    void updateFunctionCodeDoesNotDeleteALegacyDirectoryStillLiveForAnotherAccount(@TempDir Path baseDir) throws Exception {
+        // Before account-scoping, two accounts' same-named functions shared the exact same
+        // on-disk directory. If account B's function was never updated since the migration, its
+        // $LATEST still points at that shared legacy directory. Account A updating its own code
+        // must not delete it out from under B.
+        CodeStore codeStore = new CodeStore(baseDir);
+        LambdaFunctionStore sharedStore = new LambdaFunctionStore(AccountAwareStorageBackend.inMemory(ACCOUNT_A));
+        LambdaService svcA = new LambdaService(sharedStore, new WarmPool(), codeStore, new ZipExtractor(),
+                new RegionResolver(REGION, ACCOUNT_A));
+        svcA.createFunction(REGION, zipRequest("shared-fn", "A"));
+
+        Path legacyPath = codeStore.getLegacyCodePath("shared-fn");
+        Files.createDirectories(legacyPath);
+        Files.writeString(legacyPath.resolve("index.js"), "B-legacy");
+        LambdaFunction bFn = new LambdaFunction();
+        bFn.setFunctionName("shared-fn");
+        bFn.setAccountId(ACCOUNT_B);
+        bFn.setVersion("$LATEST");
+        bFn.setCodeLocalPath(legacyPath.toAbsolutePath().normalize().toString());
+        sharedStore.saveForAccount(ACCOUNT_B, REGION, bFn);
+
+        svcA.updateFunctionCode(REGION, "shared-fn", Map.of("ZipFile", zipBase64("index.js", "A-v2")));
+
+        assertTrue(Files.exists(legacyPath),
+                "a legacy directory another account's $LATEST still points at must survive this update");
+    }
+
+    @Test
+    void deleteFunctionDoesNotDeleteALegacyDirectoryStillLiveForAnotherAccount(@TempDir Path baseDir) throws Exception {
+        CodeStore codeStore = new CodeStore(baseDir);
+        LambdaFunctionStore sharedStore = new LambdaFunctionStore(AccountAwareStorageBackend.inMemory(ACCOUNT_A));
+        LambdaService svcA = new LambdaService(sharedStore, new WarmPool(), codeStore, new ZipExtractor(),
+                new RegionResolver(REGION, ACCOUNT_A));
+        svcA.createFunction(REGION, zipRequest("shared-fn", "A"));
+
+        Path legacyPath = codeStore.getLegacyCodePath("shared-fn");
+        Files.createDirectories(legacyPath);
+        Files.writeString(legacyPath.resolve("index.js"), "B-legacy");
+        LambdaFunction bFn = new LambdaFunction();
+        bFn.setFunctionName("shared-fn");
+        bFn.setAccountId(ACCOUNT_B);
+        bFn.setVersion("$LATEST");
+        bFn.setCodeLocalPath(legacyPath.toAbsolutePath().normalize().toString());
+        sharedStore.saveForAccount(ACCOUNT_B, REGION, bFn);
+
+        svcA.deleteFunction(REGION, "shared-fn");
+
+        assertTrue(Files.exists(legacyPath),
+                "a legacy directory another account's $LATEST still points at must survive this delete");
     }
 
     private LambdaFunction functionOwnedBy(String accountId) {

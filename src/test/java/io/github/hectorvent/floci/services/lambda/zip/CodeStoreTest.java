@@ -75,10 +75,12 @@ class CodeStoreTest {
     }
 
     @Test
-    void deleteAlsoRemovesAPreAccountScopedLegacyDirectory(@TempDir Path baseDir) throws IOException {
-        // Before account-scoping, code extracted to baseDir/<functionName> directly. delete()
-        // only targeted the new baseDir/<accountId>/<functionName> path, so a function created
-        // before the migration would leave its old directory (and disk usage) behind forever.
+    void deleteDoesNotTouchAPreAccountScopedLegacyDirectory(@TempDir Path baseDir) throws IOException {
+        // The pre-account-scoped layout gave every account's same-named function the exact same
+        // directory, so CodeStore itself cannot safely know whether another account's function
+        // still depends on it. That decision belongs to the caller (LambdaService, which can
+        // check every account's persisted functions) via the separate deleteLegacy() below -
+        // delete() must only ever touch its own account-scoped path.
         CodeStore store = new CodeStore(baseDir);
         Path legacyPath = baseDir.resolve("legacy-fn");
         writeHandler(legacyPath, "legacy");
@@ -86,8 +88,19 @@ class CodeStoreTest {
 
         store.delete(ACCOUNT_A, "legacy-fn");
 
-        assertFalse(Files.exists(legacyPath), "the pre-account-scoped directory must be cleaned up too");
+        assertTrue(Files.exists(legacyPath), "delete() must not unilaterally remove the legacy directory");
         assertFalse(store.exists(ACCOUNT_A, "legacy-fn"));
+    }
+
+    @Test
+    void deleteLegacyRemovesThePreAccountScopedDirectory(@TempDir Path baseDir) throws IOException {
+        CodeStore store = new CodeStore(baseDir);
+        Path legacyPath = store.getLegacyCodePath("legacy-fn");
+        writeHandler(legacyPath, "legacy");
+
+        store.deleteLegacy("legacy-fn");
+
+        assertFalse(Files.exists(legacyPath));
     }
 
     private void writeHandler(Path codePath, String content) throws IOException {

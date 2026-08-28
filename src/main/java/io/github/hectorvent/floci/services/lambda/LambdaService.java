@@ -712,6 +712,7 @@ public class LambdaService implements ResourceProvider {
             }
             codeStore.delete(ownerAccount(fn), functionName);
             functionStore.delete(region, functionName);
+            reclaimLegacyCodeDirectoryIfUnused(region, functionName);
             versionCounters.remove(versionCounterKey(region, fn));
             versionCounters.remove(legacyVersionCounterKey(region, functionName));
             if (aliasStore != null) {
@@ -730,6 +731,22 @@ public class LambdaService implements ResourceProvider {
             }
         }
         LOG.infov("Deleted Lambda function: {0}", functionName);
+    }
+
+    /**
+     * The pre-account-scoped code layout gave every account's same-named function the exact
+     * same on-disk directory, so it is only safe to reclaim once no account's {@code $LATEST}
+     * still has {@code codeLocalPath} pointing at it — otherwise a delete or code update in one
+     * account destroys a directory another account's function still serves invocations from.
+     */
+    private void reclaimLegacyCodeDirectoryIfUnused(String region, String functionName) {
+        String legacyPath = codeStore.getLegacyCodePath(functionName).toAbsolutePath().normalize().toString();
+        boolean stillLive = functionStore.listAllAccounts(region).stream()
+                .anyMatch(other -> functionName.equals(other.getFunctionName())
+                        && legacyPath.equals(other.getCodeLocalPath()));
+        if (!stillLive) {
+            codeStore.deleteLegacy(functionName);
+        }
     }
 
     public InvokeResult invoke(String region, String functionName, byte[] payload, InvocationType type) {
@@ -1868,7 +1885,7 @@ public class LambdaService implements ResourceProvider {
             storeDeploymentPackage(fn, zipBytes, region);
             // Reclaim a directory left behind by a function created before account-scoping;
             // codePath above is already the new location, so this is a no-op once migrated.
-            codeStore.deleteLegacy(fn.getFunctionName());
+            reclaimLegacyCodeDirectoryIfUnused(region, fn.getFunctionName());
         } catch (AwsException e) {
             throw e;
         } catch (IOException e) {
