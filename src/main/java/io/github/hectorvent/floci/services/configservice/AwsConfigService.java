@@ -97,6 +97,11 @@ public class AwsConfigService {
     private final ConcurrentHashMap<String, Long> ruleFirstActivatedTime = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Long> ruleLastInvokedTime = new ConcurrentHashMap<>();
 
+    // guards the check-then-act between a rule's existence and its evaluations, keyed
+    // region + "|" + ruleName, so DeleteConfigRule can't race PutEvaluations/PutExternalEvaluation
+    // into recreating a deleted rule's evaluation bucket for a later same-named rule to inherit
+    private final ConcurrentHashMap<String, Object> ruleLocks = new ConcurrentHashMap<>();
+
     // resourceArn -> {tagKey -> tagValue} (flat outer, mutable inner)
     private Map<String, Map<String, String>> tags = new ConcurrentHashMap<>();
 
@@ -236,17 +241,22 @@ public class AwsConfigService {
     }
 
     public void deleteConfigRule(String region, String ruleName) {
-        Map<String, ConfigRule> store = rulesFor(region);
-        if (isBlank(ruleName) || store.remove(ruleName) == null) {
+        if (isBlank(ruleName)) {
             throw new AwsException("NoSuchConfigRuleException", NO_SUCH_CONFIG_RULE_MESSAGE, 400);
         }
-        persistRegion(configRules, region);
-        Map<String, Map<String, ConfigEvaluation>> regionEvaluations = evaluations.get(region);
-        if (regionEvaluations != null && regionEvaluations.remove(ruleName) != null) {
-            persistRegion(evaluations, region);
+        synchronized (lockFor(ruleKey(region, ruleName))) {
+            Map<String, ConfigRule> store = rulesFor(region);
+            if (store.remove(ruleName) == null) {
+                throw new AwsException("NoSuchConfigRuleException", NO_SUCH_CONFIG_RULE_MESSAGE, 400);
+            }
+            persistRegion(configRules, region);
+            Map<String, Map<String, ConfigEvaluation>> regionEvaluations = evaluations.get(region);
+            if (regionEvaluations != null && regionEvaluations.remove(ruleName) != null) {
+                persistRegion(evaluations, region);
+            }
+            ruleFirstActivatedTime.remove(ruleKey(region, ruleName));
+            ruleLastInvokedTime.remove(ruleKey(region, ruleName));
         }
-        ruleFirstActivatedTime.remove(ruleKey(region, ruleName));
-        ruleLastInvokedTime.remove(ruleKey(region, ruleName));
     }
 
     public List<ConfigRule> describeConfigRules(String region, List<String> ruleNames) {
@@ -327,21 +337,27 @@ public class AwsConfigService {
         }
         int separator = resultToken.indexOf(':');
         String ruleName = separator > 0 ? resultToken.substring(0, separator) : resultToken;
-        requireRule(region, ruleName);
-        storeEvaluations(region, ruleName, newEvaluations);
+        synchronized (lockFor(ruleKey(region, ruleName))) {
+            requireRule(region, ruleName);
+            storeEvaluations(region, ruleName, newEvaluations);
+        }
     }
 
     public void putExternalEvaluation(String region, String ruleName, ConfigEvaluation evaluation) {
-        requireRule(region, ruleName);
         validateEvaluation(evaluation);
-        storeEvaluations(region, ruleName, List.of(evaluation));
+        synchronized (lockFor(ruleKey(region, ruleName))) {
+            requireRule(region, ruleName);
+            storeEvaluations(region, ruleName, List.of(evaluation));
+        }
     }
 
     public void deleteEvaluationResults(String region, String ruleName) {
-        requireRule(region, ruleName);
-        Map<String, Map<String, ConfigEvaluation>> regionEvaluations = evaluations.get(region);
-        if (regionEvaluations != null && regionEvaluations.remove(ruleName) != null) {
-            persistRegion(evaluations, region);
+        synchronized (lockFor(ruleKey(region, ruleName))) {
+            requireRule(region, ruleName);
+            Map<String, Map<String, ConfigEvaluation>> regionEvaluations = evaluations.get(region);
+            if (regionEvaluations != null && regionEvaluations.remove(ruleName) != null) {
+                persistRegion(evaluations, region);
+            }
         }
     }
 
@@ -939,6 +955,10 @@ public class AwsConfigService {
 
     private static String ruleKey(String region, String ruleName) {
         return region + "|" + ruleName;
+    }
+
+    private Object lockFor(String key) {
+        return ruleLocks.computeIfAbsent(key, k -> new Object());
     }
 
     private static boolean isBlank(String value) {

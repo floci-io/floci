@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.configservice;
 
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.configservice.model.ConfigEvaluation;
 import io.github.hectorvent.floci.services.configservice.model.ConfigRule;
@@ -70,6 +71,63 @@ class AwsConfigServiceEvaluationConcurrencyTest {
                     null, null).items().getFirst().complianceType();
             assertEquals("COMPLIANT", recorded,
                     "attempt " + attempt + ": the newer evaluation must win regardless of write order");
+        }
+    }
+
+    @Test
+    void deletingARuleDuringPutEvaluationsDoesNotLeaveEvaluationsForAFutureSameNamedRule() throws Exception {
+        AwsConfigService service = new AwsConfigService(new RegionResolver(REGION, "000000000000"), null);
+        ConfigRuleSource source = new ConfigRuleSource("CUSTOM_LAMBDA",
+                "arn:aws:lambda:us-east-1:000000000000:function:check", null, null);
+
+        for (int attempt = 0; attempt < 200; attempt++) {
+            String ruleName = "race-rule-" + attempt;
+            service.putConfigRule(REGION, new ConfigRule(ruleName, null, null, null, null, source,
+                    null, null, null, null, null));
+
+            CountDownLatch start = new CountDownLatch(1);
+            AtomicReference<Throwable> putFailure = new AtomicReference<>();
+            AtomicReference<Throwable> deleteFailure = new AtomicReference<>();
+
+            Thread putter = new Thread(() -> {
+                await(start);
+                try {
+                    service.putEvaluations(REGION, ruleName,
+                            List.of(evaluation("bucket-1", "NON_COMPLIANT", 1700000000.0)), false);
+                } catch (Throwable t) {
+                    putFailure.set(t);
+                }
+            });
+            Thread deleter = new Thread(() -> {
+                await(start);
+                try {
+                    service.deleteConfigRule(REGION, ruleName);
+                } catch (Throwable t) {
+                    deleteFailure.set(t);
+                }
+            });
+
+            putter.start();
+            deleter.start();
+            start.countDown();
+            putter.join(TimeUnit.SECONDS.toMillis(10));
+            deleter.join(TimeUnit.SECONDS.toMillis(10));
+            assertFalse(putter.isAlive() || deleter.isAlive(), "a putEvaluations/deleteConfigRule call never finished");
+            // Losing the race to the delete (NoSuchConfigRuleException) is a legitimate outcome for
+            // the putter; any other failure, on either side, is not.
+            if (putFailure.get() != null) {
+                assertEquals("NoSuchConfigRuleException",
+                        ((AwsException) putFailure.get()).getErrorCode(),
+                        "unexpected putEvaluations failure: " + putFailure.get());
+            }
+            assertNull(deleteFailure.get(), () -> "unexpected deleteConfigRule failure: " + deleteFailure.get());
+
+            // A brand new rule reusing the deleted rule's name must start with a clean evaluation
+            // bucket -- it must never inherit compliance details left behind by the deleted rule.
+            service.putConfigRule(REGION, new ConfigRule(ruleName, null, null, null, null, source,
+                    null, null, null, null, null));
+            assertEquals("INSUFFICIENT_DATA", service.complianceForRule(REGION, ruleName).complianceType(),
+                    "attempt " + attempt + ": a same-named rule inherited the deleted rule's evaluations");
         }
     }
 
