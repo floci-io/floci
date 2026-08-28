@@ -198,6 +198,75 @@ class KmsServiceTest {
                         List.of("Encrypt"), null, tooLong, null, REGION));
 
         assertEquals("ValidationException", ex.getErrorCode());
+        assertTrue(ex.getMessage().contains("less than or equal to 256"),
+                "too-long-name message should cite the max-length constraint, was: " + ex.getMessage());
+    }
+
+    @Test
+    void createGrantEmptyNameThrowsValidationWithMinLengthMessage() {
+        KmsKey key = kmsService.createKey("grant key", REGION);
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                kmsService.createGrant(key.getKeyId(), "arn:aws:iam::000000000000:user/grantee",
+                        List.of("Encrypt"), null, "", null, REGION));
+
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertTrue(ex.getMessage().contains("greater than or equal to 1"),
+                "empty-name message should cite the min-length constraint, was: " + ex.getMessage());
+    }
+
+    @Test
+    void createGrantConstraintsUnknownMemberThrowsValidation() {
+        KmsKey key = kmsService.createKey("grant key", REGION);
+        Map<String, Object> constraints = new LinkedHashMap<>();
+        constraints.put("NotARealConstraint", "value");
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                kmsService.createGrant(key.getKeyId(), "arn:aws:iam::000000000000:user/grantee",
+                        List.of("Encrypt"), null, null, constraints, REGION));
+
+        assertEquals("ValidationException", ex.getErrorCode());
+    }
+
+    @Test
+    void createGrantConstraintsStringValuedEncryptionContextEqualsThrowsValidation() {
+        KmsKey key = kmsService.createKey("grant key", REGION);
+        Map<String, Object> constraints = new LinkedHashMap<>();
+        constraints.put("EncryptionContextEquals", "not-a-map");
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                kmsService.createGrant(key.getKeyId(), "arn:aws:iam::000000000000:user/grantee",
+                        List.of("Encrypt"), null, null, constraints, REGION));
+
+        assertEquals("ValidationException", ex.getErrorCode());
+    }
+
+    @Test
+    void createGrantConstraintsInvalidSourceArnThrowsValidation() {
+        KmsKey key = kmsService.createKey("grant key", REGION);
+        Map<String, Object> constraints = new LinkedHashMap<>();
+        constraints.put("SourceArn", "not-an-arn");
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                kmsService.createGrant(key.getKeyId(), "arn:aws:iam::000000000000:user/grantee",
+                        List.of("Encrypt"), null, null, constraints, REGION));
+
+        assertEquals("ValidationException", ex.getErrorCode());
+    }
+
+    @Test
+    void createGrantConstraintsValidEncryptionContextRoundTrips() {
+        KmsKey key = kmsService.createKey("grant key", REGION);
+        Map<String, Object> constraints = new LinkedHashMap<>();
+        Map<String, String> encryptionContext = new LinkedHashMap<>();
+        encryptionContext.put("purpose", "test");
+        constraints.put("EncryptionContextEquals", encryptionContext);
+        constraints.put("SourceArn", "arn:aws:iam::123456789012:role/test-role");
+
+        KmsGrant grant = kmsService.createGrant(key.getKeyId(), "arn:aws:iam::000000000000:user/grantee",
+                List.of("Encrypt"), null, null, constraints, REGION);
+
+        assertEquals(constraints, grant.getConstraints());
     }
 
     @Test

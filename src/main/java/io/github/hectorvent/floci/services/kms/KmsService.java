@@ -283,6 +283,56 @@ public class KmsService implements ResourceProvider {
     private static final java.util.regex.Pattern GRANT_NAME_PATTERN =
             java.util.regex.Pattern.compile("^[a-zA-Z0-9:/_-]+$");
 
+    /** GrantConstraintSourceArnType pattern from the KMS model (kms/2014-11-01/service-2.json). */
+    private static final java.util.regex.Pattern GRANT_CONSTRAINT_SOURCE_ARN_PATTERN =
+            java.util.regex.Pattern.compile("^arn:aws[a-z0-9-]*:[a-z0-9-]+:[a-z0-9-]*:[0-9]{12}:.+$");
+
+    private static final Set<String> GRANT_CONSTRAINT_MEMBERS =
+            Set.of("EncryptionContextSubset", "EncryptionContextEquals", "SourceArn");
+
+    /** Validates a CreateGrant Constraints map against the modeled GrantConstraints shape. */
+    private void validateGrantConstraints(Map<String, Object> constraints) {
+        if (constraints == null) {
+            return;
+        }
+        for (String member : constraints.keySet()) {
+            if (!GRANT_CONSTRAINT_MEMBERS.contains(member)) {
+                throw new AwsException("ValidationException",
+                        "1 validation error detected: Unknown parameter in 'constraints': \"" + member
+                                + "\", must be one of: " + String.join(", ", GRANT_CONSTRAINT_MEMBERS), 400);
+            }
+        }
+        for (String encryptionContextMember : List.of("EncryptionContextSubset", "EncryptionContextEquals")) {
+            Object value = constraints.get(encryptionContextMember);
+            if (value == null) {
+                continue;
+            }
+            if (!(value instanceof Map<?, ?> map)) {
+                throw new AwsException("ValidationException",
+                        "1 validation error detected: Value at 'constraints." + encryptionContextMember
+                                + "' failed to satisfy constraint: Member must be a map of string to string", 400);
+            }
+            for (Map.Entry<?, ?> entry : map.entrySet()) {
+                if (!(entry.getKey() instanceof String) || !(entry.getValue() instanceof String)) {
+                    throw new AwsException("ValidationException",
+                            "1 validation error detected: Value at 'constraints." + encryptionContextMember
+                                    + "' failed to satisfy constraint: Member must be a map of string to string", 400);
+                }
+            }
+        }
+        Object sourceArn = constraints.get("SourceArn");
+        if (sourceArn != null) {
+            if (!(sourceArn instanceof String sourceArnValue)
+                    || sourceArnValue.length() < 20 || sourceArnValue.length() > 512
+                    || !GRANT_CONSTRAINT_SOURCE_ARN_PATTERN.matcher(sourceArnValue).matches()) {
+                throw new AwsException("ValidationException",
+                        "1 validation error detected: Value at 'constraints.sourceArn' failed to satisfy "
+                                + "constraint: Member must satisfy regular expression pattern: "
+                                + "^arn:aws[a-z0-9-]*:[a-z0-9-]+:[a-z0-9-]*:[0-9]{12}:.+$", 400);
+            }
+        }
+    }
+
     public KmsGrant createGrant(String keyId, String granteePrincipal, List<String> operations, String region) {
         return createGrant(keyId, granteePrincipal, operations, null, null, null, region);
     }
@@ -313,7 +363,12 @@ public class KmsService implements ResourceProvider {
             }
         }
         if (name != null) {
-            if (name.isEmpty() || name.length() > 256) {
+            if (name.isEmpty()) {
+                throw new AwsException("ValidationException",
+                        "1 validation error detected: Value '" + name + "' at 'name' failed to satisfy "
+                                + "constraint: Member must have length greater than or equal to 1", 400);
+            }
+            if (name.length() > 256) {
                 throw new AwsException("ValidationException",
                         "1 validation error detected: Value '" + name + "' at 'name' failed to satisfy "
                                 + "constraint: Member must have length less than or equal to 256", 400);
@@ -325,6 +380,7 @@ public class KmsService implements ResourceProvider {
                                 + "^[a-zA-Z0-9:/_-]+$", 400);
             }
         }
+        validateGrantConstraints(constraints);
 
         KmsKey key = resolveKey(keyId, region);
         String grantId = UUID.randomUUID().toString();
