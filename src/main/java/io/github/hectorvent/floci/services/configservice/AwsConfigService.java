@@ -235,7 +235,7 @@ public class AwsConfigService {
 
     public void deleteConfigRule(String region, String ruleName) {
         Map<String, ConfigRule> store = rulesFor(region);
-        if (store.remove(ruleName) == null) {
+        if (isBlank(ruleName) || store.remove(ruleName) == null) {
             throw new AwsException("NoSuchConfigRuleException", NO_SUCH_CONFIG_RULE_MESSAGE, 400);
         }
         persistRegion(configRules, region);

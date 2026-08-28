@@ -267,6 +267,22 @@ class ConfigRuleIntegrationTest {
             .body("__type", equalTo("NoSuchConfigRuleException"));
     }
 
+    @Test
+    @Order(11)
+    void deleteConfigRuleWithoutNameIsRejected() {
+        given()
+            .header("X-Amz-Target", TARGET_PREFIX + "DeleteConfigRule")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("NoSuchConfigRuleException"));
+    }
+
     /**
      * PutConfigRule now deserializes the whole modeled ConfigRule and stores it, so every
      * enum-typed member it keeps has to be checked: {@code Source/Owner},
