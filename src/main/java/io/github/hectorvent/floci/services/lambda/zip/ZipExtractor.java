@@ -38,8 +38,15 @@ public class ZipExtractor {
         // to find where the data ends. The central directory always carries the true method,
         // CRC and sizes regardless of the flag, so reading it accepts the same archives real
         // AWS Lambda does — e.g. a Serverless Framework package bundling node_modules
-        // (issue #2593). ZipFile needs a seekable file, so the bytes are staged on disk.
-        Path staged = Files.createTempFile("floci-lambda-", ".zip");
+        // (issue #2593).
+        //
+        // ZipFile needs a seekable file, so the bytes are staged on disk. Stage inside the code
+        // store rather than java.io.tmpdir: the shared temp filesystem must not become a new
+        // unbounded consumer that concurrent deployments can exhaust and that unrelated
+        // services would then fail on. The code store already has to hold this package's
+        // *uncompressed* contents — always at least as large as the archive — so it is already
+        // provisioned for the size, and the staged copy is released as soon as extraction ends.
+        Path staged = Files.createTempFile(absTarget.getParent(), ".floci-staging-", ".zip");
         try {
             Files.write(staged, zipBytes);
             try (ZipFile zip = new ZipFile(staged.toFile())) {

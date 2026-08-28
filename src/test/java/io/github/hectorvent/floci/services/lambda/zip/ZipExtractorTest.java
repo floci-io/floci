@@ -265,4 +265,27 @@ class ZipExtractorTest {
         assertTrue(thrown.getMessage().contains("invalid entry CRC"),
                 "corrupt entry must be reported as a checksum failure, was: " + thrown.getMessage());
     }
+
+    @Test
+    void leavesNoStagedArchiveInTheCodeStore(@TempDir Path codeStore) throws IOException {
+        // ZipFile needs a seekable file, so the archive is staged on disk next to the target
+        // rather than in the shared java.io.tmpdir. That puts a stray file one level above the
+        // function's code directory, so pin that none survives: a leaked staging archive would
+        // sit in the code store indefinitely, and one leaked *inside* a function directory
+        // would be tar-copied into that function's container at launch.
+        Path target = codeStore.resolve("fn");
+        extractor.extractTo(zipWith("index.js", "v1"), target);
+        assertNoStagedFiles(codeStore);
+
+        byte[] corrupt = corruptedPayloadZip("index.js", "v2-but-corrupted-in-transit");
+        assertThrows(IOException.class, () -> extractor.extractTo(corrupt, target));
+        assertNoStagedFiles(codeStore);
+    }
+
+    private static void assertNoStagedFiles(Path codeStore) throws IOException {
+        try (var entries = Files.list(codeStore)) {
+            assertEquals(List.of("fn"), entries.map(p -> p.getFileName().toString()).sorted().toList(),
+                    "no staged archive may survive extraction, successful or failed");
+        }
+    }
 }
