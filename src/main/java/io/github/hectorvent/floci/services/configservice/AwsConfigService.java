@@ -68,6 +68,8 @@ public class AwsConfigService {
     private static final int MAX_COMPLIANCE_TYPE_FILTERS = 3;
     /** {@code Scope.ComplianceResourceTypes} is {@code max: 100}. */
     private static final int MAX_COMPLIANCE_RESOURCE_TYPES = 100;
+    /** {@code DescribeConfigRulesRequest.ConfigRuleNames} is {@code max: 25}. */
+    private static final int MAX_DESCRIBE_CONFIG_RULE_NAMES = 25;
     private static final int RULE_CONTRIBUTOR_CAP = 25;
     private static final int RESOURCE_CONTRIBUTOR_CAP = 100;
 
@@ -248,6 +250,10 @@ public class AwsConfigService {
     }
 
     public List<ConfigRule> describeConfigRules(String region, List<String> ruleNames) {
+        if (ruleNames != null && ruleNames.size() > MAX_DESCRIBE_CONFIG_RULE_NAMES) {
+            throw new AwsException("InvalidParameterValueException",
+                    "ConfigRuleNames accepts at most " + MAX_DESCRIBE_CONFIG_RULE_NAMES + " values.", 400);
+        }
         Map<String, ConfigRule> store = rulesFor(region);
         List<ConfigRule> result = new ArrayList<>();
         if (ruleNames == null || ruleNames.isEmpty()) {
