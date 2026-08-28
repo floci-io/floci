@@ -62,7 +62,8 @@ class HybridStorageTest {
         var table = new TableDefinition(
                 "ConfigTable",
                 List.of(new KeySchemaElement("pk", "HASH"), new KeySchemaElement("sk", "RANGE")),
-                List.of(new AttributeDefinition("pk", "S"), new AttributeDefinition("sk", "S")));
+                List.of(new AttributeDefinition("pk", "S"), new AttributeDefinition("sk", "S"),
+                        new AttributeDefinition("lsiSk", "S")));
         table.setLocalSecondaryIndexes(List.of(new LocalSecondaryIndex(
                 "lsi", List.of(new KeySchemaElement("pk", "HASH"),
                         new KeySchemaElement("lsiSk", "RANGE")), null, "ALL")));
