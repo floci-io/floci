@@ -1201,6 +1201,8 @@ public class CloudFormationService implements ResourceProvider {
                 stack, previousState.resources(), attemptedResourceIds, region);
         if (rollbackFailures.isEmpty()) {
             stack.setTemplateBody(previousState.templateBody());
+            stack.getParameters().clear();
+            stack.getParameters().putAll(previousState.parameters());
         }
         try {
             restoreOutputAndExportState(stack, region, previousState);
@@ -1344,6 +1346,7 @@ public class CloudFormationService implements ResourceProvider {
     private StackUpdateSnapshot snapshotForUpdate(Stack stack) {
         return new StackUpdateSnapshot(
                 stack.getTemplateBody(),
+                new LinkedHashMap<>(stack.getParameters()),
                 new LinkedHashMap<>(stack.getOutputs()),
                 new LinkedHashMap<>(stack.getExports()),
                 new LinkedHashMap<>(stack.getOutputExportNames()),
@@ -1374,6 +1377,7 @@ public class CloudFormationService implements ResourceProvider {
 
     private record StackUpdateSnapshot(
             String templateBody,
+            Map<String, String> parameters,
             Map<String, String> outputs,
             Map<String, String> exports,
             Map<String, String> outputExportNames,
