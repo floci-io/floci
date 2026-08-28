@@ -17,10 +17,10 @@ import static org.hamcrest.Matchers.not;
 @QuarkusTest
 class CloudFormationLambdaMissingS3CodeIntegrationTest {
 
-    private static final String CFN_AUTH =
+    static final String CFN_AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/cloudformation/aws4_request";
 
-    private static String template(String fnName, String handler) {
+    static String template(String fnName, String handler) {
         return """
                 {
                   "Resources": {
@@ -39,7 +39,7 @@ class CloudFormationLambdaMissingS3CodeIntegrationTest {
                 """.formatted(fnName, handler);
     }
 
-    private static void createStack(String stackName, String template) {
+    static void createStack(String stackName, String template) {
         given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", CFN_AUTH)

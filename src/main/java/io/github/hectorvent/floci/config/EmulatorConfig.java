@@ -1293,6 +1293,19 @@ public interface EmulatorConfig {
 
         @WithDefault("30")
         long deletedStackRetentionSeconds();
+
+        /**
+         * Whether an {@code AWS::Lambda::Function} whose template names code in S3 that cannot be
+         * read should fall back to the built-in stub handler instead of failing the resource.
+         *
+         * <p>Defaults to {@code false}, matching real CloudFormation, which fails the resource and
+         * rolls the stack back. Set to {@code true} to restore the older behaviour for a stack that
+         * deliberately leaves Lambda packages unbuilt — note that such a stack reports
+         * {@code CREATE_COMPLETE} while serving a placeholder that returns
+         * {@code {"statusCode":200}}, so it cannot be used to verify the real function.
+         */
+        @WithDefault("false")
+        boolean allowStubLambdaCode();
     }
 
     interface AcmServiceConfig {

@@ -71,7 +71,7 @@ class SecretTargetAttachmentCfnProvisionerTest {
                 null, null, null, null, null, null, null,
                 rdsService, null, null, null, null, null, null,
                 docDbService, null,
-                new CloudFormationResourceRegistry(List.of()));
+                new CloudFormationResourceRegistry(List.of()), null);
     }
 
     @Test

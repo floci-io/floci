@@ -42,7 +42,7 @@ class CloudFormationEc2ProvisionerTest {
                 null, null, null, null, null, null, null, null, null, null,
                 null, null, null, null, null, null, mapper, null, null, null, null, null, null,
                 ec2Service, null, null, null, null, null, null, null,
-                null, null, new CloudFormationResourceRegistry(List.of()));
+                null, null, new CloudFormationResourceRegistry(List.of()), null);
     }
 
     @Test
