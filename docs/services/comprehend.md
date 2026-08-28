@@ -22,9 +22,12 @@
   returns one stub phrase, `DetectDominantLanguage` always reports `en`, and
   `DetectPiiEntities`/`ContainsPiiEntities` always report no PII found.
 - **Real input validation:** `Text` and `LanguageCode` (where applicable) are still
-  required and `LanguageCode` is validated against Comprehend's supported set
-  (`en`, `es`, `fr`, `de`, `it`, `pt`, `ar`, `hi`, `ja`, `ko`, `zh`, `zh-TW`) —
-  this is protocol compatibility, not content analysis.
+  required and `LanguageCode` is validated against Comprehend's supported set —
+  this is protocol compatibility, not content analysis. `DetectSentiment` and
+  `DetectKeyPhrases` accept the general set (`en`, `es`, `fr`, `de`, `it`, `pt`,
+  `ar`, `hi`, `ja`, `ko`, `zh`, `zh-TW`); `DetectPiiEntities` and
+  `ContainsPiiEntities` accept only `en`/`es`, matching AWS's narrower support
+  for PII detection.
 - **Out of scope:** the async job/model-training surface (`DocumentClassifier`,
   `EntityRecognizer`, `Flywheel`, `Dataset`, `Endpoint` operations), `DetectEntities`,
   and `DetectSyntax` are not implemented.

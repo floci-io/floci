@@ -21,9 +21,15 @@ import java.util.Set;
  */
 @ApplicationScoped
 public class ComprehendService {
-    /** Languages accepted by DetectSentiment/DetectKeyPhrases/DetectPiiEntities/ContainsPiiEntities. */
+    /** Languages accepted by DetectSentiment/DetectKeyPhrases. */
     private static final Set<String> SUPPORTED_LANGUAGE_CODES = Set.of(
             "en", "es", "fr", "de", "it", "pt", "ar", "hi", "ja", "ko", "zh", "zh-TW");
+    /**
+     * Languages accepted by DetectPiiEntities/ContainsPiiEntities — a narrower set than the
+     * general LanguageCode enum. AWS's own operation docs for DetectPiiEntitiesRequest.LanguageCode
+     * state: "Enter the language code for English (en) or Spanish (es)."
+     */
+    private static final Set<String> PII_SUPPORTED_LANGUAGE_CODES = Set.of("en", "es");
     private final ObjectMapper objectMapper;
     @Inject
     public ComprehendService(ObjectMapper objectMapper) {
@@ -35,7 +41,7 @@ public class ComprehendService {
      */
     public Response detectSentiment(String text, String languageCode) {
         requireText(text);
-        requireLanguageCode(languageCode);
+        requireLanguageCode(languageCode, SUPPORTED_LANGUAGE_CODES);
         ObjectNode root = objectMapper.createObjectNode();
         root.put("Sentiment", "NEUTRAL");
         ObjectNode score = root.putObject("SentimentScore");
@@ -51,7 +57,7 @@ public class ComprehendService {
      */
     public Response detectKeyPhrases(String text, String languageCode) {
         requireText(text);
-        requireLanguageCode(languageCode);
+        requireLanguageCode(languageCode, SUPPORTED_LANGUAGE_CODES);
         ObjectNode root = objectMapper.createObjectNode();
         ArrayNode keyPhrases = root.putArray("KeyPhrases");
         ObjectNode phrase = keyPhrases.addObject();
@@ -81,7 +87,7 @@ public class ComprehendService {
      */
     public Response detectPiiEntities(String text, String languageCode) {
         requireText(text);
-        requireLanguageCode(languageCode);
+        requireLanguageCode(languageCode, PII_SUPPORTED_LANGUAGE_CODES);
         ObjectNode root = objectMapper.createObjectNode();
         root.putArray("Entities");
         return Response.ok(root).build();
@@ -92,7 +98,7 @@ public class ComprehendService {
      */
     public Response containsPiiEntities(String text, String languageCode) {
         requireText(text);
-        requireLanguageCode(languageCode);
+        requireLanguageCode(languageCode, PII_SUPPORTED_LANGUAGE_CODES);
         ObjectNode root = objectMapper.createObjectNode();
         root.putArray("Labels");
         return Response.ok(root).build();
@@ -103,11 +109,11 @@ public class ComprehendService {
             throw new AwsException("InvalidRequestException", "Text is a required field.", 400);
         }
     }
-    private void requireLanguageCode(String languageCode) {
+    private void requireLanguageCode(String languageCode, Set<String> allowedLanguageCodes) {
         if (languageCode == null || languageCode.isEmpty()) {
             throw new AwsException("InvalidRequestException", "LanguageCode is a required field.", 400);
         }
-        if (!SUPPORTED_LANGUAGE_CODES.contains(languageCode)) {
+        if (!allowedLanguageCodes.contains(languageCode)) {
             throw new AwsException("UnsupportedLanguageException",
                     "Confidence score for language code \"" + languageCode
                             + "\" is not supported.", 400);

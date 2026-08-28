@@ -121,6 +121,34 @@ class ComprehendIntegrationTest {
             .body("Entities", hasSize(0));
     }
     @Test
+    void detectPiiEntities_rejectsLanguageOutsideEnEs() {
+        // DetectPiiEntities/ContainsPiiEntities support only en/es, unlike the general
+        // 12-language set accepted by DetectSentiment/DetectKeyPhrases.
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "Comprehend_20171127.DetectPiiEntities")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"Text\":\"My SSN is 123-45-6789\",\"LanguageCode\":\"fr\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("UnsupportedLanguageException"));
+    }
+    @Test
+    void containsPiiEntities_rejectsLanguageOutsideEnEs() {
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "Comprehend_20171127.ContainsPiiEntities")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"Text\":\"My SSN is 123-45-6789\",\"LanguageCode\":\"fr\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("UnsupportedLanguageException"));
+    }
+    @Test
     void containsPiiEntities_returnsEmptyLabels() {
         given()
             .contentType(CONTENT_TYPE)
