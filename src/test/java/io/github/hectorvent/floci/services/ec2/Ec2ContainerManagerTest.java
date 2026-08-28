@@ -31,12 +31,17 @@ import org.junit.jupiter.api.Test;
 
 import java.io.InputStream;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 
@@ -241,6 +246,57 @@ class Ec2ContainerManagerTest {
         String bomb = "A".repeat(50 * 1024 * 1024);
 
         assertEquals(List.of(), Ec2ContainerManager.userDataShellScripts(gzipBase64(bomb)));
+    }
+
+    @Test
+    void userDataShellScriptsBoundsAggregateConcurrentDecompression() throws Exception {
+        // Each launch decodes its UserData independently on Ec2ContainerManager's unbounded
+        // cached launch executor, so the per-payload 10 MB cap alone does not stop many
+        // concurrent launches from each decompressing near that limit at once (Greptile's
+        // follow-up on the gzip-bomb fix). Drive real concurrent decompressions through the
+        // public entry point and use the test hook to prove no more than
+        // MAX_CONCURRENT_USER_DATA_DECOMPRESSIONS (4) ever run at the same instant, while still
+        // exercising genuine concurrency rather than serialized calls.
+        int concurrentLaunches = 12;
+        AtomicInteger active = new AtomicInteger(0);
+        AtomicInteger peakActive = new AtomicInteger(0);
+        Ec2ContainerManager.userDataDecompressionTestHook = () -> {
+            int now = active.incrementAndGet();
+            peakActive.accumulateAndGet(now, Math::max);
+            try {
+                Thread.sleep(75);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+            } finally {
+                active.decrementAndGet();
+            }
+        };
+
+        List<List<String>> results = new CopyOnWriteArrayList<>();
+        ExecutorService pool = Executors.newFixedThreadPool(concurrentLaunches);
+        try {
+            // ~9 MB of a repeated character: near the 10 MB per-payload cap, well within it.
+            String nearCapPayload = "A".repeat(9 * 1024 * 1024);
+            String gzipped = gzipBase64(nearCapPayload);
+
+            List<Future<List<String>>> futures = new ArrayList<>();
+            for (int i = 0; i < concurrentLaunches; i++) {
+                futures.add(pool.submit(() -> Ec2ContainerManager.userDataShellScripts(gzipped)));
+            }
+            for (Future<List<String>> future : futures) {
+                results.add(future.get(30, TimeUnit.SECONDS));
+            }
+        } finally {
+            pool.shutdownNow();
+            Ec2ContainerManager.userDataDecompressionTestHook = null;
+        }
+
+        assertEquals(concurrentLaunches, results.size());
+        assertTrue(peakActive.get() <= 4,
+                "peak concurrent UserData decompressions was " + peakActive.get() + ", expected <= 4");
+        assertTrue(peakActive.get() >= 2,
+                "test did not exercise real concurrency; peak concurrent decompressions was only "
+                        + peakActive.get());
     }
 
     @Test

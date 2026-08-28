@@ -42,6 +42,7 @@ import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -70,6 +71,24 @@ public class Ec2ContainerManager {
      *  10 MB decompressed, and it bounds how much a caller-controlled gzip stream can expand
      *  to in the shared emulator JVM. */
     private static final int MAX_DECOMPRESSED_USER_DATA_BYTES = 10 * 1024 * 1024;
+    /** Caps concurrent UserData gzip decompressions across ALL instance launches, not just one.
+     *  Launches run independently on {@link #executor}, an unbounded cached thread pool, so the
+     *  per-payload cap above only bounds a single launch's allocation: without this, N concurrent
+     *  RunInstances/CreateLaunchConfiguration calls, each smuggling a near-cap gzip payload, could
+     *  together decompress N * 10 MB at once in the shared emulator JVM with no aggregate ceiling.
+     *  4 permits budgets ~40 MB of decompressed UserData in flight at a time - a few multiples of
+     *  the per-payload cap rather than 1, so an ordinary burst of legitimate concurrent launches
+     *  (e.g. an Auto Scaling group launching a handful of instances together) is not serialized
+     *  down to one decompression at a time, while a launch storm still cannot grow memory usage
+     *  without bound. */
+    private static final int MAX_CONCURRENT_USER_DATA_DECOMPRESSIONS = 4;
+    /** Gates entry to {@link #gunzip}; see {@link #MAX_CONCURRENT_USER_DATA_DECOMPRESSIONS}. */
+    private static final Semaphore USER_DATA_DECOMPRESSION_BUDGET =
+            new Semaphore(MAX_CONCURRENT_USER_DATA_DECOMPRESSIONS);
+    /** Test seam: when non-null, invoked by {@link #gunzip} right after it acquires a
+     *  decompression-budget permit and before it starts decompressing, so tests can observe and
+     *  serialize concurrent decompressions deterministically. Always null in production. */
+    static volatile Runnable userDataDecompressionTestHook;
 
     static int containerBridgeIpAttempts = 30;
     static long containerBridgeIpPollMillis = 500;
@@ -951,27 +970,48 @@ public class Ec2ContainerManager {
         if (payload.length < 2 || (payload[0] & 0xff) != 0x1f || (payload[1] & 0xff) != 0x8b) {
             return null;
         }
-        // Bounded the same way AwsJsonCborController.decodeBody is: a crafted payload can
-        // otherwise expand to gigabytes of image-heap while the launch worker holds it, since
-        // UserData is caller-controlled and this runs in the shared emulator JVM.
-        byte[] buffer = new byte[64 * 1024];
-        int totalRead = 0;
-        ByteArrayOutputStream decompressed = new ByteArrayOutputStream();
-        try (GZIPInputStream gzip = new GZIPInputStream(new ByteArrayInputStream(payload))) {
-            int read;
-            while ((read = gzip.read(buffer)) != -1) {
-                totalRead += read;
-                if (totalRead > MAX_DECOMPRESSED_USER_DATA_BYTES) {
-                    LOG.warnv("UserData decompressed past {0} bytes; discarding as oversized",
-                            MAX_DECOMPRESSED_USER_DATA_BYTES);
-                    return null;
-                }
-                decompressed.write(buffer, 0, read);
-            }
-            return decompressed.toByteArray();
-        } catch (IOException e) {
-            LOG.warnv("UserData starts with the gzip magic bytes but could not be decompressed: {0}", e.getMessage());
+        // Aggregate bound (see MAX_CONCURRENT_USER_DATA_DECOMPRESSIONS): this call runs on
+        // whichever launch worker submitted it to the unbounded #executor, independently of every
+        // other concurrent launch, so the per-payload cap below is not enough on its own - it only
+        // stops one caller from expanding past 10 MB, not many callers doing so at once. Blocking
+        // here (rather than failing the launch) mirrors ContainerLauncher's POPULATE_SEMAPHORE: a
+        // burst of legitimate concurrent launches queues briefly instead of being rejected.
+        try {
+            USER_DATA_DECOMPRESSION_BUDGET.acquire();
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            LOG.warnv("Interrupted while waiting for UserData decompression budget; discarding payload");
             return null;
+        }
+        try {
+            Runnable hook = userDataDecompressionTestHook;
+            if (hook != null) {
+                hook.run();
+            }
+            // Bounded the same way AwsJsonCborController.decodeBody is: a crafted payload can
+            // otherwise expand to gigabytes of image-heap while the launch worker holds it, since
+            // UserData is caller-controlled and this runs in the shared emulator JVM.
+            byte[] buffer = new byte[64 * 1024];
+            int totalRead = 0;
+            ByteArrayOutputStream decompressed = new ByteArrayOutputStream();
+            try (GZIPInputStream gzip = new GZIPInputStream(new ByteArrayInputStream(payload))) {
+                int read;
+                while ((read = gzip.read(buffer)) != -1) {
+                    totalRead += read;
+                    if (totalRead > MAX_DECOMPRESSED_USER_DATA_BYTES) {
+                        LOG.warnv("UserData decompressed past {0} bytes; discarding as oversized",
+                                MAX_DECOMPRESSED_USER_DATA_BYTES);
+                        return null;
+                    }
+                    decompressed.write(buffer, 0, read);
+                }
+                return decompressed.toByteArray();
+            } catch (IOException e) {
+                LOG.warnv("UserData starts with the gzip magic bytes but could not be decompressed: {0}", e.getMessage());
+                return null;
+            }
+        } finally {
+            USER_DATA_DECOMPRESSION_BUDGET.release();
         }
     }
 
