@@ -22,11 +22,14 @@ public class IamPolicy {
     private int attachmentCount = 0;
     /**
      * High-water mark for issued version numbers, so a deleted version's id is never reissued.
-     * Defensive at the call site too (never trusted below the live keys' own max + 1): a policy
-     * persisted before this field existed rehydrates it at the initializer value below, which
-     * could otherwise be lower than versions already on disk.
+     * Left null (rather than defaulted) so a policy persisted before this field existed is
+     * distinguishable from a genuinely fresh one: Jackson leaves an absent JSON field at null,
+     * while every policy constructed since this field shipped explicitly sets it below. A null
+     * value is treated at the call site as "true history unknown" and given a defensive margin
+     * beyond the live keys' own max, since the live keys alone cannot reveal a version deleted
+     * before this field ever existed on disk.
      */
-    private int nextVersionNumber = 2;
+    private Integer nextVersionNumber;
     private Instant createDate;
     private Instant updateDate;
     private Map<String, String> tags = new ConcurrentHashMap<>();
@@ -46,6 +49,7 @@ public class IamPolicy {
         this.updateDate = Instant.now();
         PolicyVersion v1 = new PolicyVersion("v1", document, true);
         this.versions.put("v1", v1);
+        this.nextVersionNumber = 2;
     }
 
     public String getDefaultDocument() {
@@ -74,8 +78,8 @@ public class IamPolicy {
     public int getAttachmentCount() { return attachmentCount; }
     public void setAttachmentCount(int attachmentCount) { this.attachmentCount = attachmentCount; }
 
-    public int getNextVersionNumber() { return nextVersionNumber; }
-    public void setNextVersionNumber(int nextVersionNumber) { this.nextVersionNumber = nextVersionNumber; }
+    public Integer getNextVersionNumber() { return nextVersionNumber; }
+    public void setNextVersionNumber(Integer nextVersionNumber) { this.nextVersionNumber = nextVersionNumber; }
 
     public Instant getCreateDate() { return createDate; }
     public void setCreateDate(Instant createDate) { this.createDate = createDate; }

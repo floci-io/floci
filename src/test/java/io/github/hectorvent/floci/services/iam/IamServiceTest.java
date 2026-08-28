@@ -416,6 +416,27 @@ class IamServiceTest {
     }
 
     @Test
+    void createPolicyVersionOnLegacyRehydratedPolicyDoesNotReuseADeletedTopVersion() {
+        // Simulates a policy persisted by a Floci version that predates nextVersionNumber: the
+        // field is absent from the old JSON, so it rehydrates at the class's fresh-policy default
+        // (2) regardless of how many versions actually existed historically. Here we seed the
+        // versions map directly (bypassing createPolicyVersion, which is the only path that would
+        // have kept nextVersionNumber honest) to reproduce exactly that rehydrated shape: v1-v4
+        // live, as if v5 had been created and deleted before this field ever existed on disk.
+        IamPolicy policy = iamService.createPolicy("LegacyP", "/", null, "{\"v\":1}", null);
+        String arn = policy.getArn();
+        for (int i = 2; i <= 4; i++) {
+            policy.getVersions().put("v" + i,
+                    new io.github.hectorvent.floci.services.iam.model.PolicyVersion(
+                            "v" + i, "{\"v\":" + i + "}", false));
+        }
+        policy.setNextVersionNumber(null); // Jackson leaves this null when absent from old JSON
+        PolicyVersion next = iamService.createPolicyVersion(arn, "{\"v\":next}", false);
+        assertNotEquals("v5", next.getVersionId(),
+                "a legacy-rehydrated policy must not reissue the id of a version deleted before upgrade");
+    }
+
+    @Test
     void updateGroupMalformedNewGroupNameIsRejected() {
         iamService.createGroup("orig-group", "/");
         assertThrows(AwsException.class,

@@ -973,12 +973,22 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             // AWS version ids are monotonic and never reissued after a DeletePolicyVersion.
             // The live keys' own max is only a floor, not the source of truth: deleting the
             // highest-numbered surviving version would otherwise let a "derive from what's left"
-            // computation reissue its id. The stored high-water mark is the real counter; the
-            // live-key floor only guards a policy rehydrated from before this field existed.
+            // computation reissue its id. The stored high-water mark is the real counter.
             int highestSurviving = versions.keySet().stream()
                     .mapToInt(id -> Integer.parseInt(id.substring(1)))
                     .max().orElse(0);
-            int nextVersionNum = Math.max(policy.getNextVersionNumber(), highestSurviving + 1);
+            int nextVersionNum;
+            if (policy.getNextVersionNumber() == null) {
+                // A policy persisted before this field existed: the live-key floor alone can't
+                // reveal a version deleted before this field was ever recorded (e.g. v1-v4 live
+                // after a pre-migration DeletePolicyVersion("v5")). Since a policy can never hold
+                // more than 5 concurrent versions, no more than 5 stacked deletions could have
+                // happened at the top between two persists; jump the counter past that worst
+                // case rather than trust the live keys' max + 1 for an unknown history.
+                nextVersionNum = highestSurviving + 1 + 5;
+            } else {
+                nextVersionNum = Math.max(policy.getNextVersionNumber(), highestSurviving + 1);
+            }
             String versionId = "v" + nextVersionNum;
             version = new PolicyVersion(versionId, document, setAsDefault);
             if (setAsDefault) {
