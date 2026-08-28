@@ -5,8 +5,10 @@ import io.github.hectorvent.floci.testutil.IamServiceTestHelper;
 import io.github.hectorvent.floci.testutil.SigV4TokenTestHelper;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Method;
 import java.time.Instant;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -273,5 +275,41 @@ class SigV4ValidatorTest {
 
         assertFalse(validator.validate(token, "cache-cluster-01", "default"),
                 "Omitting User from the token must not bypass the expectedUsername identity check");
+    }
+
+    @Test
+    void validateAcceptsWellKnownLocalDevCredentialEvenWhenNotRegisteredInIam() throws Exception {
+        // AwsBasicCredentials.create("test", "test") is the default local-dev credential used
+        // pervasively by SDK clients against this emulator (RDS, S3, etc. compat tests). It must
+        // keep working even though it is never registered in IamService -- this is the same
+        // "test"/"test" convenience already honored by S3Service/PreSignedUrlFilter, carved out
+        // explicitly rather than via the removed generic unregistered-key fallback.
+        IamService iamService = IamServiceTestHelper.iamServiceWithAccessKey("AKIDCACHE", "secret-cache");
+
+        SigV4Validator validator = new SigV4Validator(iamService);
+        String token = SigV4TokenTestHelper.createElastiCacheToken(
+                "cache-cluster-01",
+                "default",
+                "test",
+                "test",
+                Instant.now().minusSeconds(60),
+                900
+        );
+
+        assertTrue(validator.validate(token, "cache-cluster-01", "default"),
+                "The well-known \"test\"/\"test\" local-dev credential pair must still validate");
+    }
+
+    @Test
+    void sanitizeForLogStripsControlCharacters() throws Exception {
+        // A forged accessKeyId containing CR/LF must not be able to inject fake log lines into
+        // the debug logs this validator writes.
+        Method sanitizeForLog = SigV4Validator.class.getDeclaredMethod("sanitizeForLog", String.class);
+        sanitizeForLog.setAccessible(true);
+
+        String malicious = "AKID\r\nINJECTEDLINE\r\n";
+        String sanitized = (String) sanitizeForLog.invoke(null, malicious);
+
+        assertEquals("AKIDINJECTEDLINE", sanitized);
     }
 }

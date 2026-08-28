@@ -5,8 +5,10 @@ import io.github.hectorvent.floci.testutil.IamServiceTestHelper;
 import io.github.hectorvent.floci.testutil.SigV4TokenTestHelper;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Method;
 import java.time.Instant;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -331,5 +333,43 @@ class RdsSigV4ValidatorTest {
         assertFalse(validator.validate(token, "admin"),
                 "A token self-signed with secret == accessKeyId for an unregistered access key "
                         + "must never validate; unregistered keys must fail closed");
+    }
+
+    @Test
+    void validateAcceptsWellKnownLocalDevCredentialEvenWhenNotRegisteredInIam() throws Exception {
+        // AwsBasicCredentials.create("test", "test") is the default local-dev credential used
+        // pervasively by SDK clients against this emulator (RDS compat tests generate real IAM
+        // tokens with it). It must keep working even though it is never registered in
+        // IamService -- the same "test"/"test" convenience already honored by
+        // S3Service/PreSignedUrlFilter, carved out explicitly rather than via the removed
+        // generic unregistered-key fallback.
+        IamService iamService = IamServiceTestHelper.iamServiceWithAccessKey("AKIDRDS", "secret-rds");
+
+        RdsSigV4Validator validator = new RdsSigV4Validator(iamService);
+        String token = SigV4TokenTestHelper.createRdsToken(
+                "db.example.local",
+                5432,
+                "admin",
+                "test",
+                "test",
+                Instant.now().minusSeconds(60),
+                900
+        );
+
+        assertTrue(validator.validate(token, "admin"),
+                "The well-known \"test\"/\"test\" local-dev credential pair must still validate");
+    }
+
+    @Test
+    void sanitizeForLogStripsControlCharacters() throws Exception {
+        // A forged accessKeyId containing CR/LF must not be able to inject fake log lines into
+        // the debug logs this validator writes.
+        Method sanitizeForLog = RdsSigV4Validator.class.getDeclaredMethod("sanitizeForLog", String.class);
+        sanitizeForLog.setAccessible(true);
+
+        String malicious = "AKID\r\nINJECTEDLINE\r\n";
+        String sanitized = (String) sanitizeForLog.invoke(null, malicious);
+
+        assertEquals("AKIDINJECTEDLINE", sanitized);
     }
 }
