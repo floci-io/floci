@@ -238,6 +238,7 @@ floci:
       enabled: true
       enforce-auth: false
       default-presign-expiry-seconds: 3600
+      global-bucket-namespace: false
     dynamodb:
       enabled: true
     sns:
