@@ -1201,60 +1201,67 @@ public class LambdaService implements ResourceProvider {
     public LambdaFunction publishVersion(String region, String functionName, String description) {
         LambdaFunction fn = getFunction(region, functionName);
         functionName = fn.getFunctionName();
-        int version = nextVersionNumber(versionCounterKey(region, fn),
-                legacyVersionCounterKey(region, functionName));
-        LambdaFunction snapshot = new LambdaFunction();
-        snapshot.setAccountId(fn.getAccountId());
-        snapshot.setFunctionName(fn.getFunctionName());
-        snapshot.setVersion(String.valueOf(version));
-        snapshot.setFunctionArn(fn.getFunctionArn().replace(":$LATEST", "") + ":" + version);
-        snapshot.setRuntime(fn.getRuntime());
-        snapshot.setRole(fn.getRole());
-        snapshot.setHandler(fn.getHandler());
-        snapshot.setDescription(description != null ? description : fn.getDescription());
-        snapshot.setTimeout(fn.getTimeout());
-        snapshot.setMemorySize(fn.getMemorySize());
-        snapshot.setPackageType(fn.getPackageType());
-        snapshot.setState(fn.getState());
-        snapshot.setCodeSizeBytes(fn.getCodeSizeBytes());
-        snapshot.setEnvironment(fn.getEnvironment());
-        snapshot.setVpcConfig(fn.getVpcConfig() == null
-                ? null
-                : new java.util.HashMap<>(fn.getVpcConfig()));
-        snapshot.setVpcId(fn.getVpcId());
-        snapshot.setSnapStartApplyOn(fn.getSnapStartApplyOn());
-        snapshot.setLogFormat(fn.getLogFormat());
-        snapshot.setApplicationLogLevel(fn.getApplicationLogLevel());
-        snapshot.setSystemLogLevel(fn.getSystemLogLevel());
-        snapshot.setLogGroup(fn.getLogGroup());
-        snapshot.setFileSystemConfigs(new ArrayList<>(fn.getFileSystemConfigs()));
-        snapshot.setLastModified(System.currentTimeMillis());
-        snapshot.setRevisionId(UUID.randomUUID().toString());
+        // Shares the per-function lock deleteFunction and extractZipCodeBytes take around their
+        // own codeLocalPath-affecting work: without it, a version could be published in the
+        // narrow window between reclaimLegacyCodeDirectoryIfUnused's check and its actual
+        // delete, persisting a snapshot.codeLocalPath (below) that names a directory about to
+        // be removed as unreferenced.
+        synchronized (lockForConcurrencyOp(fn.getFunctionArn())) {
+            int version = nextVersionNumber(versionCounterKey(region, fn),
+                    legacyVersionCounterKey(region, functionName));
+            LambdaFunction snapshot = new LambdaFunction();
+            snapshot.setAccountId(fn.getAccountId());
+            snapshot.setFunctionName(fn.getFunctionName());
+            snapshot.setVersion(String.valueOf(version));
+            snapshot.setFunctionArn(fn.getFunctionArn().replace(":$LATEST", "") + ":" + version);
+            snapshot.setRuntime(fn.getRuntime());
+            snapshot.setRole(fn.getRole());
+            snapshot.setHandler(fn.getHandler());
+            snapshot.setDescription(description != null ? description : fn.getDescription());
+            snapshot.setTimeout(fn.getTimeout());
+            snapshot.setMemorySize(fn.getMemorySize());
+            snapshot.setPackageType(fn.getPackageType());
+            snapshot.setState(fn.getState());
+            snapshot.setCodeSizeBytes(fn.getCodeSizeBytes());
+            snapshot.setEnvironment(fn.getEnvironment());
+            snapshot.setVpcConfig(fn.getVpcConfig() == null
+                    ? null
+                    : new java.util.HashMap<>(fn.getVpcConfig()));
+            snapshot.setVpcId(fn.getVpcId());
+            snapshot.setSnapStartApplyOn(fn.getSnapStartApplyOn());
+            snapshot.setLogFormat(fn.getLogFormat());
+            snapshot.setApplicationLogLevel(fn.getApplicationLogLevel());
+            snapshot.setSystemLogLevel(fn.getSystemLogLevel());
+            snapshot.setLogGroup(fn.getLogGroup());
+            snapshot.setFileSystemConfigs(new ArrayList<>(fn.getFileSystemConfigs()));
+            snapshot.setLastModified(System.currentTimeMillis());
+            snapshot.setRevisionId(UUID.randomUUID().toString());
 
-        // Everything that determines what actually runs. Without these the snapshot describes a
-        // function with no code: a version-qualified invoke resolves to it, launches a container
-        // with nothing in it, and hangs to the function timeout instead of failing (#1987). A
-        // published version is an immutable snapshot of code plus configuration, so it carries the
-        // code location for every package type, not only Zip.
-        snapshot.setCodeLocalPath(fn.getCodeLocalPath());
-        snapshot.setCodeSha256(fn.getCodeSha256());
-        snapshot.setS3Bucket(fn.getS3Bucket());
-        snapshot.setS3Key(fn.getS3Key());
-        snapshot.setHotReloadHostPath(fn.getHotReloadHostPath());
-        snapshot.setImageUri(fn.getImageUri());
-        snapshot.setImageConfigCommand(fn.getImageConfigCommand());
-        snapshot.setImageConfigEntryPoint(fn.getImageConfigEntryPoint());
-        snapshot.setImageConfigWorkingDirectory(fn.getImageConfigWorkingDirectory());
-        snapshot.setLayers(fn.getLayers());
-        snapshot.setArchitectures(fn.getArchitectures());
-        snapshot.setEphemeralStorageSize(fn.getEphemeralStorageSize());
-        snapshot.setTracingMode(fn.getTracingMode());
-        snapshot.setDeadLetterTargetArn(fn.getDeadLetterTargetArn());
-        snapshot.setKmsKeyArn(fn.getKmsKeyArn());
+            // Everything that determines what actually runs. Without these the snapshot describes a
+            // function with no code: a version-qualified invoke resolves to it, launches a container
+            // with nothing in it, and hangs to the function timeout instead of failing (#1987). A
+            // published version is an immutable snapshot of code plus configuration, so it carries the
+            // code location for every package type, not only Zip.
+            snapshot.setCodeLocalPath(fn.getCodeLocalPath());
+            snapshot.setCodeSha256(fn.getCodeSha256());
+            snapshot.setS3Bucket(fn.getS3Bucket());
+            snapshot.setS3Key(fn.getS3Key());
+            snapshot.setHotReloadHostPath(fn.getHotReloadHostPath());
+            snapshot.setImageUri(fn.getImageUri());
+            snapshot.setImageConfigCommand(fn.getImageConfigCommand());
+            snapshot.setImageConfigEntryPoint(fn.getImageConfigEntryPoint());
+            snapshot.setImageConfigWorkingDirectory(fn.getImageConfigWorkingDirectory());
+            snapshot.setLayers(fn.getLayers());
+            snapshot.setArchitectures(fn.getArchitectures());
+            snapshot.setEphemeralStorageSize(fn.getEphemeralStorageSize());
+            snapshot.setTracingMode(fn.getTracingMode());
+            snapshot.setDeadLetterTargetArn(fn.getDeadLetterTargetArn());
+            snapshot.setKmsKeyArn(fn.getKmsKeyArn());
 
-        functionStore.save(region, snapshot);
-        LOG.infov("Published version {0} for function {1}", version, functionName);
-        return snapshot;
+            functionStore.save(region, snapshot);
+            LOG.infov("Published version {0} for function {1}", version, functionName);
+            return snapshot;
+        }
     }
 
     private static List<LambdaFileSystemConfig> parseFileSystemConfigs(Object value) {
@@ -1777,7 +1784,8 @@ public class LambdaService implements ResourceProvider {
         }
     }
 
-    private Object lockForConcurrencyOp(String functionArn) {
+    /** Package-private (not private) so tests can hold this lock to prove a critical section waits for it. */
+    Object lockForConcurrencyOp(String functionArn) {
         return concurrencyOpLocks.computeIfAbsent(functionArn, k -> new Object());
     }
 
@@ -1890,7 +1898,12 @@ public class LambdaService implements ResourceProvider {
             storeDeploymentPackage(fn, zipBytes, region);
             // Reclaim a directory left behind by a function created before account-scoping;
             // codePath above is already the new location, so this is a no-op once migrated.
-            reclaimLegacyCodeDirectoryIfUnused(fn.getFunctionName());
+            // Locked against publishVersion (see its own comment) so a version cannot be
+            // persisted, referencing this legacy path, in the window between the check below
+            // and the actual delete.
+            synchronized (lockForConcurrencyOp(fn.getFunctionArn())) {
+                reclaimLegacyCodeDirectoryIfUnused(fn.getFunctionName());
+            }
         } catch (AwsException e) {
             throw e;
         } catch (IOException e) {

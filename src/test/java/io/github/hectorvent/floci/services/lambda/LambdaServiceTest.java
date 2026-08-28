@@ -947,4 +947,49 @@ class LambdaServiceTest {
 
         assertEquals(expectedStatementIds, actualStatementIds);
     }
+
+    @Test
+    void publishVersionWaitsForAConcurrentHolderOfTheFunctionsConcurrencyLock() throws Exception {
+        // publishVersion reads codeLocalPath and persists a snapshot of it with no
+        // synchronization against extractZipCodeBytes's own reclaim-the-legacy-directory
+        // decision (which runs under this same per-function lock, e.g. from deleteFunction).
+        // Without publishVersion also taking that lock, a version could be published in the
+        // narrow window between that decision and the actual delete, persisting a snapshot
+        // that references a directory which is about to be removed as "unused". Proving
+        // publishVersion blocks on this lock closes that window regardless of the exact
+        // interleaving, rather than relying on timing to catch it in the act.
+        LambdaFunction fn = service.createFunction(REGION, baseRequest("lock-race-fn"));
+        Object lock = service.lockForConcurrencyOp(fn.getFunctionArn());
+
+        ExecutorService pool = Executors.newFixedThreadPool(1);
+        CountDownLatch acquired = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        Thread holder = new Thread(() -> {
+            synchronized (lock) {
+                acquired.countDown();
+                try {
+                    release.await();
+                } catch (InterruptedException ignored) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+        });
+        try {
+            holder.start();
+            assertTrue(acquired.await(2, java.util.concurrent.TimeUnit.SECONDS));
+
+            Future<LambdaFunction> publishFuture = pool.submit(
+                    () -> service.publishVersion(REGION, "lock-race-fn", null));
+            assertThrows(java.util.concurrent.TimeoutException.class,
+                    () -> publishFuture.get(200, java.util.concurrent.TimeUnit.MILLISECONDS),
+                    "publishVersion must block while another operation holds this function's lock");
+
+            release.countDown();
+            holder.join();
+            assertNotNull(publishFuture.get(2, java.util.concurrent.TimeUnit.SECONDS));
+        } finally {
+            release.countDown();
+            pool.shutdownNow();
+        }
+    }
 }
