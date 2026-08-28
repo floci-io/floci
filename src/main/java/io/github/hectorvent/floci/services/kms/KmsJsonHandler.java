@@ -221,8 +221,14 @@ public class KmsJsonHandler {
         String retiringPrincipal = request.path("RetiringPrincipal").isMissingNode()
                 ? null : request.path("RetiringPrincipal").asText(null);
         String name = request.path("Name").isMissingNode() ? null : request.path("Name").asText(null);
-        Map<String, Object> constraints = request.path("Constraints").isObject()
-                ? objectMapper.convertValue(request.path("Constraints"), Map.class)
+        JsonNode constraintsNode = request.path("Constraints");
+        if (!constraintsNode.isMissingNode() && !constraintsNode.isNull() && !constraintsNode.isObject()) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value at 'constraints' failed to satisfy constraint: "
+                            + "Member must be a structure", 400);
+        }
+        Map<String, Object> constraints = constraintsNode.isObject()
+                ? objectMapper.convertValue(constraintsNode, Map.class)
                 : null;
 
         KmsGrant grant = service.createGrant(

@@ -789,6 +789,36 @@ class KmsIntegrationTest {
     }
 
     @Test
+    void createGrantWithNonObjectConstraintsReturnsValidationException() {
+        // The handler previously converted any non-object Constraints (e.g. a raw string or
+        // array) to null before it reached KmsService, so a malformed request was silently
+        // treated as "no constraints" instead of rejected.
+        String keyId = given()
+                .header("X-Amz-Target", "TrentService.CreateKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"Description\":\"constraints-type-check\"}")
+                .when().post("/")
+                .then().statusCode(200)
+                .extract().path("KeyMetadata.KeyId");
+
+        given()
+                .header("X-Amz-Target", "TrentService.CreateGrant")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("""
+                        {
+                            "KeyId": "%s",
+                            "GranteePrincipal": "arn:aws:iam::000000000000:user/grantee",
+                            "Operations": ["Encrypt"],
+                            "Constraints": "not-an-object"
+                        }
+                        """.formatted(keyId))
+                .when().post("/")
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"));
+    }
+
+    @Test
     void revokeGrantReturnsNotFoundForUnknownGrant() {
         String keyId = given()
                 .header("X-Amz-Target", "TrentService.CreateKey")
