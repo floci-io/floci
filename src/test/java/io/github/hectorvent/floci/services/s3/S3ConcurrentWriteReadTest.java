@@ -11,6 +11,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
 /**
@@ -76,7 +77,10 @@ class S3ConcurrentWriteReadTest {
             });
         }
         for (Thread t : threads) t.start();
-        for (Thread t : threads) t.join(30_000);
+        for (Thread t : threads) {
+            t.join(30_000);
+            assertFalse(t.isAlive(), "thread did not finish within the join timeout");
+        }
 
         assertNull(firstTear.get(), firstTear.get());
         // Guard against a vacuous pass: the readers must actually have run.
