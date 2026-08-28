@@ -110,6 +110,35 @@ class LambdaAccountScopedCodeTest {
     }
 
     @Test
+    void updateFunctionCodeDoesNotDeleteALegacyDirectoryStillReferencedByAPublishedVersion(
+            @TempDir Path baseDir) throws Exception {
+        // publishVersion snapshots codeLocalPath verbatim (it must, or a version-qualified
+        // invoke launches a container with no code - see #1987). If $LATEST was still on the
+        // legacy path at publish time, that version's snapshot is now the ONLY thing keeping
+        // the legacy directory alive once $LATEST itself migrates. The unused-check only scanned
+        // $LATEST records, so it missed this and reclaimed the directory out from under the
+        // published version's own future invokes.
+        CodeStore codeStore = new CodeStore(baseDir);
+        LambdaService svc = serviceFor(ACCOUNT_A, codeStore);
+        svc.createFunction(REGION, zipRequest("legacy-version-fn", "v1"));
+
+        Path legacyPath = codeStore.getLegacyCodePath("legacy-version-fn");
+        Files.createDirectories(legacyPath);
+        Files.writeString(legacyPath.resolve("index.js"), "v1");
+        LambdaFunction latest = svc.getFunction(REGION, "legacy-version-fn");
+        latest.setCodeLocalPath(legacyPath.toAbsolutePath().normalize().toString());
+
+        LambdaFunction version = svc.publishVersion(REGION, "legacy-version-fn", null);
+        assertEquals(legacyPath.toAbsolutePath().normalize().toString(), version.getCodeLocalPath(),
+                "the published version must have snapshotted the legacy path");
+
+        svc.updateFunctionCode(REGION, "legacy-version-fn", Map.of("ZipFile", zipBase64("index.js", "v2")));
+
+        assertTrue(Files.exists(legacyPath),
+                "a legacy directory a published version still references must survive this update");
+    }
+
+    @Test
     void updateFunctionCodeDoesNotDeleteALegacyDirectoryStillLiveForAnotherAccount(@TempDir Path baseDir) throws Exception {
         // Before account-scoping, two accounts' same-named functions shared the exact same
         // on-disk directory. If account B's function was never updated since the migration, its

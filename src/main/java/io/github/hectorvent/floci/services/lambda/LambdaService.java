@@ -712,7 +712,7 @@ public class LambdaService implements ResourceProvider {
             }
             codeStore.delete(ownerAccount(fn), functionName);
             functionStore.delete(region, functionName);
-            reclaimLegacyCodeDirectoryIfUnused(region, functionName);
+            reclaimLegacyCodeDirectoryIfUnused(functionName);
             versionCounters.remove(versionCounterKey(region, fn));
             versionCounters.remove(legacyVersionCounterKey(region, functionName));
             if (aliasStore != null) {
@@ -735,13 +735,18 @@ public class LambdaService implements ResourceProvider {
 
     /**
      * The pre-account-scoped code layout gave every account's same-named function the exact
-     * same on-disk directory, so it is only safe to reclaim once no account's {@code $LATEST}
-     * still has {@code codeLocalPath} pointing at it — otherwise a delete or code update in one
-     * account destroys a directory another account's function still serves invocations from.
+     * same on-disk directory (CodeStore never scoped it by region either), so it is only safe
+     * to reclaim once nothing at all still has {@code codeLocalPath} pointing at it. That
+     * includes published versions, not just {@code $LATEST}: publishVersion snapshots
+     * codeLocalPath verbatim, so a version published while $LATEST was still on the legacy path
+     * keeps that directory alive on its own even after $LATEST itself migrates. Checking only
+     * $LATEST (via listAllAccounts) missed this and let a later delete or code update reclaim
+     * the directory out from under that version's own future invokes. listAll() has no region
+     * or $LATEST filter, matching the fact that the legacy path itself carries neither.
      */
-    private void reclaimLegacyCodeDirectoryIfUnused(String region, String functionName) {
+    private void reclaimLegacyCodeDirectoryIfUnused(String functionName) {
         String legacyPath = codeStore.getLegacyCodePath(functionName).toAbsolutePath().normalize().toString();
-        boolean stillLive = functionStore.listAllAccounts(region).stream()
+        boolean stillLive = functionStore.listAll().stream()
                 .anyMatch(other -> functionName.equals(other.getFunctionName())
                         && legacyPath.equals(other.getCodeLocalPath()));
         if (!stillLive) {
@@ -1885,7 +1890,7 @@ public class LambdaService implements ResourceProvider {
             storeDeploymentPackage(fn, zipBytes, region);
             // Reclaim a directory left behind by a function created before account-scoping;
             // codePath above is already the new location, so this is a no-op once migrated.
-            reclaimLegacyCodeDirectoryIfUnused(region, fn.getFunctionName());
+            reclaimLegacyCodeDirectoryIfUnused(fn.getFunctionName());
         } catch (AwsException e) {
             throw e;
         } catch (IOException e) {
