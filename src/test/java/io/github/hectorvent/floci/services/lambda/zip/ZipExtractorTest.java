@@ -267,25 +267,62 @@ class ZipExtractorTest {
     }
 
     @Test
-    void leavesNoStagedArchiveInTheCodeStore(@TempDir Path codeStore) throws IOException {
-        // ZipFile needs a seekable file, so the archive is staged on disk next to the target
-        // rather than in the shared java.io.tmpdir. That puts a stray file one level above the
-        // function's code directory, so pin that none survives: a leaked staging archive would
-        // sit in the code store indefinitely, and one leaked *inside* a function directory
-        // would be tar-copied into that function's container at launch.
-        Path target = codeStore.resolve("fn");
+    void replacesThePreviousExtractionInsteadOfOverlayingIt(@TempDir Path target) throws IOException {
+        // Issue #2647: a deployment package is the complete contents of the function, so a file
+        // present in one deploy and absent from the next has to disappear. Extracting in place
+        // only ever adds and overwrites, so removed files survived and stayed loadable — a
+        // handler pointing at a deleted module kept resolving and running stale code.
+        byte[] v1 = zipWith("index.js", "v1");
+        extractor.extractTo(v1, target);
+        Files.writeString(target.resolve("removed.js"), "STALE");
+        Files.createDirectories(target.resolve("legacy"));
+        Files.writeString(target.resolve("legacy").resolve("old.js"), "STALE");
+
+        byte[] v2 = zipWith("index.js", "v2");
+        extractor.extractTo(v2, target);
+
+        assertEquals("v2", Files.readString(target.resolve("index.js")), "new package must land");
+        assertFalse(Files.exists(target.resolve("removed.js")),
+                "a file absent from the new package must not survive the deploy");
+        assertFalse(Files.exists(target.resolve("legacy")),
+                "a directory absent from the new package must not survive the deploy");
+    }
+
+    @Test
+    void leavesThePreviousExtractionIntactWhenExtractionFailsPartWay(@TempDir Path target) throws IOException {
+        // Extraction is all-or-nothing: a failure must not leave the function holding a mixture
+        // of the old package and part of the new one. The archive below opens cleanly and only
+        // fails once its entry has been streamed out, which is exactly when writing directly
+        // into the target would already have clobbered the previous deploy.
         extractor.extractTo(zipWith("index.js", "v1"), target);
-        assertNoStagedFiles(codeStore);
 
         byte[] corrupt = corruptedPayloadZip("index.js", "v2-but-corrupted-in-transit");
         assertThrows(IOException.class, () -> extractor.extractTo(corrupt, target));
-        assertNoStagedFiles(codeStore);
+
+        assertEquals("v1", Files.readString(target.resolve("index.js")),
+                "a failed deploy must leave the previous package in place");
     }
 
-    private static void assertNoStagedFiles(Path codeStore) throws IOException {
+    @Test
+    void leavesNoStagingArtefactsInTheCodeStore(@TempDir Path codeStore) throws IOException {
+        // Extraction stages two things beside the target rather than in java.io.tmpdir: the
+        // archive itself (so ZipFile has a seekable source) and the directory it unpacks into
+        // before the swap. Both sit one level above the function's code directory, so pin that
+        // neither survives — an orphan would accumulate one per deploy, and anything leaked
+        // *inside* a function directory would be tar-copied into its container at launch.
+        Path target = codeStore.resolve("fn");
+        extractor.extractTo(zipWith("index.js", "v1"), target);
+        assertNoStagingArtefacts(codeStore);
+
+        byte[] corrupt = corruptedPayloadZip("index.js", "v2-but-corrupted-in-transit");
+        assertThrows(IOException.class, () -> extractor.extractTo(corrupt, target));
+        assertNoStagingArtefacts(codeStore);
+    }
+
+    private static void assertNoStagingArtefacts(Path codeStore) throws IOException {
         try (var entries = Files.list(codeStore)) {
             assertEquals(List.of("fn"), entries.map(p -> p.getFileName().toString()).sorted().toList(),
-                    "no staged archive may survive extraction, successful or failed");
+                    "no staged archive or staging directory may survive extraction, successful or failed");
         }
     }
 

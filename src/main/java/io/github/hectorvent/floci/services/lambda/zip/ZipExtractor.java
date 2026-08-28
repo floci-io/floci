@@ -6,15 +6,19 @@ import org.jboss.logging.Logger;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.util.Comparator;
+import java.util.UUID;
 import java.util.zip.CRC32;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipException;
 import java.util.zip.ZipFile;
 
 /**
- * Extracts ZIP bytes to a target directory.
+ * Extracts ZIP bytes to a target directory, replacing whatever was there before.
  * Guards against path traversal attacks by validating entry names.
  */
 @ApplicationScoped
@@ -27,7 +31,17 @@ public class ZipExtractor {
     public void extractTo(byte[] zipBytes, Path targetDir) throws IOException {
         // Resolve to absolute path so that normalize() on entry paths stays comparable
         Path absTarget = targetDir.toAbsolutePath().normalize();
-        Files.createDirectories(absTarget);
+        Files.createDirectories(absTarget.getParent());
+
+        // Extract into a staging directory and swap it in, rather than writing over the target
+        // in place. A deployment package is the complete contents of the function, so a file
+        // dropped between two deploys has to disappear — writing in place only ever adds and
+        // overwrites, leaving removed files behind to stay loadable (issue #2647). Staging also
+        // makes extraction all-or-nothing: a failure part-way through leaves the previous
+        // deployment intact instead of a half-replaced mixture of the two.
+        Path staging = absTarget.resolveSibling(
+                absTarget.getFileName() + ".floci-staging-" + UUID.randomUUID());
+        Files.createDirectories(staging);
 
         // Read the archive through its central directory (ZipFile) rather than sequentially
         // over the local file headers (ZipInputStream). A streaming packager cannot seek back
@@ -71,8 +85,8 @@ public class ZipExtractor {
                         continue;
                     }
 
-                    Path targetPath = absTarget.resolve(entryName).normalize();
-                    if (!targetPath.startsWith(absTarget)) {
+                    Path targetPath = staging.resolve(entryName).normalize();
+                    if (!targetPath.startsWith(staging)) {
                         LOG.warnv("Skipping out-of-bounds ZIP entry: {0}", entryName);
                         continue;
                     }
@@ -85,11 +99,37 @@ public class ZipExtractor {
                     }
                 }
             }
+            // Extraction succeeded in full: swap the new tree in for the old one.
+            deleteRecursively(absTarget);
+            moveIntoPlace(staging, absTarget);
         } finally {
             Files.deleteIfExists(staged);
+            // A no-op once the move succeeded; on failure this discards the partial staging
+            // tree and leaves the previous extraction untouched.
+            deleteRecursively(staging);
         }
 
         LOG.debugv("Extracted ZIP to: {0}", absTarget);
+    }
+
+    private static void moveIntoPlace(Path staging, Path absTarget) throws IOException {
+        try {
+            Files.move(staging, absTarget, StandardCopyOption.ATOMIC_MOVE);
+        } catch (AtomicMoveNotSupportedException e) {
+            // Some filesystems (and bind mounts inside containers) cannot rename atomically.
+            Files.move(staging, absTarget);
+        }
+    }
+
+    private static void deleteRecursively(Path root) throws IOException {
+        if (!Files.exists(root)) {
+            return;
+        }
+        try (var paths = Files.walk(root)) {
+            for (Path p : paths.sorted(Comparator.reverseOrder()).toList()) {
+                Files.deleteIfExists(p);
+            }
+        }
     }
 
     /**
