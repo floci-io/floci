@@ -338,6 +338,46 @@ class StepFunctionsAwsSdkTaskIntegrationTest {
         assertEquals("Scheduler.ResourceNotFoundException", describe.jsonPath().getString("error"));
     }
 
+    @Test
+    @Order(13)
+    void createScheduleWithIncompleteEventBridgeParametersIsCatchableAsAValidationException() throws Exception {
+        var smArn = createStateMachine("aws-sdk-create-schedule-invalid-target", """
+                {
+                  "QueryLanguage": "JSONata",
+                  "StartAt": "Schedule",
+                  "States": {
+                    "Schedule": {
+                      "Type": "Task",
+                      "Resource": "arn:aws:states:::aws-sdk:scheduler:createSchedule",
+                      "Arguments": {
+                        "Name": "payout-invalid-target",
+                        "ScheduleExpression": "rate(1 day)",
+                        "FlexibleTimeWindow": {"Mode": "OFF"},
+                        "Target": {
+                          "Arn": "TARGET_ARN",
+                          "RoleArn": "ROLE",
+                          "EventBridgeParameters": {"DetailType": "payout.requested"}
+                        }
+                      },
+                      "Catch": [{
+                        "ErrorEquals": ["Scheduler.ValidationException"],
+                        "Next": "Recovered",
+                        "Output": {"caughtError": "{% $states.errorOutput.Error %}"}
+                      }],
+                      "End": true
+                    },
+                    "Recovered": {"Type": "Pass", "End": true}
+                  }
+                }
+                """
+                .replace("TARGET_ARN", quickChildArn)
+                .replace("ROLE", ROLE_ARN));
+
+        var result = mapper.readTree(succeedingOutputOf(smArn, "{}"));
+        assertEquals("Scheduler.ValidationException", result.path("caughtError").asText(),
+                "a target the parser rejects must reach Catch as an SDK exception, not States.Runtime");
+    }
+
     private static String scheduleTask(String action, String scheduleName, String expression) {
         return """
                 {

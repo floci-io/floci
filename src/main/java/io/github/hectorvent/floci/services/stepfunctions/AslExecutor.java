@@ -1065,7 +1065,10 @@ public class AslExecutor {
     /**
      * AWS SDK integrations for {@code scheduler:createSchedule} and {@code scheduler:updateSchedule}.
      * The Task {@code Arguments} are the CreateSchedule body with {@code Name} folded in, so they go
-     * through the controller's parse, and both actions answer with the schedule ARN alone.
+     * through the controller's parse, and both actions answer with the schedule ARN alone. The parse
+     * rejects a malformed {@code Target} with the same {@code AwsException} the service raises, so it
+     * belongs inside the translation that makes those failures reachable for {@code Retry} and
+     * {@code Catch}.
      */
     private JsonNode invokeAwsSdkScheduler(String action, JsonNode input, String region) {
         boolean creating = "createSchedule".equals(action);
@@ -1073,9 +1076,9 @@ public class AslExecutor {
             throw new FailStateException("States.TaskFailed",
                     "Unsupported resource: " + AWS_SDK_SCHEDULER_PREFIX + action);
         }
-        ScheduleRequest request = schedulerController.parseScheduleRequest(input);
-        request.setName(input.path("Name").asText(null));
         try {
+            ScheduleRequest request = schedulerController.parseScheduleRequest(input);
+            request.setName(input.path("Name").asText(null));
             Schedule schedule = creating
                     ? schedulerService.createSchedule(request, region)
                     : schedulerService.updateSchedule(request, region);
