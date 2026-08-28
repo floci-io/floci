@@ -51,6 +51,15 @@ clients the same name the `ConfigurationEndpoint` reports, while the cluster bus
 container network. Any cluster-aware Redis/Valkey client works against the reported
 `ConfigurationEndpoint`.
 
+Because clients must resolve the announced name to follow redirects, a `FLOCI_HOSTNAME` that only
+resolves inside Floci's Docker network (such as the Compose service name `floci`) breaks
+cluster-aware clients connecting from outside it. Set
+`FLOCI_SERVICES_ELASTICACHE_CLUSTER_ANNOUNCE_HOSTNAME` to a universally resolvable name in that
+case — the shipped `docker-compose.yml` uses `localhost.floci.io`, which public DNS resolves to
+`127.0.0.1` on the host (reaching the published proxy ports) while the Compose network alias and
+Floci's embedded DNS resolve it to the Floci container from inside Docker. Cluster-mode groups
+then announce that name and report it as their `ConfigurationEndpoint`.
+
 With `persistent`, `hybrid` or `wal` storage, cluster-mode groups are re-provisioned from their
 persisted topology on startup: containers are restarted, the cluster is re-formed (caches restart
 empty, as on any Floci restart) and each node's proxy port is re-reserved. A group whose data plane

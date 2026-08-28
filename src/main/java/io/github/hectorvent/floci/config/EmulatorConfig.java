@@ -1015,6 +1015,14 @@ public interface EmulatorConfig {
 
         /** Docker network to attach ElastiCache containers to. Empty = default bridge. */
         Optional<String> dockerNetwork();
+
+        /**
+         * Hostname cluster-mode nodes announce in MOVED/ASK redirects and cluster topology,
+         * and that is reported as the ConfigurationEndpoint. Must resolve to Floci from every
+         * client location; set it when the main hostname only resolves inside Floci's Docker
+         * network. Empty = the main hostname.
+         */
+        Optional<String> clusterAnnounceHostname();
     }
 
     interface MemoryDbServiceConfig {

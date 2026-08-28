@@ -343,6 +343,21 @@ class ElastiCacheServiceTest {
         assertEquals("16379", flagValue(captured, "--cluster-announce-port"));
     }
 
+    @Test
+    void clusterAnnounceHostnameOverrideIsAnnouncedAndReported() {
+        when(config.services().elasticache().clusterAnnounceHostname())
+                .thenReturn(java.util.Optional.of("localhost.floci.io"));
+        stubPerNodeContainers();
+
+        ReplicationGroup group = service.createReplicationGroup(clusterRequest("grp", 1, 0));
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<String>> flags = ArgumentCaptor.forClass(List.class);
+        verify(containerManager).start(eq("grp-0001-001"), anyString(), flags.capture());
+        assertEquals("localhost.floci.io", flagValue(flags.getValue(), "--cluster-announce-hostname"));
+        assertEquals("localhost.floci.io", group.getConfigurationEndpoint().address());
+    }
+
     private static String flagValue(List<String> flags, String flag) {
         int index = flags.indexOf(flag);
         assertTrue(index >= 0 && index + 1 < flags.size(), "Missing flag " + flag + " in " + flags);

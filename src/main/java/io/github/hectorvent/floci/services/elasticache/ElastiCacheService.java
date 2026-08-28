@@ -220,7 +220,7 @@ public class ElastiCacheService implements ResourceProvider {
                 ? validateRange("ReplicasPerNodeGroup", request.replicasPerNodeGroup(), 0, 5)
                 : 0;
         String image = config.services().elasticache().defaultImage();
-        String endpointHost = resolveEndpointHost();
+        String endpointHost = resolveClusterAnnounceHost();
         String announceIp = resolveAnnounceIp(endpointHost);
 
         LOG.infov("Creating cluster-mode replication group {0} with {1} node group(s), {2} replica(s) each",
@@ -350,7 +350,7 @@ public class ElastiCacheService implements ResourceProvider {
     }
 
     /**
-     * Nodes announce the configured endpoint hostname as their preferred endpoint, so MOVED/ASK
+     * Nodes announce the cluster announce hostname as their preferred endpoint, so MOVED/ASK
      * redirects and CLUSTER SLOTS hand clients the exact name floci reports as the configuration
      * endpoint — how (or whether) that name resolves inside floci's own container is irrelevant.
      * The best-effort IPv4 stays announced for consumers that read the address fields instead.
@@ -455,7 +455,7 @@ public class ElastiCacheService implements ResourceProvider {
     private void restoreClusterModeGroup(ReplicationGroup group) {
         String groupId = group.getReplicationGroupId();
         String image = config.services().elasticache().defaultImage();
-        String endpointHost = resolveEndpointHost();
+        String endpointHost = resolveClusterAnnounceHost();
         String announceIp = resolveAnnounceIp(endpointHost);
         List<ClusterNode> nodes = group.getClusterNodes();
 
@@ -810,6 +810,18 @@ public class ElastiCacheService implements ResourceProvider {
 
     private String resolveEndpointHost() {
         return config.hostname().orElse("localhost");
+    }
+
+    /**
+     * Cluster-mode groups bake this name into MOVED/ASK redirects and topology responses that
+     * every client must resolve, unlike the plain endpoint host that clients may override —
+     * so a hostname resolvable only inside Floci's Docker network (e.g. a Compose service
+     * name) needs the cluster-announce-hostname override.
+     */
+    private String resolveClusterAnnounceHost() {
+        return config.services().elasticache().clusterAnnounceHostname()
+                .filter(host -> !host.isBlank())
+                .orElseGet(this::resolveEndpointHost);
     }
 
     private int allocateProxyPort() {
