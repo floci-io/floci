@@ -2407,14 +2407,21 @@ public class CloudFormationResourceProvisioner {
             String s3Bucket = codeNode.path("S3Bucket").asText(null);
             String s3Key = codeNode.path("S3Key").asText(null);
             if (s3Bucket != null && s3Key != null) {
+                // A template that names its code explicitly must fail if that code cannot be
+                // read, the way real CloudFormation does. Substituting the stub handler here
+                // let a stack reach CREATE_COMPLETE running code the template never referenced
+                // — or, when the handler was not "index.handler", fail with a handler error
+                // that pointed away from the real problem (issue #2648). The stub below is for
+                // a template that supplies no Code at all, which is a different case.
                 try {
                     s3Service.getObject(s3Bucket, s3Key);
-                    return new LambdaCodeSpec(Map.of("S3Bucket", s3Bucket, "S3Key", s3Key),
-                            "s3:" + s3Bucket + "\n" + s3Key);
                 } catch (Exception e) {
-                    LOG.warnv("S3 code not found for Lambda ({0}/{1}), using default handler: {2}",
-                              s3Bucket, s3Key, e.getMessage());
+                    throw new AwsException("ValidationError",
+                            "Error occurred while GetObject. S3 Error Message: " + e.getMessage()
+                                    + " (bucket: " + s3Bucket + ", key: " + s3Key + ")", 400);
                 }
+                return new LambdaCodeSpec(Map.of("S3Bucket", s3Bucket, "S3Key", s3Key),
+                        "s3:" + s3Bucket + "\n" + s3Key);
             }
 
             String zipFile = codeNode.path("ZipFile").asText(null);
