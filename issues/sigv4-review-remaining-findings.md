@@ -128,12 +128,13 @@ Source review: `.temp/wt-l10-lambdaowner/review-2657.md` (41 findings across 6 f
     `releaseCodeVolumeReference`/`volumesInFlight` — no overlap, safe to fix
     independently whenever picked up.
 
-## Collision found during review: PR #2657 reintroduces the false "safe" comment
+## Resolved collision: PR #2657 had reintroduced the false "safe" comment
 
-`gh pr diff 2657` (currently open, `fix/lambda-placeholder-owner-account`) adds
-this comment directly above the vulnerable
-`iamService.findSecretKey(accessKeyId).orElse(accessKeyId)` line in
-`SigV4Validator.java`:
+PR #2657 (`fix/lambda-placeholder-owner-account`) merged into `upstream/main`
+as `be892864d` and added this comment directly above the vulnerable
+`iamService.findSecretKey(accessKeyId).orElse(accessKeyId)` line in **both**
+`SigV4Validator.java` and `RdsSigV4Validator.java` (not just the ElastiCache
+file, as first flagged here):
 
 > "Deliberately no fallback for a bare 12-digit account ID here: trusting an
 > unregistered numeric access key paired with the well-known "test" secret
@@ -142,14 +143,13 @@ this comment directly above the vulnerable
 > itself, unchanged (never a valid secret), so it always fails the signature
 > check below."
 
-This is the exact false safety claim this PR (`fix/sigv4-auth-bypass`) proves
-wrong with a RED test (self-signing with `secret == accessKeyId` produces a
-matching signature). PR #2657's branch does not currently include this fix —
-its diff is against a stale base, so no merge conflict exists today against
-`upstream/main`, but if #2657 merges as-is it will reintroduce the misleading
-comment (though not the vulnerable line itself, which predates both branches).
-Worth flagging to whoever owns #2657 so the comment doesn't ship, or so the
-comment gets corrected/removed as part of a rebase onto this fix.
+This is the exact false safety claim `fix/sigv4-auth-bypass` proves wrong with
+a RED test (self-signing with `secret == accessKeyId` produces a matching
+signature). Rebasing `fix/sigv4-auth-bypass` onto `upstream/main` after #2657
+merged produced real conflicts on both files (this comment vs. the fail-closed
+fix); both were resolved by keeping the fail-closed fix and dropping the
+misleading comment entirely. No follow-up needed here — the comment is gone
+from both files as of this branch's rebase.
 
 ## Medium/low findings not touched by this PR (from review-2657.md)
 
