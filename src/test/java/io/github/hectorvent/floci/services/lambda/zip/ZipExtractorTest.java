@@ -393,4 +393,44 @@ class ZipExtractorTest {
         le16(out, 0);
         return out.toByteArray();
     }
+
+    @Test
+    void aFailedInstallPutsThePreviousPackageBack(@TempDir Path codeStore) throws IOException {
+        // The install used to delete the live tree and then move the new one in, so a failure in
+        // the move left the function with no code and nothing to restore: a failed update
+        // destroyed a working deployment. Driving install() directly is the only way to reach
+        // that branch, since a rename between siblings does not fail under any condition a test
+        // can arrange through extractTo.
+        Path target = Files.createDirectories(codeStore.resolve("fn"));
+        Files.writeString(target.resolve("index.js"), "v1");
+        Path staging = codeStore.resolve("fn.floci-staging-never-created");
+
+        assertThrows(IOException.class, () -> ZipExtractor.install(staging, target));
+
+        assertTrue(Files.isRegularFile(target.resolve("index.js")),
+                "a failed install must put the previous package back, not leave the function empty");
+        assertEquals("v1", Files.readString(target.resolve("index.js")));
+        try (var entries = Files.list(codeStore)) {
+            assertEquals(List.of("fn"), entries.map(p -> p.getFileName().toString()).sorted().toList(),
+                    "the restored package must not leave a renamed copy behind");
+        }
+    }
+
+    @Test
+    void aSuccessfulInstallReplacesAndLeavesNoCopyBehind(@TempDir Path codeStore) throws IOException {
+        Path target = Files.createDirectories(codeStore.resolve("fn"));
+        Files.writeString(target.resolve("index.js"), "v1");
+        Files.writeString(target.resolve("removed.js"), "STALE");
+        Path staging = Files.createDirectories(codeStore.resolve("fn.floci-staging-x"));
+        Files.writeString(staging.resolve("index.js"), "v2");
+
+        ZipExtractor.install(staging, target);
+
+        assertEquals("v2", Files.readString(target.resolve("index.js")));
+        assertFalse(Files.exists(target.resolve("removed.js")), "install must replace, not merge");
+        try (var entries = Files.list(codeStore)) {
+            assertEquals(List.of("fn"), entries.map(p -> p.getFileName().toString()).sorted().toList(),
+                    "neither the staging tree nor the superseded package may survive");
+        }
+    }
 }
