@@ -675,7 +675,9 @@ public class AutoScalingService {
         // Stored-only — Phase 2 reconciler observes this via the instance lifecycle state
         requireGroup(region, asgName);
         validateLifecycleHookName(hookName);
-        validateLifecycleActionToken(token);
+        if (token != null) {
+            validateLifecycleActionToken(token);
+        }
     }
 
     /** LifecycleHookName pattern/length from the Auto Scaling model (autoscaling/2011-01-01/service-2.json). */

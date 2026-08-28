@@ -668,6 +668,15 @@ class AutoScalingServiceTest {
     }
 
     @Test
+    void completeLifecycleActionAllowsNullTokenWhenInstanceIdIdentifiesTheAction() {
+        service.putLifecycleHook(REGION, "test-asg", "hook-1", "autoscaling:EC2_INSTANCE_LAUNCHING",
+                null, null, null, null, null);
+
+        assertDoesNotThrow(() -> service.completeLifecycleAction(REGION, "test-asg", "hook-1",
+                "i-0123456789abcdef0", "CONTINUE", null));
+    }
+
+    @Test
     void deleteLifecycleHookByNameRejectsNameOutsideModeledPattern() {
         AwsException ex = assertThrows(AwsException.class,
                 () -> service.deleteLifecycleHookByName(REGION, "bad name!"));
