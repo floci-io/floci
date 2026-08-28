@@ -2520,7 +2520,7 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     public String getBucketReplication(String bucketName) {
-        Bucket bucket = bucketStore.get(bucketName)
+        Bucket bucket = resolveBucket(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
         if (bucket.getReplicationConfiguration() == null) {
             throw new AwsException("ReplicationConfigurationNotFoundError",

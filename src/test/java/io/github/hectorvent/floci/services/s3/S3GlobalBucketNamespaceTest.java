@@ -138,4 +138,33 @@ class S3GlobalBucketNamespaceTest {
         assertTrue(buckets.getForAccount(DEFAULT_ACCT, "elb-access-logs-bucket").isEmpty(),
                 "cross-account replication write must not fork a bucket into the caller's account");
     }
+
+    /**
+     * The write side of {@code Custom::S3PutBucketReplication} resolves and persists cross-account
+     * (see {@link #putBucketReplicationResolvesAndWritesBackToOwnerCrossAccount}); the read side
+     * must resolve just as far, or the custom resource's own follow-up
+     * {@code GetBucketReplication} — and any other management-account reader — sees
+     * {@code NoSuchBucket} on a bucket that plainly exists in its owning account.
+     */
+    @Test
+    void getBucketReplicationResolvesCrossAccount() {
+        Instance<RequestContext> ctx = mutableContext();
+        AccountAwareStorageBackend<Bucket> buckets =
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), ctx, DEFAULT_ACCT);
+        AccountAwareStorageBackend<S3Object> objects =
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), ctx, DEFAULT_ACCT);
+        S3Service globalNs = new S3Service(buckets, objects, Path.of("s3-gns-repl-read-test"), true, true);
+
+        caller.set(ACCOUNT_A);
+        globalNs.createBucket("elb-access-logs-bucket-2", "us-east-1");
+        String xml = "<ReplicationConfiguration>"
+                + "<Role>arn:aws:iam::000000000001:role/replication</Role>"
+                + "<Rule><Status>Enabled</Status>"
+                + "<Destination><Bucket>arn:aws:s3:::central-logs</Bucket></Destination></Rule>"
+                + "</ReplicationConfiguration>";
+        globalNs.putBucketReplication("elb-access-logs-bucket-2", xml);
+
+        caller.set(DEFAULT_ACCT);
+        assertEquals(xml, globalNs.getBucketReplication("elb-access-logs-bucket-2"));
+    }
 }
