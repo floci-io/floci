@@ -38,13 +38,15 @@ public class CodeStore {
     }
 
     public void delete(String accountId, String functionName) {
-        Path codePath = getCodePath(accountId, functionName);
-        if (!Files.exists(codePath)) {
+        deleteDirectory(getCodePath(accountId, functionName), functionName);
+    }
+
+    private void deleteDirectory(Path path, String functionName) {
+        if (!Files.exists(path)) {
             return;
         }
-        try {
-            Files.walk(codePath)
-                    .sorted(Comparator.reverseOrder())
+        try (var walk = Files.walk(path)) {
+            walk.sorted(Comparator.reverseOrder())
                     .forEach(p -> {
                         try {
                             Files.delete(p);
@@ -60,14 +62,27 @@ public class CodeStore {
 
     public boolean exists(String accountId, String functionName) {
         Path codePath = getCodePath(accountId, functionName);
-        try {
-            return Files.exists(codePath) && Files.list(codePath).findAny().isPresent();
+        if (!Files.exists(codePath)) {
+            return false;
+        }
+        try (var listing = Files.list(codePath)) {
+            return listing.findAny().isPresent();
         } catch (IOException e) {
             return false;
         }
     }
 
+    /**
+     * Replaces disallowed characters, then collapses any segment that consists entirely of dots
+     * ({@code "."}, {@code ".."}, ...) to a safe placeholder: dots alone survive the character
+     * replacement above but are special path segments that {@link Path#resolve} would otherwise
+     * follow outside {@link #baseDir}.
+     */
     private String sanitizeName(String name) {
-        return name.replaceAll("[^a-zA-Z0-9_\\-.]", "_");
+        String sanitized = name.replaceAll("[^a-zA-Z0-9_\\-.]", "_");
+        if (sanitized.isEmpty() || sanitized.chars().allMatch(c -> c == '.')) {
+            return "_";
+        }
+        return sanitized;
     }
 }

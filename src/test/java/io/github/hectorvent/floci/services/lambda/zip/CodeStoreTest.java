@@ -49,6 +49,31 @@ class CodeStoreTest {
                 "a hostile account segment must not escape the base directory");
     }
 
+    @Test
+    void bareDotDotAccountSegmentCannotEscapeTheBaseDirectory(@TempDir Path baseDir) {
+        // "../../etc" contains "/", which sanitizeName replaces with "_", neutralizing it as a
+        // single segment. A segment that is EXACTLY ".." consists entirely of otherwise-allowed
+        // characters (dots), so it survives that replacement untouched and still resolves to the
+        // parent directory once handed to Path.resolve.
+        CodeStore store = new CodeStore(baseDir);
+
+        Path traversal = store.getCodePath("..", "fn");
+
+        assertTrue(traversal.normalize().startsWith(baseDir.normalize()),
+                "a bare '..' account segment must not escape the base directory");
+    }
+
+    @Test
+    void bareDotFunctionSegmentCannotResolveToTheAccountDirectoryItself(@TempDir Path baseDir) {
+        CodeStore store = new CodeStore(baseDir);
+
+        Path traversal = store.getCodePath(ACCOUNT_A, ".");
+
+        assertTrue(traversal.normalize().startsWith(baseDir.normalize()));
+        assertNotEquals(baseDir.resolve(ACCOUNT_A).normalize(), traversal.normalize(),
+                "a bare '.' function segment must not collapse to the account directory itself");
+    }
+
     private void writeHandler(Path codePath, String content) throws IOException {
         Files.createDirectories(codePath);
         Files.writeString(codePath.resolve("index.js"), content);
