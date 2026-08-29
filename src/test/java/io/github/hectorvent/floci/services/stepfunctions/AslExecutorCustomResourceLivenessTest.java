@@ -83,6 +83,9 @@ class AslExecutorCustomResourceLivenessTest {
                 mock(S3Service.class),
                 mock(io.github.hectorvent.floci.services.ecs.EcsService.class),
                 mock(io.github.hectorvent.floci.services.ecs.EcsJsonHandler.class),
+                mock(io.github.hectorvent.floci.services.eventbridge.EventBridgeHandler.class),
+                mock(io.github.hectorvent.floci.services.scheduler.SchedulerService.class),
+                mock(io.github.hectorvent.floci.services.scheduler.SchedulerController.class),
                 objectMapper,
                 new JsonataEvaluator(objectMapper),
                 mock(Instance.class), mock(EmulatorConfig.class), vertx, customResourceLiveness);
