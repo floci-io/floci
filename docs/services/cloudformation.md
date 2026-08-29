@@ -86,6 +86,7 @@ cross-resource references.
 | CloudWatch | `Alarm` |
 | CloudWatch Logs | `LogGroup` |
 | CloudFormation | `Stack` (nested stacks), `CustomResource` and `Custom::*` (Lambda-backed) |
+| CloudTrail | `Trail` |
 | CDK | `CDK::Metadata` (accepted; no-op) |
 
 All other resource types are accepted without error and assigned a synthetic physical ID (with an

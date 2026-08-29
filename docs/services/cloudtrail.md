@@ -26,6 +26,9 @@ ${prefix}AWSLogs/${accountId}/CloudTrail/${region}/yyyy/MM/dd/${accountId}_Cloud
 | `StopLogging` | Stops logging for a trail |
 | `GetTrailStatus` | Returns the logging status of a trail |
 | `LookupEvents` | - |
+| `ListTrails` | - |
+| `AddTags` | - |
+| `ListTags` | - |
 <!-- floci:actions:end -->
 
 Selector matching honors `ReadWriteType` (`All`, `ReadOnly`, `WriteOnly`)
