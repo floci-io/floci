@@ -313,6 +313,113 @@ class SesTenantServiceTest {
         assertEquals("NotFoundException", missing.getErrorCode());
     }
 
+    // ──────────────────────── Suppression attributes (Phase 3) ────────────────────────
+
+    @Test
+    void putSuppressionAttributes_setsAndClears() {
+        service.createTenant("acme", List.of(), ACCOUNT, REGION);
+        service.putSuppressionAttributes("acme", List.of("BOUNCE", "COMPLAINT"), "TENANT", REGION);
+        var attrs = service.getTenant("acme", REGION).suppressionAttributes();
+        assertEquals(List.of("BOUNCE", "COMPLAINT"), attrs.suppressedReasons());
+        assertEquals("TENANT", attrs.suppressionScope());
+
+        // A put with neither member is AWS's clear mechanism.
+        service.putSuppressionAttributes("acme", null, null, REGION);
+        assertEquals(null, service.getTenant("acme", REGION).suppressionAttributes());
+    }
+
+    @Test
+    void putSuppressionAttributes_emptyReasonListWithScope_isValidState() {
+        service.createTenant("acme", List.of(), ACCOUNT, REGION);
+        service.putSuppressionAttributes("acme", List.of(), "TENANT", REGION);
+        var attrs = service.getTenant("acme", REGION).suppressionAttributes();
+        assertEquals(List.of(), attrs.suppressedReasons());
+        assertEquals("TENANT", attrs.suppressionScope());
+    }
+
+    @Test
+    void putSuppressionAttributes_pairRules_threeMessages() {
+        service.createTenant("acme", List.of(), ACCOUNT, REGION);
+        assertEquals("SuppressedReasons cannot be specified without SuppressionScope.",
+                assertThrows(AwsException.class, () -> service.putSuppressionAttributes(
+                        "acme", List.of("BOUNCE"), null, REGION)).getMessage());
+        assertEquals("SuppressionScope cannot be specified without SuppressedReasons.",
+                assertThrows(AwsException.class, () -> service.putSuppressionAttributes(
+                        "acme", null, "ACCOUNT", REGION)).getMessage());
+        // An empty list without a scope gets AWS's third wording.
+        assertEquals("SuppressionScope is required when SuppressedReasons are provided. "
+                        + "Valid values are: TENANT, ACCOUNT",
+                assertThrows(AwsException.class, () -> service.putSuppressionAttributes(
+                        "acme", List.of(), null, REGION)).getMessage());
+    }
+
+    @Test
+    void putSuppressionAttributes_enumAndDuplicateMessages() {
+        service.createTenant("acme", List.of(), ACCOUNT, REGION);
+        assertEquals("1 validation error detected: Value at 'suppressedReasons' failed to satisfy "
+                        + "constraint: Member must satisfy constraint: [Member must satisfy enum value "
+                        + "set: [BOUNCE, COMPLAINT]]",
+                assertThrows(AwsException.class, () -> service.putSuppressionAttributes(
+                        "acme", List.of("NOPE"), null, REGION)).getMessage());
+        assertEquals("1 validation error detected: Value at 'suppressionScope' failed to satisfy "
+                        + "constraint: Member must satisfy enum value set: [TENANT, ACCOUNT]",
+                assertThrows(AwsException.class, () -> service.putSuppressionAttributes(
+                        "acme", null, "NOPE", REGION)).getMessage());
+        assertEquals("Each suppressed reason can only be specified at most once",
+                assertThrows(AwsException.class, () -> service.putSuppressionAttributes(
+                        "acme", List.of("BOUNCE", "BOUNCE"), "ACCOUNT", REGION)).getMessage());
+    }
+
+    @Test
+    void putSuppressionAttributes_precedenceMatchesAws() {
+        // Empty TenantName wins over the enum check; request validation wins over existence.
+        assertEquals("TenantName cannot be empty",
+                assertThrows(AwsException.class, () -> service.putSuppressionAttributes(
+                        "", List.of("NOPE"), "TENANT", REGION)).getMessage());
+        assertEquals("SuppressedReasons cannot be specified without SuppressionScope.",
+                assertThrows(AwsException.class, () -> service.putSuppressionAttributes(
+                        "ghost", List.of("BOUNCE"), null, REGION)).getMessage());
+        AwsException ghost = assertThrows(AwsException.class, () -> service.putSuppressionAttributes(
+                "ghost", List.of("BOUNCE"), "TENANT", REGION));
+        assertEquals("NotFoundException", ghost.getErrorCode());
+        assertEquals("The requested tenant <ghost> does not exist.", ghost.getMessage());
+    }
+
+    @Test
+    void createTenant_withSuppressionAttributes_validatedAndStored() {
+        Tenant tenant = service.createTenant("acme", List.of(), List.of("BOUNCE"), "TENANT",
+                ACCOUNT, REGION);
+        assertEquals("TENANT", tenant.suppressionAttributes().suppressionScope());
+        assertThrows(AwsException.class, () -> service.createTenant("beta", List.of(),
+                List.of("BOUNCE"), null, ACCOUNT, REGION));
+    }
+
+    @Test
+    void runWithTenant_resolvesUnderLock_orThrows() {
+        Tenant tenant = service.createTenant("acme", List.of(), ACCOUNT, REGION);
+        String[] seenTenantId = new String[1];
+        service.runWithTenant("acme", REGION, t -> seenTenantId[0] = t.tenantId());
+        assertEquals(tenant.tenantId(), seenTenantId[0]);
+        assertEquals("TenantName cannot be empty",
+                assertThrows(AwsException.class,
+                        () -> service.runWithTenant(" ", REGION, t -> null)).getMessage());
+        assertEquals("NotFoundException",
+                assertThrows(AwsException.class,
+                        () -> service.runWithTenant("ghost", REGION, t -> null)).getErrorCode());
+    }
+
+    @Test
+    void deleteTenant_runsDependentCascadeInsideLock_beforeRecordRemoval() {
+        Tenant tenant = service.createTenant("acme", List.of(), ACCOUNT, REGION);
+        boolean[] sawTenantStillPresent = new boolean[1];
+        service.deleteTenant("acme", REGION, t -> {
+            assertEquals(tenant.tenantId(), t.tenantId());
+            sawTenantStillPresent[0] = service.find("acme", REGION).isPresent();
+        });
+        assertTrue(sawTenantStillPresent[0]);
+        assertTrue(service.find("acme", REGION).isEmpty());
+    }
+
     @Test
     void validateFilterAndPaging_matchAwsMessages() {
         assertEquals("Invalid resource type NOPE specified.",

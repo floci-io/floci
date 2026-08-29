@@ -1658,8 +1658,15 @@ public class SesService {
     // ──────────────────────── Tenants (multi-tenancy) ────────────────────────
     // Tenants live in SesTenantService; the facade forwards.
 
-    public Tenant createTenant(String tenantName, List<Tag> tags, String accountId, String region) {
-        return tenantService.createTenant(tenantName, tags, accountId, region);
+    public Tenant createTenant(String tenantName, List<Tag> tags, List<String> suppressedReasons,
+                               String suppressionScope, String accountId, String region) {
+        return tenantService.createTenant(tenantName, tags, suppressedReasons, suppressionScope,
+                accountId, region);
+    }
+
+    public void putTenantSuppressionAttributes(String tenantName, List<String> suppressedReasons,
+                                               String suppressionScope, String region) {
+        tenantService.putSuppressionAttributes(tenantName, suppressedReasons, suppressionScope, region);
     }
 
     public Tenant getTenant(String tenantName, String region) {
@@ -1671,7 +1678,10 @@ public class SesService {
     }
 
     public void deleteTenant(String tenantName, String region) {
-        tenantService.deleteTenant(tenantName, region);
+        // The tenant-scoped suppression entries live in the suppression domain; the callback runs
+        // their cascade inside the tenant lock, before the associations and the tenant record.
+        tenantService.deleteTenant(tenantName, region,
+                tenant -> suppressionService.deleteAllForTenant(region, tenant.tenantId()));
     }
 
     // The association operations validate resource existence here in the facade — the tenant domain
@@ -2372,20 +2382,78 @@ public class SesService {
         suppressionService.putAccountSuppressionAttributes(region, suppressedReasons);
     }
 
+    // A TenantName routes each suppression-list operation to that tenant's own list (fully separate
+    // from the account list on AWS); the reason/address validation still runs first, matching the
+    // probed precedence where request validation precedes tenant existence.
+
     public void putSuppressedDestination(String region, String emailAddress, String reason) {
-        suppressionService.putSuppressedDestination(region, emailAddress, reason);
+        putSuppressedDestination(region, emailAddress, reason, null);
     }
 
     public SuppressedDestination getSuppressedDestination(String region, String emailAddress) {
-        return suppressionService.getSuppressedDestination(region, emailAddress);
+        return getSuppressedDestination(region, emailAddress, null);
     }
 
     public void deleteSuppressedDestination(String region, String emailAddress) {
-        suppressionService.deleteSuppressedDestination(region, emailAddress);
+        deleteSuppressedDestination(region, emailAddress, null);
     }
 
-    public List<SuppressedDestination> listSuppressedDestinations(String region, List<String> reasonFilters) {
-        return suppressionService.listSuppressedDestinations(region, reasonFilters);
+    public List<SuppressedDestination> listSuppressedDestinations(String region,
+                                                                  List<String> reasonFilters) {
+        return listSuppressedDestinations(region, reasonFilters, null);
+    }
+
+    public void putSuppressedDestination(String region, String emailAddress, String reason,
+                                         String tenantName) {
+        if (tenantName == null) {
+            suppressionService.putSuppressedDestination(region, emailAddress, reason);
+            return;
+        }
+        // The address and reason are validated before the tenant is resolved, keeping request
+        // validation ahead of tenant existence for every member, as on the attribute operations.
+        SesSuppressionService.normalizeSuppressionEmail(emailAddress);
+        SesSuppressionService.validateSuppressionReason(reason, "reason", false);
+        tenantService.runWithTenant(tenantName, region, tenant -> {
+            suppressionService.putTenantSuppressedDestination(region, tenant.tenantId(),
+                    tenantName, emailAddress, reason);
+            return null;
+        });
+    }
+
+    public SuppressedDestination getSuppressedDestination(String region, String emailAddress,
+                                                          String tenantName) {
+        if (tenantName == null) {
+            return suppressionService.getSuppressedDestination(region, emailAddress);
+        }
+        SesSuppressionService.normalizeSuppressionEmail(emailAddress);
+        return tenantService.runWithTenant(tenantName, region, tenant ->
+                suppressionService.getTenantSuppressedDestination(region, tenant.tenantId(),
+                        emailAddress));
+    }
+
+    public void deleteSuppressedDestination(String region, String emailAddress, String tenantName) {
+        if (tenantName == null) {
+            suppressionService.deleteSuppressedDestination(region, emailAddress);
+            return;
+        }
+        SesSuppressionService.normalizeSuppressionEmail(emailAddress);
+        tenantService.runWithTenant(tenantName, region, tenant -> {
+            suppressionService.deleteTenantSuppressedDestination(region, tenant.tenantId(),
+                    emailAddress);
+            return null;
+        });
+    }
+
+    public List<SuppressedDestination> listSuppressedDestinations(String region,
+                                                                  List<String> reasonFilters,
+                                                                  String tenantName) {
+        if (tenantName == null) {
+            return suppressionService.listSuppressedDestinations(region, reasonFilters);
+        }
+        SesSuppressionService.validateReasonFilters(reasonFilters);
+        return tenantService.runWithTenant(tenantName, region, tenant ->
+                suppressionService.listTenantSuppressedDestinations(region, tenant.tenantId(),
+                        reasonFilters));
     }
 
     /**

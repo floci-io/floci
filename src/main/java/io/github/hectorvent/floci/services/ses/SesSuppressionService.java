@@ -39,19 +39,24 @@ public class SesSuppressionService {
 
     private final StorageBackend<String, SuppressedDestination> suppressionStore;
     private final StorageBackend<String, AccountSuppressionAttributes> accountSuppressionStore;
+    private final StorageBackend<String, SuppressedDestination> tenantSuppressionStore;
 
     @Inject
     public SesSuppressionService(StorageFactory storageFactory) {
-        this.suppressionStore = storageFactory.create("ses", "ses-suppression.json",
-                new TypeReference<Map<String, SuppressedDestination>>() {});
-        this.accountSuppressionStore = storageFactory.create("ses", "ses-account-suppression.json",
-                new TypeReference<Map<String, AccountSuppressionAttributes>>() {});
+        this(storageFactory.create("ses", "ses-suppression.json",
+                        new TypeReference<Map<String, SuppressedDestination>>() {}),
+                storageFactory.create("ses", "ses-account-suppression.json",
+                        new TypeReference<Map<String, AccountSuppressionAttributes>>() {}),
+                storageFactory.create("ses", "ses-tenant-suppression.json",
+                        new TypeReference<Map<String, SuppressedDestination>>() {}));
     }
 
     SesSuppressionService(StorageBackend<String, SuppressedDestination> suppressionStore,
-                          StorageBackend<String, AccountSuppressionAttributes> accountSuppressionStore) {
+                          StorageBackend<String, AccountSuppressionAttributes> accountSuppressionStore,
+                          StorageBackend<String, SuppressedDestination> tenantSuppressionStore) {
         this.suppressionStore = suppressionStore;
         this.accountSuppressionStore = accountSuppressionStore;
+        this.tenantSuppressionStore = tenantSuppressionStore;
     }
 
     // ──────────────────── Account-level suppression attributes ────────────────────
@@ -168,15 +173,7 @@ public class SesSuppressionService {
     }
 
     public List<SuppressedDestination> listSuppressedDestinations(String region, List<String> reasonFilters) {
-        Set<String> filters = new HashSet<>();
-        if (reasonFilters != null) {
-            for (String r : reasonFilters) {
-                if (r != null && !r.isBlank()) {
-                    validateSuppressionReason(r, "reasons", true);
-                    filters.add(r);
-                }
-            }
-        }
+        Set<String> filters = validateReasonFilters(reasonFilters);
         String prefix = "suppression::" + region + "::";
         List<SuppressedDestination> all = new ArrayList<>(suppressionStore.scan(k -> k.startsWith(prefix)));
         all.sort(Comparator.comparing(SuppressedDestination::getLastUpdateTime,
@@ -195,7 +192,101 @@ public class SesSuppressionService {
         return "suppression::" + region + "::" + emailAddress;
     }
 
-    private static String normalizeSuppressionEmail(String emailAddress) {
+    // ──────────────────── Tenant-scoped suppression list (Phase 3) ────────────────────
+    // Probe-confirmed 2026-08-30: each tenant's list is fully separate from the account list (they
+    // are mutually invisible), the tenant's SuppressionScope does not gate these operations, and the
+    // not-found message says "tenant suppression list". Keys carry the TenantId, so a recreated
+    // same-name tenant starts with an empty list; DeleteTenant cascades via deleteAllForTenant.
+    // Callers pass through SesTenantService.runWithTenant, which resolves the tenant (404) and
+    // serializes against the DeleteTenant cascade.
+
+    public void putTenantSuppressedDestination(String region, String tenantId, String tenantName,
+                                               String emailAddress, String reason) {
+        String normalized = normalizeSuppressionEmail(emailAddress);
+        validateSuppressionReason(reason, "reason", false);
+        SuppressedDestination entry = new SuppressedDestination(normalized, reason);
+        entry.setTenantName(tenantName);
+        tenantSuppressionStore.put(tenantSuppressionKey(region, tenantId, normalized), entry);
+        LOG.infov("Suppressed destination {0} for tenant {1} in region {2} (reason={3})",
+                normalized, tenantName, region, reason);
+    }
+
+    public SuppressedDestination getTenantSuppressedDestination(String region, String tenantId,
+                                                                String emailAddress) {
+        String normalized = normalizeSuppressionEmail(emailAddress);
+        return tenantSuppressionStore.get(tenantSuppressionKey(region, tenantId, normalized))
+                .orElseThrow(() -> tenantEntryNotFound(normalized));
+    }
+
+    /** Unlike the tenant resource associations, this delete is not idempotent on AWS: a second
+     * delete of the same address is a NotFound. */
+    public void deleteTenantSuppressedDestination(String region, String tenantId, String emailAddress) {
+        String normalized = normalizeSuppressionEmail(emailAddress);
+        String key = tenantSuppressionKey(region, tenantId, normalized);
+        if (tenantSuppressionStore.get(key).isEmpty()) {
+            throw tenantEntryNotFound(normalized);
+        }
+        tenantSuppressionStore.delete(key);
+        LOG.infov("Removed tenant suppression entry for {0} in region {1}", normalized, region);
+    }
+
+    public List<SuppressedDestination> listTenantSuppressedDestinations(String region, String tenantId,
+                                                                        List<String> reasonFilters) {
+        Set<String> filters = validateReasonFilters(reasonFilters);
+        String prefix = tenantSuppressionKeyPrefix(region, tenantId);
+        List<SuppressedDestination> all =
+                new ArrayList<>(tenantSuppressionStore.scan(k -> k.startsWith(prefix)));
+        all.sort(Comparator.comparing(SuppressedDestination::getLastUpdateTime,
+                        Comparator.nullsLast(Comparator.naturalOrder()))
+                .thenComparing(SuppressedDestination::getEmailAddress,
+                        Comparator.nullsLast(Comparator.naturalOrder())));
+        if (filters.isEmpty()) {
+            return all;
+        }
+        return all.stream()
+                .filter(s -> filters.contains(s.getReason()))
+                .toList();
+    }
+
+    /** DeleteTenant's cascade for this domain, run from inside the tenant lock. */
+    public void deleteAllForTenant(String region, String tenantId) {
+        String prefix = tenantSuppressionKeyPrefix(region, tenantId);
+        for (String key : tenantSuppressionStore.keys().stream()
+                .filter(k -> k.startsWith(prefix)).toList()) {
+            tenantSuppressionStore.delete(key);
+        }
+    }
+
+    private static AwsException tenantEntryNotFound(String normalizedEmail) {
+        return new AwsException("NotFoundException",
+                "Email address " + normalizedEmail + " does not exist on your tenant suppression list.",
+                404);
+    }
+
+    private static String tenantSuppressionKey(String region, String tenantId, String emailAddress) {
+        return tenantSuppressionKeyPrefix(region, tenantId) + emailAddress;
+    }
+
+    private static String tenantSuppressionKeyPrefix(String region, String tenantId) {
+        return "tenantSuppression::" + region + "::" + tenantId + "::";
+    }
+
+    /** Validates a Reasons filter list, returning the non-blank values; shared by the account and
+     * tenant list paths, and by the facade to keep request validation ahead of tenant existence. */
+    static Set<String> validateReasonFilters(List<String> reasonFilters) {
+        Set<String> filters = new HashSet<>();
+        if (reasonFilters != null) {
+            for (String r : reasonFilters) {
+                if (r != null && !r.isBlank()) {
+                    validateSuppressionReason(r, "reasons", true);
+                    filters.add(r);
+                }
+            }
+        }
+        return filters;
+    }
+
+    static String normalizeSuppressionEmail(String emailAddress) {
         if (emailAddress == null || emailAddress.isBlank()) {
             throw new AwsException("BadRequestException", "EmailAddress is required.", 400);
         }
@@ -223,7 +314,7 @@ public class SesSuppressionService {
      * (single Reason field) returns the unwrapped form; the two list-bearing APIs return the wrapped
      * form. Shared by the two sub-domains above, which is why they were extracted together.
      */
-    private static void validateSuppressionReason(String reason, String fieldName, boolean nested) {
+    static void validateSuppressionReason(String reason, String fieldName, boolean nested) {
         if (reason == null || (!"BOUNCE".equals(reason) && !"COMPLAINT".equals(reason))) {
             String constraint = nested
                     ? "Member must satisfy constraint: [Member must satisfy enum value set: [BOUNCE, COMPLAINT]]"

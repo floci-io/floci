@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ses.model.Tag;
 import io.github.hectorvent.floci.services.ses.model.Tenant;
 import io.github.hectorvent.floci.services.ses.model.TenantResourceAssociation;
+import io.github.hectorvent.floci.services.ses.model.TenantSuppressionAttributes;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -16,8 +17,12 @@ import java.time.Clock;
 import java.time.Instant;
 import java.util.Comparator;
 import java.util.List;
+import java.util.HashSet;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
+import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.regex.Pattern;
 
 /**
@@ -30,8 +35,10 @@ import java.util.regex.Pattern;
  * AlreadyExists message), not the key.
  *
  * <p>Phase 2 adds tenant→resource associations, owned here as well ({@code associationStore}); the
- * facade validates that the referenced resource exists before delegating. Tenant suppression and
- * tenant-scoped sending are separate follow-ups.
+ * facade validates that the referenced resource exists before delegating. Phase 3 adds the tenant
+ * suppression attributes (stored on the tenant record) — the tenant-scoped suppression list itself
+ * lives in {@code SesSuppressionService} with the account list, and cascades through the
+ * {@code DeleteTenant} callback. Tenant-scoped sending is a separate follow-up.
  */
 @ApplicationScoped
 public class SesTenantService {
@@ -87,12 +94,20 @@ public class SesTenantService {
     }
 
     public Tenant createTenant(String tenantName, List<Tag> tags, String accountId, String region) {
+        return createTenant(tenantName, tags, null, null, accountId, region);
+    }
+
+    public Tenant createTenant(String tenantName, List<Tag> tags, List<String> suppressedReasons,
+                               String suppressionScope, String accountId, String region) {
         validateTenantName(tenantName);
         SesTags.validate(tags);
+        TenantSuppressionAttributes attrs =
+                validateSuppressionAttributesPair(suppressedReasons, suppressionScope);
         String key = tenantKey(region, tenantName);
         String tenantId = generateTenantId();
         String tenantArn = "arn:aws:ses:" + region + ":" + accountId + ":tenant/" + tenantName + "/" + tenantId;
-        Tenant tenant = new Tenant(tenantName, tenantId, tenantArn, Instant.now(clock), tags, "ENABLED");
+        Tenant tenant = new Tenant(tenantName, tenantId, tenantArn, Instant.now(clock), tags,
+                "ENABLED", attrs);
         // Only the check-then-put needs to be atomic, so two concurrent creates for the same name can't
         // both observe the key as absent; the id/ARN/record are built outside the lock.
         synchronized (tenantMutationLock) {
@@ -125,15 +140,25 @@ public class SesTenantService {
     }
 
     public void deleteTenant(String tenantName, String region) {
+        deleteTenant(tenantName, region, tenant -> { });
+    }
+
+    /**
+     * Deletes the tenant. {@code dependentCascade} runs inside the lock with the resolved tenant so
+     * the facade can cascade state held by other domains (the tenant suppression list); like the
+     * associations, it runs before the tenant record is removed — persistent/wal backends apply each
+     * deletion durably, so a crash mid-cascade must leave the tenant record (a retryable
+     * DeleteTenant) rather than orphans no API call can remove.
+     */
+    public void deleteTenant(String tenantName, String region, Consumer<Tenant> dependentCascade) {
         validateTenantName(tenantName);
         String key = tenantKey(region, tenantName);
         synchronized (tenantMutationLock) {
             Tenant tenant = tenantStore.get(key).orElseThrow(() -> tenantNotFound(tenantName));
+            dependentCascade.accept(tenant);
             // AWS cascades: deleting a tenant silently removes its resource associations
             // (probe-confirmed 2026-08-28). Keys carry the TenantId, so a recreated same-name tenant
-            // never sees the old associations. The associations go first — persistent/wal backends
-            // apply each deletion durably, so a crash mid-cascade must leave the tenant record (a
-            // retryable DeleteTenant) rather than orphan associations no API call can remove.
+            // never sees the old associations.
             String assocPrefix = associationKeyPrefix(region, tenant.tenantId());
             for (String assocKey : associationStore.keys().stream()
                     .filter(k -> k.startsWith(assocPrefix)).toList()) {
@@ -342,6 +367,96 @@ public class SesTenantService {
 
     private static String associationKeyPrefix(String region, String tenantId) {
         return "tenantAssoc::" + region + "::" + tenantId + "::";
+    }
+
+    // ──────────────────────── Suppression attributes (Phase 3) ────────────────────────
+    // Behavior and messages probe-confirmed against real AWS us-east-1, 2026-08-30.
+
+    /**
+     * {@code PutTenantSuppressionAttributes}: both members set the block (an empty reason list is a
+     * valid state), neither member clears it. Observed precedence: empty TenantName, then the Smithy
+     * enum checks, then duplicates, then the pair rules, then tenant existence — a put on a missing
+     * tenant still gets its request validated first.
+     */
+    public void putSuppressionAttributes(String tenantName, List<String> suppressedReasons,
+                                         String suppressionScope, String region) {
+        if (tenantName == null) {
+            throw new AwsException("BadRequestException",
+                    "1 validation error detected: Value at 'tenantName' failed to satisfy constraint: "
+                            + "Member must not be null", 400);
+        }
+        if (tenantName.isBlank()) {
+            throw new AwsException("BadRequestException", "TenantName cannot be empty", 400);
+        }
+        TenantSuppressionAttributes attrs =
+                validateSuppressionAttributesPair(suppressedReasons, suppressionScope);
+        String key = tenantKey(region, tenantName);
+        synchronized (tenantMutationLock) {
+            Tenant tenant = tenantStore.get(key).orElseThrow(() -> tenantNotFound(tenantName));
+            tenantStore.put(key, tenant.withSuppressionAttributes(attrs));
+        }
+        LOG.infov("Updated suppression attributes of SES tenant {0} in region {1}: {2}",
+                tenantName, region, attrs);
+    }
+
+    /**
+     * Resolves the tenant and runs {@code action} under the shared lock — the tenant-scoped
+     * suppression-list operations go through this so a concurrent {@code DeleteTenant} cascade
+     * cannot interleave and leave entries for a deleted tenant.
+     */
+    public <T> T runWithTenant(String tenantName, String region, Function<Tenant, T> action) {
+        if (tenantName.isBlank()) {
+            throw new AwsException("BadRequestException", "TenantName cannot be empty", 400);
+        }
+        synchronized (tenantMutationLock) {
+            Tenant tenant = tenantStore.get(tenantKey(region, tenantName))
+                    .orElseThrow(() -> tenantNotFound(tenantName));
+            return action.apply(tenant);
+        }
+    }
+
+    /**
+     * Validates the SuppressedReasons/SuppressionScope pair (shared by CreateTenant and
+     * PutTenantSuppressionAttributes) and returns the block to store — {@code null} when neither
+     * member was given. AWS rejects half a pair with member-specific messages, and an empty reason
+     * list without a scope gets its own third wording.
+     */
+    private static TenantSuppressionAttributes validateSuppressionAttributesPair(
+            List<String> suppressedReasons, String suppressionScope) {
+        if (suppressedReasons != null) {
+            for (String reason : suppressedReasons) {
+                SesSuppressionService.validateSuppressionReason(reason, "suppressedReasons", true);
+            }
+        }
+        if (suppressionScope != null && !"TENANT".equals(suppressionScope)
+                && !"ACCOUNT".equals(suppressionScope)) {
+            throw new AwsException("BadRequestException",
+                    "1 validation error detected: Value at 'suppressionScope' failed to satisfy "
+                            + "constraint: Member must satisfy enum value set: [TENANT, ACCOUNT]", 400);
+        }
+        if (suppressedReasons != null) {
+            Set<String> seen = new HashSet<>();
+            for (String reason : suppressedReasons) {
+                if (!seen.add(reason)) {
+                    throw new AwsException("BadRequestException",
+                            "Each suppressed reason can only be specified at most once", 400);
+                }
+            }
+        }
+        if (suppressedReasons != null && suppressionScope == null) {
+            throw new AwsException("BadRequestException", suppressedReasons.isEmpty()
+                    ? "SuppressionScope is required when SuppressedReasons are provided. "
+                            + "Valid values are: TENANT, ACCOUNT"
+                    : "SuppressedReasons cannot be specified without SuppressionScope.", 400);
+        }
+        if (suppressedReasons == null && suppressionScope != null) {
+            throw new AwsException("BadRequestException",
+                    "SuppressionScope cannot be specified without SuppressedReasons.", 400);
+        }
+        if (suppressedReasons == null) {
+            return null;
+        }
+        return new TenantSuppressionAttributes(List.copyOf(suppressedReasons), suppressionScope);
     }
 
     // Validation order and messages verified against real AWS (2026-08-22): an empty string is the
