@@ -1078,7 +1078,20 @@ public class RdsService implements Resettable, ResourceProvider {
                     instance.getEngineVersion(), effectiveRegion);
             instance.setOptionGroupName(optionGroupName);
         }
+        boolean passwordRotated = false;
         if (newPassword != null && !newPassword.isBlank()) {
+            String oldPassword = instance.getMasterPassword();
+            boolean backendRunning = !config.services().rds().mock()
+                    && instance.getDbClusterIdentifier() == null && instance.getContainerId() != null;
+            passwordRotated = backendRunning && !newPassword.equals(oldPassword);
+            // Propagate the rotation into the running backend DB before overwriting the stored
+            // password — this is the last moment the old credential (which the backend still
+            // holds) is known. Without it every later connection fails: the proxy dials the
+            // backend with the rotated password against a database still holding the original.
+            if (passwordRotated) {
+                containerManager.rotateMasterPassword(id, instance.getContainerId(),
+                        instance.getEngine(), instance.getMasterUsername(), oldPassword, newPassword);
+            }
             instance.setMasterPassword(newPassword);
         }
         if (iamEnabled != null) {
@@ -1096,6 +1109,26 @@ public class RdsService implements Resettable, ResourceProvider {
         }
         effective.applyTo(instance);
         putInstanceForScope(currentAccountId(), effectiveRegion, id, instance);
+
+        // The running auth proxy validates the master scramble against the password it was
+        // started with, so restart it on the rotated credential (the same stop/start the
+        // reboot path uses).
+        if (passwordRotated) {
+            String effectiveMasterUser = instance.getMasterUsername() != null
+                    ? instance.getMasterUsername() : "root";
+            final String accountId = accountIdFromArn(instance.getDbInstanceArn());
+            final String instanceRegion = regionFromArn(instance.getDbInstanceArn());
+            proxyManager.stopProxy(rdsResourceRelayKey(instance.getDbInstanceArn(), id));
+            proxyManager.startProxy(rdsResourceRelayKey(instance.getDbInstanceArn(), id),
+                    instance.getEngine(),
+                    instance.isIamDatabaseAuthenticationEnabled(),
+                    instance.getProxyPort(), instance.getContainerHost(), instance.getContainerPort(),
+                    instance.getEndpoint().address(),
+                    effectiveMasterUser, instance.getMasterPassword(), instance.getDbName(),
+                    (user, pw) -> validateDbPasswordForScope(
+                            accountId, instanceRegion, id, user, pw));
+        }
+
         LOG.infov("DB instance {0} modified", id);
         return instance;
     }

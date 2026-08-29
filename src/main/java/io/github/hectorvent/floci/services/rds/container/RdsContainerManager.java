@@ -408,6 +408,52 @@ public class RdsContainerManager {
     }
 
     /**
+     * Propagates a ModifyDBInstance master-password rotation into the running DB container, so
+     * the backend's stored credential matches what clients (and the auth proxy) use from now on.
+     * For MySQL/MariaDB this runs as the master user itself with the old password — changing your
+     * own password needs no extra privileges, and the container's root password is the
+     * creation-time one, not reliably known after earlier rotations. PostgreSQL's official image
+     * trusts local socket connections, so psql needs no password at all.
+     */
+    public void rotateMasterPassword(String instanceId, String containerId, DatabaseEngine engine,
+                                     String masterUsername, String oldPassword, String newPassword) {
+        execUntilSuccess(instanceId, containerId,
+                passwordRotationCommand(engine, masterUsername, oldPassword, newPassword),
+                "master-password rotation");
+    }
+
+    static String[] passwordRotationCommand(DatabaseEngine engine, String masterUsername,
+                                            String oldPassword, String newPassword) {
+        if (engine == DatabaseEngine.POSTGRES) {
+            String effectiveUser = (masterUsername != null && !masterUsername.isBlank())
+                    ? masterUsername : "postgres";
+            return new String[]{"psql", "-v", "ON_ERROR_STOP=1", "-U", effectiveUser, "-d", "postgres",
+                    "-c", postgresPasswordRotationSql(effectiveUser, newPassword)};
+        }
+        String effectiveUser = (masterUsername != null && !masterUsername.isBlank())
+                ? masterUsername : "root";
+        // MariaDB images ≥10.4 (Floci's floor is 10.11) ship only the `mariadb` client binary.
+        String client = engine == DatabaseEngine.MARIADB ? "mariadb" : "mysql";
+        return new String[]{client, "-u" + effectiveUser, "-p" + oldPassword,
+                "-e", mysqlPasswordRotationSql(engine, newPassword)};
+    }
+
+    static String mysqlPasswordRotationSql(DatabaseEngine engine, String newPassword) {
+        String escaped = newPassword.replace("\\", "\\\\").replace("'", "\\'");
+        // MariaDB only accepts the PASSWORD() form; MySQL 8 only the plain literal.
+        return engine == DatabaseEngine.MARIADB
+                ? "SET PASSWORD = PASSWORD('" + escaped + "');"
+                : "SET PASSWORD = '" + escaped + "';";
+    }
+
+    static String postgresPasswordRotationSql(String masterUsername, String newPassword) {
+        // Identifier quoted with doubled double-quotes, literal with doubled single-quotes.
+        String role = masterUsername.replace("\"", "\"\"");
+        String password = newPassword.replace("'", "''");
+        return "ALTER ROLE \"" + role + "\" WITH PASSWORD '" + password + "';";
+    }
+
+    /**
      * The stock mysql/mariadb images grant {@code MYSQL_USER} only {@code ALL} on
      * {@code MYSQL_DATABASE}, so a master user cannot {@code CREATE DATABASE}, {@code CREATE USER}
      * or {@code GRANT} — operations real RDS master users perform routinely. A root master needs

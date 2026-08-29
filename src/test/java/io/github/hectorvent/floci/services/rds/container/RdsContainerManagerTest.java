@@ -74,6 +74,36 @@ class RdsContainerManagerTest {
     }
 
     @Test
+    void passwordRotationCommandRunsAsTheMasterUserWithTheOldPassword() {
+        String[] mysql = RdsContainerManager.passwordRotationCommand(
+                DatabaseEngine.MYSQL, "admin", "old-pass", "new-pass");
+        assertEquals("mysql", mysql[0]);
+        assertEquals("-uadmin", mysql[1]);
+        assertEquals("-pold-pass", mysql[2]);
+        assertEquals("SET PASSWORD = 'new-pass';", mysql[4]);
+
+        assertEquals("mariadb", RdsContainerManager.passwordRotationCommand(
+                DatabaseEngine.MARIADB, "admin", "old-pass", "new-pass")[0]);
+
+        // PostgreSQL: local socket connections are trusted, so no old password appears at all.
+        String[] postgres = RdsContainerManager.passwordRotationCommand(
+                DatabaseEngine.POSTGRES, "admin", "old-pass", "new-pass");
+        assertEquals("psql", postgres[0]);
+        assertEquals("ALTER ROLE \"admin\" WITH PASSWORD 'new-pass';", postgres[postgres.length - 1]);
+    }
+
+    @Test
+    void passwordRotationSqlUsesEngineSyntaxAndEscapes() {
+        assertEquals("SET PASSWORD = 'a\\'b';",
+                RdsContainerManager.mysqlPasswordRotationSql(DatabaseEngine.MYSQL, "a'b"));
+        // MariaDB only accepts the PASSWORD() form.
+        assertEquals("SET PASSWORD = PASSWORD('a\\'b');",
+                RdsContainerManager.mysqlPasswordRotationSql(DatabaseEngine.MARIADB, "a'b"));
+        assertEquals("ALTER ROLE \"we\"\"ird\" WITH PASSWORD 'a''b';",
+                RdsContainerManager.postgresPasswordRotationSql("we\"ird", "a'b"));
+    }
+
+    @Test
     void needsMasterGrantSkipsRootAndPostgres() {
         assertTrue(RdsContainerManager.needsMasterGrant(DatabaseEngine.MYSQL, "admin"));
         assertTrue(RdsContainerManager.needsMasterGrant(DatabaseEngine.MARIADB, "admin"));
