@@ -166,6 +166,22 @@ class Ec2VpcPeeringConnectionIntegrationTest {
                     + ".allowDnsResolutionFromRemoteVpc", equalTo("true"))
             .body("ModifyVpcPeeringConnectionOptionsResponse.requesterPeeringConnectionOptions"
                     + ".allowDnsResolutionFromRemoteVpc", equalTo("true"));
+
+        // Terraform's aws_vpc_peering_connection_options resource reads this back via Describe on
+        // every plan, not by re-issuing Modify — it must round-trip here or the provider sees
+        // permanent drift on a value it just set.
+        given()
+            .formParam("Action", "DescribeVpcPeeringConnections")
+            .formParam("VpcPeeringConnectionId.1", pcxId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeVpcPeeringConnectionsResponse.vpcPeeringConnectionSet.item"
+                    + ".accepterVpcInfo.peeringOptions.allowDnsResolutionFromRemoteVpc", equalTo("true"))
+            .body("DescribeVpcPeeringConnectionsResponse.vpcPeeringConnectionSet.item"
+                    + ".requesterVpcInfo.peeringOptions.allowDnsResolutionFromRemoteVpc", equalTo("true"));
     }
 
     /**

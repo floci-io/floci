@@ -3036,8 +3036,10 @@ public class Ec2QueryHandler {
     private String vpcPeeringConnectionXml(VpcPeeringConnection pcx) {
         XmlBuilder xml = new XmlBuilder()
                 .elem("vpcPeeringConnectionId", pcx.getVpcPeeringConnectionId());
-        xml.raw(vpcPeeringConnectionVpcInfoXml("requesterVpcInfo", pcx.getRequesterVpcInfo()));
-        xml.raw(vpcPeeringConnectionVpcInfoXml("accepterVpcInfo", pcx.getAccepterVpcInfo()));
+        xml.raw(vpcPeeringConnectionVpcInfoXml("requesterVpcInfo", pcx.getRequesterVpcInfo(),
+                pcx.isRequesterAllowRemoteVpcDnsResolution()));
+        xml.raw(vpcPeeringConnectionVpcInfoXml("accepterVpcInfo", pcx.getAccepterVpcInfo(),
+                pcx.isAccepterAllowRemoteVpcDnsResolution()));
         if (pcx.getStatus() != null) {
             xml.start("status")
                     .elem("code", pcx.getStatus().getCode())
@@ -3048,7 +3050,8 @@ public class Ec2QueryHandler {
         return xml.build();
     }
 
-    private String vpcPeeringConnectionVpcInfoXml(String elementName, VpcPeeringConnectionVpcInfo info) {
+    private String vpcPeeringConnectionVpcInfoXml(String elementName, VpcPeeringConnectionVpcInfo info,
+            boolean allowRemoteVpcDnsResolution) {
         if (info == null) {
             return "";
         }
@@ -3060,6 +3063,9 @@ public class Ec2QueryHandler {
         if (info.getCidrBlock() != null) {
             xml.elem("cidrBlock", info.getCidrBlock());
         }
+        xml.start("peeringOptions")
+                .elem("allowDnsResolutionFromRemoteVpc", String.valueOf(allowRemoteVpcDnsResolution))
+                .end("peeringOptions");
         xml.end(elementName);
         return xml.build();
     }
