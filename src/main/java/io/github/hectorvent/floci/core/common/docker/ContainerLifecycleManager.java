@@ -8,6 +8,7 @@ import com.github.dockerjava.api.command.CreateContainerResponse;
 import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.command.InspectVolumeResponse;
 import com.github.dockerjava.api.command.ListVolumesResponse;
+import com.github.dockerjava.api.exception.ConflictException;
 import com.github.dockerjava.api.exception.DockerException;
 import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.Bind;
@@ -138,11 +139,36 @@ public class ContainerLifecycleManager {
         }
         createCmd.withLabels(mergedLabels(spec.labels()));
 
-        CreateContainerResponse response = DockerRetry.call(
-                CREATE_MAX_ATTEMPTS, CREATE_RETRY_BACKOFF_MS, createCmd::exec);
-        String containerId = response.getId();
+        String containerId = createWithConflictRecovery(createCmd, spec);
         LOG.infov("Created container {0} (name={1}, not yet started)", containerId, spec.name());
         return containerId;
+    }
+
+    /**
+     * Runs the create call through {@link DockerRetry}. A create is not idempotent: if the
+     * daemon accepts a named create but the response is lost to a transient socket error, the
+     * retry's own attempt hits a 409 name conflict rather than the transient error it's built to
+     * catch, so {@link DockerRetry} rethrows it immediately. For a named spec that conflict means
+     * the earlier attempt actually won — look the container up by name and adopt its ID instead
+     * of failing and leaking it untracked.
+     */
+    private String createWithConflictRecovery(CreateContainerCmd createCmd, ContainerSpec spec) {
+        try {
+            CreateContainerResponse response = DockerRetry.call(
+                    CREATE_MAX_ATTEMPTS, CREATE_RETRY_BACKOFF_MS, createCmd::exec);
+            return response.getId();
+        } catch (ConflictException e) {
+            if (spec.name() != null) {
+                Optional<Container> existing = findByName(spec.name());
+                if (existing.isPresent()) {
+                    LOG.infov("Create retry for {0} hit a name conflict; an earlier attempt's "
+                            + "response was lost but the container exists, adopting {1}",
+                            spec.name(), existing.get().getId());
+                    return existing.get().getId();
+                }
+            }
+            throw e;
+        }
     }
 
     /**
