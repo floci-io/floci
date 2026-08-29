@@ -21,10 +21,17 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import io.quarkus.runtime.StartupEvent;
 import org.jboss.logging.Logger;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.function.Consumer;
 
 @ApplicationScoped
 public class RedshiftService {
@@ -187,10 +194,10 @@ public class RedshiftService {
         // so a plain stop+recreate would silently drop the cluster's data. Dump before stopping and
         // restore immediately after starting, using a throwaway temp file — no Snapshot resource is
         // created or exposed to the caller.
-        java.nio.file.Path tempDump;
+        Path tempDump;
         try {
-            tempDump = java.nio.file.Files.createTempFile("redshift-reboot-" + clusterIdentifier, ".sql");
-        } catch (java.io.IOException e) {
+            tempDump = Files.createTempFile("redshift-reboot-" + clusterIdentifier, ".sql");
+        } catch (IOException e) {
             throw new AwsException("InternalFailure", "Failed to prepare reboot dump file: " + e.getMessage(), 500);
         }
 
@@ -219,8 +226,8 @@ public class RedshiftService {
             throw new AwsException("InternalFailure", "Failed to reboot cluster " + clusterIdentifier + ": " + e.getMessage(), 500);
         } finally {
             try {
-                java.nio.file.Files.deleteIfExists(tempDump);
-            } catch (java.io.IOException ignored) {
+                Files.deleteIfExists(tempDump);
+            } catch (IOException ignored) {
                 // best-effort cleanup of a temp file
             }
         }
@@ -232,7 +239,43 @@ public class RedshiftService {
 
     // ── Snapshot Operations ──────────────────────────────────────────────────
 
+    // AWS constrains a snapshot identifier to 1-255 characters, first a letter, then
+    // letters, digits or single hyphens (no trailing or doubled hyphen). Enforcing that
+    // here also keeps the value safe to splice into the dump file path below: '.', '/'
+    // and '\' can never appear, so it cannot escape the account's dump directory.
+    private static void validateSnapshotIdentifier(String id) {
+        if (id == null || !id.matches("[a-zA-Z][a-zA-Z0-9-]{0,254}")
+                || id.contains("--") || id.endsWith("-")) {
+            throw new AwsException("InvalidParameterValue",
+                    "SnapshotIdentifier must be 1-255 characters, start with a letter, and contain "
+                    + "only letters, digits and non-consecutive hyphens", 400);
+        }
+    }
+
+    /** Absolute, normalised {@code <persistentPath>/redshift-dumps/<accountId>} for this request's account. */
+    private Path accountDumpDir() {
+        return Paths.get(config.storage().persistentPath())
+                .resolve("redshift-dumps")
+                .resolve(clusters.accountId())
+                .toAbsolutePath()
+                .normalize();
+    }
+
+    /**
+     * A stored {@code sqlDump} path is trusted only if it still resolves inside this account's
+     * dump directory. Guards restore/delete against a path persisted by an older, unvalidated
+     * createSnapshot (or by a different account).
+     */
+    private boolean isTrustedDumpPath(String storedPath) {
+        if (storedPath == null || storedPath.isBlank()) {
+            return false;
+        }
+        Path dir = accountDumpDir();
+        return Paths.get(storedPath).toAbsolutePath().normalize().startsWith(dir);
+    }
+
     public Snapshot createSnapshot(String snapshotIdentifier, String clusterIdentifier) {
+        validateSnapshotIdentifier(snapshotIdentifier);
         Optional<Cluster> clusterOpt = clusters.get(clusterIdentifier);
         if (clusterOpt.isEmpty()) {
             throw new AwsException("ClusterNotFound", "Cluster " + clusterIdentifier + " not found", 404);
@@ -254,14 +297,17 @@ public class RedshiftService {
             snapshot.setPort(5439);
         }
 
-        java.nio.file.Path dumpDir = java.nio.file.Paths.get(config.storage().persistentPath())
-                .resolve("redshift-dumps")
-                .resolve(clusters.accountId());
+        Path dumpDir = accountDumpDir();
+        // Defence in depth: validateSnapshotIdentifier already rejects path separators,
+        // but keep the containment check so the dump can never land outside the account dir.
+        Path dumpFile = dumpDir.resolve(snapshotIdentifier + ".sql").normalize();
+        if (!dumpFile.startsWith(dumpDir)) {
+            throw new AwsException("InvalidParameterValue", "Invalid snapshot identifier", 400);
+        }
         try {
-            java.nio.file.Files.createDirectories(dumpDir);
-            java.nio.file.Path dumpFile = dumpDir.resolve(snapshotIdentifier + ".sql");
+            Files.createDirectories(dumpDir);
             containerManager.takeSnapshot(clusters.accountId(), clusterIdentifier, cluster.getMasterUsername(), dumpFile);
-            snapshot.setSqlDump(dumpFile.toAbsolutePath().toString());
+            snapshot.setSqlDump(dumpFile.toString());
         } catch (AwsException e) {
             throw e;
         } catch (Exception e) {
@@ -305,12 +351,10 @@ public class RedshiftService {
         Snapshot snapshot = snapshotOpt.get();
         snapshots.delete(snapshotIdentifier);
         snapshots.flush();
-        if (snapshot.getSqlDump() != null) {
-            // sqlDump is the absolute path that was stored when the snapshot was created
-            java.nio.file.Path dumpFile = java.nio.file.Paths.get(snapshot.getSqlDump());
+        if (isTrustedDumpPath(snapshot.getSqlDump())) {
             try {
-                java.nio.file.Files.deleteIfExists(dumpFile);
-            } catch (java.io.IOException e) {
+                Files.deleteIfExists(Paths.get(snapshot.getSqlDump()));
+            } catch (IOException e) {
                 // ignore
             }
         }
@@ -359,8 +403,11 @@ public class RedshiftService {
             cluster.setEndpoint(endpoint);
 
             if (snapshot.getSqlDump() != null && !snapshot.getSqlDump().isBlank()) {
-                // sqlDump is the absolute path that was stored when the snapshot was created
-                java.nio.file.Path dumpFile = java.nio.file.Paths.get(snapshot.getSqlDump());
+                if (!isTrustedDumpPath(snapshot.getSqlDump())) {
+                    throw new AwsException("InvalidParameterValue",
+                            "Snapshot " + snapshotIdentifier + " has an unusable dump location", 400);
+                }
+                Path dumpFile = Paths.get(snapshot.getSqlDump());
                 containerManager.restoreSnapshot(clusters.accountId(), clusterIdentifier, username, dumpFile);
             }
 
@@ -506,7 +553,7 @@ public class RedshiftService {
     // ── Tagging Operations ───────────────────────────────────────────────────
 
     /** A resolved tag target: its current tags plus a sink that persists an updated map. */
-    private record TagHandle(Map<String, String> tags, java.util.function.Consumer<Map<String, String>> save) {}
+    private record TagHandle(Map<String, String> tags, Consumer<Map<String, String>> save) {}
 
     public record TaggedResource(String resourceName, String resourceType, String tagKey, String tagValue) {}
 
@@ -516,20 +563,20 @@ public class RedshiftService {
 
     public synchronized void createTags(String resourceName, Map<String, String> tags) {
         TagHandle handle = resolveTagHandle(resourceName);
-        Map<String, String> updated = new java.util.LinkedHashMap<>(handle.tags());
+        Map<String, String> updated = new LinkedHashMap<>(handle.tags());
         updated.putAll(tags);
         handle.save().accept(updated);
     }
 
-    public synchronized void deleteTags(String resourceName, java.util.Collection<String> tagKeys) {
+    public synchronized void deleteTags(String resourceName, Collection<String> tagKeys) {
         TagHandle handle = resolveTagHandle(resourceName);
-        Map<String, String> updated = new java.util.LinkedHashMap<>(handle.tags());
+        Map<String, String> updated = new LinkedHashMap<>(handle.tags());
         tagKeys.forEach(updated::remove);
         handle.save().accept(updated);
     }
 
     public List<TaggedResource> describeTags(String resourceName, String resourceType, List<String> tagKeysFilter) {
-        List<TaggedResource> result = new java.util.ArrayList<>();
+        List<TaggedResource> result = new ArrayList<>();
         if (resourceName != null && !resourceName.isBlank()) {
             TagHandle handle = resolveTagHandle(resourceName);
             String type = arnResourceType(resourceName);

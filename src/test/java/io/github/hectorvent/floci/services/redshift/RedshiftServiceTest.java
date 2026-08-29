@@ -64,6 +64,12 @@ class RedshiftServiceTest {
         service = new RedshiftService(sf, cm, config, regionResolver);
     }
 
+    /** Absolute dump path as {@code createSnapshot} now stores it: under {@code <persistentPath>/redshift-dumps/<accountId>}. */
+    private static String dumpPath(String snapshotId) {
+        return java.nio.file.Paths.get("target/test-data", "redshift-dumps", "111111111111", snapshotId + ".sql")
+                .toAbsolutePath().normalize().toString();
+    }
+
     @Test
     void testOnStartRecreatesContainersAcrossAccounts() {
         Cluster clusterA = new Cluster();
@@ -269,6 +275,28 @@ class RedshiftServiceTest {
     }
 
     @Test
+    void testCreateSnapshotRejectsTraversalOrMalformedIdentifier() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("my-cluster");
+        cluster.setMasterUsername("admin");
+        when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
+        when(snapshotBackend.get(anyString())).thenReturn(Optional.empty());
+
+        String[] bad = {
+                "../evil", "../../etc/cron.d/x", "/etc/passwd", "a/b", "a\\b",
+                "foo/../bar", "-leading", "trailing-", "double--hyphen", "1startsdigit", "", "has space",
+        };
+        for (String id : bad) {
+            AwsException ex = assertThrows(AwsException.class,
+                    () -> service.createSnapshot(id, "my-cluster"), "expected rejection for: " + id);
+            assertEquals("InvalidParameterValue", ex.getErrorCode(), id);
+            assertEquals(400, ex.getHttpStatus(), id);
+        }
+        verify(cm, never()).takeSnapshot(any(), any(), any(), any(java.nio.file.Path.class));
+        verify(snapshotBackend, never()).put(anyString(), any(Snapshot.class));
+    }
+
+    @Test
     void testModifyClusterUpdatesMetadataAndPassword() {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("my-cluster");
@@ -328,7 +356,7 @@ class RedshiftServiceTest {
     @Test
     void testDeleteSnapshot() {
         Snapshot s = new Snapshot("snap-1", "my-cluster", "available", 5439, "admin");
-        s.setSqlDump("snap-1.sql");
+        s.setSqlDump(dumpPath("snap-1"));
         when(snapshotBackend.get("snap-1")).thenReturn(Optional.of(s));
 
         Snapshot deleted = service.deleteSnapshot("snap-1");
@@ -352,7 +380,7 @@ class RedshiftServiceTest {
         sourceCluster.setMasterPassword("password123");
 
         Snapshot snapshot = new Snapshot("my-snapshot", "source-cluster", "available", 5439, "admin");
-        snapshot.setSqlDump("my-snapshot.sql");
+        snapshot.setSqlDump(dumpPath("my-snapshot"));
         when(clusterBackend.get("restored-cluster")).thenReturn(Optional.empty());
         when(clusterBackend.get("source-cluster")).thenReturn(Optional.of(sourceCluster));
         when(snapshotBackend.get("my-snapshot")).thenReturn(Optional.of(snapshot));
@@ -380,7 +408,7 @@ class RedshiftServiceTest {
     void testRestoreFromClusterSnapshotUsesStoredPasswordAfterSourceClusterDeleted() {
         Snapshot snapshot = new Snapshot("my-snapshot", "deleted-source", "available", 5439, "admin");
         snapshot.setMasterPassword("original-secret");
-        snapshot.setSqlDump("my-snapshot.sql");
+        snapshot.setSqlDump(dumpPath("my-snapshot"));
         when(clusterBackend.get("restored-cluster")).thenReturn(Optional.empty());
         // Source cluster no longer exists, but the snapshot itself still carries the original password
         when(clusterBackend.get("deleted-source")).thenReturn(Optional.empty());
@@ -397,7 +425,7 @@ class RedshiftServiceTest {
     @Test
     void testRestoreFromClusterSnapshotFallsBackToAdminWhenSourceClusterGone() {
         Snapshot snapshot = new Snapshot("my-snapshot", "deleted-source", "available", 5439, "admin");
-        snapshot.setSqlDump("my-snapshot.sql");
+        snapshot.setSqlDump(dumpPath("my-snapshot"));
         when(clusterBackend.get("restored-cluster")).thenReturn(Optional.empty());
         when(clusterBackend.get("deleted-source")).thenReturn(Optional.empty());
         when(snapshotBackend.get("my-snapshot")).thenReturn(Optional.of(snapshot));

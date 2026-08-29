@@ -13,8 +13,12 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class RedshiftQueryHandler {
@@ -514,7 +518,7 @@ public class RedshiftQueryHandler {
     private static List<String> memberList(MultivaluedMap<String, String> params, String baseName) {
         return params.keySet().stream()
                 .filter(key -> key.matches(memberKeyRegex(baseName)))
-                .sorted(java.util.Comparator.comparingInt(RedshiftQueryHandler::numericSuffix))
+                .sorted(Comparator.comparingInt(RedshiftQueryHandler::numericSuffix))
                 .map(params::getFirst)
                 .filter(value -> value != null && !value.isBlank())
                 .toList();
@@ -523,7 +527,7 @@ public class RedshiftQueryHandler {
     // The AWS Query protocol accepts both the generic ".member.N" form and each shape's own
     // locationName (e.g. the real Redshift SDK sends "SubnetIds.SubnetIdentifier.N", not "SubnetIds.member.N").
     private static String memberKeyRegex(String baseName) {
-        String quoted = java.util.regex.Pattern.quote(baseName);
+        String quoted = Pattern.quote(baseName);
         return switch (baseName) {
             case "SubnetIds" -> quoted + "(\\.member|\\.SubnetIdentifier)?\\.\\d+";
             case "VpcSecurityGroupIds" -> quoted + "(\\.member|\\.VpcSecurityGroupId)?\\.\\d+";
@@ -545,7 +549,7 @@ public class RedshiftQueryHandler {
     }
 
     private static List<Parameter> parseParameters(MultivaluedMap<String, String> params) {
-        List<Parameter> parsed = new java.util.ArrayList<>();
+        List<Parameter> parsed = new ArrayList<>();
         readParameters(params, "Parameters.member", parsed);
         readParameters(params, "Parameters.Parameter", parsed);
         return parsed;
@@ -563,7 +567,7 @@ public class RedshiftQueryHandler {
     }
 
     private static Map<String, String> parseTags(MultivaluedMap<String, String> params) {
-        Map<String, String> tags = new java.util.LinkedHashMap<>();
+        Map<String, String> tags = new LinkedHashMap<>();
         readTags(params, "Tags.member", tags);
         readTags(params, "Tags.Tag", tags);
         return tags;
