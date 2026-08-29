@@ -615,17 +615,25 @@ public class Ec2QueryHandler {
 
         String iamInstanceProfileArn = resolveIamInstanceProfileArn(p);
 
-        // Parse TagSpecifications
+        // Parse TagSpecifications. AWS applies each specification to exactly the resource
+        // type it names, so the interfaces RunInstances creates are tagged only by a
+        // ResourceType=network-interface specification - never by the instance's own tags.
         List<Tag> instanceTags = new ArrayList<>();
+        List<Tag> networkInterfaceTags = new ArrayList<>();
         for (int i = 1; ; i++) {
             String resType = p.getFirst("TagSpecification." + i + ".ResourceType");
             if (resType == null) break;
-            if ("instance".equals(resType)) {
+            List<Tag> target = switch (resType) {
+                case "instance" -> instanceTags;
+                case "network-interface" -> networkInterfaceTags;
+                default -> null;
+            };
+            if (target != null) {
                 for (int j = 1; ; j++) {
                     String k = p.getFirst("TagSpecification." + i + ".Tag." + j + ".Key");
                     if (k == null) break;
                     String v = p.getFirst("TagSpecification." + i + ".Tag." + j + ".Value");
-                    instanceTags.add(new Tag(k, v));
+                    target.add(new Tag(k, v));
                 }
             }
         }
@@ -652,6 +660,16 @@ public class Ec2QueryHandler {
         Reservation res = service.runInstances(region, imageId, instanceType, minCount, maxCount,
                 keyName, sgIds, subnetId, clientToken, instanceTags, userData, iamInstanceProfileArn,
                 associatePublicIp);
+
+        if (!networkInterfaceTags.isEmpty()) {
+            List<String> eniIds = new ArrayList<>();
+            for (Instance inst : res.getInstances()) {
+                inst.getNetworkInterfaces().forEach(eni -> eniIds.add(eni.getNetworkInterfaceId()));
+            }
+            if (!eniIds.isEmpty()) {
+                service.createTags(region, eniIds, networkInterfaceTags);
+            }
+        }
 
         XmlBuilder xml = new XmlBuilder()
                 .start("RunInstancesResponse", AwsNamespaces.EC2)
