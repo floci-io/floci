@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.services.cognito.model.ResourceServerScope;
 import io.github.hectorvent.floci.services.cognito.model.UserPool;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolClient;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolClientSecret;
+import io.github.hectorvent.floci.services.cognito.model.UserPoolDomain;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
@@ -57,6 +58,9 @@ public class CognitoJsonHandler {
             case "ListResourceServers" -> handleListResourceServers(request);
             case "UpdateResourceServer" -> handleUpdateResourceServer(request);
             case "DeleteResourceServer" -> handleDeleteResourceServer(request);
+            case "CreateUserPoolDomain" -> handleCreateUserPoolDomain(request);
+            case "DescribeUserPoolDomain" -> handleDescribeUserPoolDomain(request);
+            case "DeleteUserPoolDomain" -> handleDeleteUserPoolDomain(request);
             case "AdminResetUserPassword" -> handleAdminResetUserPassword(request);
             case "AdminCreateUser" -> handleAdminCreateUser(request);
             case "AdminGetUser" -> handleAdminGetUser(request);
@@ -339,6 +343,64 @@ public class CognitoJsonHandler {
                 request.path("Identifier").asText()
         );
         return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleCreateUserPoolDomain(JsonNode request) {
+        JsonNode customDomainConfigNode = request.path("CustomDomainConfig");
+        Map<String, Object> customDomainConfig = customDomainConfigNode.isObject()
+                ? objectMapper.convertValue(customDomainConfigNode, new TypeReference<Map<String, Object>>() {})
+                : null;
+        UserPoolDomain domain = service.createUserPoolDomain(
+                request.path("Domain").asText(),
+                request.path("UserPoolId").asText(),
+                customDomainConfig,
+                request.has("ManagedLoginVersion") ? request.path("ManagedLoginVersion").asInt() : null
+        );
+        ObjectNode response = objectMapper.createObjectNode();
+        if (domain.isCustomDomain()) {
+            response.put("CloudFrontDomain", domain.getCloudFrontDistribution());
+        }
+        if (domain.getManagedLoginVersion() != null) {
+            response.put("ManagedLoginVersion", domain.getManagedLoginVersion());
+        }
+        return Response.ok(response).build();
+    }
+
+    private Response handleDescribeUserPoolDomain(JsonNode request) {
+        UserPoolDomain domain = service.describeUserPoolDomain(request.path("Domain").asText());
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("DomainDescription", userPoolDomainToNode(domain));
+        return Response.ok(response).build();
+    }
+
+    private Response handleDeleteUserPoolDomain(JsonNode request) {
+        service.deleteUserPoolDomain(
+                request.path("Domain").asText(),
+                request.path("UserPoolId").asText()
+        );
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private ObjectNode userPoolDomainToNode(UserPoolDomain d) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("AWSAccountId", d.getAwsAccountId());
+        if (d.getCloudFrontDistribution() != null) {
+            node.put("CloudFrontDistribution", d.getCloudFrontDistribution());
+        }
+        if (d.isCustomDomain()) {
+            ObjectNode customDomainConfig = node.putObject("CustomDomainConfig");
+            customDomainConfig.put("CertificateArn", d.getCertificateArn());
+            customDomainConfig.put("SecurityPolicy", d.getSecurityPolicy());
+        }
+        node.put("Domain", d.getDomain());
+        if (d.getManagedLoginVersion() != null) {
+            node.put("ManagedLoginVersion", d.getManagedLoginVersion());
+        }
+        node.put("S3Bucket", d.getS3Bucket());
+        node.put("Status", d.getStatus());
+        node.put("UserPoolId", d.getUserPoolId());
+        node.put("Version", d.getVersion());
+        return node;
     }
 
     private Response handleAdminCreateUser(JsonNode request) {
@@ -731,6 +793,11 @@ public class CognitoJsonHandler {
 
         return node;
     }
+
+
+    @SuppressWarnings("unchecked")
+
+
 
     private ObjectNode clientToDescriptionNode(UserPoolClient c) {
         ObjectNode node = objectMapper.createObjectNode();
