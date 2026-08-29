@@ -198,9 +198,6 @@ public class ApiGatewayV2OpenApiImporter {
      */
     private static void collectUnresolvedSecurity(OpenAPI openAPI, List<AuthorizerSpec> specs,
                                                   List<String> warnings) {
-        if (openAPI.getPaths() == null) {
-            return;
-        }
         java.util.Set<String> bindable = new java.util.HashSet<>();
         specs.forEach(spec -> bindable.add(spec.schemeName()));
 
@@ -220,21 +217,33 @@ public class ApiGatewayV2OpenApiImporter {
                 reported.add("Security requirement (" + names + ") on " + routeKey
                         + " does not resolve to a supported authorizer; the route is imported as NONE"
                         + " and will accept unauthenticated requests");
+                return;
             }
+            // Several schemes inside one SecurityRequirement is OpenAPI's AND: the caller must
+            // satisfy all of them. A route carries exactly one authorizer, so only the first
+            // resolvable scheme is enforced and the rest are dropped.
+            security.stream()
+                    .filter(requirement -> requirement.keySet().size() > 1)
+                    .findFirst()
+                    .ifPresent(requirement -> {
+                        String enforced = requirement.keySet().stream()
+                                .filter(bindable::contains)
+                                .findFirst()
+                                .orElse(null);
+                        reported.add("Security requirement on " + routeKey + " combines ("
+                                + String.join(", ", requirement.keySet())
+                                + "); HTTP API routes carry a single authorizer, so only "
+                                + enforced + " is enforced and the remaining schemes are dropped");
+                    });
         };
 
         List<SecurityRequirement> globalSecurity = openAPI.getSecurity();
-        openAPI.getPaths().forEach((path, pathItem) -> {
-            if (pathItem == null) {
-                return;
-            }
-            pathItem.readOperationsMap().forEach((method, operation) -> {
-                List<SecurityRequirement> security =
-                        operation != null && operation.getSecurity() != null
-                                ? operation.getSecurity()
-                                : globalSecurity;
-                check.accept(method.name() + " " + path, security);
-            });
+        forEachImportedOperation(openAPI, (method, path, operation) -> {
+            List<SecurityRequirement> security =
+                    operation != null && operation.getSecurity() != null
+                            ? operation.getSecurity()
+                            : globalSecurity;
+            check.accept(method + " " + path, security);
         });
         warnings.addAll(reported);
     }
@@ -311,20 +320,11 @@ public class ApiGatewayV2OpenApiImporter {
                 && !openAPI.getComponents().getSchemas().isEmpty()) {
             importInfo.add("Ignoring component schemas; HTTP APIs do not perform request validation");
         }
-        if (openAPI.getPaths() == null) {
-            return;
-        }
-        openAPI.getPaths().forEach((path, pathItem) -> {
-            if (pathItem == null) {
-                return;
+        forEachImportedOperation(openAPI, (method, path, operation) -> {
+            if (operation != null && extensionAsMap(operation.getExtensions(), EXT_INTEGRATION) == null) {
+                importInfo.add("No " + EXT_INTEGRATION + " for " + method + " " + path
+                        + "; the route was created without an integration");
             }
-            pathItem.readOperationsMap().forEach((method, operation) -> {
-                if (operation != null
-                        && extensionAsMap(operation.getExtensions(), EXT_INTEGRATION) == null) {
-                    importInfo.add("No " + EXT_INTEGRATION + " for " + method.name() + " " + path
-                            + "; the route was created without an integration");
-                }
-            });
         });
     }
 
@@ -337,31 +337,43 @@ public class ApiGatewayV2OpenApiImporter {
 
     // ──────────────────────────── Spec application ────────────────────────────
 
+    /** Receives every operation the import turns into a route. */
+    @FunctionalInterface
+    private interface OperationVisitor {
+        void visit(String method, String path, Operation operation);
+    }
+
+    /**
+     * Single enumeration of the operations an import materialises, so route creation and the
+     * diagnostic passes can never disagree about which they are. The
+     * {@code x-amazon-apigateway-any-method} extension is not part of {@code readOperationsMap()},
+     * and walking that map alone left ANY-method routes unexamined by the warning collectors.
+     */
+    private static void forEachImportedOperation(OpenAPI openAPI, OperationVisitor visitor) {
+        if (openAPI.getPaths() == null) {
+            return;
+        }
+        openAPI.getPaths().forEach((path, pathItem) -> {
+            if (pathItem == null) {
+                return;
+            }
+            pathItem.readOperationsMap()
+                    .forEach((method, operation) -> visitor.visit(method.name(), path, operation));
+            Operation anyMethod = anyMethodOperation(pathItem);
+            if (anyMethod != null) {
+                visitor.visit("ANY", path, anyMethod);
+            }
+        });
+    }
+
     private void applySpec(String region, String apiId, ImportPlan plan) {
         OpenAPI openAPI = plan.openAPI();
         Map<String, SchemeBinding> schemes = createAuthorizers(region, apiId, plan);
         List<SecurityRequirement> globalSecurity = openAPI.getSecurity();
 
-        if (openAPI.getPaths() == null) {
-            return;
-        }
-        for (Map.Entry<String, PathItem> pathEntry : openAPI.getPaths().entrySet()) {
-            String path = plan.pathPrefix() + pathEntry.getKey();
-            PathItem pathItem = pathEntry.getValue();
-            if (pathItem == null) {
-                continue;
-            }
-
-            for (Map.Entry<PathItem.HttpMethod, Operation> opEntry : pathItem.readOperationsMap().entrySet()) {
-                createRouteForOperation(region, apiId, opEntry.getKey().name(), path,
-                        opEntry.getValue(), schemes, globalSecurity);
-            }
-
-            Operation anyMethod = anyMethodOperation(pathItem);
-            if (anyMethod != null) {
-                createRouteForOperation(region, apiId, "ANY", path, anyMethod, schemes, globalSecurity);
-            }
-        }
+        forEachImportedOperation(openAPI, (method, path, operation) ->
+                createRouteForOperation(region, apiId, method, plan.pathPrefix() + path,
+                        operation, schemes, globalSecurity));
     }
 
     private void createRouteForOperation(String region, String apiId, String method, String path,
@@ -405,7 +417,7 @@ public class ApiGatewayV2OpenApiImporter {
         return method.toUpperCase(Locale.ROOT) + " " + normalized;
     }
 
-    private Operation anyMethodOperation(PathItem pathItem) {
+    private static Operation anyMethodOperation(PathItem pathItem) {
         Map<String, Object> anyMethod = extensionAsMap(pathItem.getExtensions(), EXT_ANY_METHOD);
         if (anyMethod == null) {
             return null;

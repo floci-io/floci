@@ -492,4 +492,84 @@ class ApiGatewayV2OpenApiImportTest {
                 .when().put("/v2/apis")
                 .then().statusCode(400);
     }
+
+    @Test
+    @Order(15)
+    void anyMethodSecurityIsCheckedToo() throws Exception {
+        // x-amazon-apigateway-any-method is not part of readOperationsMap(), so a diagnostic pass
+        // that walks only that map leaves ANY routes unexamined.
+        String spec = """
+                {
+                  "openapi": "3.0.1",
+                  "info": {"title": "AnyMethodSecurityApi", "version": "1.0"},
+                  "components": {"securitySchemes": {"BearerAuth": {"type": "http", "scheme": "bearer"}}},
+                  "paths": {"/proxy": {"x-amazon-apigateway-any-method": {
+                    "security": [{"BearerAuth": []}],
+                    "x-amazon-apigateway-integration": {
+                      "type": "http_proxy", "httpMethod": "ANY", "uri": "https://example.com",
+                      "payloadFormatVersion": "1.0"}
+                  }}}
+                }
+                """;
+
+        String response = given().contentType(ContentType.JSON)
+                .body(envelope(spec))
+                .when().put("/v2/apis")
+                .then().statusCode(201)
+                .extract().asString();
+        String apiId = mapper.readTree(response).get("apiId").asText();
+
+        JsonNode warnings = get("/v2/apis/" + apiId).get("warnings");
+        assertNotNull(warnings, "ANY-method security must be examined like any other operation");
+        assertTrue(warnings.toString().contains("ANY /proxy"));
+
+        assertNotNull(findRoute(get("/v2/apis/" + apiId + "/routes"), "ANY /proxy"));
+
+        given().contentType(ContentType.JSON)
+                .queryParam("failOnWarnings", "true")
+                .body(envelope(spec))
+                .when().put("/v2/apis")
+                .then().statusCode(400);
+    }
+
+    @Test
+    @Order(16)
+    void compoundSecurityRequirementIsWarnedAbout() throws Exception {
+        // Two schemes inside one requirement is AND. A route holds one authorizer, so the second
+        // cannot be enforced — that has to be visible rather than silently dropped.
+        String spec = """
+                {
+                  "openapi": "3.0.1",
+                  "info": {"title": "CompoundSecurityApi", "version": "1.0"},
+                  "components": {"securitySchemes": {
+                    "LambdaAuth": {
+                      "type": "apiKey", "name": "Authorization", "in": "header",
+                      "x-amazon-apigateway-authorizer": {
+                        "type": "request",
+                        "authorizerUri": "arn:aws:lambda:us-east-1:000000000000:function:auth",
+                        "authorizerPayloadFormatVersion": "2.0",
+                        "identitySource": "$request.header.Authorization"
+                      }
+                    },
+                    "ExtraKey": {"type": "apiKey", "name": "X-Extra", "in": "header"}
+                  }},
+                  "paths": {"/both": {"get": {"security": [{"LambdaAuth": [], "ExtraKey": []}]}}}
+                }
+                """;
+
+        String response = given().contentType(ContentType.JSON)
+                .body(envelope(spec))
+                .when().put("/v2/apis")
+                .then().statusCode(201)
+                .extract().asString();
+        String apiId = mapper.readTree(response).get("apiId").asText();
+
+        String warnings = get("/v2/apis/" + apiId).get("warnings").toString();
+        assertTrue(warnings.contains("GET /both"), warnings);
+        assertTrue(warnings.contains("ExtraKey"), warnings);
+
+        // The resolvable half is still enforced.
+        JsonNode route = findRoute(get("/v2/apis/" + apiId + "/routes"), "GET /both");
+        assertEquals("CUSTOM", route.get("authorizationType").asText());
+    }
 }
