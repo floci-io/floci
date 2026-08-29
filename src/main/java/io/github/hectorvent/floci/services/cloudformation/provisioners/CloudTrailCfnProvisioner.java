@@ -53,6 +53,7 @@ public class CloudTrailCfnProvisioner implements CfnResourceProvisioner {
             boolean isOrganizationTrail = resolved.path("IsOrganizationTrail").asBoolean(false);
             trail = trailService.createTrail(ctx.region(), name, s3BucketName, s3KeyPrefix, snsTopicName,
                     includeGlobalServiceEvents, isMultiRegionTrail, enableLogFileValidation, isOrganizationTrail);
+            resource.setPhysicalId(trail.trailArn());
             applySelectors(resolved, ctx.region(), name);
             if (resolved.path("IsLogging").asBoolean(false)) {
                 trailService.startLogging(ctx.region(), name);
@@ -70,8 +71,12 @@ public class CloudTrailCfnProvisioner implements CfnResourceProvisioner {
                     snsTopicName, includeGlobalServiceEvents, isMultiRegionTrail, enableLogFileValidation,
                     isOrganizationTrail);
             applySelectors(resolved, ctx.region(), previousPhysicalId);
-            if (resolved.has("IsLogging") && resolved.path("IsLogging").asBoolean()) {
-                trailService.startLogging(ctx.region(), previousPhysicalId);
+            if (resolved.has("IsLogging")) {
+                if (resolved.path("IsLogging").asBoolean()) {
+                    trailService.startLogging(ctx.region(), previousPhysicalId);
+                } else {
+                    trailService.stopLogging(ctx.region(), previousPhysicalId);
+                }
             }
         }
 

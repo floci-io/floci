@@ -103,6 +103,30 @@ class CloudTrailCfnProvisionerTest {
 
         assertThrows(io.github.hectorvent.floci.core.common.AwsException.class,
                 () -> provisioner.provision(resource, props, context()));
+        assertEquals(created.trailArn(), resource.getPhysicalId(),
+                "physicalId must be recorded right after createTrail succeeds, "
+                        + "before selector validation can fail and leak the created trail");
+    }
+
+    @Test
+    void updateStopsLoggingWhenIsLoggingExplicitlyFalse() {
+        Trail updated = trail("audit-trail", "arn:aws:cloudtrail:us-east-1:111122223333:trail/audit-trail");
+        when(trailService.updateTrail(eq("us-east-1"),
+                eq("arn:aws:cloudtrail:us-east-1:111122223333:trail/audit-trail"),
+                eq("dest-bucket"), any(), any(), any(), any(), any(), any()))
+                .thenReturn(updated);
+
+        ObjectNode props = mapper.createObjectNode()
+                .put("TrailName", "audit-trail")
+                .put("S3BucketName", "dest-bucket")
+                .put("IsLogging", false);
+        StackResource resource = resource();
+        resource.setPhysicalId("arn:aws:cloudtrail:us-east-1:111122223333:trail/audit-trail");
+
+        provisioner.provision(resource, props, context());
+
+        verify(trailService).stopLogging("us-east-1", "arn:aws:cloudtrail:us-east-1:111122223333:trail/audit-trail");
+        verify(trailService, never()).startLogging(anyString(), anyString());
     }
 
     @Test
