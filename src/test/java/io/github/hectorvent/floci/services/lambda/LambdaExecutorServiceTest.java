@@ -174,4 +174,38 @@ class LambdaExecutorServiceTest {
         assertEquals("Unhandled", result.getFunctionError());
         assertTrue(new String(result.getPayload()).contains("InvocationError"));
     }
+
+    @Test
+    void physicalAdmissionTimeoutReturnsBoundedErrorAndReleasesLogicalPermit() {
+        LambdaConcurrencyLimiter.Permit logicalPermit = mock(LambdaConcurrencyLimiter.Permit.class);
+        when(concurrencyLimiter.acquire(any())).thenReturn(logicalPermit);
+        when(warmPool.acquire(any())).thenThrow(new LambdaEnvironmentLimiter.AdmissionTimeoutException(
+                fn.getFunctionArn(), 4, 0));
+
+        InvokeResult result = executor.invoke(fn, "{}".getBytes(), InvocationType.RequestResponse);
+
+        verify(logicalPermit).close();
+        verify(warmPool, never()).release(any());
+        verify(warmPool, never()).destroyHandle(any());
+        assertEquals(200, result.getStatusCode());
+        assertEquals("Unhandled", result.getFunctionError());
+        assertTrue(new String(result.getPayload()).contains("Lambda.EnvironmentTimeout"));
+    }
+
+    @Test
+    void physicalAdmissionInterruptionReturnsBoundedErrorAndReleasesLogicalPermit() {
+        LambdaConcurrencyLimiter.Permit logicalPermit = mock(LambdaConcurrencyLimiter.Permit.class);
+        when(concurrencyLimiter.acquire(any())).thenReturn(logicalPermit);
+        when(warmPool.acquire(any())).thenThrow(new LambdaEnvironmentLimiter.AdmissionInterruptedException(
+                fn.getFunctionArn(), new InterruptedException()));
+
+        InvokeResult result = executor.invoke(fn, "{}".getBytes(), InvocationType.RequestResponse);
+
+        verify(logicalPermit).close();
+        verify(warmPool, never()).release(any());
+        verify(warmPool, never()).destroyHandle(any());
+        assertEquals(200, result.getStatusCode());
+        assertEquals("Unhandled", result.getFunctionError());
+        assertTrue(new String(result.getPayload()).contains("Invocation interrupted"));
+    }
 }

@@ -11,6 +11,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.util.OptionalInt;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -43,6 +44,18 @@ class WarmPoolTest {
         when(lambda.ephemeral()).thenReturn(false);
         when(lambda.containerIdleTimeoutSeconds()).thenReturn(0);
         return new WarmPool(containerLauncher, config);
+    }
+
+    private WarmPool buildBoundedPool(int maxPhysicalEnvironments) {
+        EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
+        EmulatorConfig.LambdaServiceConfig lambda = mock(EmulatorConfig.LambdaServiceConfig.class);
+        when(config.services()).thenReturn(services);
+        when(services.lambda()).thenReturn(lambda);
+        when(lambda.ephemeral()).thenReturn(false);
+        when(lambda.containerIdleTimeoutSeconds()).thenReturn(0);
+        when(lambda.maxPhysicalEnvironments()).thenReturn(OptionalInt.of(maxPhysicalEnvironments));
+        return new WarmPool(containerLauncher, config,
+                new LambdaEnvironmentLimiter(maxPhysicalEnvironments, 1));
     }
 
     @Test
@@ -276,6 +289,86 @@ class WarmPoolTest {
 
         pool.release(reacquiredLatest);
         pool.release(reacquiredVersion);
+        pool.shutdown();
+    }
+
+    @Test
+    void accountsUseSeparateWarmPoolsForIdenticallyNamedFunctions() {
+        WarmPool pool = buildPool();
+        pool.init();
+
+        LambdaFunction accountA = mock(LambdaFunction.class);
+        LambdaFunction accountB = mock(LambdaFunction.class);
+        when(accountA.getFunctionName()).thenReturn("shared-name");
+        when(accountB.getFunctionName()).thenReturn("shared-name");
+        when(accountA.getFunctionArn())
+                .thenReturn("arn:aws:lambda:us-east-1:111111111111:function:shared-name");
+        when(accountB.getFunctionArn())
+                .thenReturn("arn:aws:lambda:us-east-1:222222222222:function:shared-name");
+
+        ContainerHandle handleA = new ContainerHandle("cid-account-a", "shared-name", null, ContainerState.WARM);
+        ContainerHandle handleB = new ContainerHandle("cid-account-b", "shared-name", null, ContainerState.WARM);
+        when(containerLauncher.launch(any())).thenReturn(handleA, handleB);
+        when(containerLauncher.isAlive(any())).thenReturn(true);
+
+        pool.release(pool.acquire(accountA));
+        pool.release(pool.acquire(accountB));
+
+        assertSame(handleA, pool.acquire(accountA));
+        assertSame(handleB, pool.acquire(accountB));
+        verify(containerLauncher, times(2)).launch(any());
+
+        pool.release(handleA);
+        pool.release(handleB);
+        pool.shutdown();
+    }
+
+    @Test
+    void boundedProfileRetainsAtMostConfiguredIdleEnvironmentsAcrossFunctions() {
+        WarmPool pool = buildBoundedPool(1);
+        pool.init();
+
+        LambdaFunction accountA = mock(LambdaFunction.class);
+        LambdaFunction accountB = mock(LambdaFunction.class);
+        when(accountA.getFunctionName()).thenReturn("first");
+        when(accountB.getFunctionName()).thenReturn("second");
+        when(accountA.getFunctionArn())
+                .thenReturn("arn:aws:lambda:us-east-1:111111111111:function:first");
+        when(accountB.getFunctionArn())
+                .thenReturn("arn:aws:lambda:us-east-1:222222222222:function:second");
+
+        ContainerHandle first = new ContainerHandle("cid-first", "first", null, ContainerState.WARM);
+        ContainerHandle second = new ContainerHandle("cid-second", "second", null, ContainerState.WARM);
+        when(containerLauncher.launch(any())).thenReturn(first, second);
+
+        pool.release(pool.acquire(accountA));
+        assertEquals(1, pool.idleContainerCount());
+        pool.release(pool.acquire(accountB));
+
+        assertEquals(1, pool.idleContainerCount());
+        verify(containerLauncher).stop(second);
+        assertEquals(1, pool.status().configuredLimit());
+        assertEquals(0, pool.status().inFlight());
+        pool.shutdown();
+    }
+
+    @Test
+    void destroyHandleReleasesPhysicalAdmissionPermit() {
+        WarmPool pool = buildBoundedPool(1);
+        pool.init();
+        LambdaFunction fn = mock(LambdaFunction.class);
+        when(fn.getFunctionName()).thenReturn("destroy-permit");
+        when(fn.getFunctionArn())
+                .thenReturn("arn:aws:lambda:us-east-1:000000000000:function:destroy-permit");
+        ContainerHandle handle = new ContainerHandle("cid-destroy-permit", "destroy-permit", null,
+                ContainerState.WARM);
+        when(containerLauncher.launch(any())).thenReturn(handle);
+
+        assertSame(handle, pool.acquire(fn));
+        assertEquals(1, pool.status().inFlight());
+        pool.destroyHandle(handle);
+        assertEquals(0, pool.status().inFlight());
+        verify(containerLauncher).stop(handle);
         pool.shutdown();
     }
 

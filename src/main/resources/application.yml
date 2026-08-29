@@ -258,6 +258,8 @@ floci:
       code-path: ./data/lambda-code
       poll-interval-ms: 1000
       container-idle-timeout-seconds: 300
+      # max-physical-environments: 4            # Optional cap for concurrently running Docker environments; unset preserves the historical behavior
+      physical-environment-wait-timeout-seconds: 15 # FLOCI_SERVICES_LAMBDA_PHYSICAL_ENVIRONMENT_WAIT_TIMEOUT_SECONDS
       region-concurrency-limit: 1000
       unreserved-concurrency-min: 100
       # aws-config-path:                      # Host path to bind-mount (read-only) at /opt/aws-config for real credential discovery

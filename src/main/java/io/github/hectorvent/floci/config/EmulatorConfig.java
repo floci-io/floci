@@ -1740,6 +1740,27 @@ public interface EmulatorConfig {
         @WithDefault("300")
         int containerIdleTimeoutSeconds();
 
+        /**
+         * Optional hard ceiling for physical Lambda execution environments. When absent,
+         * Floci keeps its historical unbounded Docker-environment behavior; when present,
+         * invocation admission is queued fairly behind this number of concurrently running
+         * environments. The logical Lambda concurrency limit remains independent.
+         *
+         * <p>Env var: FLOCI_SERVICES_LAMBDA_MAX_PHYSICAL_ENVIRONMENTS
+         */
+        OptionalInt maxPhysicalEnvironments();
+
+        /**
+         * Maximum time an invocation waits for a physical execution-environment slot when
+         * {@link #maxPhysicalEnvironments()} is configured. This is intentionally separate
+         * from the function timeout: AWS starts the function timeout after the runtime receives
+         * the invocation. The constrained Samva profile uses the 15-second default.
+         *
+         * <p>Env var: FLOCI_SERVICES_LAMBDA_PHYSICAL_ENVIRONMENT_WAIT_TIMEOUT_SECONDS
+         */
+        @WithDefault("15")
+        int physicalEnvironmentWaitTimeoutSeconds();
+
         /** Docker network to attach Lambda containers to. Empty = default bridge. */
         Optional<String> dockerNetwork();
 

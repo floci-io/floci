@@ -85,6 +85,25 @@ public class LambdaExecutorService {
         ContainerHandle handle;
         try {
             handle = warmPool.acquire(fn);
+        } catch (LambdaEnvironmentLimiter.AdmissionTimeoutException e) {
+            LOG.warnv("Physical environment admission timed out for function {0}: {1}",
+                    fn.getFunctionName(), e.getMessage());
+            return new InvokeResult(200, "Unhandled",
+                    buildErrorPayload(e.getMessage(), "Lambda.EnvironmentTimeout"),
+                    null, requestId);
+        } catch (LambdaEnvironmentLimiter.AdmissionInterruptedException e) {
+            // LambdaEnvironmentLimiter restores the interrupted flag before exposing this
+            // unchecked exception, so preserve it while returning a bounded invocation error.
+            LOG.warnv("Physical environment admission interrupted for function {0}", fn.getFunctionName());
+            return new InvokeResult(200, "Unhandled",
+                    buildErrorPayload("Invocation interrupted while waiting for a Lambda execution environment",
+                            "Interrupted"),
+                    null, requestId);
+        } catch (LambdaEnvironmentLimiter.AdmissionClosedException e) {
+            LOG.warnv("Physical environment admission is closed for function {0}", fn.getFunctionName());
+            return new InvokeResult(200, "Unhandled",
+                    buildErrorPayload(e.getMessage(), "Lambda.EnvironmentUnavailable"),
+                    null, requestId);
         } catch (Exception e) {
             LOG.warnv("Failed to acquire container for function {0}: {1}", fn.getFunctionName(), e.getMessage());
             return new InvokeResult(200, "Unhandled",

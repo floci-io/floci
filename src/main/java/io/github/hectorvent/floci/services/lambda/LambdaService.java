@@ -698,7 +698,9 @@ public class LambdaService implements ResourceProvider {
         LambdaFunction fn = getFunction(region, functionName); // throws 404 if not found
         functionName = fn.getFunctionName();
         String arn = fn.getFunctionArn();
-        warmPool.drainFunction(functionName);
+        // Include the owner account so deleting one tenant's function cannot drain
+        // an identically named warm environment belonging to another tenant.
+        warmPool.drainFunction(fn);
         // Take the same per-function lock used by Put/DeleteFunctionConcurrency
         // so a concurrent concurrency mutation cannot interleave with the
         // limiter reset and store delete and leave the two views out of sync.
