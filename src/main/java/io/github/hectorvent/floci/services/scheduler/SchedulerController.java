@@ -523,8 +523,8 @@ public class SchedulerController {
 
     /**
      * Reads one of the {@code EcsParameters} lists of objects. An element that is not an object is a
-     * malformed body, which AWS answers with {@code ValidationException}, so the conversion failure
-     * is named here instead of escaping as a server error.
+     * malformed body, which AWS answers with 400 {@code SerializationException}, so the conversion
+     * failure is named here instead of escaping as a server error.
      */
     private List<Map<String, Object>> mapList(String field, JsonNode node) {
         try {
@@ -532,20 +532,32 @@ public class SchedulerController {
                     objectMapper.getTypeFactory().constructCollectionType(List.class,
                             objectMapper.getTypeFactory().constructMapType(Map.class, String.class, Object.class)));
         } catch (IllegalArgumentException e) {
-            throw new AwsException("ValidationException",
-                    "EcsParameters " + field + " must be a list of objects.", 400);
+            throw malformedList(field, "objects");
         }
     }
 
-    /** {@link #mapList(String, JsonNode)} for the {@code awsvpcConfiguration} lists of strings. */
+    /**
+     * {@link #mapList(String, JsonNode)} for the {@code awsvpcConfiguration} lists of strings.
+     * A number or a boolean is checked before the conversion because Jackson writes it out as a
+     * string rather than refusing it, which would store a value AWS never accepts.
+     */
     private List<String> stringList(String field, JsonNode node) {
+        for (JsonNode element : node) {
+            if (!element.isTextual()) {
+                throw malformedList(field, "strings");
+            }
+        }
         try {
             return objectMapper.convertValue(node,
                     objectMapper.getTypeFactory().constructCollectionType(List.class, String.class));
         } catch (IllegalArgumentException e) {
-            throw new AwsException("ValidationException",
-                    "EcsParameters " + field + " must be a list of strings.", 400);
+            throw malformedList(field, "strings");
         }
+    }
+
+    private AwsException malformedList(String field, String elementType) {
+        return new AwsException("SerializationException",
+                "EcsParameters " + field + " must be a list of " + elementType + ".", 400);
     }
 
     private NetworkConfiguration parseNetworkConfiguration(JsonNode node) {
