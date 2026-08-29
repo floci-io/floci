@@ -476,7 +476,7 @@ public class SchedulerController {
 
     private EcsParameters parseEcsParameters(JsonNode node) {
         EcsParameters ecs = new EcsParameters();
-        if (node.has("CapacityProviderStrategy") && node.get("CapacityProviderStrategy").isArray()) {
+        if (node.has("CapacityProviderStrategy") && !node.get("CapacityProviderStrategy").isNull()) {
             ecs.setCapacityProviderStrategy(mapList("CapacityProviderStrategy", node.get("CapacityProviderStrategy")));
         }
         if (node.has("EnableECSManagedTags") && !node.get("EnableECSManagedTags").isNull()) {
@@ -494,10 +494,10 @@ public class SchedulerController {
         if (node.has("LaunchType") && !node.get("LaunchType").isNull()) {
             ecs.setLaunchType(node.get("LaunchType").asText());
         }
-        if (node.has("PlacementConstraints") && node.get("PlacementConstraints").isArray()) {
+        if (node.has("PlacementConstraints") && !node.get("PlacementConstraints").isNull()) {
             ecs.setPlacementConstraints(mapList("PlacementConstraints", node.get("PlacementConstraints")));
         }
-        if (node.has("PlacementStrategy") && node.get("PlacementStrategy").isArray()) {
+        if (node.has("PlacementStrategy") && !node.get("PlacementStrategy").isNull()) {
             ecs.setPlacementStrategy(mapList("PlacementStrategy", node.get("PlacementStrategy")));
         }
         if (node.has("TaskCount") && !node.get("TaskCount").isNull()) {
@@ -512,7 +512,7 @@ public class SchedulerController {
         if (node.has("ReferenceId") && !node.get("ReferenceId").isNull()) {
             ecs.setReferenceId(node.get("ReferenceId").asText());
         }
-        if (node.has("Tags") && node.get("Tags").isArray()) {
+        if (node.has("Tags") && !node.get("Tags").isNull()) {
             ecs.setTags(mapList("Tags", node.get("Tags")));
         }
         if (node.has("NetworkConfiguration") && !node.get("NetworkConfiguration").isNull()) {
@@ -527,6 +527,9 @@ public class SchedulerController {
      * failure is named here instead of escaping as a server error.
      */
     private List<Map<String, Object>> mapList(String field, JsonNode node) {
+        if (!node.isArray()) {
+            throw malformedList(field, "objects");
+        }
         try {
             return objectMapper.convertValue(node,
                     objectMapper.getTypeFactory().constructCollectionType(List.class,
@@ -542,6 +545,9 @@ public class SchedulerController {
      * string rather than refusing it, which would store a value AWS never accepts.
      */
     private List<String> stringList(String field, JsonNode node) {
+        if (!node.isArray()) {
+            throw malformedList(field, "strings");
+        }
         for (JsonNode element : node) {
             if (!element.isTextual()) {
                 throw malformedList(field, "strings");
@@ -570,10 +576,10 @@ public class SchedulerController {
 
     private AwsVpcConfiguration parseAwsVpcConfiguration(JsonNode node) {
         AwsVpcConfiguration vpc = new AwsVpcConfiguration();
-        if (node.has("Subnets") && node.get("Subnets").isArray()) {
+        if (node.has("Subnets") && !node.get("Subnets").isNull()) {
             vpc.setSubnets(stringList("Subnets", node.get("Subnets")));
         }
-        if (node.has("SecurityGroups") && node.get("SecurityGroups").isArray()) {
+        if (node.has("SecurityGroups") && !node.get("SecurityGroups").isNull()) {
             vpc.setSecurityGroups(stringList("SecurityGroups", node.get("SecurityGroups")));
         }
         if (node.has("AssignPublicIp") && !node.get("AssignPublicIp").isNull()) {
