@@ -102,8 +102,12 @@ class SesTenantSuppressionV2IntegrationTest {
                 .when().post("/v2/email/tenant/suppression").then().statusCode(400)
                 .body("message", equalTo("Each suppressed reason can only be specified at most once"));
 
-        // Precedence: empty TenantName wins over enum errors; validation wins over existence.
+        // Precedence: empty TenantName wins over enum errors; validation wins over existence. An
+        // absent TenantName collapses to the same message (no Smithy not-null on this operation).
         v2().body("{\"TenantName\":\"\",\"SuppressedReasons\":[\"NOPE\"],\"SuppressionScope\":\"TENANT\"}")
+                .when().post("/v2/email/tenant/suppression").then().statusCode(400)
+                .body("message", equalTo("TenantName cannot be empty"));
+        v2().body("{\"SuppressedReasons\":[\"BOUNCE\"],\"SuppressionScope\":\"TENANT\"}")
                 .when().post("/v2/email/tenant/suppression").then().statusCode(400)
                 .body("message", equalTo("TenantName cannot be empty"));
         v2().body("{\"TenantName\":\"ghost-tenant\",\"SuppressedReasons\":[\"BOUNCE\"]}")

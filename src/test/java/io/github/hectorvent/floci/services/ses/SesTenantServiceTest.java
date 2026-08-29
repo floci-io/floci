@@ -372,10 +372,14 @@ class SesTenantServiceTest {
 
     @Test
     void putSuppressionAttributes_precedenceMatchesAws() {
-        // Empty TenantName wins over the enum check; request validation wins over existence.
+        // Empty TenantName wins over the enum check; request validation wins over existence. An
+        // absent TenantName gets the same message — no Smithy not-null variant on this operation.
         assertEquals("TenantName cannot be empty",
                 assertThrows(AwsException.class, () -> service.putSuppressionAttributes(
                         "", List.of("NOPE"), "TENANT", REGION)).getMessage());
+        assertEquals("TenantName cannot be empty",
+                assertThrows(AwsException.class, () -> service.putSuppressionAttributes(
+                        null, List.of("BOUNCE"), "TENANT", REGION)).getMessage());
         assertEquals("SuppressedReasons cannot be specified without SuppressionScope.",
                 assertThrows(AwsException.class, () -> service.putSuppressionAttributes(
                         "ghost", List.of("BOUNCE"), null, REGION)).getMessage());
@@ -403,9 +407,11 @@ class SesTenantServiceTest {
         assertEquals("TenantName cannot be empty",
                 assertThrows(AwsException.class,
                         () -> service.runWithTenant(" ", REGION, t -> null)).getMessage());
-        assertTrue(assertThrows(AwsException.class,
-                () -> service.runWithTenant(null, REGION, t -> null))
-                .getMessage().contains("Member must not be null"));
+        // An absent TenantName collapses to the same service-level message (probe-confirmed) —
+        // the Smithy not-null variant exists only on CreateTenant.
+        assertEquals("TenantName cannot be empty",
+                assertThrows(AwsException.class,
+                        () -> service.runWithTenant(null, REGION, t -> null)).getMessage());
         assertEquals("NotFoundException",
                 assertThrows(AwsException.class,
                         () -> service.runWithTenant("ghost", REGION, t -> null)).getErrorCode());

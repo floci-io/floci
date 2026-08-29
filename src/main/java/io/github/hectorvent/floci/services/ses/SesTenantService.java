@@ -380,12 +380,9 @@ public class SesTenantService {
      */
     public void putSuppressionAttributes(String tenantName, List<String> suppressedReasons,
                                          String suppressionScope, String region) {
-        if (tenantName == null) {
-            throw new AwsException("BadRequestException",
-                    "1 validation error detected: Value at 'tenantName' failed to satisfy constraint: "
-                            + "Member must not be null", 400);
-        }
-        if (tenantName.isBlank()) {
+        // Unlike CreateTenant, an absent TenantName gets the same service-level message as an empty
+        // one here (probe-confirmed 2026-08-30) — no Smithy not-null variant on this operation.
+        if (tenantName == null || tenantName.isBlank()) {
             throw new AwsException("BadRequestException", "TenantName cannot be empty", 400);
         }
         TenantSuppressionAttributes attrs =
@@ -405,12 +402,10 @@ public class SesTenantService {
      * cannot interleave and leave entries for a deleted tenant.
      */
     public <T> T runWithTenant(String tenantName, String region, Function<Tenant, T> action) {
-        if (tenantName == null) {
-            throw new AwsException("BadRequestException",
-                    "1 validation error detected: Value at 'tenantName' failed to satisfy constraint: "
-                            + "Member must not be null", 400);
-        }
-        if (tenantName.isBlank()) {
+        // Same service-level message for null and blank: on the operations served here the probed
+        // AWS behavior collapses an absent TenantName to "cannot be empty" (only CreateTenant has
+        // the Smithy not-null variant).
+        if (tenantName == null || tenantName.isBlank()) {
             throw new AwsException("BadRequestException", "TenantName cannot be empty", 400);
         }
         synchronized (tenantMutationLock) {
