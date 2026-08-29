@@ -121,6 +121,13 @@ services:
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/rds/RdsQueryHandler.java, mode: switch }
     exclude_actions: [SubnetIds, VpcSecurityGroupIds, OptionsToRemove]
+  - service: redshift
+    doc: docs/services/redshift.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/redshift/RedshiftQueryHandler.java, mode: switch }
+    # SubnetIds / VpcSecurityGroupIds / TagKeys are labels of an inner member-name
+    # switch (memberKeyRegex), not actions — same shape as the rds exclusions above.
+    exclude_actions: [SubnetIds, VpcSecurityGroupIds, TagKeys]
   - service: secretsmanager
     doc: docs/services/secrets-manager.md
     sources:

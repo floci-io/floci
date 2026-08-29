@@ -123,6 +123,8 @@ public class RedshiftContainerManager {
         String containerName = containerName(accountId, clusterIdentifier);
         var existing = lifecycleManager.findByName(containerName);
         if (existing.isEmpty()) {
+            LOG.warnv("No surviving container for cluster {0}; starting a fresh empty one — the previous"
+                    + " contents are not recoverable (no Docker volume backs Redshift containers)", clusterIdentifier);
             return start(accountId, clusterIdentifier, masterUsername, masterPassword);
         }
 
@@ -209,18 +211,35 @@ public class RedshiftContainerManager {
         if (!effectiveUser.matches("^[A-Za-z_][A-Za-z0-9_]*$")) {
             throw new AwsException("InvalidParameterValue", "Username must be a valid SQL identifier", 400);
         }
-        // The password is embedded in a SQL literal executed via psql -c, not shell-interpolated —
-        // ' inside the password would break the SQL literal, so reject it rather than risk injection.
-        if (newPassword != null && newPassword.contains("'")) {
-            throw new AwsException("InvalidParameterValue", "MasterUserPassword must not contain a single quote", 400);
+        // AWS ModifyCluster rejects ', ", \, / and @ in MasterUserPassword and enforces an
+        // 8-64 length plus at least one uppercase, one lowercase and one digit — we enforce
+        // the same set for parity. The single-quote rejection is doubly load-bearing: the
+        // password is spliced into a psql -c SQL literal here, so ' would also break that
+        // literal — but it is AWS-correct regardless, so do not "fix" it away by escaping.
+        if (newPassword != null) {
+            for (char forbidden : new char[]{'\'', '"', '\\', '/', '@'}) {
+                if (newPassword.indexOf(forbidden) >= 0) {
+                    throw new AwsException("InvalidParameterValue",
+                            "MasterUserPassword must not contain ', \", \\, / or @", 400);
+                }
+            }
+            if (newPassword.length() < 8 || newPassword.length() > 64) {
+                throw new AwsException("InvalidParameterValue",
+                        "MasterUserPassword must be between 8 and 64 characters in length", 400);
+            }
+            if (!newPassword.matches(".*[A-Z].*") || !newPassword.matches(".*[a-z].*")
+                    || !newPassword.matches(".*[0-9].*")) {
+                throw new AwsException("InvalidParameterValue",
+                        "MasterUserPassword must contain at least one uppercase letter, one lowercase letter and one number", 400);
+            }
         }
         String sql = "ALTER USER " + effectiveUser + " PASSWORD '" + newPassword + "'";
         String[] cmd = new String[]{"psql", "-U", effectiveUser, "-d", "dev", "-c", sql};
         try {
             ExecResult result = execInContainer(handle.getContainerId(), cmd, 15);
             if (result.exitCode() != 0) {
-                // KHÔNG log/đưa result.stderr() vào message — psql có thể echo lại câu lệnh
-                // ALTER USER lỗi (kèm password literal) trong context dòng lỗi, rò rỉ secret.
+                // Deliberately omit result.stderr() from the log and the exception: psql echoes
+                // the failing ALTER USER statement, which contains the password literal.
                 LOG.warnv("ALTER USER command failed for cluster {0} (exit {1})", clusterIdentifier, result.exitCode());
                 throw new AwsException("InternalFailure", "Failed to change master password for cluster " + clusterIdentifier, 500);
             }

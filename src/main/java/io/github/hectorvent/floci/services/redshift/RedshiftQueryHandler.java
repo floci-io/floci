@@ -26,7 +26,8 @@ public class RedshiftQueryHandler {
     }
 
     public Response handle(String action, MultivaluedMap<String, String> params) {
-        if ("CreateCluster".equals(action)) {
+        switch (action) {
+        case "CreateCluster" -> {
             String identifier = params.getFirst("ClusterIdentifier");
             String nodeType = params.getFirst("NodeType");
             String masterUsername = params.getFirst("MasterUsername");
@@ -47,7 +48,8 @@ public class RedshiftQueryHandler {
                     .end("CreateClusterResponse")
                     .build();
             return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
-        } else if ("DescribeClusters".equals(action)) {
+        }
+        case "DescribeClusters" -> {
             String identifier = params.getFirst("ClusterIdentifier");
             List<Cluster> clusters = service.describeClusters(identifier);
             XmlBuilder xmlBuilder = new XmlBuilder()
@@ -66,7 +68,8 @@ public class RedshiftQueryHandler {
                     .end("DescribeClustersResponse")
                     .build();
             return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
-        } else if ("DeleteCluster".equals(action)) {
+        }
+        case "DeleteCluster" -> {
             String identifier = params.getFirst("ClusterIdentifier");
             Cluster cluster = service.deleteCluster(identifier);
             String xml = new XmlBuilder()
@@ -80,7 +83,8 @@ public class RedshiftQueryHandler {
                     .end("DeleteClusterResponse")
                     .build();
             return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
-        } else if ("CreateClusterSnapshot".equals(action)) {
+        }
+        case "CreateClusterSnapshot" -> {
             String snapshotIdentifier = params.getFirst("SnapshotIdentifier");
             String clusterIdentifier = params.getFirst("ClusterIdentifier");
             Snapshot snapshot = service.createSnapshot(snapshotIdentifier, clusterIdentifier);
@@ -95,7 +99,8 @@ public class RedshiftQueryHandler {
                     .end("CreateClusterSnapshotResponse")
                     .build();
             return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
-        } else if ("DescribeClusterSnapshots".equals(action)) {
+        }
+        case "DescribeClusterSnapshots" -> {
             String snapshotIdentifier = params.getFirst("SnapshotIdentifier");
             String clusterIdentifier = params.getFirst("ClusterIdentifier");
             List<Snapshot> snapshots = service.describeSnapshots(snapshotIdentifier, clusterIdentifier);
@@ -115,7 +120,8 @@ public class RedshiftQueryHandler {
                     .end("DescribeClusterSnapshotsResponse")
                     .build();
             return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
-        } else if ("DeleteClusterSnapshot".equals(action)) {
+        }
+        case "DeleteClusterSnapshot" -> {
             String snapshotIdentifier = params.getFirst("SnapshotIdentifier");
             Snapshot snapshot = service.deleteSnapshot(snapshotIdentifier);
             String xml = new XmlBuilder()
@@ -129,7 +135,8 @@ public class RedshiftQueryHandler {
                     .end("DeleteClusterSnapshotResponse")
                     .build();
             return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
-        } else if ("RestoreFromClusterSnapshot".equals(action)) {
+        }
+        case "RestoreFromClusterSnapshot" -> {
             String clusterIdentifier = params.getFirst("ClusterIdentifier");
             String snapshotIdentifier = params.getFirst("SnapshotIdentifier");
             String nodeType = params.getFirst("NodeType");
@@ -145,7 +152,8 @@ public class RedshiftQueryHandler {
                     .end("RestoreFromClusterSnapshotResponse")
                     .build();
             return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
-        } else if ("CreateClusterParameterGroup".equals(action)) {
+        }
+        case "CreateClusterParameterGroup" -> {
             String parameterGroupName = params.getFirst("ParameterGroupName");
             String parameterGroupFamily = params.getFirst("ParameterGroupFamily");
             String description = params.getFirst("Description");
@@ -161,7 +169,8 @@ public class RedshiftQueryHandler {
                     .end("CreateClusterParameterGroupResponse")
                     .build();
             return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
-        } else if ("DescribeClusterParameterGroups".equals(action)) {
+        }
+        case "DescribeClusterParameterGroups" -> {
             String parameterGroupName = params.getFirst("ParameterGroupName");
             List<ClusterParameterGroup> groups = service.describeClusterParameterGroups(parameterGroupName);
             XmlBuilder xmlBuilder = new XmlBuilder()
@@ -180,7 +189,8 @@ public class RedshiftQueryHandler {
                     .end("DescribeClusterParameterGroupsResponse")
                     .build();
             return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
-        } else if ("DescribeClusterParameters".equals(action)) {
+        }
+        case "DescribeClusterParameters" -> {
             String parameterGroupName = params.getFirst("ParameterGroupName");
             if (parameterGroupName == null || parameterGroupName.isBlank()) {
                 throw new AwsException("InvalidParameterValue", "ParameterGroupName is required", 400);
@@ -202,7 +212,8 @@ public class RedshiftQueryHandler {
                     .end("DescribeClusterParametersResponse")
                     .build();
             return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
-        } else if ("ModifyClusterParameterGroup".equals(action)) {
+        }
+        case "ModifyClusterParameterGroup" -> {
             String parameterGroupName = params.getFirst("ParameterGroupName");
             if (parameterGroupName == null || parameterGroupName.isBlank()) {
                 throw new AwsException("InvalidParameterValue", "ParameterGroupName is required", 400);
@@ -221,7 +232,8 @@ public class RedshiftQueryHandler {
                     .end("ModifyClusterParameterGroupResponse")
                     .build();
             return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
-        } else if ("DeleteClusterParameterGroup".equals(action)) {
+        }
+        case "DeleteClusterParameterGroup" -> {
             String parameterGroupName = params.getFirst("ParameterGroupName");
             service.deleteClusterParameterGroup(parameterGroupName);
             String xml = new XmlBuilder()
@@ -232,7 +244,8 @@ public class RedshiftQueryHandler {
                     .end("DeleteClusterParameterGroupResponse")
                     .build();
             return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
-        } else if ("CreateTags".equals(action)) {
+        }
+        case "CreateTags" -> {
             String resourceName = params.getFirst("ResourceName");
             service.createTags(resourceName, parseTags(params));
             String xml = new XmlBuilder()
@@ -243,7 +256,8 @@ public class RedshiftQueryHandler {
                     .end("CreateTagsResponse")
                     .build();
             return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
-        } else if ("DeleteTags".equals(action)) {
+        }
+        case "DeleteTags" -> {
             String resourceName = params.getFirst("ResourceName");
             List<String> tagKeys = memberList(params, "TagKeys");
             service.deleteTags(resourceName, tagKeys);
@@ -255,7 +269,8 @@ public class RedshiftQueryHandler {
                     .end("DeleteTagsResponse")
                     .build();
             return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
-        } else if ("DescribeTags".equals(action)) {
+        }
+        case "DescribeTags" -> {
             String resourceName = params.getFirst("ResourceName");
             String resourceType = params.getFirst("ResourceType");
             List<String> tagKeys = memberList(params, "TagKeys");
@@ -283,7 +298,8 @@ public class RedshiftQueryHandler {
                     .end("DescribeTagsResponse")
                     .build();
             return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
-        } else if ("CreateClusterSubnetGroup".equals(action)) {
+        }
+        case "CreateClusterSubnetGroup" -> {
             String name = params.getFirst("ClusterSubnetGroupName");
             if (name == null || name.isBlank()) {
                 throw new AwsException("InvalidParameterValue", "ClusterSubnetGroupName is required", 400);
@@ -302,7 +318,8 @@ public class RedshiftQueryHandler {
                     .end("CreateClusterSubnetGroupResponse")
                     .build();
             return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
-        } else if ("DescribeClusterSubnetGroups".equals(action)) {
+        }
+        case "DescribeClusterSubnetGroups" -> {
             String name = params.getFirst("ClusterSubnetGroupName");
             List<ClusterSubnetGroup> groups = service.describeClusterSubnetGroups(name);
             XmlBuilder xmlBuilder = new XmlBuilder()
@@ -321,7 +338,8 @@ public class RedshiftQueryHandler {
                     .end("DescribeClusterSubnetGroupsResponse")
                     .build();
             return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
-        } else if ("ModifyClusterSubnetGroup".equals(action)) {
+        }
+        case "ModifyClusterSubnetGroup" -> {
             String name = params.getFirst("ClusterSubnetGroupName");
             String description = params.getFirst("Description");
             List<String> subnetIds = memberList(params, "SubnetIds");
@@ -337,7 +355,8 @@ public class RedshiftQueryHandler {
                     .end("ModifyClusterSubnetGroupResponse")
                     .build();
             return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
-        } else if ("DeleteClusterSubnetGroup".equals(action)) {
+        }
+        case "DeleteClusterSubnetGroup" -> {
             String name = params.getFirst("ClusterSubnetGroupName");
             service.deleteClusterSubnetGroup(name);
             String xml = new XmlBuilder()
@@ -348,7 +367,8 @@ public class RedshiftQueryHandler {
                     .end("DeleteClusterSubnetGroupResponse")
                     .build();
             return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
-        } else if ("ModifyCluster".equals(action)) {
+        }
+        case "ModifyCluster" -> {
             String clusterIdentifier = params.getFirst("ClusterIdentifier");
             if (clusterIdentifier == null || clusterIdentifier.isBlank()) {
                 throw new AwsException("InvalidParameterValue", "ClusterIdentifier is required", 400);
@@ -371,7 +391,8 @@ public class RedshiftQueryHandler {
                     .end("ModifyClusterResponse")
                     .build();
             return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
-        } else if ("RebootCluster".equals(action)) {
+        }
+        case "RebootCluster" -> {
             String clusterIdentifier = params.getFirst("ClusterIdentifier");
             if (clusterIdentifier == null || clusterIdentifier.isBlank()) {
                 throw new AwsException("InvalidParameterValue", "ClusterIdentifier is required", 400);
@@ -389,8 +410,8 @@ public class RedshiftQueryHandler {
                     .build();
             return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
         }
-
-        throw new AwsException("InvalidAction", "Action " + action + " is not supported", 400);
+        default -> throw new AwsException("InvalidAction", "Action " + action + " is not supported", 400);
+        }
     }
 
     private String buildClusterXml(Cluster cluster) {
@@ -499,8 +520,8 @@ public class RedshiftQueryHandler {
                 .toList();
     }
 
-    // AWS Query protocol cho phép cả form generic ".member.N" lẫn locationName riêng của từng
-    // shape (vd Redshift SDK thật gửi "SubnetIds.SubnetIdentifier.N" thay vì "SubnetIds.member.N").
+    // The AWS Query protocol accepts both the generic ".member.N" form and each shape's own
+    // locationName (e.g. the real Redshift SDK sends "SubnetIds.SubnetIdentifier.N", not "SubnetIds.member.N").
     private static String memberKeyRegex(String baseName) {
         String quoted = java.util.regex.Pattern.quote(baseName);
         return switch (baseName) {

@@ -361,7 +361,7 @@ class RedshiftContainerManagerTest {
         when(inspectCmd.exec()).thenReturn(inspectResponse);
         when(dockerClient.inspectExecCmd("exec-alter")).thenReturn(inspectCmd);
 
-        manager.alterUserPassword(ACCOUNT_ID, "test-cluster", "admin", "new-secret");
+        manager.alterUserPassword(ACCOUNT_ID, "test-cluster", "admin", "NewSecret1");
 
         verify(dockerClient).execCreateCmd("cont-123");
     }
@@ -403,11 +403,29 @@ class RedshiftContainerManagerTest {
         when(lifecycleManager.createAndStart(any())).thenReturn(info);
         manager.start(ACCOUNT_ID, "test-cluster", "admin", "pass");
 
-        // Test password with single quote
-        AwsException ex = assertThrows(AwsException.class, () ->
-                manager.alterUserPassword(ACCOUNT_ID, "test-cluster", "admin", "pass'word"));
-        assertEquals("InvalidParameterValue", ex.getErrorCode());
-        assertEquals(400, ex.getHttpStatus());
+        // Forbidden characters: ', ", \, / and @ (AWS ModifyCluster rejects the same set)
+        for (String bad : new String[]{"Pass'word1", "Pass\"word1", "Pass\\word1", "Pass/word1", "Pass@word1"}) {
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    manager.alterUserPassword(ACCOUNT_ID, "test-cluster", "admin", bad));
+            assertEquals("InvalidParameterValue", ex.getErrorCode());
+            assertEquals(400, ex.getHttpStatus());
+        }
+
+        // Too short (< 8) and too long (> 64)
+        for (String bad : new String[]{"Ab1cde", "A1" + "a".repeat(63)}) {
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    manager.alterUserPassword(ACCOUNT_ID, "test-cluster", "admin", bad));
+            assertEquals("InvalidParameterValue", ex.getErrorCode());
+            assertEquals(400, ex.getHttpStatus());
+        }
+
+        // Missing a required class: no uppercase, no lowercase, no digit
+        for (String bad : new String[]{"lowercase1", "UPPERCASE1", "NoDigitsHere"}) {
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    manager.alterUserPassword(ACCOUNT_ID, "test-cluster", "admin", bad));
+            assertEquals("InvalidParameterValue", ex.getErrorCode());
+            assertEquals(400, ex.getHttpStatus());
+        }
     }
 
     @Test
@@ -442,7 +460,7 @@ class RedshiftContainerManagerTest {
         when(dockerClient.inspectExecCmd("exec-fail")).thenReturn(inspectCmd);
 
         AwsException ex = assertThrows(AwsException.class, () ->
-                manager.alterUserPassword(ACCOUNT_ID, "test-cluster", "admin", "new-secret"));
+                manager.alterUserPassword(ACCOUNT_ID, "test-cluster", "admin", "NewSecret1"));
         assertEquals("InternalFailure", ex.getErrorCode());
         assertEquals(500, ex.getHttpStatus());
     }

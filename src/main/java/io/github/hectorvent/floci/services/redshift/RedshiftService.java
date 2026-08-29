@@ -153,17 +153,17 @@ public class RedshiftService {
         Cluster cluster = clusters.get(clusterIdentifier)
                 .orElseThrow(() -> new AwsException("ClusterNotFound", "Cluster " + clusterIdentifier + " not found", 404));
 
-        // alterUserPassword chạy TRƯỚC mọi mutation trên object cluster (live reference từ
-        // HybridStorage, không phải copy) — nếu nó throw, chưa có metadata nào bị đổi.
+        // alterUserPassword runs before any mutation of the cluster object (a live reference
+        // from HybridStorage, not a copy) — if it throws, no metadata has been changed yet.
         if (masterUserPassword != null && !masterUserPassword.isBlank()) {
             containerManager.alterUserPassword(clusters.accountId(), clusterIdentifier,
                     cluster.getMasterUsername(), masterUserPassword);
             cluster.setMasterPassword(masterUserPassword);
         }
 
-        // NodeType chỉ update metadata — không resize container Postgres bên dưới (không có
-        // khái niệm Redshift node count). NumberOfNodes được nhận cho tương thích API shape
-        // nhưng chưa được model/lưu ở đâu cả — gap đã biết, chưa cần xử lý (xem plan Task 9).
+        // NodeType only updates metadata — it does not resize the underlying Postgres container
+        // (Redshift node-count has no equivalent here). NumberOfNodes is accepted for API-shape
+        // compatibility but is not modelled or stored anywhere — known gap, see plan Task 9.
         if (nodeType != null && !nodeType.isBlank()) {
             cluster.setNodeType(nodeType);
         }
