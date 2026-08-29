@@ -153,8 +153,11 @@ class MySqlProtocolHandlerTest {
 
                 byte[] scramble = scrambleNativePassword("secret", nonce);
                 // Real clients send this at sequence 2 after the TLS upgrade — the proxy must
-                // rewrite it to 1 before forwarding to the (plaintext-only) backend.
-                byte[] response = buildHandshakeResponse41("admin", scramble, (byte) 2);
+                // rewrite it to 1 before forwarding to the (plaintext-only) backend. They also
+                // keep CLIENT_SSL set in it; a real backend would treat a first packet carrying
+                // that bit as an SSLRequest and hang waiting for a TLS handshake.
+                byte[] response = buildHandshakeResponse41("admin", scramble, (byte) 2,
+                        CLIENT_PROTOCOL_41 | CLIENT_SECURE_CONNECTION | CLIENT_SSL);
                 tlsOut.write(response);
                 tlsOut.flush();
 
@@ -178,6 +181,11 @@ class MySqlProtocolHandlerTest {
         assertEquals((byte) 1, backendResponseSeq.get(),
                 "backend never saw the SSLRequest, so it must receive the real response at sequence 1");
         assertEquals("admin", extractUsername(backendResponsePayload.get()));
+        int backendCaps = (backendResponsePayload.get()[0] & 0xFF)
+                | ((backendResponsePayload.get()[1] & 0xFF) << 8);
+        assertEquals(0, backendCaps & CLIENT_SSL,
+                "the plaintext backend must not see CLIENT_SSL, or it treats the response as an "
+                        + "SSLRequest and waits forever for a TLS handshake");
     }
 
     @Test
@@ -238,7 +246,8 @@ class MySqlProtocolHandlerTest {
                 OutputStream tlsOut = sslClient.getOutputStream();
 
                 byte[] scramble = scrambleNativePassword("secret", nonce);
-                byte[] response = buildHandshakeResponse41("admin", scramble, (byte) 2);
+                byte[] response = buildHandshakeResponse41("admin", scramble, (byte) 2,
+                        CLIENT_PROTOCOL_41 | CLIENT_SECURE_CONNECTION | CLIENT_SSL);
                 tlsOut.write(response);
                 tlsOut.flush();
 
@@ -352,8 +361,14 @@ class MySqlProtocolHandlerTest {
 
     private static byte[] buildHandshakeResponse41(String username, byte[] scramble, byte sequence)
             throws IOException {
+        return buildHandshakeResponse41(username, scramble, sequence,
+                CLIENT_PROTOCOL_41 | CLIENT_SECURE_CONNECTION);
+    }
+
+    private static byte[] buildHandshakeResponse41(String username, byte[] scramble, byte sequence,
+                                                   int capabilities) throws IOException {
         ByteArrayOutputStream payload = new ByteArrayOutputStream();
-        writeInt32LE(payload, CLIENT_PROTOCOL_41 | CLIENT_SECURE_CONNECTION);
+        writeInt32LE(payload, capabilities);
         writeInt32LE(payload, 0); // max packet size
         payload.write(0x21); // charset
         payload.write(new byte[23]); // reserved
