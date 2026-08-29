@@ -85,7 +85,6 @@ cross-resource references.
 | Kinesis Data Firehose | `DeliveryStream` |
 | CloudWatch | `Alarm` |
 | CloudWatch Logs | `LogGroup` |
-| Route 53 | `HostedZone` |
 | CloudFormation | `Stack` (nested stacks), `CustomResource` and `Custom::*` (Lambda-backed) |
 | CDK | `CDK::Metadata` (accepted; no-op) |
 
