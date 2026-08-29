@@ -1031,13 +1031,22 @@ public class ApiGatewayV2Service {
 
     // ──────────────────────────── Standalone Tagging ────────────────────────────
 
+    /** A taggable v2 resource: an API, or a stage within one. */
+    private record TaggedResource(String region, String apiId, String stageName) {
+        boolean isStage() {
+            return stageName != null;
+        }
+    }
+
     /**
-     * Parses an API Gateway v2 resource ARN and returns a two-element array
-     * [region, apiId]. Throws BadRequestException if the ARN is malformed.
+     * Parses an API Gateway v2 resource ARN.
      *
-     * Expected format: arn:aws:apigateway:{region}::/apis/{apiId}
+     * <p>Accepted forms: {@code arn:aws:apigateway:{region}::/apis/{apiId}} and
+     * {@code arn:aws:apigateway:{region}::/apis/{apiId}/stages/{stageName}}. Matching on the
+     * trailing segment alone would read a stage ARN's stage name as the API id, which surfaces as
+     * a misleading "Invalid API id specified" on TagResource.
      */
-    private String[] parseArn(String resourceArn) {
+    private TaggedResource parseArn(String resourceArn) {
         if (resourceArn == null || resourceArn.isBlank()) {
             throw new AwsException("BadRequestException", "ResourceArn must not be blank", 400);
         }
@@ -1049,48 +1058,65 @@ public class ApiGatewayV2Service {
                     "Invalid ResourceArn format: " + resourceArn, 400);
         }
         String region = arn.region();
-        String resource = arn.resource(); // e.g. "/apis/abc1234567"
-        int lastSlash = resource.lastIndexOf('/');
-        if (lastSlash < 0 || lastSlash == resource.length() - 1) {
-            throw new AwsException("BadRequestException",
-                    "Cannot extract apiId from ResourceArn: " + resourceArn, 400);
+        // e.g. "/apis/abc1234567" or "/apis/abc1234567/stages/$default"
+        String[] segments = arn.resource().replaceFirst("^/", "").split("/");
+        if (segments.length >= 4 && "apis".equals(segments[0]) && "stages".equals(segments[2])
+                && !segments[1].isEmpty() && !segments[3].isEmpty()) {
+            return new TaggedResource(region, segments[1], segments[3]);
         }
-        String apiId = resource.substring(lastSlash + 1);
-        return new String[]{region, apiId};
+        if (segments.length >= 2 && "apis".equals(segments[0]) && !segments[1].isEmpty()) {
+            return new TaggedResource(region, segments[1], null);
+        }
+        throw new AwsException("BadRequestException",
+                "Cannot extract apiId from ResourceArn: " + resourceArn, 400);
     }
 
     public void tagResource(String resourceArn, Map<String, String> tags) {
         ReservedTags.rejectApiGatewayReservedTagsOnUpdate(tags);
-        String[] parsed = parseArn(resourceArn);
-        String region = parsed[0];
-        String apiId  = parsed[1];
-        Api api = getApi(region, apiId);
+        TaggedResource target = parseArn(resourceArn);
+        if (target.isStage()) {
+            Stage stage = getStage(target.region(), target.apiId(), target.stageName());
+            if (tags != null && !tags.isEmpty()) {
+                if (stage.getTags() == null) {
+                    stage.setTags(new java.util.HashMap<>());
+                }
+                stage.getTags().putAll(tags);
+            }
+            stageStore.put(stageKey(target.region(), target.apiId(), target.stageName()), stage);
+            return;
+        }
+        Api api = getApi(target.region(), target.apiId());
         if (tags != null && !tags.isEmpty()) {
             if (api.getTags() == null) {
                 api.setTags(new java.util.HashMap<>());
             }
             api.getTags().putAll(tags);
         }
-        apiStore.put(apiKey(region, apiId), api);
+        apiStore.put(apiKey(target.region(), target.apiId()), api);
     }
 
     public void untagResource(String resourceArn, List<String> tagKeys) {
-        String[] parsed = parseArn(resourceArn);
-        String region = parsed[0];
-        String apiId  = parsed[1];
-        Api api = getApi(region, apiId);
+        TaggedResource target = parseArn(resourceArn);
+        if (target.isStage()) {
+            Stage stage = getStage(target.region(), target.apiId(), target.stageName());
+            if (tagKeys != null && stage.getTags() != null) {
+                tagKeys.forEach(k -> stage.getTags().remove(k));
+            }
+            stageStore.put(stageKey(target.region(), target.apiId(), target.stageName()), stage);
+            return;
+        }
+        Api api = getApi(target.region(), target.apiId());
         if (tagKeys != null && api.getTags() != null) {
             tagKeys.forEach(k -> api.getTags().remove(k));
         }
-        apiStore.put(apiKey(region, apiId), api);
+        apiStore.put(apiKey(target.region(), target.apiId()), api);
     }
 
     public Map<String, String> getTags(String resourceArn) {
-        String[] parsed = parseArn(resourceArn);
-        String region = parsed[0];
-        String apiId  = parsed[1];
-        Api api = getApi(region, apiId);
-        Map<String, String> tags = api.getTags();
+        TaggedResource target = parseArn(resourceArn);
+        Map<String, String> tags = target.isStage()
+                ? getStage(target.region(), target.apiId(), target.stageName()).getTags()
+                : getApi(target.region(), target.apiId()).getTags();
         return (tags != null) ? new java.util.HashMap<>(tags) : java.util.Collections.emptyMap();
     }
 
