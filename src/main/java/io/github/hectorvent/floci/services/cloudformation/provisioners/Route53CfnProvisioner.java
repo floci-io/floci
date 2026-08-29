@@ -47,6 +47,10 @@ public class Route53CfnProvisioner implements CfnResourceProvisioner {
             Route53Service.CreateZoneResult created = route53Service.createHostedZone(
                     name, callerReference, comment, firstVpc);
             id = created.zone().getId();
+            // Record the physical ID before any follow-up call that can fail: once the
+            // zone exists, the stack engine must be able to track and clean it up even
+            // if a later VPC association or tag write throws.
+            resource.setPhysicalId(id);
             for (int i = 1; i < vpcs.size(); i++) {
                 route53Service.associateVpcWithHostedZone(id, vpcs.get(i), comment);
             }

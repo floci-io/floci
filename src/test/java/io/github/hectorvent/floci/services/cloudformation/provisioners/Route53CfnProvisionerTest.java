@@ -95,6 +95,42 @@ class Route53CfnProvisionerTest {
         verify(service).associateVpcWithHostedZone(eq("Z123456789"), argThat(sameVpc(secondVpc)), eq(null));
     }
 
+    @Test
+    void recordsPhysicalIdBeforeAssociatingAdditionalVpcsSoAFailureIsStillTrackedForCleanup() {
+        Route53Service service = mock(Route53Service.class);
+        VpcAssociation firstVpc = new VpcAssociation("vpc-123", "us-east-1");
+        VpcAssociation secondVpc = new VpcAssociation("vpc-456", "us-west-2");
+        HostedZone zone = new HostedZone("Z123456789", "ssm.us-east-1.amazonaws.com.",
+                "caller", null, firstVpc);
+        when(service.createHostedZone(eq("ssm.us-east-1.amazonaws.com"), eq("dns-stack/Zone"),
+                eq(null), argThat(sameVpc(firstVpc)))).thenReturn(
+                        new Route53Service.CreateZoneResult(zone, null));
+        when(service.associateVpcWithHostedZone(eq("Z123456789"), argThat(sameVpc(secondVpc)), any()))
+                .thenThrow(new RuntimeException("boom"));
+
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode props = mapper.createObjectNode().put("Name", "ssm.us-east-1.amazonaws.com");
+        ((com.fasterxml.jackson.databind.node.ObjectNode) props).set("VPCs", mapper.createArrayNode()
+                .add(mapper.createObjectNode().put("VPCId", "vpc-123").put("VPCRegion", "us-east-1"))
+                .add(mapper.createObjectNode().put("VPCId", "vpc-456").put("VPCRegion", "us-west-2")));
+
+        CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
+        when(engine.resolve(any())).thenAnswer(invocation -> invocation.<JsonNode>getArgument(0).asText());
+        when(engine.resolveNode(props)).thenReturn(props);
+        ProvisionContext context = new ProvisionContext(engine, "us-east-1", "623666680275", "dns-stack");
+        StackResource resource = new StackResource();
+        resource.setLogicalId("Zone");
+        resource.setResourceType("AWS::Route53::HostedZone");
+
+        try {
+            new Route53CfnProvisioner(service).provision(resource, props, context);
+        } catch (RuntimeException expected) {
+            // the second VPC association is expected to fail in this test
+        }
+
+        assertEquals("Z123456789", resource.getPhysicalId());
+    }
+
     private static org.mockito.ArgumentMatcher<VpcAssociation> sameVpc(VpcAssociation expected) {
         if (expected == null) {
             return java.util.Objects::isNull;
