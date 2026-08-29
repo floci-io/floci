@@ -177,10 +177,17 @@ class ContainerLifecycleManagerLabelsTest {
         return createCmd;
     }
 
+    /**
+     * Strips the per-call {@code ContainerLifecycleManager.CREATE_ATTEMPT_LABEL} — a random id
+     * generated fresh on every {@code create()} call for conflict-recovery adoption safety,
+     * orthogonal to the default-label behavior this test file covers.
+     */
     private Map<String, String> capturedLabels(CreateContainerCmd createCmd) {
         ArgumentCaptor<Map<String, String>> labels = labelsCaptor();
         verify(createCmd).withLabels(labels.capture());
-        return labels.getValue();
+        Map<String, String> captured = new java.util.HashMap<>(labels.getValue());
+        captured.remove(ContainerLifecycleManager.CREATE_ATTEMPT_LABEL);
+        return captured;
     }
 
     @SuppressWarnings("unchecked")

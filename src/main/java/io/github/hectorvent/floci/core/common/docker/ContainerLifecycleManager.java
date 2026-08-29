@@ -52,6 +52,10 @@ public class ContainerLifecycleManager {
     private static final int CREATE_MAX_ATTEMPTS = 6;
     private static final long CREATE_RETRY_BACKOFF_MS = 500L;
 
+    /** Per-{@code create()}-call random label letting conflict recovery prove a name-conflicting
+     *  container is this exact call's own lost-response retry, not a different concurrent call's. */
+    static final String CREATE_ATTEMPT_LABEL = "floci.create-attempt-id";
+
     private final DockerClient dockerClient;
     private final ImageCacheService imageCacheService;
     private final ContainerDetector containerDetector;
@@ -137,9 +141,16 @@ public class ContainerLifecycleManager {
                     .toArray(ExposedPort[]::new);
             createCmd.withExposedPorts(exposed);
         }
-        createCmd.withLabels(mergedLabels(spec.labels()));
+        // A fresh id per create() call, not per spec: two calls can carry identical image, name,
+        // and labels (a second, genuinely concurrent caller racing on the same fixed name), and
+        // matchesSpec must be able to tell that apart from THIS call's own retry of THIS createCmd
+        // hitting a lost-response conflict — see createWithConflictRecovery.
+        String createAttemptId = java.util.UUID.randomUUID().toString();
+        Map<String, String> labels = mergedLabels(spec.labels());
+        labels.put(CREATE_ATTEMPT_LABEL, createAttemptId);
+        createCmd.withLabels(labels);
 
-        String containerId = createWithConflictRecovery(createCmd, spec);
+        String containerId = createWithConflictRecovery(createCmd, spec, createAttemptId);
         LOG.infov("Created container {0} (name={1}, not yet started)", containerId, spec.name());
         return containerId;
     }
@@ -151,10 +162,14 @@ public class ContainerLifecycleManager {
      * catch, so {@link DockerRetry} rethrows it immediately. For a named spec that conflict means
      * the earlier attempt actually won — look the container up by name and adopt its ID instead
      * of failing and leaking it untracked. A stale or unrelated container can hold the same
-     * fixed name, so the candidate is only adopted when its image and labels actually match
-     * this spec; a name match alone is not proof it is the container this launch just created.
+     * fixed name, so the candidate is only adopted when its image, labels, and this exact call's
+     * {@code createAttemptId} all match — image and labels alone cannot tell this call's own
+     * lost-response retry apart from a second, genuinely concurrent {@code create()} call racing
+     * on the same fixed name/image/labels, which would otherwise be adopted as if it were this
+     * invocation's own container.
      */
-    private String createWithConflictRecovery(CreateContainerCmd createCmd, ContainerSpec spec) {
+    private String createWithConflictRecovery(CreateContainerCmd createCmd, ContainerSpec spec,
+                                               String createAttemptId) {
         try {
             CreateContainerResponse response = DockerRetry.call(
                     CREATE_MAX_ATTEMPTS, CREATE_RETRY_BACKOFF_MS, createCmd::exec);
@@ -162,7 +177,7 @@ public class ContainerLifecycleManager {
         } catch (ConflictException e) {
             if (spec.name() != null) {
                 Optional<Container> existing = findByName(spec.name());
-                if (existing.isPresent() && matchesSpec(existing.get(), spec)) {
+                if (existing.isPresent() && matchesSpec(existing.get(), spec, createAttemptId)) {
                     LOG.infov("Create retry for {0} hit a name conflict; an earlier attempt's "
                             + "response was lost but the container exists, adopting {1}",
                             spec.name(), existing.get().getId());
@@ -174,16 +189,20 @@ public class ContainerLifecycleManager {
     }
 
     /**
-     * Confirms a name-conflicting container is actually the one this spec's own create attempt
-     * produced, not a stale or differently-owned container that happens to hold the same fixed
-     * name: its image must match, and it must carry every label this spec's create call would
-     * have applied (the default floci labels plus the spec's own).
+     * Confirms a name-conflicting container is actually the one THIS create() call's own attempt
+     * produced, not a stale/differently-owned container, and not a container from a different,
+     * genuinely concurrent create() call that happens to share the same fixed name, image, and
+     * spec labels: its image must match, it must carry every label this call's create would have
+     * applied (the default floci labels plus the spec's own), AND its {@link #CREATE_ATTEMPT_LABEL}
+     * must equal this exact call's {@code createAttemptId} — the one part of the label set that a
+     * different concurrent call could never coincidentally reproduce.
      */
-    private boolean matchesSpec(Container existing, ContainerSpec spec) {
+    private boolean matchesSpec(Container existing, ContainerSpec spec, String createAttemptId) {
         if (!spec.image().equals(existing.getImage())) {
             return false;
         }
         Map<String, String> expectedLabels = mergedLabels(spec.labels());
+        expectedLabels.put(CREATE_ATTEMPT_LABEL, createAttemptId);
         Map<String, String> actualLabels = existing.getLabels();
         return actualLabels != null && actualLabels.entrySet().containsAll(expectedLabels.entrySet());
     }

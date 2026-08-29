@@ -62,14 +62,21 @@ class ContainerLifecycleManagerCreateConflictRecoveryTest {
     void createAdoptsContainerThatWonTheRaceOnRetryConflict() {
         CreateContainerCmd createCmd = mock(CreateContainerCmd.class, RETURNS_SELF);
         when(dockerClient.createContainerCmd("busybox:stable")).thenReturn(createCmd);
+        // The container that actually got created on the daemon carries exactly the labels this
+        // create() call applied (including the per-call attempt-id) — captured here rather than
+        // hardcoded, since createWithConflictRecovery only adopts a container proven to be THIS
+        // call's own lost-response attempt, not merely one with matching image/spec labels.
+        @SuppressWarnings("unchecked")
+        org.mockito.ArgumentCaptor<java.util.Map<String, String>> labelsCaptor =
+                org.mockito.ArgumentCaptor.forClass(java.util.Map.class);
+        when(createCmd.withLabels(labelsCaptor.capture())).thenReturn(createCmd);
         when(createCmd.exec()).thenThrow(new ConflictException("named container already exists"));
 
         Container existing = mock(Container.class);
         when(existing.getId()).thenReturn("winning-container-id");
         when(existing.getNames()).thenReturn(new String[] {"/emulator-fixed-name"});
         when(existing.getImage()).thenReturn("busybox:stable");
-        when(existing.getLabels()).thenReturn(
-                java.util.Map.of("floci", "true", "floci_emulator", "floci-aws"));
+        when(existing.getLabels()).thenAnswer(inv -> labelsCaptor.getValue());
 
         ListContainersCmd listCmd = mock(ListContainersCmd.class, RETURNS_SELF);
         when(dockerClient.listContainersCmd()).thenReturn(listCmd);
@@ -83,6 +90,45 @@ class ContainerLifecycleManagerCreateConflictRecoveryTest {
         String containerId = manager().create(spec);
 
         assertEquals("winning-container-id", containerId);
+    }
+
+    /**
+     * Image and label matching alone cannot tell "my own create's lost response" apart from a
+     * second, genuinely concurrent {@code create()} call racing on the same fixed name, image,
+     * and spec labels (e.g. a duplicate CreateBroker request retried by an AWS SDK client while
+     * the original is still in flight) — both produce a container satisfying {@code matchesSpec}.
+     * Adopting the other call's container means starting, modifying, or removing a container this
+     * invocation doesn't own. Each {@code create()} call tags its own createCmd with a fresh
+     * per-call attempt id; a name-conflicting container missing (or mismatching) this exact id
+     * belongs to a different call and must not be adopted.
+     */
+    @Test
+    void createRethrowsConflictWhenExistingContainerIsFromADifferentConcurrentCreateCall() {
+        CreateContainerCmd createCmd = mock(CreateContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.createContainerCmd("busybox:stable")).thenReturn(createCmd);
+        when(createCmd.exec()).thenThrow(new ConflictException("named container already exists"));
+
+        Container existing = mock(Container.class);
+        when(existing.getNames()).thenReturn(new String[] {"/emulator-fixed-name"});
+        when(existing.getImage()).thenReturn("busybox:stable");
+        // Same image and default/spec labels as this call would apply, but a different
+        // create() invocation's attempt id — simulating a genuinely concurrent racing caller,
+        // not this call's own lost-response retry.
+        java.util.Map<String, String> foreignLabels = new java.util.HashMap<>(
+                java.util.Map.of("floci", "true", "floci_emulator", "floci-aws"));
+        foreignLabels.put(ContainerLifecycleManager.CREATE_ATTEMPT_LABEL, "some-other-callers-attempt-id");
+        when(existing.getLabels()).thenReturn(foreignLabels);
+
+        ListContainersCmd listCmd = mock(ListContainersCmd.class, RETURNS_SELF);
+        when(dockerClient.listContainersCmd()).thenReturn(listCmd);
+        when(listCmd.exec()).thenReturn(List.of(existing));
+
+        ContainerSpec spec = new ContainerSpec(
+                "busybox:stable", "emulator-fixed-name", List.of(), null, null, null, java.util.Map.of(),
+                List.of(), null, List.of(), List.of(), List.of(), java.util.Map.of(), null, false, null,
+                List.of(), null, null, List.of());
+
+        assertThrows(ConflictException.class, () -> manager().create(spec));
     }
 
     @Test
