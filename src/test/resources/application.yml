@@ -298,6 +298,8 @@ floci:
       enabled: true
     comprehend:
       enabled: true
+    rekognition:
+      enabled: true
     pricing:
       enabled: true
     ce:

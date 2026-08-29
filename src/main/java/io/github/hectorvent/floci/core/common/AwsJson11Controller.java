@@ -29,6 +29,7 @@ import io.github.hectorvent.floci.services.cur.CurJsonHandler;
 import io.github.hectorvent.floci.services.pricing.PricingJsonHandler;
 import io.github.hectorvent.floci.services.textract.TextractJsonHandler;
 import io.github.hectorvent.floci.services.comprehend.ComprehendJsonHandler;
+import io.github.hectorvent.floci.services.rekognition.RekognitionJsonHandler;
 import io.github.hectorvent.floci.services.transcribe.TranscribeJsonHandler;
 import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2JsonHandler;
 import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsHandler;
@@ -102,6 +103,7 @@ public class AwsJson11Controller {
     private final TransferHandler transferHandler;
     private final TextractJsonHandler textractJsonHandler;
     private final ComprehendJsonHandler comprehendJsonHandler;
+    private final RekognitionJsonHandler rekognitionJsonHandler;
     private final PricingJsonHandler pricingJsonHandler;
     private final TranscribeJsonHandler transcribeJsonHandler;
     private final CostExplorerJsonHandler costExplorerJsonHandler;
@@ -146,6 +148,7 @@ public class AwsJson11Controller {
                                TransferHandler transferHandler,
                                TextractJsonHandler textractJsonHandler,
                                ComprehendJsonHandler comprehendJsonHandler,
+                               RekognitionJsonHandler rekognitionJsonHandler,
                                PricingJsonHandler pricingJsonHandler,
                                TranscribeJsonHandler transcribeJsonHandler,
                                CostExplorerJsonHandler costExplorerJsonHandler,
@@ -194,6 +197,7 @@ public class AwsJson11Controller {
         this.transferHandler = transferHandler;
         this.textractJsonHandler = textractJsonHandler;
         this.comprehendJsonHandler = comprehendJsonHandler;
+        this.rekognitionJsonHandler = rekognitionJsonHandler;
         this.pricingJsonHandler = pricingJsonHandler;
         this.transcribeJsonHandler = transcribeJsonHandler;
         this.costExplorerJsonHandler = costExplorerJsonHandler;
@@ -273,6 +277,7 @@ public class AwsJson11Controller {
                 case "transfer" -> transferHandler.handle(action, request, region);
                 case "textract" -> textractJsonHandler.handle(action, request, region);
                 case "comprehend" -> comprehendJsonHandler.handle(action, request, region);
+                case "rekognition" -> rekognitionJsonHandler.handle(action, request, region);
                 case "pricing" -> pricingJsonHandler.handle(action, request, region);
                 case "transcribe" -> transcribeJsonHandler.handle(action, request, region);
                 case "ce" -> costExplorerJsonHandler.handle(action, request, region);

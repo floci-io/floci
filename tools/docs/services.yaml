@@ -38,6 +38,10 @@ services:
     doc: docs/services/comprehend.md
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/comprehend/ComprehendJsonHandler.java, mode: switch }
+  - service: rekognition
+    doc: docs/services/rekognition.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/rekognition/RekognitionJsonHandler.java, mode: switch }
   - service: docdb
     doc: docs/services/docdb.md
     sources:
