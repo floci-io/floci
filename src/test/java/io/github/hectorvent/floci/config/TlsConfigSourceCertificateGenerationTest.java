@@ -289,6 +289,31 @@ class TlsConfigSourceCertificateGenerationTest {
     }
 
     /**
+     * A client can also hit an explicit HTTPS endpoint in a region Floci doesn't itself
+     * advertise via DescribeRegions but that AWS has published (e.g. {@code eu-north-1}).
+     * DNS spoofing still routes it to Floci, so SAN coverage must key off
+     * {@link io.github.hectorvent.floci.core.common.AwsRegions#KNOWN_IDS}, the superset of
+     * every published region id, not {@code ALL} (what this emulator advertises).
+     */
+    @Test
+    void testAwsRegionalWildcardsCoverEveryKnownRegionNotJustAdvertisedOnes() throws Exception {
+        // Arrange
+        System.setProperty("floci.dns.spoof-aws-endpoints", "true");
+        System.setProperty("floci.default-region", "eu-west-1");
+
+        // Act
+        new TlsConfigSource();
+
+        // Assert
+        List<String> sans = extractSansFromCertificate(tempDir.resolve("tls/floci-selfsigned.crt"));
+        assertTrue(sans.contains("*.eu-north-1.amazonaws.com"),
+            "Certificate SANs should include '*.eu-north-1.amazonaws.com', a published region "
+                + "outside AwsRegions.ALL");
+        assertTrue(sans.contains("*.s3.eu-north-1.amazonaws.com"),
+            "Certificate SANs should include regional virtual-hosted S3 for eu-north-1");
+    }
+
+    /**
      * Test that no AWS wildcards are included when spoof-aws-endpoints is disabled
      */
     @Test

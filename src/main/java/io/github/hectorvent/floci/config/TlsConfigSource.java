@@ -205,16 +205,17 @@ public class TlsConfigSource implements ConfigSource {
      * ({@code sts.us-east-1.amazonaws.com}), which need their own
      * {@code *.<region>.amazonaws.com} entry. A client can hit an explicit endpoint outside
      * {@code floci.default-region} (a cross-region call, or a Lambda whose own AWS_REGION
-     * differs from the emulator default); DNS spoofing routes it to Floci regardless of
-     * region, so every region {@link AwsRegions#ALL the emulator advertises} gets a SAN, not
-     * just the configured default.
+     * differs from the emulator default, or a published region this emulator doesn't itself
+     * advertise via DescribeRegions); DNS spoofing routes it to Floci regardless of region, so
+     * every {@link AwsRegions#KNOWN_IDS published region id} gets a SAN, not just the ones in
+     * {@link AwsRegions#ALL} or the configured default.
      */
     private List<String> awsSpoofSans() {
         if (!"true".equalsIgnoreCase(resolveProperty("floci.dns.spoof-aws-endpoints", "false"))) {
             return List.of();
         }
         List<String> sans = new ArrayList<>(List.of("*.amazonaws.com", "*.s3.amazonaws.com"));
-        for (String region : AwsRegions.ALL) {
+        for (String region : AwsRegions.KNOWN_IDS) {
             // A wildcard matches exactly one label (RFC 6125 6.4.3), so the two broad
             // wildcards miss virtual-hosted addressing, where the bucket adds a label:
             // my-bucket.s3.amazonaws.com and my-bucket.s3.<region>.amazonaws.com. The DNS
