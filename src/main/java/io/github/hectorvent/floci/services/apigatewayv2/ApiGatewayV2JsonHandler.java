@@ -19,11 +19,15 @@ import java.util.Map;
 public class ApiGatewayV2JsonHandler {
 
     private final ApiGatewayV2Service service;
+    private final ApiGatewayV2OpenApiImporter openApiImporter;
     private final ObjectMapper objectMapper;
 
     @Inject
-    public ApiGatewayV2JsonHandler(ApiGatewayV2Service service, ObjectMapper objectMapper) {
+    public ApiGatewayV2JsonHandler(ApiGatewayV2Service service,
+                                   ApiGatewayV2OpenApiImporter openApiImporter,
+                                   ObjectMapper objectMapper) {
         this.service = service;
+        this.openApiImporter = openApiImporter;
         this.objectMapper = objectMapper;
     }
 
@@ -31,6 +35,8 @@ public class ApiGatewayV2JsonHandler {
         try {
             return switch (action) {
                 case "CreateApi" -> handleCreateApi(request, region);
+                case "ImportApi" -> handleImportApi(request, region);
+                case "ReimportApi" -> handleReimportApi(request, region);
                 case "GetApis" -> handleGetApis(region);
                 case "GetApi" -> handleGetApi(request, region);
                 case "UpdateApi" -> handleUpdateApi(request, region);
@@ -91,6 +97,17 @@ public class ApiGatewayV2JsonHandler {
         @SuppressWarnings("unchecked")
         Map<String, Object> map = toLowerCamelCase(objectMapper.convertValue(request, Map.class));
         Api api = service.createApi(region, map);
+        return Response.status(201).entity(toApiNode(api).toString()).build();
+    }
+
+    private Response handleImportApi(JsonNode request, String region) {
+        Api api = openApiImporter.importApi(region, request.path("Body").asText(null));
+        return Response.status(201).entity(toApiNode(api).toString()).build();
+    }
+
+    private Response handleReimportApi(JsonNode request, String region) {
+        String apiId = request.path("ApiId").asText();
+        Api api = openApiImporter.reimportApi(region, apiId, request.path("Body").asText(null));
         return Response.status(201).entity(toApiNode(api).toString()).build();
     }
 

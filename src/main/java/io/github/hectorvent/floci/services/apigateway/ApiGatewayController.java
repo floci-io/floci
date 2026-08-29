@@ -29,6 +29,7 @@ import io.github.hectorvent.floci.services.apigateway.model.RequestValidator;
 import io.github.hectorvent.floci.services.apigateway.model.RestApi;
 import io.github.hectorvent.floci.services.apigateway.model.UsagePlan;
 import io.github.hectorvent.floci.services.apigateway.model.UsagePlanKey;
+import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2OpenApiImporter;
 import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2Service;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Api;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Authorizer;
@@ -66,14 +67,17 @@ public class ApiGatewayController {
 
     private final ApiGatewayService service;
     private final ApiGatewayV2Service v2Service;
+    private final ApiGatewayV2OpenApiImporter v2OpenApiImporter;
     private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
 
     @Inject
     public ApiGatewayController(ApiGatewayService service, ApiGatewayV2Service v2Service,
+                                ApiGatewayV2OpenApiImporter v2OpenApiImporter,
                                 RegionResolver regionResolver, ObjectMapper objectMapper) {
         this.service = service;
         this.v2Service = v2Service;
+        this.v2OpenApiImporter = v2OpenApiImporter;
         this.regionResolver = regionResolver;
         this.objectMapper = objectMapper;
     }
@@ -1099,6 +1103,18 @@ public class ApiGatewayController {
         }
     }
 
+    @PUT
+    @Path("/v2/apis")
+    @Consumes(MediaType.WILDCARD)
+    public Response importApi(@Context HttpHeaders headers,
+                              @QueryParam("basepath") String basePath,
+                              @QueryParam("failOnWarnings") Boolean failOnWarnings,
+                              String body) {
+        String region = regionResolver.resolveRegion(headers);
+        Api api = v2OpenApiImporter.importApi(region, extractOpenApiBody(body));
+        return Response.status(201).entity(toV2ApiNode(api).toString()).type(MediaType.APPLICATION_JSON).build();
+    }
+
     @GET
     @Path("/v2/apis")
     public Response getApis(@Context HttpHeaders headers) {
@@ -1146,6 +1162,39 @@ public class ApiGatewayController {
         String region = regionResolver.resolveRegion(headers);
         v2Service.deleteCorsConfiguration(region, apiId);
         return Response.noContent().build();
+    }
+
+    @PUT
+    @Path("/v2/apis/{apiId}")
+    @Consumes(MediaType.WILDCARD)
+    public Response reimportApi(@Context HttpHeaders headers,
+                                @PathParam("apiId") String apiId,
+                                @QueryParam("basepath") String basePath,
+                                @QueryParam("failOnWarnings") Boolean failOnWarnings,
+                                String body) {
+        String region = regionResolver.resolveRegion(headers);
+        Api api = v2OpenApiImporter.reimportApi(region, apiId, extractOpenApiBody(body));
+        return Response.status(201).entity(toV2ApiNode(api).toString()).type(MediaType.APPLICATION_JSON).build();
+    }
+
+    /**
+     * ImportApi/ReimportApi wrap the OpenAPI document in a restJson1 envelope — {@code {"body": "..."}} —
+     * unlike the v1 ImportRestApi/PutRestApi pair, which post the document as the raw HTTP body.
+     * Fall back to treating the payload as the document itself so a hand-rolled curl still works.
+     */
+    private String extractOpenApiBody(String payload) {
+        if (payload == null || payload.isBlank()) {
+            throw new AwsException("BadRequestException", "Body is required for OpenAPI import", 400);
+        }
+        try {
+            com.fasterxml.jackson.databind.JsonNode root = objectMapper.readTree(payload);
+            if (root.isObject() && root.hasNonNull("body") && root.get("body").isTextual()) {
+                return root.get("body").asText();
+            }
+        } catch (IOException e) {
+            // Not JSON at all — a raw YAML/JSON OpenAPI document.
+        }
+        return payload;
     }
 
     @POST
