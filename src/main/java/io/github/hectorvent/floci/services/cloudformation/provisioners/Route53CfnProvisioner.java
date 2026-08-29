@@ -3,7 +3,7 @@ package io.github.hectorvent.floci.services.cloudformation.provisioners;
 import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.route53.Route53Service;
-import io.github.hectorvent.floci.services.route53.model.HostedZoneVpc;
+import io.github.hectorvent.floci.services.route53.model.VpcAssociation;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -35,17 +35,27 @@ public class Route53CfnProvisioner implements CfnResourceProvisioner {
 
         JsonNode resolved = ctx.engine().resolveNode(props);
         String comment = resolved.path("HostedZoneConfig").path("Comment").asText(null);
-        List<HostedZoneVpc> vpcs = parseVpcs(resolved.path("VPCs"));
+        List<VpcAssociation> vpcs = parseVpcs(resolved.path("VPCs"));
         String callerReference = ctx.stackName() + "/" + resource.getLogicalId();
         String id;
         if (resource.getPhysicalId() == null) {
+            // CreateHostedZone only accepts a single VPC (a private zone becomes
+            // resolvable from that VPC immediately); any further VPCs in the CFN
+            // template's list are wired in afterward via AssociateVPCWithHostedZone,
+            // matching how a real CloudFormation update converges an existing zone.
+            VpcAssociation firstVpc = vpcs.isEmpty() ? null : vpcs.get(0);
             Route53Service.CreateZoneResult created = route53Service.createHostedZone(
-                    name, callerReference, comment, !vpcs.isEmpty(), vpcs);
+                    name, callerReference, comment, firstVpc);
             id = created.zone().getId();
+            for (int i = 1; i < vpcs.size(); i++) {
+                route53Service.associateVpcWithHostedZone(id, vpcs.get(i), comment);
+            }
         } else {
             id = resource.getPhysicalId();
-            route53Service.ensureHostedZone(
-                    id, name, callerReference, comment, !vpcs.isEmpty(), vpcs);
+            route53Service.getHostedZone(id);
+            for (VpcAssociation vpc : vpcs) {
+                route53Service.associateVpcWithHostedZone(id, vpc, comment);
+            }
         }
 
         resource.setPhysicalId(id);
@@ -59,18 +69,18 @@ public class Route53CfnProvisioner implements CfnResourceProvisioner {
     }
 
     @Override
-    public void delete(String resourceType, String physicalId, String region, String accountId) {
+    public void delete(String resourceType, String physicalId, String region) {
         route53Service.deleteHostedZone(physicalId);
     }
 
-    private List<HostedZoneVpc> parseVpcs(JsonNode node) {
-        List<HostedZoneVpc> vpcs = new ArrayList<>();
+    private List<VpcAssociation> parseVpcs(JsonNode node) {
+        List<VpcAssociation> vpcs = new ArrayList<>();
         if (node.isArray()) {
             for (JsonNode item : node) {
                 String id = item.path("VPCId").asText(null);
                 String region = item.path("VPCRegion").asText(null);
                 if (id != null && region != null) {
-                    vpcs.add(new HostedZoneVpc(id, region));
+                    vpcs.add(new VpcAssociation(id, region));
                 }
             }
         }
