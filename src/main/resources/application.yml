@@ -238,6 +238,7 @@ floci:
       enabled: true
       enforce-auth: false
       default-presign-expiry-seconds: 3600
+      global-bucket-namespace: false
     dynamodb:
       enabled: true
     sns:
@@ -247,8 +248,13 @@ floci:
       ephemeral: false
       default-memory-mb: 128
       default-timeout-seconds: 3
-      runtime-api-base-port: 9200
-      runtime-api-max-port: 9299
+      # 500 ports, not the former 100 (9200-9299): one port is held per running Lambda
+      # container, so this is the concurrent-execution ceiling, and a multi-account LZA needs
+      # ~112 at once. See EmulatorConfig.runtimeApiBasePort for why 12000 and not a wider 9200.
+      # Keep in step with the @WithDefault there — a value set here WINS over the annotation,
+      # so changing only the default silently does nothing (the issue #2225 trap).
+      runtime-api-base-port: 12000
+      runtime-api-max-port: 12499
       code-path: ./data/lambda-code
       poll-interval-ms: 1000
       container-idle-timeout-seconds: 300
@@ -369,6 +375,9 @@ floci:
       timeout-sweep-interval-seconds: 1
     cloudformation:
       enabled: true
+      # Fail an AWS::Lambda::Function whose S3 code cannot be read, as real CloudFormation
+      # does. Set true to fall back to the built-in stub handler instead (issue #2648).
+      allow-stub-lambda-code: false
     acm:
       enabled: true
       validation-wait-seconds: 0
@@ -409,6 +418,10 @@ floci:
       socat-image: alpine/socat
       mock: false
       aws-faithful-private-ip: false
+      # container-ips-routable: true  # Auto-detected by default (a throwaway TCP probe toward
+                                       # the container network). Set explicitly when the probe
+                                       # can't speak for your clients, e.g. Floci itself running
+                                       # containerized. FLOCI_SERVICES_EC2_CONTAINER_IPS_ROUTABLE
     ecs:
       enabled: true
       mock: false
@@ -497,6 +510,8 @@ floci:
       enabled: true
     textract:
       enabled: true
+    comprehend:
+      enabled: true
     pricing:
       enabled: true
     transcribe:
@@ -558,6 +573,10 @@ floci:
     ssoadmin:
       enabled: true
     controltower:
+      enabled: true
+    route53resolver:
+      enabled: true
+    aps:
       enabled: true
     lakeformation:
       enabled: true

@@ -128,6 +128,213 @@ class FirehoseIntegrationTest {
     }
 
     @Test
+    @Order(6)
+    void startAndStopDeliveryStreamEncryption() {
+        String encryptionStream = "encryption-stream-" + System.currentTimeMillis();
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "Firehose_20150804.CreateDeliveryStream")
+            .body("{ \"DeliveryStreamName\": \"" + encryptionStream + "\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String keyArn = "arn:aws:kms:us-east-1:123456789012:key/test-key";
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "Firehose_20150804.StartDeliveryStreamEncryption")
+            .body("{ \"DeliveryStreamName\": \"" + encryptionStream
+                    + "\", \"DeliveryStreamEncryptionConfigurationInput\": { \"KeyType\": \"CUSTOMER_MANAGED_CMK\", \"KeyARN\": \""
+                    + keyArn + "\" } }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "Firehose_20150804.DescribeDeliveryStream")
+            .body("{ \"DeliveryStreamName\": \"" + encryptionStream + "\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DeliveryStreamDescription.DeliveryStreamEncryptionConfiguration.KeyType",
+                    equalTo("CUSTOMER_MANAGED_CMK"))
+            .body("DeliveryStreamDescription.DeliveryStreamEncryptionConfiguration.KeyARN",
+                    equalTo(keyArn))
+            .body("DeliveryStreamDescription.DeliveryStreamEncryptionConfiguration.Status",
+                    equalTo("ENABLED"));
+
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "Firehose_20150804.StopDeliveryStreamEncryption")
+            .body("{ \"DeliveryStreamName\": \"" + encryptionStream + "\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "Firehose_20150804.DescribeDeliveryStream")
+            .body("{ \"DeliveryStreamName\": \"" + encryptionStream + "\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DeliveryStreamDescription.DeliveryStreamEncryptionConfiguration.Status",
+                    equalTo("DISABLED"))
+            // Disabling must not erase the key identity: real AWS keeps reporting the
+            // stopped stream's KeyType and customer KeyARN.
+            .body("DeliveryStreamDescription.DeliveryStreamEncryptionConfiguration.KeyType",
+                    equalTo("CUSTOMER_MANAGED_CMK"))
+            .body("DeliveryStreamDescription.DeliveryStreamEncryptionConfiguration.KeyARN",
+                    equalTo("arn:aws:kms:us-east-1:123456789012:key/test-key"));
+
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "Firehose_20150804.DeleteDeliveryStream")
+            .body("{ \"DeliveryStreamName\": \"" + encryptionStream + "\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    @Order(8)
+    void startDeliveryStreamEncryptionWithoutInputDefaultsToAwsOwnedCmk() {
+        // DeliveryStreamEncryptionConfigurationInput is optional (Required: No) - omitting
+        // it is the documented way to enable SSE with the service-owned key, not an error.
+        String encryptionStream = "encryption-noinput-" + System.currentTimeMillis();
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "Firehose_20150804.CreateDeliveryStream")
+            .body("{ \"DeliveryStreamName\": \"" + encryptionStream + "\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "Firehose_20150804.StartDeliveryStreamEncryption")
+            .body("{ \"DeliveryStreamName\": \"" + encryptionStream + "\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "Firehose_20150804.DescribeDeliveryStream")
+            .body("{ \"DeliveryStreamName\": \"" + encryptionStream + "\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DeliveryStreamDescription.DeliveryStreamEncryptionConfiguration.Status",
+                    equalTo("ENABLED"))
+            .body("DeliveryStreamDescription.DeliveryStreamEncryptionConfiguration.KeyType",
+                    equalTo("AWS_OWNED_CMK"));
+
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "Firehose_20150804.DeleteDeliveryStream")
+            .body("{ \"DeliveryStreamName\": \"" + encryptionStream + "\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    @Order(7)
+    void startDeliveryStreamEncryptionWithoutCustomerKeyReturnsInvalidArgument() {
+        String encryptionStream = "encryption-validation-" + System.currentTimeMillis();
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "Firehose_20150804.CreateDeliveryStream")
+            .body("{ \"DeliveryStreamName\": \"" + encryptionStream + "\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "Firehose_20150804.StartDeliveryStreamEncryption")
+            .body("{ \"DeliveryStreamName\": \"" + encryptionStream
+                    + "\", \"DeliveryStreamEncryptionConfigurationInput\": { \"KeyType\": \"CUSTOMER_MANAGED_CMK\" } }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidArgumentException"));
+
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "Firehose_20150804.DeleteDeliveryStream")
+            .body("{ \"DeliveryStreamName\": \"" + encryptionStream + "\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    @Order(9)
+    void startDeliveryStreamEncryptionWithMalformedKeyArnReturnsInvalidArgument() {
+        String encryptionStream = "encryption-badarn-" + System.currentTimeMillis();
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "Firehose_20150804.CreateDeliveryStream")
+            .body("{ \"DeliveryStreamName\": \"" + encryptionStream + "\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // botocore pins AWSKMSKeyARNForSSE to
+        // arn:.*:kms:<region>:<12-digit account>:key/<id> — a bare key id is not a KeyARN,
+        // and storing it would make DescribeDeliveryStream report a key that cannot exist.
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "Firehose_20150804.StartDeliveryStreamEncryption")
+            .body("{ \"DeliveryStreamName\": \"" + encryptionStream
+                    + "\", \"DeliveryStreamEncryptionConfigurationInput\": "
+                    + "{ \"KeyType\": \"CUSTOMER_MANAGED_CMK\", \"KeyARN\": \"not-an-arn\" } }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidArgumentException"));
+
+        // The rejected call must not have enabled encryption on the stream.
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "Firehose_20150804.DescribeDeliveryStream")
+            .body("{ \"DeliveryStreamName\": \"" + encryptionStream + "\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DeliveryStreamDescription.DeliveryStreamEncryptionConfiguration.Status",
+                    equalTo("DISABLED"));
+
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "Firehose_20150804.DeleteDeliveryStream")
+            .body("{ \"DeliveryStreamName\": \"" + encryptionStream + "\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
     @Order(16)
     void describeDeliveryStreamReturnsKinesisSourceConfiguration() {
         given()

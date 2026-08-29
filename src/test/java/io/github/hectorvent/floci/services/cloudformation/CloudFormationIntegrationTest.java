@@ -514,6 +514,150 @@ class CloudFormationIntegrationTest {
     }
 
     @Test
+    void createStack_s3BucketWithVersioningConfiguration() {
+        String template = """
+            {
+              "Resources": {
+                "MyBucket": {
+                  "Type": "AWS::S3::Bucket",
+                  "Properties": {
+                    "BucketName": "cfn-versioning-test-bucket",
+                    "VersioningConfiguration": {
+                      "Status": "Enabled"
+                    }
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-versioning-stack")
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackId>"));
+
+        // The bucket's ?versioning subresource should reflect the CloudFormation VersioningConfiguration.
+        given()
+        .when()
+            .get("/cfn-versioning-test-bucket?versioning")
+        .then()
+            .statusCode(200)
+            .body(containsString("<Status>Enabled</Status>"));
+    }
+
+    @Test
+    void createStack_s3BucketWithoutVersioningConfigurationLeavesVersioningUnset() {
+        String template = """
+            {
+              "Resources": {
+                "MyBucket": {
+                  "Type": "AWS::S3::Bucket",
+                  "Properties": {
+                    "BucketName": "cfn-versioning-unset-bucket"
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-versioning-unset-stack")
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // No VersioningConfiguration in the template → versioning must stay unset (no <Status> element),
+        // matching real AWS behavior for a bucket that was never versioned.
+        given()
+        .when()
+            .get("/cfn-versioning-unset-bucket?versioning")
+        .then()
+            .statusCode(200)
+            .body(not(containsString("<Status>")));
+    }
+
+    @Test
+    void updateStack_s3BucketVersioningConfigurationIsReconciled() {
+        String stackName = "cfn-versioning-update-stack";
+        String bucketName = "cfn-versioning-update-bucket";
+        String enabled = """
+            {
+              "Resources": {
+                "MyBucket": {
+                  "Type": "AWS::S3::Bucket",
+                  "Properties": {
+                    "BucketName": "%s",
+                    "VersioningConfiguration": {
+                      "Status": "Enabled"
+                    }
+                  }
+                }
+              }
+            }
+            """.formatted(bucketName);
+        String suspended = """
+            {
+              "Resources": {
+                "MyBucket": {
+                  "Type": "AWS::S3::Bucket",
+                  "Properties": {
+                    "BucketName": "%s",
+                    "VersioningConfiguration": {
+                      "Status": "Suspended"
+                    }
+                  }
+                }
+              }
+            }
+            """.formatted(bucketName);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", enabled)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+        .when()
+            .get("/" + bucketName + "?versioning")
+        .then()
+            .statusCode(200)
+            .body(containsString("<Status>Enabled</Status>"));
+
+        // Update: Status changes to Suspended → versioning is reconciled to match the template.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", suspended)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+        .when()
+            .get("/" + bucketName + "?versioning")
+        .then()
+            .statusCode(200)
+            .body(containsString("<Status>Suspended</Status>"));
+    }
+
+    @Test
     void createStack_lambdaWithS3Code() {
         byte[] zipBytes = buildHandlerZip();
 
@@ -10290,6 +10434,90 @@ class CloudFormationIntegrationTest {
                 .body("name", equalTo("cfn-private-api"))
                 .body("endpointConfiguration.types", contains("PRIVATE"))
                 .body("endpointConfiguration.vpcEndpointIds", contains("vpce-12345678"));
+    }
+
+    @Test
+    void createStack_eventBridgeRuleWithInputTransformer_deliversTransformedBodyToSqs() {
+        String template = """
+            {
+              "Resources": {
+                "TargetQueue": {
+                  "Type": "AWS::SQS::Queue",
+                  "Properties": { "QueueName": "cfn-it-transform-queue" }
+                },
+                "MyRule": {
+                  "Type": "AWS::Events::Rule",
+                  "Properties": {
+                    "Name": "cfn-it-transform-rule",
+                    "EventPattern": { "source": ["cfn.transform.test"] },
+                    "Targets": [
+                      {
+                        "Id": "T0",
+                        "Arn": { "Fn::GetAtt": ["TargetQueue", "Arn"] },
+                        "InputTransformer": {
+                          "InputPathsMap": { "e": "$.detail.eventName" },
+                          "InputTemplate": "{\\"e\\":<e>}"
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-it-transform-stack")
+            .formParam("TemplateBody", template)
+        .when().post("/").then().statusCode(200).body(containsString("<StackId>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", "cfn-it-transform-stack")
+        .when().post("/")
+        .then().statusCode(200).body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
+
+        // The transformer survived CFN provisioning.
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "AWSEvents.ListTargetsByRule")
+            .body("{\"Rule\":\"cfn-it-transform-rule\"}")
+        .when().post("/")
+        .then().statusCode(200)
+            .body("Targets[0].InputTransformer.InputTemplate", equalTo("{\"e\":<e>}"));
+
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "AWSEvents.PutEvents")
+            .body("""
+                {"Entries":[{"Source":"cfn.transform.test","DetailType":"t",
+                 "Detail":"{\\"eventName\\":\\"site.created\\"}"}]}
+                """)
+        .when().post("/")
+        .then().statusCode(200).body("FailedEntryCount", equalTo(0));
+
+        String getUrlXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "GetQueueUrl")
+            .formParam("QueueName", "cfn-it-transform-queue")
+        .when().post("/")
+        .then().statusCode(200).extract().body().asString();
+        String queueUrl = getUrlXml.substring(
+                getUrlXml.indexOf("<QueueUrl>") + "<QueueUrl>".length(),
+                getUrlXml.indexOf("</QueueUrl>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ReceiveMessage")
+            .formParam("QueueUrl", queueUrl)
+            .formParam("MaxNumberOfMessages", "1")
+            .formParam("WaitTimeSeconds", "0")
+        .when().post("/")
+        .then().statusCode(200)
+            .body(containsString("{&quot;e&quot;:&quot;site.created&quot;}"));
     }
 
     @Test

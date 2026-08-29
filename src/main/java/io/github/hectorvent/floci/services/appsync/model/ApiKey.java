@@ -13,7 +13,6 @@ public class ApiKey {
     private Long expires;
     private Long deletes;
     private String apiId;
-    private String apiKey;
 
     public String getId() { return id; }
     public void setId(String id) { this.id = id; }
@@ -29,7 +28,4 @@ public class ApiKey {
 
     public String getApiId() { return apiId; }
     public void setApiId(String apiId) { this.apiId = apiId; }
-
-    public String getApiKey() { return apiKey; }
-    public void setApiKey(String apiKey) { this.apiKey = apiKey; }
 }

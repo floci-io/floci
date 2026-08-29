@@ -131,8 +131,8 @@ floci:
       ephemeral: false                        # true = remove container after each invocation
       default-memory-mb: 128
       default-timeout-seconds: 3
-      runtime-api-base-port: 9200             # Port range for Lambda Runtime API
-      runtime-api-max-port: 9299
+      runtime-api-base-port: 12000            # Port range for Lambda Runtime API
+      runtime-api-max-port: 12499             # One port per running container = concurrency ceiling
       code-path: ./data/lambda-code           # Where ZIP archives are stored
       poll-interval-ms: 1000
       container-idle-timeout-seconds: 300     # Remove idle containers after this

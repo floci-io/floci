@@ -20,7 +20,7 @@ uv add --dev testcontainers-floci
 
 ```python
 import boto3
-from testcontainers_floci import FlociContainer
+from floci import FlociContainer
 
 
 def test_s3_create_bucket():
@@ -46,7 +46,7 @@ Use a session-scoped fixture so the container starts once and is shared across a
 ```python
 import pytest
 import boto3
-from testcontainers_floci import FlociContainer
+from floci import FlociContainer
 
 
 @pytest.fixture(scope="session")
@@ -85,7 +85,7 @@ def test_upload_object(s3_client):
 import pytest
 import boto3
 import json
-from testcontainers_floci import FlociContainer
+from floci import FlociContainer
 
 
 @pytest.fixture(scope="session")
@@ -125,7 +125,7 @@ def test_send_and_receive_message(sqs_client):
 ```python
 import pytest
 import boto3
-from testcontainers_floci import FlociContainer
+from floci import FlociContainer
 
 
 @pytest.fixture(scope="session")
@@ -191,7 +191,7 @@ Place shared fixtures in `conftest.py` so every test module picks them up automa
 # conftest.py
 import pytest
 import boto3
-from testcontainers_floci import FlociContainer
+from floci import FlociContainer
 
 
 @pytest.fixture(scope="session")

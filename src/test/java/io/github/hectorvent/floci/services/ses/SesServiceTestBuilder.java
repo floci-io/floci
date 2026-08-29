@@ -15,8 +15,10 @@ import io.github.hectorvent.floci.services.ses.model.Identity;
 import io.github.hectorvent.floci.services.ses.model.ReceiptRuleSet;
 import io.github.hectorvent.floci.services.ses.model.SentEmail;
 import io.github.hectorvent.floci.services.ses.model.SuppressedDestination;
+import io.github.hectorvent.floci.services.ses.model.Tenant;
 import io.github.hectorvent.floci.services.route53.Route53Service;
 
+import java.security.SecureRandom;
 import java.time.Clock;
 
 import static org.mockito.Mockito.mock;
@@ -45,6 +47,7 @@ final class SesServiceTestBuilder {
     private final InMemoryStorage<String, String> policyStore = new InMemoryStorage<>();
     private final InMemoryStorage<String, ReceiptRuleSet> receiptRuleStore = new InMemoryStorage<>();
     private final InMemoryStorage<String, CustomVerificationEmailTemplate> cvetStore = new InMemoryStorage<>();
+    private final InMemoryStorage<String, Tenant> tenantStore = new InMemoryStorage<>();
 
     private SmtpRelay smtpRelay = mock(SmtpRelay.class);
     // Default null, matching the production null-Route53 case: SesService treats a null Route53Service
@@ -121,6 +124,7 @@ final class SesServiceTestBuilder {
                 new SesPolicyService(policyStore, objectMapper),
                 new SesReceiptRuleService(receiptRuleStore, clock),
                 new SesCvetService(cvetStore),
+                new SesTenantService(tenantStore, clock, new SecureRandom()),
                 smtpRelay,
                 objectMapper,
                 route53Service,

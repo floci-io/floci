@@ -265,7 +265,7 @@ class AppSyncAuthIntegrationTest {
             .post("/v1/apis/" + apiId + "/apikeys")
         .then()
             .statusCode(200)
-            .extract().path("apiKey.apiKey");
+            .extract().path("apiKey.id");
     }
 
     private static void startSchema(String apiId, String definition) {

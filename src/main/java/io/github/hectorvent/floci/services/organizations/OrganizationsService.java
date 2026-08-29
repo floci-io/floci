@@ -8,6 +8,8 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.services.iam.ScpProvider;
 import io.github.hectorvent.floci.services.organizations.model.CreateAccountStatus;
 import io.github.hectorvent.floci.services.organizations.model.Handshake;
 import io.github.hectorvent.floci.services.organizations.model.HandshakeParty;
@@ -51,7 +53,7 @@ import java.util.regex.Pattern;
  * @see <a href="https://docs.aws.amazon.com/organizations/latest/APIReference/Welcome.html">AWS Organizations API Reference</a>
  */
 @ApplicationScoped
-public class OrganizationsService {
+public class OrganizationsService implements ScpProvider {
 
     private static final Logger LOG = Logger.getLogger(OrganizationsService.class);
 
@@ -88,6 +90,10 @@ public class OrganizationsService {
      * {@code DescribeEffectivePolicy} is defined only for the inheritable policy types. AWS
      * rejects the two access-control types outright — they are evaluated as a deny-by-intersection
      * chain rather than merged into a single effective document, so there is nothing to return.
+     *
+     * <p>This is floci's rendering of the model's {@code EffectivePolicyType} shape; the last five
+     * entries were added to the shape after it was first written here. Ordered for the same reason
+     * as {@link #POLICY_TYPES}.
      */
     private static final List<String> EFFECTIVE_POLICY_TYPES = List.of(
             "TAG_POLICY",
@@ -95,7 +101,12 @@ public class OrganizationsService {
             "AISERVICES_OPT_OUT_POLICY",
             "CHATBOT_POLICY",
             "DECLARATIVE_POLICY_EC2",
-            "SECURITYHUB_POLICY");
+            "SECURITYHUB_POLICY",
+            "INSPECTOR_POLICY",
+            "UPGRADE_ROLLOUT_POLICY",
+            "BEDROCK_POLICY",
+            "S3_POLICY",
+            "NETWORK_SECURITY_DIRECTOR_POLICY");
 
     private static final Set<String> EFFECTIVE_POLICY_TYPE_SET = Set.copyOf(EFFECTIVE_POLICY_TYPES);
 
@@ -139,9 +150,12 @@ public class OrganizationsService {
     private final AccountAwareStorageBackend<OrganizationPolicy> policies;
     private final AccountAwareStorageBackend<CreateAccountStatus> createAccountStatuses;
     private final AccountAwareStorageBackend<Handshake> handshakes;
+    private final boolean scpEnforcementEnabled;
 
     @Inject
-    public OrganizationsService(StorageFactory storageFactory, ObjectMapper objectMapper) {
+    public OrganizationsService(StorageFactory storageFactory, ObjectMapper objectMapper,
+                                EmulatorConfig config) {
+        this.scpEnforcementEnabled = config.services().organizations().scpEnforcementEnabled();
         this.objectMapper = objectMapper;
         this.organizations = storageFactory.create("organizations", "organizations-organizations.json",
                 new TypeReference<Map<String, Organization>>() {});
@@ -164,6 +178,18 @@ public class OrganizationsService {
                          AccountAwareStorageBackend<OrganizationPolicy> policies,
                          AccountAwareStorageBackend<CreateAccountStatus> createAccountStatuses,
                          AccountAwareStorageBackend<Handshake> handshakes) {
+        this(objectMapper, organizations, accounts, organizationalUnits, policies,
+                createAccountStatuses, handshakes, true);
+    }
+
+    OrganizationsService(ObjectMapper objectMapper,
+                         AccountAwareStorageBackend<Organization> organizations,
+                         AccountAwareStorageBackend<OrganizationAccount> accounts,
+                         AccountAwareStorageBackend<OrganizationalUnit> organizationalUnits,
+                         AccountAwareStorageBackend<OrganizationPolicy> policies,
+                         AccountAwareStorageBackend<CreateAccountStatus> createAccountStatuses,
+                         AccountAwareStorageBackend<Handshake> handshakes,
+                         boolean scpEnforcementEnabled) {
         this.objectMapper = objectMapper;
         this.organizations = organizations;
         this.accounts = accounts;
@@ -171,6 +197,7 @@ public class OrganizationsService {
         this.policies = policies;
         this.createAccountStatuses = createAccountStatuses;
         this.handshakes = handshakes;
+        this.scpEnforcementEnabled = scpEnforcementEnabled;
     }
 
     /** A parent reference as returned by {@code ListParents}. */
@@ -749,14 +776,48 @@ public class OrganizationsService {
     }
 
     /**
+     * Rejects anything outside the {@code EffectivePolicyType} enum, which both
+     * DescribeEffectivePolicy and ListAccountsWithInvalidEffectivePolicy draw their required
+     * PolicyType from. Without it the latter answers 200 with an empty account list for a
+     * policy type that does not exist, which reads as "nothing is broken".
+     */
+    private void validateEffectivePolicyType(String policyType) {
+        if (policyType == null || !EFFECTIVE_POLICY_TYPE_SET.contains(policyType)) {
+            throw invalidInput("PolicyType must be one of " + String.join(", ", EFFECTIVE_POLICY_TYPES) + ".");
+        }
+    }
+
+    /**
+     * Floci does not evaluate effective policies, so no account can be reported as carrying an
+     * invalid one. The operation still has to validate its required PolicyType before it can
+     * honestly answer "none".
+     *
+     * <p>The model restricts this to the management account or a delegated administrator, but
+     * names no service that delegation must be scoped to and {@code EffectivePolicyType} maps to
+     * none — there is nothing to check a delegated admin's registration against, because
+     * delegated administration of Organizations' own operations is granted through the
+     * organization's resource-based delegation policy ({@code PutResourcePolicy}), not through
+     * {@code RegisterDelegatedAdministrator}'s per-service map. Floci exposes the resource-policy
+     * CRUD but nothing reads it for authorization yet, so the concept genuinely isn't modelled
+     * here — if it ever is, the resource policy is the hook. Management-only is stricter than the
+     * model text, matching how every other operation carrying this same boilerplate phrase is
+     * gated here ({@link #attachPolicy}, {@link #enablePolicyType},
+     * {@link #registerDelegatedAdministrator}, {@link #listDelegatedAdministrators}).
+     */
+    public List<OrganizationAccount> listAccountsWithInvalidEffectivePolicy(String callerAccountId,
+                                                                           String policyType) {
+        requireManagementAccount(callerAccountId);
+        validateEffectivePolicyType(policyType);
+        return List.of();
+    }
+
+    /**
      * Merges every policy of {@code policyType} down the inheritance chain root → OU(s) → target,
      * with the closest ancestor taking precedence on conflicting keys.
      */
     public EffectivePolicy describeEffectivePolicy(String callerAccountId, String policyType, String targetId) {
         Organization organization = requireOrganizationForCaller(callerAccountId);
-        if (policyType == null || !EFFECTIVE_POLICY_TYPE_SET.contains(policyType)) {
-            throw invalidInput("PolicyType must be one of " + String.join(", ", EFFECTIVE_POLICY_TYPES) + ".");
-        }
+        validateEffectivePolicyType(policyType);
         String effectiveTarget = targetId == null || targetId.isEmpty() ? callerAccountId : targetId;
         requireTarget(organization, effectiveTarget);
 
@@ -827,6 +888,50 @@ public class OrganizationsService {
         if (guardrail.getTargets().addAll(targetIds) || guardrail.getTargets().isEmpty()) {
             policies.putForAccount(organization.getMasterAccountId(), guardrail.getId(), guardrail);
         }
+    }
+
+    // ──────────────────────────── SCP provider ────────────────────────────
+
+    /**
+     * {@inheritDoc}
+     *
+     * <p>Levels are ordered root → OUs on the path → account. Only bites when
+     * {@code floci.services.organizations.scp-enforcement-enabled} is set (and, in practice,
+     * IAM enforcement too — {@code IamEnforcementFilter} is the only consumer). The management
+     * account is exempt, matching AWS.</p>
+     */
+    @Override
+    public List<List<String>> effectiveScpLevels(String accountId) {
+        if (!scpEnforcementEnabled) {
+            return null;
+        }
+        Organization organization;
+        try {
+            organization = requireOrganizationForCaller(accountId);
+        } catch (AwsException e) {
+            return null;
+        }
+        if (accountId.equals(organization.getMasterAccountId())) {
+            return null;
+        }
+        boolean scpEnabled = organization.getRoot().getPolicyTypes().stream()
+                .anyMatch(t -> SERVICE_CONTROL_POLICY.equals(t.getType()) && "ENABLED".equals(t.getStatus()));
+        if (!scpEnabled) {
+            return null;
+        }
+        List<OrganizationPolicy> organizationPolicies = policiesIn(organization);
+        List<List<String>> levels = new ArrayList<>();
+        for (String node : ancestryOf(organization, accountId)) {
+            List<String> documents = organizationPolicies.stream()
+                    .filter(policy -> SERVICE_CONTROL_POLICY.equals(policy.getType())
+                            && policy.getTargets().contains(node))
+                    .map(OrganizationPolicy::getContent)
+                    .toList();
+            if (!documents.isEmpty()) {
+                levels.add(documents);
+            }
+        }
+        return levels.isEmpty() ? null : levels;
     }
 
     // ──────────────────────────── Tags ────────────────────────────

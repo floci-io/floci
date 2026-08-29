@@ -178,7 +178,7 @@ LocalStack's community edition [sunset in March 2026](https://blog.localstack.cl
 | CodeBuild | Real Docker execution | No |
 | Native binary | ~40 MB | No |
 
-**81 AWS services. Broad coverage. Free forever.**
+**83 AWS services. Broad coverage. Free forever.**
 
 ## Architecture Overview
 
@@ -300,7 +300,7 @@ For operation-level compatibility, see the [Services Overview](https://floci.io/
 | Elastic Beanstalk | In-process | Applications, application versions, environments, configuration templates, platform and solution stack metadata |
 | AWS Backup | In-process | Vaults, backup plans, selections, simulated job lifecycle, recovery points |
 | AWS FIS | In-process | All 26 management APIs for templates, experiments, target accounts, action and target discovery, safety lever, tagging, and pagination; experiment execution is a safe control-plane simulation and does not inject faults into other services |
-| AWS Config | In-process | Config rules, configuration recorders, delivery channels, conformance packs, tagging |
+| AWS Config | In-process | Config rules, evaluation-driven compliance (PutEvaluations, compliance details and summaries), configuration recorders, delivery channels, retention configuration, conformance packs, tagging |
 | Organizations | In-process | Organizations, roots, nested OUs, member accounts, all policy types with `FullAWSAccess` and effective-policy inheritance, trusted service access, delegated administrators, resource policy, and the full invitation/handshake flow; created accounts are usable Floci accounts and member accounts can read the organization they belong to |
 | CloudTrail | In-process | Trails, event selectors (S3 data events with bucket/prefix matching), `StartLogging`/`StopLogging`, scheduled gzipped log file emission to the destination bucket at AWS-shaped key paths, IAM-deny path emits `AccessDenied` records |
 | CloudFront | In-process | Distributions, origins, cache behaviors, invalidations, tagging |
@@ -571,9 +571,11 @@ aws --endpoint-url http://localhost:4566 s3 ls
 
 Floci has Testcontainers modules for starting isolated Floci instances directly from tests. This avoids shared state, manual daemon setup, and port conflicts.
 
+For Testcontainers 1.x, use the versions as indicated in the table below.
+
 | Language | Package | Latest | Registry | Source |
 |---|---|---|---|---|
-| Java | `io.floci:testcontainers-floci` | `1.4.0` | [Maven Central](https://mvnrepository.com/artifact/io.floci/testcontainers-floci) | [GitHub](https://github.com/floci-io/testcontainers-floci) |
+| Java | `io.floci:testcontainers-floci` | `1.14.0` | [Maven Central](https://mvnrepository.com/artifact/io.floci/testcontainers-floci) | [GitHub](https://github.com/floci-io/testcontainers-floci) |
 | Node.js | `@floci/testcontainers` | `0.1.0` | [npm](https://www.npmjs.com/package/@floci/testcontainers) | [GitHub](https://github.com/floci-io/testcontainers-floci-node) |
 | Python | `testcontainers-floci` | `0.1.1` | [PyPI](https://pypi.org/project/testcontainers-floci/) | [GitHub](https://github.com/floci-io/testcontainers-floci-python) |
 | Go | In progress | In progress | N/A | [GitHub](https://github.com/floci-io/testcontainers-floci-go) |
@@ -585,7 +587,7 @@ Floci has Testcontainers modules for starting isolated Floci instances directly 
 <dependency>
     <groupId>io.floci</groupId>
     <artifactId>testcontainers-floci</artifactId>
-    <version>1.4.0</version>
+    <version>1.14.0</version>
     <scope>test</scope>
 </dependency>
 ```
@@ -612,7 +614,7 @@ class S3IntegrationTest {
 }
 ```
 
-For Testcontainers 2.x / Spring Boot 4.x, use version `2.5.0`.
+For Testcontainers 2.x / Spring Boot 4.x, use version `2.15.0`.
 
 </details>
 
@@ -665,7 +667,7 @@ pip install testcontainers-floci
 
 ```python
 import boto3
-from testcontainers_floci import FlociContainer
+from floci import FlociContainer
 
 
 def test_s3_create_bucket():
@@ -801,30 +803,34 @@ Join the Floci community on [Slack](https://join.slack.com/t/floci/shared_invite
 
 ## Sponsors
 
-Floci is independent open source, funded by its users. If Floci saves you time,
-consider [sponsoring the project](https://github.com/sponsors/floci-io) — every
-tier keeps the emulators fast, light, and free.
+Floci is independent open source, funded by the people and companies who use it.
+Sponsorship buys gratitude and nothing else: every emulated service is free for
+everyone, forever, and no sponsor gets features, priority, or roadmap influence
+that the rest of the Flock does not.
 
 ### 🥇 Gold
 
-Large logo with top placement, a dedicated support channel, input on roadmap
-priorities, and custom integration help.
+Large logo with top placement in the emulator READMEs and on floci.io, plus a
+mention in release notes.
 
-*Your logo here — [become a Gold sponsor](https://github.com/sponsors/floci-io).*
+[IceGuard](https://github.com/iceguard) · [Softmax](https://softmax.com/)
 
 ### 🥈 Silver
 
-Logo in this README and on floci.io, priority issue support, and a mention in
-release notes.
+Logo in the emulator READMEs and on floci.io, plus a mention in release notes.
 
-*Your logo here — [become a Silver sponsor](https://github.com/sponsors/floci-io).*
+*Your logo here. [Become a sponsor](https://github.com/sponsors/floci-io).*
 
 ### 🥉 Community
 
-Name in this README, a sponsor badge on GitHub, and our sincere thanks.
+Name in the emulator READMEs, a sponsor badge on GitHub, and our sincere thanks.
 
-- [Nexxion.ai](https://github.com/Nexxion-ai)
-- [Your name here](https://github.com/sponsors/floci-io)
+[AutoScout24](https://www.autoscout24.com) · [Nexxion AI](https://nexxion.ai/)
+
+Every sponsor, including the Friends of the Flock who support Floci outside these
+tiers, is listed in [THANKS.md](https://github.com/floci-io/.github/blob/main/THANKS.md).
+
+**[Sponsor Floci](https://github.com/sponsors/floci-io)**
 
 ## Star History
 

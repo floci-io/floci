@@ -321,12 +321,22 @@ public class AwsQueryController {
                 }
                 yield rdsQueryHandler.handle(action, formParams, region);
             }
-            case "neptune" -> neptuneQueryHandler.handle(action, formParams);
+            case "neptune" -> isFamilyListing(action, formParams)
+                    ? rdsQueryHandler.handle(action, formParams, region)
+                    : neptuneQueryHandler.handle(action, formParams);
             case "docdb" -> {
                 // The same check as on the rds scope: DocumentDB is reachable under either, and a
                 // create that skipped it here would put a second record under an ARN RDS owns.
                 Response clash = rdsAlreadyHoldsIdentifier(action, formParams, region);
-                yield clash != null ? clash : docDbQueryHandler.handle(action, formParams);
+                if (clash != null) {
+                    yield clash;
+                }
+                // The list form answers for the whole RDS family on either endpoint; the RDS
+                // handler assembles it from both stores.
+                if (isFamilyListing(action, formParams)) {
+                    yield rdsQueryHandler.handle(action, formParams, region);
+                }
+                yield docDbQueryHandler.handle(action, formParams);
             }
             case "email" -> sesQueryHandler.handle(action, formParams, region);
             case "monitoring" -> cloudWatchMetricsQueryHandler.handle(action, formParams, region);
@@ -383,6 +393,18 @@ public class AwsQueryController {
      * included — so one identifier keeps one answer. The collision is logged once, because the
      * RDS record behind it is unreachable on this scope and only deleting one of the two fixes it.
      */
+    private static boolean isFamilyListing(String action, MultivaluedMap<String, String> formParams) {
+        return switch (action) {
+            case "DescribeDBClusters" -> isBlank(formParams.getFirst("DBClusterIdentifier"));
+            case "DescribeDBInstances" -> isBlank(formParams.getFirst("DBInstanceIdentifier"));
+            default -> false;
+        };
+    }
+
+    private static boolean isBlank(String value) {
+        return value == null || value.isBlank();
+    }
+
     private boolean namesDocDbResource(String resourceName, String region) {
         if (!docDbService.hasResourceWithArn(resourceName)) {
             return false;

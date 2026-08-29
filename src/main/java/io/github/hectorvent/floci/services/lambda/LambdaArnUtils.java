@@ -13,7 +13,8 @@ import java.util.regex.Pattern;
  */
 public final class LambdaArnUtils {
 
-    private static final Pattern NAME_PATTERN = Pattern.compile("[a-zA-Z0-9-_]+");
+    private static final Pattern NAME_PATTERN = Pattern.compile("[a-zA-Z0-9-_.]+");
+    private static final int MAX_NAME_LENGTH = 256;
     private static final Pattern ACCOUNT_PATTERN = Pattern.compile("\\d{12}");
     private static final Pattern QUALIFIER_PATTERN = Pattern.compile("\\$LATEST|[a-zA-Z0-9-_]+");
 
@@ -143,6 +144,9 @@ public final class LambdaArnUtils {
     private static void validateName(String name) {
         if (name == null || name.isEmpty()) {
             throw invalid("FunctionName segment is empty");
+        }
+        if (name.length() > MAX_NAME_LENGTH) {
+            throw invalid("FunctionName exceeds maximum length of " + MAX_NAME_LENGTH + ": " + name);
         }
         if (!NAME_PATTERN.matcher(name).matches()) {
             throw invalid("FunctionName contains invalid characters: " + name);

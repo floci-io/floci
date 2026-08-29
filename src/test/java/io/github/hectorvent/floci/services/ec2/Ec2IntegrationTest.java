@@ -1594,8 +1594,10 @@ class Ec2IntegrationTest {
                     equalTo("t3.micro"))
             .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.userData",
                     equalTo(launchTemplateUserData))
-            .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.iamInstanceProfile.arn",
-                    equalTo("arn:aws:iam::000000000000:instance-profile/sample-profile"))
+            // Submitted as Name, so it reads back as Name. Rewriting it to an Arn is what made
+            // aws_launch_template.iam_instance_profile.name diff forever.
+            .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.iamInstanceProfile.name",
+                    equalTo("sample-profile"))
             .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.tagSpecificationSet.item.resourceType",
                     equalTo("instance"))
             .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.tagSpecificationSet.item.tagSet.item.find { it.key == 'example:ClusterId' }.value",
@@ -1638,8 +1640,8 @@ class Ec2IntegrationTest {
                     equalTo("t3.small"))
             .body("CreateLaunchTemplateVersionResponse.launchTemplateVersion.launchTemplateData.userData",
                     equalTo(launchTemplateVersionUserData))
-            .body("CreateLaunchTemplateVersionResponse.launchTemplateVersion.launchTemplateData.iamInstanceProfile.arn",
-                    equalTo("arn:aws:iam::000000000000:instance-profile/sample-profile-v2"))
+            .body("CreateLaunchTemplateVersionResponse.launchTemplateVersion.launchTemplateData.iamInstanceProfile.name",
+                    equalTo("sample-profile-v2"))
             .body("CreateLaunchTemplateVersionResponse.launchTemplateVersion.launchTemplateData.tagSpecificationSet.item.tagSet.item.find { it.key == 'example:NodeType' }.value",
                     equalTo("SECONDARY"));
 

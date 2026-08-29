@@ -122,6 +122,7 @@ floci:
       enabled: true
       enforce-auth: false
       default-presign-expiry-seconds: 3600
+      global-bucket-namespace: false
     dynamodb:
       enabled: true
     sns:
@@ -216,6 +217,9 @@ floci:
       timeout-sweep-interval-seconds: 1
     cloudformation:
       enabled: true
+      # Fail an AWS::Lambda::Function whose S3 code cannot be read, as real CloudFormation
+      # does. Set true to fall back to the built-in stub handler instead (issue #2648).
+      allow-stub-lambda-code: false
     acm:
       enabled: true
       validation-wait-seconds: 0
@@ -243,6 +247,7 @@ floci:
       socat-image: alpine/socat
       mock: true
       aws-faithful-private-ip: false
+      # container-ips-routable: true  # see src/main/resources/application.yml
     ecs:
       enabled: true
       mock: true
@@ -294,6 +299,8 @@ floci:
     route53:
       enabled: true
     textract:
+      enabled: true
+    comprehend:
       enabled: true
     pricing:
       enabled: true
@@ -352,6 +359,10 @@ floci:
     ssoadmin:
       enabled: true
     controltower:
+      enabled: true
+    route53resolver:
+      enabled: true
+    aps:
       enabled: true
     lakeformation:
       enabled: true

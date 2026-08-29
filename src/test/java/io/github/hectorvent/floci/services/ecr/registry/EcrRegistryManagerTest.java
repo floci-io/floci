@@ -20,6 +20,7 @@ import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -43,6 +44,7 @@ class EcrRegistryManagerTest {
     private ContainerDetector containerDetector;
     private CurrentContainerNetworkResolver currentContainerNetworkResolver;
     private EmulatorConfig.DockerConfig docker;
+    private EmulatorConfig.EcrServiceConfig ecr;
     private ContainerBuilder.Builder builder;
     private EcrRegistryManager manager;
 
@@ -64,7 +66,7 @@ class EcrRegistryManagerTest {
         RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
 
         EmulatorConfig config = Mockito.mock(EmulatorConfig.class);
-        EmulatorConfig.EcrServiceConfig ecr = Mockito.mock(EmulatorConfig.EcrServiceConfig.class);
+        ecr = Mockito.mock(EmulatorConfig.EcrServiceConfig.class);
         docker = Mockito.mock(EmulatorConfig.DockerConfig.class);
         EmulatorConfig.StorageConfig storage = Mockito.mock(EmulatorConfig.StorageConfig.class);
         when(config.services()).thenReturn(Mockito.mock(EmulatorConfig.ServicesConfig.class));
@@ -162,5 +164,40 @@ class EcrRegistryManagerTest {
         when(docker.resourceNamespace()).thenReturn(Optional.of("run/one"));
 
         assertEquals("http://floci-run-one-test-ecr-registry:5000", manager.httpClient().baseUrl());
+    }
+
+    @Test
+    void rewriteImageUri_matchesAwsEcrUri_rewritesToLocalRegistryAndStartsIt() {
+        when(lifecycleManager.createAndStart(any())).thenReturn(
+                new ContainerLifecycleManager.ContainerInfo("container-id", Map.of()));
+
+        String rewritten = manager.rewriteImageUri("123456789012.dkr.ecr.us-east-1.amazonaws.com/backend-user:1");
+
+        assertEquals("123456789012.dkr.ecr.us-east-1.localhost:" + BASE_PORT + "/backend-user:1", rewritten);
+        verify(lifecycleManager).createAndStart(any());
+    }
+
+    @Test
+    void rewriteImageUri_pathStyleConfig_usesPathStyleUri() {
+        when(ecr.uriStyle()).thenReturn("path");
+        when(lifecycleManager.createAndStart(any())).thenReturn(
+                new ContainerLifecycleManager.ContainerInfo("container-id", Map.of()));
+
+        String rewritten = manager.rewriteImageUri("123456789012.dkr.ecr.us-east-1.amazonaws.com/backend-user:1");
+
+        assertEquals("localhost:" + BASE_PORT + "/123456789012/us-east-1/backend-user:1", rewritten);
+    }
+
+    @Test
+    void rewriteImageUri_nonEcrImage_passesThroughWithoutStartingRegistry() {
+        String rewritten = manager.rewriteImageUri("nginx:latest");
+
+        assertEquals("nginx:latest", rewritten);
+        verify(lifecycleManager, Mockito.never()).createAndStart(any());
+    }
+
+    @Test
+    void rewriteImageUri_nullImage_returnsNull() {
+        assertNull(manager.rewriteImageUri(null));
     }
 }

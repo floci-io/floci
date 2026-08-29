@@ -54,6 +54,9 @@ class AslExecutorResultWriterTest {
         s3Service = mock(S3Service.class);
         when(s3Service.putObject(anyString(), anyString(), any(byte[].class), anyString(), any()))
                 .thenReturn(null);
+        // An exported Map run is retained through the service, so a Map state needs one to run.
+        Instance<StepFunctionsService> sfnService = mock(Instance.class);
+        when(sfnService.get()).thenReturn(mock(StepFunctionsService.class));
         executor = new AslExecutor(
                 mock(LambdaExecutorService.class),
                 mock(LambdaFunctionStore.class),
@@ -65,9 +68,12 @@ class AslExecutorResultWriterTest {
                 s3Service,
                 mock(io.github.hectorvent.floci.services.ecs.EcsService.class),
                 mock(io.github.hectorvent.floci.services.ecs.EcsJsonHandler.class),
+                mock(io.github.hectorvent.floci.services.eventbridge.EventBridgeHandler.class),
+                mock(io.github.hectorvent.floci.services.scheduler.SchedulerService.class),
+                mock(io.github.hectorvent.floci.services.scheduler.SchedulerController.class),
                 mapper,
                 new JsonataEvaluator(mapper),
-                mock(Instance.class),
+                sfnService,
                 mock(EmulatorConfig.class),
                 null);
 
@@ -399,19 +405,27 @@ class AslExecutorResultWriterTest {
         assertEquals("States.QueryEvaluationError", nestedBucketFailure.error);
         assertTrue(nestedBucketFailure.getMessage().contains("Bucket must resolve to a string"));
 
-        JsonNode nestedPrefixStateDef = mapper.readTree("""
+        verify(s3Service, org.mockito.Mockito.never())
+                .putObject(anyString(), anyString(), any(byte[].class), anyString(), any());
+    }
+
+    @Test
+    void aDestinationExpressionReturningNothingFailsBeforeWriting() throws Exception {
+        JsonNode stateDef = mapper.readTree("""
                 {"Type":"Map",
                  "ResultWriter":{"Resource":"arn:aws:states:::s3:putObject",
                    "Arguments":{"Bucket":"b","Prefix":"{% $states.input.missing %}"}}}
                 """);
-        AslExecutor.FailStateException nestedPrefixFailure = assertThrows(
+
+        AslExecutor.FailStateException failure = assertThrows(
                 AslExecutor.FailStateException.class,
-                () -> executor.applyResultWriter("Process", nestedPrefixStateDef, mapper.createObjectNode(),
+                () -> executor.applyResultWriter("Process", stateDef, mapper.createObjectNode(),
                         arr("{\"ok\":true}"), mapper.createArrayNode(), List.of(),
                         sm, context, true));
-        assertEquals("States.QueryEvaluationError", nestedPrefixFailure.error);
-        assertTrue(nestedPrefixFailure.getMessage().contains("Prefix must resolve to a string"));
 
+        assertEquals("States.QueryEvaluationError", failure.error);
+        assertEquals("The JSONata expression '$states.input.missing' specified for the field "
+                + "'ResultWriter/Arguments/Prefix' returned nothing (undefined).", failure.cause);
         verify(s3Service, org.mockito.Mockito.never())
                 .putObject(anyString(), anyString(), any(byte[].class), anyString(), any());
     }

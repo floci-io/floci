@@ -1,12 +1,39 @@
 package io.github.hectorvent.floci.services.s3;
 
+import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.testutil.IamServiceTestHelper;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Method;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 
 class PreSignedUrlFilterTest {
+
+    /**
+     * A bare 12-digit access key ID that isn't registered in IAM must be rejected like any
+     * other unknown key, not resolved to the well-known "test" secret. That fallback would let
+     * a client sign an arbitrary account's X-Amz-Credential with the public "test" secret and
+     * have account resolution treat the forged value as the request's account — an
+     * authentication bypass under S3 auth enforcement (see AccountResolver, which reads a
+     * 12-digit access key ID as the account directly).
+     */
+    private static String resolveSecretKey(PreSignedUrlFilter filter, String accessKeyId) throws Exception {
+        Method method = PreSignedUrlFilter.class.getDeclaredMethod("resolveSecretKey", String.class);
+        method.setAccessible(true);
+        return (String) method.invoke(filter, accessKeyId);
+    }
+
+    @Test
+    void resolveSecretKeyRejectsUnregisteredNumericAccessKeyId() throws Exception {
+        IamService iamService = IamServiceTestHelper.iamServiceWithAccessKey("AKIDUNRELATED", "unrelated-secret");
+        PreSignedUrlFilter filter = new PreSignedUrlFilter(null, null, iamService);
+
+        assertNull(resolveSecretKey(filter, "123456789012"));
+    }
 
     private static MultivaluedMap<String, String> params() {
         return new MultivaluedHashMap<>();

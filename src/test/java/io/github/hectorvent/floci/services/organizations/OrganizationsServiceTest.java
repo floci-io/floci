@@ -20,6 +20,8 @@ import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -251,6 +253,7 @@ class OrganizationsServiceTest {
                 () -> service.describeOrganization(OUTSIDER_ACCOUNT));
         assertEquals("AWSOrganizationsNotInUseException", error.getErrorCode());
     }
+
     @Test
     void controlTowerGuardrailsReconcileRegisteredAndSecurityOusIdempotently() {
         Organization organization = service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
@@ -274,5 +277,79 @@ class OrganizationsServiceTest {
                 .stream().anyMatch(policy -> policy.getName().startsWith("aws-guardrails-")));
         assertFalse(service.listPoliciesForTarget(MANAGEMENT_ACCOUNT, unrelated, "SERVICE_CONTROL_POLICY")
                 .stream().anyMatch(policy -> policy.getName().startsWith("aws-guardrails-")));
+    }
+
+    // ──────────────────────────── effective SCP levels ────────────────────────────
+
+    private static final String DENY_S3 =
+            "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Deny\","
+                    + "\"Action\":\"s3:*\",\"Resource\":\"*\"}]}";
+
+    @Test
+    void effectiveScpLevelsWalkRootOuAccountChain() {
+        Organization organization = service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+        String rootId = organization.getRoot().getId();
+        String ouId = service.createOrganizationalUnit(MANAGEMENT_ACCOUNT, rootId, "workloads", null).getId();
+        String member = service.createAccount(MANAGEMENT_ACCOUNT, "member@example.com", "Member", null, false)
+                .getAccountId();
+        service.moveAccount(MANAGEMENT_ACCOUNT, member, rootId, ouId);
+
+        // FullAWSAccess sits on root, OU, and account: three levels.
+        List<List<String>> levels = service.effectiveScpLevels(member);
+        assertEquals(3, levels.size());
+        assertTrue(levels.get(0).get(0).contains("\"Allow\""));
+
+        // A deny-s3 SCP attached to the OU shows up on the middle level.
+        String policyId = service.createPolicy(MANAGEMENT_ACCOUNT, DENY_S3, null,
+                "deny-s3", "SERVICE_CONTROL_POLICY", null).getId();
+        service.attachPolicy(MANAGEMENT_ACCOUNT, policyId, ouId);
+        levels = service.effectiveScpLevels(member);
+        assertEquals(2, levels.get(1).size());
+    }
+
+    @Test
+    void theManagementAccountIsExemptFromScps() {
+        service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+        String member = service.createAccount(MANAGEMENT_ACCOUNT, "member@example.com", "Member", null, false)
+                .getAccountId();
+
+        // The member is under the same root and does get a ceiling, so the exemption is what
+        // separates the two — not an organization-wide absence of SCPs.
+        assertNotNull(service.effectiveScpLevels(member));
+        assertNull(service.effectiveScpLevels(MANAGEMENT_ACCOUNT));
+    }
+
+    @Test
+    void anAccountOutsideAnyOrganizationHasNoScpCeiling() {
+        service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+        assertNull(service.effectiveScpLevels(OUTSIDER_ACCOUNT));
+    }
+
+    @Test
+    void disablingTheScpPolicyTypeOnTheRootRemovesTheCeiling() {
+        Organization organization = service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+        String member = service.createAccount(MANAGEMENT_ACCOUNT, "member@example.com", "Member", null, false)
+                .getAccountId();
+        assertNotNull(service.effectiveScpLevels(member));
+
+        service.disablePolicyType(MANAGEMENT_ACCOUNT, organization.getRoot().getId(), "SERVICE_CONTROL_POLICY");
+        assertNull(service.effectiveScpLevels(member));
+    }
+
+    @Test
+    void effectiveScpLevelsAreNullWhenEnforcementDisabled() {
+        OrganizationsService disabled = new OrganizationsService(
+                new ObjectMapper(),
+                AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT),
+                AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT),
+                AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT),
+                AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT),
+                AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT),
+                AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT),
+                false);
+        disabled.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+        String member = disabled.createAccount(MANAGEMENT_ACCOUNT, "member@example.com", "Member", null, false)
+                .getAccountId();
+        assertNull(disabled.effectiveScpLevels(member));
     }
 }

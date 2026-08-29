@@ -48,6 +48,15 @@ public class FirehoseService implements ResourceProvider {
     private static final String DEFAULT_BUCKET = "floci-firehose-results";
     private static final int DEFAULT_BUFFERING_INTERVAL_SECONDS = 300;
     private static final int DEFAULT_BUFFERING_SIZE_MBS = 5;
+    /**
+     * botocore's {@code AWSKMSKeyARNForSSE} shape: a KMS <em>key</em> ARN, not an alias and
+     * not a bare key id. Accepting anything else would let DescribeDeliveryStream report an
+     * encryption key that could never exist, where real AWS rejects the call outright.
+     */
+    private static final java.util.regex.Pattern SSE_KEY_ARN_PATTERN = java.util.regex.Pattern.compile(
+            "arn:.*:kms:[a-zA-Z0-9\\-]+:\\d{12}:key/[a-zA-Z_0-9+=,.@\\-_/]+");
+    private static final int SSE_KEY_ARN_MAX_LENGTH = 512;
+
     // Per shard, per tick. GetRecords caps at 1000 anyway; a smaller page keeps one
     // busy source stream from monopolising the single flusher thread.
     private static final int SOURCE_POLL_LIMIT = 500;
@@ -255,6 +264,45 @@ public class FirehoseService implements ResourceProvider {
         stream.setLastUpdateTimestamp(java.time.Instant.now());
         streamStore.put(name, stream);
         LOG.infov("Updated destination {0} of Firehose delivery stream {1}", destinationId, name);
+    }
+
+    public void startDeliveryStreamEncryption(String name, String keyType, String keyArn) {
+        DeliveryStreamDescription stream = describeDeliveryStream(name);
+        String effectiveKeyType = keyType == null ? "AWS_OWNED_CMK" : keyType;
+        if (!effectiveKeyType.equals("AWS_OWNED_CMK") && !effectiveKeyType.equals("CUSTOMER_MANAGED_CMK")) {
+            throw new AwsException("InvalidArgumentException",
+                    "KeyType must be AWS_OWNED_CMK or CUSTOMER_MANAGED_CMK.", 400);
+        }
+        if (effectiveKeyType.equals("CUSTOMER_MANAGED_CMK") && (keyArn == null || keyArn.isBlank())) {
+            throw new AwsException("InvalidArgumentException",
+                    "KeyARN is required for CUSTOMER_MANAGED_CMK.", 400);
+        }
+        if (keyArn != null && !keyArn.isBlank()
+                && (keyArn.length() > SSE_KEY_ARN_MAX_LENGTH || !SSE_KEY_ARN_PATTERN.matcher(keyArn).matches())) {
+            throw new AwsException("InvalidArgumentException",
+                    "KeyARN is not a valid KMS key ARN: " + keyArn, 400);
+        }
+        stream.setDeliveryStreamEncryptionConfiguration(
+                new DeliveryStreamDescription.DeliveryStreamEncryptionConfiguration(
+                        effectiveKeyType,
+                        effectiveKeyType.equals("CUSTOMER_MANAGED_CMK") ? keyArn : null,
+                        "ENABLED"));
+        streamStore.put(name, stream);
+    }
+
+    public void stopDeliveryStreamEncryption(String name) {
+        DeliveryStreamDescription stream = describeDeliveryStream(name);
+        DeliveryStreamDescription.DeliveryStreamEncryptionConfiguration current =
+                stream.getDeliveryStreamEncryptionConfiguration();
+        String keyType = current == null ? "AWS_OWNED_CMK" : current.getKeyType();
+        // Keep the customer key identity on disable: real AWS still reports the KeyARN
+        // of a stopped CUSTOMER_MANAGED_CMK stream, and dropping it here would make a
+        // later DescribeDeliveryStream forget which key the stream was encrypted with.
+        String keyArn = current == null ? null : current.getKeyArn();
+        stream.setDeliveryStreamEncryptionConfiguration(
+                new DeliveryStreamDescription.DeliveryStreamEncryptionConfiguration(
+                        keyType, keyArn, "DISABLED"));
+        streamStore.put(name, stream);
     }
 
     // A corrupt persisted version can only reach here when the caller echoed it

@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.services.iam.model.SessionCreds;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -122,5 +123,101 @@ class LaunchedContainerAwsEnvTest {
 
         assertEquals(1, env.stream().filter(e -> e.equals("FLOCI_HOSTNAME=host.docker.internal")).count());
         assertTrue(env.contains("AWS_ENDPOINT_URL=https://host.docker.internal:4566"));
+    }
+
+    // --- ownerAccountId: a launched Lambda container that never assumes an execution role must
+    // resolve, on Floci's own side, to the function's real owning account rather than the literal
+    // "test" placeholder — otherwise AccountResolver falls back to the emulator's default
+    // (management) account and account-partitioned reads and writes collide or miss whenever the
+    // resource actually lives in a different account's partition.
+
+    @Test
+    void ownerAccountIdWinsOverFlocisOwnAmbientAccessKeyId() {
+        // The regression case. Floci itself is very often started with AWS_ACCESS_KEY_ID set —
+        // the floci-lza image sets it unconditionally — and the server process's credentials say
+        // nothing about which account launched this container. Every other test here leaves the
+        // host env unset, so none of them would fail if this precedence were inverted.
+        LaunchedContainerAwsEnv awsEnv = awsEnvWithHostEnv("http://localhost:4566",
+                Map.of("AWS_ACCESS_KEY_ID", "test", "AWS_SECRET_ACCESS_KEY", "test"));
+
+        List<String> env = awsEnv.sdkBaselineEnv("us-east-1", Optional.empty(), Optional.empty(), "041922743467");
+
+        assertTrue(env.contains("AWS_ACCESS_KEY_ID=041922743467"));
+    }
+
+    @Test
+    void ownerAccountIdForcesTestSecretEvenWithNonTestAmbientSecret() {
+        // The numeric owner-account access key is only ever validated by Floci's S3/RDS/
+        // ElastiCache SigV4 checks when paired with the literal "test" secret (see
+        // LaunchedContainerAwsEnv's class javadoc and the matching validators). If Floci itself
+        // was started with a real, non-test AWS_SECRET_ACCESS_KEY (an exported key pair,
+        // aws-vault, a CI runner), that ambient secret must never be paired with the numeric
+        // owner-account key — the SDK would sign with a pair nothing can verify.
+        LaunchedContainerAwsEnv awsEnv = awsEnvWithHostEnv("http://localhost:4566",
+                Map.of("AWS_ACCESS_KEY_ID", "test", "AWS_SECRET_ACCESS_KEY", "AKIAREALAMBIENTSECRET",
+                        "AWS_SESSION_TOKEN", "real-ambient-session-token"));
+
+        List<String> env = awsEnv.sdkBaselineEnv("us-east-1", Optional.empty(), Optional.empty(), "041922743467");
+
+        assertTrue(env.contains("AWS_ACCESS_KEY_ID=041922743467"));
+        assertTrue(env.contains("AWS_SECRET_ACCESS_KEY=test"));
+        assertTrue(env.contains("AWS_SESSION_TOKEN=test"));
+    }
+
+    @Test
+    void injectsOwnerAccountIdAsAccessKeyWhenHostEnvNotSet() {
+        LaunchedContainerAwsEnv awsEnv = awsEnvWithHostEnv("http://localhost:4566", Map.of());
+
+        List<String> env = awsEnv.sdkBaselineEnv("us-east-1", Optional.empty(), Optional.empty(), "041922743467");
+
+        assertTrue(env.contains("AWS_ACCESS_KEY_ID=041922743467"));
+    }
+
+    @Test
+    void fallsBackToHostEnvWhenOwnerAccountIdIsNotTwelveDigits() {
+        LaunchedContainerAwsEnv awsEnv = awsEnvWithHostEnv("http://localhost:4566",
+                Map.of("AWS_ACCESS_KEY_ID", "AKIAHOSTKEY"));
+
+        List<String> env = awsEnv.sdkBaselineEnv("us-east-1", Optional.empty(), Optional.empty(), "not-an-account-id");
+
+        assertTrue(env.contains("AWS_ACCESS_KEY_ID=AKIAHOSTKEY"));
+    }
+
+    @Test
+    void nullOwnerAccountIdFallsBackToPlaceholder() {
+        LaunchedContainerAwsEnv awsEnv = awsEnvWithHostEnv("http://localhost:4566", Map.of());
+
+        List<String> env = awsEnv.sdkBaselineEnv("us-east-1", Optional.empty(), Optional.empty(), null);
+
+        assertTrue(env.contains("AWS_ACCESS_KEY_ID=test"));
+    }
+
+    @Test
+    void executionRoleCredentialsStillBeatOwnerAccountId() {
+        // A function that does assume a role has real credentials for it; the owning-account
+        // placeholder is only for the fall-through case.
+        LaunchedContainerAwsEnv awsEnv = awsEnvWithHostEnv("http://localhost:4566", Map.of());
+        SessionCreds credentials = new SessionCreds("ASIAEXECUTIONROLE", "role-secret", "role-token");
+
+        List<String> env = awsEnv.sdkBaselineEnv(
+                "us-east-1", Optional.empty(), Optional.of(credentials), "041922743467");
+
+        assertTrue(env.contains("AWS_ACCESS_KEY_ID=ASIAEXECUTIONROLE"));
+    }
+
+    @Test
+    void mountedConfigDirIgnoresOwnerAccountId() {
+        LaunchedContainerAwsEnv awsEnv = awsEnvWithHostEnv("http://localhost:4566", Map.of());
+
+        List<String> env = awsEnv.sdkBaselineEnv(
+                "us-east-1", Optional.of("/opt/aws-config"), Optional.empty(), "041922743467");
+
+        assertTrue(env.stream().noneMatch(e -> e.startsWith("AWS_ACCESS_KEY_ID=")));
+    }
+
+    private LaunchedContainerAwsEnv awsEnvWithHostEnv(String baseUrl, Map<String, String> hostEnv) {
+        ContainerReachableEndpoint endpoint = mock(ContainerReachableEndpoint.class);
+        when(endpoint.baseUrl()).thenReturn(baseUrl);
+        return new LaunchedContainerAwsEnv(endpoint, hostEnv::get);
     }
 }

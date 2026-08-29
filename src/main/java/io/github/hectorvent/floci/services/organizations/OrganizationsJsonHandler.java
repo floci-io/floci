@@ -81,6 +81,8 @@ public class OrganizationsJsonHandler {
                 case "DescribeAccount" -> describeAccount(request, callerAccountId);
                 case "ListAccounts" -> listAccounts(request, callerAccountId);
                 case "ListAccountsForParent" -> listAccountsForParent(request, callerAccountId);
+                case "ListAccountsWithInvalidEffectivePolicy" ->
+                        listAccountsWithInvalidEffectivePolicy(request, callerAccountId);
                 case "MoveAccount" -> moveAccount(request, callerAccountId);
                 case "RemoveAccountFromOrganization" -> removeAccountFromOrganization(request, callerAccountId);
                 case "LeaveOrganization" -> leaveOrganization(callerAccountId);
@@ -278,6 +280,29 @@ public class OrganizationsJsonHandler {
     private Response listAccountsForParent(JsonNode request, String caller) {
         List<OrganizationAccount> all = service.listAccountsForParent(caller, text(request, "ParentId"));
         return accountsResponse(page(all, OrganizationAccount::getId, request));
+    }
+
+    /**
+     * Effective-policy validation is not modeled in Floci; there is no way to evaluate
+     * which accounts have invalid effective policies. Return an explicit empty list to
+     * match the wire contract without fabricating data — but only once the required
+     * PolicyType has been checked against the enum, so a bogus type is not answered with
+     * a reassuring "no invalid accounts".
+     */
+    private Response listAccountsWithInvalidEffectivePolicy(JsonNode request, String caller) {
+        String policyType = text(request, "PolicyType");
+        List<OrganizationAccount> accounts =
+                service.listAccountsWithInvalidEffectivePolicy(caller, policyType);
+        PaginatedResult<OrganizationAccount> page = page(accounts, OrganizationAccount::getId, request);
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode accountsNode = response.putArray("Accounts");
+        page.items().forEach(account -> accountsNode.add(accountNode(account)));
+        putNextToken(response, page.nextToken());
+        // PolicyType is the only field this operation's response can carry any
+        // information in - Accounts is always empty by design (see javadoc above) - so
+        // echoing the validated request value back is required, not cosmetic.
+        response.put("PolicyType", policyType);
+        return Response.ok(response).build();
     }
 
     private Response accountsResponse(PaginatedResult<OrganizationAccount> page) {

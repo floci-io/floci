@@ -32,6 +32,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -41,9 +42,11 @@ import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.zip.GZIPInputStream;
 
 /**
  * Manages Docker container lifecycle for EC2 instances.
@@ -61,6 +64,31 @@ public class Ec2ContainerManager {
     private static final List<String> ALLOWED_SSHD_PATHS = List.of("/usr/sbin/sshd", "/usr/local/sbin/sshd", "/sbin/sshd");
     /** Exit code the sshd install probe uses for "sshd is present but scp is not". See startSshd. */
     static final int SSH_CLIENT_MISSING_EXIT_CODE = 2;
+    /** Base64 alphabet plus the line breaks base64-encoded UserData is commonly wrapped at. */
+    private static final Pattern BASE64_BODY = Pattern.compile("[A-Za-z0-9+/\\s]+={0,2}");
+    private static final int MAX_USER_DATA_DECODE_ROUNDS = 3;
+    /** Mirrors AwsJsonCborController.decodeBody's cap: no AWS service should need more than
+     *  10 MB decompressed, and it bounds how much a caller-controlled gzip stream can expand
+     *  to in the shared emulator JVM. */
+    private static final int MAX_DECOMPRESSED_USER_DATA_BYTES = 10 * 1024 * 1024;
+    /** Caps concurrent UserData gzip decompressions across ALL instance launches, not just one.
+     *  Launches run independently on {@link #executor}, an unbounded cached thread pool, so the
+     *  per-payload cap above only bounds a single launch's allocation: without this, N concurrent
+     *  RunInstances/CreateLaunchConfiguration calls, each smuggling a near-cap gzip payload, could
+     *  together decompress N * 10 MB at once in the shared emulator JVM with no aggregate ceiling.
+     *  4 permits budgets ~40 MB of decompressed UserData in flight at a time - a few multiples of
+     *  the per-payload cap rather than 1, so an ordinary burst of legitimate concurrent launches
+     *  (e.g. an Auto Scaling group launching a handful of instances together) is not serialized
+     *  down to one decompression at a time, while a launch storm still cannot grow memory usage
+     *  without bound. */
+    private static final int MAX_CONCURRENT_USER_DATA_DECOMPRESSIONS = 4;
+    /** Gates entry to {@link #gunzip}; see {@link #MAX_CONCURRENT_USER_DATA_DECOMPRESSIONS}. */
+    private static final Semaphore USER_DATA_DECOMPRESSION_BUDGET =
+            new Semaphore(MAX_CONCURRENT_USER_DATA_DECOMPRESSIONS);
+    /** Test seam: when non-null, invoked by {@link #gunzip} right after it acquires a
+     *  decompression-budget permit and before it starts decompressing, so tests can observe and
+     *  serialize concurrent decompressions deterministically. Always null in production. */
+    static volatile Runnable userDataDecompressionTestHook;
 
     static int containerBridgeIpAttempts = 30;
     static long containerBridgeIpPollMillis = 500;
@@ -76,6 +104,7 @@ public class Ec2ContainerManager {
     private final Ec2MetadataServer metadataServer;
     private final Ec2PortForwardManager portForwardManager;
     private final RegionResolver regionResolver;
+    private final ContainerNetworkReachability containerNetworkReachability;
 
     private final ExecutorService executor = Executors.newCachedThreadPool(r -> {
         Thread t = new Thread(r, "ec2-container-launcher");
@@ -94,7 +123,8 @@ public class Ec2ContainerManager {
                                EmulatorConfig config,
                                Ec2MetadataServer metadataServer,
                                Ec2PortForwardManager portForwardManager,
-                               RegionResolver regionResolver) {
+                               RegionResolver regionResolver,
+                               ContainerNetworkReachability containerNetworkReachability) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.logStreamer = logStreamer;
@@ -106,6 +136,7 @@ public class Ec2ContainerManager {
         this.regionResolver = regionResolver;
         this.metadataServer = metadataServer;
         this.portForwardManager = portForwardManager;
+        this.containerNetworkReachability = containerNetworkReachability;
     }
 
     @PreDestroy
@@ -204,11 +235,9 @@ public class Ec2ContainerManager {
 
                 // Set public-facing addresses only for instances whose subnet
                 // opts in via MapPublicIpOnLaunch (#1984). Private-subnet
-                // instances have no public IP/DNS, matching real EC2. The value
-                // stays the host-reachable 127.0.0.1/localhost for public ones.
+                // instances have no public IP/DNS, matching real EC2.
                 if (instance.isAssociatePublicIp()) {
-                    instance.setPublicIpAddress("127.0.0.1");
-                    instance.setPublicDnsName("localhost");
+                    exposeReachablePublicAddress(instance);
                 }
 
                 LOG.infov("EC2 instance {0} running in container {1} (SSH host port {2})",
@@ -528,6 +557,11 @@ public class Ec2ContainerManager {
                 if (containerIp != null && !containerIp.isBlank()) {
                     instance.setContainerBridgeIp(containerIp);
                     exposeReachablePrivateAddress(instance, containerIp, config.services().ec2().awsFaithfulPrivateIp());
+                    // Docker hands out a new bridge IP on restart, so the previously reported
+                    // public address can now point at another container entirely.
+                    if (instance.isAssociatePublicIp() || instance.getPublicIpAddress() != null) {
+                        exposeReachablePublicAddress(instance);
+                    }
                     metadataServer.registerContainer(containerIp, instanceId, instance);
                 }
             } catch (InterruptedException e) {
@@ -568,8 +602,48 @@ public class Ec2ContainerManager {
         }
         instance.setContainerBridgeIp(containerIp);
         exposeReachablePrivateAddress(instance, containerIp, config.services().ec2().awsFaithfulPrivateIp());
+        if (instance.isAssociatePublicIp() || instance.getPublicIpAddress() != null) {
+            exposeReachablePublicAddress(instance);
+        }
         metadataServer.registerContainer(containerIp, instance.getInstanceId(), instance);
         return true;
+    }
+
+    /**
+     * The address Floci is willing to hand out as this instance's public address — chosen so
+     * that whatever dials it reaches the guest on the service's own port.
+     *
+     * <p>Where container IPs are routable that is the container's IP: port 22 is really port
+     * 22 there, and so is every other port the guest listens on, with no published mapping to
+     * translate. Where they are not, it falls back to {@code 127.0.0.1}, which is where the
+     * published high host ports live — reachable, though not on the ports AWS clients assume.
+     *
+     * @return the address, or null if the instance has no container IP yet
+     */
+    public String reachablePublicAddress(Instance instance) {
+        if (instance == null) {
+            return null;
+        }
+        String containerIp = instance.getContainerBridgeIp();
+        if (containerIp == null || containerIp.isBlank()) {
+            return null;
+        }
+        return containerNetworkReachability.isContainerIpRoutable(containerIp) ? containerIp : "127.0.0.1";
+    }
+
+    /**
+     * Publishes {@link #reachablePublicAddress} as the instance's public IP and DNS name.
+     * The DNS name is set to the same literal rather than an AWS-shaped
+     * {@code ec2-…​.compute-1.amazonaws.com} hostname, because that hostname resolves nowhere
+     * and callers that prefer PublicDnsName over PublicIpAddress would be handed a dead name.
+     */
+    void exposeReachablePublicAddress(Instance instance) {
+        String publicAddress = reachablePublicAddress(instance);
+        if (publicAddress == null) {
+            return;
+        }
+        instance.setPublicIpAddress(publicAddress);
+        instance.setPublicDnsName("127.0.0.1".equals(publicAddress) ? "localhost" : publicAddress);
     }
 
     static void exposeReachablePrivateAddress(Instance instance, String privateIp) {
@@ -741,7 +815,9 @@ public class Ec2ContainerManager {
 
             List<String> shellScripts = userDataShellScripts(userData);
             if (shellScripts.isEmpty()) {
-                LOG.infov("UserData for EC2 instance {0} did not contain executable shellscript parts", instanceId);
+                LOG.warnv("UserData for EC2 instance {0} did not contain executable shellscript parts, "
+                        + "so nothing it was meant to install has run. Floci executes cloud-init "
+                        + "text/x-shellscript parts and bare '#!' scripts only.", instanceId);
                 return;
             }
 
@@ -814,11 +890,12 @@ public class Ec2ContainerManager {
     }
 
     static List<String> userDataShellScripts(String userData) {
-        if (userData == null || userData.isBlank()) {
+        String decoded = decodeUserDataPayload(userData);
+        if (decoded == null || decoded.isBlank()) {
             return List.of();
         }
 
-        String normalized = userData.replace("\r\n", "\n").replace('\r', '\n');
+        String normalized = decoded.replace("\r\n", "\n").replace('\r', '\n');
         String trimmed = normalized.stripLeading();
         if (trimmed.startsWith("#!")) {
             return List.of(normalized);
@@ -852,6 +929,120 @@ public class Ec2ContainerManager {
             }
         }
         return List.copyOf(scripts);
+    }
+
+    /**
+     * Unwraps whatever encoding the UserData arrived in until a cloud-init document is
+     * visible: gzip, base64, and base64-of-gzip, in any nesting the callers produce.
+     *
+     * <p>RunInstances decodes the wire-level base64 (and its gzip) before Floci ever stores
+     * the value, but not every path does — CreateLaunchConfiguration stores what the client
+     * sent, still base64 — and {@code data.cloudinit_config { gzip = true }}, the documented
+     * way to pass a multipart cloud-init, produces a payload that survives one decode still
+     * compressed. Left unwrapped it matches neither the {@code #!} nor the MIME test below and
+     * the whole document is silently dropped, so the instance boots without anything its
+     * user-data was supposed to install.
+     *
+     * @return the decoded document, or the input unchanged when it is not encoded
+     */
+    static String decodeUserDataPayload(String userData) {
+        if (userData == null || userData.isBlank()) {
+            return null;
+        }
+        byte[] payload = userData.getBytes(StandardCharsets.UTF_8);
+        // Bounded so a crafted payload cannot make this loop forever; two rounds already
+        // covers base64(gzip(document)), the deepest form in practice.
+        for (int round = 0; round < MAX_USER_DATA_DECODE_ROUNDS; round++) {
+            byte[] next = gunzip(payload);
+            if (next == null) {
+                next = base64Decode(payload);
+            }
+            if (next == null) {
+                break;
+            }
+            payload = next;
+        }
+        return new String(payload, StandardCharsets.UTF_8);
+    }
+
+    /** @return the decompressed bytes, or null when the input does not start with the gzip magic */
+    private static byte[] gunzip(byte[] payload) {
+        if (payload.length < 2 || (payload[0] & 0xff) != 0x1f || (payload[1] & 0xff) != 0x8b) {
+            return null;
+        }
+        // Aggregate bound (see MAX_CONCURRENT_USER_DATA_DECOMPRESSIONS): this call runs on
+        // whichever launch worker submitted it to the unbounded #executor, independently of every
+        // other concurrent launch, so the per-payload cap below is not enough on its own - it only
+        // stops one caller from expanding past 10 MB, not many callers doing so at once. Blocking
+        // here (rather than failing the launch) mirrors ContainerLauncher's POPULATE_SEMAPHORE: a
+        // burst of legitimate concurrent launches queues briefly instead of being rejected.
+        try {
+            USER_DATA_DECOMPRESSION_BUDGET.acquire();
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            LOG.warnv("Interrupted while waiting for UserData decompression budget; discarding payload");
+            return null;
+        }
+        try {
+            Runnable hook = userDataDecompressionTestHook;
+            if (hook != null) {
+                hook.run();
+            }
+            // Bounded the same way AwsJsonCborController.decodeBody is: a crafted payload can
+            // otherwise expand to gigabytes of image-heap while the launch worker holds it, since
+            // UserData is caller-controlled and this runs in the shared emulator JVM.
+            byte[] buffer = new byte[64 * 1024];
+            int totalRead = 0;
+            ByteArrayOutputStream decompressed = new ByteArrayOutputStream();
+            try (GZIPInputStream gzip = new GZIPInputStream(new ByteArrayInputStream(payload))) {
+                int read;
+                while ((read = gzip.read(buffer)) != -1) {
+                    totalRead += read;
+                    if (totalRead > MAX_DECOMPRESSED_USER_DATA_BYTES) {
+                        LOG.warnv("UserData decompressed past {0} bytes; discarding as oversized",
+                                MAX_DECOMPRESSED_USER_DATA_BYTES);
+                        return null;
+                    }
+                    decompressed.write(buffer, 0, read);
+                }
+                return decompressed.toByteArray();
+            } catch (IOException e) {
+                LOG.warnv("UserData starts with the gzip magic bytes but could not be decompressed: {0}", e.getMessage());
+                return null;
+            }
+        } finally {
+            USER_DATA_DECOMPRESSION_BUDGET.release();
+        }
+    }
+
+    /**
+     * @return the decoded bytes when the input is base64 that unwraps to something recognisable
+     *         (gzip, a shebang, or MIME headers), null otherwise. The recognisability test is
+     *         what keeps a plain shell script — which can be accidentally valid base64 — from
+     *         being mangled into binary noise.
+     */
+    private static byte[] base64Decode(byte[] payload) {
+        String text = new String(payload, StandardCharsets.UTF_8).strip();
+        if (text.isEmpty() || !BASE64_BODY.matcher(text).matches()) {
+            return null;
+        }
+        byte[] decoded;
+        try {
+            decoded = Base64.getMimeDecoder().decode(text);
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+        if (decoded.length < 2) {
+            return null;
+        }
+        if ((decoded[0] & 0xff) == 0x1f && (decoded[1] & 0xff) == 0x8b) {
+            return decoded;
+        }
+        String head = new String(decoded, 0, Math.min(decoded.length, 512), StandardCharsets.UTF_8).stripLeading();
+        return head.startsWith("#!") || head.toLowerCase(Locale.ROOT).startsWith("content-type:")
+                || head.toLowerCase(Locale.ROOT).startsWith("mime-version:") || head.startsWith("#cloud-config")
+                ? decoded
+                : null;
     }
 
     private static boolean hasShellscriptContentType(String headers) {

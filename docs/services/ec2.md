@@ -122,7 +122,7 @@ curl -s -H "x-aws-ec2-metadata-token: $TOKEN" \
 | `GET /latest/meta-data/ami-id` | Image ID |
 | `GET /latest/meta-data/instance-type` | Instance type |
 | `GET /latest/meta-data/local-ipv4` | Private IP |
-| `GET /latest/meta-data/public-ipv4` | Public IP (`127.0.0.1`) |
+| `GET /latest/meta-data/public-ipv4` | Public IP — the container IP where that is routable from the host, `127.0.0.1` otherwise |
 | `GET /latest/meta-data/public-hostname` | Public hostname |
 | `GET /latest/meta-data/local-hostname` | Private DNS name |
 | `GET /latest/meta-data/hostname` | Private DNS name |
@@ -444,6 +444,13 @@ Route table ids follow the live API's own inconsistency: an id that does not exi
 | DisassociateAddress | Removes an Elastic IP address association. |
 | ReleaseAddress | Releases an Elastic IP address record. |
 
+An allocated Elastic IP's `54.x.x.x` address is invented and routes nowhere, so associating
+it re-points it at the address the instance is actually reachable on — the same value
+DescribeInstances reports. This is a deliberate deviation from AWS, where an EIP's public IP
+is fixed from allocation: without it, `aws_eip.x.public_ip` hands every caller a dead address.
+The allocation ID, association ID and domain are unaffected, and disassociating restores the
+allocated address.
+
 ### Availability Zones & Regions
 
 | Action | Description |
@@ -471,6 +478,52 @@ Route table ids follow the live API's own inconsistency: an id that does not exi
 | DeleteLaunchTemplate | Deletes a launch template and its versions. |
 
 Launch templates store versioned launch data. New template versions can be created from an existing source version, and `ModifyLaunchTemplate` updates the default version used by later launches.
+
+#### Launch template data members
+
+These members of `RequestLaunchTemplateData` are stored and read back unchanged by
+`DescribeLaunchTemplateVersions`:
+
+`ImageId`, `InstanceType`, `KeyName`, `UserData`, `KernelId`, `RamDiskId`, `SecurityGroupIds`,
+`IamInstanceProfile`, `BlockDeviceMappings`, `NetworkInterfaces`, `TagSpecifications`,
+`MetadataOptions`, `Monitoring`, `Placement`, `CpuOptions`, `CreditSpecification`,
+`EnclaveOptions`, `HibernationOptions`, `MaintenanceOptions`, `PrivateDnsNameOptions`,
+`CapacityReservationSpecification`, `EbsOptimized`, `DisableApiTermination`, `DisableApiStop`,
+`InstanceInitiatedShutdownBehavior`.
+
+Two behaviours worth calling out, because they are what Terraform reads back:
+
+- **`IamInstanceProfile` keeps the form it was given.** A profile submitted as `Name` reads back as
+  `Name`, not rewritten to `Arn`. The instance-profile ARN is derived at launch time instead, so
+  `aws_launch_template.iam_instance_profile.name` converges.
+- **`NetworkInterfaces` stays a `NetworkInterfaces` block.** Its `Groups` are not hoisted into
+  top-level `SecurityGroupIds`; on AWS the two are mutually exclusive. A launch from the template
+  resolves its security groups from whichever of the two is populated.
+
+#### Launch template versions
+
+`CreateLaunchTemplateVersion` accepts two members outside `LaunchTemplateData` itself:
+
+- **`SourceVersion` controls inheritance, and omitting it means no inheritance.** A request that
+  names a source version — including `$Latest` or `$Default` — layers its own fields onto that
+  version's data, so only the fields it restates change. A request that omits `SourceVersion`
+  entirely does **not** fall back to the latest version: the new version starts from an empty
+  `LaunchTemplateData`, populated only by whatever fields the request itself supplies. This matches
+  the AWS-documented behavior; it does not merge onto any prior version.
+- **`VersionDescription` is stored and read back by `DescribeLaunchTemplateVersions`.** It is a
+  version-level field on `LaunchTemplateVersion`, not a member of `RequestLaunchTemplateData` /
+  `ResponseLaunchTemplateData`, so it is tracked per version alongside `VersionNumber` and
+  `CreateTime` rather than inside the launch template data payload. `CreateLaunchTemplate` accepts
+  the same field for the initial version it creates.
+
+Members the service model declares that are accepted and ignored rather than stored:
+`InstanceMarketOptions`, `InstanceRequirements`, `LicenseSpecifications`, `ElasticGpuSpecifications`,
+`ElasticInferenceAccelerators`, `NetworkPerformanceOptions`, `Operator`, `SecondaryInterfaces` and
+`SecurityGroups` (security groups by name — resolving names to IDs would need lookup machinery,
+including ambiguity handling across VPCs, that no other EC2 action here has either; `RunInstances`
+itself only accepts `SecurityGroupId`). Within `NetworkInterfaces`, the IPv4/IPv6 address and
+prefix lists, `EnaSrdSpecification`, `ConnectionTrackingSpecification`, `PrimaryIpv6` and
+`EnaQueueCount` are likewise ignored.
 
 ### IAM Instance Profiles
 
@@ -558,6 +611,7 @@ State is reported settled rather than transitional, as elsewhere in this service
 | `FLOCI_SERVICES_EC2_SOCAT_IMAGE` | `alpine/socat` | Image used for the port-forwarding sidecar |
 | `FLOCI_SERVICES_EC2_MOCK` | `false` | Skip Docker; instances jump directly to final state (useful for tests) |
 | `FLOCI_SERVICES_EC2_AWS_FAITHFUL_PRIVATE_IP` | `false` | Report the CFN/subnet-allocated private IP instead of the container bridge IP; routing and IMDS are unaffected |
+| `FLOCI_SERVICES_EC2_CONTAINER_IPS_ROUTABLE` | auto-detect | Whether an instance's container IP is reachable from the machines consuming Floci's API (Terraform, Terratest, your shell). When it is, DescribeInstances and DescribeAddresses report the container IP, so port 22 really is port 22; when it is not, they report `127.0.0.1` and reachability goes through the published high host ports. Detected by a throwaway TCP connect; set explicitly when Floci itself runs as a container |
 
 ## Requirements
 

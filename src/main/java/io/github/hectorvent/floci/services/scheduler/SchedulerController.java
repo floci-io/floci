@@ -354,7 +354,12 @@ public class SchedulerController {
         return null;
     }
 
-    private ScheduleRequest parseScheduleRequest(JsonNode node) {
+    /**
+     * Reads the PascalCase CreateSchedule / UpdateSchedule body. The Step Functions
+     * {@code aws-sdk:scheduler:*} Task integrations pass the same shape as {@code Arguments},
+     * so they parse it here instead of restating the mapping.
+     */
+    public ScheduleRequest parseScheduleRequest(JsonNode node) {
         ScheduleRequest req = new ScheduleRequest();
         req.setGroupName(textField(node, "GroupName"));
         req.setScheduleExpression(textField(node, "ScheduleExpression"));
@@ -471,8 +476,8 @@ public class SchedulerController {
 
     private EcsParameters parseEcsParameters(JsonNode node) {
         EcsParameters ecs = new EcsParameters();
-        if (node.has("CapacityProviderStrategy") && node.get("CapacityProviderStrategy").isArray()) {
-            ecs.setCapacityProviderStrategy(mapList(node.get("CapacityProviderStrategy")));
+        if (node.has("CapacityProviderStrategy") && !node.get("CapacityProviderStrategy").isNull()) {
+            ecs.setCapacityProviderStrategy(mapList("CapacityProviderStrategy", node.get("CapacityProviderStrategy")));
         }
         if (node.has("EnableECSManagedTags") && !node.get("EnableECSManagedTags").isNull()) {
             ecs.setEnableECSManagedTags(node.get("EnableECSManagedTags").asBoolean());
@@ -489,11 +494,11 @@ public class SchedulerController {
         if (node.has("LaunchType") && !node.get("LaunchType").isNull()) {
             ecs.setLaunchType(node.get("LaunchType").asText());
         }
-        if (node.has("PlacementConstraints") && node.get("PlacementConstraints").isArray()) {
-            ecs.setPlacementConstraints(mapList(node.get("PlacementConstraints")));
+        if (node.has("PlacementConstraints") && !node.get("PlacementConstraints").isNull()) {
+            ecs.setPlacementConstraints(mapList("PlacementConstraints", node.get("PlacementConstraints")));
         }
-        if (node.has("PlacementStrategy") && node.get("PlacementStrategy").isArray()) {
-            ecs.setPlacementStrategy(mapList(node.get("PlacementStrategy")));
+        if (node.has("PlacementStrategy") && !node.get("PlacementStrategy").isNull()) {
+            ecs.setPlacementStrategy(mapList("PlacementStrategy", node.get("PlacementStrategy")));
         }
         if (node.has("TaskCount") && !node.get("TaskCount").isNull()) {
             ecs.setTaskCount(node.get("TaskCount").asInt());
@@ -507,8 +512,8 @@ public class SchedulerController {
         if (node.has("ReferenceId") && !node.get("ReferenceId").isNull()) {
             ecs.setReferenceId(node.get("ReferenceId").asText());
         }
-        if (node.has("Tags") && node.get("Tags").isArray()) {
-            ecs.setTags(mapList(node.get("Tags")));
+        if (node.has("Tags") && !node.get("Tags").isNull()) {
+            ecs.setTags(mapList("Tags", node.get("Tags")));
         }
         if (node.has("NetworkConfiguration") && !node.get("NetworkConfiguration").isNull()) {
             ecs.setNetworkConfiguration(parseNetworkConfiguration(node.get("NetworkConfiguration")));
@@ -516,10 +521,49 @@ public class SchedulerController {
         return ecs;
     }
 
-    private List<Map<String, Object>> mapList(JsonNode node) {
-        return objectMapper.convertValue(node,
-                objectMapper.getTypeFactory().constructCollectionType(List.class,
-                        objectMapper.getTypeFactory().constructMapType(Map.class, String.class, Object.class)));
+    /**
+     * Reads one of the {@code EcsParameters} lists of objects. An element that is not an object is a
+     * malformed body, which AWS answers with 400 {@code SerializationException}, so the conversion
+     * failure is named here instead of escaping as a server error.
+     */
+    private List<Map<String, Object>> mapList(String field, JsonNode node) {
+        if (!node.isArray()) {
+            throw malformedList(field, "objects");
+        }
+        try {
+            return objectMapper.convertValue(node,
+                    objectMapper.getTypeFactory().constructCollectionType(List.class,
+                            objectMapper.getTypeFactory().constructMapType(Map.class, String.class, Object.class)));
+        } catch (IllegalArgumentException e) {
+            throw malformedList(field, "objects");
+        }
+    }
+
+    /**
+     * {@link #mapList(String, JsonNode)} for the {@code awsvpcConfiguration} lists of strings.
+     * A number or a boolean is checked before the conversion because Jackson writes it out as a
+     * string rather than refusing it, which would store a value AWS never accepts.
+     */
+    private List<String> stringList(String field, JsonNode node) {
+        if (!node.isArray()) {
+            throw malformedList(field, "strings");
+        }
+        for (JsonNode element : node) {
+            if (!element.isTextual()) {
+                throw malformedList(field, "strings");
+            }
+        }
+        try {
+            return objectMapper.convertValue(node,
+                    objectMapper.getTypeFactory().constructCollectionType(List.class, String.class));
+        } catch (IllegalArgumentException e) {
+            throw malformedList(field, "strings");
+        }
+    }
+
+    private AwsException malformedList(String field, String elementType) {
+        return new AwsException("SerializationException",
+                "EcsParameters " + field + " must be a list of " + elementType + ".", 400);
     }
 
     private NetworkConfiguration parseNetworkConfiguration(JsonNode node) {
@@ -532,11 +576,11 @@ public class SchedulerController {
 
     private AwsVpcConfiguration parseAwsVpcConfiguration(JsonNode node) {
         AwsVpcConfiguration vpc = new AwsVpcConfiguration();
-        if (node.has("Subnets") && node.get("Subnets").isArray()) {
-            vpc.setSubnets(objectMapper.convertValue(node.get("Subnets"), objectMapper.getTypeFactory().constructCollectionType(List.class, String.class)));
+        if (node.has("Subnets") && !node.get("Subnets").isNull()) {
+            vpc.setSubnets(stringList("Subnets", node.get("Subnets")));
         }
-        if (node.has("SecurityGroups") && node.get("SecurityGroups").isArray()) {
-            vpc.setSecurityGroups(objectMapper.convertValue(node.get("SecurityGroups"), objectMapper.getTypeFactory().constructCollectionType(List.class, String.class)));
+        if (node.has("SecurityGroups") && !node.get("SecurityGroups").isNull()) {
+            vpc.setSecurityGroups(stringList("SecurityGroups", node.get("SecurityGroups")));
         }
         if (node.has("AssignPublicIp") && !node.get("AssignPublicIp").isNull()) {
             vpc.setAssignPublicIp(node.get("AssignPublicIp").asText());

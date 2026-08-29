@@ -53,6 +53,34 @@ class StepFunctionsJsonataIntegrationTest {
     }
 
     @Test
+    void passStateWithJsonataStringOfALargeWholeNumber() throws Exception {
+        // $string of an id feeds a MessageGroupId, an S3 key or a DynamoDB key, so exponent
+        // notation writes a different key without failing the execution.
+        String definition = """
+                {
+                    "QueryLanguage": "JSONata",
+                    "StartAt": "Stringify",
+                    "States": {
+                        "Stringify": {
+                            "Type": "Pass",
+                            "Output": {
+                                "underTheBoundary": "{% $string(1e20) %}",
+                                "atTheBoundary": "{% $string(1e21) %}"
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("jsonata-string-large-whole-number", definition);
+        JsonNode output = objectMapper.readTree(waitForExecution(startExecution(smArn, "{}")));
+
+        assertEquals("100000000000000000000", output.get("underTheBoundary").asText());
+        assertEquals("1e+21", output.get("atTheBoundary").asText());
+    }
+
+    @Test
     void choiceStateWithJsonataCondition() throws Exception {
         // Choice state using JSONata Condition instead of Variable/StringEquals
         String definition = """
@@ -1195,6 +1223,476 @@ class StepFunctionsJsonataIntegrationTest {
         assertTrue(output.contains("Jane"));
         assertTrue(output.contains("Doe"));
         assertTrue(output.contains("Jane Doe"));
+    }
+
+    @Test
+    void outputKeepsAnExplicitNullInEveryPosition() throws Exception {
+        // AWS returns {"v":null} for an expression that evaluates to JSON null, in an object field,
+        // nested, as an array element and as a literal.
+        String definition = """
+                {
+                    "QueryLanguage": "JSONata",
+                    "StartAt": "Transform",
+                    "States": {
+                        "Transform": {
+                            "Type": "Pass",
+                            "Output": {
+                                "fromInput": "{% $lookup($states.input, 'bar') %}",
+                                "fromLiteralExpression": "{% null %}",
+                                "literal": null,
+                                "nested": {"inner": "{% null %}", "kept": 1},
+                                "values": ["{% null %}", 1]
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("jsonata-explicit-null-test", definition);
+        String execArn = startExecution(smArn, "{\"bar\": null}");
+        JsonNode output = objectMapper.readTree(waitForExecution(execArn));
+
+        assertTrue(output.path("fromInput").isNull(), output.toString());
+        assertTrue(output.path("fromLiteralExpression").isNull(), output.toString());
+        assertTrue(output.path("literal").isNull(), output.toString());
+        assertTrue(output.path("nested").path("inner").isNull(), output.toString());
+        assertEquals("[null,1]", output.path("values").toString());
+    }
+
+    @Test
+    void outputExpressionReturningNothingFailsTheStateAndIsCatchable() throws Exception {
+        // Real AWS on the same definition: States.QueryEvaluationError, "An error occurred while
+        // executing the state 'Transform' (entered at the event id #2). The JSONata expression
+        // '$states.input.missing' specified for the field 'Output/v' returned nothing (undefined)."
+        // Floci does not yet render the "An error occurred while executing the state" prefix (#2668).
+        String definition = """
+                {
+                    "QueryLanguage": "JSONata",
+                    "StartAt": "Transform",
+                    "States": {
+                        "Transform": {
+                            "Type": "Pass",
+                            "Output": {"v": "{% $states.input.missing %}"},
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("jsonata-output-returned-nothing-test", definition);
+        Response failure = waitForExecutionFailure(startExecution(smArn, "{}"));
+
+        assertEquals("States.QueryEvaluationError", failure.jsonPath().getString("error"));
+        assertEquals("The JSONata expression '$states.input.missing' specified for the field 'Output/v' "
+                + "returned nothing (undefined).", failure.jsonPath().getString("cause"));
+
+        String catching = definition.replace("\"End\": true",
+                """
+                        "Catch": [{"ErrorEquals": ["States.QueryEvaluationError"], "Next": "Caught"}],
+                        "Next": "Unreached"
+                    },
+                    "Unreached": {"Type": "Fail", "Error": "UnexpectedSuccess"},
+                    "Caught": {"Type": "Pass", "Output": {"caught": true}, "End": true""");
+        String catchingArn = createStateMachine("jsonata-output-returned-nothing-catch-test", catching);
+        JsonNode caught = objectMapper.readTree(waitForExecution(startExecution(catchingArn, "{}")));
+
+        assertTrue(caught.path("caught").asBoolean(), caught.toString());
+    }
+
+    @Test
+    void assignExpressionReturningNothingFailsTheState() throws Exception {
+        // Real AWS names 'Assign/x' for this definition; before this guard the variable was never
+        // bound and the next state read it as missing.
+        String definition = """
+                {
+                    "QueryLanguage": "JSONata",
+                    "StartAt": "Bind",
+                    "States": {
+                        "Bind": {
+                            "Type": "Pass",
+                            "Assign": {"x": "{% $states.input.missing %}"},
+                            "Next": "Read"
+                        },
+                        "Read": {"Type": "Pass", "Output": {"got": "{% $x %}"}, "End": true}
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("jsonata-assign-returned-nothing-test", definition);
+        Response failure = waitForExecutionFailure(startExecution(smArn, "{}"));
+
+        assertEquals("States.QueryEvaluationError", failure.jsonPath().getString("error"));
+        assertEquals("The JSONata expression '$states.input.missing' specified for the field 'Assign/x' "
+                + "returned nothing (undefined).", failure.jsonPath().getString("cause"));
+    }
+
+    @Test
+    void taskArgumentReturningNothingFailsTheStateBeforeTheRequestIsSent() throws Exception {
+        // Real AWS names 'Arguments/MessageGroupId' and fails before reaching SQS, which is why the
+        // queue url below never has to exist. Before this guard Floci sent the message without it.
+        String definition = """
+                {
+                    "QueryLanguage": "JSONata",
+                    "StartAt": "Send",
+                    "States": {
+                        "Send": {
+                            "Type": "Task",
+                            "Resource": "arn:aws:states:::sqs:sendMessage",
+                            "Arguments": {
+                                "QueueUrl": "http://localhost:4566/000000000000/absent-queue",
+                                "MessageBody": "m",
+                                "MessageGroupId": "{% $states.input.missing %}"
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("jsonata-arguments-returned-nothing-test", definition);
+        Response failure = waitForExecutionFailure(startExecution(smArn, "{}"));
+
+        assertEquals("States.QueryEvaluationError", failure.jsonPath().getString("error"));
+        assertEquals("The JSONata expression '$states.input.missing' specified for the field "
+                + "'Arguments/MessageGroupId' returned nothing (undefined).",
+                failure.jsonPath().getString("cause"));
+    }
+
+    @Test
+    void choiceConditionReturningNothingFailsTheStateInsteadOfTakingDefault() throws Exception {
+        // Real AWS names the rule by its index, 'Choices[1]/Condition', and evaluates the rules in
+        // order, so the first rule being false is what makes the second one run.
+        String definition = """
+                {
+                    "QueryLanguage": "JSONata",
+                    "StartAt": "Pick",
+                    "States": {
+                        "Pick": {
+                            "Type": "Choice",
+                            "Choices": [
+                                {"Condition": "{% false %}", "Next": "First"},
+                                {"Condition": "{% $states.input.missing %}", "Next": "Second"}
+                            ],
+                            "Default": "Fallback"
+                        },
+                        "First": {"Type": "Pass", "Output": {"went": "First"}, "End": true},
+                        "Second": {"Type": "Pass", "Output": {"went": "Second"}, "End": true},
+                        "Fallback": {"Type": "Pass", "Output": {"went": "Fallback"}, "End": true}
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("jsonata-condition-returned-nothing-test", definition);
+        Response failure = waitForExecutionFailure(startExecution(smArn, "{}"));
+
+        assertEquals("States.QueryEvaluationError", failure.jsonPath().getString("error"));
+        assertEquals("The JSONata expression '$states.input.missing' specified for the field "
+                + "'Choices[1]/Condition' returned nothing (undefined).", failure.jsonPath().getString("cause"));
+    }
+
+    @Test
+    void aChoiceRuleAfterTheMatchingOneIsNeverEvaluated() throws Exception {
+        // AWS succeeds on this definition: the first rule matches, so the undefined condition in the
+        // second one is never reached. The guard must not turn rule order into a failure.
+        String definition = """
+                {
+                    "QueryLanguage": "JSONata",
+                    "StartAt": "Pick",
+                    "States": {
+                        "Pick": {
+                            "Type": "Choice",
+                            "Choices": [
+                                {"Condition": "{% true %}", "Next": "First"},
+                                {"Condition": "{% $states.input.missing %}", "Next": "Second"}
+                            ],
+                            "Default": "Fallback"
+                        },
+                        "First": {"Type": "Pass", "Output": {"went": "First"}, "End": true},
+                        "Second": {"Type": "Pass", "Output": {"went": "Second"}, "End": true},
+                        "Fallback": {"Type": "Pass", "Output": {"went": "Fallback"}, "End": true}
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("jsonata-condition-short-circuit-test", definition);
+        JsonNode output = objectMapper.readTree(waitForExecution(startExecution(smArn, "{}")));
+
+        assertEquals("First", output.path("went").asText(), output.toString());
+    }
+
+    @Test
+    void aMatchedChoiceRuleNamesItsOwnOutputUnderTheRuleIndex() throws Exception {
+        // Real AWS names 'Choices[1]/Output/v': a rule's own Output is a field of the rule, not the
+        // state-level Output, and the index is the rule's position in Choices.
+        String definition = """
+                {
+                    "QueryLanguage": "JSONata",
+                    "StartAt": "Pick",
+                    "States": {
+                        "Pick": {
+                            "Type": "Choice",
+                            "Choices": [
+                                {"Condition": "{% false %}", "Next": "First"},
+                                {"Condition": "{% true %}",
+                                 "Output": {"v": "{% $states.input.missing %}"}, "Next": "First"}
+                            ],
+                            "Default": "Fallback"
+                        },
+                        "First": {"Type": "Pass", "End": true},
+                        "Fallback": {"Type": "Pass", "End": true}
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("jsonata-choice-rule-output-nothing-test", definition);
+        Response failure = waitForExecutionFailure(startExecution(smArn, "{}"));
+
+        assertEquals("States.QueryEvaluationError", failure.jsonPath().getString("error"));
+        assertEquals("The JSONata expression '$states.input.missing' specified for the field "
+                + "'Choices[1]/Output/v' returned nothing (undefined).", failure.jsonPath().getString("cause"));
+    }
+
+    @Test
+    void aMatchedChoiceRuleNamesItsOwnAssignUnderTheRuleIndex() throws Exception {
+        // Real AWS names 'Choices[0]/Assign/x' for a rule's own Assign.
+        String definition = """
+                {
+                    "QueryLanguage": "JSONata",
+                    "StartAt": "Pick",
+                    "States": {
+                        "Pick": {
+                            "Type": "Choice",
+                            "Choices": [
+                                {"Condition": "{% true %}",
+                                 "Assign": {"x": "{% $states.input.missing %}"}, "Next": "First"}
+                            ],
+                            "Default": "Fallback"
+                        },
+                        "First": {"Type": "Pass", "End": true},
+                        "Fallback": {"Type": "Pass", "End": true}
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("jsonata-choice-rule-assign-nothing-test", definition);
+        Response failure = waitForExecutionFailure(startExecution(smArn, "{}"));
+
+        assertEquals("States.QueryEvaluationError", failure.jsonPath().getString("error"));
+        assertEquals("The JSONata expression '$states.input.missing' specified for the field "
+                + "'Choices[0]/Assign/x' returned nothing (undefined).", failure.jsonPath().getString("cause"));
+    }
+
+    @Test
+    void aCatchClauseNamesItsOwnOutputUnderTheClauseIndex() throws Exception {
+        // Real AWS names 'Catch[1]/Output/v': a clause's own Output is a field of the clause, and the
+        // index is its position in Catch, not its position among the clauses that matched. Measured
+        // with a real execution: TestState answers CAUGHT_ERROR and omits the output rather than
+        // failing. Catch belongs to a Task, which AWS rejects on a Pass, so the state below fails on
+        // its own Arguments and the clause catches that.
+        String definition = """
+                {
+                    "QueryLanguage": "JSONata",
+                    "StartAt": "Boom",
+                    "States": {
+                        "Boom": {
+                            "Type": "Task",
+                            "Resource": "arn:aws:states:::sqs:sendMessage",
+                            "Arguments": {
+                                "QueueUrl": "http://localhost:4566/000000000000/absent-queue",
+                                "MessageBody": "m",
+                                "MessageGroupId": "{% $states.input.missing %}"
+                            },
+                            "Catch": [
+                                {"ErrorEquals": ["States.Timeout"], "Next": "Caught"},
+                                {"ErrorEquals": ["States.QueryEvaluationError"],
+                                 "Output": {"v": "{% $states.input.missing %}"}, "Next": "Caught"}
+                            ],
+                            "End": true
+                        },
+                        "Caught": {"Type": "Pass", "End": true}
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("jsonata-catch-output-nothing-test", definition);
+        Response failure = waitForExecutionFailure(startExecution(smArn, "{}"));
+
+        assertEquals("States.QueryEvaluationError", failure.jsonPath().getString("error"));
+        assertEquals("The JSONata expression '$states.input.missing' specified for the field "
+                + "'Catch[1]/Output/v' returned nothing (undefined).", failure.jsonPath().getString("cause"));
+    }
+
+    @Test
+    void waitSecondsReturningNothingFailsTheStateInsteadOfNotWaiting() throws Exception {
+        // Real AWS names 'Seconds'. Before this guard the expression resolved to zero and the state
+        // did not wait at all.
+        String definition = """
+                {
+                    "QueryLanguage": "JSONata",
+                    "StartAt": "Pause",
+                    "States": {
+                        "Pause": {"Type": "Wait", "Seconds": "{% $states.input.missing %}", "End": true}
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("jsonata-wait-returned-nothing-test", definition);
+        Response failure = waitForExecutionFailure(startExecution(smArn, "{}"));
+
+        assertEquals("States.QueryEvaluationError", failure.jsonPath().getString("error"));
+        assertEquals("The JSONata expression '$states.input.missing' specified for the field 'Seconds' "
+                + "returned nothing (undefined).", failure.jsonPath().getString("cause"));
+    }
+
+    @Test
+    void failErrorAndCauseReturningNothingFailTheStateWithTheQueryEvaluationError() throws Exception {
+        // Real AWS names 'Error' and 'Cause'. The Fail state's own error is replaced by the
+        // evaluation failure, so a Catch on States.QueryEvaluationError fires instead of one on the
+        // error the definition meant to raise.
+        String definition = """
+                {
+                    "QueryLanguage": "JSONata",
+                    "StartAt": "Stop",
+                    "States": {
+                        "Stop": {"Type": "Fail", "Error": "%s", "Cause": "%s"}
+                    }
+                }
+                """;
+
+        Response errorFailure = waitForExecutionFailure(startExecution(
+                createStateMachine("jsonata-fail-error-returned-nothing-test",
+                        definition.formatted("{% $states.input.missing %}", "boom")), "{}"));
+        assertEquals("States.QueryEvaluationError", errorFailure.jsonPath().getString("error"));
+        assertEquals("The JSONata expression '$states.input.missing' specified for the field 'Error' "
+                + "returned nothing (undefined).", errorFailure.jsonPath().getString("cause"));
+
+        Response causeFailure = waitForExecutionFailure(startExecution(
+                createStateMachine("jsonata-fail-cause-returned-nothing-test",
+                        definition.formatted("Boom", "{% $states.input.missing %}")), "{}"));
+        assertEquals("States.QueryEvaluationError", causeFailure.jsonPath().getString("error"));
+        assertEquals("The JSONata expression '$states.input.missing' specified for the field 'Cause' "
+                + "returned nothing (undefined).", causeFailure.jsonPath().getString("cause"));
+    }
+
+    @Test
+    void mapItemsReturningNothingFailsTheStateInsteadOfIteratingNothing() throws Exception {
+        // Real AWS names 'Items'.
+        String definition = """
+                {
+                    "QueryLanguage": "JSONata",
+                    "StartAt": "Fan",
+                    "States": {
+                        "Fan": {
+                            "Type": "Map",
+                            "Items": "{% $states.input.missing %}",
+                            "ItemProcessor": {
+                                "StartAt": "P",
+                                "States": {"P": {"Type": "Pass", "End": true}}
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("jsonata-map-items-returned-nothing-test", definition);
+        Response failure = waitForExecutionFailure(startExecution(smArn, "{}"));
+
+        assertEquals("States.QueryEvaluationError", failure.jsonPath().getString("error"));
+        assertEquals("The JSONata expression '$states.input.missing' specified for the field 'Items' "
+                + "returned nothing (undefined).", failure.jsonPath().getString("cause"));
+    }
+
+    @Test
+    void mapMaxConcurrencyReturningNothingFailsTheStateNamingTheField() throws Exception {
+        // Real AWS names 'MaxConcurrency'. Before this guard the undefined value reached the
+        // non-negative-integer check and failed with Floci's own wording instead of AWS's.
+        String definition = """
+                {
+                    "QueryLanguage": "JSONata",
+                    "StartAt": "Fan",
+                    "States": {
+                        "Fan": {
+                            "Type": "Map",
+                            "Items": [1, 2],
+                            "MaxConcurrency": "{% $states.input.missing %}",
+                            "ItemProcessor": {
+                                "StartAt": "P",
+                                "States": {"P": {"Type": "Pass", "End": true}}
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("jsonata-map-maxconcurrency-returned-nothing-test", definition);
+        Response failure = waitForExecutionFailure(startExecution(smArn, "{}"));
+
+        assertEquals("States.QueryEvaluationError", failure.jsonPath().getString("error"));
+        assertEquals("The JSONata expression '$states.input.missing' specified for the field "
+                + "'MaxConcurrency' returned nothing (undefined).", failure.jsonPath().getString("cause"));
+    }
+
+    @Test
+    void anAssignedNullReadsBackAsANullInTheNextState() throws Exception {
+        // AWS keeps the null in the variables map: TestState TRACE reports {"x":null} for
+        // Assign {"x": "{% null %}"}. A state never sees its own Assign, so the read is one state on.
+        String definition = """
+                {
+                    "QueryLanguage": "JSONata",
+                    "StartAt": "AssignNull",
+                    "States": {
+                        "AssignNull": {
+                            "Type": "Pass",
+                            "Assign": {"nullVariable": "{% $states.input.bar %}"},
+                            "Next": "ReadItBack"
+                        },
+                        "ReadItBack": {
+                            "Type": "Pass",
+                            "Output": {
+                                "fromVariable": "{% $nullVariable %}",
+                                "exists": "{% $exists($nullVariable) %}"
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("jsonata-assign-null-test", definition);
+        String execArn = startExecution(smArn, "{\"bar\": null}");
+        JsonNode output = objectMapper.readTree(waitForExecution(execArn));
+
+        assertTrue(output.path("fromVariable").isNull(), output.toString());
+        assertTrue(output.path("exists").asBoolean(), output.toString());
+    }
+
+    @Test
+    void aWholeOutputThatReturnedNothingFailsTheState() throws Exception {
+        // Real AWS names the whole field, 'Output', with no path below it. There is no output to
+        // serialize once the state fails, which is what the null this used to resolve to stood in for.
+        String definition = """
+                {
+                    "QueryLanguage": "JSONata",
+                    "StartAt": "Transform",
+                    "States": {
+                        "Transform": {
+                            "Type": "Pass",
+                            "Output": "{% $states.input.missing %}",
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("jsonata-whole-output-nothing-test", definition);
+        Response failure = waitForExecutionFailure(startExecution(smArn, "{}"));
+
+        assertEquals("States.QueryEvaluationError", failure.jsonPath().getString("error"));
+        assertEquals("The JSONata expression '$states.input.missing' specified for the field 'Output' "
+                + "returned nothing (undefined).", failure.jsonPath().getString("cause"));
     }
 
     @Test

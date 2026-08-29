@@ -214,7 +214,7 @@ What each setting does and why it is needed:
 !!! tip "When the Runtime API address is still unreachable"
     On some Podman network topologies the auto-detected Runtime API address
     (the host/IP Lambda containers use to call back into Floci) is still wrong,
-    and invocations fail with `connect ECONNREFUSED <ip>:9200`. Set the address
+    and invocations fail with `connect ECONNREFUSED <ip>:12000`. Set the address
     explicitly to bypass auto-detection:
 
     ```bash

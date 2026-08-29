@@ -5,7 +5,10 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsQueryResponse;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
+import io.github.hectorvent.floci.core.common.BackupWindows;
 import io.github.hectorvent.floci.services.docdb.model.DocDbCluster;
+import io.github.hectorvent.floci.services.docdb.model.DocDbClusterSettings;
+import io.github.hectorvent.floci.services.docdb.model.DocDbInstanceSettings;
 import io.github.hectorvent.floci.services.docdb.model.DocDbInstance;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -76,13 +79,9 @@ public class DocDbQueryHandler {
         String masterPassword = params.getFirst("MasterUserPassword");
         boolean iamEnabled = "true".equalsIgnoreCase(params.getFirst("EnableIAMDatabaseAuthentication"));
 
+        // Tags given at create are readable back on a live account; they go in with the record.
         DocDbCluster cluster = service.createDbCluster(id, engineVersion,
-                masterUsername, masterPassword, iamEnabled);
-        // Tags given at create are readable back on a live account, so they must not be dropped.
-        Map<String, String> tags = parseTags(params);
-        if (!tags.isEmpty()) {
-            service.addTagsToResource(cluster.getDbClusterArn(), tags);
-        }
+                masterUsername, masterPassword, iamEnabled, clusterSettings(params, true), parseTags(params));
         return Response.ok(AwsQueryResponse.envelope("CreateDBCluster", AwsNamespaces.RDS,
                 clusterXml(cluster))).build();
     }
@@ -109,6 +108,19 @@ public class DocDbQueryHandler {
         }
         xml.end("DBClusters").start("Marker").end("Marker");
         return Response.ok(AwsQueryResponse.envelope("DescribeDBClusters", AwsNamespaces.RDS, xml.build())).build();
+    }
+
+    /**
+     * The rows the list form of DescribeDBClusters would return, for the RDS-family listing that
+     * {@code RdsQueryHandler} assembles: a live account lists DocumentDB clusters from the RDS
+     * endpoint and the DocumentDB endpoint alike.
+     */
+    public List<String> clusterRowsXml(String filterId) {
+        return service.listDbClusters(filterId).stream().map(this::clusterInnerXml).toList();
+    }
+
+    public List<String> instanceRowsXml(String filterId) {
+        return service.listDbInstances(filterId).stream().map(this::instanceInnerXml).toList();
     }
 
     private Response handleDescribeGlobalClusters(MultivaluedMap<String, String> params) {
@@ -177,7 +189,7 @@ public class DocDbQueryHandler {
         String iamStr = params.getFirst("EnableIAMDatabaseAuthentication");
         Boolean iamEnabled = iamStr != null ? Boolean.parseBoolean(iamStr) : null;
 
-        DocDbCluster cluster = service.modifyDbCluster(id, engineVersion, iamEnabled);
+        DocDbCluster cluster = service.modifyDbCluster(id, engineVersion, iamEnabled, clusterSettings(params, false));
         return Response.ok(AwsQueryResponse.envelope("ModifyDBCluster", AwsNamespaces.RDS,
                 clusterXml(cluster))).build();
     }
@@ -200,7 +212,7 @@ public class DocDbQueryHandler {
         boolean iamEnabled = "true".equalsIgnoreCase(params.getFirst("EnableIAMDatabaseAuthentication"));
 
         DocDbInstance instance = service.createDbInstance(id, dbClusterIdentifier,
-                dbInstanceClass, engineVersion, iamEnabled);
+                dbInstanceClass, engineVersion, iamEnabled, instanceSettings(params), parseTags(params));
         return Response.ok(AwsQueryResponse.envelope("CreateDBInstance", AwsNamespaces.RDS,
                 instanceXml(instance))).build();
     }
@@ -251,9 +263,66 @@ public class DocDbQueryHandler {
         String iamStr = params.getFirst("EnableIAMDatabaseAuthentication");
         Boolean iamEnabled = iamStr != null ? Boolean.parseBoolean(iamStr) : null;
 
-        DocDbInstance instance = service.modifyDbInstance(id, dbInstanceClass, iamEnabled);
+        DocDbInstance instance = service.modifyDbInstance(id, dbInstanceClass, iamEnabled, instanceSettings(params));
         return Response.ok(AwsQueryResponse.envelope("ModifyDBInstance", AwsNamespaces.RDS,
                 instanceXml(instance))).build();
+    }
+
+    /**
+     * The cluster settings a request carries. DBSubnetGroupName, StorageEncrypted and KmsKeyId are
+     * fixed at create and not in the ModifyDBCluster shape, so a modify reads the rest only. Port
+     * is not taken from the request: the port a cluster reports is the one it is reachable on.
+     */
+    private static DocDbClusterSettings clusterSettings(MultivaluedMap<String, String> params, boolean create) {
+        List<String> securityGroups = memberList(params, "VpcSecurityGroupIds.VpcSecurityGroupId.");
+        return new DocDbClusterSettings(
+                create ? params.getFirst("DBSubnetGroupName") : null,
+                params.getFirst("DBClusterParameterGroupName"),
+                securityGroups.isEmpty() ? null : securityGroups,
+                create ? optionalBoolean(params.getFirst("StorageEncrypted")) : null,
+                create ? params.getFirst("KmsKeyId") : null,
+                optionalInt(params.getFirst("BackupRetentionPeriod")),
+                params.getFirst("PreferredBackupWindow"),
+                params.getFirst("PreferredMaintenanceWindow"),
+                optionalBoolean(params.getFirst("DeletionProtection")));
+    }
+
+    private static DocDbInstanceSettings instanceSettings(MultivaluedMap<String, String> params) {
+        return new DocDbInstanceSettings(
+                optionalBoolean(params.getFirst("AutoMinorVersionUpgrade")),
+                params.getFirst("PreferredMaintenanceWindow"),
+                optionalBoolean(params.getFirst("CopyTagsToSnapshot")),
+                optionalInt(params.getFirst("PromotionTier")));
+    }
+
+    private static List<String> memberList(MultivaluedMap<String, String> params, String prefix) {
+        List<String> values = new java.util.ArrayList<>();
+        for (int i = 1; ; i++) {
+            String value = params.getFirst(prefix + i);
+            if (value == null) {
+                break;
+            }
+            if (!value.isBlank()) {
+                values.add(value);
+            }
+        }
+        return values;
+    }
+
+    /** A live account reads any Query boolean that is not "false" as true. */
+    private static Boolean optionalBoolean(String value) {
+        return value == null ? null : !"false".equalsIgnoreCase(value.trim());
+    }
+
+    private static Integer optionalInt(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            return Integer.parseInt(value.trim());
+        } catch (NumberFormatException e) {
+            throw new AwsException("InvalidParameterValue", "Value " + value + " is not a valid integer.", 400);
+        }
     }
 
     // ── XML builders ──────────────────────────────────────────────────────────
@@ -274,11 +343,32 @@ public class DocDbQueryHandler {
                 .elem("MasterUsername", c.getMasterUsername())
                 .elem("IAMDatabaseAuthenticationEnabled", c.isIamDatabaseAuthenticationEnabled())
                 .elem("MultiAZ", false)
-                .elem("StorageEncrypted", true)
+                .elem("StorageEncrypted", c.isStorageEncrypted())
                 .elem("AvailabilityZone", config.defaultAvailabilityZone())
+                .elem("DBSubnetGroup", c.getDbSubnetGroupName() != null ? c.getDbSubnetGroupName() : "default")
+                .elem("DBClusterParameterGroup", c.getDbClusterParameterGroupName() != null
+                        ? c.getDbClusterParameterGroupName()
+                        : "default." + DocDbService.parameterGroupFamily(c.getEngineVersion()))
+                .elem("BackupRetentionPeriod", c.getBackupRetentionPeriod())
+                .elem("PreferredBackupWindow", c.getPreferredBackupWindow() != null
+                        ? c.getPreferredBackupWindow() : BackupWindows.DEFAULT_BACKUP_WINDOW)
+                .elem("PreferredMaintenanceWindow", c.getPreferredMaintenanceWindow() != null
+                        ? c.getPreferredMaintenanceWindow() : BackupWindows.DEFAULT_MAINTENANCE_WINDOW)
+                .elem("DeletionProtection", c.isDeletionProtection())
                 .elem("DbClusterResourceId", c.getDbClusterResourceId())
-                .elem("DBClusterArn", c.getDbClusterArn())
-                .start("DBClusterMembers");
+                .elem("DBClusterArn", c.getDbClusterArn());
+        if (c.getKmsKeyId() != null && !c.getKmsKeyId().isBlank()) {
+            xml.elem("KmsKeyId", c.getKmsKeyId());
+        }
+        xml.start("VpcSecurityGroups");
+        for (String groupId : c.getVpcSecurityGroupIds()) {
+            xml.start("VpcSecurityGroupMembership")
+               .elem("VpcSecurityGroupId", groupId)
+               .elem("Status", "active")
+               .end("VpcSecurityGroupMembership");
+        }
+        xml.end("VpcSecurityGroups")
+           .start("DBClusterMembers");
         if (c.getDbClusterMembers() != null) {
             for (String memberId : c.getDbClusterMembers()) {
                 xml.start("member")
@@ -309,11 +399,25 @@ public class DocDbQueryHandler {
                 .end("Endpoint")
                 .elem("IAMDatabaseAuthenticationEnabled", i.isIamDatabaseAuthenticationEnabled())
                 .elem("MultiAZ", false)
-                .elem("StorageEncrypted", true)
+                .elem("StorageEncrypted", storageEncryptedOf(i))
                 .elem("AvailabilityZone", config.defaultAvailabilityZone())
+                .elem("AutoMinorVersionUpgrade", i.isAutoMinorVersionUpgrade())
+                .elem("PreferredMaintenanceWindow", i.getPreferredMaintenanceWindow() != null
+                        ? i.getPreferredMaintenanceWindow() : BackupWindows.DEFAULT_MAINTENANCE_WINDOW)
+                .elem("CopyTagsToSnapshot", i.isCopyTagsToSnapshot())
+                .elem("PromotionTier", i.getPromotionTier())
                 .elem("DbiResourceId", i.getDbiResourceId())
                 .elem("DBInstanceArn", i.getDbInstanceArn())
                 .build();
+    }
+
+    /** An instance's encryption is its cluster's; a member of a cluster that is gone reads unencrypted. */
+    private boolean storageEncryptedOf(DocDbInstance i) {
+        try {
+            return service.getDbCluster(i.getDbClusterIdentifier()).isStorageEncrypted();
+        } catch (AwsException e) {
+            return false;
+        }
     }
 
     private static String extractFilterValue(MultivaluedMap<String, String> params, String filterName) {

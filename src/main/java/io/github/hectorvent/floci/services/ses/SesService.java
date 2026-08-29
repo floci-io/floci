@@ -35,6 +35,7 @@ import io.github.hectorvent.floci.services.ses.model.TopicPreference;
 import io.github.hectorvent.floci.services.ses.model.TrackingOptions;
 import io.github.hectorvent.floci.services.ses.model.VdmOptions;
 import io.github.hectorvent.floci.services.ses.model.SentEmail;
+import io.github.hectorvent.floci.services.ses.model.Tenant;
 import io.github.hectorvent.floci.services.ses.model.SuppressedDestination;
 import io.github.hectorvent.floci.services.ses.model.SuppressionOptions;
 import io.github.hectorvent.floci.services.ses.model.Tag;
@@ -111,6 +112,8 @@ public class SesService {
     // Custom verification email templates: storage extracted to SesCvetService. The
     // facade keeps the identity-dependent validation and the send path; the service owns the store.
     private final SesCvetService cvetService;
+    // Tenants (multi-tenancy) live in SesTenantService. The facade delegates.
+    private final SesTenantService tenantService;
     private final SmtpRelay smtpRelay;
     private final ObjectMapper objectMapper;
     private final SesEventPublisher eventPublisher;
@@ -131,7 +134,7 @@ public class SesService {
                        SesPolicyService policyService, SesContactService contactService,
                        SesSuppressionService suppressionService, SesDedicatedIpService dedicatedIpService,
                        SesTemplateService templateService, SesSentEmailService sentEmailService,
-                       SmtpRelay smtpRelay, ObjectMapper objectMapper,
+                       SesTenantService tenantService, SmtpRelay smtpRelay, ObjectMapper objectMapper,
                        SesEventPublisher eventPublisher, EmulatorConfig config, Route53Service route53Service,
                        RegionResolver regionResolver, Clock clock) {
         this.identityStore = storageFactory.create("ses", "ses-identities.json",
@@ -147,6 +150,7 @@ public class SesService {
         this.policyService = policyService;
         this.receiptRuleService = receiptRuleService;
         this.cvetService = cvetService;
+        this.tenantService = tenantService;
         this.smtpRelay = smtpRelay;
         this.objectMapper = objectMapper;
         this.eventPublisher = eventPublisher;
@@ -168,12 +172,13 @@ public class SesService {
                SesPolicyService policyService,
                SesReceiptRuleService receiptRuleService,
                SesCvetService cvetService,
+               SesTenantService tenantService,
                SmtpRelay smtpRelay,
                ObjectMapper objectMapper,
                Clock clock) {
         this(identityStore, sentEmailService, accountService, templateService, configSetStore, suppressionService,
                 dedicatedIpService, contactService, policyService,
-                receiptRuleService, cvetService, smtpRelay, objectMapper, null, clock);
+                receiptRuleService, cvetService, tenantService, smtpRelay, objectMapper, null, clock);
     }
 
     SesService(StorageBackend<String, Identity> identityStore,
@@ -187,6 +192,7 @@ public class SesService {
                SesPolicyService policyService,
                SesReceiptRuleService receiptRuleService,
                SesCvetService cvetService,
+               SesTenantService tenantService,
                SmtpRelay smtpRelay,
                ObjectMapper objectMapper,
                Route53Service route53Service,
@@ -202,6 +208,7 @@ public class SesService {
         this.policyService = policyService;
         this.receiptRuleService = receiptRuleService;
         this.cvetService = cvetService;
+        this.tenantService = tenantService;
         this.smtpRelay = smtpRelay;
         this.objectMapper = objectMapper;
         this.eventPublisher = null;
@@ -1636,6 +1643,25 @@ public class SesService {
     private static String configSetKey(String region, String name) {
         validateConfigurationSetName(name);
         return "configSet::" + region + "::" + name;
+    }
+
+    // ──────────────────────── Tenants (multi-tenancy) ────────────────────────
+    // Tenants live in SesTenantService; the facade forwards.
+
+    public Tenant createTenant(String tenantName, List<Tag> tags, String accountId, String region) {
+        return tenantService.createTenant(tenantName, tags, accountId, region);
+    }
+
+    public Tenant getTenant(String tenantName, String region) {
+        return tenantService.getTenant(tenantName, region);
+    }
+
+    public List<Tenant> listTenants(String region) {
+        return tenantService.listTenants(region);
+    }
+
+    public void deleteTenant(String tenantName, String region) {
+        tenantService.deleteTenant(tenantName, region);
     }
 
     // ──────────────────────── Receipt rule sets (inbound) ────────────────────────

@@ -70,6 +70,15 @@ public class ElastiCacheContainerManager {
     }
 
     public ElastiCacheContainerHandle start(String groupId, String image) {
+        return start(groupId, image, List.of());
+    }
+
+    /**
+     * Starts a backend container for the given resource id, appending {@code extraServerFlags}
+     * to the Valkey server command line (via the image's {@code VALKEY_EXTRA_FLAGS} hook).
+     * Cluster-mode nodes use this to pass {@code --cluster-enabled} and announce settings.
+     */
+    public ElastiCacheContainerHandle start(String groupId, String image, List<String> extraServerFlags) {
         LOG.infov("Starting ElastiCache backend container for group: {0}", groupId);
 
         String containerName = containerName(groupId);
@@ -77,12 +86,17 @@ public class ElastiCacheContainerManager {
         // Remove any stale container with the same name
         lifecycleManager.removeIfExists(containerName);
 
+        StringBuilder serverFlags = new StringBuilder("--loglevel verbose");
+        for (String flag : extraServerFlags) {
+            serverFlags.append(' ').append(flag);
+        }
+
         // Build container spec. Only publish the backend port to the host in
         // native mode — in Docker mode the JVM reaches the container via its
         // network IP, no host binding needed.
         ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
                 .withName(containerName)
-                .withEnv("VALKEY_EXTRA_FLAGS", "--loglevel verbose")
+                .withEnv("VALKEY_EXTRA_FLAGS", serverFlags.toString())
                 .withDockerNetwork(config.services().elasticache().dockerNetwork())
                 .withLogRotation()
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(
@@ -104,6 +118,13 @@ public class ElastiCacheContainerManager {
 
         ElastiCacheContainerHandle handle = new ElastiCacheContainerHandle(
                 info.containerId(), groupId, endpoint.host(), endpoint.port());
+        try {
+            handle.setNetworkIp(lifecycleManager.resolveContainerNetworkIp(
+                    info.containerId(), config.services().elasticache().dockerNetwork().orElse(null)));
+        } catch (RuntimeException e) {
+            LOG.warnv("Could not resolve network IP for ElastiCache container {0}: {1}",
+                    info.containerId(), e.getMessage());
+        }
         activeContainers.put(groupId, handle);
 
         // Attach log streaming

@@ -507,6 +507,47 @@ public class AcmService implements ResourceProvider {
         return Set.of(new SupportedResourceType("acm:certificate", "acm", true));
     }
 
+    public Certificate revokeCertificate(String certificateArn, RevocationReason reason, String region) {
+        Certificate cert = getCertificateByArn(certificateArn, region);
+        boolean exportEnabled = cert.getCertOptions() != null && "ENABLED".equals(cert.getCertOptions().export());
+        if (!exportEnabled) {
+            throw new AwsException("ValidationException",
+                "Certificate " + certificateArn + " cannot be revoked because it is not export-enabled.", 400);
+        }
+        cert.setStatus(CertificateStatus.REVOKED);
+        store.put(regionKey(region, cert.extractCertificateId()), cert);
+        return cert;
+    }
+
+    public Certificate renewCertificate(String certificateArn, String region) {
+        Certificate cert = getCertificateByArn(certificateArn, region);
+        if (cert.getStatus() == CertificateStatus.PENDING_VALIDATION) {
+            throw new AwsException("RequestInProgressException", "Certificate is pending validation", 400);
+        }
+        if (cert.getType() != CertificateType.PRIVATE || cert.getStatus() != CertificateStatus.ISSUED) {
+            throw new AwsException("InvalidArnException", "Certificate is not a private issued certificate", 400);
+        }
+        // TODO: certificate/key reissuance material is not regenerated in this local emulator.
+        Instant now = Instant.now();
+        cert.setIssuedAt(now);
+        cert.setNotBefore(now);
+        cert.setNotAfter(now.plusSeconds(365L * 24L * 60L * 60L));
+        store.put(regionKey(region, cert.extractCertificateId()), cert);
+        return cert;
+    }
+
+    public void updateCertificateOptions(String certificateArn, CertificateOptions options, String region) {
+        Certificate cert = getCertificateByArn(certificateArn, region);
+        CertificateOptions current = cert.getCertOptions() != null
+            ? cert.getCertOptions() : CertificateOptions.defaultOptions();
+        cert.setCertOptions(new CertificateOptions(
+            options.certificateTransparencyLoggingPreference() != null
+                ? options.certificateTransparencyLoggingPreference()
+                : current.certificateTransparencyLoggingPreference(),
+            options.export() != null ? options.export() : current.export()));
+        store.put(regionKey(region, cert.extractCertificateId()), cert);
+    }
+
     // ============ Helper Methods ============
 
     private Certificate getCertificateByArn(String arn, String region) {

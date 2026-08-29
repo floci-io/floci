@@ -123,10 +123,6 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
     private final LaunchedContainerAwsEnv awsEnv;
     private final LambdaExecutionRoleCredentials executionRoleCredentials;
 
-    /** Matches an AWS-shaped ECR image URI: {@code <account>.dkr.ecr.<region>.amazonaws.com/<repo>[:tag]}. */
-    private static final java.util.regex.Pattern AWS_ECR_URI =
-            java.util.regex.Pattern.compile("^([0-9]{12})\\.dkr\\.ecr\\.([a-z0-9-]+)\\.amazonaws\\.com/(.+)$");
-
     @Inject
     public ContainerLauncher(ContainerBuilder containerBuilder,
                              ContainerLifecycleManager lifecycleManager,
@@ -161,28 +157,6 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
     @PreDestroy
     void shutdown() {
         volumeCleanupScheduler.shutdownNow();
-    }
-
-    /**
-     * Rewrites real-AWS-shaped ECR image URIs to point at Floci's loopback registry.
-     * Stored ImageUri is preserved (so describe-function returns the original);
-     * the rewrite is only applied immediately before the docker pull.
-     */
-    private String rewriteForEmulatedRegistry(String image) {
-        if (image == null) {
-            return null;
-        }
-        java.util.regex.Matcher m = AWS_ECR_URI.matcher(image);
-        if (!m.matches()) {
-            return image;
-        }
-        String account = m.group(1);
-        String region = m.group(2);
-        String repoAndTag = m.group(3);
-        ecrRegistryManager.ensureStarted();
-        String rewritten = ecrRegistryManager.getRepositoryUri(account, region, repoAndTag);
-        LOG.infov("Rewriting ECR image URI {0} -> {1}", image, rewritten);
-        return rewritten;
     }
 
     public ContainerHandle launch(LambdaFunction fn) {
@@ -236,7 +210,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
                 : imageResolver.resolve(fn.getRuntime());
 
         // If this is an AWS-shaped ECR URI, rewrite it to Floci's loopback registry
-        image = rewriteForEmulatedRegistry(image);
+        image = ecrRegistryManager.rewriteImageUri(image);
 
         // Determine host address reachable from container
         String hostAddress = dockerHostResolver.resolve();
@@ -282,12 +256,23 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         }
         env.addAll(awsEnv.sdkBaselineEnv(lambdaRegion,
                 awsConfigPath.isPresent() ? Optional.of("/opt/aws-config") : Optional.empty(),
-                roleCredentials));
+                roleCredentials, lambdaAccountId));
         env.addAll(flociCaEnv(flociCaCert));
         if (fn.getEnvironment() != null) {
             boolean hasExecutionRoleCredentials = roleCredentials.isPresent();
+            boolean userDefinesFullCredentialTriad = definesFullCredentialTriad(fn.getEnvironment());
             fn.getEnvironment().forEach((k, v) -> {
-                if (!hasExecutionRoleCredentials || !isAwsCredentialVariable(k)) {
+                if (isAwsCredentialVariable(k)) {
+                    // Credential injection is all-or-nothing: a partial override (e.g. only
+                    // AWS_ACCESS_KEY_ID set) must never join the baseline's other two values —
+                    // that pairs a user-chosen key with the owner-account/execution-role secret
+                    // and session token, a tuple nothing can verify. Only let the user's triad
+                    // through when it is complete, and only when there is no execution role
+                    // (which is already the authoritative credential source).
+                    if (!hasExecutionRoleCredentials && userDefinesFullCredentialTriad) {
+                        env.add(k + "=" + v);
+                    }
+                } else {
                     env.add(k + "=" + v);
                 }
             });
@@ -583,10 +568,23 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         }
     }
 
-    private static boolean isAwsCredentialVariable(String name) {
+    public static boolean isAwsCredentialVariable(String name) {
         return "AWS_ACCESS_KEY_ID".equals(name)
                 || "AWS_SECRET_ACCESS_KEY".equals(name)
                 || "AWS_SESSION_TOKEN".equals(name);
+    }
+
+    /**
+     * Whether a Lambda's own Environment config defines all three AWS credential variables,
+     * the only condition under which any of them may override the baseline env — a partial
+     * set must never leak through and split the baseline's credential tuple. Public: both the
+     * Docker and Kubernetes launchers append the function's Environment after the same baseline
+     * and must apply this rule identically.
+     */
+    public static boolean definesFullCredentialTriad(java.util.Map<String, String> environment) {
+        return environment.containsKey("AWS_ACCESS_KEY_ID")
+                && environment.containsKey("AWS_SECRET_ACCESS_KEY")
+                && environment.containsKey("AWS_SESSION_TOKEN");
     }
 
     /**

@@ -512,6 +512,7 @@ public class DynamoDbService implements ResourceProvider {
         final JsonNode normalizedItem = DynamoDbNumberUtils.normalizeNumbersInItem(item);
         DynamoDbItemSize.validateSize(normalizedItem);
         String itemKey = buildItemKey(table, normalizedItem);
+        validateIndexKeyTypes(table, normalizedItem, false);
 
         withItemLock(storageKey, itemKey, () -> {
             var tableItems = itemsByTable.computeIfAbsent(scopedItemsKey(storageKey), k -> new ConcurrentSkipListMap<>());
@@ -732,6 +733,9 @@ public class DynamoDbService implements ResourceProvider {
                             + ". This attribute is part of the key", 400);
                 }
             }
+
+            // AWS validates index key values against the item the update produces.
+            validateIndexKeyTypes(table, item, true);
 
             items.put(itemKey, item);
             persistItems(storageKey);
@@ -2548,7 +2552,7 @@ public class DynamoDbService implements ResourceProvider {
             throw new AwsException("ValidationException",
                     "One of the required keys was not given a value", 400);
         }
-        validateKeyAttributeValue(pkAttr, pkName);
+        validateKeyAttributeValue(table, pkAttr, pkName, isKeyArg);
 
         String pk = extractScalarValue(pkAttr);
         String skName = table.getSortKeyName();
@@ -2562,17 +2566,113 @@ public class DynamoDbService implements ResourceProvider {
                 throw new AwsException("ValidationException",
                         "One of the required keys was not given a value", 400);
             }
-            validateKeyAttributeValue(skAttr, skName);
+            validateKeyAttributeValue(table, skAttr, skName, isKeyArg);
             return pk + "#" + extractScalarValue(skAttr);
         }
         return pk;
     }
 
-    private void validateKeyAttributeValue(JsonNode attr, String keyName) {
-        if (attr != null && attr.has("S") && attr.get("S").asText().isEmpty()) {
+    // A wire-format AttributeValue must be a JSON object with exactly one type member.
+    // AWS enforces this for every attribute value; floci additionally relies on it
+    // wherever a value becomes part of a storage or index key.
+    private void validateAttributeValueShape(JsonNode attr) {
+        if (!attr.isObject()) {
+            // AWS's protocol layer rejects non-object values before validation runs.
+            throw new AwsException("SerializationException", "Unexpected value type in payload", 400);
+        }
+        if (attr.isEmpty()) {
+            throw new AwsException("ValidationException",
+                    "Supplied AttributeValue is empty, must contain exactly one of the supported datatypes", 400);
+        }
+        if (attr.size() > 1) {
+            throw new AwsException("ValidationException",
+                    "Supplied AttributeValue has more than one datatypes set, "
+                    + "must contain exactly one of the supported datatypes", 400);
+        }
+    }
+
+    private void validateKeyAttributeValue(TableDefinition table, JsonNode attr, String keyName, boolean isKeyArg) {
+        if (attr == null) {
+            return;
+        }
+        validateAttributeValueShape(attr);
+        String expectedType = keyAttributeType(table, keyName);
+        if (expectedType != null && !attr.has(expectedType)) {
+            // AWS words the type mismatch differently for a Key argument
+            // (Get/Delete/Update) than for a PutItem item body.
+            if (isKeyArg) {
+                throw new AwsException("ValidationException",
+                        "The provided key element does not match the schema", 400);
+            }
+            throw new AwsException("ValidationException",
+                    "One or more parameter values were invalid: Type mismatch for key " + keyName
+                    + " expected: " + expectedType + " actual: " + attr.fieldNames().next(), 400);
+        }
+        if (attr.has("S") && attr.get("S").asText().isEmpty()) {
             throw new AwsException("ValidationException",
                     "One or more parameter values were invalid: "
                     + "The AttributeValue for a key attribute cannot contain an empty string value. Key: " + keyName, 400);
+        }
+    }
+
+    private String keyAttributeType(TableDefinition table, String keyName) {
+        if (table.getAttributeDefinitions() == null) {
+            return null;
+        }
+        return table.getAttributeDefinitions().stream()
+                .filter(def -> keyName.equals(def.getAttributeName()))
+                .map(AttributeDefinition::getAttributeType)
+                .findFirst().orElse(null);
+    }
+
+    // AWS validates GSI/LSI key attribute values on every write that produces the item,
+    // but only when the attribute is present — sparse indexes allow it to be absent.
+    private void validateIndexKeyTypes(TableDefinition table, JsonNode item, boolean isUpdate) {
+        if (table.getGlobalSecondaryIndexes() != null) {
+            for (GlobalSecondaryIndex gsi : table.getGlobalSecondaryIndexes()) {
+                validateIndexKeySchema(table, item, gsi.getIndexName(), gsi.getKeySchema(), isUpdate);
+            }
+        }
+        if (table.getLocalSecondaryIndexes() != null) {
+            for (LocalSecondaryIndex lsi : table.getLocalSecondaryIndexes()) {
+                validateIndexKeySchema(table, item, lsi.getIndexName(), lsi.getKeySchema(), isUpdate);
+            }
+        }
+    }
+
+    private void validateIndexKeySchema(TableDefinition table, JsonNode item,
+                                        String indexName, List<KeySchemaElement> keySchema,
+                                        boolean isUpdate) {
+        if (keySchema == null) {
+            return;
+        }
+        for (KeySchemaElement element : keySchema) {
+            String attrName = element.getAttributeName();
+            JsonNode attr = item.get(attrName);
+            if (attr == null) {
+                continue;
+            }
+            validateAttributeValueShape(attr);
+            String expectedType = keyAttributeType(table, attrName);
+            if (expectedType != null && !attr.has(expectedType)) {
+                throw new AwsException("ValidationException",
+                        "One or more parameter values were invalid: Type mismatch for Index Key " + attrName
+                        + " Expected: " + expectedType + " Actual: " + attr.fieldNames().next()
+                        + " IndexName: " + indexName, 400);
+            }
+            if (attr.has("S") && attr.get("S").asText().isEmpty()) {
+                // AWS uses different wording for UpdateItem than for writes of a whole item.
+                if (isUpdate) {
+                    throw new AwsException("ValidationException",
+                            "One or more parameter values are not valid. The update expression attempted to "
+                            + "update a secondary index key to a value that is not supported. "
+                            + "The AttributeValue for a key attribute cannot contain an empty string value.", 400);
+                }
+                throw new AwsException("ValidationException",
+                        "One or more parameter values are not valid. A value specified for a secondary "
+                        + "index key is not supported. The AttributeValue for a key attribute cannot "
+                        + "contain an empty string value. IndexName: " + indexName + ", IndexKey: " + attrName, 400);
+            }
         }
     }
 

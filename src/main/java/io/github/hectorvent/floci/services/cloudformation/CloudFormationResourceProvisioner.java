@@ -20,6 +20,7 @@ import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import io.github.hectorvent.floci.services.eventbridge.model.BatchParameters;
 import io.github.hectorvent.floci.services.eventbridge.model.EventBus;
+import io.github.hectorvent.floci.services.eventbridge.model.InputTransformer;
 import io.github.hectorvent.floci.services.eventbridge.model.RuleState;
 import io.github.hectorvent.floci.services.eventbridge.model.SqsParameters;
 import io.github.hectorvent.floci.services.eventbridge.model.Target;
@@ -100,6 +101,7 @@ import io.github.hectorvent.floci.services.apigatewayv2.model.*;
 import io.github.hectorvent.floci.services.cognito.CognitoService;
 import io.github.hectorvent.floci.services.cognito.model.UserPool;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolClient;
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.docker.ContainerReachableEndpoint;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
@@ -220,6 +222,7 @@ public class CloudFormationResourceProvisioner {
     // below. As types migrate, their switch cases and provisionXxx methods are removed here; the
     // now-dead service deps above are cleared in the final cleanup once the switch is empty.
     private final CloudFormationResourceRegistry resourceRegistry;
+    private final EmulatorConfig config;
 
     @Inject
     public CloudFormationResourceProvisioner(S3Service s3Service, SqsService sqsService,
@@ -251,7 +254,9 @@ public class CloudFormationResourceProvisioner {
                                              FirehoseService firehoseService,
                                              DocDbService docDbService,
                                              CloudFrontService cloudFrontService,
-                                             CloudFormationResourceRegistry resourceRegistry) {
+                                             CloudFormationResourceRegistry resourceRegistry,
+                                             EmulatorConfig config) {
+        this.config = config;
         this.s3Service = s3Service;
         this.sqsService = sqsService;
         this.snsService = snsService;
@@ -677,6 +682,7 @@ public class CloudFormationResourceProvisioner {
         }
         s3Service.createBucket(bucketName, region);
         applyBucketCorsConfiguration(bucketName, props, engine);
+        applyBucketVersioningConfiguration(bucketName, props, engine);
         r.setPhysicalId(bucketName);
         r.getAttributes().put("Arn", AwsArnUtils.Arn.of("s3", "", "", bucketName).toString());
         r.getAttributes().put("DomainName", bucketName + ".s3.amazonaws.com");
@@ -720,6 +726,18 @@ public class CloudFormationResourceProvisioner {
         }
         xml.end("CORSConfiguration");
         s3Service.putBucketCors(bucketName, xml.build());
+    }
+
+    private void applyBucketVersioningConfiguration(String bucketName, JsonNode props,
+                                                     CloudFormationTemplateEngine engine) {
+        if (props == null || !props.has("VersioningConfiguration")
+                || props.get("VersioningConfiguration").isNull()) {
+            return;
+        }
+        String status = resolveOptional(props.get("VersioningConfiguration"), "Status", engine);
+        if (status != null && !status.isBlank()) {
+            s3Service.putBucketVersioning(bucketName, status);
+        }
     }
 
     private void appendCorsRuleElements(XmlBuilder xml, JsonNode values, String elementName,
@@ -2399,6 +2417,15 @@ public class CloudFormationResourceProvisioner {
                 reservedConcurrentExecutions);
     }
 
+    /**
+     * Whether an unreadable explicit {@code Code} reference may fall back to the stub handler.
+     * The provisioners hand-built in unit tests carry no config; absent configuration means the
+     * documented default, which is the strict behaviour.
+     */
+    private boolean stubLambdaCodeAllowed() {
+        return config != null && config.services().cloudformation().allowStubLambdaCode();
+    }
+
     private LambdaCodeSpec resolveLambdaCode(JsonNode props, CloudFormationTemplateEngine engine,
                                              String handler, String runtime) {
         if (props != null && props.has("Code")) {
@@ -2407,13 +2434,30 @@ public class CloudFormationResourceProvisioner {
             String s3Bucket = codeNode.path("S3Bucket").asText(null);
             String s3Key = codeNode.path("S3Key").asText(null);
             if (s3Bucket != null && s3Key != null) {
+                // A template that names its code explicitly must fail if that code cannot be
+                // read, the way real CloudFormation does. Substituting the stub handler here
+                // let a stack reach CREATE_COMPLETE running code the template never referenced
+                // — or, when the handler was not "index.handler", fail with a handler error
+                // that pointed away from the real problem (issue #2648). The stub below is for
+                // a template that supplies no Code at all, which is a different case.
+                //
+                // allow-stub-lambda-code opts back in to the old fallback, for a stack that
+                // deliberately leaves its Lambda packages unbuilt and only cares about the
+                // other resources. Off by default: silently serving a placeholder is the more
+                // dangerous of the two behaviours.
                 try {
                     s3Service.getObject(s3Bucket, s3Key);
                     return new LambdaCodeSpec(Map.of("S3Bucket", s3Bucket, "S3Key", s3Key),
                             "s3:" + s3Bucket + "\n" + s3Key);
                 } catch (Exception e) {
-                    LOG.warnv("S3 code not found for Lambda ({0}/{1}), using default handler: {2}",
-                              s3Bucket, s3Key, e.getMessage());
+                    if (!stubLambdaCodeAllowed()) {
+                        throw new AwsException("ValidationError",
+                                "Error occurred while GetObject. S3 Error Message: " + e.getMessage()
+                                        + " (bucket: " + s3Bucket + ", key: " + s3Key + ")", 400);
+                    }
+                    LOG.warnv("S3 code not found for Lambda ({0}/{1}), using default handler because "
+                                    + "floci.services.cloudformation.allow-stub-lambda-code is enabled: {2}",
+                            s3Bucket, s3Key, e.getMessage());
                 }
             }
 
@@ -2832,19 +2876,7 @@ public class CloudFormationResourceProvisioner {
     private record LambdaCodeSpec(Map<String, Object> request, String identity) {}
 
     private static String sourceToZipBase64(String source, String handler, String runtime) {
-        String module = handler.contains(".") ? handler.substring(0, handler.lastIndexOf('.')) : "index";
-        String ext = runtime.startsWith("python") ? ".py" : ".js";
-        try {
-            var baos = new ByteArrayOutputStream();
-            try (var zos = new ZipOutputStream(baos)) {
-                zos.putNextEntry(new ZipEntry(module + ext));
-                zos.write(source.getBytes(StandardCharsets.UTF_8));
-                zos.closeEntry();
-            }
-            return Base64.getEncoder().encodeToString(baos.toByteArray());
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to create zip from ZipFile source", e);
-        }
+        return InlineZipPackager.sourceToZipBase64(source, handler, runtime);
     }
 
     private static String defaultHandlerZipBase64() {
@@ -3620,6 +3652,7 @@ public class CloudFormationResourceProvisioner {
                 String inputPath = resolved.path("InputPath").asText(null);
                 if (targetId != null && targetArn != null) {
                     Target target = new Target(targetId, targetArn, input, inputPath);
+                    target.setInputTransformer(InputTransformer.fromJson(resolved.path("InputTransformer")));
                     JsonNode sqsParamsNode = resolved.path("SqsParameters");
                     if (!sqsParamsNode.isMissingNode() && sqsParamsNode.isObject()) {
                         String messageGroupId = sqsParamsNode.path("MessageGroupId").asText(null);

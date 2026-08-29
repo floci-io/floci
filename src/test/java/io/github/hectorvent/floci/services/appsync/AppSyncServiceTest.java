@@ -43,6 +43,7 @@ class AppSyncServiceTest {
 
     private static final Instant NOW = Instant.parse("2026-01-01T00:00:00Z");
     private AppSyncService service;
+    private AccountAwareStorageBackend<ApiKey> apiKeyStoreOverride;
 
     @BeforeEach
     void setUp() {
@@ -53,7 +54,36 @@ class AppSyncServiceTest {
     void validateApiKeyLooksUpByValue() {
         GraphqlApi api = service.createGraphqlApi(Map.of("name", "a", "authenticationType", "API_KEY"), "us-east-1");
         ApiKey created = service.createApiKey(api.getApiId(), Map.of());
-        assertTrue(service.validateApiKey(api.getApiId(), created.getApiKey()).isPresent());
+        assertTrue(service.validateApiKey(api.getApiId(), created.getId()).isPresent());
+    }
+
+    @Test
+    void createApiKeyIdIsTheUsableKeyValue() {
+        GraphqlApi api = service.createGraphqlApi(Map.of("name", "fmt", "authenticationType", "API_KEY"), "us-east-1");
+        ApiKey created = service.createApiKey(api.getApiId(), Map.of());
+        assertTrue(created.getId().matches("da2-[a-z0-9]{26}"), created.getId());
+        assertTrue(service.validateApiKey(api.getApiId(), created.getId()).isPresent());
+        assertTrue(service.validateApiKey(api.getApiId(), "da2-" + "x".repeat(26)).isEmpty());
+        assertEquals(created.getId(), service.getApiKey(api.getApiId(), created.getId()).getId());
+    }
+
+    @Test
+    void legacyShortApiKeyIdIsListedButNeverAuthenticates() {
+        // Keys persisted by builds before ApiKey.id became the key value have a 7-character id.
+        AccountAwareStorageBackend<ApiKey> keyStore = AccountAwareStorageBackend.inMemory("000000000000");
+        apiKeyStoreOverride = keyStore;
+        AppSyncService svc = newService(Clock.fixed(NOW, ZoneOffset.UTC));
+        GraphqlApi api = svc.createGraphqlApi(Map.of("name", "legacy", "authenticationType", "API_KEY"), "us-east-1");
+        ApiKey legacy = new ApiKey();
+        legacy.setId("ad6c9b6");
+        legacy.setApiId(api.getApiId());
+        legacy.setExpires(NOW.getEpochSecond() + Duration.ofDays(7).getSeconds());
+        keyStore.put(api.getApiId() + "::ad6c9b6", legacy);
+
+        assertEquals(1, svc.listApiKeys(api.getApiId(), null, null).items().size());
+        assertTrue(svc.validateApiKey(api.getApiId(), "ad6c9b6").isEmpty());
+        svc.deleteApiKey(api.getApiId(), "ad6c9b6");
+        assertEquals(0, svc.listApiKeys(api.getApiId(), null, null).items().size());
     }
 
     @Test
@@ -63,9 +93,9 @@ class AppSyncServiceTest {
         GraphqlApi api = svc.createGraphqlApi(Map.of("name", "b", "authenticationType", "API_KEY"), "us-east-1");
         long expires = NOW.getEpochSecond() + Duration.ofDays(1).getSeconds();
         ApiKey created = svc.createApiKey(api.getApiId(), Map.of("expires", expires));
-        assertTrue(svc.validateApiKey(api.getApiId(), created.getApiKey()).isPresent());
+        assertTrue(svc.validateApiKey(api.getApiId(), created.getId()).isPresent());
         clock.set(NOW.plus(Duration.ofDays(1)));
-        assertTrue(svc.validateApiKey(api.getApiId(), created.getApiKey()).isEmpty());
+        assertTrue(svc.validateApiKey(api.getApiId(), created.getId()).isEmpty());
     }
 
     @Test
@@ -104,7 +134,7 @@ class AppSyncServiceTest {
         GraphqlApi a = service.createGraphqlApi(Map.of("name", "c", "authenticationType", "API_KEY"), "us-east-1");
         GraphqlApi b = service.createGraphqlApi(Map.of("name", "d", "authenticationType", "API_KEY"), "us-east-1");
         ApiKey created = service.createApiKey(a.getApiId(), Map.of());
-        assertTrue(service.validateApiKey(b.getApiId(), created.getApiKey()).isEmpty());
+        assertTrue(service.validateApiKey(b.getApiId(), created.getId()).isEmpty());
     }
 
     @Test
@@ -306,6 +336,9 @@ class AppSyncServiceTest {
                     TypeReference<Map<String, V>> typeReference) {
                 if ("appsync-apis.json".equals(fileName)) {
                     return (AccountAwareStorageBackend<V>) apiStore;
+                }
+                if ("appsync-apikeys.json".equals(fileName) && apiKeyStoreOverride != null) {
+                    return (AccountAwareStorageBackend<V>) apiKeyStoreOverride;
                 }
                 return AccountAwareStorageBackend.inMemory("000000000000");
             }

@@ -117,12 +117,12 @@ class DocDbIntegrationTest {
             .contentType(FORM)
             .formParam("Action", "ModifyDBCluster")
             .formParam("DBClusterIdentifier", CLUSTER_ID)
-            .formParam("EngineVersion", "6.0.0")
+            .formParam("EngineVersion", "8.0.0")
         .when().post("/")
         .then()
             .statusCode(200)
             .body(containsString(CLUSTER_ID))
-            .body(containsString("6.0.0"));
+            .body(containsString("8.0.0"));
     }
 
     @Test

@@ -21,6 +21,7 @@ import static org.hamcrest.Matchers.*;
 class S3PresignedPostIntegrationTest {
 
     private static final String BUCKET = "presigned-post-bucket";
+    private static final String VERSIONED_BUCKET = "presigned-post-versioned-bucket";
     private static final DateTimeFormatter AMZ_DATE_FORMAT =
             DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'").withZone(ZoneOffset.UTC);
 
@@ -671,5 +672,52 @@ class S3PresignedPostIntegrationTest {
                   ]
                 }
                 """.formatted(expiration, bucket, keyPrefix, contentTypePrefix, minSize, maxSize);
+    }
+
+    @Test
+    @Order(110)
+    void presignedPostReturnsVersionIdOnAVersionedBucket() {
+        given()
+        .when()
+            .put("/" + VERSIONED_BUCKET)
+        .then()
+            .statusCode(200);
+
+        given()
+            .body("<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>")
+        .when()
+            .put("/" + VERSIONED_BUCKET + "?versioning")
+        .then()
+            .statusCode(200);
+
+        String key = "uploads/versioned.txt";
+        String contentType = "text/plain";
+        String policy = buildPolicy(VERSIONED_BUCKET, key, contentType, 0, 10485760);
+        String policyBase64 = Base64.getEncoder().encodeToString(policy.getBytes(StandardCharsets.UTF_8));
+
+        String versionId =
+            given()
+                .multiPart("key", key)
+                .multiPart("Content-Type", contentType)
+                .multiPart("policy", policyBase64)
+                .multiPart("x-amz-algorithm", "AWS4-HMAC-SHA256")
+                .multiPart("x-amz-date", AMZ_DATE_FORMAT.format(Instant.now()))
+                .multiPart("file", "versioned.txt",
+                        "Hello from a versioned presigned POST!".getBytes(StandardCharsets.UTF_8), contentType)
+            .when()
+                .post("/" + VERSIONED_BUCKET)
+            .then()
+                .statusCode(204)
+                .extract()
+                .header("x-amz-version-id");
+
+        assertThat(versionId, is(notNullValue()));
+
+        given()
+        .when()
+            .head("/" + VERSIONED_BUCKET + "/" + key)
+        .then()
+            .statusCode(200)
+            .header("x-amz-version-id", is(versionId));
     }
 }

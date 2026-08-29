@@ -10,6 +10,9 @@ import io.github.hectorvent.floci.services.docdb.container.DocDbContainerManager
 import io.github.hectorvent.floci.services.docdb.model.DocDbCluster;
 import io.github.hectorvent.floci.services.docdb.model.DocDbInstance;
 import org.junit.jupiter.api.Test;
+import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.kms.KmsService;
+import io.github.hectorvent.floci.services.rds.RdsService;
 import org.mockito.Mockito;
 
 import java.util.concurrent.CountDownLatch;
@@ -51,7 +54,8 @@ class DocDbLegacyMigrationRaceTest {
         when(servicesConfig.docdb()).thenReturn(docdbConfig);
         when(docdbConfig.mock()).thenReturn(true);
         service = new DocDbService(config, new RegionResolver("us-east-1", "000000000000"),
-                Mockito.mock(DocDbContainerManager.class), storageFactory);
+                Mockito.mock(DocDbContainerManager.class), storageFactory,
+                Mockito.mock(RdsService.class), Mockito.mock(Ec2Service.class), Mockito.mock(KmsService.class));
     }
 
     private void freshService() {
@@ -70,7 +74,8 @@ class DocDbLegacyMigrationRaceTest {
         when(docdbConfig.mock()).thenReturn(true);
 
         service = new DocDbService(config, new RegionResolver("us-east-1", "000000000000"),
-                Mockito.mock(DocDbContainerManager.class), storageFactory);
+                Mockito.mock(DocDbContainerManager.class), storageFactory,
+                Mockito.mock(RdsService.class), Mockito.mock(Ec2Service.class), Mockito.mock(KmsService.class));
     }
 
     @Test

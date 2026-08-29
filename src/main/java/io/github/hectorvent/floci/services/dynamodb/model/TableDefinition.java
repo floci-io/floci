@@ -207,6 +207,7 @@ public class TableDefinition {
     public Integer getOnDemandMaxWriteRequestUnits() { return onDemandMaxWriteRequestUnits; }
     public void setOnDemandMaxWriteRequestUnits(Integer v) { this.onDemandMaxWriteRequestUnits = v; }
 
+    @JsonIgnore
     public String getPartitionKeyName() {
         return keySchema.stream()
                 .filter(k -> "HASH".equals(k.getKeyType()))
@@ -216,6 +217,7 @@ public class TableDefinition {
     }
 
     /** Returns the sort key attribute name, or null if none. */
+    @JsonIgnore
     public String getSortKeyName() {
         return keySchema.stream()
                 .filter(k -> "RANGE".equals(k.getKeyType()))
