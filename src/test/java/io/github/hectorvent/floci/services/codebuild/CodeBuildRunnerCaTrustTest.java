@@ -23,8 +23,10 @@ import org.junit.jupiter.api.io.TempDir;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import com.github.dockerjava.api.command.CopyArchiveFromContainerCmd;
 import com.github.dockerjava.api.command.CopyArchiveToContainerCmd;
 
+import java.io.IOException;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.nio.file.Files;
@@ -33,6 +35,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -103,12 +106,13 @@ class CodeBuildRunnerCaTrustTest {
 
     /**
      * A buildspec, project, build override, parameter-store value, or secret can define its own
-     * {@code NODE_EXTRA_CA_CERTS}/{@code AWS_CA_BUNDLE} (e.g. for an unrelated corporate CA). The
-     * env-merge order in {@code buildEnvList} put the Floci CA vars first and then layered every
-     * other source's env on top with {@code Map.put}, so a user-supplied value for either var
-     * silently clobbers the staged Floci CA path — the build then trusts a CA bundle that never
-     * includes Floci's cert, and every spoofed HTTPS AWS call fails certificate verification.
-     * Floci's CA vars must win regardless of merge order.
+     * {@code NODE_EXTRA_CA_CERTS}/{@code AWS_CA_BUNDLE} for another CA it genuinely needs (e.g. a
+     * corporate proxy CA unrelated to AWS traffic). Pointing both vars straight at Floci's own
+     * cert file — the first fix for this thread — makes Floci's spoofed endpoints reachable but
+     * silently drops that other CA, since {@code NODE_EXTRA_CA_CERTS} normally *extends* Node's
+     * trust store rather than replacing it wholesale. The env vars must instead point at a
+     * Floci-owned combined-bundle path so {@link #stageFlociCaCertIfNeeded} can write both CAs
+     * into one file.
      */
     @Test
     void flociCaTrustEnvSurvivesUserSuppliedOverride() throws Exception {
@@ -126,10 +130,146 @@ class CodeBuildRunnerCaTrustTest {
         List<String> env = runner().buildEnvList(
                 "us-east-1", build(), project(), buildspecWithUserCaOverride, "log-stream");
 
-        assertTrue(env.contains("NODE_EXTRA_CA_CERTS=" + ContainerLauncher.FLOCI_CA_CONTAINER_PATH),
-                () -> "expected Floci's NODE_EXTRA_CA_CERTS to win over the buildspec override in " + env);
-        assertTrue(env.contains("AWS_CA_BUNDLE=" + ContainerLauncher.FLOCI_CA_CONTAINER_PATH),
-                () -> "expected Floci's AWS_CA_BUNDLE to win over the buildspec override in " + env);
+        assertTrue(env.contains("NODE_EXTRA_CA_CERTS=" + CodeBuildRunner.COMBINED_CA_BUNDLE_CONTAINER_PATH),
+                () -> "expected NODE_EXTRA_CA_CERTS to point at the combined bundle in " + env);
+        assertTrue(env.contains("AWS_CA_BUNDLE=" + CodeBuildRunner.COMBINED_CA_BUNDLE_CONTAINER_PATH),
+                () -> "expected AWS_CA_BUNDLE to point at the combined bundle in " + env);
+    }
+
+    /**
+     * When no buildspec/project/build-override/parameter/secret source defines a CA var, staging
+     * must still write Floci's cert to the plain {@code FLOCI_CA_CONTAINER_PATH} (not the combined
+     * bundle path) — there is no existing CA to preserve, so the simpler single-file path from the
+     * original fix stays correct in the common case.
+     */
+    @Test
+    void stagesPlainFlociCertWhenNoUserCaOverrideExists() throws Exception {
+        Path tlsDir = Files.createDirectories(tempDir.resolve("tls"));
+        Files.writeString(tlsDir.resolve("floci-selfsigned.crt"), "fake-cert-pem-content");
+
+        when(tlsConfig.enabled()).thenReturn(true);
+        when(tlsConfig.certPath()).thenReturn(Optional.empty());
+
+        CopyArchiveToContainerCmd copyCmd = mock(CopyArchiveToContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.copyArchiveToContainerCmd("container-id")).thenReturn(copyCmd);
+        org.mockito.ArgumentCaptor<java.io.InputStream> tarCaptor =
+                org.mockito.ArgumentCaptor.forClass(java.io.InputStream.class);
+        when(copyCmd.withTarInputStream(tarCaptor.capture())).thenReturn(copyCmd);
+
+        stageFlociCaCert("container-id", Optional.empty());
+
+        Map<String, byte[]> entries = readTarEntries(tarCaptor.getValue());
+        assertTrue(entries.containsKey(ContainerLauncher.FLOCI_CA_FILE_NAME),
+                () -> "expected a plain " + ContainerLauncher.FLOCI_CA_FILE_NAME + " entry, got " + entries.keySet());
+        assertFalse(entries.containsKey("floci-ca-bundle.crt"));
+        assertArrayEquals("fake-cert-pem-content".getBytes(),
+                entries.get(ContainerLauncher.FLOCI_CA_FILE_NAME));
+    }
+
+    /**
+     * When a buildspec/project/build-override source already points NODE_EXTRA_CA_CERTS or
+     * AWS_CA_BUNDLE at another CA bundle, staging must fetch that existing file from the container
+     * (via {@code copyArchiveFromContainerCmd}, the same Docker archive API
+     * {@code copyArtifactsFromContainer} already uses) and write a combined bundle containing both
+     * the user's existing CA content and Floci's cert — dropping neither.
+     */
+    @Test
+    void mergesExistingCaBundleWithFlociCertWhenUserOverrideExists() throws Exception {
+        Path tlsDir = Files.createDirectories(tempDir.resolve("tls"));
+        Files.writeString(tlsDir.resolve("floci-selfsigned.crt"), "floci-cert-content");
+
+        when(tlsConfig.enabled()).thenReturn(true);
+        when(tlsConfig.certPath()).thenReturn(Optional.empty());
+
+        CopyArchiveFromContainerCmd fromCmd = mock(CopyArchiveFromContainerCmd.class);
+        when(fromCmd.exec()).thenReturn(new java.io.ByteArrayInputStream(
+                tarOfSingleFile("corporate-ca.pem", "corporate-ca-content")));
+        when(dockerClient.copyArchiveFromContainerCmd("container-id", "/etc/corporate-ca.pem"))
+                .thenReturn(fromCmd);
+
+        CopyArchiveToContainerCmd toCmd = mock(CopyArchiveToContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.copyArchiveToContainerCmd("container-id")).thenReturn(toCmd);
+        org.mockito.ArgumentCaptor<java.io.InputStream> tarCaptor =
+                org.mockito.ArgumentCaptor.forClass(java.io.InputStream.class);
+        when(toCmd.withTarInputStream(tarCaptor.capture())).thenReturn(toCmd);
+
+        stageFlociCaCert("container-id", Optional.of("/etc/corporate-ca.pem"));
+
+        Map<String, byte[]> entries = readTarEntries(tarCaptor.getValue());
+        assertTrue(entries.containsKey("floci-ca-bundle.crt"),
+                () -> "expected a combined floci-ca-bundle.crt entry, got " + entries.keySet());
+        String combined = new String(entries.get("floci-ca-bundle.crt"));
+        assertTrue(combined.contains("corporate-ca-content"),
+                () -> "expected the existing corporate CA content to survive the merge: " + combined);
+        assertTrue(combined.contains("floci-cert-content"),
+                () -> "expected Floci's cert content to be included in the merge: " + combined);
+    }
+
+    /**
+     * If the user-configured CA path never materializes inside the build image (e.g. it is
+     * created later by a buildspec install command, not baked in), fetching it fails. Staging must
+     * fall back to a Floci-only bundle rather than propagating that failure — the build still
+     * needs to be able to reach Floci's spoofed endpoints even though the user's own CA couldn't
+     * be located at container-creation time.
+     */
+    @Test
+    void fallsBackToFlociOnlyBundleWhenUserCaPathIsUnreadable() throws Exception {
+        Path tlsDir = Files.createDirectories(tempDir.resolve("tls"));
+        Files.writeString(tlsDir.resolve("floci-selfsigned.crt"), "floci-cert-content");
+
+        when(tlsConfig.enabled()).thenReturn(true);
+        when(tlsConfig.certPath()).thenReturn(Optional.empty());
+
+        CopyArchiveFromContainerCmd fromCmd = mock(CopyArchiveFromContainerCmd.class);
+        when(fromCmd.exec()).thenThrow(new RuntimeException("no such file"));
+        when(dockerClient.copyArchiveFromContainerCmd("container-id", "/etc/not-yet-created.pem"))
+                .thenReturn(fromCmd);
+
+        CopyArchiveToContainerCmd toCmd = mock(CopyArchiveToContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.copyArchiveToContainerCmd("container-id")).thenReturn(toCmd);
+        org.mockito.ArgumentCaptor<java.io.InputStream> tarCaptor =
+                org.mockito.ArgumentCaptor.forClass(java.io.InputStream.class);
+        when(toCmd.withTarInputStream(tarCaptor.capture())).thenReturn(toCmd);
+
+        stageFlociCaCert("container-id", Optional.of("/etc/not-yet-created.pem"));
+
+        Map<String, byte[]> entries = readTarEntries(tarCaptor.getValue());
+        assertTrue(entries.containsKey("floci-ca-bundle.crt"));
+        assertArrayEquals("floci-cert-content".getBytes(), entries.get("floci-ca-bundle.crt"));
+    }
+
+    private static byte[] tarOfSingleFile(String name, String content) throws IOException {
+        var bos = new java.io.ByteArrayOutputStream();
+        try (org.apache.commons.compress.archivers.tar.TarArchiveOutputStream tar =
+                     new org.apache.commons.compress.archivers.tar.TarArchiveOutputStream(bos)) {
+            byte[] bytes = content.getBytes();
+            org.apache.commons.compress.archivers.tar.TarArchiveEntry entry =
+                    new org.apache.commons.compress.archivers.tar.TarArchiveEntry(name);
+            entry.setSize(bytes.length);
+            tar.putArchiveEntry(entry);
+            tar.write(bytes);
+            tar.closeArchiveEntry();
+        }
+        return bos.toByteArray();
+    }
+
+    private static Map<String, byte[]> readTarEntries(java.io.InputStream tarStream) throws IOException {
+        Map<String, byte[]> result = new java.util.LinkedHashMap<>();
+        try (org.apache.commons.compress.archivers.tar.TarArchiveInputStream tar =
+                     new org.apache.commons.compress.archivers.tar.TarArchiveInputStream(tarStream)) {
+            org.apache.commons.compress.archivers.tar.TarArchiveEntry entry;
+            while ((entry = tar.getNextEntry()) != null) {
+                result.put(entry.getName(), tar.readAllBytes());
+            }
+        }
+        return result;
+    }
+
+    private void stageFlociCaCert(String containerId, Optional<String> preexistingCaPath) throws Exception {
+        Method method = CodeBuildRunner.class.getDeclaredMethod(
+                "stageFlociCaCertIfNeeded", String.class, Optional.class);
+        method.setAccessible(true);
+        method.invoke(runner(), containerId, preexistingCaPath);
     }
 
     /**
@@ -151,13 +291,8 @@ class CodeBuildRunnerCaTrustTest {
         when(dockerClient.copyArchiveToContainerCmd("container-id")).thenReturn(copyCmd);
         when(copyCmd.exec()).thenThrow(new RuntimeException("docker daemon unreachable"));
 
-        assertThrows(InvocationTargetException.class, () -> invokeStageFlociCaCertIfNeeded("container-id"));
-    }
-
-    private void invokeStageFlociCaCertIfNeeded(String containerId) throws Exception {
-        Method method = CodeBuildRunner.class.getDeclaredMethod("stageFlociCaCertIfNeeded", String.class);
-        method.setAccessible(true);
-        method.invoke(runner(), containerId);
+        assertThrows(InvocationTargetException.class,
+                () -> stageFlociCaCert("container-id", Optional.empty()));
     }
 
     private CodeBuildRunner runner() {
