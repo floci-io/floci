@@ -604,4 +604,56 @@ class ApiGatewayV2OpenApiImportTest {
         assertTrue(warnings.contains("GET /signed"), warnings);
         assertTrue(warnings.contains("does not enforce"), warnings);
     }
+
+    @Test
+    @Order(18)
+    void scalarJwtAudienceIsAcceptedAndDoesNotDestroyThePreviousDefinition() throws Exception {
+        // audience is stored as a List<String> and cast as one, so a scalar has to be coerced
+        // during planning — otherwise the cast throws after ReimportApi has already deleted.
+        String scalarAudienceSpec = """
+                {
+                  "openapi": "3.0.1",
+                  "info": {"title": "ScalarAudienceApi", "version": "1.0"},
+                  "security": [{"Jwt": []}],
+                  "components": {"securitySchemes": {"Jwt": {
+                    "type": "oauth2",
+                    "x-amazon-apigateway-authorizer": {
+                      "type": "jwt",
+                      "jwtConfiguration": {"issuer": "https://issuer.example.com", "audience": "single-aud"},
+                      "identitySource": "$request.header.Authorization"
+                    }
+                  }}},
+                  "paths": {"/j": {"get": {}}}
+                }
+                """;
+
+        String created = given().contentType(ContentType.JSON)
+                .body("{\"name\": \"scalarAudienceTarget\", \"protocolType\": \"HTTP\"}")
+                .when().post("/v2/apis")
+                .then().statusCode(201).extract().asString();
+        String apiId = mapper.readTree(created).get("apiId").asText();
+
+        given().contentType(ContentType.JSON)
+                .body(envelope(SPEC_WITH_AUTHORIZER))
+                .when().put("/v2/apis/" + apiId)
+                .then().statusCode(201);
+        assertEquals(2, get("/v2/apis/" + apiId + "/routes").get("items").size());
+
+        given().contentType(ContentType.JSON)
+                .body(envelope(scalarAudienceSpec))
+                .when().put("/v2/apis/" + apiId)
+                .then().statusCode(201);
+
+        JsonNode authorizer = get("/v2/apis/" + apiId + "/authorizers").get("items").get(0);
+        assertEquals("JWT", authorizer.get("authorizerType").asText());
+        assertEquals("single-aud", authorizer.get("jwtConfiguration").get("audience").get(0).asText());
+
+        // A shape neither string nor array is refused, with the previous definition kept.
+        String badAudience = scalarAudienceSpec.replace("\"single-aud\"", "{\"nope\": 1}");
+        given().contentType(ContentType.JSON)
+                .body(envelope(badAudience))
+                .when().put("/v2/apis/" + apiId)
+                .then().statusCode(400);
+        assertNotNull(findRoute(get("/v2/apis/" + apiId + "/routes"), "GET /j"));
+    }
 }

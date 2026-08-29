@@ -539,7 +539,7 @@ public class ApiGatewayV2OpenApiImporter {
             }
             Map<String, Object> jwtConfiguration = extensionAsMap(authDef, "jwtConfiguration");
             if (jwtConfiguration != null) {
-                request.put("jwtConfiguration", jwtConfiguration);
+                request.put("jwtConfiguration", normalisedJwtConfiguration(jwtConfiguration, schemeName));
             }
 
             if ("REQUEST".equals(authorizerType)) {
@@ -570,6 +570,41 @@ public class ApiGatewayV2OpenApiImporter {
                     new SchemeBinding(spec.authorizationType(), authorizer.getAuthorizerId()));
         }
         return bindings;
+    }
+
+    /**
+     * Coerces jwtConfiguration into the shape CreateAuthorizer expects, in the planning phase.
+     * {@code audience} reaches the store as a {@code List<String>} and is cast as one, so a scalar
+     * — which the extension is commonly written with — would otherwise throw a ClassCastException
+     * during application, after ReimportApi had already dropped the previous definition.
+     */
+    private static Map<String, Object> normalisedJwtConfiguration(Map<String, Object> jwtConfiguration,
+                                                                  String schemeName) {
+        Map<String, Object> normalised = new LinkedHashMap<>(jwtConfiguration);
+        Object audience = normalised.get("audience");
+        if (audience instanceof String single) {
+            normalised.put("audience", List.of(single));
+        } else if (audience instanceof List<?> list) {
+            List<String> values = new ArrayList<>();
+            for (Object item : list) {
+                if (item == null) {
+                    continue;
+                }
+                values.add(String.valueOf(item));
+            }
+            normalised.put("audience", values);
+        } else if (audience != null) {
+            throw new AwsException("BadRequestException",
+                    "jwtConfiguration.audience for security scheme " + schemeName
+                            + " must be a string or an array of strings", 400);
+        }
+
+        Object issuer = normalised.get("issuer");
+        if (issuer != null && !(issuer instanceof String)) {
+            throw new AwsException("BadRequestException",
+                    "jwtConfiguration.issuer for security scheme " + schemeName + " must be a string", 400);
+        }
+        return normalised;
     }
 
     /**
