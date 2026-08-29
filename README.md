@@ -132,7 +132,7 @@ Run AWS-compatible services locally without an AWS account, auth token, or paid 
 <details>
 <summary><strong>Real Docker where fidelity matters</strong></summary>
 
-Lambda, RDS, Neptune, ElastiCache, MSK, ECS, EC2, EKS, OpenSearch, and CodeBuild use real Docker-backed execution instead of shallow mocks.
+Lambda, RDS, Neptune, ElastiCache, MSK, ECS, EC2, EKS, OpenSearch, CodeBuild, and Managed Service for Apache Flink use real Docker-backed execution instead of shallow mocks.
 
 </details>
 
@@ -178,7 +178,7 @@ LocalStack's community edition [sunset in March 2026](https://blog.localstack.cl
 | CodeBuild | Real Docker execution | No |
 | Native binary | ~40 MB | No |
 
-**69 AWS services. Broad coverage. Free forever.**
+**83 AWS services. Broad coverage. Free forever.**
 
 ## Architecture Overview
 
@@ -190,7 +190,7 @@ flowchart LR
         Router["HTTP Router\nJAX-RS / Vert.x"]
 
         subgraph Stateless ["Stateless Services"]
-            A["SSM · SQS · SNS\nIAM · STS · KMS\nSecrets Manager · SES\nCognito · Kinesis\nEventBridge · Scheduler · AppConfig\nCloudWatch · Step Functions\nCloudFormation · ACM · Config\nAPI Gateway · AppSync · ELB v2 · Auto Scaling\nElastic Beanstalk · CodeDeploy · CodePipeline · Backup · Bedrock Runtime · Route53 · Transfer"]
+            A["SSM · SQS · SNS\nIAM · STS · KMS\nSecrets Manager · SES\nCognito · Kinesis\nEventBridge · Scheduler · AppConfig\nCloudWatch · Step Functions\nCloudFormation · ACM · Config · CloudTrail\nAPI Gateway · AppSync · ELB v2 · Auto Scaling\nElastic Beanstalk · CodeDeploy · CodePipeline · Backup · FIS · Bedrock Runtime · Bedrock AgentCore · Route53 · Transfer"]
         end
 
         subgraph Stateful ["Stateful Services"]
@@ -198,7 +198,7 @@ flowchart LR
         end
 
         subgraph Containers ["Container Services"]
-            C["Lambda\nElastiCache\nRDS\nNeptune\nECS\nEC2\nMSK\nEKS\nOpenSearch\nCodeBuild"]
+            C["Lambda\nElastiCache\nRDS\nNeptune\nECS\nEC2\nMSK\nEKS\nOpenSearch\nCodeBuild\nManaged Flink"]
             D["Athena -> floci-duck\nDuckDB sidecar"]
         end
 
@@ -220,15 +220,15 @@ Floci supports local emulation for application services, data services, eventing
 | Category | Services |
 |---|---|
 | Core app services | S3, SQS, SNS, DynamoDB, Lambda, IAM, KMS, Secrets Manager, SSM |
-| Events and workflows | EventBridge, EventBridge Pipes, EventBridge Scheduler, Step Functions, CloudWatch Logs, CloudWatch Metrics |
+| Events and workflows | EventBridge, EventBridge Pipes, EventBridge Scheduler, Step Functions, SWF, CloudWatch Logs, CloudWatch Metrics |
 | API and identity | API Gateway REST, API Gateway v2, AppSync, Cognito, ACM, Route53, Cloud Map |
-| Containers and compute | ECS, EC2, Lightsail, EKS, ECR, CodeBuild, CodeDeploy, CodePipeline, AWS Batch, Auto Scaling, Elastic Beanstalk, ELB v2 |
-| Data, analytics, and AI | Athena, Glue, EMR, Firehose, OpenSearch, S3 Vectors, Textract, Transcribe, Bedrock Runtime |
+| Containers and compute | ECS, EC2, Lightsail, EKS, MWAA, ECR, CodeBuild, CodeDeploy, CodePipeline, AWS Batch, Auto Scaling, Application Auto Scaling, Elastic Beanstalk, ELB v2 |
+| Data, analytics, and AI | Athena, Glue, EMR, Firehose, Managed Service for Apache Flink, OpenSearch, S3 Tables, S3 Vectors, Textract, Transcribe, Bedrock Runtime, Bedrock AgentCore |
 | Databases and caching | RDS, RDS Data API, Neptune, DocumentDB, MemoryDB, ElastiCache |
 | Messaging and transfer | SES, Kinesis, MSK, Amazon MQ, Transfer Family, IoT Core |
-| Security and governance | WAF v2, CloudTrail, CloudFront, Resource Groups Tagging API |
+| Security and governance | AWS Network Firewall, AWS RAM, Service Quotas, WAF v2, CloudTrail, CloudFront, Resource Groups Tagging API, Resource Explorer 2, CloudHSM v2, Organizations |
 | Cost and billing | Pricing, Cost Explorer, Cost and Usage Reports, BCM Data Exports |
-| Backup and config | AWS Backup, AWS Config, AppConfig, AppConfigData, CloudFormation, Cloud Control API |
+| Resilience, backup, and config | AWS FIS, AWS Backup, AWS Config, AppConfig, AppConfigData, CloudFormation, Cloud Control API |
 
 For operation-level compatibility, see the [Services Overview](https://floci.io/floci/services/).
 
@@ -253,6 +253,7 @@ For operation-level compatibility, see the [Services Overview](https://floci.io/
 | Kinesis | In-process | Streams, shards, enhanced fan-out, split and merge |
 | Secrets Manager | In-process | Versioning, resource policies, tagging |
 | Step Functions | In-process | ASL execution, task tokens, execution history |
+| SWF | In-process | Decision and activity tasks, timers, child workflows, timeouts, real Lambda invocation |
 | CloudFormation | In-process | Stacks, change sets, resource provisioning, StackSets (cross-account instances) |
 | EventBridge | In-process | Custom buses, rules, SQS, SNS and Lambda targets |
 | EventBridge Pipes | In-process | Poller-based integration connecting SQS, Kinesis, DynamoDB, and MSK sources to targets with optional filtering |
@@ -270,7 +271,8 @@ For operation-level compatibility, see the [Services Overview](https://floci.io/
 | Athena | In-process with DuckDB sidecar | Real SQL execution over S3 and Glue-backed views |
 | Glue | In-process | Data Catalog, Schema Registry, tables consumed by Athena |
 | EMR | In-process | Cluster (job flow) lifecycle, instance groups and fleets, steps, security configurations, tagging |
-| Data Firehose | In-process | Streaming delivery, NDJSON flush to S3 |
+| Data Firehose | In-process | Streaming delivery, buffered flush to S3 with GZIP/ZIP/Snappy compression |
+| Managed Service for Apache Flink | Real Docker | Kinesis Analytics V2 control plane; StartApplication runs a real Flink cluster (JobManager + TaskManager, image per RuntimeEnvironment), pulls the application JAR from local S3, and submits the job |
 | ECS | Real Docker | Clusters, task definitions, tasks, services, capacity providers, task sets |
 | EC2 | Real Docker | RunInstances launches containers, SSH key injection, UserData, IMDS, VPC resources |
 | Lightsail | In-process | Instances, disks, static IPs, key pairs, ports, tags, regions, blueprints, bundles, operations |
@@ -282,19 +284,28 @@ For operation-level compatibility, see the [Services Overview](https://floci.io/
 | AppConfig | In-process | Applications, environments, profiles, hosted versions, deployments |
 | AppConfigData | In-process | Configuration sessions and dynamic configuration retrieval |
 | Bedrock Runtime | In-process stub | Dummy Converse and InvokeModel responses for local development |
+| Bedrock AgentCore | In-process stub | Stateful control plane (agent runtimes, gateways, memory, workload identity); canned InvokeAgentRuntime responses |
 | EKS | Real Docker, mock mode available | k3s clusters with live Kubernetes API server |
+| MWAA | Real Docker, mock mode available | Real Apache Airflow (LocalExecutor) + Postgres metadata DB per environment; web/CLI proxy; S3-backed DAG sync |
 | ELB v2 | In-process | ALB, NLB, target groups, listeners, routing rules, Lambda targets, tags |
 | CodeBuild | In-process with real Docker | Real buildspec execution, CloudWatch logs, S3 artifacts |
 | CodeDeploy | In-process with Lambda traffic shifting | Deployment groups, configs, lifecycle hooks, auto-rollback |
 | CodePipeline | In-process orchestration | Pipelines, executions, S3 artifacts, approvals, local providers, custom workers |
+| AWS Network Firewall | In-process | DescribeFirewall with stable emulated endpoint attachments for infrastructure tooling |
+| Service Quotas | In-process | Generated quota catalog with generous static values; real quota codes for CodeBuild and Lambda concurrency |
+| AWS RAM | In-process | EnableSharingWithAwsOrganization opt-in |
 | AWS Batch | In-process | Compute environments, job queues, job definitions, job submission and lifecycle |
 | Auto Scaling | In-process with reconciler | Launch configs, ASGs, desired capacity reconciliation, lifecycle hooks |
+| Application Auto Scaling | In-process | Scalable targets, target-tracking and step scaling policies, CloudWatch alarm creation, tagging (policies are stored but inert) |
 | Elastic Beanstalk | In-process | Applications, application versions, environments, configuration templates, platform and solution stack metadata |
 | AWS Backup | In-process | Vaults, backup plans, selections, simulated job lifecycle, recovery points |
-| AWS Config | In-process | Config rules, configuration recorders, delivery channels, conformance packs, tagging |
-| CloudTrail | In-process | Trail lifecycle, event selectors, logging status; management API only |
+| AWS FIS | In-process | All 26 management APIs for templates, experiments, target accounts, action and target discovery, safety lever, tagging, and pagination; experiment execution is a safe control-plane simulation and does not inject faults into other services |
+| AWS Config | In-process | Config rules, evaluation-driven compliance (PutEvaluations, compliance details and summaries), configuration recorders, delivery channels, retention configuration, conformance packs, tagging |
+| Organizations | In-process | Organizations, roots, nested OUs, member accounts, all policy types with `FullAWSAccess` and effective-policy inheritance, trusted service access, delegated administrators, resource policy, and the full invitation/handshake flow; created accounts are usable Floci accounts and member accounts can read the organization they belong to |
+| CloudTrail | In-process | Trails, event selectors (S3 data events with bucket/prefix matching), `StartLogging`/`StopLogging`, scheduled gzipped log file emission to the destination bucket at AWS-shaped key paths, IAM-deny path emits `AccessDenied` records |
 | CloudFront | In-process | Distributions, origins, cache behaviors, invalidations, tagging |
 | WAF v2 | In-process | Web ACLs, IP sets, regex pattern sets, rule groups, logging configs, resource associations, tagging (REGIONAL and CLOUDFRONT scopes) |
+| Resource Explorer 2 | In-process | All 32 management APIs — index and view lifecycle, multi-Region setup tasks, the full search query grammar, and tagging; 30 services expose their resources for search, gathered live rather than from an index |
 | Route53 | In-process | Hosted zones, SOA and NS records, resource record sets, change tracking, tagging |
 | Cloud Map | In-process | HTTP and DNS namespaces, services, instance registration, discovery queries, operations, tagging |
 | Transfer Family | In-process | Server lifecycle, user management, SSH key import, tagging |
@@ -323,9 +334,11 @@ Floci uses real Docker containers when in-process emulation would reduce fidelit
 | DocumentDB | `mongo:7.0` | MongoDB engine; MongoDB wire protocol on port 27017 |
 | MSK | `redpandadata/redpanda:latest` | Kafka-compatible broker via Redpanda |
 | Amazon MQ | `rabbitmq:3-management` | RabbitMQ broker; AMQP on port 5672, management console on 15672 |
+| Managed Service for Apache Flink | `apache/flink:<version>` | Apache Flink JobManager; image chosen per RuntimeEnvironment (FLINK-1_15 … FLINK-1_20, FLINK-2_0 … FLINK-2_3) |
 | EC2 | AMI-mapped Linux images | Linux containers, SSH key injection, UserData, IMDS, IAM credentials |
 | ECS | User-specified task image | Container lifecycle, start, stop, health checks |
 | EKS | `rancher/k3s:latest` | Kubernetes API server via k3s |
+| MWAA | `apache/airflow:<version>-python3.12` + `postgres:16-alpine` | Real Apache Airflow (LocalExecutor: scheduler + webserver) with its own Postgres metadata DB; webserver/CLI reachable via Floci's proxy |
 | CodeBuild | User-specified environment image | Buildspec execution, log streaming, S3 artifact upload |
 | OpenSearch | `opensearchproject/opensearch:2` | Full OpenSearch engine with REST API |
 | ECR | `registry:2` | OCI-compatible registry for docker push and docker pull |
@@ -350,10 +363,12 @@ docker run -d --name floci \
 | `FLOCI_SERVICES_RDS_DEFAULT_MARIADB_IMAGE` | `mariadb:11` |
 | `FLOCI_SERVICES_MSK_DEFAULT_IMAGE` | `redpandadata/redpanda:latest` |
 | `FLOCI_SERVICES_OPENSEARCH_DEFAULT_IMAGE` | `opensearchproject/opensearch:2` |
+| `FLOCI_SERVICES_KINESIS_ANALYTICS_DEFAULT_IMAGE` | _(unset; chosen per RuntimeEnvironment)_ |
 | `FLOCI_SERVICES_NEPTUNE_DEFAULT_IMAGE` | `tinkerpop/gremlin-server:3.7.3` |
 | `FLOCI_SERVICES_NEPTUNE_DEFAULT_NEO4J_IMAGE` | `neo4j:5-community` |
 | `FLOCI_SERVICES_DOCDB_DEFAULT_IMAGE` | `mongo:7.0` |
 | `FLOCI_SERVICES_EKS_DEFAULT_IMAGE` | `rancher/k3s:latest` |
+| `FLOCI_SERVICES_MWAA_DEFAULT_POSTGRES_IMAGE` | `postgres:16-alpine` |
 | `FLOCI_SERVICES_ECR_REGISTRY_IMAGE` | `registry:2` |
 | `FLOCI_ECR_BASE_URI` | `public.ecr.aws` |
 
@@ -556,9 +571,11 @@ aws --endpoint-url http://localhost:4566 s3 ls
 
 Floci has Testcontainers modules for starting isolated Floci instances directly from tests. This avoids shared state, manual daemon setup, and port conflicts.
 
+For Testcontainers 1.x, use the versions as indicated in the table below.
+
 | Language | Package | Latest | Registry | Source |
 |---|---|---|---|---|
-| Java | `io.floci:testcontainers-floci` | `1.4.0` | [Maven Central](https://mvnrepository.com/artifact/io.floci/testcontainers-floci) | [GitHub](https://github.com/floci-io/testcontainers-floci) |
+| Java | `io.floci:testcontainers-floci` | `1.14.0` | [Maven Central](https://mvnrepository.com/artifact/io.floci/testcontainers-floci) | [GitHub](https://github.com/floci-io/testcontainers-floci) |
 | Node.js | `@floci/testcontainers` | `0.1.0` | [npm](https://www.npmjs.com/package/@floci/testcontainers) | [GitHub](https://github.com/floci-io/testcontainers-floci-node) |
 | Python | `testcontainers-floci` | `0.1.1` | [PyPI](https://pypi.org/project/testcontainers-floci/) | [GitHub](https://github.com/floci-io/testcontainers-floci-python) |
 | Go | In progress | In progress | N/A | [GitHub](https://github.com/floci-io/testcontainers-floci-go) |
@@ -570,7 +587,7 @@ Floci has Testcontainers modules for starting isolated Floci instances directly 
 <dependency>
     <groupId>io.floci</groupId>
     <artifactId>testcontainers-floci</artifactId>
-    <version>1.4.0</version>
+    <version>1.14.0</version>
     <scope>test</scope>
 </dependency>
 ```
@@ -597,7 +614,7 @@ class S3IntegrationTest {
 }
 ```
 
-For Testcontainers 2.x / Spring Boot 4.x, use version `2.5.0`.
+For Testcontainers 2.x / Spring Boot 4.x, use version `2.15.0`.
 
 </details>
 
@@ -650,7 +667,7 @@ pip install testcontainers-floci
 
 ```python
 import boto3
-from testcontainers_floci import FlociContainer
+from floci import FlociContainer
 
 
 def test_s3_create_bucket():
@@ -786,30 +803,34 @@ Join the Floci community on [Slack](https://join.slack.com/t/floci/shared_invite
 
 ## Sponsors
 
-Floci is independent open source, funded by its users. If Floci saves you time,
-consider [sponsoring the project](https://github.com/sponsors/floci-io) — every
-tier keeps the emulators fast, light, and free.
+Floci is independent open source, funded by the people and companies who use it.
+Sponsorship buys gratitude and nothing else: every emulated service is free for
+everyone, forever, and no sponsor gets features, priority, or roadmap influence
+that the rest of the Flock does not.
 
 ### 🥇 Gold
 
-Large logo with top placement, a dedicated support channel, input on roadmap
-priorities, and custom integration help.
+Large logo with top placement in the emulator READMEs and on floci.io, plus a
+mention in release notes.
 
-*Your logo here — [become a Gold sponsor](https://github.com/sponsors/floci-io).*
+[IceGuard](https://github.com/iceguard) · [Softmax](https://softmax.com/)
 
 ### 🥈 Silver
 
-Logo in this README and on floci.io, priority issue support, and a mention in
-release notes.
+Logo in the emulator READMEs and on floci.io, plus a mention in release notes.
 
-*Your logo here — [become a Silver sponsor](https://github.com/sponsors/floci-io).*
+*Your logo here. [Become a sponsor](https://github.com/sponsors/floci-io).*
 
 ### 🥉 Community
 
-Name in this README, a sponsor badge on GitHub, and our sincere thanks.
+Name in the emulator READMEs, a sponsor badge on GitHub, and our sincere thanks.
 
-- [Nexxion.ai](https://github.com/Nexxion-ai)
-- [Your name here](https://github.com/sponsors/floci-io)
+[AutoScout24](https://www.autoscout24.com) · [Nexxion AI](https://nexxion.ai/)
+
+Every sponsor, including the Friends of the Flock who support Floci outside these
+tiers, is listed in [THANKS.md](https://github.com/floci-io/.github/blob/main/THANKS.md).
+
+**[Sponsor Floci](https://github.com/sponsors/floci-io)**
 
 ## Star History
 

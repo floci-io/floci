@@ -20,6 +20,10 @@
 | `RemoveTagsFromCertificate` | Remove tags from a certificate |
 | `GetAccountConfiguration` | Get account-level ACM settings |
 | `PutAccountConfiguration` | Update account-level ACM settings |
+| `UpdateCertificateOptions` | - |
+| `RevokeCertificate` | - |
+| `RenewCertificate` | - |
+| `ResendValidationEmail` | - |
 <!-- floci:actions:end -->
 
 ## Emulation Behavior

@@ -77,6 +77,14 @@ public interface TagHandler {
     }
 
     /**
+     * Whether an {@code UntagResource} request may omit the tag-key query parameter.
+     * Defaults to {@code false} so strict handlers retain their existing validation.
+     */
+    default boolean allowEmptyTagKeys() {
+        return false;
+    }
+
+    /**
      * Query parameter name for {@code UntagResource}. Defaults to lowercase
      * {@code "tagKeys"}, which matches the great majority of AWS services — including
      * most that use capitalized {@code "Tags"} in the body. Override to {@code "TagKeys"}
@@ -96,6 +104,16 @@ public interface TagHandler {
      */
     default boolean tagResourceUsesPut() {
         return false;
+    }
+
+    /** HTTP status for successful path-based TagResource requests. */
+    default int tagResourceSuccessStatus() {
+        return 204;
+    }
+
+    /** HTTP status for successful path-based UntagResource requests. */
+    default int untagResourceSuccessStatus() {
+        return 204;
     }
 
     Map<String, String> listTags(String region, String arn);

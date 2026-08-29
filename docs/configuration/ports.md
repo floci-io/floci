@@ -9,8 +9,8 @@
 | `6379–6399` | TCP | ElastiCache Redis proxy (inside Floci) | Yes |
 | `6500–6599` | HTTPS | EKS k3s API server — bound directly by each k3s container | **No** |
 | `7001–7099` | TCP | RDS proxy (inside Floci) | Yes |
-| `9200–9299` | HTTP | Lambda Runtime API (internal, Docker-network only) | **No** |
 | `9400–9499` | HTTP | OpenSearch data-plane — bound directly by each OpenSearch container | **No** |
+| `12000–12499` | HTTP | Lambda Runtime API (internal, Docker-network only) | **No** |
 
 ## Why some ports don't need docker-compose mapping
 
@@ -105,9 +105,11 @@ psql -h localhost -p 7001 -U admin
 !!! note
     Configure the range with `FLOCI_SERVICES_RDS_PROXY_BASE_PORT` and `FLOCI_SERVICES_RDS_PROXY_MAX_PORT`.
 
-## Ports 9200–9299 — Lambda Runtime API (internal)
+## Ports 12000–12499 — Lambda Runtime API (internal)
 
-Floci binds a Runtime API port in `9200–9299` for each warm Lambda container to poll. These ports are consumed by containers on the shared Docker network only — they are never accessed from the host and must **not** be mapped in `docker-compose.yml`.
+Floci binds a Runtime API port in `12000–12499` for each warm Lambda container to poll. These ports are consumed by containers on the shared Docker network only — they are never accessed from the host and must **not** be mapped in `docker-compose.yml`.
+
+One port is held for the lifetime of each running Lambda container, so the width of this range is a hard ceiling on **concurrent Lambda executions** — 500 with the default. This range was previously `9200–9299`; if you pinned that in your own configuration, raise it.
 
 Configure the range with `FLOCI_SERVICES_LAMBDA_RUNTIME_API_BASE_PORT` and `FLOCI_SERVICES_LAMBDA_RUNTIME_API_MAX_PORT`.
 

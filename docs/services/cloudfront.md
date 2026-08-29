@@ -1,6 +1,9 @@
 # CloudFront
 
-CloudFront management-plane emulation. Supports distribution lifecycle, cache policies, origin request policies, response headers policies, origin access controls, origin access identities, CloudFront Functions, invalidations, and tagging. Actual content delivery is not emulated — this is a management-plane-only implementation.
+CloudFront management-plane and local content-delivery emulation. Supports distribution lifecycle,
+cache policies, origin request policies, response headers policies, origin access controls, origin
+access identities, public keys, trusted key groups, CloudFront Functions, invalidations, tagging, and
+GET/HEAD/OPTIONS delivery from S3 or custom origins.
 
 **Protocol:** REST XML  
 **API version:** `2020-05-31`  
@@ -97,6 +100,23 @@ CloudFront management-plane emulation. Supports distribution lifecycle, cache po
 | `DeleteFunction` | DELETE | `/2020-05-31/function/{Name}` |
 | `ListFunctions` | GET | `/2020-05-31/function` |
 
+### Public Keys and Key Groups
+
+| Operation | Method | Path |
+|---|---|---|
+| `CreatePublicKey` | POST | `/2020-05-31/public-key` |
+| `GetPublicKey` | GET | `/2020-05-31/public-key/{Id}` |
+| `GetPublicKeyConfig` | GET | `/2020-05-31/public-key/{Id}/config` |
+| `UpdatePublicKey` | PUT | `/2020-05-31/public-key/{Id}/config` |
+| `DeletePublicKey` | DELETE | `/2020-05-31/public-key/{Id}` |
+| `ListPublicKeys` | GET | `/2020-05-31/public-key` |
+| `CreateKeyGroup` | POST | `/2020-05-31/key-group` |
+| `GetKeyGroup` | GET | `/2020-05-31/key-group/{Id}` |
+| `GetKeyGroupConfig` | GET | `/2020-05-31/key-group/{Id}/config` |
+| `UpdateKeyGroup` | PUT | `/2020-05-31/key-group/{Id}` |
+| `DeleteKeyGroup` | DELETE | `/2020-05-31/key-group/{Id}` |
+| `ListKeyGroups` | GET | `/2020-05-31/key-group` |
+
 ### Tagging
 
 | Operation | Method | Path |
@@ -113,11 +133,57 @@ CloudFront management-plane emulation. Supports distribution lifecycle, cache po
 - ARNs are global — no region segment: `arn:aws:cloudfront::{accountId}:distribution/{id}`.
 - Invalidations are immediately marked `Completed`.
 - `DeleteDistribution` returns `DistributionNotDisabled` (409) if `Enabled` is `true` in the config.
-- All mutating operations (`PUT`, `DELETE`) require an `If-Match` header containing the current `ETag`. A missing or incorrect `ETag` returns `InvalidIfMatchVersion` (400).
+- All mutating operations (`PUT`, `DELETE`) require an `If-Match` header containing the current
+  `ETag`. Response headers policies, public keys, and key groups distinguish a missing header
+  (`InvalidIfMatchVersion`, 400) from a stale `ETag` (`PreconditionFailed`, 412). Other CloudFront
+  resources currently return `InvalidIfMatchVersion` (400) for either case.
 - All `GET` and `POST` (create) responses include an `ETag` response header.
-- All list-type sub-elements in XML follow CloudFront's `<Quantity>N</Quantity><Items>...</Items>` wrapper pattern.
+- List operations emit the payload root declared by the CloudFront REST XML model (for example,
+  `ListDistributions` returns `<DistributionList>`), with list contents represented by
+  `<Quantity>N</Quantity><Items>...</Items>`.
 - OAI `CallerReference` uniqueness is enforced — duplicate `CallerReference` values return `CloudFrontOriginAccessIdentityAlreadyExists` (409).
-- `AssociateAlias` attaches a CNAME alias to the target distribution's config.
+- CNAME aliases are globally unique. `AssociateAlias` atomically transfers an alias from its current
+  owner to the target distribution. Exact aliases take precedence over the most-specific matching
+  wildcard alias.
+- Viewer GET/HEAD requests, and OPTIONS requests allowed by the matched cache behavior, addressed to
+  an enabled distribution's generated domain or alias are routed to the matching S3 or custom
+  origin. Origin forwarding preserves the raw path; custom-origin redirects are not followed.
+- Origin custom headers are persisted through the CloudFront API and CloudFormation. They replace
+  same-named viewer headers on custom-origin GET/HEAD/OPTIONS requests. For in-process S3 origins, a
+  configured `Origin` header is used for S3 CORS evaluation. AWS-prohibited names, malformed
+  values, inconsistent quantities, duplicates, and quota violations are rejected with modeled
+  CloudFront errors when the distribution is created or updated.
+- Cache behaviors with enabled `TrustedKeyGroups` require a valid CloudFront signed URL or signed
+  cookie before the origin is contacted. Signed URL parameters take precedence over signed cookies.
+  Canned and custom policies support SHA-1 or SHA-256 signatures with RSA-2048 or ECDSA P-256 public
+  keys. Custom policies enforce resource wildcards, expiration, optional activation time, and
+  IPv4 CIDR restrictions. Canned resources compare literally, including query strings. Exact custom
+  resources can include one raw query delimiter. As a conservative limitation, other custom
+  resources containing a raw `?` fail closed because the character is ambiguous with CloudFront's
+  one-character wildcard; custom query-string wildcards are therefore not supported. Invalid or
+  expired signatures return 403.
+- A key group must contain one to five existing public keys. Public keys that belong to a key group
+  and key groups referenced by a cache behavior cannot be deleted until those references are removed.
+- Application query parameters are retained when constructing the resource covered by a signature.
+  CloudFront signing parameters are excluded from that resource and are never sent to the origin.
+- S3-origin reads honor anonymous access, OAI bucket-policy or object-ACL grants, and OAC
+  service-principal bucket-policy grants (including the distribution `AWS:SourceArn`) when strict S3
+  authentication is enabled. OAC `always`, `never`, and unsigned `no-override` requests follow their
+  documented signing behavior; signed `no-override` viewer requests retain their authorization.
+- Cache-policy, origin-request-policy, and legacy `ForwardedValues` data-plane evaluation is not
+  implemented yet. Viewer query strings therefore follow CloudFront's default behavior and are not
+  forwarded to origins.
+- Custom origins that resolve to loopback, private, link-local, carrier-grade NAT, or other non-routable addresses are rejected by default. Development-only private origins must be explicitly allowlisted by exact hostname.
+- Response headers policies validate the AWS configuration shape and are applied after the origin
+  response, including CORS preflight fields, origin override behavior, custom headers, security
+  headers, allowed header removals, and sampled `Server-Timing` metrics. `Pragma: server-timing`
+  forces those metrics for enabled policies. Distribution writes reject unknown policy IDs, and
+  policies attached to a cache behavior cannot be deleted.
+- Up to 20 custom response headers policies can be created, and one policy can be associated with
+  up to 100 distributions.
+- The five AWS managed response headers policy IDs are available and can be selected with
+  `ListResponseHeadersPolicies?Type=managed`; `Type` uses the AWS lowercase `managed` or `custom`
+  values.
 
 ## Configuration
 
@@ -125,6 +191,7 @@ CloudFront management-plane emulation. Supports distribution lifecycle, cache po
 |---|---|---|---|
 | `floci.services.cloudfront.enabled` | `FLOCI_SERVICES_CLOUDFRONT_ENABLED` | `true` | Enable or disable the service |
 | `floci.services.cloudfront.domain-suffix` | `FLOCI_SERVICES_CLOUDFRONT_DOMAIN_SUFFIX` | `cloudfront.net` | Domain suffix for generated distribution domain names |
+| `floci.services.cloudfront.allowed-private-origin-hosts` | `FLOCI_SERVICES_CLOUDFRONT_ALLOWED_PRIVATE_ORIGIN_HOSTS` | `[]` | Exact custom-origin hosts permitted to resolve to private/non-routable addresses (comma-separated in the environment variable) |
 
 ## CLI Examples
 
@@ -217,9 +284,10 @@ aws cloudfront delete-distribution --id E1Z2X3C4V5B6N7 --if-match "$ETAG"
 - `CopyDistribution` (staging distributions)
 - Real-time log configs (`CreateRealtimeLogConfig`, etc.)
 - Field-level encryption (`CreateFieldLevelEncryptionConfig`, etc.)
-- Public keys and key groups (`CreatePublicKey`, `CreateKeyGroup`, etc.)
 - `TestFunction` execution (function is stored, not executed)
 - Streaming distributions (RTMP — deprecated by AWS)
 - VPC origins, Anycast IP lists, key value stores
 - Monitoring subscriptions
-- Actual CDN content delivery and caching
+- CloudFormation provisioning of custom `AWS::CloudFront::ResponseHeadersPolicy` resources
+  (literal custom or managed policy IDs are supported on distributions)
+- Persistent edge caching and global CDN propagation

@@ -13,6 +13,9 @@ public class DbInstance {
 
     private String dbInstanceIdentifier;
     private DatabaseEngine engine;
+    // the engine name the request gave (aurora-postgresql, postgres, ...): the enum collapses the
+    // Aurora names onto the community engine that backs them, which is not what AWS reports
+    private String engineIdentifier;
     private String engineVersion;
     private String masterUsername;
     private String masterPassword;
@@ -23,12 +26,24 @@ public class DbInstance {
     private DbEndpoint endpoint;
     private boolean iamDatabaseAuthenticationEnabled;
     private String parameterGroupName;
+    private String optionGroupName;
     private String dbSubnetGroupName;
     private String dbClusterIdentifier;
     private String vpcId;
     private List<String> vpcSecurityGroupIds = new ArrayList<>();
     private String availabilityZone;
     private boolean multiAz;
+    // AWS defaults this to true when CreateDBInstance omits it (minor engine upgrades are
+    // applied automatically unless explicitly opted out).
+    private boolean autoMinorVersionUpgrade = true;
+    private boolean storageEncrypted;
+    private String kmsKeyId;
+    // AWS defaults to one day of automated backups when CreateDBInstance omits it; a record
+    // persisted before the field existed reads the same way.
+    private int backupRetentionPeriod = 1;
+    private String preferredBackupWindow;
+    private String preferredMaintenanceWindow;
+    private boolean copyTagsToSnapshot;
     private Map<String, String> subnetAvailabilityZones = new LinkedHashMap<>();
     private String dbiResourceId;
     private String dbInstanceArn;
@@ -41,6 +56,7 @@ public class DbInstance {
 
     private String dockerVolumeName;
     private String volumeId;
+    private String containerStorageResourceId;
 
     private transient String containerId;
     private transient String containerHost;
@@ -109,8 +125,14 @@ public class DbInstance {
     public String getParameterGroupName() { return parameterGroupName; }
     public void setParameterGroupName(String parameterGroupName) { this.parameterGroupName = parameterGroupName; }
 
+    public String getOptionGroupName() { return optionGroupName; }
+    public void setOptionGroupName(String optionGroupName) { this.optionGroupName = optionGroupName; }
+
     public String getDbSubnetGroupName() { return dbSubnetGroupName; }
     public void setDbSubnetGroupName(String dbSubnetGroupName) { this.dbSubnetGroupName = dbSubnetGroupName; }
+
+    public String getEngineIdentifier() { return engineIdentifier; }
+    public void setEngineIdentifier(String engineIdentifier) { this.engineIdentifier = engineIdentifier; }
 
     public String getDbClusterIdentifier() { return dbClusterIdentifier; }
     public void setDbClusterIdentifier(String dbClusterIdentifier) { this.dbClusterIdentifier = dbClusterIdentifier; }
@@ -128,6 +150,11 @@ public class DbInstance {
 
     public boolean isMultiAz() { return multiAz; }
     public void setMultiAz(boolean multiAz) { this.multiAz = multiAz; }
+
+    public boolean isAutoMinorVersionUpgrade() { return autoMinorVersionUpgrade; }
+    public void setAutoMinorVersionUpgrade(boolean autoMinorVersionUpgrade) {
+        this.autoMinorVersionUpgrade = autoMinorVersionUpgrade;
+    }
 
     public Map<String, String> getSubnetAvailabilityZones() { return subnetAvailabilityZones; }
     public void setSubnetAvailabilityZones(Map<String, String> subnetAvailabilityZones) {
@@ -148,6 +175,24 @@ public class DbInstance {
     public String getMasterUserSecretStatus() { return masterUserSecretStatus; }
     public void setMasterUserSecretStatus(String masterUserSecretStatus) { this.masterUserSecretStatus = masterUserSecretStatus; }
 
+    public boolean isStorageEncrypted() { return storageEncrypted; }
+    public void setStorageEncrypted(boolean storageEncrypted) { this.storageEncrypted = storageEncrypted; }
+
+    public String getKmsKeyId() { return kmsKeyId; }
+    public void setKmsKeyId(String kmsKeyId) { this.kmsKeyId = kmsKeyId; }
+
+    public int getBackupRetentionPeriod() { return backupRetentionPeriod; }
+    public void setBackupRetentionPeriod(int backupRetentionPeriod) { this.backupRetentionPeriod = backupRetentionPeriod; }
+
+    public String getPreferredBackupWindow() { return preferredBackupWindow; }
+    public void setPreferredBackupWindow(String preferredBackupWindow) { this.preferredBackupWindow = preferredBackupWindow; }
+
+    public String getPreferredMaintenanceWindow() { return preferredMaintenanceWindow; }
+    public void setPreferredMaintenanceWindow(String preferredMaintenanceWindow) { this.preferredMaintenanceWindow = preferredMaintenanceWindow; }
+
+    public boolean isCopyTagsToSnapshot() { return copyTagsToSnapshot; }
+    public void setCopyTagsToSnapshot(boolean copyTagsToSnapshot) { this.copyTagsToSnapshot = copyTagsToSnapshot; }
+
     public String getMasterUserSecretKmsKeyId() { return masterUserSecretKmsKeyId; }
     public void setMasterUserSecretKmsKeyId(String masterUserSecretKmsKeyId) { this.masterUserSecretKmsKeyId = masterUserSecretKmsKeyId; }
 
@@ -165,6 +210,11 @@ public class DbInstance {
 
     public String getVolumeId() { return volumeId; }
     public void setVolumeId(String volumeId) { this.volumeId = volumeId; }
+
+    public String getContainerStorageResourceId() { return containerStorageResourceId; }
+    public void setContainerStorageResourceId(String containerStorageResourceId) {
+        this.containerStorageResourceId = containerStorageResourceId;
+    }
 
     public String getContainerId() { return containerId; }
     public void setContainerId(String containerId) { this.containerId = containerId; }

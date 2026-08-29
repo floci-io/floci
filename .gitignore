@@ -36,3 +36,7 @@ scripts/node_modules/
 # Python tooling caches
 __pycache__/
 *.pyc
+
+# The Release Cut toolchain is pinned; its lockfile must be committed
+# (npm ci fails without it) despite the global package-lock.json ignore.
+!.github/release-tooling/package-lock.json

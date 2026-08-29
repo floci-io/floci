@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import org.jboss.logging.Logger;
 
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
@@ -231,32 +232,48 @@ final class CognitoAuthFlowHandler {
         String refreshToken = params.get("REFRESH_TOKEN");
         if (refreshToken == null) throw new AwsException("InvalidParameterException", "REFRESH_TOKEN is required", 400);
         String[] parts = service.parseRefreshToken(refreshToken);
-        if (parts != null) {
-            String username = parts[1];
-            String tokenClientId = parts[2];
-            long iat = parts.length > 3 && !parts[3].isEmpty() ? Long.parseLong(parts[3]) : 0L;
-            String refreshTokenUuid = parts.length > 4 ? parts[4] : null;
-            
-            // Check revocation before issuing new tokens
-            service.validateRefreshTokenNotRevoked(refreshTokenUuid, pool.getId(), username, iat);
-            
-            try {
-                CognitoUser user = service.adminGetUser(pool.getId(), username);
-                CognitoService.ClaimsOverride override = firePreTokenGeneration(pool, client, user,
-                        clientMetadata, "TokenGeneration_RefreshTokens");
-                Map<String, Object> auth = new HashMap<>();
-                auth.put("AccessToken", service.generateSignedJwt(user, pool, "access", client, override, refreshTokenUuid));
-                auth.put("IdToken", service.generateSignedJwt(user, pool, "id", client, override, refreshTokenUuid));
-                auth.put("ExpiresIn", service.getAccessTokenExpiresInSeconds(client));
-                auth.put("TokenType", "Bearer");
-                Map<String, Object> result = new HashMap<>();
-                result.put("AuthenticationResult", auth);
-                return result;
-            } catch (AwsException ignored) { }
+        if (parts == null) {
+            throw new AwsException("NotAuthorizedException", "Invalid Refresh Token", 400);
         }
+        // Scope the token to the pool that minted it. HMAC verification only proves the token
+        // was signed by parts[0]'s pool, not that parts[0] is the pool serving this request, so
+        // a token legitimately issued for pool A must not be replayed against pool B's client.
+        // Mirrors getTokensFromRefreshToken's pool-id check.
+        if (!pool.getId().equals(parts[0])) {
+            throw new AwsException("NotAuthorizedException", "Invalid Refresh Token", 400);
+        }
+        String username = parts[1];
+        long iat;
+        try {
+            iat = parts.length > 3 && !parts[3].isEmpty() ? Long.parseLong(parts[3]) : 0L;
+        } catch (NumberFormatException e) {
+            throw new AwsException("NotAuthorizedException", "Invalid Refresh Token", 400);
+        }
+        String refreshTokenUuid = parts.length > 4 ? parts[4] : null;
+
+        if (service.isRefreshTokenExpired(client, parts)) {
+            throw new AwsException("NotAuthorizedException", "Refresh Token has expired", 400);
+        }
+
+        // Check revocation before issuing new tokens
+        service.validateRefreshTokenNotRevoked(refreshTokenUuid, pool.getId(), username, iat);
+
+        CognitoUser user;
+        try {
+            user = service.adminGetUser(pool.getId(), username);
+        } catch (AwsException ae) {
+            // Real Cognito never reveals whether the encoded username exists; any
+            // refresh token that doesn't resolve to a real user is simply invalid.
+            if ("UserNotFoundException".equals(ae.getErrorCode())) {
+                throw new AwsException("NotAuthorizedException", "Invalid Refresh Token", 400);
+            }
+            throw ae;
+        }
+        CognitoService.ClaimsOverride override = firePreTokenGeneration(pool, client, user,
+                clientMetadata, "TokenGeneration_RefreshTokens");
         Map<String, Object> auth = new HashMap<>();
-        auth.put("AccessToken", service.generateTokenString("access", "unknown", pool, client));
-        auth.put("IdToken", service.generateTokenString("id", "unknown", pool, client));
+        auth.put("AccessToken", service.generateSignedJwt(user, pool, "access", client, override, refreshTokenUuid));
+        auth.put("IdToken", service.generateSignedJwt(user, pool, "id", client, override, refreshTokenUuid));
         auth.put("ExpiresIn", service.getAccessTokenExpiresInSeconds(client));
         auth.put("TokenType", "Bearer");
         Map<String, Object> result = new HashMap<>();
@@ -304,8 +321,19 @@ final class CognitoAuthFlowHandler {
         } catch (Exception e) {
             throw new AwsException("InternalErrorException", "SECRET_HASH computation failed", 500);
         }
-        if (!expected.equals(provided)) {
+        if (!MessageDigest.isEqual(expected.getBytes(StandardCharsets.UTF_8),
+                provided.getBytes(StandardCharsets.UTF_8))) {
             throw new AwsException("NotAuthorizedException", "SECRET_HASH does not match", 400);
+        }
+    }
+
+    private String resolveToCanonicalUsername(UserPool pool, String username) {
+        try {
+            return service.adminGetUser(pool.getId(), username).getUsername();
+        } catch (AwsException e) {
+            LOG.debugv("Could not resolve USERNAME {0} in pool {1}: {2}",
+                    username, pool.getId(), e.getMessage());
+            return null;
         }
     }
 
@@ -327,6 +355,9 @@ final class CognitoAuthFlowHandler {
         if (!user.isEnabled()) throw new AwsException("UserNotConfirmedException", "User is disabled", 400);
         if ("RESET_REQUIRED".equals(user.getUserStatus())) {
             throw new AwsException("PasswordResetRequiredException", "Password reset required", 400);
+        }
+        if ("UNCONFIRMED".equals(user.getUserStatus())) {
+            throw new AwsException("UserNotConfirmedException", "User is not confirmed", 400);
         }
         if (user.getSrpVerifier() == null) {
             throw new AwsException("NotAuthorizedException", "User does not support SRP auth", 400);
@@ -386,6 +417,9 @@ final class CognitoAuthFlowHandler {
         if ("RESET_REQUIRED".equals(user.getUserStatus())) {
             throw new AwsException("PasswordResetRequiredException", "Password reset required", 400);
         }
+        if ("UNCONFIRMED".equals(user.getUserStatus())) {
+            throw new AwsException("UserNotConfirmedException", "User is not confirmed", 400);
+        }
         if (user.getSrpVerifier() == null) {
             throw new AwsException("NotAuthorizedException", "User does not support SRP auth", 400);
         }
@@ -426,7 +460,7 @@ final class CognitoAuthFlowHandler {
         }
 
         CustomAuthSession state =
-                new CustomAuthSession(pool.getId(), username, client.getClientId());
+                new CustomAuthSession(pool.getId(), user.getUsername(), client.getClientId());
         state.clientMetadata = clientMetadata == null ? Map.of() : clientMetadata;
 
         Map<String, Object> defineResp = defineAuthChallenge(pool, client, user, state);
@@ -444,7 +478,7 @@ final class CognitoAuthFlowHandler {
         state.currentChallengeName = challengeName;
 
         Map<String, String> publicParams = new HashMap<>();
-        publicParams.put("USERNAME", username);
+        publicParams.put("USERNAME", user.getUsername());
         for (Map.Entry<String, String> e : authParameters.entrySet()) {
             if (!"USERNAME".equals(e.getKey()) && !"SRP_A".equals(e.getKey())) {
                 publicParams.putIfAbsent(e.getKey(), e.getValue());
@@ -453,7 +487,7 @@ final class CognitoAuthFlowHandler {
         applyCreateResponse(state, challengeName,
                 createAuthChallenge(pool, client, user, state, challengeName), publicParams);
 
-        String sessionToken = buildSessionToken(pool.getId(), username, client.getClientId());
+        String sessionToken = buildSessionToken(pool.getId(), user.getUsername(), client.getClientId());
         customAuthSessions.put(sessionToken, state);
 
         Map<String, Object> result = new HashMap<>();
@@ -481,9 +515,14 @@ final class CognitoAuthFlowHandler {
         if (answer == null || answer.isBlank()) {
             throw new AwsException("InvalidParameterException", "ANSWER is required", 400);
         }
-        validateSecretHash(client, responses, state.username);
+
+        String suppliedUsername = responses.getOrDefault("USERNAME", state.username);
+        validateSecretHash(client, responses, suppliedUsername);
 
         CognitoUser user = service.adminGetUser(pool.getId(), state.username);
+        if (!user.getUsername().equals(resolveToCanonicalUsername(pool, suppliedUsername))) {
+            throw new AwsException("NotAuthorizedException", "Invalid session for the user.", 400);
+        }
 
         boolean answerCorrect = verifyAuthChallenge(pool, client, user, state, answer);
         if (!state.history.isEmpty()) {

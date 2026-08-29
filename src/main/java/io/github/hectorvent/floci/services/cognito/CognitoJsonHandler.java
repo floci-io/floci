@@ -67,6 +67,7 @@ public class CognitoJsonHandler {
             case "AdminUserGlobalSignOut" -> handleAdminUserGlobalSignOut(request);
             case "AdminEnableUser" -> handleAdminEnableUser(request);
             case "AdminDisableUser" -> handleAdminDisableUser(request);
+            case "AdminLinkProviderForUser" -> handleAdminLinkProviderForUser(request);
             case "ListUsers" -> handleListUsers(request);
             case "InitiateAuth" -> handleInitiateAuth(request);
             case "AdminInitiateAuth" -> handleAdminInitiateAuth(request);
@@ -74,11 +75,13 @@ public class CognitoJsonHandler {
             case "AdminRespondToAuthChallenge" -> handleAdminRespondToAuthChallenge(request);
             case "SignUp" -> handleSignUp(request);
             case "ConfirmSignUp" -> handleConfirmSignUp(request);
+            case "ResendConfirmationCode" -> handleResendConfirmationCode(request);
             case "AdminConfirmSignUp" -> handleAdminConfirmSignUp(request);
             case "ChangePassword" -> handleChangePassword(request);
             case "ForgotPassword" -> handleForgotPassword(request);
             case "ConfirmForgotPassword" -> handleConfirmForgotPassword(request);
             case "GetUser" -> handleGetUser(request);
+            case "GetUserAttributeVerificationCode" -> handleGetUserAttributeVerificationCode(request);
             case "UpdateUserAttributes" -> handleUpdateUserAttributes(request);
             case "DeleteUserAttributes" -> handleDeleteUserAttributes(request);
             case "GlobalSignOut" -> handleGlobalSignOut(request);
@@ -351,7 +354,8 @@ public class CognitoJsonHandler {
                 request.path("Username").asText(),
                 attrs,
                 tempPassword,
-                messageAction
+                messageAction,
+                request.path("ForceAliasCreation").asBoolean(false)
         );
         ObjectNode response = objectMapper.createObjectNode();
         response.set("User", userToNode(user));
@@ -432,6 +436,16 @@ public class CognitoJsonHandler {
 
     private Response handleAdminDisableUser(JsonNode request) {
         service.adminDisableUser(request.path("UserPoolId").asText(), request.path("Username").asText());
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleAdminLinkProviderForUser(JsonNode request) {
+        JsonNode sourceUser = request.path("SourceUser");
+        service.adminLinkProviderForUser(
+                request.path("UserPoolId").asText(),
+                request.path("DestinationUser").path("ProviderAttributeValue").asText(),
+                sourceUser.path("ProviderName").asText(),
+                sourceUser.path("ProviderAttributeValue").asText());
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
@@ -559,6 +573,19 @@ public class CognitoJsonHandler {
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
+    private Response handleResendConfirmationCode(JsonNode request) {
+        Map<String, String> deliveryDetails = service.resendConfirmationCode(
+                request.path("ClientId").asText(),
+                request.path("Username").asText()
+        );
+        ObjectNode response = objectMapper.createObjectNode();
+        ObjectNode delivery = response.putObject("CodeDeliveryDetails");
+        delivery.put("AttributeName", deliveryDetails.get("AttributeName"));
+        delivery.put("DeliveryMedium", deliveryDetails.get("DeliveryMedium"));
+        delivery.put("Destination", deliveryDetails.get("Destination"));
+        return Response.ok(response).build();
+    }
+
     private Response handleAdminConfirmSignUp(JsonNode request) {
         service.adminConfirmSignUp(
                 request.path("UserPoolId").asText(),
@@ -602,6 +629,19 @@ public class CognitoJsonHandler {
     private Response handleGetUser(JsonNode request) {
         Map<String, Object> result = service.getUser(request.path("AccessToken").asText());
         return Response.ok(objectMapper.valueToTree(result)).build();
+    }
+
+    private Response handleGetUserAttributeVerificationCode(JsonNode request) {
+        Map<String, Object> deliveryDetails = service.getUserAttributeVerificationCode(
+                request.path("AccessToken").asText(),
+                request.path("AttributeName").asText()
+        );
+        ObjectNode response = objectMapper.createObjectNode();
+        ObjectNode delivery = response.putObject("CodeDeliveryDetails");
+        delivery.put("AttributeName", (String) deliveryDetails.get("AttributeName"));
+        delivery.put("DeliveryMedium", (String) deliveryDetails.get("DeliveryMedium"));
+        delivery.put("Destination", (String) deliveryDetails.get("Destination"));
+        return Response.ok(response).build();
     }
 
     private Response handleUpdateUserAttributes(JsonNode request) {
@@ -662,13 +702,29 @@ public class CognitoJsonHandler {
         if (p.getSmsAuthenticationMessage() != null) node.put("SmsAuthenticationMessage", p.getSmsAuthenticationMessage());
 
         node.put("MfaConfiguration", p.getMfaConfiguration() != null ? p.getMfaConfiguration() : "OFF");
-        node.set("DeviceConfiguration", objectMapper.valueToTree(p.getDeviceConfiguration() != null ? p.getDeviceConfiguration() : new HashMap<>()));
+        // AWS's JSON protocol serializes only members with a value provided - an unconfigured
+        // pool omits this key entirely, it doesn't emit a JSON null (confirmed against moto's
+        // DescribeUserPool, which never writes the key when unset). An empty object here (the
+        // prior bug) made a re-planning Terraform see one block with false/false the first time
+        // and no block at all the next, reporting perpetual drift.
+        if (p.getDeviceConfiguration() != null && !p.getDeviceConfiguration().isEmpty()) {
+            node.set("DeviceConfiguration", objectMapper.valueToTree(p.getDeviceConfiguration()));
+        }
         node.put("EstimatedNumberOfUsers", p.getEstimatedNumberOfUsers());
-        node.set("EmailConfiguration", objectMapper.valueToTree(p.getEmailConfiguration() != null ? p.getEmailConfiguration() : new HashMap<>()));
+        Map<String, Object> emailConfig = p.getEmailConfiguration() != null
+                ? new HashMap<>(p.getEmailConfiguration()) : new HashMap<>();
+        emailConfig.putIfAbsent("EmailSendingAccount", "COGNITO_DEFAULT");
+        node.set("EmailConfiguration", objectMapper.valueToTree(emailConfig));
         node.set("SmsConfiguration", objectMapper.valueToTree(p.getSmsConfiguration() != null ? p.getSmsConfiguration() : new HashMap<>()));
         node.set("UserPoolTags", objectMapper.valueToTree(p.getUserPoolTags() != null ? p.getUserPoolTags() : new HashMap<>()));
         node.set("AdminCreateUserConfig", objectMapper.valueToTree(p.getAdminCreateUserConfig() != null ? p.getAdminCreateUserConfig() : new HashMap<>()));
-        node.set("UserPoolAddOns", objectMapper.valueToTree(p.getUserPoolAddOns() != null ? p.getUserPoolAddOns() : new HashMap<>()));
+        // Same reasoning as DeviceConfiguration above: an unconfigured pool omits the
+        // UserPoolAddOns key entirely, it isn't present with AdvancedSecurityMode filled in or
+        // as a JSON null - confirmed by re-planning Terraform, which otherwise saw the block
+        // appear at apply (captured into state) and disappear on the next refresh.
+        if (p.getUserPoolAddOns() != null && !p.getUserPoolAddOns().isEmpty()) {
+            node.set("UserPoolAddOns", objectMapper.valueToTree(p.getUserPoolAddOns()));
+        }
         node.set("UsernameConfiguration", objectMapper.valueToTree(p.getUsernameConfiguration() != null ? p.getUsernameConfiguration() : new HashMap<>()));
         node.set("AccountRecoverySetting", objectMapper.valueToTree(p.getAccountRecoverySetting() != null ? p.getAccountRecoverySetting() : new HashMap<>()));
         node.put("UserPoolTier", p.getUserPoolTier() != null ? p.getUserPoolTier() : "ESSENTIALS");

@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.lambda;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.lambda.model.LambdaLayerVersion;
 import jakarta.inject.Inject;
@@ -17,6 +18,7 @@ import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import jakarta.ws.rs.core.UriInfo;
 
 import java.util.List;
 import java.util.Map;
@@ -52,10 +54,11 @@ public class LambdaLayerController {
     @Path("/layers/{layerName}/versions")
     public Response publishLayerVersion(@PathParam("layerName") String layerName,
                                         @Context HttpHeaders headers,
+                                        @Context UriInfo uriInfo,
                                         Map<String, Object> request) {
         String region = regionResolver.resolveRegion(headers);
         LambdaLayerVersion lv = layerService.publishLayerVersion(region, layerName, request);
-        return Response.status(201).entity(buildLayerVersionResponse(lv)).build();
+        return Response.status(201).entity(buildLayerVersionResponse(lv, region, uriInfo)).build();
     }
 
     @GET
@@ -76,10 +79,11 @@ public class LambdaLayerController {
     @Path("/layers/{layerName}/versions/{versionNumber}")
     public Response getLayerVersion(@PathParam("layerName") String layerName,
                                     @PathParam("versionNumber") long versionNumber,
-                                    @Context HttpHeaders headers) {
+                                    @Context HttpHeaders headers,
+                                    @Context UriInfo uriInfo) {
         String region = regionResolver.resolveRegion(headers);
         LambdaLayerVersion lv = layerService.getLayerVersion(region, layerName, versionNumber);
-        return Response.ok(buildLayerVersionResponse(lv)).build();
+        return Response.ok(buildLayerVersionResponse(lv, region, uriInfo)).build();
     }
 
     @DELETE
@@ -122,7 +126,7 @@ public class LambdaLayerController {
         return Response.ok(root).build();
     }
 
-    private ObjectNode buildLayerVersionResponse(LambdaLayerVersion lv) {
+    private ObjectNode buildLayerVersionResponse(LambdaLayerVersion lv, String region, UriInfo uriInfo) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("LayerArn", lv.getLayerArn());
         node.put("LayerVersionArn", lv.getLayerVersionArn());
@@ -135,8 +139,10 @@ public class LambdaLayerController {
         ObjectNode contentNode = node.putObject("Content");
         contentNode.put("CodeSha256", lv.getCodeSha256() != null ? lv.getCodeSha256() : "");
         contentNode.put("CodeSize", lv.getCodeSizeBytes());
-        // Location is a presigned URL in real AWS; we provide a placeholder
-        contentNode.put("Location", "");
+        // Only advertise a fetchable Location when the archive was actually stored; AWS
+        // clients treat Content.Location as a downloadable URL, so a placeholder empty
+        // string is correct for pre-upgrade or failed-store layers.
+        contentNode.put("Location", lv.isArchiveStored() ? tasksLocation(lv, region, uriInfo) : "");
 
         if (lv.getCompatibleRuntimes() != null && !lv.getCompatibleRuntimes().isEmpty()) {
             ArrayNode runtimes = node.putArray("CompatibleRuntimes");
@@ -147,6 +153,28 @@ public class LambdaLayerController {
             lv.getCompatibleArchitectures().forEach(archs::add);
         }
         return node;
+    }
+
+    /**
+     * Path-style URL to the archive in Floci's own S3 (a presigned URL in real AWS),
+     * built from the request so it targets the same endpoint the client is talking to.
+     * Segments are percent-encoded directly rather than through {@code UriBuilder.path},
+     * whose template syntax would throw on a layer name containing braces.
+     * Clients fetch this URL unsigned, so an {@code X-Amz-Credential} query steers
+     * Floci's account filter to the layer's owning account; without it a layer owned
+     * by a non-default account resolves the default-account bucket and 404s.
+     */
+    private String tasksLocation(LambdaLayerVersion lv, String region, UriInfo uriInfo) {
+        var base = uriInfo.getBaseUri().toString();
+        if (base.endsWith("/")) {
+            base = base.substring(0, base.length() - 1);
+        }
+        var account = AwsArnUtils.accountOrDefault(lv.getLayerVersionArn(), "000000000000");
+        var bucket = LambdaService.tasksBucketName(region);
+        var key = LambdaService.layerObjectKey(account, lv.getLayerName(), lv.getVersion());
+        return base + "/" + LambdaService.encodeObjectPath(bucket)
+                + "/" + LambdaService.encodeObjectPath(key)
+                + "?X-Amz-Credential=" + account + "%2F00010101%2F" + region + "%2Fs3%2Faws4_request";
     }
 
     private ObjectNode buildLayerVersionSummary(LambdaLayerVersion lv) {

@@ -20,6 +20,13 @@ public class DockerClientProducer {
 
     private static final Logger LOG = Logger.getLogger(DockerClientProducer.class);
 
+    /**
+     * Docker Desktop's well-known named pipe on native Windows. Unlike the unix-socket default,
+     * this isn't reachable by simply bind-mounting a path — Windows has no equivalent of
+     * {@code /var/run/docker.sock}, so a platform-specific fallback is required.
+     */
+    private static final String WINDOWS_DEFAULT_DOCKER_HOST = "npipe:////./pipe/docker_engine";
+
     private final EmulatorConfig config;
 
     @Inject
@@ -56,15 +63,23 @@ public class DockerClientProducer {
      * Priority:
      * 1. If {@code floci.docker.docker-host} is explicitly configured (non-default), use it.
      * 2. Otherwise fall back to the standard {@code DOCKER_HOST} env var (normalized).
-     * 3. Otherwise use the default unix socket.
+     * 3. Otherwise use the platform default: the unix socket on Linux/macOS, or Docker Desktop's
+     *    named pipe on native Windows — which has no {@code /var/run/docker.sock} equivalent, so
+     *    the unix-socket default is unreachable there unless a user overrides it manually.
      *
      * Both the configured value and the env var are normalized to ensure a valid URI scheme.
      */
-    static String resolveEffectiveDockerHost(String configuredHost, String dockerHostEnv) {
+    static String resolveEffectiveDockerHost(String configuredHost, String dockerHostEnv, boolean isWindows) {
         String normalizedEnvHost = normalizeDockerHost(dockerHostEnv);
-        if ("unix:///var/run/docker.sock".equals(configuredHost)
-                && normalizedEnvHost != null && !normalizedEnvHost.isBlank()) {
+        boolean atDefault = "unix:///var/run/docker.sock".equals(configuredHost);
+        if (atDefault && normalizedEnvHost != null && !normalizedEnvHost.isBlank()) {
             return normalizedEnvHost;
+        }
+        if (atDefault && isWindows) {
+            LOG.infov("Docker host is at its unix-socket default on Windows, which has no "
+                    + "/var/run/docker.sock equivalent; using named pipe ''{0}'' instead.",
+                    WINDOWS_DEFAULT_DOCKER_HOST);
+            return WINDOWS_DEFAULT_DOCKER_HOST;
         }
         return normalizeDockerHost(configuredHost);
     }
@@ -84,11 +99,15 @@ public class DockerClientProducer {
         }
     }
 
+    private static boolean isWindows() {
+        return System.getProperty("os.name", "").toLowerCase().contains("win");
+    }
+
     @Produces
     @ApplicationScoped
     public DockerClient dockerClient() {
         String dockerHost = resolveEffectiveDockerHost(
-                config.docker().dockerHost(), System.getenv("DOCKER_HOST"));
+                config.docker().dockerHost(), System.getenv("DOCKER_HOST"), isWindows());
         LOG.infov("Creating DockerClient for host: {0}", dockerHost);
 
         // createDefaultConfigBuilder() reads DOCKER_HOST directly from System.getenv() and passes

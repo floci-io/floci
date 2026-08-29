@@ -9,8 +9,12 @@ import software.amazon.awssdk.services.firehose.model.PutRecordRequest;
 import software.amazon.awssdk.services.firehose.model.Record;
 import software.amazon.awssdk.services.glue.GlueClient;
 import software.amazon.awssdk.services.glue.model.*;
+import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
+import software.amazon.awssdk.services.s3.model.NoSuchBucketException;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -25,6 +29,7 @@ class DataLakeTest {
     private static AthenaClient athena;
     private static GlueClient glue;
     private static FirehoseClient firehose;
+    private static S3Client s3;
 
     private static final String DB_NAME = TestFixtures.uniqueName("test_db");
     private static final String TABLE_NAME = "orders";
@@ -35,6 +40,7 @@ class DataLakeTest {
         athena = TestFixtures.athenaClient();
         glue = TestFixtures.glueClient();
         firehose = TestFixtures.firehoseClient();
+        s3 = TestFixtures.s3Client();
     }
 
     @Test
@@ -66,9 +72,22 @@ class DataLakeTest {
                         .build())
                 .build());
 
-        // 3. Firehose Stream
+        // 3. Firehose Stream delivering under the Glue table location. The static
+        // prefix gets yyyy/MM/dd/HH/ appended like real Firehose, which stays
+        // inside the table location since Athena reads it recursively.
         firehose.createDeliveryStream(software.amazon.awssdk.services.firehose.model.CreateDeliveryStreamRequest.builder()
                 .deliveryStreamName(STREAM_NAME)
+                .extendedS3DestinationConfiguration(software.amazon.awssdk.services.firehose.model.ExtendedS3DestinationConfiguration.builder()
+                        .bucketARN("arn:aws:s3:::floci-firehose-results")
+                        .roleARN("arn:aws:iam::000000000000:role/datalake-firehose-role")
+                        .prefix(STREAM_NAME + "/")
+                        // Floci does not enforce AWS's 60s minimum interval, which keeps
+                        // the delivery wait short (would need 60+ against real AWS).
+                        .bufferingHints(software.amazon.awssdk.services.firehose.model.BufferingHints.builder()
+                                .sizeInMBs(1)
+                                .intervalInSeconds(5)
+                                .build())
+                        .build())
                 .build());
     }
 
@@ -84,6 +103,28 @@ class DataLakeTest {
                     .build());
         }
 
+        // Small records stay buffered until the stream's IntervalInSeconds
+        // elapses; wait for Firehose to deliver before querying, the same way a
+        // real AWS client would.
+        long deadline = System.currentTimeMillis() + 30_000;
+        boolean delivered = false;
+        while (!delivered && System.currentTimeMillis() < deadline) {
+            try {
+                delivered = !s3.listObjectsV2(ListObjectsV2Request.builder()
+                        .bucket("floci-firehose-results")
+                        .prefix(STREAM_NAME + "/")
+                        .build()).contents().isEmpty();
+            } catch (NoSuchBucketException e) {
+                // The bucket itself is only created on the first delivery.
+            }
+            if (!delivered) {
+                Thread.sleep(2_000);
+            }
+        }
+        assertThat(delivered)
+                .as("Firehose should deliver the buffered records within IntervalInSeconds")
+                .isTrue();
+
         // Athena Query
         StartQueryExecutionResponse startResp = athena.startQueryExecution(StartQueryExecutionRequest.builder()
                 .queryString("SELECT sum(amount) as total FROM " + TABLE_NAME)
@@ -92,23 +133,11 @@ class DataLakeTest {
 
         String queryId = startResp.queryExecutionId();
 
-        // Wait for query
-        int attempts = 0;
-        QueryExecutionStatus status = null;
-        while (attempts < 30) {
-            GetQueryExecutionResponse getResp = athena.getQueryExecution(GetQueryExecutionRequest.builder()
-                    .queryExecutionId(queryId)
-                    .build());
-            status = getResp.queryExecution().status();
-            if (status.state() == QueryExecutionState.SUCCEEDED) break;
-            if (status.state() == QueryExecutionState.FAILED) {
-                Assertions.fail("Query failed: " + status.stateChangeReason());
-            }
-            Thread.sleep(1000);
-            attempts++;
-        }
-
-        assertThat(status.state()).isEqualTo(QueryExecutionState.SUCCEEDED);
+        QueryExecutionStatus status = TestFixtures.awaitAthenaQueryTerminal(
+                athena, queryId, Duration.ofSeconds(60));
+        assertThat(status.state())
+                .as("Athena query did not succeed: %s", status.stateChangeReason())
+                .isEqualTo(QueryExecutionState.SUCCEEDED);
 
         GetQueryResultsResponse results = athena.getQueryResults(GetQueryResultsRequest.builder()
                 .queryExecutionId(queryId)

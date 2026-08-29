@@ -131,7 +131,7 @@ class DockerClientProducerTest {
     @Test
     void resolveEffectiveDockerHost_dockerHostEnvBareHostPort_usesNormalizedEnv() {
         String result = DockerClientProducer.resolveEffectiveDockerHost(
-                "unix:///var/run/docker.sock", "10.37.124.101:2375");
+                "unix:///var/run/docker.sock", "10.37.124.101:2375", false);
         assertEquals("tcp://10.37.124.101:2375", result,
                 "Bare DOCKER_HOST env var should be normalized and used when config is at its default");
     }
@@ -143,7 +143,7 @@ class DockerClientProducerTest {
     @Test
     void resolveEffectiveDockerHost_dockerHostEnvTcpUri_usedDirectly() {
         String result = DockerClientProducer.resolveEffectiveDockerHost(
-                "unix:///var/run/docker.sock", "tcp://10.37.124.101:2375");
+                "unix:///var/run/docker.sock", "tcp://10.37.124.101:2375", false);
         assertEquals("tcp://10.37.124.101:2375", result,
                 "Valid tcp:// DOCKER_HOST env var should be used when config is at its default");
     }
@@ -155,30 +155,80 @@ class DockerClientProducerTest {
     @Test
     void resolveEffectiveDockerHost_explicitFlociConfig_takesPriorityOverEnv() {
         String result = DockerClientProducer.resolveEffectiveDockerHost(
-                "tcp://custom-daemon:2376", "10.37.124.101:2375");
+                "tcp://custom-daemon:2376", "10.37.124.101:2375", false);
         assertEquals("tcp://custom-daemon:2376", result,
                 "Explicit floci.docker.docker-host should take priority over DOCKER_HOST env var");
     }
 
     /**
-     * When DOCKER_HOST env var is null and floci.docker.docker-host is default, use the default.
+     * When DOCKER_HOST env var is null and floci.docker.docker-host is default on a non-Windows
+     * platform, use the unix-socket default (existing Linux/macOS behavior, unchanged).
      */
     @Test
-    void resolveEffectiveDockerHost_noEnvVar_usesDefault() {
+    void resolveEffectiveDockerHost_noEnvVar_nonWindows_usesUnixSocketDefault() {
         String result = DockerClientProducer.resolveEffectiveDockerHost(
-                "unix:///var/run/docker.sock", null);
+                "unix:///var/run/docker.sock", null, false);
         assertEquals("unix:///var/run/docker.sock", result,
-                "Default unix socket should be used when DOCKER_HOST env var is not set");
+                "Default unix socket should be used on non-Windows platforms when DOCKER_HOST is not set");
     }
 
     /**
-     * When DOCKER_HOST env var is blank and floci.docker.docker-host is default, use the default.
+     * When DOCKER_HOST env var is blank and floci.docker.docker-host is default on a non-Windows
+     * platform, use the unix-socket default (existing Linux/macOS behavior, unchanged).
      */
     @Test
-    void resolveEffectiveDockerHost_blankEnvVar_usesDefault() {
+    void resolveEffectiveDockerHost_blankEnvVar_nonWindows_usesUnixSocketDefault() {
         String result = DockerClientProducer.resolveEffectiveDockerHost(
-                "unix:///var/run/docker.sock", "");
+                "unix:///var/run/docker.sock", "", false);
         assertEquals("unix:///var/run/docker.sock", result,
-                "Default unix socket should be used when DOCKER_HOST env var is blank");
+                "Default unix socket should be used on non-Windows platforms when DOCKER_HOST is blank");
+    }
+
+    /**
+     * Bug: on native Windows, /var/run/docker.sock has no equivalent — Docker Desktop exposes
+     * its API via a named pipe instead. When floci.docker.docker-host is still at its unix-socket
+     * default and no DOCKER_HOST override is set, Windows must fall back to the named pipe rather
+     * than the unreachable unix-socket path (issue floci-io/floci#2006).
+     */
+    @Test
+    void resolveEffectiveDockerHost_noEnvVar_windows_usesNamedPipeDefault() {
+        String result = DockerClientProducer.resolveEffectiveDockerHost(
+                "unix:///var/run/docker.sock", null, true);
+        assertEquals("npipe:////./pipe/docker_engine", result,
+                "Windows should fall back to the named pipe when the unix-socket default is unreachable");
+    }
+
+    /**
+     * Same as above, but with a blank (rather than null) DOCKER_HOST env var.
+     */
+    @Test
+    void resolveEffectiveDockerHost_blankEnvVar_windows_usesNamedPipeDefault() {
+        String result = DockerClientProducer.resolveEffectiveDockerHost(
+                "unix:///var/run/docker.sock", "", true);
+        assertEquals("npipe:////./pipe/docker_engine", result,
+                "Windows should fall back to the named pipe when DOCKER_HOST is blank");
+    }
+
+    /**
+     * An explicit DOCKER_HOST env var still takes priority over the Windows named-pipe fallback.
+     */
+    @Test
+    void resolveEffectiveDockerHost_envVarSet_windows_usesEnvNotNamedPipe() {
+        String result = DockerClientProducer.resolveEffectiveDockerHost(
+                "unix:///var/run/docker.sock", "tcp://10.0.0.5:2375", true);
+        assertEquals("tcp://10.0.0.5:2375", result,
+                "An explicit DOCKER_HOST should take priority over the Windows named-pipe fallback");
+    }
+
+    /**
+     * An explicitly-configured (non-default) floci.docker.docker-host still takes priority over
+     * the Windows named-pipe fallback.
+     */
+    @Test
+    void resolveEffectiveDockerHost_explicitFlociConfig_windows_takesPriorityOverNamedPipe() {
+        String result = DockerClientProducer.resolveEffectiveDockerHost(
+                "tcp://custom-daemon:2376", null, true);
+        assertEquals("tcp://custom-daemon:2376", result,
+                "An explicitly-configured docker-host should take priority over the Windows named-pipe fallback");
     }
 }

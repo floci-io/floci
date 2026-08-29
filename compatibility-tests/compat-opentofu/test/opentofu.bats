@@ -78,6 +78,16 @@ setup() {
     assert_output --partial "floci-compat-events"
 }
 
+@test "OpenTofu: SES receipt rule set created and active" {
+    run aws_cmd ses describe-receipt-rule-set --rule-set-name floci-compat-rule-set
+    assert_success
+    assert_output --partial "floci-compat-rule-set"
+
+    run aws_cmd ses describe-active-receipt-rule-set
+    assert_success
+    assert_output --partial "floci-compat-rule-set"
+}
+
 @test "OpenTofu: DynamoDB table created" {
     run aws_cmd dynamodb describe-table --table-name floci-compat-items
     assert_success
@@ -191,4 +201,18 @@ setup() {
         --query "DeliveryStreamDescription.Destinations[0].ExtendedS3DestinationDescription.CompressionFormat" --output text
     assert_success
     assert_output "GZIP"
+}
+
+@test "OpenTofu: GuardDuty detector is created with organization configuration" {
+    run aws_cmd guardduty list-detectors --query "DetectorIds[0]" --output text
+    assert_success
+    DETECTOR_ID="$output"
+    run aws_cmd guardduty get-detector --detector-id "$DETECTOR_ID" \
+        --query "Status" --output text
+    assert_success
+    assert_output "ENABLED"
+    run aws_cmd guardduty describe-organization-configuration --detector-id "$DETECTOR_ID" \
+        --query "AutoEnableOrganizationMembers" --output text
+    assert_success
+    assert_output "ALL"
 }

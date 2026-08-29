@@ -122,7 +122,7 @@ curl -s -H "x-aws-ec2-metadata-token: $TOKEN" \
 | `GET /latest/meta-data/ami-id` | Image ID |
 | `GET /latest/meta-data/instance-type` | Instance type |
 | `GET /latest/meta-data/local-ipv4` | Private IP |
-| `GET /latest/meta-data/public-ipv4` | Public IP (`127.0.0.1`) |
+| `GET /latest/meta-data/public-ipv4` | Public IP — the container IP where that is routable from the host, `127.0.0.1` otherwise |
 | `GET /latest/meta-data/public-hostname` | Public hostname |
 | `GET /latest/meta-data/local-hostname` | Private DNS name |
 | `GET /latest/meta-data/hostname` | Private DNS name |
@@ -179,8 +179,9 @@ Floci seeds the following resources on first use in each region so Terraform, th
 | ModifyVpcAttribute | Updates supported VPC attributes. |
 | DescribeVpcAttribute | Returns a supported VPC attribute. |
 | DescribeVpcEndpointServices | Returns an empty local VPC endpoint service catalog. |
-| CreateVpcEndpoint | Creates a VPC endpoint record. |
+| CreateVpcEndpoint | Creates a VPC endpoint record, including its `PolicyDocument`. |
 | DescribeVpcEndpoints | Lists or returns stored VPC endpoints. |
+| ModifyVpcEndpoint | Associates or disassociates route tables, subnets and security groups, and sets or resets the endpoint policy. `DnsOptions`, `IpAddressType` and `SubnetConfiguration.N` are accepted and ignored. |
 | DeleteVpcEndpoints | Deletes VPC endpoint records. |
 | CreateDefaultVpc | Creates or returns the default VPC for the region. |
 | AssociateVpcCidrBlock | Adds a secondary CIDR block association to a VPC. |
@@ -202,10 +203,11 @@ Floci seeds the following resources on first use in each region so Terraform, th
 | CreateSecurityGroup | Creates a security group in a VPC. |
 | DescribeSecurityGroups | Lists or returns stored security groups. |
 | DeleteSecurityGroup | Deletes a security group from the local EC2 store. |
-| AuthorizeSecurityGroupIngress | Adds inbound permissions to a security group. |
-| AuthorizeSecurityGroupEgress | Adds outbound permissions to a security group. |
-| RevokeSecurityGroupIngress | Removes inbound permissions from a security group. |
-| RevokeSecurityGroupEgress | Removes outbound permissions from a security group. |
+| AuthorizeSecurityGroupIngress | Adds inbound permissions. Sources may be IPv4 ranges, IPv6 ranges, or another security group (`UserIdGroupPairs`, sent on the wire as `Groups`); prefix list sources are not stored. One rule is stored per source, each carrying its own description. |
+| AuthorizeSecurityGroupEgress | Adds outbound permissions, with the same source types as the inbound call. |
+| RevokeSecurityGroupIngress | Removes inbound permissions. Matches on protocol and port range only, so it removes every permission on that port regardless of source. |
+| RevokeSecurityGroupEgress | Removes outbound permissions, matched the same way as the inbound call. |
+| GetSecurityGroupsForVpc | Lists the security groups belonging to one VPC, with the same filters as the describe call. |
 | DescribeSecurityGroupRules | Lists stored security group rules. |
 | ModifySecurityGroupRules | Updates supported fields on security group rules. |
 | UpdateSecurityGroupRuleDescriptionsIngress | Updates descriptions on matching inbound security group rules. |
@@ -225,6 +227,8 @@ Floci seeds the following resources on first use in each region so Terraform, th
 | Action | Description |
 |--------|-------------|
 | DescribeImages | Returns AMI metadata known to the local EC2 service. |
+| CreateImage | Captures an instance as a new AMI. Reboots the source unless `NoReboot=true`. |
+| RegisterImage | Registers an AMI from supplied metadata and block device mappings. |
 
 ### Tags
 
@@ -254,6 +258,7 @@ Floci seeds the following resources on first use in each region so Terraform, th
 | AssociateRouteTable | Associates a route table with a subnet. |
 | DisassociateRouteTable | Removes a route table association. |
 | CreateRoute | Adds a route to a route table. |
+| ReplaceRoute | Replaces the target of an existing route. |
 | DeleteRoute | Removes a route from a route table. |
 
 ### Network ACLs
@@ -273,6 +278,152 @@ Floci seeds the following resources on first use in each region so Terraform, th
 | Action | Description |
 |--------|-------------|
 | DescribePrefixLists | Returns prefix lists known to the local EC2 service. |
+| CreateManagedPrefixList | Creates a customer-managed prefix list with its initial entries. |
+| DescribeManagedPrefixLists | Lists customer-managed and AWS-managed prefix lists. |
+| GetManagedPrefixListEntries | Returns the entries of a prefix list, optionally at an earlier version. |
+| ModifyManagedPrefixList | Adds or removes entries, renames the list, or raises its entry limit. |
+| DeleteManagedPrefixList | Deletes a customer-managed prefix list. |
+
+Two AWS-managed prefix lists exist in every region without being created —
+`com.amazonaws.<region>.s3` (`pl-63a5400a`) and `com.amazonaws.<region>.dynamodb`
+(`pl-02cd2c6b`) — matching the gateway endpoint services on AWS. They are owned by `AWS`,
+read-only, and served by both `DescribePrefixLists` and `DescribeManagedPrefixLists`;
+modifying or deleting one returns `UnsupportedOperation`.
+
+A customer-managed list may not take a name AWS reserves for its own: `com.amazonaws.`,
+`com.amazon.` or `com.aws.`, each including the trailing dot. `CreateManagedPrefixList`
+rejects those with `InvalidParameterValue`; a name that merely resembles one, such as
+`com.amazonaws-internal`, is allowed.
+
+Entries are versioned. A prefix list starts at version 1, and each `ModifyManagedPrefixList`
+that adds or removes entries stores a new version and bumps the counter, so
+`GetManagedPrefixListEntries` can serve an earlier `TargetVersion`. Renaming the list or
+changing `MaxEntries` does not create a version. Passing `CurrentVersion` makes the
+modification conditional: a stale value returns `PrefixListVersionMismatch`. Removals are applied before
+additions, so one call can replace an entry's description by removing and re-adding the CIDR.
+
+Creation is synchronous: a new list is returned as `create-complete` rather than passing
+through `create-in-progress`, since nothing about it is slow locally.
+
+A security group rule can take a prefix list as its source instead of a CIDR. Pass it as
+`IpPermissions.N.PrefixListIds.M.PrefixListId`, optionally with a `Description`; AWS emits one rule
+per source, so a permission naming both CIDRs and prefix lists expands to a rule for each. The
+resulting rule carries `prefixListId` in place of `cidrIpv4`, and `DescribeSecurityGroups` nests
+the reference under the permission as `prefixListIds`. Authorizing against a list that does not
+exist returns `InvalidPrefixListID.NotFound`, so a typo cannot leave a rule pointing at nothing.
+
+### Transit Gateways
+
+| Action | Description |
+|--------|-------------|
+| CreateTransitGateway | Creates a transit gateway, applying AWS's option defaults and minting its default route table. |
+| DescribeTransitGateways | Lists or returns stored transit gateways. |
+| ModifyTransitGateway | Updates a transit gateway's description, options and CIDR blocks. |
+| DeleteTransitGateway | Deletes a transit gateway and the default route table created with it. |
+
+Transit gateway metadata only: nothing routes packets, and the value is in ids that later
+resources can reference and describes that round-trip so plans converge.
+
+Options left out of `CreateTransitGateway` take the same defaults AWS applies — `amazonSideAsn`
+64512, `dnsSupport`, `vpnEcmpSupport`, `defaultRouteTableAssociation` and
+`defaultRouteTablePropagation` enabled, and `autoAcceptSharedAttachments`,
+`securityGroupReferencingSupport` and `multicastSupport` disabled. `transitGatewayCidrBlocks` is
+omitted from the response entirely when no blocks are set, rather than sent empty.
+
+Creating a gateway with either default-route-table option enabled also creates the route table
+AWS creates, and reports its id as `associationDefaultRouteTableId` and
+`propagationDefaultRouteTableId`. Both name the same table. Disabling both leaves the ids absent.
+The actions that operate on transit gateway route tables directly — creating them, associating
+attachments, enabling propagation — are not implemented yet, and neither are attachments.
+
+State is reported settled rather than transitional: AWS returns a new gateway as `pending` and
+reaches `available` roughly a minute later, and reports `deleting` before `deleted`. Nothing here
+is slow, so callers see `available` and `deleted` immediately. `ModifyTransitGateway` and
+`DeleteTransitGateway` echo the gateway without its `tagSet`, matching AWS; `CreateTransitGateway`
+and `DescribeTransitGateways` include it.
+
+### Transit Gateway VPC Attachments
+
+| Action | Description |
+|--------|-------------|
+| CreateTransitGatewayVpcAttachment | Attaches a VPC to a transit gateway through one subnet per availability zone. |
+| DescribeTransitGatewayVpcAttachments | Lists or returns VPC attachments with their subnets and options. |
+| DescribeTransitGatewayAttachments | Returns the same attachments in the resource-agnostic shape, including the route table association. |
+| ModifyTransitGatewayVpcAttachment | Adds or removes attachment subnets and updates its options. |
+| DeleteTransitGatewayVpcAttachment | Deletes a VPC attachment. |
+
+An attachment's option defaults are its own rather than the gateway's: `dnsSupport` and
+`securityGroupReferencingSupport` enabled, `ipv6Support` and `applianceModeSupport` disabled. Note
+that `securityGroupReferencingSupport` is enabled here while a transit gateway defaults it to
+disabled.
+
+The attachment is associated with the gateway's default route table only when the gateway carries
+`defaultRouteTableAssociation` enabled; a gateway created without it produces an attachment with no
+association. That association is reported by `DescribeTransitGatewayAttachments` alone — the
+VPC-specific describe does not carry it, and the resource-agnostic one carries neither the subnets
+nor the options in exchange.
+
+Subnets must belong to the VPC being attached and no two may share an availability zone; one from
+another VPC is reported as `InvalidSubnetID.NotFound` rather than as a mismatch. A VPC can be
+attached to a given gateway once, so a second attempt returns `DuplicateTransitGatewayAttachment`.
+Removing every subnet returns `InsufficientSubnetsException`, and a gateway with a live attachment
+cannot be deleted — `IncorrectState`, naming the attachments.
+
+As with the gateway itself, state is reported settled rather than transitional, and the echoes are
+trimmed the way AWS trims them: modify omits the `tagSet`, and delete omits both the `tagSet` and
+the subnets. `Ipv6Support` is accepted without checking that the subnets carry IPv6 CIDRs, which
+real AWS rejects; Floci does not model subnet IPv6 allocation.
+
+### Transit Gateway Route Tables
+
+| Action | Description |
+|--------|-------------|
+| CreateTransitGatewayRouteTable | Creates a route table on a transit gateway. |
+| DescribeTransitGatewayRouteTables | Lists or returns stored transit gateway route tables. |
+| DeleteTransitGatewayRouteTable | Deletes a route table, along with its propagations and static routes. |
+| AssociateTransitGatewayRouteTable | Associates an attachment with a route table. |
+| DisassociateTransitGatewayRouteTable | Removes an attachment's association. |
+| GetTransitGatewayRouteTableAssociations | Lists the attachments associated with a route table. |
+| EnableTransitGatewayRouteTablePropagation | Propagates an attachment's routes into a route table. |
+| DisableTransitGatewayRouteTablePropagation | Stops an attachment propagating into a route table. |
+| GetTransitGatewayRouteTablePropagations | Lists the propagations into a route table. |
+| CreateTransitGatewayRoute | Adds a static or blackhole route to a route table. |
+| DeleteTransitGatewayRoute | Removes a static route. |
+| ReplaceTransitGatewayRoute | Points an existing route at a different target, or writes it if absent. |
+| SearchTransitGatewayRoutes | Returns a route table's routes, static and propagated, filtered. |
+| ExportTransitGatewayRoutes | Reports the S3 object a route-table export would be written to. |
+
+A route table asked for by name is never a default one; only the table a gateway mints for itself
+carries `defaultAssociationRouteTable` or `defaultPropagationRouteTable`. Deleting a route table is
+refused with `IncorrectState` while it is a gateway's default association table, and again while
+attachments are still associated with it; the two cases carry different messages. Once it does go,
+its propagations and static routes go with it.
+
+An attachment is associated with exactly one route table at a time, so associating a second time
+returns `Resource.AlreadyAssociated` rather than moving it — disassociate first. Association is
+recorded on the attachment itself, which is why `GetTransitGatewayRouteTableAssociations` reports
+the attachment's VPC as the associated resource.
+
+Propagation is separate: one attachment may propagate into several route tables. Enabling twice
+returns `TransitGatewayRouteTablePropagation.Duplicate`. Unlike association, which reports
+`associating` and `disassociating`, propagation reports the settled `enabled` or `disabled` at
+once — that is what the live API does rather than a shortcut taken here.
+
+`ReplaceTransitGatewayRoute` is an upsert rather than an update: replacing a destination the table
+has never held writes it instead of reporting it missing, which is what the live API does. The
+target moves as a unit, so a route turned into a blackhole keeps no attachment and one pointed back
+at an attachment regains all of its fields.
+
+`SearchTransitGatewayRoutes` serves both kinds of route. Static routes are stored as written; a
+blackhole is a static route in the `blackhole` state rather than a type of its own, and carries no
+attachment. Propagated routes are derived when searched, from each enabled propagation joined to
+the attached VPC's CIDR blocks, so a VPC's CIDRs changing cannot leave a stale route behind. A
+route table's own listings drop the route table id that the mutating calls include, matching AWS.
+
+Route table ids follow the live API's own inconsistency: an id that does not exist is
+`InvalidRouteTableID.NotFound`, while one of the wrong shape is `InvalidRouteTableId.Malformed`.
+
+`ExportTransitGatewayRoutes` validates the route table and requires `S3Bucket`, then returns the `s3://` object key the export would occupy. No object is written and nothing is uploaded — the value is a caller that needs the call to succeed and the key to look right, not a readable export.
 
 ### NAT Gateways
 
@@ -292,6 +443,13 @@ Floci seeds the following resources on first use in each region so Terraform, th
 | AssociateAddress | Associates an Elastic IP address with a resource. |
 | DisassociateAddress | Removes an Elastic IP address association. |
 | ReleaseAddress | Releases an Elastic IP address record. |
+
+An allocated Elastic IP's `54.x.x.x` address is invented and routes nowhere, so associating
+it re-points it at the address the instance is actually reachable on — the same value
+DescribeInstances reports. This is a deliberate deviation from AWS, where an EIP's public IP
+is fixed from allocation: without it, `aws_eip.x.public_ip` hands every caller a dead address.
+The allocation ID, association ID and domain are unaffected, and disassociating restores the
+allocated address.
 
 ### Availability Zones & Regions
 
@@ -321,6 +479,52 @@ Floci seeds the following resources on first use in each region so Terraform, th
 
 Launch templates store versioned launch data. New template versions can be created from an existing source version, and `ModifyLaunchTemplate` updates the default version used by later launches.
 
+#### Launch template data members
+
+These members of `RequestLaunchTemplateData` are stored and read back unchanged by
+`DescribeLaunchTemplateVersions`:
+
+`ImageId`, `InstanceType`, `KeyName`, `UserData`, `KernelId`, `RamDiskId`, `SecurityGroupIds`,
+`IamInstanceProfile`, `BlockDeviceMappings`, `NetworkInterfaces`, `TagSpecifications`,
+`MetadataOptions`, `Monitoring`, `Placement`, `CpuOptions`, `CreditSpecification`,
+`EnclaveOptions`, `HibernationOptions`, `MaintenanceOptions`, `PrivateDnsNameOptions`,
+`CapacityReservationSpecification`, `EbsOptimized`, `DisableApiTermination`, `DisableApiStop`,
+`InstanceInitiatedShutdownBehavior`.
+
+Two behaviours worth calling out, because they are what Terraform reads back:
+
+- **`IamInstanceProfile` keeps the form it was given.** A profile submitted as `Name` reads back as
+  `Name`, not rewritten to `Arn`. The instance-profile ARN is derived at launch time instead, so
+  `aws_launch_template.iam_instance_profile.name` converges.
+- **`NetworkInterfaces` stays a `NetworkInterfaces` block.** Its `Groups` are not hoisted into
+  top-level `SecurityGroupIds`; on AWS the two are mutually exclusive. A launch from the template
+  resolves its security groups from whichever of the two is populated.
+
+#### Launch template versions
+
+`CreateLaunchTemplateVersion` accepts two members outside `LaunchTemplateData` itself:
+
+- **`SourceVersion` controls inheritance, and omitting it means no inheritance.** A request that
+  names a source version — including `$Latest` or `$Default` — layers its own fields onto that
+  version's data, so only the fields it restates change. A request that omits `SourceVersion`
+  entirely does **not** fall back to the latest version: the new version starts from an empty
+  `LaunchTemplateData`, populated only by whatever fields the request itself supplies. This matches
+  the AWS-documented behavior; it does not merge onto any prior version.
+- **`VersionDescription` is stored and read back by `DescribeLaunchTemplateVersions`.** It is a
+  version-level field on `LaunchTemplateVersion`, not a member of `RequestLaunchTemplateData` /
+  `ResponseLaunchTemplateData`, so it is tracked per version alongside `VersionNumber` and
+  `CreateTime` rather than inside the launch template data payload. `CreateLaunchTemplate` accepts
+  the same field for the initial version it creates.
+
+Members the service model declares that are accepted and ignored rather than stored:
+`InstanceMarketOptions`, `InstanceRequirements`, `LicenseSpecifications`, `ElasticGpuSpecifications`,
+`ElasticInferenceAccelerators`, `NetworkPerformanceOptions`, `Operator`, `SecondaryInterfaces` and
+`SecurityGroups` (security groups by name — resolving names to IDs would need lookup machinery,
+including ambiguity handling across VPCs, that no other EC2 action here has either; `RunInstances`
+itself only accepts `SecurityGroupId`). Within `NetworkInterfaces`, the IPv4/IPv6 address and
+prefix lists, `EnaSrdSpecification`, `ConnectionTrackingSpecification`, `PrimaryIpv6` and
+`EnaQueueCount` are likewise ignored.
+
 ### IAM Instance Profiles
 
 | Action | Description |
@@ -341,6 +545,58 @@ Launch templates store versioned launch data. New template versions can be creat
 | DescribeVolumes | Lists or returns stored EBS volume records. |
 | DeleteVolume | Deletes an EBS volume record. |
 
+### EBS Encryption Defaults
+
+| Action | Description |
+|--------|-------------|
+| EnableEbsEncryptionByDefault | Turns on default encryption for new volumes in the region. |
+| DisableEbsEncryptionByDefault | Turns default encryption back off. |
+| GetEbsEncryptionByDefault | Reports whether default encryption is on. |
+| ModifyEbsDefaultKmsKeyId | Sets the KMS key used when a volume names none. |
+| GetEbsDefaultKmsKeyId | Reports the current default KMS key. |
+| ResetEbsDefaultKmsKeyId | Restores the AWS-managed default key. |
+
+These are account-level settings scoped per region, not per volume, and nothing here encrypts anything — no volume's stored bytes change. LZA's SecurityStack drives them through its `Custom::EnableEbsEncryptionByDefault` Lambda, which calls enable plus `ModifyEbsDefaultKmsKeyId` on create and disable on delete, then reads the state back with the two `Get` calls.
+
+An account that has never set a key reports `alias/aws/ebs`, the AWS-managed EBS key every account starts with, rather than an empty value — the module runner fails hard on a missing `KmsKeyId`, so the fallback is what keeps it running. `ResetEbsDefaultKmsKeyId` returns to that same alias. `ModifyEbsDefaultKmsKeyId` requires `KmsKeyId` and rejects a blank one with `MissingParameter`; the key is stored as given and is not checked against KMS.
+
+### IPAM
+
+| Action | Description |
+|--------|-------------|
+| EnableIpamOrganizationAdminAccount | Delegates IPAM administration to a member account. |
+| DisableIpamOrganizationAdminAccount | Removes the IPAM delegated administrator. |
+| CreateIpam | Creates an IPAM with its default private and public scopes. |
+| DescribeIpams | Lists or returns stored IPAMs. |
+| ModifyIpam | Updates an IPAM's description, tier, metered account and operating regions. |
+| DeleteIpam | Deletes an IPAM and, leniently, the pools that belong to it. |
+| CreateIpamPool | Creates a pool under a scope, optionally sourced from a parent pool. |
+| DescribeIpamPools | Lists or returns stored pools. |
+| ModifyIpamPool | Updates a pool's description, auto-import flag and netmask-length bounds. |
+| DeleteIpamPool | Deletes a pool. |
+| ProvisionIpamPoolCidr | Provisions a CIDR onto a pool, validated against its source pool. |
+| GetIpamPoolCidrs | Returns a pool's provisioned CIDRs. |
+| AllocateIpamPoolCidr | Allocates a CIDR from a pool, by explicit CIDR or by netmask length. |
+| ReleaseIpamPoolAllocation | Releases an allocation, returning its space to the pool. |
+| GetIpamPoolAllocations | Returns a pool's live allocations. |
+| AssociateIpamByoasn | Associates a BYOASN with a CIDR. |
+| DisassociateIpamByoasn | Removes a BYOASN association. |
+| DescribeIpamByoasn | Lists BYOASN associations in the region. |
+
+This is what LZA needs end to end: the Organization stage delegates the IPAM admin through `Custom::EnableIpamOrganizationAdminAccount`, the Network stages build the IPAM and pool hierarchy through CloudFormation, and the `get-ipam-subnet-cidr` custom-resource Lambda allocates subnet CIDRs from pools at Deploy time.
+
+Allocation is real rather than recorded. `AllocateIpamPoolCidr` by netmask length hands out the first free block that fits, skipping both live allocations and any space already provisioned onward to child pools, and reports `InsufficientCidrBlocks` when nothing fits. An explicit `Cidr` must fall inside a provisioned CIDR and must not overlap an existing allocation. `ProvisionIpamPoolCidr` on a pool with a source pool requires the CIDR to sit inside one of the parent's provisioned CIDRs. Releasing an allocation returns its space, so the next allocation of the same size reuses it.
+
+`CreateIpam`, `CreateIpamPool`, `ProvisionIpamPoolCidr` and `AllocateIpamPoolCidr` honour `ClientToken` — the four IPAM operations that model it. A replay returns what the first call produced rather than creating a second resource: the same pool, the same provisioned CIDR, the same allocation id and CIDR, with pool consumption unchanged. This matters most on `AllocateIpamPoolCidr`, which LZA's `get-ipam-subnet-cidr` Lambda retries; without it each retry would burn another distinct CIDR out of the pool. Parameter differences on a replay are ignored rather than rejected as `IdempotentParameterMismatch`, and the token is not echoed in the response, matching the AWS output shapes. A token is scoped to the account that used it.
+
+Pool lookups deliberately fall back to an id-only scan across accounts, so a RAM-shared pool resolves from a workload account and region. That fallback covers reads and allocation only: `AllocateIpamPoolCidr` from an account that does not own the pool succeeds and writes the allocation back to the owner's partition rather than forking a copy into the caller's. Mutations of the pool itself — `ModifyIpamPool`, `DeleteIpamPool`, `ProvisionIpamPoolCidr` — are owner-only, as are `ModifyIpam` and `DeleteIpam`, and a non-owner gets `InvalidIpamPoolId.NotFound` or `InvalidIpamId.NotFound`, which is what AWS returns for a resource you cannot act on. `ReleaseIpamPoolAllocation` stays on the cross-account path, since no per-allocation caller is tracked to check ownership against.
+
+The delegated administrator is stored organization-wide rather than per account, so every member account reads the same value and delegating a second, different account conflicts with `InvalidParameterValue` no matter which account asks.
+
+Omitting a required identifier is a modeled `MissingParameter` rather than a not-found: this covers `IpamPoolId` on every pool operation, and `IpamScopeId` on `CreateIpamPool`. A `CreateIpamPool` naming a scope no IPAM owns is rejected with `InvalidIpamScopeId.NotFound` instead of storing a pool with a null `ipamId`.
+
+State is reported settled rather than transitional, as elsewhere in this service: IPAMs and pools come back `create-complete` immediately and `delete-complete` on deletion, with no intermediate states. `DeleteIpam` cascades to the IPAM's pools, which real AWS requires `--cascade` to do. BYOASN associations are stored and echoed but nothing validates the ASN or advertises it.
+
 ## Configuration
 
 | Environment variable | Default | Description |
@@ -354,6 +610,8 @@ Launch templates store versioned launch data. New template versions can be creat
 | `FLOCI_SERVICES_EC2_MAX_PUBLISHED_PORTS_PER_INSTANCE` | `20` | Max published ports per instance; also the widest single-rule span published |
 | `FLOCI_SERVICES_EC2_SOCAT_IMAGE` | `alpine/socat` | Image used for the port-forwarding sidecar |
 | `FLOCI_SERVICES_EC2_MOCK` | `false` | Skip Docker; instances jump directly to final state (useful for tests) |
+| `FLOCI_SERVICES_EC2_AWS_FAITHFUL_PRIVATE_IP` | `false` | Report the CFN/subnet-allocated private IP instead of the container bridge IP; routing and IMDS are unaffected |
+| `FLOCI_SERVICES_EC2_CONTAINER_IPS_ROUTABLE` | auto-detect | Whether an instance's container IP is reachable from the machines consuming Floci's API (Terraform, Terratest, your shell). When it is, DescribeInstances and DescribeAddresses report the container IP, so port 22 really is port 22; when it is not, they report `127.0.0.1` and reachability goes through the published high host ports. Detected by a throwaway TCP connect; set explicitly when Floci itself runs as a container |
 
 ## Requirements
 

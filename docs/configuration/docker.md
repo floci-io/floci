@@ -12,6 +12,8 @@ floci:
     docker-host: unix:///var/run/docker.sock
 ```
 
+**Running natively on Windows** (not inside WSL or a container): Windows has no equivalent of `/var/run/docker.sock`, so when `docker-host` is left at its default and `DOCKER_HOST` isn't set, Floci automatically falls back to Docker Desktop's named pipe (`npipe:////./pipe/docker_engine`) instead. An explicit `docker-host` or `DOCKER_HOST` always takes priority over this fallback.
+
 Environment variable: `FLOCI_DOCKER_DOCKER_HOST`
 
 When running Floci inside Docker Compose, mount the host socket:
@@ -99,6 +101,59 @@ floci:
     log-max-file: "3"     # Number of rotated log files to retain per container
 ```
 
+## Container Labels
+
+Every container and volume Floci creates carries three reserved labels for discovery and cleanup:
+
+| Label | Value | Purpose |
+|---|---|---|
+| `floci` | `true` | Umbrella across all Floci emulators — `docker ps --filter label=floci=true` |
+| `floci_emulator` | `floci-aws` | Per-emulator discriminator |
+| `floci_namespace` | *(the configured namespace)* | Only present when `resource-namespace` is set |
+
+Add your own labels with `extra-labels` — they are applied to every container **and** volume Floci creates (Lambda functions and code volumes, RDS databases, ElastiCache, OpenSearch, MSK, ECS, ...):
+
+```yaml
+floci:
+  docker:
+    extra-labels:
+      - key: "com.example.project"
+        value: my-project
+      - key: environment
+        value: dev
+```
+
+Or via environment variables (indexed entries, like `registry-credentials`):
+
+```yaml
+services:
+  floci:
+    environment:
+      FLOCI_DOCKER_EXTRA_LABELS_0__KEY: "com.example.project"
+      FLOCI_DOCKER_EXTRA_LABELS_0__VALUE: my-project
+      FLOCI_DOCKER_EXTRA_LABELS_1__KEY: environment
+      FLOCI_DOCKER_EXTRA_LABELS_1__VALUE: dev
+```
+
+Extra labels are a list of key/value entries rather than a map so that label keys containing dots, colons, or uppercase characters survive the environment-variable naming convention.
+
+!!! note
+    Entries using one of the reserved keys (`floci`, `floci_emulator`, `floci_namespace`) are ignored with a warning — user configuration can never break Floci's own container discovery and volume pruning.
+
+### Resource Identity Labels
+
+A container backing an emulated AWS resource also carries labels tying it back to that resource, additive to the labels above:
+
+| Label | Value | Purpose |
+|---|---|---|
+| `io.floci` | `aws` | Cloud provider, for multi-cloud discovery when several Floci-like emulators share a host |
+| `io.floci.service` | e.g. `rds` | The AWS service the container backs |
+| `io.floci.resource-id` | e.g. `orders-db-primary` | The resource's identifier (DB instance identifier, cluster name, function name, ...) |
+| `io.floci.account` | the resolved account id | The AWS account the resource belongs to |
+| `io.floci.region` | the resolved region | The AWS region the resource belongs to |
+
+This makes `docker ps --filter label=io.floci.resource-id=orders-db-primary` resolve a specific emulated resource to its backing container directly, without inferring it from names or creation order. Applied to RDS, DocDB, ElastiCache (Redis/Valkey and Memcached), MemoryDB, Neptune, MSK, OpenSearch, ECS, EKS, AmazonMQ, MWAA, Kinesis Data Analytics (Flink), Batch, CodeBuild, Lambda, and EC2. ECR's backing registry container carries every label except `io.floci.resource-id`, since it is a shared singleton with no single resource identifier.
+
 ## Docker Network
 
 Containers spawned by Floci (Lambda, RDS, ElastiCache, OpenSearch, MSK, ECS) need to be on the same Docker network to communicate with each other and with Floci itself.
@@ -159,7 +214,7 @@ What each setting does and why it is needed:
 !!! tip "When the Runtime API address is still unreachable"
     On some Podman network topologies the auto-detected Runtime API address
     (the host/IP Lambda containers use to call back into Floci) is still wrong,
-    and invocations fail with `connect ECONNREFUSED <ip>:9200`. Set the address
+    and invocations fail with `connect ECONNREFUSED <ip>:12000`. Set the address
     explicitly to bypass auto-detection:
 
     ```bash
@@ -182,4 +237,7 @@ What each setting does and why it is needed:
 | `FLOCI_DOCKER_REGISTRY_CREDENTIALS_0__PASSWORD` | _(unset)_ | Password for credential entry 0 |
 | `FLOCI_DOCKER_LOG_MAX_SIZE` | `10m` | Max container log file size before rotation |
 | `FLOCI_DOCKER_LOG_MAX_FILE` | `3` | Number of rotated log files to retain |
+| `FLOCI_DOCKER_EXTRA_LABELS_0__KEY` | _(unset)_ | Label key for extra-label entry 0, applied to every Floci-created container and volume (increment the index for more) |
+| `FLOCI_DOCKER_EXTRA_LABELS_0__VALUE` | _(unset)_ | Label value for extra-label entry 0 |
 | `FLOCI_SERVICES_DOCKER_NETWORK` | _(unset)_ | Shared Docker network for all container-based services |
+| `FLOCI_SERVICES_LAMBDA_CONTAINER_NAME_PREFIX` | `floci` | Base name prefix for spawned Lambda containers and code volumes (e.g. `acme` → `acme-<function>-<id>` containers, `acme-code-<function>-<hash>` volumes). Must be a valid Docker name segment (`[A-Za-z0-9][A-Za-z0-9_.-]*`); invalid values are ignored with a warning. See the [Lambda docs](../services/lambda.md#configuration) |

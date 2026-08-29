@@ -103,7 +103,10 @@ public class RedpandaManager {
         ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
                 .withName(containerName)
                 .withDockerNetwork(config.services().dockerNetwork())
-                .withLogRotation();
+                .withLogRotation()
+                .withLabels(ContainerStorageHelper.resourceIdentityLabels(
+                        "msk", cluster.getClusterName(), regionResolver.getAccountId(),
+                        regionResolver.getDefaultRegion()));
 
         if (!containerDetector.isRunningInContainer()) {
             specBuilder.withPortBinding(KAFKA_PORT, kafkaHostPort).withDynamicPort(ADMIN_PORT);

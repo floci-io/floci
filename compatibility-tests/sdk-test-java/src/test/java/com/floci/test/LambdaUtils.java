@@ -96,6 +96,24 @@ public final class LambdaUtils {
     }
 
     /**
+     * ZIP containing a Node.js handler that writes and reads a configured Lambda file-system mount.
+     */
+    public static byte[] fileSystemZip() {
+        String code = """
+                const fs = require('fs');
+                const file = '/mnt/shared/sdk-test.txt';
+                exports.handler = async (event) => {
+                    fs.writeFileSync(file, event.value, 'utf8');
+                    return {
+                        mounted: fs.existsSync(file),
+                        value: fs.readFileSync(file, 'utf8')
+                    };
+                };
+                """;
+        return createZip("index.js", code);
+    }
+
+    /**
      * ZIP containing a Node.js handler that logs the first S3 event record.
      */
     public static byte[] s3NotificationLoggerZip() {

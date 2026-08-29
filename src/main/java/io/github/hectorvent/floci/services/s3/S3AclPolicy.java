@@ -75,8 +75,9 @@ record S3AclPolicy(List<S3AclPolicy.Grant> grants) {
     private static Grant parseGrant(Element grantElement) {
         Element granteeElement = firstChildElement(grantElement, "Grantee");
         String uri = granteeElement != null ? descendantText(granteeElement, "URI") : null;
+        String id = granteeElement != null ? descendantText(granteeElement, "ID") : null;
         String permissionText = childText(grantElement, "Permission");
-        return new Grant(new Grantee(uri), Permission.fromXml(permissionText));
+        return new Grant(new Grantee(uri, id), Permission.fromXml(permissionText));
     }
 
     private static Element firstChildElement(Element parent, String localName) {
@@ -112,11 +113,23 @@ record S3AclPolicy(List<S3AclPolicy.Grant> grants) {
         boolean allowsPublicRead() {
             return grantee.isAllUsersGroup() && permission.allowsRead();
         }
+
+        boolean allowsPublicWrite() {
+            return grantee.isAllUsersGroup() && permission.allowsWrite();
+        }
+
+        boolean allowsCanonicalUserRead(String canonicalUserId) {
+            return grantee.isCanonicalUser(canonicalUserId) && permission.allowsRead();
+        }
     }
 
-    record Grantee(String uri) {
+    record Grantee(String uri, String id) {
         boolean isAllUsersGroup() {
             return ALL_USERS_GROUP_URI.equals(uri);
+        }
+
+        boolean isCanonicalUser(String canonicalUserId) {
+            return canonicalUserId != null && canonicalUserId.equals(id);
         }
     }
 
@@ -141,6 +154,10 @@ record S3AclPolicy(List<S3AclPolicy.Grant> grants) {
 
         boolean allowsRead() {
             return this == READ || this == FULL_CONTROL;
+        }
+
+        boolean allowsWrite() {
+            return this == WRITE || this == FULL_CONTROL;
         }
     }
 

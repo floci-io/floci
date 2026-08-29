@@ -5,6 +5,7 @@ import software.amazon.awssdk.services.athena.AthenaClient;
 import software.amazon.awssdk.services.athena.model.*;
 import software.amazon.awssdk.services.glue.GlueClient;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.UUID;
 
@@ -66,20 +67,12 @@ class AthenaTest {
     @Test
     @Order(3)
     @DisplayName("Get query results returns result set")
-    void getQueryResults() {
-        // Poll until succeeded (mock mode completes immediately, real duck may take a moment)
-        QueryExecutionState state = QueryExecutionState.RUNNING;
-        int attempts = 0;
-        while (state == QueryExecutionState.RUNNING && attempts++ < 20) {
-            GetQueryExecutionResponse exec = athena.getQueryExecution(
-                    GetQueryExecutionRequest.builder().queryExecutionId(queryExecutionId).build());
-            state = exec.queryExecution().status().state();
-            if (state == QueryExecutionState.RUNNING) {
-                try { Thread.sleep(500); } catch (InterruptedException ignored) {}
-            }
-        }
-
-        assertThat(state).isEqualTo(QueryExecutionState.SUCCEEDED);
+    void getQueryResults() throws InterruptedException {
+        QueryExecutionStatus status = TestFixtures.awaitAthenaQueryTerminal(
+                athena, queryExecutionId, Duration.ofSeconds(60));
+        assertThat(status.state())
+                .as("Athena query did not succeed: %s", status.stateChangeReason())
+                .isEqualTo(QueryExecutionState.SUCCEEDED);
 
         GetQueryResultsResponse results = athena.getQueryResults(
                 GetQueryResultsRequest.builder()
@@ -177,4 +170,3 @@ class AthenaTest {
         glue.close();
     }
 }
-

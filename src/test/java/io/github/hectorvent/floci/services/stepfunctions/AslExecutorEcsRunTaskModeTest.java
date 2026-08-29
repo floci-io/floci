@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.stepfunctions;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbJsonHandler;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
 import io.github.hectorvent.floci.services.ecs.EcsJsonHandler;
@@ -68,9 +69,14 @@ class AslExecutorEcsRunTaskModeTest {
                 mock(io.github.hectorvent.floci.services.s3.S3Service.class),
                 ecsService,
                 ecsJsonHandler,
+                mock(io.github.hectorvent.floci.services.eventbridge.EventBridgeHandler.class),
+                mock(io.github.hectorvent.floci.services.scheduler.SchedulerService.class),
+                mock(io.github.hectorvent.floci.services.scheduler.SchedulerController.class),
                 objectMapper,
                 new JsonataEvaluator(objectMapper),
-                mock(Instance.class));
+                mock(Instance.class),
+                mock(EmulatorConfig.class),
+                null);
     }
 
     @Test

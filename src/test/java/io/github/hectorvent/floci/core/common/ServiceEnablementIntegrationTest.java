@@ -157,6 +157,20 @@ class ServiceEnablementIntegrationTest {
     }
 
     @Test
+    void signedFisGetRequestsReturnJsonWhenServiceDisabled() {
+        given()
+            .header("Authorization", authorization("fis"))
+        .when()
+            .get("/actions")
+        .then()
+            .statusCode(400)
+            .contentType("application/json")
+            .header("X-Amzn-Errortype", "ServiceNotAvailableException")
+            .body("__type", equalTo("ServiceNotAvailableException"))
+            .body("message", equalTo("Service fis is not enabled."));
+    }
+
+    @Test
     void signedRdsDataExecuteRequestsReturnJsonWhenServiceDisabled() {
         given()
             .contentType("application/json")
@@ -191,6 +205,7 @@ class ServiceEnablementIntegrationTest {
                     "floci.services.acm.enabled", "false",
                     "floci.services.dynamodb.enabled", "false",
                     "floci.services.ecs.enabled", "false",
+                    "floci.services.fis.enabled", "false",
                     "floci.services.lambda.enabled", "false",
                     "floci.services.opensearch.enabled", "false",
                     "floci.services.rds-data.enabled", "false",

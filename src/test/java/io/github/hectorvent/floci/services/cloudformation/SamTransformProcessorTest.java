@@ -102,6 +102,151 @@ class SamTransformProcessorTest {
     }
 
     @Test
+    void expandSamTemplate_autoPublishAliasGeneratesVersionAndAlias() throws Exception {
+        // AutoPublishAlias must expand into the Version + Alias pair real SAM generates. Dropping it
+        // leaves the function with only $LATEST, so an alias-qualified invoke (<function>:production,
+        // which the declaration exists to enable) fails with "Alias not found" long after the deploy
+        // reported CREATE_COMPLETE.
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Resources": {
+                "MyFunc": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "Handler": "index.handler",
+                    "Runtime": "nodejs20.x",
+                    "AutoPublishAlias": "production",
+                    "InlineCode": "exports.handler = async () => ({});"
+                  }
+                }
+              }
+            }
+            """);
+
+        JsonNode resources = processor.expandSamTemplate(template).path("Resources");
+
+        assertTrue(resources.has("MyFuncVersion"));
+        assertEquals("AWS::Lambda::Version", resources.path("MyFuncVersion").path("Type").asText());
+        assertEquals("MyFunc",
+                resources.path("MyFuncVersion").path("Properties").path("FunctionName").path("Ref").asText());
+
+        // Suffix is sanitize()d, so the logical id stays alphanumeric — see the alias-name case
+        // below, where the raw name would otherwise leak a '-' into it.
+        assertTrue(resources.has("MyFuncAliasProduction"));
+        JsonNode aliasProps = resources.path("MyFuncAliasProduction").path("Properties");
+        assertEquals("AWS::Lambda::Alias", resources.path("MyFuncAliasProduction").path("Type").asText());
+        // The alias NAME itself is untouched — only the logical id is sanitized.
+        assertEquals("production", aliasProps.path("Name").asText());
+        assertEquals("MyFunc", aliasProps.path("FunctionName").path("Ref").asText());
+
+        // The alias deliberately targets $LATEST rather than the published version real SAM points
+        // at: Floci cannot invoke a published version (#1987 cold-start timeout, #1988 warm-pool
+        // keying), so the faithful form would break the alias-qualified invoke this expansion
+        // exists to enable.
+        assertEquals("$LATEST", aliasProps.path("FunctionVersion").asText());
+    }
+
+    @Test
+    void expandSamTemplate_withoutAutoPublishAliasGeneratesNeither() throws Exception {
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Resources": {
+                "MyFunc": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "Handler": "index.handler",
+                    "Runtime": "nodejs20.x",
+                    "InlineCode": "exports.handler = async () => ({});"
+                  }
+                }
+              }
+            }
+            """);
+
+        JsonNode resources = processor.expandSamTemplate(template).path("Resources");
+
+        Iterator<String> names = resources.fieldNames();
+        while (names.hasNext()) {
+            String name = names.next();
+            String type = resources.path(name).path("Type").asText();
+            assertNotEquals("AWS::Lambda::Version", type, name + " should not exist");
+            assertNotEquals("AWS::Lambda::Alias", type, name + " should not exist");
+        }
+    }
+
+    @Test
+    void expandSamTemplate_autoPublishAliasFromIntrinsicPassesNodeThrough() throws Exception {
+        // SAM allows an intrinsic alias name (e.g. !Ref StageName). The logical id needs a literal,
+        // so it drops the suffix, but the node itself is passed through to Name for the template
+        // engine to resolve at provision time.
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Parameters": {"StageName": {"Type": "String", "Default": "live"}},
+              "Resources": {
+                "MyFunc": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "Handler": "index.handler",
+                    "Runtime": "nodejs20.x",
+                    "AutoPublishAlias": {"Ref": "StageName"},
+                    "InlineCode": "exports.handler = async () => ({});"
+                  }
+                }
+              }
+            }
+            """);
+
+        JsonNode resources = processor.expandSamTemplate(template).path("Resources");
+
+        assertTrue(resources.has("MyFuncAlias"));
+        assertEquals("StageName",
+                resources.path("MyFuncAlias").path("Properties").path("Name").path("Ref").asText());
+    }
+
+    @Test
+    void expandSamTemplate_autoPublishAliasWithSeparatorsYieldsAlphanumericLogicalId() throws Exception {
+        // '-' and '_' are legal in a Lambda alias name but not in a CloudFormation logical id, so
+        // the suffix has to be sanitized. Using the raw name emits "MyFuncAliasblue-green".
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Resources": {
+                "MyFunc": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "Handler": "index.handler",
+                    "Runtime": "nodejs20.x",
+                    "AutoPublishAlias": "blue-green_2",
+                    "InlineCode": "exports.handler = async () => ({});"
+                  }
+                }
+              }
+            }
+            """);
+
+        JsonNode resources = processor.expandSamTemplate(template).path("Resources");
+
+        String aliasId = null;
+        Iterator<String> names = resources.fieldNames();
+        while (names.hasNext()) {
+            String name = names.next();
+            if ("AWS::Lambda::Alias".equals(resources.path(name).path("Type").asText())) {
+                aliasId = name;
+            }
+        }
+        assertNotNull(aliasId, "expansion emitted no AWS::Lambda::Alias");
+        assertTrue(aliasId.matches("[A-Za-z0-9]+"),
+                "logical id must be alphanumeric, was: " + aliasId);
+        assertEquals("MyFuncAliasBlueGreen2", aliasId);
+
+        // The alias name reaching Lambda keeps its separators — only the logical id is sanitized.
+        assertEquals("blue-green_2", resources.path(aliasId).path("Properties").path("Name").asText());
+    }
+
+    @Test
     void expandSamTemplate_functionWithPackageTypeImage() throws Exception {
         // PackageType must be carried through to the expanded AWS::Lambda::Function: without it,
         // CloudFormationResourceProvisioner.buildLambdaDesiredState defaults PackageType to "Zip"
@@ -134,6 +279,46 @@ class SamTransformProcessorTest {
         // PackageType: Image (verified separately in CloudFormationIntegrationTest).
         assertTrue(lambdaProps.path("Handler").isMissingNode());
         assertTrue(lambdaProps.path("Runtime").isMissingNode());
+    }
+
+    @Test
+    void expandSamTemplate_functionWithFileSystemConfig() throws Exception {
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Resources": {
+                "MyFunc": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "Handler": "index.handler",
+                    "Runtime": "nodejs20.x",
+                    "InlineCode": "exports.handler = async () => ({});",
+                    "VpcConfig": {
+                      "SubnetIds": ["subnet-0123456789abcdef0"],
+                      "SecurityGroupIds": ["sg-0123456789abcdef0"]
+                    },
+                    "FileSystemConfigs": [{
+                      "Arn": "arn:aws:elasticfilesystem:us-east-1:000000000000:access-point/fsap-0123456789abcdef0",
+                      "LocalMountPath": "/mnt/shared"
+                    }]
+                  }
+                }
+              }
+            }
+            """);
+
+        JsonNode lambdaProps = processor.expandSamTemplate(template)
+                .path("Resources").path("MyFunc").path("Properties");
+
+        assertEquals("subnet-0123456789abcdef0",
+                lambdaProps.path("VpcConfig").path("SubnetIds").get(0).asText());
+        assertEquals("sg-0123456789abcdef0",
+                lambdaProps.path("VpcConfig").path("SecurityGroupIds").get(0).asText());
+        assertEquals("arn:aws:elasticfilesystem:us-east-1:000000000000:"
+                        + "access-point/fsap-0123456789abcdef0",
+                lambdaProps.path("FileSystemConfigs").get(0).path("Arn").asText());
+        assertEquals("/mnt/shared",
+                lambdaProps.path("FileSystemConfigs").get(0).path("LocalMountPath").asText());
     }
 
     @Test
@@ -711,5 +896,236 @@ class SamTransformProcessorTest {
 
         assertTrue(expanded.path("Transform").isMissingNode());
         assertTrue(expanded.path("Globals").isMissingNode());
+    }
+    @Test
+    void expandSamTemplate_httpApiPreservesDefinitionBodyAsRoutes() throws Exception {
+        // Regression for #1956: a route-bearing HttpApi carries its routes in the inline
+        // OpenAPI DefinitionBody, which must survive as the ApiGatewayV2::Api Body — otherwise
+        // the API expands with no routes.
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Resources": {
+                "MyHttpApi": {
+                  "Type": "AWS::Serverless::HttpApi",
+                  "Properties": {
+                    "DefinitionBody": {
+                      "openapi": "3.0.1",
+                      "paths": {
+                        "/hello": { "get": { "x-amazon-apigateway-integration": { "type": "aws_proxy" } } }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            """);
+
+        JsonNode resources = processor.expandSamTemplate(template).path("Resources");
+
+        JsonNode api = resources.path("MyHttpApi");
+        assertEquals("AWS::ApiGatewayV2::Api", api.path("Type").asText());
+        JsonNode body = api.path("Properties").path("Body");
+        assertFalse(body.isMissingNode(), "DefinitionBody must be preserved as the API Body");
+        assertEquals("3.0.1", body.path("openapi").asText());
+        assertTrue(body.path("paths").has("/hello"), "route definitions must survive the transform");
+    }
+
+    @Test
+    void expandSamTemplate_httpApiEventMergesIntoMatchingDefinitionBodyOperation() throws Exception {
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Resources": {
+                "MyHttpApi": {
+                  "Type": "AWS::Serverless::HttpApi",
+                  "Properties": {
+                    "Auth": {
+                      "DefaultAuthorizer": "JwtAuth",
+                      "Authorizers": {
+                        "JwtAuth": {
+                          "IdentitySource": "$request.header.Authorization",
+                          "AuthorizationScopes": ["read:items"],
+                          "JwtConfiguration": {
+                            "Issuer": "https://issuer.example.com",
+                            "Audience": ["items-client"]
+                          }
+                        }
+                      }
+                    },
+                    "DefinitionBody": {
+                      "openapi": "3.0.1",
+                      "paths": {
+                        "/items": {
+                          "get": {
+                            "security": [],
+                            "responses": { "200": { "description": "ok" } }
+                          }
+                        }
+                      }
+                    }
+                  }
+                },
+                "MyFunction": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "Runtime": "python3.12",
+                    "Handler": "index.handler",
+                    "InlineCode": "def handler(e,c): return {}",
+                    "Events": {
+                      "Api": {
+                        "Type": "HttpApi",
+                        "Properties": {
+                          "ApiId": { "Ref": "MyHttpApi" },
+                          "Path": "/items",
+                          "Method": "GET"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            """);
+
+        JsonNode resources = processor.expandSamTemplate(template).path("Resources");
+        JsonNode operation = resources.path("MyHttpApi").path("Properties").path("Body")
+                .path("paths").path("/items").path("get");
+        JsonNode integration = operation.path("x-amazon-apigateway-integration");
+        JsonNode authorizer = resources.path("MyHttpApi").path("Properties").path("Body")
+                .path("components").path("securitySchemes").path("JwtAuth");
+
+        assertEquals("ok", operation.path("responses").path("200").path("description").asText());
+        assertEquals("aws_proxy", integration.path("type").asText());
+        assertEquals("POST", integration.path("httpMethod").asText());
+        assertEquals("2.0", integration.path("payloadFormatVersion").asText());
+        assertEquals("MyFunction", integration.path("uri").path("Fn::Sub").path(1)
+                .path("FnArn").path("Fn::GetAtt").path(0).asText());
+        assertEquals("oauth2", authorizer.path("type").asText());
+        assertEquals("jwt", authorizer.path("x-amazon-apigateway-authorizer").path("type").asText());
+        assertEquals("$request.header.Authorization", authorizer.path("x-amazon-apigateway-authorizer")
+                .path("identitySource").path(0).asText());
+        assertEquals("https://issuer.example.com", authorizer.path("x-amazon-apigateway-authorizer")
+                .path("jwtConfiguration").path("issuer").asText());
+        assertEquals("items-client", authorizer.path("x-amazon-apigateway-authorizer")
+                .path("jwtConfiguration").path("audience").path(0).asText());
+        assertEquals("read:items", operation.path("security").path(0).path("JwtAuth").path(0).asText());
+
+        int routeResources = 0;
+        int integrationResources = 0;
+        int permissionResources = 0;
+        Iterator<JsonNode> definitions = resources.elements();
+        while (definitions.hasNext()) {
+            String type = definitions.next().path("Type").asText();
+            routeResources += "AWS::ApiGatewayV2::Route".equals(type) ? 1 : 0;
+            integrationResources += "AWS::ApiGatewayV2::Integration".equals(type) ? 1 : 0;
+            permissionResources += "AWS::Lambda::Permission".equals(type) ? 1 : 0;
+        }
+        assertEquals(0, routeResources, "matching body operations must not emit a duplicate route resource");
+        assertEquals(0, integrationResources, "the body owns the merged integration");
+        assertEquals(1, permissionResources, "API Gateway still needs permission to invoke the function");
+    }
+
+    @Test
+    void expandSamTemplate_matchingHttpApiEventCanOptOutOfDefaultAuthorizer() throws Exception {
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Resources": {
+                "HttpApi": {
+                  "Type": "AWS::Serverless::HttpApi",
+                  "Properties": {
+                    "Auth": {
+                      "DefaultAuthorizer": "JwtAuth",
+                      "Authorizers": {
+                        "JwtAuth": {
+                          "IdentitySource": ["$request.header.Authorization"],
+                          "JwtConfiguration": {
+                            "issuer": "https://issuer.example.com",
+                            "audience": ["client-id"]
+                          }
+                        }
+                      }
+                    },
+                    "DefinitionBody": {
+                      "openapi": "3.0.1",
+                      "paths": { "/public": { "get": {} } }
+                    }
+                  }
+                },
+                "Handler": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "Runtime": "python3.12",
+                    "Handler": "index.handler",
+                    "InlineCode": "def handler(e,c): return {}",
+                    "Events": {
+                      "Public": {
+                        "Type": "HttpApi",
+                        "Properties": {
+                          "ApiId": { "Ref": "HttpApi" },
+                          "Path": "/public",
+                          "Method": "GET",
+                          "Auth": { "Authorizer": "NONE" }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            """);
+
+        JsonNode operation = processor.expandSamTemplate(template).path("Resources")
+                .path("HttpApi").path("Properties").path("Body")
+                .path("paths").path("/public").path("get");
+
+        assertTrue(operation.path("security").isArray());
+        assertTrue(operation.path("security").isEmpty(),
+                "Authorizer NONE must override the API's default authorizer");
+        assertTrue(operation.path("x-amazon-apigateway-integration").isObject());
+    }
+
+    @Test
+    void expandSamTemplate_httpApiMapsDefinitionUriToBodyS3Location() throws Exception {
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Resources": {
+                "MyHttpApi": {
+                  "Type": "AWS::Serverless::HttpApi",
+                  "Properties": { "DefinitionUri": "s3://api-specs/openapi.yaml" }
+                }
+              }
+            }
+            """);
+
+        JsonNode properties = processor.expandSamTemplate(template)
+                .path("Resources").path("MyHttpApi").path("Properties");
+
+        assertTrue(properties.path("Body").isMissingNode(), "DefinitionUri must not become an inline Body");
+        assertEquals("api-specs", properties.path("BodyS3Location").path("Bucket").asText());
+        assertEquals("openapi.yaml", properties.path("BodyS3Location").path("Key").asText());
+    }
+    @Test
+    void expandSamTemplate_httpApiPreservesIntrinsicDefinitionUriForProvisioning() throws Exception {
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Resources": {
+                "MyHttpApi": {
+                  "Type": "AWS::Serverless::HttpApi",
+                  "Properties": {
+                    "DefinitionUri": { "Fn::Sub": "s3://${SpecBucket}/openapi.yaml" }
+                  }
+                }
+              }
+            }
+            """);
+
+        JsonNode bodyS3Location = processor.expandSamTemplate(template)
+                .path("Resources").path("MyHttpApi").path("Properties").path("BodyS3Location");
+
+        assertEquals("s3://${SpecBucket}/openapi.yaml", bodyS3Location.path("Fn::Sub").asText());
     }
 }

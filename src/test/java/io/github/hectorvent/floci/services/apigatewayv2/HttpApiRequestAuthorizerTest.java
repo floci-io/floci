@@ -534,6 +534,36 @@ class HttpApiRequestAuthorizerTest {
                 .then().statusCode(200);
     }
 
+    // ──────────────────────── Trailing slash preservation (#2136) ────────────────────────
+
+    /**
+     * A trailing slash is significant in the delivered path, and rawPath is by contract the raw
+     * path. The route key stays {@code GET /hello}, so route matching still runs on the
+     * normalized path while the Lambda receives the slash. REST (V1) has behaved this way since
+     * #1557; this pins the same behaviour for HTTP APIs.
+     */
+    @Test
+    @Order(110)
+    void trailingSlashReachesTheLambdaRawPath() throws Exception {
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"authorizationType":"NONE","authorizerId":null}
+                        """)
+                .when().patch("/v2/apis/" + httpApiId + "/routes/" + routeId)
+                .then().statusCode(200);
+
+        String body = given()
+                .when().get("/execute-api/" + httpApiId + "/test/hello/")
+                .then().statusCode(200)
+                .extract().asString();
+
+        // The backend Lambda echoes event.rawPath back as "path".
+        JsonNode response = MAPPER.readTree(body);
+        assertEquals("/hello/", response.path("path").asText(),
+                "rawPath must keep the trailing slash the JAX-RS {proxy} binding strips");
+    }
+
     // ──────────────────────────── Cleanup ────────────────────────────
 
     @Test

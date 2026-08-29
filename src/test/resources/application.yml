@@ -6,6 +6,14 @@ quarkus:
       max-body-size: ${floci.max-request-size}M
   datasource:
     active: false
+  kubernetes-client:
+    devservices:
+      enabled: false
+  # Groovy (a REST Assured dependency) starts DFA-cache-cleaner threads that never stop.
+  # Loaded parent-first they live in the shared system classloader, so they cannot pin a
+  # per-profile application classloader across the many app restarts of a test run.
+  class-loading:
+    parent-first-artifacts: org.apache.groovy:groovy
 
 floci:
   base-url: "http://localhost:4566"
@@ -44,6 +52,8 @@ floci:
         flush-interval-ms: 60000
       s3vectors:
         flush-interval-ms: 60000
+      s3tables:
+        flush-interval-ms: 60000
       ecs:
         flush-interval-ms: 60000
       codebuild:
@@ -60,6 +70,19 @@ floci:
         flush-interval-ms: 60000
       cloudfront:
       appsync:
+        flush-interval-ms: 60000
+      rum:
+        flush-interval-ms: 60000
+      resourceexplorer2:
+        mode: memory
+        flush-interval-ms: 60000
+      fis:
+        flush-interval-ms: 60000
+      guardduty:
+        flush-interval-ms: 60000
+      emrserverless:
+        flush-interval-ms: 60000
+      lakeformation:
         flush-interval-ms: 60000
 
   auth:
@@ -80,6 +103,7 @@ floci:
 
   protocols:
     strict-claiming: false
+    reject-unknown-service-scope: true
 
   docker:
     log-max-size: "10m"
@@ -98,6 +122,7 @@ floci:
       enabled: true
       enforce-auth: false
       default-presign-expiry-seconds: 3600
+      global-bucket-namespace: false
     dynamodb:
       enabled: true
     sns:
@@ -122,6 +147,9 @@ floci:
     amazonmq:
       enabled: true
       mock: true
+    kinesis-analytics:
+      enabled: true
+      mock: true
     elasticache:
       enabled: true
       proxy-base-port: 6379
@@ -139,9 +167,6 @@ floci:
       mock: false
       proxy-base-port: 7001
       proxy-max-port: 7099
-      default-postgres-image: "postgres:16-alpine"
-      default-mysql-image: "mysql:8.0"
-      default-mariadb-image: "mariadb:11"
     rds-data:
       enabled: true
       transaction-ttl-seconds: 180
@@ -172,14 +197,25 @@ floci:
       enabled: true
     firehose:
       enabled: true
+      tick-interval-seconds: 10
+      flush-record-count: 0
     kms:
       enabled: true
     cognito:
       enabled: true
     stepfunctions:
       enabled: true
+      allow-plaintext-http: true
+      mock-config-file: ${SFN_MOCK_CONFIG:src/test/resources/fixtures/sfn-mock-config.json}
+    swf:
+      enabled: true
+      timeout-sweep-enabled: true
+      timeout-sweep-interval-seconds: 1
     cloudformation:
       enabled: true
+      # Fail an AWS::Lambda::Function whose S3 code cannot be read, as real CloudFormation
+      # does. Set true to fall back to the built-in stub handler instead (issue #2648).
+      allow-stub-lambda-code: false
     acm:
       enabled: true
       validation-wait-seconds: 0
@@ -206,6 +242,8 @@ floci:
       max-published-ports-per-instance: 20
       socat-image: alpine/socat
       mock: true
+      aws-faithful-private-ip: false
+      # container-ips-routable: true  # see src/main/resources/application.yml
     ecs:
       enabled: true
       mock: true
@@ -223,6 +261,9 @@ floci:
       enabled: true
       mock: true
       ecr-registry-mirror: true
+    mwaa:
+      enabled: true
+      mock: true
     pipes:
       enabled: true
     elbv2:
@@ -240,6 +281,8 @@ floci:
       enabled: true
     autoscaling:
       enabled: true
+    applicationautoscaling:
+      enabled: true
     elasticbeanstalk:
       enabled: true
     transfer:
@@ -247,9 +290,13 @@ floci:
     backup:
       enabled: true
       job-completion-delay-seconds: 1
+    fis:
+      enabled: true
     route53:
       enabled: true
     textract:
+      enabled: true
+    comprehend:
       enabled: true
     pricing:
       enabled: true
@@ -264,15 +311,21 @@ floci:
     cloudtrail:
       enabled: true
     lightsail:
+      enabled: true
     cloudcontrol:
+      enabled: true
+    resourceexplorer2:
       enabled: true
     cloudfront:
       enabled: true
+      allowed-private-origin-hosts: []
     appsync:
       enabled: true
       schema-worker-threads: 4
       schema-worker-shutdown-timeout-seconds: 30
     s3vectors:
+      enabled: true
+    s3tables:
       enabled: true
     iot:
       enabled: true
@@ -282,4 +335,48 @@ floci:
         host: 127.0.0.1
         port: 1883
     iotdata:
+      enabled: true
+    cloudhsmv2:
+      enabled: true
+    efs:
+      enabled: true
+    organizations:
+      enabled: true
+    rum:
+      enabled: true
+    networkfirewall:
+      enabled: true
+    servicecatalog:
+      enabled: true
+    guardduty:
+      enabled: true
+    emrserverless:
+      enabled: true
+    ssoadmin:
+      enabled: true
+    controltower:
+      enabled: true
+    route53resolver:
+      enabled: true
+    aps:
+      enabled: true
+    lakeformation:
+      enabled: true
+    tagging:
+      enabled: true
+    configservice:
+      enabled: true
+    transcribe:
+      enabled: true
+    docdb:
+      enabled: true
+      mock: false
+      default-image: "mongo:7.0"
+    bedrock-agent-core:
+      enabled: true
+    bedrock-agent-core-control:
+      enabled: true
+    servicequotas:
+      enabled: true
+    ram:
       enabled: true

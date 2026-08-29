@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.services.route53.model.HealthCheckConfig;
 import io.github.hectorvent.floci.services.route53.model.HostedZone;
 import io.github.hectorvent.floci.services.route53.model.ResourceRecord;
 import io.github.hectorvent.floci.services.route53.model.ResourceRecordSet;
+import io.github.hectorvent.floci.services.route53.model.VpcAssociation;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.DELETE;
 import jakarta.ws.rs.DefaultValue;
@@ -32,12 +33,35 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 @Path("/2013-04-01")
 public class Route53Controller {
 
     private static final String NS = AwsNamespaces.ROUTE53;
     private static final String XML = "application/xml";
+
+    /**
+     * The {@code VPCRegion} enum, verbatim from the Route 53 model. Deliberately not
+     * {@code AwsRegions.KNOWN_IDS}: the enum admits the ISO and European Sovereign
+     * partitions that this emulator never advertises, and rejecting those would refuse
+     * requests AWS accepts.
+     */
+    private static final Set<String> VPC_REGIONS = Set.of(
+            "us-east-1", "us-east-2", "us-west-1", "us-west-2",
+            "eu-west-1", "eu-west-2", "eu-west-3", "eu-central-1", "eu-central-2",
+            "ap-east-1", "ap-east-2", "me-south-1", "me-central-1",
+            "us-gov-west-1", "us-gov-east-1",
+            "us-iso-east-1", "us-iso-west-1", "us-isob-east-1", "us-isob-west-1",
+            "us-isof-south-1", "us-isof-east-1", "eu-isoe-west-1", "eusc-de-east-1",
+            "ap-southeast-1", "ap-southeast-2", "ap-southeast-3", "ap-southeast-4",
+            "ap-southeast-5", "ap-southeast-6", "ap-southeast-7",
+            "ap-south-1", "ap-south-2",
+            "ap-northeast-1", "ap-northeast-2", "ap-northeast-3",
+            "eu-north-1", "sa-east-1", "ca-central-1", "ca-west-1",
+            "cn-north-1", "cn-northwest-1",
+            "af-south-1", "eu-south-1", "eu-south-2",
+            "il-central-1", "mx-central-1");
 
     private static final XMLInputFactory XML_FACTORY;
 
@@ -60,25 +84,29 @@ public class Route53Controller {
             String name = XmlParser.extractFirst(body, "Name", null);
             String callerRef = XmlParser.extractFirst(body, "CallerReference", null);
             String comment = XmlParser.extractFirst(body, "Comment", null);
-            boolean privateZone = "true".equalsIgnoreCase(
-                    XmlParser.extractFirst(body, "PrivateZone", "false"));
+            VpcAssociation vpcAssociation = parseVpcAssociation(body);
+            if (vpcAssociation != null) {
+                requireModelledVpcRegion(vpcAssociation.getVpcRegion());
+            }
 
             if (name == null || callerRef == null) {
                 throw new AwsException("InvalidInput", "Name and CallerReference are required.", 400);
             }
 
-            CreateZoneResult result = service.createHostedZone(name, callerRef, comment, privateZone);
-            String xml = new XmlBuilder()
+            CreateZoneResult result = service.createHostedZone(name, callerRef, comment, vpcAssociation);
+            XmlBuilder xml = new XmlBuilder()
                     .start("CreateHostedZoneResponse", NS)
                     .raw(xmlHostedZone(result.zone()))
                     .raw(xmlChangeInfo(result.change()))
-                    .raw(xmlDelegationSet())
-                    .end("CreateHostedZoneResponse")
-                    .build();
+                    .raw(xmlDelegationSet());
+            if (!result.zone().getVpcAssociations().isEmpty()) {
+                xml.raw(xmlVpcAssociation(result.zone().getVpcAssociations().getFirst()));
+            }
+            xml.end("CreateHostedZoneResponse");
 
             return Response.created(URI.create("/2013-04-01/hostedzone/" + result.zone().getId()))
                     .type(XML)
-                    .entity(xml)
+                    .entity(xml.build())
                     .build();
         } catch (AwsException e) {
             return xmlErrorResponse(e);
@@ -94,6 +122,7 @@ public class Route53Controller {
                     .start("GetHostedZoneResponse", NS)
                     .raw(xmlHostedZone(zone))
                     .raw(xmlDelegationSet())
+                    .raw(xmlVpcAssociations(zone.getVpcAssociations()))
                     .end("GetHostedZoneResponse")
                     .build();
             return Response.ok(xml, XML).build();
@@ -170,6 +199,146 @@ public class Route53Controller {
                 xml.elem("DNSName", dnsName);
             }
             xml.end("ListHostedZonesByNameResponse");
+
+            return Response.ok(xml.build(), XML).build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    // ── VPC Associations ──────────────────────────────────────────────────────
+
+    @POST
+    @Path("/hostedzone/{Id}/associatevpc")
+    public Response associateVpcWithHostedZone(@PathParam("Id") String id, String body) {
+        try {
+            VpcAssociation vpc = requireVpcAssociation(body);
+            String comment = XmlParser.extractFirst(body, "Comment", null);
+            ChangeInfo change = service.associateVpcWithHostedZone(id, vpc, comment);
+            String xml = new XmlBuilder()
+                    .start("AssociateVPCWithHostedZoneResponse", NS)
+                    .raw(xmlChangeInfo(change))
+                    .end("AssociateVPCWithHostedZoneResponse")
+                    .build();
+            return Response.ok(xml, XML).build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    @POST
+    @Path("/hostedzone/{Id}/disassociatevpc")
+    public Response disassociateVpcFromHostedZone(@PathParam("Id") String id, String body) {
+        try {
+            VpcAssociation vpc = requireVpcAssociationWithoutRegionCheck(body);
+            String comment = XmlParser.extractFirst(body, "Comment", null);
+            ChangeInfo change = service.disassociateVpcFromHostedZone(id, vpc, comment);
+            String xml = new XmlBuilder()
+                    .start("DisassociateVPCFromHostedZoneResponse", NS)
+                    .raw(xmlChangeInfo(change))
+                    .end("DisassociateVPCFromHostedZoneResponse")
+                    .build();
+            return Response.ok(xml, XML).build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    /**
+     * Authorization is only meaningful when the zone and the VPC belong to different
+     * accounts. Zones are not account-scoped here, so this validates the request and
+     * echoes the authorized VPC back without gating a later associate call.
+     */
+    @POST
+    @Path("/hostedzone/{Id}/authorizevpcassociation")
+    public Response createVpcAssociationAuthorization(@PathParam("Id") String id, String body) {
+        try {
+            VpcAssociation vpc = requireVpcAssociation(body);
+            service.getHostedZone(id);
+            String xml = new XmlBuilder()
+                    .start("CreateVPCAssociationAuthorizationResponse", NS)
+                    .elem("HostedZoneId", id)
+                    .raw(xmlVpcAssociation(vpc))
+                    .end("CreateVPCAssociationAuthorizationResponse")
+                    .build();
+            return Response.ok(xml, XML).build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    /**
+     * Counterpart to {@link #createVpcAssociationAuthorization}; the response has no members,
+     * so this returns the response's root element with nothing inside it.
+     */
+    @POST
+    @Path("/hostedzone/{Id}/deauthorizevpcassociation")
+    public Response deleteVpcAssociationAuthorization(@PathParam("Id") String id, String body) {
+        try {
+            requireVpcAssociation(body);
+            service.getHostedZone(id);
+            String xml = new XmlBuilder()
+                    .start("DeleteVPCAssociationAuthorizationResponse", NS)
+                    .end("DeleteVPCAssociationAuthorizationResponse")
+                    .build();
+            return Response.ok(xml, XML).build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    @GET
+    @Path("/hostedzonesbyvpc")
+    public Response listHostedZonesByVpc(@QueryParam("vpcid") String vpcId,
+                                         @QueryParam("vpcregion") String vpcRegion,
+                                         @QueryParam("maxitems") @DefaultValue("100") int maxItems,
+                                         @QueryParam("nexttoken") String nextToken) {
+        try {
+            if (vpcId == null || vpcId.isEmpty()) {
+                throw new AwsException("InvalidInput", "VPCId is required.", 400);
+            }
+            if (vpcRegion == null || vpcRegion.isEmpty()) {
+                throw new AwsException("InvalidInput", "VPCRegion is required.", 400);
+            }
+            // Deliberately not enum-gated: an association persisted under a region since
+            // retired from VPC_REGIONS (or from before this check existed) must remain listable.
+
+            if (maxItems <= 0) {
+                throw new AwsException("InvalidInput", "MaxItems must be a positive integer.", 400);
+            }
+
+            List<HostedZone> zones = service.listHostedZonesByVpc(vpcId, vpcRegion);
+            if (nextToken != null && !nextToken.isEmpty()) {
+                int idx = -1;
+                for (int i = 0; i < zones.size(); i++) {
+                    if (zones.get(i).getId().equals(nextToken)) {
+                        idx = i + 1;
+                        break;
+                    }
+                }
+                if (idx < 0) {
+                    throw new AwsException("InvalidPaginationToken",
+                            "Invalid value for NextToken: " + nextToken, 400);
+                }
+                zones = zones.subList(idx, zones.size());
+            }
+            boolean truncated = zones.size() > maxItems;
+            if (truncated) {
+                zones = zones.subList(0, maxItems);
+            }
+
+            XmlBuilder xml = new XmlBuilder()
+                    .start("ListHostedZonesByVPCResponse", NS)
+                    .start("HostedZoneSummaries");
+            for (HostedZone zone : zones) {
+                xml.raw(xmlHostedZoneSummary(zone));
+            }
+            xml.end("HostedZoneSummaries")
+               .elem("MaxItems", String.valueOf(maxItems));
+            if (truncated) {
+                xml.elem("NextToken", zones.get(zones.size() - 1).getId());
+            }
+            xml.end("ListHostedZonesByVPCResponse");
 
             return Response.ok(xml.build(), XML).build();
         } catch (AwsException e) {
@@ -541,6 +710,38 @@ public class Route53Controller {
         return xml.build();
     }
 
+    private String xmlVpcAssociation(VpcAssociation association) {
+        return new XmlBuilder()
+                .start("VPC")
+                .elem("VPCRegion", association.getVpcRegion())
+                .elem("VPCId", association.getVpcId())
+                .end("VPC")
+                .build();
+    }
+
+    private String xmlVpcAssociations(List<VpcAssociation> associations) {
+        if (associations == null || associations.isEmpty()) {
+            return "";
+        }
+        XmlBuilder xml = new XmlBuilder().start("VPCs");
+        for (VpcAssociation association : associations) {
+            xml.raw(xmlVpcAssociation(association));
+        }
+        return xml.end("VPCs").build();
+    }
+
+    private String xmlHostedZoneSummary(HostedZone zone) {
+        return new XmlBuilder()
+                .start("HostedZoneSummary")
+                .elem("HostedZoneId", zone.getId())
+                .elem("Name", zone.getName())
+                .start("Owner")
+                .elem("OwningAccount", service.getDefaultAccountId())
+                .end("Owner")
+                .end("HostedZoneSummary")
+                .build();
+    }
+
     private String xmlResourceRecordSet(ResourceRecordSet rrs) {
         XmlBuilder xml = new XmlBuilder()
                 .start("ResourceRecordSet")
@@ -610,6 +811,60 @@ public class Route53Controller {
     }
 
     // ── Request parsers ───────────────────────────────────────────────────────
+
+    private VpcAssociation parseVpcAssociation(String body) {
+        List<Map<String, String>> vpcs = XmlParser.extractGroups(body, "VPC");
+        if (vpcs.isEmpty()) {
+            return null;
+        }
+        Map<String, String> vpc = vpcs.get(0);
+        String vpcId = vpc.get("VPCId");
+        String vpcRegion = vpc.get("VPCRegion");
+        // AWS requires VPCId and VPCRegion together whenever VPC is present; a
+        // half-populated element must not mark the zone private.
+        if (vpcId == null || vpcId.isEmpty() || vpcRegion == null || vpcRegion.isEmpty()) {
+            throw new AwsException(
+                    "InvalidInput", "VPCId and VPCRegion are both required when VPC is specified.", 400);
+        }
+        return new VpcAssociation(vpcId, vpcRegion);
+    }
+
+    /**
+     * Parses the VPC element for the association operations, where AWS marks VPC as a
+     * required member — unlike CreateHostedZone, where its absence just means a public zone.
+     */
+    private VpcAssociation requireVpcAssociation(String body) {
+        VpcAssociation vpc = requireVpcAssociationWithoutRegionCheck(body);
+        requireModelledVpcRegion(vpc.getVpcRegion());
+        return vpc;
+    }
+
+    /**
+     * Same as {@link #requireVpcAssociation}, but skips the enum check: used by disassociate,
+     * where the target may be a legacy-persisted association whose region has since left
+     * VPC_REGIONS (or predates the enum check entirely). Rejecting the lookup here would strand
+     * that association — impossible to remove without deleting the whole hosted zone.
+     */
+    private VpcAssociation requireVpcAssociationWithoutRegionCheck(String body) {
+        VpcAssociation vpc = parseVpcAssociation(body);
+        if (vpc == null) {
+            throw new AwsException("InvalidInput", "VPC is required.", 400);
+        }
+        return vpc;
+    }
+
+    /**
+     * Rejects a VPCRegion outside the modelled enum. Without this the association is stored
+     * under a region that can never be matched again, so the associate reports success while
+     * the later disassociate and ListHostedZonesByVPC silently miss it.
+     */
+    private static void requireModelledVpcRegion(String vpcRegion) {
+        if (!VPC_REGIONS.contains(vpcRegion)) {
+            throw new AwsException("InvalidInput",
+                    "Invalid value '" + vpcRegion + "' at 'VPCRegion' failed to satisfy constraint: "
+                            + "Member must satisfy enum value set.", 400);
+        }
+    }
 
     /**
      * Parses the ChangeBatch XML using StAX to correctly handle multiple Change elements,

@@ -1,0 +1,61 @@
+# Registry for the service-matrix presence check (tools/docs/check_service_matrix.py).
+#
+# Every descriptor("externalKey", "configKey", ...) registered in
+# core/common/ResolvedServiceCatalog.java must resolve to a row in the Service Matrix
+# table in docs/services/index.md, keyed by the .md filename its row links to (no
+# extension, no #anchor). A key resolves one of three ways:
+#
+#   1. exact match  - externalKey literally equals a documented filename. No entry
+#                      needed in this file; most services work this way.
+#   2. aliases       - externalKey differs from the filename that documents it, because
+#                      it's an AWS SigV4 signing-name quirk (`kafka` -> msk.md) or a
+#                      facet folded into another service's page (`ec2messages` -> ssm.md).
+#   3. deferred      - genuinely undocumented today, tracked with a reason. A NEW
+#                      descriptor key that is neither an exact match, an alias target,
+#                      nor listed here fails `check_service_matrix.py --strict`.
+
+aliases:
+  apigateway: api-gateway               # "API Gateway v1" row title
+  apigatewayv2: api-gateway             # v2 facet, documented at api-gateway.md#v2
+  aps: managed-prometheus               # AMP's SigV4 signing name is "aps"
+  kafka: msk                            # MSK's SigV4 signing name is "kafka"
+  mq: amazonmq                          # Amazon MQ's SigV4 signing name is "mq"
+  signin: iam                           # AWS Sign-In facet, at iam.md#aws-sign-in-login-credentials
+  sso: iam                              # Identity Center ListInstances facet on the IAM page
+  events: eventbridge
+  servicediscovery: cloudmap            # Cloud Map's SigV4 signing name
+  elasticmapreduce: emr                 # EMR's SigV4 signing name
+  logs: cloudwatch                      # CloudWatch Logs facet, at cloudwatch.md
+  monitoring: cloudwatch                # CloudWatch Metrics facet, at cloudwatch.md#metrics
+  secretsmanager: secrets-manager
+  servicecatalog: service-catalog
+  cognito-idp: cognito                  # Cognito's SigV4 signing name
+  states: step-functions                # Step Functions' SigV4 signing name
+  email: ses                            # SES's SigV4 signing name
+  es: opensearch                        # OpenSearch's SigV4 signing name (legacy Elasticsearch)
+  appconfigdata: appconfig              # data-plane facet, at appconfig.md#data-plane
+  tagging: resource-groups-tagging      # Resource Groups Tagging API's SigV4 signing name
+  elasticloadbalancing: elb             # ELB v2's SigV4 signing name
+  application-autoscaling: applicationautoscaling
+  elasticbeanstalk: elastic-beanstalk
+  ec2messages: ssm                      # SSM Messages facet, documented alongside ssm.md
+  iotdata: iot                          # IoT Data row shares iot.md with IoT Core
+  resource-explorer-2: resource-explorer # API version suffix; the page is resource-explorer.md
+
+# A NEW switch/REST descriptor not listed here and not resolvable via an alias fails
+# `--strict`. Every entry MUST carry a `by:` expiry date (ISO, YYYY-MM-DD): once that
+# date passes, `--strict` fails for it exactly as if it were never listed, even though
+# the entry is still physically present in this file. This is deliberate - an
+# unbounded deferred list is a silent, permanent bypass of the whole check, which is
+# how Bedrock AgentCore (#2316) shipped a working service that stayed off the matrix
+# for five days with nothing red anywhere. An expiring entry forces a human to either
+# add the row or come back and renew the date with a fresh justification; it can never
+# just be forgotten. Remove an entry outright once the referenced PR merges and the
+# row lands - don't wait for it to expire.
+deferred:
+  - key: bedrock-agentcore
+    reason: "documented by floci-io/floci#2436 (open at time of writing)"
+    by: "2026-09-15"
+  - key: bedrock-agentcore-control
+    reason: "documented by floci-io/floci#2436 (open at time of writing)"
+    by: "2026-09-15"

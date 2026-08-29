@@ -3,11 +3,14 @@ package io.github.hectorvent.floci.services.ssm;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ssm.model.Parameter;
 import io.github.hectorvent.floci.services.ssm.model.ParameterHistory;
 import io.github.hectorvent.floci.services.ssm.model.PatchBaselineIdentity;
+import io.github.hectorvent.floci.services.ssm.model.ServiceSetting;
+import io.github.hectorvent.floci.services.ssm.model.SsmDocument;
 import com.fasterxml.jackson.core.type.TypeReference;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -15,14 +18,34 @@ import org.jboss.logging.Logger;
 
 import java.time.Instant;
 import java.util.*;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import java.util.ArrayList;
+import java.util.Set;
 
 @ApplicationScoped
-public class SsmService {
+public class SsmService implements ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(SsmService.class);
 
+    /**
+     * Account-default values for the service settings floci models. AWS rejects
+     * unknown setting ids with ServiceSettingNotFound; so do we.
+     */
+    private static final Map<String, String> SERVICE_SETTING_DEFAULTS = Map.of(
+            "/ssm/documents/console/public-sharing-permission", "Enable",
+            "/ssm/parameter-store/default-parameter-tier", "Standard",
+            "/ssm/parameter-store/high-throughput-enabled", "false",
+            "/ssm/managed-instance/activation-tier", "standard"
+    );
+
     private final StorageBackend<String, Parameter> parameterStore;
     private final StorageBackend<String, List<ParameterHistory>> historyStore;
+    private final StorageBackend<String, List<String>> documentPermissionStore;
+    private final StorageBackend<String, SsmDocument> documentStore;
+    private final StorageBackend<String, ServiceSetting> serviceSettingStore;
     private final int maxParameterHistory;
     private final RegionResolver regionResolver;
 
@@ -35,6 +58,15 @@ public class SsmService {
                 storageFactory.create("ssm", "ssm-history.json",
                         new TypeReference<>() {
                         }),
+                storageFactory.create("ssm", "ssm-document-permissions.json",
+                        new TypeReference<>() {
+                        }),
+                storageFactory.create("ssm", "ssm-documents.json",
+                        new TypeReference<>() {
+                        }),
+                storageFactory.create("ssm", "ssm-service-settings.json",
+                        new TypeReference<>() {
+                        }),
                 config.services().ssm().maxParameterHistory(),
                 regionResolver
         );
@@ -45,16 +77,35 @@ public class SsmService {
      */
     SsmService(StorageBackend<String, Parameter> parameterStore,
                StorageBackend<String, List<ParameterHistory>> historyStore,
+               StorageBackend<String, List<String>> documentPermissionStore,
                int maxParameterHistory) {
-        this(parameterStore, historyStore, maxParameterHistory,
+        this(parameterStore, historyStore, documentPermissionStore, new InMemoryStorage<>(),
+                new InMemoryStorage<>(), maxParameterHistory,
+                new RegionResolver("us-east-1", "000000000000"));
+    }
+
+    /**
+     * Package-private constructor for testing without CDI.
+     */
+    SsmService(StorageBackend<String, Parameter> parameterStore,
+               StorageBackend<String, List<ParameterHistory>> historyStore,
+               int maxParameterHistory) {
+        this(parameterStore, historyStore, new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), maxParameterHistory,
                 new RegionResolver("us-east-1", "000000000000"));
     }
 
     SsmService(StorageBackend<String, Parameter> parameterStore,
                StorageBackend<String, List<ParameterHistory>> historyStore,
+               StorageBackend<String, List<String>> documentPermissionStore,
+               StorageBackend<String, SsmDocument> documentStore,
+               StorageBackend<String, ServiceSetting> serviceSettingStore,
                int maxParameterHistory, RegionResolver regionResolver) {
         this.parameterStore = parameterStore;
         this.historyStore = historyStore;
+        this.documentPermissionStore = documentPermissionStore;
+        this.documentStore = documentStore;
+        this.serviceSettingStore = serviceSettingStore;
         this.maxParameterHistory = maxParameterHistory;
         this.regionResolver = regionResolver;
     }
@@ -242,6 +293,88 @@ public class SsmService {
         LOG.debugv("Removed tags from parameter: {0}", resourceId);
     }
 
+    // ──────────────────────── Documents and Share Permissions ────────────────
+    // Documents live in documentStore; share state is kept alongside it in
+    // documentPermissionStore so callers like LZA's Custom::SSMShareDocument handler
+    // can round-trip ModifyDocumentPermission -> DescribeDocumentPermission.
+    // Both permission operations resolve the document first, so an unknown document
+    // raises InvalidDocument instead of silently minting or reporting share state for
+    // a document that does not exist. (ListDocuments still returns an empty list; it
+    // is not wired to documentStore.)
+
+    public SsmDocument getDocument(String name, String region) {
+        return documentStore.get(regionKey(region, name))
+                .orElseThrow(() -> new AwsException("InvalidDocument",
+                        "Document " + name + " does not exist.", 400));
+    }
+
+    public synchronized SsmDocument createDocument(String name, String content, String documentType, String region) {
+        String storageKey = regionKey(region, name);
+        if (documentStore.get(storageKey).isPresent()) {
+            throw new AwsException("DocumentAlreadyExists",
+                    "Document " + name + " already exists.", 400);
+        }
+        SsmDocument document = new SsmDocument(name, content, documentType);
+        documentStore.put(storageKey, document);
+        return document;
+    }
+
+    public SsmDocument updateDocument(String name, String content, String region) {
+        String storageKey = regionKey(region, name);
+        SsmDocument document = documentStore.get(storageKey)
+                .orElseThrow(() -> new AwsException("InvalidDocument",
+                        "Document " + name + " does not exist.", 400));
+        if (Objects.equals(document.getContent(), content)) {
+            throw new AwsException("DuplicateDocumentContent",
+                    "The content of the association document matches another document. "
+                            + "Change the content of the document and try again.", 400);
+        }
+        document.setContent(content);
+        document.setDocumentVersion(document.getDocumentVersion() + 1);
+        documentStore.put(storageKey, document);
+        return document;
+    }
+
+    /**
+     * Lists the accounts a document is shared with. AWS raises InvalidDocument for a
+     * document that does not exist rather than returning an empty list, so the document
+     * is resolved first.
+     */
+    public List<String> describeDocumentPermission(String name, String region) {
+        getDocument(name, region);
+        return documentPermissionStore.get(regionKey(region, name))
+                .map(List::copyOf)
+                .orElse(List.of());
+    }
+
+    /**
+     * Shares (or un-shares) a document with other accounts.
+     *
+     * <p>Only the document's owner may share it. Ownership here <em>is</em> the storage
+     * partition: {@code documentStore} is an {@code AccountAwareStorageBackend}, whose key
+     * prefix is the caller's account from {@code RequestContext} — the same resolution
+     * {@code RegionResolver.getAccountId()} performs — so {@link #getDocument} can only
+     * resolve a document in the caller's own partition. A caller that does not own the
+     * document therefore gets InvalidDocument, which is AWS's answer for a document the
+     * caller cannot see. Deriving the check from the partition rather than a second stored
+     * owner field keeps the guard and the storage scope from ever disagreeing.
+     */
+    public synchronized void modifyDocumentPermission(String name, List<String> accountIdsToAdd,
+                                         List<String> accountIdsToRemove, String region) {
+        getDocument(name, region);
+        String storageKey = regionKey(region, name);
+        List<String> accountIds = new ArrayList<>(
+                documentPermissionStore.get(storageKey).orElse(List.of()));
+        for (String accountId : accountIdsToAdd) {
+            if (!accountIds.contains(accountId)) {
+                accountIds.add(accountId);
+            }
+        }
+        accountIds.removeAll(accountIdsToRemove);
+        documentPermissionStore.put(storageKey, accountIds);
+        LOG.debugv("Modified document permission for {0}: {1} account(s) shared", name, accountIds.size());
+    }
+
     // ──────────────────────────── Patch Baselines ────────────────────────────
     // AWS provides a fixed set of AWS-owned predefined patch baselines (one default per operating
     // system). These are static reference data, not customer state, so they live in-memory only.
@@ -318,6 +451,58 @@ public class SsmService {
                         "No default patch baseline exists for operating system " + os, 400));
     }
 
+    /**
+     * Read a service setting for the calling account. Never-customized settings
+     * report their account default with status "Default".
+     */
+    public ServiceSetting getServiceSetting(String settingId, String region) {
+        String defaultValue = requireKnownSetting(settingId);
+        return serviceSettingStore.get(settingKey(region, settingId))
+                .orElseGet(() -> defaultSetting(settingId, defaultValue, region));
+    }
+
+    public void updateServiceSetting(String settingId, String settingValue, String region) {
+        requireKnownSetting(settingId);
+        ServiceSetting setting = new ServiceSetting(settingId, settingValue,
+                settingArn(settingId, region), "Customized",
+                "arn:aws:iam::" + regionResolver.getAccountId() + ":root");
+        serviceSettingStore.put(settingKey(region, settingId), setting);
+    }
+
+    public ServiceSetting resetServiceSetting(String settingId, String region) {
+        String defaultValue = requireKnownSetting(settingId);
+        serviceSettingStore.delete(settingKey(region, settingId));
+        return defaultSetting(settingId, defaultValue, region);
+    }
+
+    private String requireKnownSetting(String settingId) {
+        String defaultValue = SERVICE_SETTING_DEFAULTS.get(settingId);
+        if (defaultValue == null) {
+            throw new AwsException("ServiceSettingNotFound",
+                    "The specified service setting was not found: " + settingId, 400);
+        }
+        return defaultValue;
+    }
+
+    private ServiceSetting defaultSetting(String settingId, String defaultValue, String region) {
+        return new ServiceSetting(settingId, defaultValue, settingArn(settingId, region),
+                "Default", "System");
+    }
+
+    /**
+     * Service settings are per-account per-region: LZA assumes a role into each
+     * member account before updating, so the caller's resolved account scopes the key.
+     */
+    private String settingKey(String region, String settingId) {
+        return regionResolver.getAccountId() + "::" + regionKey(region, settingId);
+    }
+
+    private String settingArn(String settingId, String region) {
+        // Setting ids begin with "/", so concatenation yields .../servicesetting/ssm/...
+        return "arn:aws:ssm:" + region + ":" + regionResolver.getAccountId()
+                + ":servicesetting" + settingId;
+    }
+
     private static String regionKey(String region, String name) {
         return region + "::" + name;
     }
@@ -334,5 +519,40 @@ public class SsmService {
         }
 
         historyStore.put(storageKey, history);
+    }
+
+    public synchronized void deleteDocument(String name, String region) {
+        String storageKey = regionKey(region, name);
+        if (!documentStore.get(storageKey).isPresent()) {
+            throw new AwsException("InvalidDocument",
+                    "Document " + name + " does not exist.", 400);
+        }
+        documentStore.delete(storageKey);
+        documentPermissionStore.delete(storageKey);
+    }
+
+    // ─── Resource Explorer 2 ───────────────────────────────────────────────────
+
+    @Override
+    public List<ExplorerResource> getResources() {
+        List<ExplorerResource> resources = new ArrayList<>();
+        for (Parameter parameter : parameterStore.scan(k -> true)) {
+            String arn = parameter.getArn();
+            if (arn == null) {
+                continue;
+            }
+            AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+            resources.add(new ExplorerResource(
+                    arn, "ssm:parameter", "ssm",
+                    parsed.region(), parsed.accountId(),
+                    parameter.getLastModifiedDate() != null ? parameter.getLastModifiedDate() : Instant.now(),
+                    parameter.getTags() != null ? parameter.getTags() : Map.of()));
+        }
+        return resources;
+    }
+
+    @Override
+    public Set<SupportedResourceType> getSupportedResourceTypes() {
+        return Set.of(new SupportedResourceType("ssm:parameter", "ssm", true));
     }
 }

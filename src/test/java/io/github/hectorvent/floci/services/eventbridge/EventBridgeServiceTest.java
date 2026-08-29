@@ -12,6 +12,8 @@ import io.github.hectorvent.floci.services.eventbridge.model.Target;
 import io.github.hectorvent.floci.services.resourcegroupstagging.ResourceGroupsTaggingService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.List;
 import java.util.Map;
@@ -33,6 +35,7 @@ class EventBridgeServiceTest {
     void setUp() {
         invokerMock = mock(EventBridgeInvoker.class);
         service = new EventBridgeService(
+                new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
@@ -77,10 +80,54 @@ class EventBridgeServiceTest {
                 service.createEventBus("", null, null, REGION));
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"default", "contains/slash", "contains space", "contains*star"})
+    void createEventBusRejectsInvalidCustomNames(String name) {
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.createEventBus(name, null, null, REGION));
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+    }
+
+    @Test
+    void createEventBusRejectsLongNameAndDescription() {
+        assertThrows(AwsException.class, () ->
+                service.createEventBus("n".repeat(257), null, null, REGION));
+        assertThrows(AwsException.class, () ->
+                service.createEventBus("valid-name", "d".repeat(513), null, REGION));
+    }
+
+    @Test
+    void updateEventBusRejectsLongDescription() {
+        service.createEventBus("my-bus", null, null, REGION);
+        assertThrows(AwsException.class, () ->
+                service.updateEventBus(
+                        "my-bus", "d".repeat(513), null, null, null, REGION));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", "contains space", "contains*star"})
+    void updateEventBusRejectsInvalidExplicitNames(String name) {
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.updateEventBus(name, "description", null, null, null, REGION));
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+    }
+
+    @Test
+    void updateEventBusRejectsLongExplicitName() {
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.updateEventBus(
+                        "n".repeat(257), "description", null, null, null, REGION));
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+    }
+
     @Test
     void deleteEventBus() {
         service.createEventBus("my-bus", null, null, REGION);
         service.deleteEventBus("my-bus", REGION);
+        assertDoesNotThrow(() -> service.deleteEventBus("my-bus", REGION));
 
         assertThrows(AwsException.class, () ->
                 service.describeEventBus("my-bus", REGION));
@@ -90,6 +137,28 @@ class EventBridgeServiceTest {
     void deleteDefaultBusThrows() {
         assertThrows(AwsException.class, () ->
                 service.deleteEventBus("default", REGION));
+    }
+
+    @Test
+    void deleteMissingEventBusIsIdempotent() {
+        assertDoesNotThrow(() -> service.deleteEventBus("missing-bus", REGION));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"contains space", "contains*star"})
+    void deleteEventBusRejectsInvalidNames(String name) {
+        AwsException error = assertThrows(
+                AwsException.class, () -> service.deleteEventBus(name, REGION));
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+    }
+
+    @Test
+    void deleteEventBusRejectsLongName() {
+        AwsException error = assertThrows(
+                AwsException.class, () -> service.deleteEventBus("n".repeat(257), REGION));
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
     }
 
     @Test
@@ -153,12 +222,22 @@ class EventBridgeServiceTest {
     }
 
     @Test
-    void deleteRule() {
+    void deleteRuleIsIdempotent() {
         service.putRule("my-rule", null, null, "rate(1 minute)", RuleState.ENABLED,
                 null, null, null, REGION);
         service.deleteRule("my-rule", null, REGION);
+        assertDoesNotThrow(() -> service.deleteRule("my-rule", null, REGION));
 
         assertTrue(service.listRules(null, null, REGION).isEmpty());
+    }
+
+    @Test
+    void deleteRuleForMissingCustomBusThrowsResourceNotFound() {
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.deleteRule("missing-rule", "missing-bus", REGION));
+
+        assertEquals("ResourceNotFoundException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
     }
 
     @Test

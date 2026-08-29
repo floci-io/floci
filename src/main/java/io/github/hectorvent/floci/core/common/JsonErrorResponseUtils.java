@@ -29,6 +29,18 @@ public class JsonErrorResponseUtils {
                 "Unknown operation: " + target, null);
     }
 
+    /**
+     * A request body that is not valid JSON is a client (deserialization) error, not a server
+     * fault. AWS's JSON protocols reject it with 400 SerializationException; without this the
+     * unparsed body escapes to the generic catch and surfaces as 500 InternalFailure.
+     */
+    public static Response createSerializationErrorResponse() {
+        return createErrorResponse(400,
+                "SerializationException",
+                "SerializationException",
+                "The request could not be parsed as valid JSON.", null);
+    }
+
     public static Response createErrorResponse(int httpStatusCode, String queryError, String errorType, String errorMessage, JsonNode item) {
         String queryErrorFault = (httpStatusCode < 500) ? "Sender" : "Receiver";
         if (item != null) {
