@@ -198,6 +198,10 @@ public class TlsConfigSource implements ConfigSource {
         return sans;
     }
 
+    /** Service infixes that AWS virtual-hosts with an extra resource-id label before the region. */
+    private static final List<String> MULTI_LABEL_REGIONAL_SERVICE_INFIXES =
+            List.of("execute-api", "dkr.ecr", "lambda-url", "s3.dualstack");
+
     /**
      * SANs covering AWS endpoint hostnames spoofed by the embedded DNS server.
      * Wildcards match a single label, so {@code *.amazonaws.com} covers global
@@ -209,6 +213,14 @@ public class TlsConfigSource implements ConfigSource {
      * advertise via DescribeRegions); DNS spoofing routes it to Floci regardless of region, so
      * every {@link AwsRegions#KNOWN_IDS published region id} gets a SAN, not just the ones in
      * {@link AwsRegions#ALL} or the configured default.
+     *
+     * <p>A single wildcard label also cannot cover the multi-label endpoints several AWS
+     * services use, where a resource id contributes an extra label before the service name:
+     * {@code <api-id>.execute-api.<region>.amazonaws.com},
+     * {@code <account>.dkr.ecr.<region>.amazonaws.com},
+     * {@code <url-id>.lambda-url.<region>.amazonaws.com}, and
+     * {@code <bucket>.s3.dualstack.<region>.amazonaws.com}. DNS spoofing routes these the same
+     * as any other AWS host, so each needs its own {@code *.<infix>.<region>.amazonaws.com} SAN.
      */
     private List<String> awsSpoofSans() {
         if (!"true".equalsIgnoreCase(resolveProperty("floci.dns.spoof-aws-endpoints", "false"))) {
@@ -223,6 +235,9 @@ public class TlsConfigSource implements ConfigSource {
             // mismatch rather than the request reaching Floci.
             sans.add("*." + region + ".amazonaws.com");
             sans.add("*.s3." + region + ".amazonaws.com");
+            for (String infix : MULTI_LABEL_REGIONAL_SERVICE_INFIXES) {
+                sans.add("*." + infix + "." + region + ".amazonaws.com");
+            }
         }
         return sans;
     }

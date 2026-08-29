@@ -314,6 +314,35 @@ class TlsConfigSourceCertificateGenerationTest {
     }
 
     /**
+     * A wildcard SAN matches exactly one label (RFC 6125 6.4.3), so {@code *.<region>.amazonaws.com}
+     * covers a single-label regional service ({@code sts.us-east-1.amazonaws.com}) but not the
+     * multi-label endpoints several AWS services use, where a resource id contributes an extra
+     * label before the service name: {@code <api-id>.execute-api.<region>.amazonaws.com},
+     * {@code <account>.dkr.ecr.<region>.amazonaws.com}, and
+     * {@code <bucket>.s3.dualstack.<region>.amazonaws.com}. DNS spoofing still routes these to
+     * Floci, so without dedicated SANs the handshake fails before the request reaches the emulator.
+     */
+    @Test
+    void testCertificateCoversMultiLabelRegionalEndpointsWhenSpoofEnabled() throws Exception {
+        // Arrange
+        System.setProperty("floci.dns.spoof-aws-endpoints", "true");
+
+        // Act
+        new TlsConfigSource();
+
+        // Assert
+        List<String> sans = extractSansFromCertificate(tempDir.resolve("tls/floci-selfsigned.crt"));
+        assertTrue(sans.contains("*.execute-api.us-east-1.amazonaws.com"),
+            "Certificate SANs should cover API Gateway execute-api endpoints");
+        assertTrue(sans.contains("*.dkr.ecr.us-east-1.amazonaws.com"),
+            "Certificate SANs should cover ECR dkr.ecr endpoints");
+        assertTrue(sans.contains("*.s3.dualstack.us-east-1.amazonaws.com"),
+            "Certificate SANs should cover dualstack virtual-hosted S3 endpoints");
+        assertTrue(sans.contains("*.lambda-url.us-east-1.amazonaws.com"),
+            "Certificate SANs should cover Lambda function URL endpoints");
+    }
+
+    /**
      * Test that no AWS wildcards are included when spoof-aws-endpoints is disabled
      */
     @Test
