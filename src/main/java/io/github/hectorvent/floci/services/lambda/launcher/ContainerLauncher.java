@@ -1108,32 +1108,54 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         // POPULATE_SEMAPHORE permit; small-code direct copies and layer copies are light enough
         // to run unthrottled.
         AtomicReference<IOException> tarFailure = new AtomicReference<>();
-        RetryingTarCopier.copyStreamed(dockerClient, containerId, remotePath,
-                "dir-" + functionName, out -> {
-                    tarFailure.set(null);
-                    try {
-                        tarWriter.write(sourceDir, out);
-                    } catch (IOException e) {
-                        if (failOnTarFailure) {
+        try {
+            RetryingTarCopier.copyStreamed(dockerClient, containerId, remotePath,
+                    "dir-" + functionName, out -> {
+                        tarFailure.set(null);
+                        try {
+                            tarWriter.write(sourceDir, out);
+                        } catch (IOException e) {
                             tarFailure.set(e);
-                        } else {
-                            LOG.errorv("Failed to stream directory tar for function {0}: {1}",
-                                    functionName, e.getMessage());
+                            if (!failOnTarFailure) {
+                                LOG.errorv("Failed to stream directory tar for function {0}: {1}",
+                                        functionName, e.getMessage());
+                            }
+                            throw e;
                         }
-                        throw e;
-                    }
-                },
-                maxAttempts, backoffMillis);
-        // The copier only fails an attempt when the daemon rejects the truncated stream; the
-        // strict path must also surface a tar-producer failure the daemon happened to accept.
-        IOException failure = tarFailure.get();
-        if (failOnTarFailure && failure != null) {
+                    },
+                    maxAttempts, backoffMillis);
+        } catch (RuntimeException e) {
+            // RetryingTarCopier always surfaces a tar-producer failure it captured (so a writer
+            // failure the daemon happened to accept doesn't masquerade as success), wrapped in its
+            // own generic message. A distinct docker-level failure (the daemon itself rejecting the
+            // stream, not our own writer) isn't ours to reinterpret and must propagate as-is.
+            IOException producerFailure = tarFailure.get();
+            if (!isCausedBy(e, producerFailure)) {
+                throw e;
+            }
+            if (!failOnTarFailure) {
+                LOG.debugv("Ignoring tolerated tar-producer failure for function {0}", functionName);
+                return;
+            }
             IOException cause = new IOException("Failed to stream tar for function " + functionName
-                    + " from " + sourceDir, failure);
+                    + " from " + sourceDir, producerFailure);
             throw new RuntimeException("Failed to copy directory " + sourceDir + " into container "
                     + containerId + " for function " + functionName + ": " + cause.getMessage(), cause);
         }
         LOG.debugv("Copied directory {0} into container {1} at {2}", sourceDir, containerId, remotePath);
+    }
+
+    /** True if {@code target} appears by reference in {@code thrown}'s cause chain. */
+    private static boolean isCausedBy(Throwable thrown, Throwable target) {
+        if (target == null) {
+            return false;
+        }
+        for (Throwable t = thrown; t != null; t = t.getCause()) {
+            if (t == target) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private void copyFileToContainer(DockerClient dockerClient, String containerId,
