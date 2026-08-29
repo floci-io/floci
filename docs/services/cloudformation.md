@@ -85,6 +85,8 @@ cross-resource references.
 | Kinesis Data Firehose | `DeliveryStream` |
 | CloudWatch | `Alarm` |
 | CloudWatch Logs | `LogGroup` |
+| WAFv2 | `WebACL` |
+| Config | `ConfigRule` |
 | CloudFormation | `Stack` (nested stacks), `CustomResource` and `Custom::*` (Lambda-backed) |
 | CDK | `CDK::Metadata` (accepted; no-op) |
 

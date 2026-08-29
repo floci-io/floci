@@ -95,6 +95,27 @@ class WafV2CfnProvisionerTest {
         assertEquals("arn:new", resource.getAttributes().get("Arn"));
     }
 
+    @Test
+    void intrinsicResolvedRuleFieldIsNotDoubleEncoded() {
+        ObjectNode props = mapper.createObjectNode().put("Name", "portal").put("Scope", "REGIONAL");
+        props.set("DefaultAction", mapper.createObjectNode());
+        ObjectNode resolved = mapper.createObjectNode().put("Name", "portal").put("Scope", "REGIONAL");
+        resolved.set("DefaultAction",
+                com.fasterxml.jackson.databind.node.TextNode.valueOf("{\"Allow\":{}}"));
+        WebAcl created = acl("portal", "acl-1", "REGIONAL", "lock-1");
+        when(wafV2.createWebAcl(any(), eq("REGIONAL"), eq("portal"), eq("us-east-1"))).thenReturn(created);
+        StackResource resource = resource();
+        CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
+        when(engine.resolveNode(props)).thenReturn(resolved);
+        ProvisionContext ctx = new ProvisionContext(engine, "us-east-1", "111122223333", "stack");
+
+        provisioner.provision(resource, props, ctx);
+
+        ArgumentCaptor<WebAcl> desired = ArgumentCaptor.forClass(WebAcl.class);
+        verify(wafV2).createWebAcl(desired.capture(), eq("REGIONAL"), eq("portal"), eq("us-east-1"));
+        assertEquals("{\"Allow\":{}}", desired.getValue().getDefaultAction());
+    }
+
     private ProvisionContext context() {
         CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
         when(engine.resolveNode(any(JsonNode.class))).thenAnswer(inv -> inv.getArgument(0));

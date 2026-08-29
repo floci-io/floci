@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.services.wafv2.WafV2Service;
 import io.github.hectorvent.floci.services.wafv2.model.WebAcl;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -16,6 +17,7 @@ import java.util.Set;
 @ApplicationScoped
 public class WafV2CfnProvisioner implements CfnResourceProvisioner {
 
+    private static final Logger LOG = Logger.getLogger(WafV2CfnProvisioner.class);
     private static final String WEB_ACL = "AWS::WAFv2::WebACL";
 
     private final WafV2Service wafV2Service;
@@ -53,8 +55,10 @@ public class WafV2CfnProvisioner implements CfnResourceProvisioner {
             if (existing != null) {
                 try {
                     wafV2Service.deleteWebAcl(existing.getScope(), existing.getId(), existing.getLockToken());
-                } catch (RuntimeException ignored) {
+                } catch (RuntimeException e) {
                     // old ACL may still be associated with a resource; new ACL is already tracked
+                    LOG.warnv("WAFv2 CFN replacement cleanup of {0}|{1}|{2} tolerated: {3}",
+                            existing.getName(), existing.getId(), existing.getScope(), e.getMessage());
                 }
             }
             return;
@@ -138,6 +142,12 @@ public class WafV2CfnProvisioner implements CfnResourceProvisioner {
 
     private String raw(JsonNode node, String field) {
         JsonNode value = node == null ? null : node.get(field);
-        return value == null || value.isNull() || value.isEmpty() ? null : value.toString();
+        if (value == null || value.isNull()) {
+            return null;
+        }
+        if (value.isTextual()) {
+            return value.asText();
+        }
+        return value.isEmpty() ? null : value.toString();
     }
 }

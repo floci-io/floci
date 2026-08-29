@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.configservice.model.Scope;
 import io.github.hectorvent.floci.services.configservice.model.SourceDetail;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -19,6 +20,7 @@ import java.util.Set;
 @ApplicationScoped
 public class ConfigCfnProvisioner implements CfnResourceProvisioner {
 
+    private static final Logger LOG = Logger.getLogger(ConfigCfnProvisioner.class);
     private static final String CONFIG_RULE = "AWS::Config::ConfigRule";
 
     private final AwsConfigService configService;
@@ -54,8 +56,10 @@ public class ConfigCfnProvisioner implements CfnResourceProvisioner {
         if (previousName != null && !previousName.equals(name)) {
             try {
                 deleteIfPresent(ctx.region(), previousName);
-            } catch (RuntimeException ignored) {
+            } catch (RuntimeException e) {
                 // old rule may still be referenced elsewhere; new rule is already tracked
+                LOG.warnv("Config CFN replacement cleanup of rule {0} tolerated: {1}",
+                        previousName, e.getMessage());
             }
         }
     }
