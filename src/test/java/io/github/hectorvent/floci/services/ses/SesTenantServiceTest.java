@@ -403,6 +403,9 @@ class SesTenantServiceTest {
         assertEquals("TenantName cannot be empty",
                 assertThrows(AwsException.class,
                         () -> service.runWithTenant(" ", REGION, t -> null)).getMessage());
+        assertTrue(assertThrows(AwsException.class,
+                () -> service.runWithTenant(null, REGION, t -> null))
+                .getMessage().contains("Member must not be null"));
         assertEquals("NotFoundException",
                 assertThrows(AwsException.class,
                         () -> service.runWithTenant("ghost", REGION, t -> null)).getErrorCode());

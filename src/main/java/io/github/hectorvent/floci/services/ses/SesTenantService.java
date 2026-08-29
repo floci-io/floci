@@ -405,6 +405,11 @@ public class SesTenantService {
      * cannot interleave and leave entries for a deleted tenant.
      */
     public <T> T runWithTenant(String tenantName, String region, Function<Tenant, T> action) {
+        if (tenantName == null) {
+            throw new AwsException("BadRequestException",
+                    "1 validation error detected: Value at 'tenantName' failed to satisfy constraint: "
+                            + "Member must not be null", 400);
+        }
         if (tenantName.isBlank()) {
             throw new AwsException("BadRequestException", "TenantName cannot be empty", 400);
         }
