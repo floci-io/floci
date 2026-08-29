@@ -65,7 +65,7 @@ class ConfigCfnProvisionerTest {
     void deleteIsIdempotent() {
         when(config.describeConfigRules("us-east-1", List.of())).thenReturn(List.of());
 
-        provisioner.delete("AWS::Config::ConfigRule", "missing", "us-east-1", "111122223333");
+        provisioner.delete("AWS::Config::ConfigRule", "missing", "us-east-1");
 
         verify(config).describeConfigRules("us-east-1", List.of());
     }
