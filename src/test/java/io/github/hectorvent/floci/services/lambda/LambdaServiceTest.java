@@ -991,6 +991,8 @@ class LambdaServiceTest {
             release.countDown();
             pool.shutdownNow();
         }
+    }
+
     // ──────────────────────────── Request-shape validation ────────────────────────────
 
     @Test
