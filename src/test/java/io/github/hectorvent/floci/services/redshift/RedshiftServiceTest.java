@@ -457,14 +457,30 @@ class RedshiftServiceTest {
 
     @Test
     void testRestoreFromClusterSnapshotFailure() {
-        Snapshot snapshot = new Snapshot("my-snapshot", "source-cluster", "available", 5439, "admin", "CREATE TABLE t;");
+        Snapshot snapshot = new Snapshot("my-snapshot", "source-cluster", "available", 5439, "admin", dumpPath("my-snapshot"));
         when(clusterBackend.get("failed-cluster")).thenReturn(Optional.empty());
         when(snapshotBackend.get("my-snapshot")).thenReturn(Optional.of(snapshot));
-        when(snapshotDumpBackend.get("my-snapshot")).thenReturn(Optional.of("CREATE TABLE t;"));
         when(cm.start(any(), any(), any(), any())).thenThrow(new RuntimeException("Docker error"));
 
         assertThrows(AwsException.class, () ->
                 service.restoreFromClusterSnapshot("failed-cluster", "my-snapshot"));
+    }
+
+    @Test
+    void testRestoreFromClusterSnapshotRejectsUntrustedDumpPathBeforeProvisioning() {
+        // A dump path persisted outside the account dir (e.g. by pre-validation code) must be
+        // rejected up front — no cluster record, no container.
+        Snapshot snapshot = new Snapshot("my-snapshot", "source-cluster", "available", 5439, "admin", "/etc/shadow");
+        when(clusterBackend.get("restored-cluster")).thenReturn(Optional.empty());
+        when(snapshotBackend.get("my-snapshot")).thenReturn(Optional.of(snapshot));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.restoreFromClusterSnapshot("restored-cluster", "my-snapshot", "dc2.large"));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        verify(cm, never()).start(any(), any(), any(), any());
+        verify(cm, never()).restoreSnapshot(any(), any(), any(), any());
+        verify(clusterBackend, never()).put(anyString(), any(Cluster.class));
     }
 
     @Test

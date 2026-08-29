@@ -377,6 +377,18 @@ public class RedshiftService {
         }
 
         Snapshot snapshot = snapshotOpt.get();
+
+        // Validate the stored dump location up front, before any provisioning. A snapshot whose
+        // sqlDump was written by pre-validation code could point outside this account's dump dir;
+        // rejecting it here (rather than mid-restore) avoids leaving a half-created cluster record
+        // and an orphaned container behind.
+        String sqlDump = snapshot.getSqlDump();
+        boolean hasDump = sqlDump != null && !sqlDump.isBlank();
+        if (hasDump && !isTrustedDumpPath(sqlDump)) {
+            throw new AwsException("InvalidParameterValue",
+                    "Snapshot " + snapshotIdentifier + " has an unusable dump location", 400);
+        }
+
         String effectiveNodeType = (nodeType != null && !nodeType.isBlank()) ? nodeType : "dc2.large";
         String username = snapshot.getMasterUsername() != null ? snapshot.getMasterUsername() : "admin";
         String sourceCluster = snapshot.getClusterIdentifier();
@@ -402,13 +414,8 @@ public class RedshiftService {
             endpoint.setPort(handle.getPort());
             cluster.setEndpoint(endpoint);
 
-            if (snapshot.getSqlDump() != null && !snapshot.getSqlDump().isBlank()) {
-                if (!isTrustedDumpPath(snapshot.getSqlDump())) {
-                    throw new AwsException("InvalidParameterValue",
-                            "Snapshot " + snapshotIdentifier + " has an unusable dump location", 400);
-                }
-                Path dumpFile = Paths.get(snapshot.getSqlDump());
-                containerManager.restoreSnapshot(clusters.accountId(), clusterIdentifier, username, dumpFile);
+            if (hasDump) {
+                containerManager.restoreSnapshot(clusters.accountId(), clusterIdentifier, username, Paths.get(sqlDump));
             }
 
             cluster.setClusterStatus("available");
