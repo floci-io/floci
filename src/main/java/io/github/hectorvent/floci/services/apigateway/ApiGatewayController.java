@@ -2304,6 +2304,7 @@ public class ApiGatewayController {
         if (api.getRouteSelectionExpression() != null) node.put("routeSelectionExpression", api.getRouteSelectionExpression());
         if (api.getDescription() != null) node.put("description", api.getDescription());
         if (api.getApiKeySelectionExpression() != null) node.put("apiKeySelectionExpression", api.getApiKeySelectionExpression());
+        if (api.getVersion() != null) node.put("version", api.getVersion());
         if (api.getTags() != null && !api.getTags().isEmpty()) {
             ObjectNode tagsNode = objectMapper.createObjectNode();
             api.getTags().forEach(tagsNode::put);
@@ -2423,6 +2424,33 @@ public class ApiGatewayController {
             ObjectNode tags = node.putObject("tags");
             s.getTags().forEach(tags::put);
         }
+        if (s.getDescription() != null) node.put("description", s.getDescription());
+        if (s.getAccessLogSettings() != null) {
+            ObjectNode logs = node.putObject("accessLogSettings");
+            if (s.getAccessLogSettings().destinationArn() != null) {
+                logs.put("destinationArn", s.getAccessLogSettings().destinationArn());
+            }
+            if (s.getAccessLogSettings().format() != null) {
+                logs.put("format", s.getAccessLogSettings().format());
+            }
+        }
+        if (s.getDefaultRouteSettings() != null) {
+            node.set("defaultRouteSettings", toV2RouteSettingsNode(s.getDefaultRouteSettings()));
+        }
+        if (s.getRouteSettings() != null && !s.getRouteSettings().isEmpty()) {
+            ObjectNode routeSettings = node.putObject("routeSettings");
+            s.getRouteSettings().forEach((k, v) -> routeSettings.set(k, toV2RouteSettingsNode(v)));
+        }
+        return node;
+    }
+
+    private ObjectNode toV2RouteSettingsNode(Stage.RouteSettings rs) {
+        ObjectNode node = objectMapper.createObjectNode();
+        if (rs.detailedMetricsEnabled() != null) node.put("detailedMetricsEnabled", rs.detailedMetricsEnabled());
+        if (rs.dataTraceEnabled() != null) node.put("dataTraceEnabled", rs.dataTraceEnabled());
+        if (rs.loggingLevel() != null) node.put("loggingLevel", rs.loggingLevel());
+        if (rs.throttlingBurstLimit() != null) node.put("throttlingBurstLimit", rs.throttlingBurstLimit());
+        if (rs.throttlingRateLimit() != null) node.put("throttlingRateLimit", rs.throttlingRateLimit());
         return node;
     }
 

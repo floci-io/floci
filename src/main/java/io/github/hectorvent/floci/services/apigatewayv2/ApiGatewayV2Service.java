@@ -103,6 +103,7 @@ public class ApiGatewayV2Service {
         api.setRouteSelectionExpression(routeSelectionExpression);
         api.setDescription(description);
         api.setApiKeySelectionExpression(apiKeySelectionExpression);
+        api.setVersion((String) request.get("version"));
         api.setDisableExecuteApiEndpoint(booleanValue(request.get("disableExecuteApiEndpoint")));
 
         if ("WEBSOCKET".equals(protocolType)) {
@@ -207,6 +208,9 @@ public class ApiGatewayV2Service {
         if (request.containsKey("routeSelectionExpression") && request.get("routeSelectionExpression") != null) {
             api.setRouteSelectionExpression((String) request.get("routeSelectionExpression"));
         }
+        if (request.containsKey("version") && request.get("version") != null) {
+            api.setVersion((String) request.get("version"));
+        }
         if (request.containsKey("apiKeySelectionExpression") && request.get("apiKeySelectionExpression") != null) {
             api.setApiKeySelectionExpression((String) request.get("apiKeySelectionExpression"));
         }
@@ -255,6 +259,51 @@ public class ApiGatewayV2Service {
                 ? null
                 : Boolean.parseBoolean(String.valueOf(m.get("allowCredentials")));
         return new Api.Cors(allowOrigins, allowMethods, allowHeaders, exposeHeaders, maxAge, allowCredentials);
+    }
+
+    // ──────────────────────────── Stage settings coercion ────────────────────────────
+
+    private static Stage.AccessLogSettings toAccessLogSettings(Object raw) {
+        if (!(raw instanceof Map<?, ?> m) || m.isEmpty()) {
+            return null;
+        }
+        return new Stage.AccessLogSettings(
+                stringOrNull(m.get("destinationArn")),
+                stringOrNull(m.get("format")));
+    }
+
+    private static Stage.RouteSettings toRouteSettings(Object raw) {
+        if (!(raw instanceof Map<?, ?> m) || m.isEmpty()) {
+            return null;
+        }
+        return new Stage.RouteSettings(
+                booleanOrNull(m.get("detailedMetricsEnabled")),
+                booleanOrNull(m.get("dataTraceEnabled")),
+                stringOrNull(m.get("loggingLevel")),
+                m.get("throttlingBurstLimit") instanceof Number burst ? burst.intValue() : null,
+                m.get("throttlingRateLimit") instanceof Number rate ? rate.doubleValue() : null);
+    }
+
+    private static Map<String, Stage.RouteSettings> toRouteSettingsMap(Object raw) {
+        if (!(raw instanceof Map<?, ?> m) || m.isEmpty()) {
+            return null;
+        }
+        Map<String, Stage.RouteSettings> settings = new java.util.LinkedHashMap<>();
+        m.forEach((key, value) -> {
+            Stage.RouteSettings parsed = toRouteSettings(value);
+            if (parsed != null) {
+                settings.put(String.valueOf(key), parsed);
+            }
+        });
+        return settings.isEmpty() ? null : settings;
+    }
+
+    private static String stringOrNull(Object value) {
+        return value == null ? null : String.valueOf(value);
+    }
+
+    private static Boolean booleanOrNull(Object value) {
+        return value == null ? null : Boolean.parseBoolean(String.valueOf(value));
     }
 
     // ──────────────────────────── Authorizer CRUD ────────────────────────────
@@ -701,6 +750,11 @@ public class ApiGatewayV2Service {
             stage.setTags(ReservedTags.stripApiGatewayReservedTags(tags));
         }
 
+        stage.setDescription((String) request.get("description"));
+        stage.setAccessLogSettings(toAccessLogSettings(request.get("accessLogSettings")));
+        stage.setDefaultRouteSettings(toRouteSettings(request.get("defaultRouteSettings")));
+        stage.setRouteSettings(toRouteSettingsMap(request.get("routeSettings")));
+
         stageStore.put(stageKey(region, apiId, stage.getStageName()), stage);
         LOG.infov("Created stage: {0} for API {1}", stage.getStageName(), apiId);
         return stage;
@@ -736,6 +790,18 @@ public class ApiGatewayV2Service {
             @SuppressWarnings("unchecked")
             Map<String, String> stageVariables = (Map<String, String>) request.get("stageVariables");
             stage.setStageVariables(stageVariables);
+        }
+        if (request.containsKey("description") && request.get("description") != null) {
+            stage.setDescription((String) request.get("description"));
+        }
+        if (request.containsKey("accessLogSettings") && request.get("accessLogSettings") != null) {
+            stage.setAccessLogSettings(toAccessLogSettings(request.get("accessLogSettings")));
+        }
+        if (request.containsKey("defaultRouteSettings") && request.get("defaultRouteSettings") != null) {
+            stage.setDefaultRouteSettings(toRouteSettings(request.get("defaultRouteSettings")));
+        }
+        if (request.containsKey("routeSettings") && request.get("routeSettings") != null) {
+            stage.setRouteSettings(toRouteSettingsMap(request.get("routeSettings")));
         }
 
         stage.setLastUpdatedDate(System.currentTimeMillis());

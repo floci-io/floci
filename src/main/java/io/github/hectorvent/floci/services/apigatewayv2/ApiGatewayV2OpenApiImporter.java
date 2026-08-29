@@ -61,6 +61,10 @@ public class ApiGatewayV2OpenApiImporter {
         if (description != null) {
             request.put("description", description);
         }
+        String version = specVersion(openAPI);
+        if (version != null) {
+            request.put("version", version);
+        }
         Map<String, Object> cors = corsConfiguration(openAPI);
         if (cors != null) {
             request.put("corsConfiguration", cors);
@@ -108,6 +112,10 @@ public class ApiGatewayV2OpenApiImporter {
         String description = specDescription(openAPI);
         if (description != null) {
             update.put("description", description);
+        }
+        String version = specVersion(openAPI);
+        if (version != null) {
+            update.put("version", version);
         }
         Map<String, Object> cors = corsConfiguration(openAPI);
         if (cors != null) {
@@ -434,6 +442,11 @@ public class ApiGatewayV2OpenApiImporter {
 
     private static String specDescription(OpenAPI openAPI) {
         return openAPI.getInfo() == null ? null : openAPI.getInfo().getDescription();
+    }
+
+    /** AWS carries the document's info.version through to the API's Version. */
+    private static String specVersion(OpenAPI openAPI) {
+        return openAPI.getInfo() == null ? null : openAPI.getInfo().getVersion();
     }
 
     @SuppressWarnings("unchecked")

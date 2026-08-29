@@ -522,6 +522,9 @@ public class ApiGatewayV2JsonHandler {
         if (api.getApiKeySelectionExpression() != null) {
             node.put("ApiKeySelectionExpression", api.getApiKeySelectionExpression());
         }
+        if (api.getVersion() != null) {
+            node.put("Version", api.getVersion());
+        }
         if (api.getTags() != null && !api.getTags().isEmpty()) {
             ObjectNode tagsNode = node.putObject("Tags");
             api.getTags().forEach(tagsNode::put);
@@ -653,6 +656,33 @@ public class ApiGatewayV2JsonHandler {
             ObjectNode tags = node.putObject("Tags");
             s.getTags().forEach(tags::put);
         }
+        if (s.getDescription() != null) node.put("Description", s.getDescription());
+        if (s.getAccessLogSettings() != null) {
+            ObjectNode logs = node.putObject("AccessLogSettings");
+            if (s.getAccessLogSettings().destinationArn() != null) {
+                logs.put("DestinationArn", s.getAccessLogSettings().destinationArn());
+            }
+            if (s.getAccessLogSettings().format() != null) {
+                logs.put("Format", s.getAccessLogSettings().format());
+            }
+        }
+        if (s.getDefaultRouteSettings() != null) {
+            node.set("DefaultRouteSettings", toRouteSettingsNode(s.getDefaultRouteSettings()));
+        }
+        if (s.getRouteSettings() != null && !s.getRouteSettings().isEmpty()) {
+            ObjectNode routeSettings = node.putObject("RouteSettings");
+            s.getRouteSettings().forEach((k, v) -> routeSettings.set(k, toRouteSettingsNode(v)));
+        }
+        return node;
+    }
+
+    private ObjectNode toRouteSettingsNode(Stage.RouteSettings rs) {
+        ObjectNode node = objectMapper.createObjectNode();
+        if (rs.detailedMetricsEnabled() != null) node.put("DetailedMetricsEnabled", rs.detailedMetricsEnabled());
+        if (rs.dataTraceEnabled() != null) node.put("DataTraceEnabled", rs.dataTraceEnabled());
+        if (rs.loggingLevel() != null) node.put("LoggingLevel", rs.loggingLevel());
+        if (rs.throttlingBurstLimit() != null) node.put("ThrottlingBurstLimit", rs.throttlingBurstLimit());
+        if (rs.throttlingRateLimit() != null) node.put("ThrottlingRateLimit", rs.throttlingRateLimit());
         return node;
     }
 

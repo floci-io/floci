@@ -21,6 +21,7 @@ public class Api {
     private String apiKeySelectionExpression;
     private boolean disableExecuteApiEndpoint;
     private Cors corsConfiguration;
+    private String version;
 
     public Api() {}
 
@@ -58,6 +59,10 @@ public class Api {
 
     public Cors getCorsConfiguration() { return corsConfiguration; }
     public void setCorsConfiguration(Cors corsConfiguration) { this.corsConfiguration = corsConfiguration; }
+
+    /** Caller-supplied API version string, e.g. "1.0.0". Opaque to AWS. */
+    public String getVersion() { return version; }
+    public void setVersion(String version) { this.version = version; }
 
     @RegisterForReflection
     public record Cors(
