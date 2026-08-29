@@ -1110,23 +1110,12 @@ public class RdsService implements Resettable, ResourceProvider {
         effective.applyTo(instance);
         putInstanceForScope(currentAccountId(), effectiveRegion, id, instance);
 
-        // The running auth proxy validates the master scramble against the password it was
-        // started with, so restart it on the rotated credential (the same stop/start the
-        // reboot path uses).
+        // The running auth proxy holds a password snapshot from start time, so swap it in place
+        // (a stop/start here races the listener rebind while relay connections are still open,
+        // and would drop live connections rotation shouldn't touch).
         if (passwordRotated) {
-            String effectiveMasterUser = instance.getMasterUsername() != null
-                    ? instance.getMasterUsername() : "root";
-            final String accountId = accountIdFromArn(instance.getDbInstanceArn());
-            final String instanceRegion = regionFromArn(instance.getDbInstanceArn());
-            proxyManager.stopProxy(rdsResourceRelayKey(instance.getDbInstanceArn(), id));
-            proxyManager.startProxy(rdsResourceRelayKey(instance.getDbInstanceArn(), id),
-                    instance.getEngine(),
-                    instance.isIamDatabaseAuthenticationEnabled(),
-                    instance.getProxyPort(), instance.getContainerHost(), instance.getContainerPort(),
-                    instance.getEndpoint().address(),
-                    effectiveMasterUser, instance.getMasterPassword(), instance.getDbName(),
-                    (user, pw) -> validateDbPasswordForScope(
-                            accountId, instanceRegion, id, user, pw));
+            proxyManager.updateMasterPassword(
+                    rdsResourceRelayKey(instance.getDbInstanceArn(), id), instance.getMasterPassword());
         }
 
         LOG.infov("DB instance {0} modified", id);

@@ -740,7 +740,7 @@ class RdsServiceTest {
     }
 
     @Test
-    void modifyDbInstancePasswordRotationPropagatesToBackendAndRestartsProxy() {
+    void modifyDbInstancePasswordRotationPropagatesToBackendAndProxy() {
         DbInstance instance = rdsService.createDbInstance("mydb", "mysql", "8.0",
                 "admin", "original-password", "dbname", "db.t3.micro",
                 20, false, null, null, null, null, false);
@@ -754,11 +754,10 @@ class RdsServiceTest {
         // The backend learns the new credential while the old one is still known...
         verify(containerManager).rotateMasterPassword("mydb", "container-1",
                 DatabaseEngine.MYSQL, "admin", "original-password", "rotated-password");
-        // ...and the proxy restarts so its master-scramble check uses the rotated password.
-        verify(proxyManager).stopProxy(anyString());
-        verify(proxyManager).startProxy(anyString(), any(), anyBoolean(), anyInt(),
-                anyString(), anyInt(), anyString(), anyString(), eq("rotated-password"),
-                anyString(), any());
+        // ...and the running proxy's password snapshot is swapped in place, without a restart
+        // (a stop/start would race the listener rebind and drop live connections).
+        verify(proxyManager).updateMasterPassword(anyString(), eq("rotated-password"));
+        verify(proxyManager, never()).stopProxy(anyString());
     }
 
     @Test
@@ -772,7 +771,7 @@ class RdsServiceTest {
 
         verify(containerManager, never()).rotateMasterPassword(
                 anyString(), anyString(), any(), anyString(), anyString(), anyString());
-        verify(proxyManager, never()).stopProxy(anyString());
+        verify(proxyManager, never()).updateMasterPassword(anyString(), anyString());
     }
 
     @Test
@@ -787,6 +786,7 @@ class RdsServiceTest {
         assertEquals("rotated-password", modified.getMasterPassword());
         verify(containerManager, never()).rotateMasterPassword(
                 anyString(), anyString(), any(), anyString(), anyString(), anyString());
+        verify(proxyManager, never()).updateMasterPassword(anyString(), anyString());
     }
 
     @Test

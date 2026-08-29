@@ -10,6 +10,7 @@ import java.net.ServerSocket;
 import java.util.concurrent.ConcurrentHashMap;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -72,6 +73,31 @@ class RdsProxyManagerTest {
         } finally {
             manager.stopAll();
         }
+    }
+
+    @Test
+    void updateMasterPasswordSwapsTheRunningProxySnapshotWithoutARestart() throws Exception {
+        RdsProxyManager manager = new RdsProxyManager(
+                mock(RdsSigV4Validator.class), mock(RdsProxyTlsCertificates.class));
+        int proxyPort = availablePort();
+        try {
+            start(manager, "proxy", proxyPort);
+
+            manager.updateMasterPassword("proxy", "rotated");
+
+            assertEquals("rotated", masterPassword(registry(manager).get("proxy")));
+            assertPortUnavailable(proxyPort);
+        } finally {
+            manager.stopAll();
+        }
+    }
+
+    @Test
+    void updateMasterPasswordForUnknownInstanceIsANoOp() {
+        RdsProxyManager manager = new RdsProxyManager(
+                mock(RdsSigV4Validator.class), mock(RdsProxyTlsCertificates.class));
+
+        assertDoesNotThrow(() -> manager.updateMasterPassword("missing", "rotated"));
     }
 
     @Test
@@ -157,6 +183,12 @@ class RdsProxyManagerTest {
         return new RdsAuthProxy(key, "localhost", 1, DatabaseEngine.POSTGRES, false,
                 "admin", "secret", "app", mock(RdsSigV4Validator.class),
                 mock(RdsProxyTlsCertificates.class), (user, password) -> true);
+    }
+
+    private static String masterPassword(RdsAuthProxy proxy) throws Exception {
+        Field field = RdsAuthProxy.class.getDeclaredField("masterPassword");
+        field.setAccessible(true);
+        return (String) field.get(proxy);
     }
 
     private static void setServerSocket(RdsAuthProxy proxy, ServerSocket socket) throws Exception {
