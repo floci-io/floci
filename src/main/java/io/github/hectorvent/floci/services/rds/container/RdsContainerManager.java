@@ -408,16 +408,16 @@ public class RdsContainerManager {
     }
 
     /**
-     * Propagates a ModifyDBInstance master-password rotation into the running DB container, so
-     * the backend's stored credential matches what clients (and the auth proxy) use from now on.
-     * For MySQL/MariaDB this runs as the master user itself with the old password — changing your
-     * own password needs no extra privileges, and the container's root password is the
-     * creation-time one, not reliably known after earlier rotations. PostgreSQL's official image
-     * trusts local socket connections, so psql needs no password at all.
+     * Propagates a ModifyDBInstance/ModifyDBCluster master-password rotation into the running DB
+     * container, so the backend's stored credential matches what clients (and the auth proxy) use
+     * from now on. For MySQL/MariaDB this runs as the master user itself with the old password —
+     * changing your own password needs no extra privileges, and the container's root password is
+     * the creation-time one, not reliably known after earlier rotations. PostgreSQL's official
+     * image trusts local socket connections, so psql needs no password at all.
      */
-    public void rotateMasterPassword(String instanceId, String containerId, DatabaseEngine engine,
+    public void rotateMasterPassword(String containerName, String containerId, DatabaseEngine engine,
                                      String masterUsername, String oldPassword, String newPassword) {
-        execUntilSuccess(instanceId, containerId,
+        execUntilSuccess(containerName, containerId,
                 passwordRotationCommand(engine, masterUsername, oldPassword, newPassword),
                 "master-password rotation");
     }

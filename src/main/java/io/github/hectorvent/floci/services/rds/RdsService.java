@@ -1089,7 +1089,8 @@ public class RdsService implements Resettable, ResourceProvider {
             // holds) is known. Without it every later connection fails: the proxy dials the
             // backend with the rotated password against a database still holding the original.
             if (passwordRotated) {
-                containerManager.rotateMasterPassword(id, instance.getContainerId(),
+                containerManager.rotateMasterPassword(
+                        instance.getDockerVolumeName(), instance.getContainerId(),
                         instance.getEngine(), instance.getMasterUsername(), oldPassword, newPassword);
             }
             instance.setMasterPassword(newPassword);
@@ -1648,7 +1649,7 @@ public class RdsService implements Resettable, ResourceProvider {
         return modifyDbCluster(id, newPassword, iamEnabled, null, null, null, region);
     }
 
-    public DbCluster modifyDbCluster(String id, String newPassword, Boolean iamEnabled,
+    public synchronized DbCluster modifyDbCluster(String id, String newPassword, Boolean iamEnabled,
                                      Double serverlessV2MinCapacity, Double serverlessV2MaxCapacity,
                                      Integer serverlessV2SecondsUntilAutoPause, String region) {
         String effectiveRegion = effectiveRegion(region);
@@ -1677,7 +1678,20 @@ public class RdsService implements Resettable, ResourceProvider {
             effectiveAutoPauseSeconds = validateServerlessV2ScalingConfiguration(
                     effectiveMinCapacity, effectiveMaxCapacity, requestedOrExistingAutoPause);
         }
+        boolean passwordRotated = false;
         if (newPassword != null && !newPassword.isBlank()) {
+            String oldPassword = cluster.getMasterPassword();
+            boolean backendRunning = !config.services().rds().mock()
+                    && cluster.getContainerId() != null;
+            passwordRotated = backendRunning && !newPassword.equals(oldPassword);
+            // Propagate the rotation into the running backend DB before overwriting the stored
+            // password — the last moment the old credential (which the backend still holds) is
+            // known — mirroring the ModifyDBInstance path.
+            if (passwordRotated) {
+                containerManager.rotateMasterPassword(
+                        cluster.getDockerVolumeName(), cluster.getContainerId(),
+                        cluster.getEngine(), cluster.getMasterUsername(), oldPassword, newPassword);
+            }
             cluster.setMasterPassword(newPassword);
         }
         if (iamEnabled != null) {
@@ -1689,6 +1703,27 @@ public class RdsService implements Resettable, ResourceProvider {
             cluster.setServerlessV2SecondsUntilAutoPause(effectiveAutoPauseSeconds);
         }
         putClusterForScope(currentAccountId(), effectiveRegion, id, cluster);
+
+        // A cluster rotation applies to every endpoint: the cluster's own proxy and each member
+        // instance's proxy hold start-time password snapshots, and member endpoints validate
+        // against the member's stored password, so propagate the rotated credential to all of
+        // them (AWS applies the cluster master password to every member endpoint).
+        if (passwordRotated) {
+            proxyManager.updateMasterPassword(
+                    rdsResourceRelayKey(cluster.getDbClusterArn(), id), newPassword);
+            for (String memberId : cluster.getDbClusterMembers()) {
+                DbInstance member = findInstanceForScope(
+                        currentAccountId(), effectiveRegion, memberId);
+                if (member == null) {
+                    continue;
+                }
+                member.setMasterPassword(newPassword);
+                putInstanceForScope(currentAccountId(), effectiveRegion, memberId, member);
+                proxyManager.updateMasterPassword(
+                        rdsResourceRelayKey(member.getDbInstanceArn(), memberId), newPassword);
+            }
+        }
+
         LOG.infov("DB cluster {0} modified", id);
         return cluster;
     }

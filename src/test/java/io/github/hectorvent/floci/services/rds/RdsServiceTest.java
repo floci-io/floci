@@ -747,12 +747,13 @@ class RdsServiceTest {
         instance.setContainerId("container-1");
         instance.setContainerHost("10.0.0.5");
         instance.setContainerPort(3306);
+        instance.setDockerVolumeName("volume-1");
 
         DbInstance modified = rdsService.modifyDbInstance("mydb", "rotated-password", null, null);
 
         assertEquals("rotated-password", modified.getMasterPassword());
         // The backend learns the new credential while the old one is still known...
-        verify(containerManager).rotateMasterPassword("mydb", "container-1",
+        verify(containerManager).rotateMasterPassword("volume-1", "container-1",
                 DatabaseEngine.MYSQL, "admin", "original-password", "rotated-password");
         // ...and the running proxy's password snapshot is swapped in place, without a restart
         // (a stop/start would race the listener rebind and drop live connections).
@@ -782,6 +783,59 @@ class RdsServiceTest {
                 20, false, null, null, null, null, false);
 
         DbInstance modified = rdsService.modifyDbInstance("mydb", "rotated-password", null, null);
+
+        assertEquals("rotated-password", modified.getMasterPassword());
+        verify(containerManager, never()).rotateMasterPassword(
+                anyString(), anyString(), any(), anyString(), anyString(), anyString());
+        verify(proxyManager, never()).updateMasterPassword(anyString(), anyString());
+    }
+
+    @Test
+    void modifyDbClusterPasswordRotationPropagatesToBackendAndEveryProxy() {
+        DbCluster cluster = rdsService.createDbCluster("cluster1", "aurora-postgresql", "16.3",
+                "admin", "original-password", "dbname", false, null);
+        cluster.setContainerId("container-1");
+        cluster.setDockerVolumeName("volume-1");
+        DbInstance member = rdsService.createDbInstance("member-1", "aurora-postgresql", "16.3",
+                "admin", "original-password", "dbname", "db.r5.large",
+                20, false, null, null, "cluster1");
+
+        DbCluster modified = rdsService.modifyDbCluster("cluster1", "rotated-password", null);
+
+        assertEquals("rotated-password", modified.getMasterPassword());
+        // The backend learns the new credential while the old one is still known...
+        verify(containerManager).rotateMasterPassword("volume-1", "container-1",
+                DatabaseEngine.POSTGRES, "admin", "original-password", "rotated-password");
+        // ...and the cluster proxy AND every member endpoint's proxy swap their snapshots,
+        // with the member's stored password updated so its validator accepts the new one.
+        verify(proxyManager).updateMasterPassword(
+                eq("rds-resource:" + cluster.getDbClusterArn()), eq("rotated-password"));
+        verify(proxyManager).updateMasterPassword(
+                eq("rds-resource:" + member.getDbInstanceArn()), eq("rotated-password"));
+        assertEquals("rotated-password", member.getMasterPassword());
+        verify(proxyManager, never()).stopProxy(anyString());
+    }
+
+    @Test
+    void modifyDbClusterSamePasswordDoesNotTouchBackendOrProxy() {
+        DbCluster cluster = rdsService.createDbCluster("cluster1", "aurora-postgresql", "16.3",
+                "admin", "original-password", "dbname", false, null);
+        cluster.setContainerId("container-1");
+
+        rdsService.modifyDbCluster("cluster1", "original-password", null);
+
+        verify(containerManager, never()).rotateMasterPassword(
+                anyString(), anyString(), any(), anyString(), anyString(), anyString());
+        verify(proxyManager, never()).updateMasterPassword(anyString(), anyString());
+    }
+
+    @Test
+    void modifyDbClusterPasswordRotationSkipsBackendInMockMode() {
+        when(config.services().rds().mock()).thenReturn(true);
+        rdsService.createDbCluster("cluster1", "aurora-postgresql", "16.3",
+                "admin", "original-password", "dbname", false, null);
+
+        DbCluster modified = rdsService.modifyDbCluster("cluster1", "rotated-password", null);
 
         assertEquals("rotated-password", modified.getMasterPassword());
         verify(containerManager, never()).rotateMasterPassword(
