@@ -231,7 +231,7 @@ public class CodeBuildRunner implements ContainerTeardown {
             containerId = info.containerId();
             runningContainers.put(buildId, containerId);
 
-            stageFlociCaCertIfNeeded(containerId, envResolution.preexistingCaPath());
+            stageFlociCaCertIfNeeded(containerId, envResolution.caBundleTargets());
 
             logHandle = logStreamer.attach(containerId, logGroup, logStream, region, "codebuild:" + buildId);
 
@@ -426,22 +426,36 @@ public class CodeBuildRunner implements ContainerTeardown {
         throw new AwsException("InvalidInputException", "No buildspec found in source or request", 400);
     }
 
-    /** Combined-bundle path Floci writes to when a user-supplied NODE_EXTRA_CA_CERTS/AWS_CA_BUNDLE
-     *  already exists, so its content isn't dropped in favor of Floci's own cert. */
+    /** Combined-bundle path Floci writes to when NODE_EXTRA_CA_CERTS and AWS_CA_BUNDLE already
+     *  agree on one user-supplied CA, so its content isn't dropped in favor of Floci's own cert. */
     static final String COMBINED_CA_BUNDLE_FILE_NAME = "floci-ca-bundle.crt";
     static final String COMBINED_CA_BUNDLE_CONTAINER_PATH =
             ContainerLauncher.FLOCI_CA_DIR + "/" + COMBINED_CA_BUNDLE_FILE_NAME;
+
+    /** Per-var bundle paths used when NODE_EXTRA_CA_CERTS and AWS_CA_BUNDLE point at genuinely
+     *  different preexisting CAs — collapsing both onto one path would drop whichever lost. */
+    static final String NODE_CA_BUNDLE_FILE_NAME = "floci-ca-bundle-node.crt";
+    static final String NODE_CA_BUNDLE_CONTAINER_PATH =
+            ContainerLauncher.FLOCI_CA_DIR + "/" + NODE_CA_BUNDLE_FILE_NAME;
+    static final String AWS_CA_BUNDLE_FILE_NAME = "floci-ca-bundle-aws.crt";
+    static final String AWS_CA_BUNDLE_CONTAINER_PATH =
+            ContainerLauncher.FLOCI_CA_DIR + "/" + AWS_CA_BUNDLE_FILE_NAME;
 
     List<String> buildEnvList(String region, Build build, Project project,
                                       ParsedBuildspec buildspec, String logStream) {
         return resolveBuildEnv(region, build, project, buildspec, logStream).variables();
     }
 
-    /** {@code variables} is the same shape {@link #buildEnvList} returns; {@code preexistingCaPath}
-     *  is whichever user-supplied NODE_EXTRA_CA_CERTS/AWS_CA_BUNDLE value existed before the Floci
-     *  CA override was applied, so {@link #stageFlociCaCertIfNeeded} can merge it with Floci's cert
-     *  instead of discarding it. */
-    private record BuildEnvResolution(List<String> variables, Optional<String> preexistingCaPath) {}
+    /** One CA bundle {@link #stageFlociCaCertIfNeeded} must write: {@code fileName} under
+     *  {@link ContainerLauncher#FLOCI_CA_DIR}, containing Floci's cert alone, or merged with
+     *  whatever preexisting user CA lived at {@code preexistingHostPath} (fetched from the
+     *  container, since it was set outside this class's control). */
+    record CaBundleTarget(String fileName, Optional<String> preexistingHostPath) {}
+
+    /** {@code variables} is the same shape {@link #buildEnvList} returns; {@code caBundleTargets}
+     *  is what {@link #stageFlociCaCertIfNeeded} must write to make each var in {@code variables}
+     *  resolve to an actual file — empty when TLS/spoofing isn't active. */
+    private record BuildEnvResolution(List<String> variables, List<CaBundleTarget> caBundleTargets) {}
 
     private BuildEnvResolution resolveBuildEnv(String region, Build build, Project project,
                                       ParsedBuildspec buildspec, String logStream) {
@@ -500,27 +514,45 @@ public class CodeBuildRunner implements ContainerTeardown {
         // Captured before the override below so a genuinely-needed other CA (e.g. a corporate
         // proxy CA) isn't silently dropped — NODE_EXTRA_CA_CERTS normally extends Node's trust
         // store rather than replacing it, so overwriting the pointer outright would drop it.
-        Optional<String> preexistingCaPath = Optional.ofNullable(env.get("NODE_EXTRA_CA_CERTS"))
-                .or(() -> Optional.ofNullable(env.get("AWS_CA_BUNDLE")));
+        Optional<String> preexistingNodeCa = Optional.ofNullable(env.get("NODE_EXTRA_CA_CERTS"));
+        Optional<String> preexistingAwsCa = Optional.ofNullable(env.get("AWS_CA_BUNDLE"));
 
         // Applied last so nothing upstream (buildspec, project, build override, parameter store,
         // or secret) can clobber the trust anchor that lets a spoofed HTTPS AWS call reach Floci
         // instead of failing certificate verification — mirrors the same trust wiring launched
-        // Lambda containers get via ContainerLauncher.flociCaEnv/resolveFlociCaCertPath. Points at
-        // the combined-bundle path (merged by stageFlociCaCertIfNeeded) when a preexisting value
-        // was captured above, so that CA isn't dropped; otherwise the plain Floci cert path.
+        // Lambda containers get via ContainerLauncher.flociCaEnv/resolveFlociCaCertPath.
+        List<CaBundleTarget> caBundleTargets;
         if (config.tls().enabled()
                 && ContainerLauncher.resolveFlociCaCertPath(
                         true, config.tls().certPath(), config.storage().persistentPath()).isPresent()) {
-            String target = preexistingCaPath.isPresent()
-                    ? COMBINED_CA_BUNDLE_CONTAINER_PATH : ContainerLauncher.FLOCI_CA_CONTAINER_PATH;
-            env.put("NODE_EXTRA_CA_CERTS", target);
-            env.put("AWS_CA_BUNDLE", target);
+            if (preexistingNodeCa.isPresent() && preexistingAwsCa.isPresent()
+                    && !preexistingNodeCa.get().equals(preexistingAwsCa.get())) {
+                // Distinct CAs for each var — one shared bundle would drop whichever lost, so each
+                // var gets its own bundle merged with its own preexisting CA.
+                env.put("NODE_EXTRA_CA_CERTS", NODE_CA_BUNDLE_CONTAINER_PATH);
+                env.put("AWS_CA_BUNDLE", AWS_CA_BUNDLE_CONTAINER_PATH);
+                caBundleTargets = List.of(
+                        new CaBundleTarget(NODE_CA_BUNDLE_FILE_NAME, preexistingNodeCa),
+                        new CaBundleTarget(AWS_CA_BUNDLE_FILE_NAME, preexistingAwsCa));
+            } else {
+                // Same value on both vars, or only one set — one bundle covers both, and when
+                // neither was set there's no preexisting CA to merge, just Floci's own cert.
+                Optional<String> preexisting = preexistingNodeCa.or(() -> preexistingAwsCa);
+                String target = preexisting.isPresent()
+                        ? COMBINED_CA_BUNDLE_CONTAINER_PATH : ContainerLauncher.FLOCI_CA_CONTAINER_PATH;
+                String fileName = preexisting.isPresent()
+                        ? COMBINED_CA_BUNDLE_FILE_NAME : ContainerLauncher.FLOCI_CA_FILE_NAME;
+                env.put("NODE_EXTRA_CA_CERTS", target);
+                env.put("AWS_CA_BUNDLE", target);
+                caBundleTargets = List.of(new CaBundleTarget(fileName, preexisting));
+            }
+        } else {
+            caBundleTargets = List.of();
         }
 
         List<String> result = new ArrayList<>();
         env.forEach((k, v) -> result.add(k + "=" + (v != null ? v : "")));
-        return new BuildEnvResolution(result, preexistingCaPath);
+        return new BuildEnvResolution(result, caBundleTargets);
     }
 
     private String resolveEndpointUrl() {
@@ -532,14 +564,13 @@ public class CodeBuildRunner implements ContainerTeardown {
         }
     }
 
-    // Stages Floci's CA cert into the container's trust anchor path, mirroring the trust wiring
+    // Stages Floci's CA cert into the container's trust anchor path(s), mirroring the trust wiring
     // launched Lambda containers get (ContainerLauncher.flociCaEnv/resolveFlociCaCertPath) — the
-    // NODE_EXTRA_CA_CERTS/AWS_CA_BUNDLE env vars in buildEnvList only help once the file exists
-    // where they point. When a user source already set one of those vars (preexistingCaPath),
-    // that file's content is fetched from the image and combined with Floci's cert into one
-    // bundle, so the user's own CA requirement survives alongside Floci's.
-    private void stageFlociCaCertIfNeeded(String containerId, Optional<String> preexistingCaPath) {
-        if (!config.tls().enabled()) {
+    // NODE_EXTRA_CA_CERTS/AWS_CA_BUNDLE env vars in buildEnvList only help once the file(s) exist
+    // where they point. One target per distinct bundle buildEnvList decided it needs — usually
+    // one, but two when NODE_EXTRA_CA_CERTS and AWS_CA_BUNDLE named different preexisting CAs.
+    private void stageFlociCaCertIfNeeded(String containerId, List<CaBundleTarget> targets) {
+        if (!config.tls().enabled() || targets.isEmpty()) {
             return;
         }
         Optional<Path> flociCaCert = ContainerLauncher.resolveFlociCaCertPath(
@@ -549,31 +580,30 @@ public class CodeBuildRunner implements ContainerTeardown {
         }
         try {
             byte[] flociCertBytes = Files.readAllBytes(flociCaCert.get());
-            String entryName;
-            byte[] contentBytes;
-            if (preexistingCaPath.isPresent()) {
-                byte[] existing = readContainerFileOrEmpty(containerId, preexistingCaPath.get());
-                ByteArrayOutputStream combined = new ByteArrayOutputStream();
-                combined.write(existing);
-                if (existing.length > 0 && existing[existing.length - 1] != '\n') {
-                    combined.write('\n');
-                }
-                combined.write(flociCertBytes);
-                contentBytes = combined.toByteArray();
-                entryName = COMBINED_CA_BUNDLE_FILE_NAME;
-            } else {
-                contentBytes = flociCertBytes;
-                entryName = ContainerLauncher.FLOCI_CA_FILE_NAME;
-            }
-
             ByteArrayOutputStream bos = new ByteArrayOutputStream();
             try (TarArchiveOutputStream tar = newTarStream(bos)) {
-                TarArchiveEntry entry = new TarArchiveEntry(entryName);
-                entry.setSize(contentBytes.length);
-                entry.setMode(0644);
-                tar.putArchiveEntry(entry);
-                tar.write(contentBytes);
-                tar.closeArchiveEntry();
+                for (CaBundleTarget target : targets) {
+                    byte[] contentBytes;
+                    if (target.preexistingHostPath().isPresent()) {
+                        byte[] existing = readContainerFileOrEmpty(containerId, target.preexistingHostPath().get());
+                        ByteArrayOutputStream combined = new ByteArrayOutputStream();
+                        combined.write(existing);
+                        if (existing.length > 0 && existing[existing.length - 1] != '\n') {
+                            combined.write('\n');
+                        }
+                        combined.write(flociCertBytes);
+                        contentBytes = combined.toByteArray();
+                    } else {
+                        contentBytes = flociCertBytes;
+                    }
+
+                    TarArchiveEntry entry = new TarArchiveEntry(target.fileName());
+                    entry.setSize(contentBytes.length);
+                    entry.setMode(0644);
+                    tar.putArchiveEntry(entry);
+                    tar.write(contentBytes);
+                    tar.closeArchiveEntry();
+                }
             }
             dockerClient.copyArchiveToContainerCmd(containerId)
                     .withRemotePath(ContainerLauncher.FLOCI_CA_DIR)

@@ -137,6 +137,43 @@ class CodeBuildRunnerCaTrustTest {
     }
 
     /**
+     * When a build supplies genuinely <em>different</em> paths for NODE_EXTRA_CA_CERTS and
+     * AWS_CA_BUNDLE (e.g. a Node-specific CA and a separate AWS SDK CA bundle), collapsing both
+     * onto a single "preexisting" value silently drops whichever one wasn't picked — the previous
+     * fix kept only NODE_EXTRA_CA_CERTS via {@code Optional.or(...)}. Both must be preserved, each
+     * merged with Floci's cert into its own bundle.
+     */
+    @Test
+    void bothDistinctCaOverridesSurviveIndependently() throws Exception {
+        Path tlsDir = Files.createDirectories(tempDir.resolve("tls"));
+        Files.writeString(tlsDir.resolve("floci-selfsigned.crt"), "fake-cert-pem");
+
+        when(tlsConfig.enabled()).thenReturn(true);
+        when(tlsConfig.certPath()).thenReturn(Optional.empty());
+
+        ParsedBuildspec buildspecWithDistinctCaOverrides = new ParsedBuildspec(
+                Map.of("NODE_EXTRA_CA_CERTS", "/etc/node-ca.pem",
+                        "AWS_CA_BUNDLE", "/etc/aws-ca.pem"),
+                Map.of(), Map.of(), List.of(), List.of(), List.of(), List.of(), null);
+
+        List<String> env = runner().buildEnvList(
+                "us-east-1", build(), project(), buildspecWithDistinctCaOverrides, "log-stream");
+
+        assertFalse(env.contains("NODE_EXTRA_CA_CERTS=" + CodeBuildRunner.COMBINED_CA_BUNDLE_CONTAINER_PATH),
+                () -> "NODE_EXTRA_CA_CERTS and AWS_CA_BUNDLE differ, so they must not share one bundle: " + env);
+        assertFalse(env.contains("AWS_CA_BUNDLE=" + CodeBuildRunner.COMBINED_CA_BUNDLE_CONTAINER_PATH),
+                () -> "NODE_EXTRA_CA_CERTS and AWS_CA_BUNDLE differ, so they must not share one bundle: " + env);
+        assertFalse(env.stream().anyMatch(e -> e.equals("NODE_EXTRA_CA_CERTS=/etc/node-ca.pem")),
+                () -> "NODE_EXTRA_CA_CERTS must still be redirected to a Floci-merged bundle: " + env);
+        assertFalse(env.stream().anyMatch(e -> e.equals("AWS_CA_BUNDLE=/etc/aws-ca.pem")),
+                () -> "AWS_CA_BUNDLE must still be redirected to a Floci-merged bundle: " + env);
+        String nodeTarget = env.stream().filter(e -> e.startsWith("NODE_EXTRA_CA_CERTS=")).findFirst().orElseThrow();
+        String awsTarget = env.stream().filter(e -> e.startsWith("AWS_CA_BUNDLE=")).findFirst().orElseThrow();
+        assertFalse(nodeTarget.equals("NODE_EXTRA_CA_CERTS=" + awsTarget.substring("AWS_CA_BUNDLE=".length())),
+                () -> "distinct source CAs must land in distinct bundles, not share one path: " + env);
+    }
+
+    /**
      * When no buildspec/project/build-override/parameter/secret source defines a CA var, staging
      * must still write Floci's cert to the plain {@code FLOCI_CA_CONTAINER_PATH} (not the combined
      * bundle path) — there is no existing CA to preserve, so the simpler single-file path from the
@@ -266,10 +303,20 @@ class CodeBuildRunnerCaTrustTest {
     }
 
     private void stageFlociCaCert(String containerId, Optional<String> preexistingCaPath) throws Exception {
+        Class<?> targetClass = Class.forName(
+                "io.github.hectorvent.floci.services.codebuild.CodeBuildRunner$CaBundleTarget");
+        var targetCtor = targetClass.getDeclaredConstructor(String.class, Optional.class);
+        targetCtor.setAccessible(true);
+        String fileName = preexistingCaPath.isPresent()
+                ? CodeBuildRunner.COMBINED_CA_BUNDLE_FILE_NAME
+                : ContainerLauncher.FLOCI_CA_FILE_NAME;
+        Object target = targetCtor.newInstance(fileName, preexistingCaPath);
+        List<Object> targetList = List.of(target);
+
         Method method = CodeBuildRunner.class.getDeclaredMethod(
-                "stageFlociCaCertIfNeeded", String.class, Optional.class);
+                "stageFlociCaCertIfNeeded", String.class, List.class);
         method.setAccessible(true);
-        method.invoke(runner(), containerId, preexistingCaPath);
+        method.invoke(runner(), containerId, targetList);
     }
 
     /**
