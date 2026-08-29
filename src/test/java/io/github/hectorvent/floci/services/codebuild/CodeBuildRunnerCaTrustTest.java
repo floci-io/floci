@@ -102,6 +102,37 @@ class CodeBuildRunnerCaTrustTest {
     }
 
     /**
+     * A buildspec, project, build override, parameter-store value, or secret can define its own
+     * {@code NODE_EXTRA_CA_CERTS}/{@code AWS_CA_BUNDLE} (e.g. for an unrelated corporate CA). The
+     * env-merge order in {@code buildEnvList} put the Floci CA vars first and then layered every
+     * other source's env on top with {@code Map.put}, so a user-supplied value for either var
+     * silently clobbers the staged Floci CA path — the build then trusts a CA bundle that never
+     * includes Floci's cert, and every spoofed HTTPS AWS call fails certificate verification.
+     * Floci's CA vars must win regardless of merge order.
+     */
+    @Test
+    void flociCaTrustEnvSurvivesUserSuppliedOverride() throws Exception {
+        Path tlsDir = Files.createDirectories(tempDir.resolve("tls"));
+        Files.writeString(tlsDir.resolve("floci-selfsigned.crt"), "fake-cert-pem");
+
+        when(tlsConfig.enabled()).thenReturn(true);
+        when(tlsConfig.certPath()).thenReturn(Optional.empty());
+
+        ParsedBuildspec buildspecWithUserCaOverride = new ParsedBuildspec(
+                Map.of("NODE_EXTRA_CA_CERTS", "/etc/corporate-ca.pem",
+                        "AWS_CA_BUNDLE", "/etc/corporate-ca.pem"),
+                Map.of(), Map.of(), List.of(), List.of(), List.of(), List.of(), null);
+
+        List<String> env = runner().buildEnvList(
+                "us-east-1", build(), project(), buildspecWithUserCaOverride, "log-stream");
+
+        assertTrue(env.contains("NODE_EXTRA_CA_CERTS=" + ContainerLauncher.FLOCI_CA_CONTAINER_PATH),
+                () -> "expected Floci's NODE_EXTRA_CA_CERTS to win over the buildspec override in " + env);
+        assertTrue(env.contains("AWS_CA_BUNDLE=" + ContainerLauncher.FLOCI_CA_CONTAINER_PATH),
+                () -> "expected Floci's AWS_CA_BUNDLE to win over the buildspec override in " + env);
+    }
+
+    /**
      * If staging the Floci CA cert into the container fails, the build must not continue
      * silently: {@code buildEnvList} still points NODE_EXTRA_CA_CERTS/AWS_CA_BUNDLE at
      * {@link ContainerLauncher#FLOCI_CA_DIR}, so a build that swallows this failure runs with a

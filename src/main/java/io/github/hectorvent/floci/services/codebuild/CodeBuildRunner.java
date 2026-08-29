@@ -443,17 +443,6 @@ public class CodeBuildRunner implements ContainerTeardown {
         env.put("AWS_SECRET_ACCESS_KEY", "test");
         env.put("AWS_ENDPOINT_URL", resolveEndpointUrl());
 
-        // When floci.dns.spoof-aws-endpoints routes an explicit AWS endpoint hit from inside
-        // the build container to Floci, self-signed TLS still fails the handshake unless the
-        // container trusts Floci's cert — mirrors the same trust wiring launched Lambda
-        // containers get via ContainerLauncher.flociCaEnv/resolveFlociCaCertPath.
-        if (config.tls().enabled()
-                && ContainerLauncher.resolveFlociCaCertPath(
-                        true, config.tls().certPath(), config.storage().persistentPath()).isPresent()) {
-            env.put("NODE_EXTRA_CA_CERTS", ContainerLauncher.FLOCI_CA_CONTAINER_PATH);
-            env.put("AWS_CA_BUNDLE", ContainerLauncher.FLOCI_CA_CONTAINER_PATH);
-        }
-
         env.putAll(buildspec.envVariables());
 
         for (Map.Entry<String, String> e : buildspec.parameterStoreVars().entrySet()) {
@@ -488,6 +477,17 @@ public class CodeBuildRunner implements ContainerTeardown {
                 String value = v.get("value");
                 if (name != null) { env.put(name, value != null ? value : ""); }
             }
+        }
+
+        // Applied last so nothing upstream (buildspec, project, build override, parameter store,
+        // or secret) can clobber the trust anchor that lets a spoofed HTTPS AWS call reach Floci
+        // instead of failing certificate verification — mirrors the same trust wiring launched
+        // Lambda containers get via ContainerLauncher.flociCaEnv/resolveFlociCaCertPath.
+        if (config.tls().enabled()
+                && ContainerLauncher.resolveFlociCaCertPath(
+                        true, config.tls().certPath(), config.storage().persistentPath()).isPresent()) {
+            env.put("NODE_EXTRA_CA_CERTS", ContainerLauncher.FLOCI_CA_CONTAINER_PATH);
+            env.put("AWS_CA_BUNDLE", ContainerLauncher.FLOCI_CA_CONTAINER_PATH);
         }
 
         List<String> result = new ArrayList<>();
