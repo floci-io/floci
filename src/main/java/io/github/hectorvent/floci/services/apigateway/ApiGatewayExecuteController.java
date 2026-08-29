@@ -1483,7 +1483,9 @@ public class ApiGatewayExecuteController {
         if ("CUSTOM".equalsIgnoreCase(route.getAuthorizationType()) && route.getAuthorizerId() != null) {
             RequestAuthorizerResult requestResult =
                     enforceRequestAuthorizerV2(region, apiId, stageName, route, httpMethod, path, headers, uriInfo);
-            if (requestResult.errorResponse() != null) return requestResult.errorResponse();
+            if (requestResult.errorResponse() != null) {
+                return requestResult.errorResponse();
+            }
             lambdaAuthorizerContext = requestResult.context();
         }
 
