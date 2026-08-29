@@ -461,10 +461,21 @@ public class CodeBuildService {
             ProjectEnvironment merged = new ProjectEnvironment();
             merged.setType(environmentOverride != null && environmentOverride.getType() != null
                     ? environmentOverride.getType() : (projectEnv != null ? projectEnv.getType() : null));
-            merged.setImage(imageOverride != null ? imageOverride : (projectEnv != null ? projectEnv.getImage() : null));
+            merged.setImage(imageOverride != null ? imageOverride
+                    : (environmentOverride != null && environmentOverride.getImage() != null
+                            ? environmentOverride.getImage() : (projectEnv != null ? projectEnv.getImage() : null)));
             merged.setComputeType(computeTypeOverride != null ? computeTypeOverride
-                    : (projectEnv != null ? projectEnv.getComputeType() : null));
-            List<Map<String, String>> baseVariables = projectEnv != null ? projectEnv.getEnvironmentVariables() : null;
+                    : (environmentOverride != null && environmentOverride.getComputeType() != null
+                            ? environmentOverride.getComputeType()
+                            : (projectEnv != null ? projectEnv.getComputeType() : null)));
+            // retryBuild passes the original build's already-resolved environment as
+            // environmentOverride (not a sparse StartBuild-style override), so its own variables
+            // must win here too -- falling back straight to the project would replay the retry
+            // with the CURRENT project's variables instead of the ones the original build ran with.
+            List<Map<String, String>> baseVariables =
+                    environmentOverride != null && environmentOverride.getEnvironmentVariables() != null
+                            ? environmentOverride.getEnvironmentVariables()
+                            : (projectEnv != null ? projectEnv.getEnvironmentVariables() : null);
             if (hasVariablesOverride) {
                 List<Map<String, String>> variables =
                         new ArrayList<>(baseVariables != null ? baseVariables : List.of());

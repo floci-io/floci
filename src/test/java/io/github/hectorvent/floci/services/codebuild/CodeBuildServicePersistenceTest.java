@@ -119,6 +119,38 @@ class CodeBuildServicePersistenceTest {
     }
 
     @Test
+    void retryBuildReplaysTheOriginalBuildsEnvironmentNotTheCurrentProjects() {
+        CodeBuildRunner runner = mock(CodeBuildRunner.class);
+        CodeBuildService service = serviceWithStorage(new SharedStorageFactory(), runner);
+        ProjectEnvironment original = new ProjectEnvironment();
+        original.setImage("aws/codebuild/standard:6.0");
+        original.setComputeType("BUILD_GENERAL1_SMALL");
+        original.setEnvironmentVariables(List.of(Map.of("name", "STAGE", "value", "original-build")));
+        service.createProject(REGION, ACCOUNT, "p1", "demo",
+                source("NO_SOURCE"), null, null, artifacts("NO_ARTIFACTS"), null,
+                original, "arn:aws:iam::" + ACCOUNT + ":role/cb",
+                null, null, null, null, null, null, null);
+        Build started = service.startBuild(REGION, ACCOUNT, "p1", null,
+                null, null, null, null, null, null, null, null, null, null);
+
+        // The project changes after the build ran (a common reason to retry against an older
+        // definition rather than whatever the project looks like now).
+        ProjectEnvironment updated = new ProjectEnvironment();
+        updated.setImage("aws/codebuild/standard:7.0");
+        updated.setComputeType("BUILD_GENERAL1_LARGE");
+        updated.setEnvironmentVariables(List.of(Map.of("name", "STAGE", "value", "current-project")));
+        service.updateProject(REGION, "p1", null, null, null, null, null, null, updated,
+                null, null, null, null, null, null, null, null);
+
+        Build retried = service.retryBuild(REGION, ACCOUNT, started.getId());
+
+        assertEquals("aws/codebuild/standard:6.0", retried.getEnvironment().getImage());
+        assertEquals("BUILD_GENERAL1_SMALL", retried.getEnvironment().getComputeType());
+        assertEquals(List.of(Map.of("name", "STAGE", "value", "original-build")),
+                retried.getEnvironment().getEnvironmentVariables());
+    }
+
+    @Test
     void startBuildWithSparseEnvironmentTypeOverrideRetainsProjectImageAndComputeType() {
         CodeBuildService service = serviceWithStorage(new SharedStorageFactory());
         ProjectEnvironment environment = new ProjectEnvironment();
