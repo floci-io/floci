@@ -10,6 +10,8 @@ import io.swagger.v3.oas.models.Operation;
 import io.swagger.v3.oas.models.PathItem;
 import io.swagger.v3.oas.models.security.SecurityRequirement;
 import io.swagger.v3.oas.models.security.SecurityScheme;
+import io.swagger.v3.oas.models.servers.Server;
+import io.swagger.v3.oas.models.servers.ServerVariable;
 import io.swagger.v3.parser.core.models.SwaggerParseResult;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -51,8 +53,9 @@ public class ApiGatewayV2OpenApiImporter {
     // ──────────────────────────── Entry points ────────────────────────────
 
     /** ImportApi — creates a brand new HTTP API from an OpenAPI 3 document. */
-    public Api importApi(String region, String specBody) {
-        OpenAPI openAPI = parseSpec(specBody);
+    public Api importApi(String region, String specBody, String basePathMode, boolean failOnWarnings) {
+        ImportPlan plan = plan(specBody, basePathMode, failOnWarnings);
+        OpenAPI openAPI = plan.openAPI();
 
         Map<String, Object> request = new HashMap<>();
         request.put("protocolType", "HTTP");
@@ -71,7 +74,8 @@ public class ApiGatewayV2OpenApiImporter {
         }
 
         Api api = service.createApi(region, request);
-        applySpec(region, api.getApiId(), openAPI);
+        applySpec(region, api.getApiId(), plan);
+        recordImportDiagnostics(region, api.getApiId(), plan);
         LOG.infov("Imported HTTP API from OpenAPI spec: {0} ({1})", api.getName(), api.getApiId());
         return service.getApi(region, api.getApiId());
     }
@@ -85,14 +89,18 @@ public class ApiGatewayV2OpenApiImporter {
      * left untouched, which is what keeps a Terraform {@code aws_apigatewayv2_api} whose
      * {@code cors_configuration} lives on the resource rather than in {@code body} from flapping.
      */
-    public Api reimportApi(String region, String apiId, String specBody) {
+    public Api reimportApi(String region, String apiId, String specBody, String basePathMode,
+                           boolean failOnWarnings) {
         Api api = service.getApi(region, apiId);
         if (!"HTTP".equals(api.getProtocolType())) {
             throw new AwsException("BadRequestException",
                     "Cannot import an OpenAPI definition into a " + api.getProtocolType() + " API", 400);
         }
 
-        OpenAPI openAPI = parseSpec(specBody);
+        // Parse and validate before touching anything: failOnWarnings must roll the whole
+        // operation back, and a half-replaced API is worse than a rejected one.
+        ImportPlan plan = plan(specBody, basePathMode, failOnWarnings);
+        OpenAPI openAPI = plan.openAPI();
 
         for (Route route : service.getRoutes(region, apiId)) {
             service.deleteRoute(region, apiId, route.getRouteId());
@@ -125,26 +133,156 @@ public class ApiGatewayV2OpenApiImporter {
             service.updateApi(region, apiId, update);
         }
 
-        applySpec(region, apiId, openAPI);
+        applySpec(region, apiId, plan);
+        recordImportDiagnostics(region, apiId, plan);
         LOG.infov("Reimported HTTP API from OpenAPI spec: {0} ({1})", api.getName(), apiId);
         return service.getApi(region, apiId);
     }
 
-    // ──────────────────────────── Spec application ────────────────────────────
+    // ──────────────────────────── Planning ────────────────────────────
 
-    private OpenAPI parseSpec(String specBody) {
+    /**
+     * A parsed document plus everything decided before the first write: the route path prefix the
+     * basepath mode implies, and the diagnostics AWS reports back on the Api.
+     */
+    private record ImportPlan(OpenAPI openAPI, String pathPrefix, List<String> warnings,
+                              List<String> importInfo) {}
+
+    private ImportPlan plan(String specBody, String basePathMode, boolean failOnWarnings) {
         if (specBody == null || specBody.isBlank()) {
             throw new AwsException("BadRequestException", "Body is required for OpenAPI import", 400);
         }
+        String mode = basePathMode == null || basePathMode.isBlank()
+                ? "ignore"
+                : basePathMode.toLowerCase(Locale.ROOT);
+        if (!List.of("ignore", "prepend", "split").contains(mode)) {
+            throw new AwsException("BadRequestException",
+                    "Invalid basepath '" + basePathMode + "'; valid values are ignore, prepend and split", 400);
+        }
+
         SwaggerParseResult result = new io.swagger.parser.OpenAPIParser().readContents(specBody, null, null);
         if (result.getOpenAPI() == null) {
             String errors = result.getMessages() != null ? String.join(", ", result.getMessages()) : "unknown error";
             throw new AwsException("BadRequestException", "Failed to parse OpenAPI spec: " + errors, 400);
         }
-        return result.getOpenAPI();
+        OpenAPI openAPI = result.getOpenAPI();
+
+        List<String> warnings = new ArrayList<>();
+        if (result.getMessages() != null) {
+            result.getMessages().stream().filter(m -> m != null && !m.isBlank()).forEach(warnings::add);
+        }
+
+        List<String> importInfo = new ArrayList<>();
+        String pathPrefix = pathPrefix(openAPI, mode, importInfo);
+        collectImportInfo(openAPI, importInfo);
+
+        if (failOnWarnings && !warnings.isEmpty()) {
+            throw new AwsException("BadRequestException",
+                    "Warnings found during import: " + String.join(", ", warnings), 400);
+        }
+        return new ImportPlan(openAPI, pathPrefix, warnings, importInfo);
     }
 
-    private void applySpec(String region, String apiId, OpenAPI openAPI) {
+    /**
+     * Resolves the base path the way the Import API does for OpenAPI 3: a {@code basePath} server
+     * variable wins (the first, if several are declared), otherwise any path carried by
+     * {@code server.url}. "prepend" puts the whole thing in front of every route; "split" drops its
+     * first segment first; "ignore" — the default — contributes nothing.
+     */
+    private static String pathPrefix(OpenAPI openAPI, String mode, List<String> importInfo) {
+        if ("ignore".equals(mode)) {
+            return "";
+        }
+        String basePath = resolveBasePath(openAPI);
+        if (basePath == null) {
+            importInfo.add("basepath=" + mode + " was requested but the definition declares no base path");
+            return "";
+        }
+        if ("split".equals(mode)) {
+            int nextSlash = basePath.indexOf('/', 1);
+            return nextSlash < 0 ? "" : trimTrailingSlash(basePath.substring(nextSlash));
+        }
+        return trimTrailingSlash(basePath);
+    }
+
+    private static String resolveBasePath(OpenAPI openAPI) {
+        if (openAPI.getServers() == null) {
+            return null;
+        }
+        for (Server server : openAPI.getServers()) {
+            if (server.getVariables() != null) {
+                ServerVariable variable = server.getVariables().get("basePath");
+                if (variable != null && variable.getDefault() != null && !variable.getDefault().isBlank()) {
+                    return leadingSlash(variable.getDefault());
+                }
+            }
+        }
+        for (Server server : openAPI.getServers()) {
+            String path = serverUrlPath(server.getUrl());
+            if (path != null) {
+                return path;
+            }
+        }
+        return null;
+    }
+
+    /** The path portion of a server URL, or null when it carries none beyond "/". */
+    private static String serverUrlPath(String url) {
+        if (url == null || url.isBlank()) {
+            return null;
+        }
+        String path = url;
+        int schemeEnd = path.indexOf("://");
+        if (schemeEnd >= 0) {
+            int hostEnd = path.indexOf('/', schemeEnd + 3);
+            path = hostEnd < 0 ? "" : path.substring(hostEnd);
+        }
+        path = trimTrailingSlash(path);
+        return path.isEmpty() || "/".equals(path) ? null : leadingSlash(path);
+    }
+
+    private static String leadingSlash(String value) {
+        return value.startsWith("/") ? value : "/" + value;
+    }
+
+    private static String trimTrailingSlash(String value) {
+        return value.length() > 1 && value.endsWith("/") ? value.substring(0, value.length() - 1) : value;
+    }
+
+    /** Notes definition properties the import does not carry into the v2 object model. */
+    private static void collectImportInfo(OpenAPI openAPI, List<String> importInfo) {
+        if (openAPI.getComponents() != null && openAPI.getComponents().getSchemas() != null
+                && !openAPI.getComponents().getSchemas().isEmpty()) {
+            importInfo.add("Ignoring component schemas; HTTP APIs do not perform request validation");
+        }
+        if (openAPI.getPaths() == null) {
+            return;
+        }
+        openAPI.getPaths().forEach((path, pathItem) -> {
+            if (pathItem == null) {
+                return;
+            }
+            pathItem.readOperationsMap().forEach((method, operation) -> {
+                if (operation != null
+                        && extensionAsMap(operation.getExtensions(), EXT_INTEGRATION) == null) {
+                    importInfo.add("No " + EXT_INTEGRATION + " for " + method.name() + " " + path
+                            + "; the route was created without an integration");
+                }
+            });
+        });
+    }
+
+    private void recordImportDiagnostics(String region, String apiId, ImportPlan plan) {
+        Api api = service.getApi(region, apiId);
+        api.setWarnings(plan.warnings().isEmpty() ? null : List.copyOf(plan.warnings()));
+        api.setImportInfo(plan.importInfo().isEmpty() ? null : List.copyOf(plan.importInfo()));
+        service.putApi(region, api);
+    }
+
+    // ──────────────────────────── Spec application ────────────────────────────
+
+    private void applySpec(String region, String apiId, ImportPlan plan) {
+        OpenAPI openAPI = plan.openAPI();
         Map<String, SchemeBinding> schemes = createAuthorizers(region, apiId, openAPI);
         List<SecurityRequirement> globalSecurity = openAPI.getSecurity();
 
@@ -152,7 +290,7 @@ public class ApiGatewayV2OpenApiImporter {
             return;
         }
         for (Map.Entry<String, PathItem> pathEntry : openAPI.getPaths().entrySet()) {
-            String path = pathEntry.getKey();
+            String path = plan.pathPrefix() + pathEntry.getKey();
             PathItem pathItem = pathEntry.getValue();
             if (pathItem == null) {
                 continue;

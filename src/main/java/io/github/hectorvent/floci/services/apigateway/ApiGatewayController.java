@@ -1111,7 +1111,8 @@ public class ApiGatewayController {
                               @QueryParam("failOnWarnings") Boolean failOnWarnings,
                               String body) {
         String region = regionResolver.resolveRegion(headers);
-        Api api = v2OpenApiImporter.importApi(region, extractOpenApiBody(body));
+        Api api = v2OpenApiImporter.importApi(region, extractOpenApiBody(body), basePath,
+                Boolean.TRUE.equals(failOnWarnings));
         return Response.status(201).entity(toV2ApiNode(api).toString()).type(MediaType.APPLICATION_JSON).build();
     }
 
@@ -1173,7 +1174,8 @@ public class ApiGatewayController {
                                 @QueryParam("failOnWarnings") Boolean failOnWarnings,
                                 String body) {
         String region = regionResolver.resolveRegion(headers);
-        Api api = v2OpenApiImporter.reimportApi(region, apiId, extractOpenApiBody(body));
+        Api api = v2OpenApiImporter.reimportApi(region, apiId, extractOpenApiBody(body), basePath,
+                Boolean.TRUE.equals(failOnWarnings));
         return Response.status(201).entity(toV2ApiNode(api).toString()).type(MediaType.APPLICATION_JSON).build();
     }
 
@@ -2305,6 +2307,14 @@ public class ApiGatewayController {
         if (api.getDescription() != null) node.put("description", api.getDescription());
         if (api.getApiKeySelectionExpression() != null) node.put("apiKeySelectionExpression", api.getApiKeySelectionExpression());
         if (api.getVersion() != null) node.put("version", api.getVersion());
+        if (api.getWarnings() != null && !api.getWarnings().isEmpty()) {
+            ArrayNode warnings = node.putArray("warnings");
+            api.getWarnings().forEach(warnings::add);
+        }
+        if (api.getImportInfo() != null && !api.getImportInfo().isEmpty()) {
+            ArrayNode importInfo = node.putArray("importInfo");
+            api.getImportInfo().forEach(importInfo::add);
+        }
         if (api.getTags() != null && !api.getTags().isEmpty()) {
             ObjectNode tagsNode = objectMapper.createObjectNode();
             api.getTags().forEach(tagsNode::put);

@@ -259,4 +259,156 @@ class ApiGatewayV2OpenApiImportTest {
                 .when().put("/v2/apis")
                 .then().statusCode(400);
     }
+
+    // ──────────────────────────── basepath ────────────────────────────
+
+    /** A base path declared the OpenAPI 3 way: a "basePath" server variable. */
+    private static final String SPEC_WITH_BASE_PATH = """
+            {
+              "openapi": "3.0.1",
+              "info": {"title": "BasePathApi", "version": "1.0"},
+              "servers": [{
+                "url": "https://example.com/{basePath}",
+                "variables": {"basePath": {"default": "/a/b/c"}}
+              }],
+              "paths": {
+                "/e": {"get": {"x-amazon-apigateway-integration": {
+                  "type": "http_proxy", "httpMethod": "GET", "uri": "https://example.com/e",
+                  "payloadFormatVersion": "1.0"}}}
+              }
+            }
+            """;
+
+    private static String importWithBasePath(String basepath) throws Exception {
+        String response = given()
+                .contentType(ContentType.JSON)
+                .queryParam("basepath", basepath)
+                .body(envelope(SPEC_WITH_BASE_PATH))
+                .when().put("/v2/apis")
+                .then().statusCode(201)
+                .extract().asString();
+        String apiId = mapper.readTree(response).get("apiId").asText();
+        return get("/v2/apis/" + apiId + "/routes").get("items").get(0).get("routeKey").asText();
+    }
+
+    @Test
+    @Order(7)
+    void basePathIgnoreIsTheDefault() throws Exception {
+        assertEquals("GET /e", importWithBasePath("ignore"));
+
+        // Omitting the parameter entirely must behave the same as ignore.
+        String response = given().contentType(ContentType.JSON)
+                .body(envelope(SPEC_WITH_BASE_PATH))
+                .when().put("/v2/apis")
+                .then().statusCode(201).extract().asString();
+        String apiId = mapper.readTree(response).get("apiId").asText();
+        assertEquals("GET /e", get("/v2/apis/" + apiId + "/routes").get("items").get(0).get("routeKey").asText());
+    }
+
+    @Test
+    @Order(8)
+    void basePathPrependAndSplit() throws Exception {
+        assertEquals("GET /a/b/c/e", importWithBasePath("prepend"));
+        // split drops the first segment of the base path.
+        assertEquals("GET /b/c/e", importWithBasePath("split"));
+    }
+
+    @Test
+    @Order(9)
+    void basePathFallsBackToTheServerUrlPath() throws Exception {
+        String spec = """
+                {
+                  "openapi": "3.0.1",
+                  "info": {"title": "ServerUrlApi", "version": "1.0"},
+                  "servers": [{"url": "https://example.com/v1/api"}],
+                  "paths": {"/e": {"get": {}}}
+                }
+                """;
+        String response = given().contentType(ContentType.JSON)
+                .queryParam("basepath", "prepend")
+                .body(envelope(spec))
+                .when().put("/v2/apis")
+                .then().statusCode(201).extract().asString();
+        String apiId = mapper.readTree(response).get("apiId").asText();
+        assertEquals("GET /v1/api/e",
+                get("/v2/apis/" + apiId + "/routes").get("items").get(0).get("routeKey").asText());
+    }
+
+    @Test
+    @Order(10)
+    void invalidBasePathIsRejected() throws Exception {
+        given().contentType(ContentType.JSON)
+                .queryParam("basepath", "sideways")
+                .body(envelope(SPEC_WITH_AUTHORIZER))
+                .when().put("/v2/apis")
+                .then().statusCode(400);
+    }
+
+    // ──────────────────────────── failOnWarnings / importInfo ────────────────────────────
+
+    @Test
+    @Order(11)
+    void importInfoReportsOperationsWithoutAnIntegration() throws Exception {
+        String spec = """
+                {
+                  "openapi": "3.0.1",
+                  "info": {"title": "NoIntegrationApi", "version": "1.0"},
+                  "paths": {"/bare": {"get": {}}}
+                }
+                """;
+        String response = given().contentType(ContentType.JSON)
+                .body(envelope(spec))
+                .when().put("/v2/apis")
+                .then().statusCode(201)
+                .extract().asString();
+
+        JsonNode api = mapper.readTree(response);
+        JsonNode importInfo = get("/v2/apis/" + api.get("apiId").asText()).get("importInfo");
+        assertNotNull(importInfo);
+        assertTrue(importInfo.toString().contains("GET /bare"));
+    }
+
+    @Test
+    @Order(12)
+    void failOnWarningsRollsBackWithoutMutatingAnExistingApi() throws Exception {
+        // A $ref to a schema that does not exist makes swagger-parser emit a message.
+        String warnSpec = """
+                {
+                  "openapi": "3.0.1",
+                  "info": {"title": "WarnApi", "version": "1.0"},
+                  "paths": {"/w": {"get": {"responses": {"200": {"description": "ok",
+                    "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Missing"}}}}}}}}
+                }
+                """;
+
+        String created = given().contentType(ContentType.JSON)
+                .body("{\"name\": \"failOnWarningsTarget\", \"protocolType\": \"HTTP\"}")
+                .when().post("/v2/apis")
+                .then().statusCode(201).extract().asString();
+        String apiId = mapper.readTree(created).get("apiId").asText();
+
+        given().contentType(ContentType.JSON)
+                .body(envelope(SPEC_WITH_AUTHORIZER))
+                .when().put("/v2/apis/" + apiId)
+                .then().statusCode(201);
+        assertEquals(2, get("/v2/apis/" + apiId + "/routes").get("items").size());
+
+        given().contentType(ContentType.JSON)
+                .queryParam("failOnWarnings", "true")
+                .body(envelope(warnSpec))
+                .when().put("/v2/apis/" + apiId)
+                .then().statusCode(400);
+
+        // The rejected reimport must not have deleted the routes it was going to replace.
+        JsonNode routes = get("/v2/apis/" + apiId + "/routes");
+        assertEquals(2, routes.get("items").size());
+        assertNotNull(findRoute(routes, "GET /api/items"));
+
+        // Without the flag the same document imports, recording the warning instead.
+        given().contentType(ContentType.JSON)
+                .body(envelope(warnSpec))
+                .when().put("/v2/apis/" + apiId)
+                .then().statusCode(201);
+        assertNotNull(get("/v2/apis/" + apiId).get("warnings"));
+    }
 }

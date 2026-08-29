@@ -101,13 +101,15 @@ public class ApiGatewayV2JsonHandler {
     }
 
     private Response handleImportApi(JsonNode request, String region) {
-        Api api = openApiImporter.importApi(region, request.path("Body").asText(null));
+        Api api = openApiImporter.importApi(region, request.path("Body").asText(null),
+                request.path("Basepath").asText(null), request.path("FailOnWarnings").asBoolean(false));
         return Response.status(201).entity(toApiNode(api).toString()).build();
     }
 
     private Response handleReimportApi(JsonNode request, String region) {
         String apiId = request.path("ApiId").asText();
-        Api api = openApiImporter.reimportApi(region, apiId, request.path("Body").asText(null));
+        Api api = openApiImporter.reimportApi(region, apiId, request.path("Body").asText(null),
+                request.path("Basepath").asText(null), request.path("FailOnWarnings").asBoolean(false));
         return Response.status(201).entity(toApiNode(api).toString()).build();
     }
 
@@ -524,6 +526,14 @@ public class ApiGatewayV2JsonHandler {
         }
         if (api.getVersion() != null) {
             node.put("Version", api.getVersion());
+        }
+        if (api.getWarnings() != null && !api.getWarnings().isEmpty()) {
+            ArrayNode warnings = node.putArray("Warnings");
+            api.getWarnings().forEach(warnings::add);
+        }
+        if (api.getImportInfo() != null && !api.getImportInfo().isEmpty()) {
+            ArrayNode importInfo = node.putArray("ImportInfo");
+            api.getImportInfo().forEach(importInfo::add);
         }
         if (api.getTags() != null && !api.getTags().isEmpty()) {
             ObjectNode tagsNode = node.putObject("Tags");

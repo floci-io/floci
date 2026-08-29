@@ -132,6 +132,11 @@ public class ApiGatewayV2Service {
                 .orElseThrow(() -> new AwsException("NotFoundException", "Invalid API id specified", 404));
     }
 
+    /** Persists an Api the caller already holds — used to attach OpenAPI import diagnostics. */
+    public void putApi(String region, Api api) {
+        apiStore.put(apiKey(region, api.getApiId()), api);
+    }
+
     /**
      * Mirrors ApiGatewayService#resolveRestApiRegion: unsigned data-plane requests carry no
      * region, so preferredRegion is whatever RegionResolver defaults to, which need not match

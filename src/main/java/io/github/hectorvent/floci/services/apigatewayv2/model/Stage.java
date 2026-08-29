@@ -48,6 +48,7 @@ public class Stage {
     public String getDescription() { return description; }
     public void setDescription(String description) { this.description = description; }
 
+
     public AccessLogSettings getAccessLogSettings() { return accessLogSettings; }
     public void setAccessLogSettings(AccessLogSettings accessLogSettings) { this.accessLogSettings = accessLogSettings; }
 
