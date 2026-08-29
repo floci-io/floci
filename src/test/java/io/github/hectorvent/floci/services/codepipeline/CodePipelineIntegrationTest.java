@@ -322,6 +322,227 @@ class CodePipelineIntegrationTest {
     }
 
     @Test
+    void listPipelineExecutionsValidatesFilterAndMaxResults() {
+        String pipelineName = "list-executions-validation-pipeline";
+        post("CreatePipeline", pipeline(pipelineName, """
+                {
+                    "name": "Source",
+                    "actions": [{
+                        "name": "SourceAction",
+                        "actionTypeId": {
+                            "category": "Source",
+                            "owner": "AWS",
+                            "provider": "S3",
+                            "version": "1"
+                        },
+                        "runOrder": 1
+                    }]
+                },
+                {
+                    "name": "Build",
+                    "actions": [{
+                        "name": "BuildAction",
+                        "actionTypeId": {
+                            "category": "Build",
+                            "owner": "AWS",
+                            "provider": "CodeBuild",
+                            "version": "1"
+                        },
+                        "runOrder": 1
+                    }]
+                }
+                """))
+                .then()
+                .statusCode(200);
+
+        post("ListPipelineExecutions", """
+                {
+                    "pipelineName": "%s",
+                    "filter": {"succeededInStage": {"stageName": 42}}
+                }
+                """.formatted(pipelineName))
+                .then()
+                .statusCode(400)
+                .body("__type", containsString("ValidationException"))
+                .body("message", containsString("succeededInStage requires stageName"));
+
+        post("ListPipelineExecutions", """
+                {
+                    "pipelineName": "%s",
+                    "filter": {"succeededInStage": {"stageName": "Source", "extra": 1}}
+                }
+                """.formatted(pipelineName))
+                .then()
+                .statusCode(400)
+                .body("__type", containsString("ValidationException"))
+                .body("message", containsString("Unknown"));
+
+        post("ListPipelineExecutions", """
+                {
+                    "pipelineName": "%s",
+                    "filter": {"succeededInStage": {"stageName": "Source"}, "extra": 1}
+                }
+                """.formatted(pipelineName))
+                .then()
+                .statusCode(400)
+                .body("__type", containsString("ValidationException"))
+                .body("message", containsString("Unknown"));
+
+        post("ListPipelineExecutions", """
+                {
+                    "pipelineName": "%s",
+                    "filter": {"succeededInStage": null}
+                }
+                """.formatted(pipelineName))
+                .then()
+                .statusCode(200);
+
+        post("ListPipelineExecutions", """
+                {
+                    "pipelineName": "%s",
+                    "maxResults": "5"
+                }
+                """.formatted(pipelineName))
+                .then()
+                .statusCode(400)
+                .body("__type", containsString("ValidationException"))
+                .body("message", containsString("maxResults must be"));
+
+        post("ListPipelineExecutions", """
+                {
+                    "pipelineName": "%s",
+                    "maxResults": 5.5
+                }
+                """.formatted(pipelineName))
+                .then()
+                .statusCode(400)
+                .body("__type", containsString("ValidationException"))
+                .body("message", containsString("maxResults must be"));
+
+        post("ListPipelineExecutions", """
+                {
+                    "pipelineName": "%s",
+                    "maxResults": 0
+                }
+                """.formatted(pipelineName))
+                .then()
+                .statusCode(400)
+                .body("__type", containsString("ValidationException"))
+                .body("message", containsString("between 1 and 100"));
+
+        post("ListPipelineExecutions", """
+                {
+                    "pipelineName": "%s",
+                    "maxResults": 101
+                }
+                """.formatted(pipelineName))
+                .then()
+                .statusCode(400)
+                .body("__type", containsString("ValidationException"))
+                .body("message", containsString("between 1 and 100"));
+    }
+
+    @Test
+    void putApprovalResultSurvivesStageRenameForInFlightApproval() throws Exception {
+        String pipelineName = "approval-rename-pipeline";
+        post("CreatePipeline", pipeline(pipelineName, """
+                {
+                    "name": "Approve",
+                    "actions": [{
+                        "name": "ManualApproval",
+                        "actionTypeId": {
+                            "category": "Approval",
+                            "owner": "AWS",
+                            "provider": "Manual",
+                            "version": "1"
+                        },
+                        "configuration": {},
+                        "runOrder": 1
+                    }]
+                },
+                {
+                    "name": "Deploy",
+                    "actions": [{
+                        "name": "PlaceholderAction",
+                        "actionTypeId": {
+                            "category": "Deploy",
+                            "owner": "AWS",
+                            "provider": "S3",
+                            "version": "1"
+                        },
+                        "configuration": {
+                            "BucketName": "codepipeline-artifacts",
+                            "ObjectKey": "placeholder"
+                        },
+                        "runOrder": 1
+                    }]
+                }
+                """))
+                .then()
+                .statusCode(200);
+
+        post("StartPipelineExecution", """
+                {"name": "%s"}
+                """.formatted(pipelineName))
+                .then()
+                .statusCode(200);
+
+        String approvalToken = waitForApprovalToken(pipelineName);
+
+        post("UpdatePipeline", pipeline(pipelineName, """
+                {
+                    "name": "ApproveRenamed",
+                    "actions": [{
+                        "name": "ManualApprovalRenamed",
+                        "actionTypeId": {
+                            "category": "Approval",
+                            "owner": "AWS",
+                            "provider": "Manual",
+                            "version": "1"
+                        },
+                        "configuration": {},
+                        "runOrder": 1
+                    }]
+                },
+                {
+                    "name": "Deploy",
+                    "actions": [{
+                        "name": "PlaceholderAction",
+                        "actionTypeId": {
+                            "category": "Deploy",
+                            "owner": "AWS",
+                            "provider": "S3",
+                            "version": "1"
+                        },
+                        "configuration": {
+                            "BucketName": "codepipeline-artifacts",
+                            "ObjectKey": "placeholder"
+                        },
+                        "runOrder": 1
+                    }]
+                }
+                """))
+                .then()
+                .statusCode(200);
+
+        post("PutApprovalResult", """
+                {
+                    "pipelineName": "%s",
+                    "stageName": "Approve",
+                    "actionName": "ManualApproval",
+                    "token": "%s",
+                    "result": {
+                        "status": "Approved",
+                        "summary": "Approved despite rename"
+                    }
+                }
+                """.formatted(pipelineName, approvalToken))
+                .then()
+                .statusCode(200)
+                .body("approvedAt", notNullValue());
+    }
+
+    @Test
     void customActionUsesAwsWorkerJobProtocol() throws Exception {
         createBucket("codepipeline-custom-source");
         putObject("codepipeline-custom-source", "source.zip", "custom artifact");
@@ -453,14 +674,7 @@ class CodePipelineIntegrationTest {
                 .statusCode(200)
                 .extract().path("pipelineExecutionId");
 
-        Thread.sleep(100);
-
-        String approvalToken = post("GetPipelineState", """
-                {"name": "%s"}
-                """.formatted(pipelineName))
-                .then()
-                .statusCode(200)
-                .extract().path("stageStates[0].actionStates[0].latestExecution.token");
+        String approvalToken = waitForApprovalToken(pipelineName);
 
         post("PutApprovalResult", """
                 {
@@ -478,11 +692,7 @@ class CodePipelineIntegrationTest {
                 .statusCode(200)
                 .body("approvedAt", notNullValue());
 
-        Thread.sleep(100);
-
-        post("GetPipelineState", """
-                {"name": "%s"}
-                """.formatted(pipelineName))
+        waitForApprovalStatus(pipelineName, "Succeeded")
                 .then()
                 .statusCode(200)
                 .body("stageStates[0].actionStates[0].latestExecution.status", equalTo("Succeeded"))
@@ -532,14 +742,7 @@ class CodePipelineIntegrationTest {
                 .statusCode(200)
                 .extract().path("pipelineExecutionId");
 
-        Thread.sleep(100);
-
-        String approvalToken2 = post("GetPipelineState", """
-                {"name": "%s"}
-                """.formatted(pipelineName2))
-                .then()
-                .statusCode(200)
-                .extract().path("stageStates[0].actionStates[0].latestExecution.token");
+        String approvalToken2 = waitForApprovalToken(pipelineName2);
 
         post("PutApprovalResult", """
                 {
@@ -557,11 +760,7 @@ class CodePipelineIntegrationTest {
                 .statusCode(200)
                 .body("approvedAt", notNullValue());
 
-        Thread.sleep(100);
-
-        post("GetPipelineState", """
-                {"name": "%s"}
-                """.formatted(pipelineName2))
+        waitForApprovalStatus(pipelineName2, "Failed")
                 .then()
                 .statusCode(200)
                 .body("stageStates[0].actionStates[0].latestExecution.status", equalTo("Failed"))
@@ -660,6 +859,50 @@ class CodePipelineIntegrationTest {
                     "pipelineName": "%s",
                     "stageName": "Approve",
                     "actionName": "ManualApproval",
+                    "token": "00000000-0000-0000-0000-000000000000"
+                }
+                """.formatted(pipelineName))
+                .then()
+                .statusCode(400)
+                .body("__type", containsString("ValidationException"))
+                .body("message", containsString("result is required"));
+
+        post("PutApprovalResult", """
+                {
+                    "pipelineName": "%s",
+                    "stageName": "Approve",
+                    "actionName": "ManualApproval",
+                    "token": "00000000-0000-0000-0000-000000000000",
+                    "result": "Approved"
+                }
+                """.formatted(pipelineName))
+                .then()
+                .statusCode(400)
+                .body("__type", containsString("ValidationException"))
+                .body("message", containsString("result must be an object"));
+
+        post("PutApprovalResult", """
+                {
+                    "pipelineName": "%s",
+                    "stageName": "Approve",
+                    "actionName": "ManualApproval",
+                    "token": "00000000-0000-0000-0000-000000000000",
+                    "result": {
+                        "status": "Approved",
+                        "summary": 12345
+                    }
+                }
+                """.formatted(pipelineName))
+                .then()
+                .statusCode(400)
+                .body("__type", containsString("ValidationException"))
+                .body("message", containsString("result.summary must be a string"));
+
+        post("PutApprovalResult", """
+                {
+                    "pipelineName": "%s",
+                    "stageName": "Approve",
+                    "actionName": "ManualApproval",
                     "token": "00000000-0000-0000-0000-000000000000",
                     "result": {
                         "status": "Invalid",
@@ -696,14 +939,7 @@ class CodePipelineIntegrationTest {
                 .statusCode(200)
                 .extract().path("pipelineExecutionId");
 
-        Thread.sleep(100);
-
-        String approvalToken = post("GetPipelineState", """
-                {"name": "%s"}
-                """.formatted(pipelineName))
-                .then()
-                .statusCode(200)
-                .extract().path("stageStates[0].actionStates[0].latestExecution.token");
+        String approvalToken = waitForApprovalToken(pipelineName);
 
         post("PutApprovalResult", """
                 {
@@ -838,6 +1074,39 @@ class CodePipelineIntegrationTest {
             Thread.sleep(50);
         } while (Instant.now().isBefore(deadline));
         throw new AssertionError("Pipeline did not reach " + expected + ", last status: " + status);
+    }
+
+    private Response waitForApprovalStatus(String pipelineName, String expectedStatus) throws Exception {
+        Instant deadline = Instant.now().plus(Duration.ofSeconds(5));
+        Response response;
+        String status;
+        do {
+            response = post("GetPipelineState", """
+                    {"name": "%s"}
+                    """.formatted(pipelineName));
+            status = response.jsonPath().getString("stageStates[0].actionStates[0].latestExecution.status");
+            if (expectedStatus.equals(status)) {
+                return response;
+            }
+            Thread.sleep(50);
+        } while (Instant.now().isBefore(deadline));
+        throw new AssertionError("Approval action did not reach " + expectedStatus + ", last status: " + status);
+    }
+
+    private String waitForApprovalToken(String pipelineName) throws Exception {
+        Instant deadline = Instant.now().plus(Duration.ofSeconds(5));
+        String token;
+        do {
+            token = post("GetPipelineState", """
+                    {"name": "%s"}
+                    """.formatted(pipelineName))
+                    .jsonPath().getString("stageStates[0].actionStates[0].latestExecution.token");
+            if (token != null) {
+                return token;
+            }
+            Thread.sleep(50);
+        } while (Instant.now().isBefore(deadline));
+        throw new AssertionError("Approval token was not issued for pipeline " + pipelineName);
     }
 
     private static Response post(String action, String body) {

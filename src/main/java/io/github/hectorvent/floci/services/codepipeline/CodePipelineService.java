@@ -39,6 +39,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -326,18 +327,32 @@ public class CodePipelineService {
         if (filter != null && !filter.isNull() && !filter.isObject()) {
             throw new AwsException("ValidationException", "filter must be an object", 400);
         }
+        if (filter != null && filter.isObject()) {
+            requireOnlyMembers(filter, "filter", Set.of("succeededInStage"));
+        }
         JsonNode succeededInStage = filter == null ? null : filter.get("succeededInStage");
         if (succeededInStage != null && !succeededInStage.isNull()) {
-            if (!succeededInStage.isObject() || !succeededInStage.hasNonNull("stageName")) {
+            if (!succeededInStage.isObject()) {
                 throw new AwsException("ValidationException",
                         "succeededInStage requires stageName", 400);
             }
-            String stage = succeededInStage.path("stageName").asText();
+            requireOnlyMembers(succeededInStage, "succeededInStage", Set.of("stageName"));
+            JsonNode stageNameNode = succeededInStage.get("stageName");
+            if (stageNameNode == null || stageNameNode.isNull() || !stageNameNode.isTextual()
+                    || stageNameNode.asText().isBlank()) {
+                throw new AwsException("ValidationException",
+                        "succeededInStage requires stageName", 400);
+            }
+            String stage = stageNameNode.asText();
             executions = executions.stream().filter(e -> actionExecutionsForStage(e, stage).stream()
                     .allMatch(a -> "Succeeded".equals(a.getStatus()))).toList();
         }
         if (request.hasNonNull("maxResults")) {
-            int maxResults = request.path("maxResults").asInt(-1);
+            JsonNode maxResultsNode = request.get("maxResults");
+            if (!maxResultsNode.isIntegralNumber()) {
+                throw new AwsException("ValidationException", "maxResults must be an integer", 400);
+            }
+            int maxResults = maxResultsNode.asInt();
             if (maxResults < 1 || maxResults > 100) {
                 throw new AwsException("ValidationException", "maxResults must be between 1 and 100", 400);
             }
@@ -429,23 +444,31 @@ public class CodePipelineService {
         String actionName = text(request, "actionName");
         String token = text(request, "token");
         JsonNode resultNode = request.get("result");
-        if (resultNode == null || !resultNode.isObject()) {
+        if (resultNode == null || resultNode.isNull()) {
             throw new AwsException("ValidationException", "result is required", 400);
+        }
+        if (!resultNode.isObject()) {
+            throw new AwsException("ValidationException", "result must be an object", 400);
         }
         String status = text(resultNode, "status");
         if (!List.of("Approved", "Rejected").contains(status)) {
             throw new AwsException("ValidationException",
                     "result.status must be one of [Approved, Rejected]", 400);
         }
-        String summary = resultNode.path("summary").asText("");
+        JsonNode summaryNode = resultNode.get("summary");
+        String summary = "";
+        if (summaryNode != null && !summaryNode.isNull()) {
+            if (!summaryNode.isTextual()) {
+                throw new AwsException("ValidationException", "result.summary must be a string", 400);
+            }
+            summary = summaryNode.asText();
+        }
         if (summary.length() > 512) {
             throw new AwsException("ValidationException",
                     "result.summary must not exceed 512 characters", 400);
         }
 
         CodePipelinePipeline pipeline = requirePipeline(account, region, pipelineName);
-        requireStage(pipeline, stageName);
-        requireAction(pipeline, stageName, actionName);
 
         CodePipelineExecution execution = executions(account, region, pipelineName).stream()
                 .filter(e -> e.getActionExecutions().stream()
@@ -453,15 +476,19 @@ public class CodePipelineService {
                                 && actionName.equals(a.getActionName())
                                 && token.equals(a.getToken())))
                 .findFirst()
-                .orElseThrow(() -> new AwsException(
-                        "InvalidApprovalTokenException", "Approval token is invalid", 400));
+                .orElse(null);
 
-        ActionExecution approval = execution.getActionExecutions().stream()
+        ActionExecution approval = execution == null ? null : execution.getActionExecutions().stream()
                 .filter(a -> stageName.equals(a.getStageName()) && actionName.equals(a.getActionName()))
                 .filter(a -> token.equals(a.getToken()))
                 .findFirst()
-                .orElseThrow(() -> new AwsException(
-                        "InvalidApprovalTokenException", "Approval token is invalid", 400));
+                .orElse(null);
+
+        if (approval == null) {
+            requireStage(pipeline, stageName);
+            requireAction(pipeline, stageName, actionName);
+            throw new AwsException("InvalidApprovalTokenException", "Approval token is invalid", 400);
+        }
 
         if (!"InProgress".equals(approval.getStatus())) {
             throw new AwsException("ApprovalAlreadyCompletedException",
@@ -1164,6 +1191,14 @@ public class CodePipelineService {
         if (name == null || !name.matches("[A-Za-z0-9.@_-]{1,100}")) {
             throw new AwsException("ValidationException", "pipeline name has invalid format", 400);
         }
+    }
+
+    private static void requireOnlyMembers(JsonNode node, String label, Set<String> allowed) {
+        node.fieldNames().forEachRemaining(field -> {
+            if (!allowed.contains(field)) {
+                throw new AwsException("ValidationException", "Unknown " + label + " member: " + field, 400);
+            }
+        });
     }
 
     private void requireStage(CodePipelinePipeline pipeline, String stageName) {
