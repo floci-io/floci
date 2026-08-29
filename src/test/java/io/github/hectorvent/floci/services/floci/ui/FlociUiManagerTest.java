@@ -12,17 +12,23 @@ import io.github.hectorvent.floci.core.common.docker.CurrentContainerNetworkReso
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import com.github.dockerjava.api.exception.DockerClientException;
 import com.github.dockerjava.api.exception.NotFoundException;
+import com.github.dockerjava.api.model.Container;
 import org.junit.jupiter.api.Test;
 
 import java.net.BindException;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.TimeUnit;
 
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class FlociUiManagerTest {
@@ -402,5 +408,83 @@ class FlociUiManagerTest {
         List<String> env = newManager().injectedEnv();
         assertFalse(env.stream().anyMatch(v -> v.startsWith("NODE_TLS_REJECT_UNAUTHORIZED")),
                 "TLS verification must stay on unless explicitly opted out, was: " + env);
+    }
+
+    // --- re-arming after an async start must not get stuck ---
+
+    @Test
+    void statusReArmsAfterAnAsyncStartActuallyRestartsTheSidecar() {
+        // The sidecar's first start goes through ensureStartedAsync() (the interstitial-page
+        // path). Once it is gone and status() wants to bring it back, the second restart is
+        // also kicked through ensureStartedAsync() — that second kick must not be silently
+        // dropped just because the first one already ran to completion.
+        withUiConfig();
+        when(ui.enabled()).thenReturn(true);
+        when(ui.containerName()).thenReturn("floci-ui");
+        when(ui.endpoint()).thenReturn(Optional.of("http://custom:4566"));
+        when(containerDetector.isRunningInContainer()).thenReturn(false);
+        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+        Container existing = mock(Container.class);
+        when(existing.getId()).thenReturn("abc123");
+        when(lifecycleManager.findByName("floci-ui")).thenReturn(Optional.of(existing));
+        when(lifecycleManager.containerEnv("abc123")).thenReturn(Optional.empty());
+        EndpointInfo endpoint = new EndpointInfo("localhost", 4500);
+        when(lifecycleManager.adopt("abc123", List.of(4500)))
+                .thenReturn(new ContainerLifecycleManager.ContainerInfo("abc123", Map.of(4500, endpoint)));
+        when(lifecycleManager.presenceOf("abc123")).thenReturn(ContainerPresence.ABSENT);
+
+        FlociUiManager manager = new FlociUiManager(
+                mock(ContainerBuilder.class),
+                lifecycleManager,
+                mock(ContainerLogStreamer.class),
+                containerDetector,
+                mock(CurrentContainerNetworkResolver.class),
+                dockerHostResolver,
+                config,
+                regionResolver);
+
+        manager.ensureStartedAsync();
+        await().atMost(2, TimeUnit.SECONDS)
+                .untilAsserted(() -> verify(lifecycleManager, times(1)).adopt("abc123", List.of(4500)));
+
+        // The sidecar is gone (ABSENT) and unreachable (nothing listens on localhost:4500), so
+        // status() must trigger a second async restart.
+        manager.status();
+
+        await().atMost(2, TimeUnit.SECONDS)
+                .untilAsserted(() -> verify(lifecycleManager, times(2)).adopt("abc123", List.of(4500)));
+    }
+
+    // --- a start that fails before the try block must not vanish silently ---
+
+    @Test
+    void ensureStartedRecordsTheFailureWhenTheContainerRuntimeIsUnreachable() {
+        // findByName runs before the try/catch in ensureStarted(). If the container runtime is
+        // unreachable it throws there, and the failure must still be captured for status() --
+        // not escape uncaught (synchronous callers) or vanish into a discarded Future (the
+        // ensureStartedAsync() path).
+        withUiConfig();
+        when(ui.enabled()).thenReturn(true);
+        when(ui.containerName()).thenReturn("floci-ui");
+        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+        when(lifecycleManager.findByName("floci-ui"))
+                .thenThrow(new com.github.dockerjava.api.exception.DockerClientException(
+                        "Cannot connect to the Docker daemon"));
+
+        FlociUiManager manager = new FlociUiManager(
+                mock(ContainerBuilder.class),
+                lifecycleManager,
+                mock(ContainerLogStreamer.class),
+                containerDetector,
+                mock(CurrentContainerNetworkResolver.class),
+                dockerHostResolver,
+                config,
+                regionResolver);
+
+        manager.ensureStarted();
+
+        assertEquals(false, manager.status().started());
+        assertTrue(manager.status().error() != null && manager.status().error().contains("Docker"),
+                "expected a captured error mentioning the Docker runtime, was: " + manager.status().error());
     }
 }

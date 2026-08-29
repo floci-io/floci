@@ -116,17 +116,17 @@ public class FlociUiManager {
         // Clear any error from a prior failed attempt so status() reports this retry
         // as in-progress rather than surfacing the stale failure.
         this.lastError = null;
-        String name = ContainerStorageHelper.dockerName(config, config.services().ui().containerName());
-
-        Optional<Container> existing = lifecycleManager.findByName(name);
-        if (existing.isPresent() && !replaceIfEndpointDrifted(existing.get())) {
-            adoptExisting(existing.get());
-            return;
-        }
-
         String image = config.services().ui().image();
-        int chosenPort = config.services().ui().port();
         try {
+            String name = ContainerStorageHelper.dockerName(config, config.services().ui().containerName());
+
+            Optional<Container> existing = lifecycleManager.findByName(name);
+            if (existing.isPresent() && !replaceIfEndpointDrifted(existing.get())) {
+                adoptExisting(existing.get());
+                return;
+            }
+
+            int chosenPort = config.services().ui().port();
             ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
                     .withName(name)
                     .withEnv(injectedEnv())
@@ -147,6 +147,10 @@ public class FlociUiManager {
             this.lastError = null;
             LOG.infov("Started floci-ui sidecar {0} on host port {1}", name, String.valueOf(hostPort));
             attachLogStream();
+        } catch (IllegalStateException e) {
+            // A misconfigured endpoint override already recorded its own specific message in
+            // replaceIfEndpointDrifted -- don't overwrite it with the generic one below.
+            LOG.errorv(e, "Failed to start floci-ui sidecar: {0}", e.getMessage());
         } catch (Exception e) {
             this.lastError = describeStartFailure(image, e);
             LOG.errorv(e, "Failed to start floci-ui sidecar from image {0}", image);
@@ -199,6 +203,10 @@ public class FlociUiManager {
             LOG.infov("floci-ui sidecar {0} is gone — starting it again so the dashboard "
                     + "recovers without Floci being restarted", containerId);
             this.started = false;
+            // ensureStartedAsync() only submits on kicked's false->true edge, but a prior
+            // successful start never reset it (it only resets after a FAILED start) -- without
+            // this, this re-arm's CAS finds kicked already true and silently no-ops.
+            this.kicked.set(false);
             ensureStartedAsync();
         }
         return new UiStatus(started, ready, hostPort, null);
