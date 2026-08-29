@@ -1790,18 +1790,14 @@ public class ApiGatewayExecuteController {
 
     // ──────────────────────────── HTTP API v2 Lambda REQUEST authorizer ────────────────────────────
 
-    // Mirrors JwtAuthorizerResult's shape (and the v1/REST AuthorizerResult's) for the same
-    // reason: a null errorResponse means "authorized, proceed", and context (when non-null) is
-    // the authorizer response's `context` object, which the caller threads through to
-    // buildV2ProxyEvent so requestContext.authorizer.lambda is populated for the backend.
+    // A null errorResponse means authorized, as in JwtAuthorizerResult.
     private record RequestAuthorizerResult(Response errorResponse, ObjectNode context) {}
 
     /**
      * Enforces a Lambda REQUEST authorizer on an HTTP API (v2) route.
      * Supports both payload format versions (1.0 and 2.0) and simple responses.
      *
-     * @return a result whose errorResponse is null if authorized, or carries the error Response
-     *         if denied/unauthorized
+     * @return a result whose errorResponse is null when authorized
      */
     private RequestAuthorizerResult enforceRequestAuthorizerV2(String region, String apiId, String stageName,
                                                 Route route, String httpMethod, String path,
@@ -1961,11 +1957,9 @@ public class ApiGatewayExecuteController {
     /**
      * The {@code context} an authorizer response carries, or null when it carries none.
      *
-     * <p>Unlike the v1/REST path (see extractAuthorizerContext), values are NOT flattened to
-     * strings: an HTTP API hands the context to the backend as JSON under
-     * requestContext.authorizer.lambda, so a nested object — the shape a verifier-style
-     * authorizer uses to pass claims down — survives intact. Anything that is not a JSON object
-     * is treated as absent, as AWS rejects those.
+     * <p>Values are not flattened to strings the way the v1/REST path flattens them
+     * (extractAuthorizerContext): an HTTP API delivers the context to the backend as JSON, so
+     * nested objects survive. A non-object context is treated as absent, as AWS rejects those.
      */
     private ObjectNode requestAuthorizerContext(JsonNode response) {
         JsonNode context = response.path("context");
@@ -1977,9 +1971,7 @@ public class ApiGatewayExecuteController {
      * Compatible with REST API (v1) REQUEST authorizer shape.
      *
      * <p>Package-private so the shape can be asserted directly, the way {@code buildV2ProxyEvent}
-     * is. The context an authorizer returns does now reach the v2 proxy event, so these fields
-     * are observable end to end by round-tripping them through an echo authorizer's context -
-     * asserting the built event directly stays the clearer test.
+     * is.
      */
     String buildRequestAuthorizerEventV1(String httpMethod, String path,
                                          String apiId, String stageName, String region,
@@ -2239,11 +2231,9 @@ public class ApiGatewayExecuteController {
                 headers, uriInfo, body, requestId, jwtClaims, jwtScopes, null);
     }
 
-    // lambdaAuthorizerContext is the context a CUSTOM/REQUEST authorizer returned (see
-    // enforceRequestAuthorizerV2) and is mutually exclusive with jwtClaims - a route carries one
-    // authorizer, not both. Previously it was discarded rather than reaching here, so a backend
-    // behind a Lambda authorizer saw no requestContext.authorizer at all; the v1/REST path has
-    // threaded its equivalent through buildProxyEvent's principalId/context since before this.
+    // lambdaAuthorizerContext is what a CUSTOM/REQUEST authorizer returned (see
+    // enforceRequestAuthorizerV2). It is mutually exclusive with jwtClaims: a route carries one
+    // authorizer, not both.
     String buildV2ProxyEvent(String httpMethod, String path, String routeKey,
                                      String apiId, String region, String stageName,
                                      HttpHeaders headers, UriInfo uriInfo,
@@ -2325,17 +2315,12 @@ public class ApiGatewayExecuteController {
                 jwtScopes.forEach(scopesNode::add);
             }
         } else if (lambdaAuthorizerContext != null) {
-            // AWS's HTTP API Lambda-authorizer shape: the authorizer's context object lands
-            // verbatim under requestContext.authorizer.lambda, nesting included (unlike a REST
-            // API, which flattens it to a string map under requestContext.authorizer).
-            // principalId is deliberately not surfaced here: a policy-document response's
-            // principalId reaches $context.authorizer.principalId for access logging and
-            // parameter mapping, and where AWS places it in the 2.0 proxy event (if anywhere)
-            // was not measured, so inventing a field is worse than omitting one.
+            // AWS delivers the context verbatim under requestContext.authorizer.lambda, nesting
+            // included, unlike a REST API's flattened string map.
             //
-            // An authorizer that allows with no context leaves the authorizer node absent
-            // entirely rather than rendering "lambda": null - also unmeasured, and absent and
-            // null read identically to a backend that navigates the event defensively.
+            // Two omissions, both because the AWS behaviour could not be measured: principalId
+            // is not surfaced here, and a context-less allow leaves the authorizer node absent
+            // rather than rendering "lambda": null.
             ctx.putObject("authorizer").set("lambda", lambdaAuthorizerContext);
         }
 

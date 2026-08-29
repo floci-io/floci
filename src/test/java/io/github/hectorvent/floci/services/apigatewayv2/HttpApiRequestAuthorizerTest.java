@@ -86,9 +86,8 @@ class HttpApiRequestAuthorizerTest {
     @Order(2)
     void setupLambdaFunctions() throws Exception {
         // Backend Lambda
-        // Echoes requestContext.authorizer back so the authorizer context the gateway
-        // delivers is assertable end to end. JSON.stringify drops the key entirely when the
-        // event carries no authorizer, which is what the contextless case asserts.
+        // Echoes requestContext.authorizer back. JSON.stringify drops the key entirely when the
+        // event carries none, which is what the contextless case asserts.
         createNodeLambda(BACKEND_FN, """
                 exports.handler = async (event) => ({
                     statusCode: 200,
@@ -143,9 +142,8 @@ class HttpApiRequestAuthorizerTest {
                 });
                 """);
 
-        // Simple-response authorizer whose context nests objects — the shape a verifier-style
-        // authorizer uses to hand verified claims to the backend. An HTTP API delivers it as
-        // JSON, so the nesting has to survive rather than being flattened to strings.
+        // Simple-response authorizer whose context nests objects — an HTTP API delivers the
+        // context as JSON, so the nesting has to survive.
         createNodeLambda(NESTED_CTX_FN, """
                 exports.handler = async (event) => ({
                     isAuthorized: true,
@@ -337,8 +335,7 @@ class HttpApiRequestAuthorizerTest {
 
     /**
      * The context an IAM-policy authorizer returns alongside its policy document reaches the
-     * backend under requestContext.authorizer.lambda. It used to be parsed for the Effect and
-     * then dropped, so a backend behind a Lambda authorizer saw no authorizer node at all.
+     * backend under requestContext.authorizer.lambda.
      */
     @Test
     @Order(15)
@@ -426,8 +423,7 @@ class HttpApiRequestAuthorizerTest {
 
     /**
      * An HTTP API delivers the authorizer context as JSON, so nested objects and non-string
-     * scalars survive to the backend — unlike a REST API, which flattens the context to a string
-     * map. A verifier-style authorizer passing claims down depends on this.
+     * scalars survive to the backend, unlike a REST API's flattened string map.
      */
     @Test
     @Order(46)
@@ -577,11 +573,8 @@ class HttpApiRequestAuthorizerTest {
                 .when().patch("/v2/apis/" + httpApiId + "/routes/" + routeId)
                 .then().statusCode(200);
 
-        // The echo authorizer allows the request and embeds the received event in its context.
-        // That context does reach the backend (see iamPolicyContextReachesBackend), but the
-        // event it describes is the one the AUTHORIZER received, so assert the shape by
-        // invoking the echo function directly with a realistic event instead of unwrapping it
-        // through two hops.
+        // The echo authorizer embeds the event it received in its context, so assert that shape
+        // by invoking the echo function directly rather than unwrapping it through two hops.
         String response = given()
                 .header("X-Custom-Header", "test-value")
                 .queryParam("foo", "bar")

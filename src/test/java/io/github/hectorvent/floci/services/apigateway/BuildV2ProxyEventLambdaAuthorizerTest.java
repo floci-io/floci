@@ -20,9 +20,8 @@ import static org.mockito.Mockito.when;
 
 /**
  * Verifies that {@link ApiGatewayExecuteController#buildV2ProxyEvent} populates
- * {@code requestContext.authorizer.lambda} for HTTP API (V2) routes behind a Lambda
- * REQUEST authorizer - previously enforceRequestAuthorizerV2 parsed the authorizer's context
- * only to decide allow/deny and then discarded it, so the backend saw no authorizer node at all.
+ * {@code requestContext.authorizer.lambda} for HTTP API (V2) routes behind a Lambda REQUEST
+ * authorizer.
  *
  * <p>The end-to-end path is covered by HttpApiRequestAuthorizerTest; these assertions pin the
  * rendered shape without needing a Lambda container.
@@ -77,9 +76,7 @@ class BuildV2ProxyEventLambdaAuthorizerTest {
 
     @Test
     void keepsNestedObjectsAndScalarTypes() throws Exception {
-        // An HTTP API hands the context to the backend as JSON, unlike a REST API, which
-        // flattens it to a string map (see buildProxyEvent's authorizerContext handling). The
-        // developer guide's own simple-response example returns a string, a number, a boolean,
+        // The developer guide's simple-response example returns a string, a number, a boolean,
         // an array and a map, so all five have to survive.
         ObjectNode context = MAPPER.createObjectNode();
         ObjectNode claims = context.putObject("jwt").putObject("claims");
@@ -118,8 +115,8 @@ class BuildV2ProxyEventLambdaAuthorizerTest {
 
     @Test
     void jwtClaimsWinOverLambdaContext() throws Exception {
-        // A route carries one authorizer, so dispatchV2 can never hand over both. Pinned so the
-        // event never grows two mutually exclusive authorizer nodes if that ever changes.
+        // dispatchV2 can never hand over both; pinned so the event never grows two authorizer
+        // nodes if that changes.
         Map<String, String> claims = new LinkedHashMap<>();
         claims.put("sub", "user_01ABC");
         ObjectNode context = MAPPER.createObjectNode();
