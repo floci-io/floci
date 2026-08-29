@@ -81,7 +81,7 @@ public class CloudTrailCfnProvisioner implements CfnResourceProvisioner {
     }
 
     @Override
-    public void delete(String resourceType, String physicalId, String region, String accountId) {
+    public void delete(String resourceType, String physicalId, String region) {
         if (physicalId == null) {
             return;
         }

@@ -110,7 +110,7 @@ class CloudTrailCfnProvisionerTest {
         when(trailService.describeTrails(eq("us-east-1"), eq(List.of("trail-arn"))))
                 .thenReturn(List.of(trail("audit-trail", "trail-arn")));
 
-        provisioner.delete("AWS::CloudTrail::Trail", "trail-arn", "us-east-1", "111122223333");
+        provisioner.delete("AWS::CloudTrail::Trail", "trail-arn", "us-east-1");
 
         verify(trailService).deleteTrail("us-east-1", "trail-arn");
     }
@@ -120,7 +120,7 @@ class CloudTrailCfnProvisionerTest {
         when(trailService.describeTrails(eq("us-east-1"), eq(List.of("missing-arn"))))
                 .thenReturn(List.of());
 
-        provisioner.delete("AWS::CloudTrail::Trail", "missing-arn", "us-east-1", "111122223333");
+        provisioner.delete("AWS::CloudTrail::Trail", "missing-arn", "us-east-1");
 
         verify(trailService, never()).deleteTrail(anyString(), anyString());
     }
