@@ -535,8 +535,8 @@ public class CodeBuildRunner implements ContainerTeardown {
                     .withTarInputStream(new ByteArrayInputStream(bos.toByteArray()))
                     .exec();
         } catch (Exception e) {
-            LOG.warnv("Could not stage Floci CA certificate into CodeBuild container {0}: {1}",
-                    containerId, e.getMessage());
+            throw new IllegalStateException(
+                    "Could not stage Floci CA certificate into CodeBuild container " + containerId, e);
         }
     }
 

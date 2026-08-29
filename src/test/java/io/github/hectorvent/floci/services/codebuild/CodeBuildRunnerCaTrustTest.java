@@ -23,6 +23,10 @@ import org.junit.jupiter.api.io.TempDir;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import com.github.dockerjava.api.command.CopyArchiveToContainerCmd;
+
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
@@ -30,8 +34,11 @@ import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /**
@@ -92,6 +99,34 @@ class CodeBuildRunnerCaTrustTest {
 
         assertFalse(env.stream().anyMatch(e -> e.startsWith("NODE_EXTRA_CA_CERTS=")));
         assertFalse(env.stream().anyMatch(e -> e.startsWith("AWS_CA_BUNDLE=")));
+    }
+
+    /**
+     * If staging the Floci CA cert into the container fails, the build must not continue
+     * silently: {@code buildEnvList} still points NODE_EXTRA_CA_CERTS/AWS_CA_BUNDLE at
+     * {@link ContainerLauncher#FLOCI_CA_DIR}, so a build that swallows this failure runs with a
+     * trust anchor that was never actually written, and every spoofed HTTPS AWS call fails
+     * certificate verification instead of reaching Floci.
+     */
+    @Test
+    void stagingFailurePropagatesInsteadOfBeingSwallowed() throws Exception {
+        Path tlsDir = Files.createDirectories(tempDir.resolve("tls"));
+        Files.writeString(tlsDir.resolve("floci-selfsigned.crt"), "fake-cert-pem");
+
+        when(tlsConfig.enabled()).thenReturn(true);
+        when(tlsConfig.certPath()).thenReturn(Optional.empty());
+
+        CopyArchiveToContainerCmd copyCmd = mock(CopyArchiveToContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.copyArchiveToContainerCmd("container-id")).thenReturn(copyCmd);
+        when(copyCmd.exec()).thenThrow(new RuntimeException("docker daemon unreachable"));
+
+        assertThrows(InvocationTargetException.class, () -> invokeStageFlociCaCertIfNeeded("container-id"));
+    }
+
+    private void invokeStageFlociCaCertIfNeeded(String containerId) throws Exception {
+        Method method = CodeBuildRunner.class.getDeclaredMethod("stageFlociCaCertIfNeeded", String.class);
+        method.setAccessible(true);
+        method.invoke(runner(), containerId);
     }
 
     private CodeBuildRunner runner() {
