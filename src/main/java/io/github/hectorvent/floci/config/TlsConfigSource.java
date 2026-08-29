@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.config;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
@@ -200,22 +201,29 @@ public class TlsConfigSource implements ConfigSource {
     /**
      * SANs covering AWS endpoint hostnames spoofed by the embedded DNS server.
      * Wildcards match a single label, so {@code *.amazonaws.com} covers global
-     * endpoints ({@code sts.amazonaws.com}) and {@code *.<region>.amazonaws.com}
-     * covers regional ones ({@code sts.us-east-1.amazonaws.com}) for the default
-     * region — the only region resolvable this early (pre-CDI, property-based).
+     * endpoints ({@code sts.amazonaws.com}) but not regional ones
+     * ({@code sts.us-east-1.amazonaws.com}), which need their own
+     * {@code *.<region>.amazonaws.com} entry. A client can hit an explicit endpoint outside
+     * {@code floci.default-region} (a cross-region call, or a Lambda whose own AWS_REGION
+     * differs from the emulator default); DNS spoofing routes it to Floci regardless of
+     * region, so every region {@link AwsRegions#ALL the emulator advertises} gets a SAN, not
+     * just the configured default.
      */
     private List<String> awsSpoofSans() {
         if (!"true".equalsIgnoreCase(resolveProperty("floci.dns.spoof-aws-endpoints", "false"))) {
             return List.of();
         }
-        String region = resolveProperty("floci.default-region", "us-east-1");
-        // A wildcard matches exactly one label (RFC 6125 6.4.3), so the two broad
-        // wildcards miss virtual-hosted addressing, where the bucket adds a label:
-        // my-bucket.s3.amazonaws.com and my-bucket.s3.<region>.amazonaws.com. The DNS
-        // spoof does route those, so without these the handshake fails on a hostname
-        // mismatch rather than the request reaching Floci.
-        return List.of("*.amazonaws.com", "*." + region + ".amazonaws.com",
-                "*.s3.amazonaws.com", "*.s3." + region + ".amazonaws.com");
+        List<String> sans = new ArrayList<>(List.of("*.amazonaws.com", "*.s3.amazonaws.com"));
+        for (String region : AwsRegions.ALL) {
+            // A wildcard matches exactly one label (RFC 6125 6.4.3), so the two broad
+            // wildcards miss virtual-hosted addressing, where the bucket adds a label:
+            // my-bucket.s3.amazonaws.com and my-bucket.s3.<region>.amazonaws.com. The DNS
+            // spoof does route those, so without these the handshake fails on a hostname
+            // mismatch rather than the request reaching Floci.
+            sans.add("*." + region + ".amazonaws.com");
+            sans.add("*.s3." + region + ".amazonaws.com");
+        }
+        return sans;
     }
 
     private void generateSelfSignedCert(Path tlsDir, Path certFile, Path keyFile) {

@@ -264,10 +264,14 @@ class TlsConfigSourceCertificateGenerationTest {
     }
 
     /**
-     * Test that the regional AWS wildcard follows the configured default region
+     * A client can hit an explicit HTTPS AWS endpoint outside floci.default-region (e.g. a
+     * cross-region call, or a Lambda whose own AWS_REGION differs from the emulator default).
+     * DNS spoofing routes it to Floci regardless of region, so the cert must cover every
+     * region the emulator advertises ({@link io.github.hectorvent.floci.core.common.AwsRegions#ALL}),
+     * not just the configured default — otherwise TLS fails before the request reaches Floci.
      */
     @Test
-    void testAwsRegionalWildcardFollowsConfiguredDefaultRegion() throws Exception {
+    void testAwsRegionalWildcardsCoverEveryAdvertisedRegion() throws Exception {
         // Arrange
         System.setProperty("floci.dns.spoof-aws-endpoints", "true");
         System.setProperty("floci.default-region", "eu-west-1");
@@ -277,10 +281,11 @@ class TlsConfigSourceCertificateGenerationTest {
 
         // Assert
         List<String> sans = extractSansFromCertificate(tempDir.resolve("tls/floci-selfsigned.crt"));
-        assertTrue(sans.contains("*.eu-west-1.amazonaws.com"),
-            "Certificate SANs should include '*.eu-west-1.amazonaws.com' for the configured region");
-        assertFalse(sans.contains("*.us-east-1.amazonaws.com"),
-            "Certificate SANs should not include the wildcard of a region that is not configured");
+        for (String region : io.github.hectorvent.floci.core.common.AwsRegions.ALL) {
+            assertTrue(sans.contains("*." + region + ".amazonaws.com"),
+                "Certificate SANs should include '*." + region + ".amazonaws.com' regardless of the "
+                    + "configured default region");
+        }
     }
 
     /**
