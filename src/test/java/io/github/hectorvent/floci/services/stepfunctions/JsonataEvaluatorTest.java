@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.NullNode;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -84,12 +85,12 @@ class JsonataEvaluatorTest {
     }
 
     @Test
-    void evaluate_returnsNullForMissingField() throws Exception {
+    void evaluate_returnsNothingForMissingField() throws Exception {
         JsonNode statesVar = objectMapper.readTree("""
                 {"input": {"name": "Alice"}}
                 """);
         JsonNode result = evaluator.evaluate("{% $states.input.missing %}", statesVar);
-        assertTrue(result.isNull());
+        assertTrue(result.isMissingNode());
     }
 
     @Test
@@ -215,7 +216,7 @@ class JsonataEvaluatorTest {
     void parse_noArgumentReturnsUndefined() {
         JsonNode statesVar = objectMapper.createObjectNode();
         JsonNode result = evaluator.evaluate("{% $parse() %}", statesVar);
-        assertTrue(result.isNull());
+        assertTrue(result.isMissingNode());
     }
 
     @Test
@@ -259,14 +260,14 @@ class JsonataEvaluatorTest {
     void partition_emptyArrayReturnsUndefined() {
         JsonNode statesVar = objectMapper.createObjectNode();
         JsonNode result = evaluator.evaluate("{% $partition([], 2) %}", statesVar);
-        assertTrue(result.isNull());
+        assertTrue(result.isMissingNode());
     }
 
     @Test
     void partition_chunkSizeZeroReturnsUndefined() {
         JsonNode statesVar = objectMapper.createObjectNode();
         JsonNode result = evaluator.evaluate("{% $partition([1,2,3], 0) %}", statesVar);
-        assertTrue(result.isNull());
+        assertTrue(result.isMissingNode());
     }
 
     @Test
@@ -318,21 +319,21 @@ class JsonataEvaluatorTest {
     void range_wrongSignStepReturnsUndefined() {
         JsonNode statesVar = objectMapper.createObjectNode();
         JsonNode result = evaluator.evaluate("{% $range(5, 1, 1) %}", statesVar);
-        assertTrue(result.isNull());
+        assertTrue(result.isMissingNode());
     }
 
     @Test
     void range_stepZeroReturnsUndefined() {
         JsonNode statesVar = objectMapper.createObjectNode();
         JsonNode result = evaluator.evaluate("{% $range(1, 5, 0) %}", statesVar);
-        assertTrue(result.isNull());
+        assertTrue(result.isMissingNode());
     }
 
     @Test
     void range_missingStepReturnsUndefined() {
         JsonNode statesVar = objectMapper.createObjectNode();
         JsonNode result = evaluator.evaluate("{% $range(1, 5) %}", statesVar);
-        assertTrue(result.isNull());
+        assertTrue(result.isMissingNode());
     }
 
     @Test
@@ -374,7 +375,7 @@ class JsonataEvaluatorTest {
     void hash_missingAlgorithmReturnsUndefined() {
         JsonNode statesVar = objectMapper.createObjectNode();
         JsonNode result = evaluator.evaluate("{% $hash('Hello') %}", statesVar);
-        assertTrue(result.isNull());
+        assertTrue(result.isMissingNode());
     }
 
     @Test
@@ -449,7 +450,7 @@ class JsonataEvaluatorTest {
         assertEquals("[-2,-1,0]", evaluator.evaluate("{% $range(-2.9, 0, 1) %}", statesVar).toString());
         assertEquals("[5,4,3,2,1]", evaluator.evaluate("{% $range(5, 1, -1.5) %}", statesVar).toString());
         // -0.5 rounds to 0, which is undefined, while -2 stays negative and is an error.
-        assertTrue(evaluator.evaluate("{% $partition([1,2,3,4], -0.5) %}", statesVar).isNull());
+        assertTrue(evaluator.evaluate("{% $partition([1,2,3,4], -0.5) %}", statesVar).isMissingNode());
     }
 
     @Test
@@ -479,7 +480,7 @@ class JsonataEvaluatorTest {
     @Test
     void hash_missingAlgorithmIsUndefinedButNonStringOneIsASignatureError() {
         JsonNode statesVar = objectMapper.createObjectNode();
-        assertTrue(evaluator.evaluate("{% $hash('a') %}", statesVar).isNull());
+        assertTrue(evaluator.evaluate("{% $hash('a') %}", statesVar).isMissingNode());
         AslExecutor.FailStateException ex = assertThrows(AslExecutor.FailStateException.class,
                 () -> evaluator.evaluate("{% $hash('a', 5) %}", statesVar));
         assertTrue(ex.cause.contains("T0410"));
@@ -550,6 +551,74 @@ class JsonataEvaluatorTest {
         assertEquals("[1,2]", result.toString());
     }
 
+    /**
+     * The expression from issue #2667. JSONata optimises the tail call, so it loops instead of
+     * overflowing the stack: nothing is thrown, and before the time bound the execution stayed
+     * RUNNING for ever with a core pinned. The evaluator is built with a 250 ms bound rather than
+     * the shipped {@link JsonataEvaluator#EVALUATION_TIMEOUT_MILLIS} so the suite stays fast, and
+     * the method timeout makes an unbounded evaluation fail the test instead of blocking the run.
+     */
+    @Test
+    @Timeout(30)
+    void recursionWithNoBaseCaseFailsOnTheTimeBound() {
+        JsonataEvaluator shortlyBounded =
+                new JsonataEvaluator(objectMapper, 250, JsonataEvaluator.MAX_EVALUATION_DEPTH);
+        JsonNode statesVar = objectMapper.createObjectNode();
+
+        AslExecutor.FailStateException ex = assertThrows(AslExecutor.FailStateException.class,
+                () -> shortlyBounded.evaluate("{% ($f := function($x){ $f($x+1) }; $f(1)) %}", statesVar));
+
+        assertEquals("States.QueryEvaluationError", ex.error);
+        assertEquals("Expression evaluation timeout: Check for infinite loop", ex.cause);
+    }
+
+    /**
+     * Recursion the library cannot optimise grows the evaluation nesting instead of looping, and
+     * without a depth bound it ends in a StackOverflowError, which is an Error and so escapes the
+     * evaluator's catch. The shipped bound is what turns it into a state failure.
+     *
+     * <p>The cause is AWS's own string for this failure, followed by the {@code Depth=N max=M}
+     * suffix that names the bound that was hit. AWS writes one space after the full stop where
+     * the library writes two.
+     */
+    @Test
+    @Timeout(30)
+    void nonTailRecursionFailsOnTheDepthBound() {
+        JsonNode statesVar = objectMapper.createObjectNode();
+
+        AslExecutor.FailStateException ex = assertThrows(AslExecutor.FailStateException.class,
+                () -> evaluator.evaluate(
+                        "{% ($f := function($x){ $x <= 0 ? 0 : 1 + $f($x-1) }; $f(1000000)) %}", statesVar));
+
+        assertEquals("States.QueryEvaluationError", ex.error);
+        assertEquals("Stack overflow error: Check for non-terminating recursive"
+                + " function.  Consider rewriting as tail-recursive. Depth=501 max=500", ex.cause);
+    }
+
+    /**
+     * The boundary from below: the risk of a bound is that it fails a working state machine, so
+     * these must all still evaluate. Measured with {@code aws stepfunctions test-state}, AWS
+     * returns 30 for the first and 800000 for the second, which makes them the ceiling of what
+     * AWS itself accepts on each axis: it refuses the recursion at n=40 (nesting depth 125) and
+     * the sequence at 900,000 elements.
+     *
+     * <p>The last two AWS refuses on its memory limit and Floci evaluates, which is where the
+     * bounds are deliberately looser than AWS rather than tighter.
+     */
+    @Test
+    @Timeout(60)
+    void expensiveButLegitimateExpressionsStayWithinTheShippedBounds() {
+        JsonNode statesVar = objectMapper.createObjectNode();
+        String recursionHead = "{% ($f := function($x){ $x <= 0 ? 0 : 1 + $f($x-1) }; $f(";
+
+        assertEquals(30, evaluator.evaluate(recursionHead + "30)) %}", statesVar).asInt());
+        assertEquals(800000, evaluator.evaluate("{% [1..800000] ~> $count() %}", statesVar).asInt());
+
+        assertEquals(160, evaluator.evaluate(recursionHead + "160)) %}", statesVar).asInt());
+        assertEquals(40000200000L,
+                evaluator.evaluate("{% $sum($map([1..200000], function($v){$v * 2})) %}", statesVar).asLong());
+    }
+
     @Test
     void string_writesAWholeNumberInFullBelowTheExponentBoundary() {
         // dashjoin stops writing digits at Long.MAX_VALUE, 9.223372036854776E18, and prints
@@ -614,7 +683,9 @@ class JsonataEvaluatorTest {
         assertEquals("abc", evaluator.evaluate("{% $string('abc') %}", statesVar).asText());
         assertEquals("null", evaluator.evaluate("{% $string(null) %}", statesVar).asText());
         assertEquals("{\n  \"a\": 1\n}", evaluator.evaluate("{% $string({'a': 1}, true) %}", statesVar).asText());
-        assertTrue(evaluator.evaluate("{% $string() %}", statesVar).isNull());
+        // $string() with no argument returns nothing, which this change stops reporting as an
+        // explicit null. AWS fails the state on it, which is #2665's subject and not this one's.
+        assertTrue(evaluator.evaluate("{% $string() %}", statesVar).isMissingNode());
         assertEquals("[\"100000000000000000000\",\"1e+21\"]",
                 evaluator.evaluate("{% $map([1e20, 1e21], $string) %}", statesVar).toString());
     }
@@ -730,5 +801,88 @@ class JsonataEvaluatorTest {
                 () -> evaluator.evaluate("{% $toMillis('nope') %}", statesVar));
         assertEquals("States.QueryEvaluationError", ex.error);
         assertTrue(ex.cause.contains("nope"), ex.cause);
+    }
+
+    @Test
+    void anExplicitNullKeepsItsKeyAndOnlyWhatReturnedNothingIsDropped() throws Exception {
+        JsonNode statesVar = objectMapper.readTree("""
+                {"input": {"bar": null}}
+                """);
+        JsonNode template = objectMapper.readTree("""
+                {"fromInput": "{% $lookup($states.input, 'bar') %}",
+                 "returnedNothing": "{% $states.input.absent %}",
+                 "kept": 1}
+                """);
+
+        assertEquals("{\"fromInput\":null,\"kept\":1}",
+                evaluator.resolveTemplate(template, statesVar).toString());
+    }
+
+    @Test
+    void anExplicitNullSurvivesInsideANestedObject() throws Exception {
+        JsonNode statesVar = objectMapper.createObjectNode();
+        JsonNode template = objectMapper.readTree("""
+                {"outer": {"fromExpression": "{% null %}", "kept": 1}}
+                """);
+
+        assertEquals("{\"outer\":{\"fromExpression\":null,\"kept\":1}}",
+                evaluator.resolveTemplate(template, statesVar).toString());
+    }
+
+    @Test
+    void aWholeTemplateIsANullWhetherItEvaluatedToNullOrReturnedNothing() throws Exception {
+        JsonNode statesVar = objectMapper.createObjectNode();
+
+        assertTrue(evaluator.resolveTemplate(objectMapper.readTree("\"{% null %}\""), statesVar).isNull());
+        // AWS fails the second one with States.QueryEvaluationError, which #2665 covers. Until then
+        // it is a null and not a missing node: an Output or Arguments is serialized as it stands,
+        // and a missing node writes itself as the empty string rather than as JSON.
+        assertTrue(evaluator.resolveTemplate(objectMapper.readTree("\"{% $states.input.absent %}\""), statesVar)
+                .isNull());
+    }
+
+    @Test
+    void anExplicitNullIsAnArrayElementWhileNothingStillFailsTheState() throws Exception {
+        JsonNode statesVar = objectMapper.createObjectNode();
+
+        assertEquals("{\"values\":[null,1]}", evaluator.resolveTemplate(objectMapper.readTree("""
+                {"values": ["{% null %}", 1]}
+                """), statesVar).toString());
+
+        AslExecutor.FailStateException failure = assertThrows(AslExecutor.FailStateException.class,
+                () -> evaluator.resolveTemplate(objectMapper.readTree("""
+                        {"values": ["{% $states.input.absent %}"]}
+                        """), statesVar));
+        assertTrue(failure.cause.contains("returned nothing (undefined)"), failure.cause);
+    }
+
+    @Test
+    void aLiteralNullInTheTemplateKeepsItsKey() throws Exception {
+        JsonNode statesVar = objectMapper.createObjectNode();
+
+        assertEquals("{\"literal\":null,\"kept\":1}", evaluator.resolveTemplate(objectMapper.readTree("""
+                {"literal": null, "kept": 1}
+                """), statesVar).toString());
+    }
+
+    @Test
+    void anInputNullIsAValueForExistsAndType() throws Exception {
+        JsonNode statesVar = objectMapper.readTree("""
+                {"input": {"bar": null}}
+                """);
+
+        assertTrue(evaluator.evaluate("{% $exists($states.input.bar) %}", statesVar).asBoolean());
+        assertEquals("null", evaluator.evaluate("{% $type($states.input.bar) %}", statesVar).asText());
+    }
+
+    @Test
+    void anAssignedNullReadsBackAsANull() throws Exception {
+        JsonNode statesVar = objectMapper.createObjectNode();
+        JsonNode variables = objectMapper.readTree("""
+                {"nullVariable": null}
+                """);
+
+        assertTrue(evaluator.evaluate("{% $nullVariable %}", statesVar, variables).isNull());
+        assertTrue(evaluator.evaluate("{% $exists($nullVariable) %}", statesVar, variables).asBoolean());
     }
 }

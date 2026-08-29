@@ -10,6 +10,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.ObjectReader;
 import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.MissingNode;
 import com.fasterxml.jackson.databind.node.NullNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -74,12 +75,49 @@ public class JsonataEvaluator {
             "a", "arrays", "b", "booleans", "f", "functions",
             "n", "numbers", "o", "objects", "s", "strings");
 
+    /**
+     * How long one expression may evaluate before the state fails with
+     * {@code States.QueryEvaluationError}. AWS bounds evaluation and Floci did not, so an
+     * expression with no base case pinned a core and left the execution {@code RUNNING} for ever.
+     * JSONata optimises the tail call, so such an expression loops instead of overflowing the
+     * stack: no {@code Error} is thrown and only a clock can end it.
+     *
+     * <p>Five seconds is the dashjoin library's own default and roughly fifty times the slowest
+     * evaluation of a payload AWS itself accepts: AWS refuses a sequence of 900,000 elements on
+     * its memory limit, and summing one that size here takes about 100 ms. Deliberately generous,
+     * because a bound that fails a working state machine costs more than one that lets a runaway
+     * expression burn a core for five seconds.
+     */
+    static final long EVALUATION_TIMEOUT_MILLIS = 5_000;
+
+    /**
+     * How deep evaluation may nest before the state fails. A non-tail-recursive function nests at
+     * roughly {@code 3n+5} for {@code $f(n)}; measured against AWS with {@code test-state}, AWS
+     * accepts {@code n=30} (depth 95) and refuses {@code n=40} (depth 125), so its own ceiling
+     * sits near 100. Five times that leaves no expression AWS accepts able to reach this bound,
+     * and it still trips before the JVM stack does: on a 1 MB thread stack the bound raises a
+     * JSONata error while 1000 or more overflows the stack instead.
+     */
+    static final int MAX_EVALUATION_DEPTH = 500;
+
     private final ObjectMapper objectMapper;
     private final ObjectReader strictJsonReader;
     private final Map<String, Jsonata.JFunction> stepFunctionsExtensions;
+    private final long evaluationTimeoutMillis;
+    private final int maxEvaluationDepth;
 
     @Inject
     public JsonataEvaluator(ObjectMapper objectMapper) {
+        this(objectMapper, EVALUATION_TIMEOUT_MILLIS, MAX_EVALUATION_DEPTH);
+    }
+
+    /**
+     * Bounds evaluation at values other than the shipped ones, so a test can trip the time bound
+     * without waiting {@link #EVALUATION_TIMEOUT_MILLIS} for it.
+     */
+    JsonataEvaluator(ObjectMapper objectMapper, long evaluationTimeoutMillis, int maxEvaluationDepth) {
+        this.evaluationTimeoutMillis = evaluationTimeoutMillis;
+        this.maxEvaluationDepth = maxEvaluationDepth;
         this.objectMapper = objectMapper;
         // AWS rejects what a lenient parser accepts: a second document after the first, a repeated
         // key, an empty string. All three come back as D3137 there, so $parse reads through this
@@ -125,7 +163,16 @@ public class JsonataEvaluator {
         String expr = isExpression(expression) ? unwrap(expression) : expression;
         try {
             Jsonata jsonataExpr = jsonata(expr);
+            // Off, the library keeps JSONata's null marker in the result instead of flattening it
+            // into a Java null. On, an expression that evaluated to JSON null and one that returned
+            // nothing both arrive here as a Java null, and AWS keeps the first while dropping the
+            // second.
+            jsonataExpr.setOutputConvertNulls(false);
             Jsonata.Frame frame = jsonataExpr.createFrame();
+            // Without this the library evaluates unbounded: a recursive expression with no base
+            // case loops for ever and the execution never leaves RUNNING. The bounds raise a
+            // JSONata error, which the catch below turns into States.QueryEvaluationError.
+            frame.setRuntimeBounds(evaluationTimeoutMillis, maxEvaluationDepth);
             stepFunctionsExtensions.forEach(frame::bind);
             // Workflow variables (the Assign field) are referenced as top-level $name in AWS's
             // JSONata dialect, e.g. $CheckpointCount. They are bound alongside $states, never
@@ -220,9 +267,18 @@ public class JsonataEvaluator {
     }
 
     JsonNode resolveTemplate(JsonNode template, JsonNode statesVar, JsonNode variables) {
-        if (template == null || template.isNull() || template.isMissingNode()) {
+        if (template == null || template.isMissingNode()) {
             return template;
         }
+        JsonNode resolved = resolveTemplateNode(template, statesVar, variables);
+        // A resolved Output or Arguments is serialized as it stands, and a missing node writes
+        // itself as the empty string, which no client can parse. "Returned nothing" is a value only
+        // in the positions resolveTemplateNode reads it in: an object field it drops, an array
+        // element it fails the state on. As the whole field there is nothing to drop it from.
+        return resolved.isMissingNode() ? NullNode.getInstance() : resolved;
+    }
+
+    private JsonNode resolveTemplateNode(JsonNode template, JsonNode statesVar, JsonNode variables) {
         if (template.isTextual()) {
             String text = template.asText();
             if (isExpression(text)) {
@@ -235,10 +291,11 @@ public class JsonataEvaluator {
             Iterator<Map.Entry<String, JsonNode>> fields = template.fields();
             while (fields.hasNext()) {
                 Map.Entry<String, JsonNode> entry = fields.next();
-                JsonNode value = resolveTemplate(entry.getValue(), statesVar, variables);
-                // Per JSONata spec: undefined (null) values are omitted from object output,
-                // matching real AWS Step Functions behavior.
-                if (value != null && !value.isNull() && !value.isMissingNode()) {
+                JsonNode value = resolveTemplateNode(entry.getValue(), statesVar, variables);
+                // Per JSONata spec: an expression that returned nothing is omitted from object
+                // output, matching real AWS Step Functions behavior. A JSON null is a value and
+                // keeps its key: AWS answers {"v":null} to Output {"v":"{% null %}"}.
+                if (!value.isMissingNode()) {
                     resolved.set(entry.getKey(), value);
                 }
             }
@@ -248,10 +305,11 @@ public class JsonataEvaluator {
             ArrayNode resolved = objectMapper.createArrayNode();
             for (int i = 0; i < template.size(); i++) {
                 JsonNode element = template.get(i);
-                JsonNode value = resolveTemplate(element, statesVar, variables);
-                // Per real AWS behavior: undefined array elements fail the execution.
+                JsonNode value = resolveTemplateNode(element, statesVar, variables);
+                // Per real AWS behavior: an array element that returned nothing fails the execution.
                 // Unlike object fields (which are omitted), undefined in an array is a runtime error.
-                if (value == null || value.isNull() || value.isMissingNode()) {
+                // A JSON null is a value and stays: AWS answers [null,1] to ["{% null %}",1].
+                if (value.isMissingNode()) {
                     String expr = element.isTextual() ? element.asText() : element.toString();
                     throw new FailStateException("States.Runtime",
                             "The JSONata expression '" + expr + "' at array index " + i + " returned nothing (undefined).");
@@ -260,20 +318,45 @@ public class JsonataEvaluator {
             }
             return resolved;
         }
-        // Primitives (number, boolean) pass through
+        // Primitives (number, boolean, null) pass through
         return template;
     }
 
-    private Object toObject(JsonNode node) {
-        if (node == null || node.isNull() || node.isMissingNode()) {
+    /**
+     * Binds $states and the workflow variables as JSONata values, so a JSON null inside them stays
+     * a null the expression can see: $exists() on it is true and $type() on it is "null", as on
+     * AWS. Only an absent node is undefined.
+     */
+    private static Object toObject(JsonNode node) {
+        if (node == null || node.isMissingNode()) {
             return null;
         }
-        return objectMapper.convertValue(node, Object.class);
+        return toJsonataValue(node);
     }
 
+    /**
+     * The evaluation result. A Java null is the expression returning nothing, which
+     * {@link #resolveTemplateNode} drops from an object; the JSONata null marker is a JSON null,
+     * which it keeps. Nested inside an object or an array there is no undefined, so every null
+     * there is a JSON null.
+     */
     private JsonNode toJsonNode(Object value) {
-        if (value == null) {
+        return value == null ? MissingNode.getInstance() : fromJsonataValue(value);
+    }
+
+    private JsonNode fromJsonataValue(Object value) {
+        if (value == null || value == Jsonata.NULL_VALUE) {
             return NullNode.getInstance();
+        }
+        if (value instanceof Map<?, ?> map) {
+            ObjectNode object = objectMapper.createObjectNode();
+            map.forEach((key, element) -> object.set(String.valueOf(key), fromJsonataValue(element)));
+            return object;
+        }
+        if (value instanceof List<?> list) {
+            ArrayNode array = objectMapper.createArrayNode();
+            list.forEach(element -> array.add(fromJsonataValue(element)));
+            return array;
         }
         return objectMapper.valueToTree(value);
     }

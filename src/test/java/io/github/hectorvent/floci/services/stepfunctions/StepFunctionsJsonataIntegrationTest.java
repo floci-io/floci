@@ -1226,6 +1226,104 @@ class StepFunctionsJsonataIntegrationTest {
     }
 
     @Test
+    void outputKeepsAnExplicitNullInEveryPositionAndDropsOnlyWhatReturnedNothing() throws Exception {
+        // AWS returns {"v":null} for an expression that evaluates to JSON null, in an object field,
+        // nested, as an array element and as a literal. Only an expression that returned nothing
+        // loses its key.
+        String definition = """
+                {
+                    "QueryLanguage": "JSONata",
+                    "StartAt": "Transform",
+                    "States": {
+                        "Transform": {
+                            "Type": "Pass",
+                            "Output": {
+                                "fromInput": "{% $lookup($states.input, 'bar') %}",
+                                "fromLiteralExpression": "{% null %}",
+                                "literal": null,
+                                "nested": {"inner": "{% null %}", "kept": 1},
+                                "values": ["{% null %}", 1],
+                                "returnedNothing": "{% $states.input.absent %}"
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("jsonata-explicit-null-test", definition);
+        String execArn = startExecution(smArn, "{\"bar\": null}");
+        JsonNode output = objectMapper.readTree(waitForExecution(execArn));
+
+        assertTrue(output.path("fromInput").isNull(), output.toString());
+        assertTrue(output.path("fromLiteralExpression").isNull(), output.toString());
+        assertTrue(output.path("literal").isNull(), output.toString());
+        assertTrue(output.path("nested").path("inner").isNull(), output.toString());
+        assertEquals("[null,1]", output.path("values").toString());
+        assertTrue(output.path("returnedNothing").isMissingNode(), output.toString());
+    }
+
+    @Test
+    void anAssignedNullReadsBackAsANullInTheNextState() throws Exception {
+        // AWS keeps the null in the variables map: TestState TRACE reports {"x":null} for
+        // Assign {"x": "{% null %}"}. A state never sees its own Assign, so the read is one state on.
+        String definition = """
+                {
+                    "QueryLanguage": "JSONata",
+                    "StartAt": "AssignNull",
+                    "States": {
+                        "AssignNull": {
+                            "Type": "Pass",
+                            "Assign": {"nullVariable": "{% $states.input.bar %}"},
+                            "Next": "ReadItBack"
+                        },
+                        "ReadItBack": {
+                            "Type": "Pass",
+                            "Output": {
+                                "fromVariable": "{% $nullVariable %}",
+                                "exists": "{% $exists($nullVariable) %}"
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("jsonata-assign-null-test", definition);
+        String execArn = startExecution(smArn, "{\"bar\": null}");
+        JsonNode output = objectMapper.readTree(waitForExecution(execArn));
+
+        assertTrue(output.path("fromVariable").isNull(), output.toString());
+        assertTrue(output.path("exists").asBoolean(), output.toString());
+    }
+
+    @Test
+    void aWholeOutputThatReturnedNothingStaysReadableJson() throws Exception {
+        // AWS fails this state with States.QueryEvaluationError, which #2665 covers. Until then the
+        // execution succeeds, and what DescribeExecution hands back has to parse: an output field
+        // holding the empty string is not JSON any client can read.
+        String definition = """
+                {
+                    "QueryLanguage": "JSONata",
+                    "StartAt": "Transform",
+                    "States": {
+                        "Transform": {
+                            "Type": "Pass",
+                            "Output": "{% $states.input.absent %}",
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("jsonata-whole-output-nothing-test", definition);
+        String execArn = startExecution(smArn, "{}");
+        String output = waitForExecution(execArn);
+
+        assertTrue(objectMapper.readTree(output).isNull(), output);
+    }
+
+    @Test
     void assignedVariablesSurviveBeyondNextStateOutput() throws Exception {
         // Variables set via Assign persist across states even after a later state replaces the output.
         String definition = """

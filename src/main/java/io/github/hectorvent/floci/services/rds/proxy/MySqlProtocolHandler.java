@@ -125,6 +125,12 @@ public class MySqlProtocolHandler {
             // permanently one behind the client's for the rest of the connection phase.
             sequenceOffset = 1;
             clientResponseRaw[3] = (byte) (clientResponseRaw[3] - sequenceOffset);
+            // Real clients keep CLIENT_SSL set in the HandshakeResponse they send over the
+            // now-encrypted stream. The backend connection stays plaintext, and a MySQL server
+            // treats any first packet with CLIENT_SSL as an SSLRequest — it would sit waiting for
+            // a TLS ClientHello that never comes while the proxy waits for its auth verdict,
+            // deadlocking the connection. Clear the bit (the mirror of forceClientSslCapability).
+            clearClientSslCapability(clientResponseRaw);
         } else {
             clientResponseRaw = clientFirstRaw;
             if (clientResponseRaw.length < 40) {
@@ -257,6 +263,15 @@ public class MySqlProtocolHandler {
         } catch (Exception e) {
             throw new IOException("Unable to negotiate MySQL SSL", e);
         }
+    }
+
+    /**
+     * Clears the {@code CLIENT_SSL} bit in a raw HandshakeResponse41 packet's capability flags.
+     * The client capabilities are the first 4 payload bytes, little-endian; {@code CLIENT_SSL}
+     * (0x0800) lives in the second byte.
+     */
+    private static void clearClientSslCapability(byte[] raw) {
+        raw[5] &= (byte) ~(CLIENT_SSL >> 8);
     }
 
     /**
