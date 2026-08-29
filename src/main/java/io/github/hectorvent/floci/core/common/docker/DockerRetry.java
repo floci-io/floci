@@ -4,6 +4,7 @@ import org.jboss.logging.Logger;
 
 import java.io.IOException;
 import java.io.InterruptedIOException;
+import java.util.Locale;
 
 /**
  * Retry policy for docker daemon calls. Every docker command travels over the single shared
@@ -70,9 +71,11 @@ public final class DockerRetry {
                 return true;
             }
             String m = c.getMessage();
-            if (m != null && (m.contains("Broken pipe")
-                    || m.toLowerCase().contains("connection reset"))) {
-                return true;
+            if (m != null) {
+                String lower = m.toLowerCase(Locale.ROOT);
+                if (lower.contains("broken pipe") || lower.contains("connection reset")) {
+                    return true;
+                }
             }
             if (c.getCause() == c) {
                 break;
@@ -88,6 +91,9 @@ public final class DockerRetry {
      * immediately. A {@link RuntimeException} is rethrown as-is; a checked exception is wrapped.
      */
     public static <T> T call(int maxAttempts, long backoffMillis, DockerCall<T> call) {
+        if (maxAttempts < 1) {
+            throw new IllegalArgumentException("maxAttempts must be >= 1, got " + maxAttempts);
+        }
         int attempt = 0;
         while (true) {
             attempt++;

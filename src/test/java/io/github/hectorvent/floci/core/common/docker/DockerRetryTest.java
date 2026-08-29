@@ -104,4 +104,16 @@ class DockerRetryTest {
         assertEquals(1, calls.get());
         assertSame(expected, thrown);
     }
+
+    @Test
+    void rejectsNonPositiveMaxAttempts() {
+        assertThrows(IllegalArgumentException.class, () -> DockerRetry.run(0, 0L, () -> { }));
+        assertThrows(IllegalArgumentException.class, () -> DockerRetry.run(-1, 0L, () -> { }));
+    }
+
+    @Test
+    void connectionResetIsTransientRegardlessOfCase() {
+        assertTrue(DockerRetry.isTransientIo(new RuntimeException("CONNECTION RESET by peer")));
+        assertTrue(DockerRetry.isTransientIo(new RuntimeException("broken PIPE")));
+    }
 }
