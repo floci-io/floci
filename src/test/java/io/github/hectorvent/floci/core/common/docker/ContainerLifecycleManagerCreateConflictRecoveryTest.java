@@ -67,6 +67,9 @@ class ContainerLifecycleManagerCreateConflictRecoveryTest {
         Container existing = mock(Container.class);
         when(existing.getId()).thenReturn("winning-container-id");
         when(existing.getNames()).thenReturn(new String[] {"/emulator-fixed-name"});
+        when(existing.getImage()).thenReturn("busybox:stable");
+        when(existing.getLabels()).thenReturn(
+                java.util.Map.of("floci", "true", "floci_emulator", "floci-aws"));
 
         ListContainersCmd listCmd = mock(ListContainersCmd.class, RETURNS_SELF);
         when(dockerClient.listContainersCmd()).thenReturn(listCmd);
@@ -80,6 +83,52 @@ class ContainerLifecycleManagerCreateConflictRecoveryTest {
         String containerId = manager().create(spec);
 
         assertEquals("winning-container-id", containerId);
+    }
+
+    @Test
+    void createRethrowsConflictWhenExistingContainerImageDoesNotMatch() {
+        CreateContainerCmd createCmd = mock(CreateContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.createContainerCmd("busybox:stable")).thenReturn(createCmd);
+        when(createCmd.exec()).thenThrow(new ConflictException("named container already exists"));
+
+        Container existing = mock(Container.class);
+        when(existing.getNames()).thenReturn(new String[] {"/emulator-fixed-name"});
+        when(existing.getImage()).thenReturn("some-other-image:latest");
+
+        ListContainersCmd listCmd = mock(ListContainersCmd.class, RETURNS_SELF);
+        when(dockerClient.listContainersCmd()).thenReturn(listCmd);
+        when(listCmd.exec()).thenReturn(List.of(existing));
+
+        ContainerSpec spec = new ContainerSpec(
+                "busybox:stable", "emulator-fixed-name", List.of(), null, null, null, java.util.Map.of(),
+                List.of(), null, List.of(), List.of(), List.of(), java.util.Map.of(), null, false, null,
+                List.of(), null, null, List.of());
+
+        assertThrows(ConflictException.class, () -> manager().create(spec));
+    }
+
+    @Test
+    void createRethrowsConflictWhenExistingContainerLabelsDoNotMatch() {
+        CreateContainerCmd createCmd = mock(CreateContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.createContainerCmd("busybox:stable")).thenReturn(createCmd);
+        when(createCmd.exec()).thenThrow(new ConflictException("named container already exists"));
+
+        Container existing = mock(Container.class);
+        when(existing.getNames()).thenReturn(new String[] {"/emulator-fixed-name"});
+        when(existing.getImage()).thenReturn("busybox:stable");
+        when(existing.getLabels()).thenReturn(
+                java.util.Map.of("floci", "true", "floci_emulator", "floci-lambda"));
+
+        ListContainersCmd listCmd = mock(ListContainersCmd.class, RETURNS_SELF);
+        when(dockerClient.listContainersCmd()).thenReturn(listCmd);
+        when(listCmd.exec()).thenReturn(List.of(existing));
+
+        ContainerSpec spec = new ContainerSpec(
+                "busybox:stable", "emulator-fixed-name", List.of(), null, null, null, java.util.Map.of(),
+                List.of(), null, List.of(), List.of(), List.of(), java.util.Map.of(), null, false, null,
+                List.of(), null, null, List.of());
+
+        assertThrows(ConflictException.class, () -> manager().create(spec));
     }
 
     @Test

@@ -150,7 +150,9 @@ public class ContainerLifecycleManager {
      * retry's own attempt hits a 409 name conflict rather than the transient error it's built to
      * catch, so {@link DockerRetry} rethrows it immediately. For a named spec that conflict means
      * the earlier attempt actually won — look the container up by name and adopt its ID instead
-     * of failing and leaking it untracked.
+     * of failing and leaking it untracked. A stale or unrelated container can hold the same
+     * fixed name, so the candidate is only adopted when its image and labels actually match
+     * this spec; a name match alone is not proof it is the container this launch just created.
      */
     private String createWithConflictRecovery(CreateContainerCmd createCmd, ContainerSpec spec) {
         try {
@@ -160,7 +162,7 @@ public class ContainerLifecycleManager {
         } catch (ConflictException e) {
             if (spec.name() != null) {
                 Optional<Container> existing = findByName(spec.name());
-                if (existing.isPresent()) {
+                if (existing.isPresent() && matchesSpec(existing.get(), spec)) {
                     LOG.infov("Create retry for {0} hit a name conflict; an earlier attempt's "
                             + "response was lost but the container exists, adopting {1}",
                             spec.name(), existing.get().getId());
@@ -169,6 +171,21 @@ public class ContainerLifecycleManager {
             }
             throw e;
         }
+    }
+
+    /**
+     * Confirms a name-conflicting container is actually the one this spec's own create attempt
+     * produced, not a stale or differently-owned container that happens to hold the same fixed
+     * name: its image must match, and it must carry every label this spec's create call would
+     * have applied (the default floci labels plus the spec's own).
+     */
+    private boolean matchesSpec(Container existing, ContainerSpec spec) {
+        if (!spec.image().equals(existing.getImage())) {
+            return false;
+        }
+        Map<String, String> expectedLabels = mergedLabels(spec.labels());
+        Map<String, String> actualLabels = existing.getLabels();
+        return actualLabels != null && actualLabels.entrySet().containsAll(expectedLabels.entrySet());
     }
 
     /**
