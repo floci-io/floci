@@ -561,7 +561,13 @@ public class ResolvedServiceCatalog {
                         storageMode(config.storage().services().efs().mode(), config.storage().mode()),
                         config.storage().services().efs().flushIntervalMs(), null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
-                        Set.of(), Set.of("elasticfilesystem"), Set.of(), Set.of(EfsController.class))
+                        Set.of(), Set.of("elasticfilesystem"), Set.of(), Set.of(EfsController.class)),
+                descriptor("codeguru-reviewer", "codegurureviewer",
+                        config.services().codegurureviewer().enabled(), true,
+                        "codegurureviewer", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON),
+                        Set.of(), Set.of("codeguru-reviewer"), Set.of(),
+                        Set.of(io.github.hectorvent.floci.services.codegurureviewer.CodeGuruReviewerController.class))
         ));
     }
 

@@ -695,6 +695,7 @@ public interface EmulatorConfig {
 
         LakeFormationServiceConfig lakeformation();
         EfsServiceConfig efs();
+        CodeGuruReviewerServiceConfig codegurureviewer();
     }
 
     interface SsoAdminServiceConfig {
@@ -703,6 +704,11 @@ public interface EmulatorConfig {
     }
 
     interface ApsServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface CodeGuruReviewerServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }

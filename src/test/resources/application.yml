@@ -382,3 +382,5 @@ floci:
       enabled: true
     ram:
       enabled: true
+    codegurureviewer:
+      enabled: true

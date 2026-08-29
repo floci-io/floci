@@ -34,6 +34,19 @@ services:
     doc: docs/services/cloudtrail.md
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/cloudtrail/CloudTrailJsonHandler.java, mode: switch }
+  - service: codegurureviewer
+    doc: docs/services/codegurureviewer.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/codegurureviewer/CodeGuruReviewerController.java, mode: rest }
+      - { path: src/main/java/io/github/hectorvent/floci/core/common/SharedTagsController.java, mode: rest }
+    rename_actions:
+      ListTags: ListTagsForResource
+      TagResourcePost: TagResource
+    exclude_actions:
+      - ListTagsByQuery
+      - TagResourceByBody
+      - TagResourcePut
+      - UntagResourceByQuery
   - service: comprehend
     doc: docs/services/comprehend.md
     sources:
