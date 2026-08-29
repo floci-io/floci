@@ -183,10 +183,17 @@ public class CloudTrailJsonHandler {
         return Response.ok(resp).build();
     }
 
+    private static final int MAX_TAGS_PER_REQUEST = 200;
+
     private Response addTags(JsonNode req, String region) {
         String resourceId = req.path("ResourceId").asText(null);
+        JsonNode tagsList = req.path("TagsList");
+        if (tagsList.size() > MAX_TAGS_PER_REQUEST) {
+            throw new AwsException("TagsLimitExceededException",
+                    "TagsList cannot contain more than " + MAX_TAGS_PER_REQUEST + " tags", 400);
+        }
         Map<String, String> tags = new LinkedHashMap<>();
-        req.path("TagsList").forEach(tag ->
+        tagsList.forEach(tag ->
                 tags.put(tag.path("Key").asText(null), tag.path("Value").asText(null)));
         service.addTags(region, resourceId, tags);
         return Response.ok(mapper.createObjectNode()).build();

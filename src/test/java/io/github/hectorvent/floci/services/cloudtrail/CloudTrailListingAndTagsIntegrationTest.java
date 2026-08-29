@@ -123,6 +123,35 @@ class CloudTrailListingAndTagsIntegrationTest {
                 .body(containsString("Owner"));
     }
 
+    @Test
+    void addTagsRejectsMoreThanTwoHundredTags() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String trailName = "toomany-" + suffix;
+        String destBucket = "toomany-logs-" + suffix;
+
+        createBucket(destBucket);
+        String createBody = invokeCloudTrail("CreateTrail", String.format("""
+                {"Name":"%s","S3BucketName":"%s"}
+                """, trailName, destBucket))
+                .then().statusCode(200)
+                .extract().asString();
+        String trailArn = extractField(createBody, "TrailARN");
+
+        StringBuilder tags = new StringBuilder();
+        for (int i = 0; i < 201; i++) {
+            if (i > 0) {
+                tags.append(",");
+            }
+            tags.append(String.format("{\"Key\":\"k%d\",\"Value\":\"v%d\"}", i, i));
+        }
+
+        invokeCloudTrail("AddTags", String.format("""
+                {"ResourceId":"%s","TagsList":[%s]}
+                """, trailArn, tags))
+                .then().statusCode(400)
+                .body(containsString("TagsLimitExceededException"));
+    }
+
     // --- Helpers ---
 
     private static io.restassured.response.Response invokeCloudTrail(String action, String body) {
