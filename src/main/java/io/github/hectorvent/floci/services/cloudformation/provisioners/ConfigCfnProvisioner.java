@@ -45,15 +45,19 @@ public class ConfigCfnProvisioner implements CfnResourceProvisioner {
         }
         ConfigRule rule = configService.putConfigRule(ctx.region(), new ConfigRule(
                 name, null, null, text(resolved, "Description"), scope(resolved.path("Scope")),
-                source(resolved.path("Source")), text(resolved, "InputParameters"),
+                source(resolved.path("Source")), inputParameters(resolved.path("InputParameters")),
                 text(resolved, "MaximumExecutionFrequency"), null, null,
                 evaluationModes(resolved.path("EvaluationModes"))));
-        if (previousName != null && !previousName.equals(name)) {
-            deleteIfPresent(ctx.region(), previousName);
-        }
         resource.setPhysicalId(rule.configRuleName());
         resource.getAttributes().put("Arn", rule.configRuleArn());
         resource.getAttributes().put("ConfigRuleId", rule.configRuleId());
+        if (previousName != null && !previousName.equals(name)) {
+            try {
+                deleteIfPresent(ctx.region(), previousName);
+            } catch (RuntimeException ignored) {
+                // old rule may still be referenced elsewhere; new rule is already tracked
+            }
+        }
     }
 
     @Override
@@ -118,5 +122,12 @@ public class ConfigCfnProvisioner implements CfnResourceProvisioner {
     private String text(JsonNode node, String field) {
         JsonNode value = node == null ? null : node.get(field);
         return value == null || value.isNull() ? null : value.asText();
+    }
+
+    private String inputParameters(JsonNode node) {
+        if (node == null || node.isMissingNode() || node.isNull()) {
+            return null;
+        }
+        return node.isTextual() ? node.asText() : node.toString();
     }
 }

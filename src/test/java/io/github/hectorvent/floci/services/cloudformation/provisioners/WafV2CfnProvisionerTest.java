@@ -75,6 +75,26 @@ class WafV2CfnProvisionerTest {
         assertEquals("portal|acl-123|REGIONAL", resource.getPhysicalId());
     }
 
+    @Test
+    void replacementTracksNewAclEvenWhenOldAclDeleteFails() {
+        WebAcl existing = acl("portal", "acl-old", "REGIONAL", "lock-1");
+        WebAcl created = acl("portal-renamed", "acl-new", "REGIONAL", "lock-2");
+        created.setArn("arn:new");
+        when(wafV2.listWebAcls("REGIONAL")).thenReturn(List.of(existing));
+        when(wafV2.createWebAcl(any(), eq("REGIONAL"), eq("portal-renamed"), eq("us-east-1")))
+                .thenReturn(created);
+        org.mockito.Mockito.doThrow(new RuntimeException("WAFAssociatedItemException"))
+                .when(wafV2).deleteWebAcl("REGIONAL", "acl-old", "lock-1");
+        StackResource resource = resource();
+        resource.setPhysicalId("portal|acl-old|REGIONAL");
+        ObjectNode props = mapper.createObjectNode().put("Name", "portal-renamed").put("Scope", "REGIONAL");
+
+        provisioner.provision(resource, props, context());
+
+        assertEquals("portal-renamed|acl-new|REGIONAL", resource.getPhysicalId());
+        assertEquals("arn:new", resource.getAttributes().get("Arn"));
+    }
+
     private ProvisionContext context() {
         CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
         when(engine.resolveNode(any(JsonNode.class))).thenAnswer(inv -> inv.getArgument(0));

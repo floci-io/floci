@@ -49,9 +49,15 @@ public class WafV2CfnProvisioner implements CfnResourceProvisioner {
             reconcileTags(acl, desired.getTags());
         } else {
             acl = wafV2Service.createWebAcl(desired, scope, name, ctx.region());
+            setReferences(resource, acl);
             if (existing != null) {
-                wafV2Service.deleteWebAcl(existing.getScope(), existing.getId(), existing.getLockToken());
+                try {
+                    wafV2Service.deleteWebAcl(existing.getScope(), existing.getId(), existing.getLockToken());
+                } catch (RuntimeException ignored) {
+                    // old ACL may still be associated with a resource; new ACL is already tracked
+                }
             }
+            return;
         }
         setReferences(resource, acl);
     }

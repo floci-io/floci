@@ -62,6 +62,48 @@ class ConfigCfnProvisionerTest {
     }
 
     @Test
+    void inputParametersGivenAsInlineJsonObjectIsSerializedNotDropped() {
+        ObjectNode props = mapper.createObjectNode()
+                .put("ConfigRuleName", "tenant-isolation");
+        props.set("Source", mapper.createObjectNode().put("Owner", "AWS")
+                .put("SourceIdentifier", "S3_BUCKET_VERSIONING_ENABLED"));
+        props.set("InputParameters", mapper.createObjectNode().put("minimumRetentionDays", "30"));
+        ConfigRule stored = new ConfigRule("tenant-isolation", "arn:rule", "config-rule-123",
+                null, null, null, null, null, "ACTIVE", null, List.of());
+        when(config.putConfigRule(eq("us-east-1"), any())).thenReturn(stored);
+        when(config.describeConfigRules("us-east-1", List.of())).thenReturn(List.of());
+        StackResource resource = resource();
+
+        provisioner.provision(resource, props, context());
+
+        ArgumentCaptor<ConfigRule> desired = ArgumentCaptor.forClass(ConfigRule.class);
+        verify(config).putConfigRule(eq("us-east-1"), desired.capture());
+        assertEquals("{\"minimumRetentionDays\":\"30\"}", desired.getValue().inputParameters());
+    }
+
+    @Test
+    void renameTracksNewRuleEvenWhenOldRuleDeleteFails() {
+        ObjectNode props = mapper.createObjectNode().put("ConfigRuleName", "renamed-rule");
+        props.set("Source", mapper.createObjectNode().put("Owner", "AWS")
+                .put("SourceIdentifier", "S3_BUCKET_VERSIONING_ENABLED"));
+        ConfigRule stored = new ConfigRule("renamed-rule", "arn:renamed", "config-rule-456",
+                null, null, null, null, null, "ACTIVE", null, List.of());
+        when(config.putConfigRule(eq("us-east-1"), any())).thenReturn(stored);
+        when(config.describeConfigRules("us-east-1", List.of()))
+                .thenReturn(List.of(new ConfigRule("old-rule", "arn:old", "config-rule-123",
+                        null, null, null, null, null, "ACTIVE", null, List.of())));
+        org.mockito.Mockito.doThrow(new RuntimeException("rule in use"))
+                .when(config).deleteConfigRule("us-east-1", "old-rule");
+        StackResource resource = resource();
+        resource.setPhysicalId("old-rule");
+
+        provisioner.provision(resource, props, context());
+
+        assertEquals("renamed-rule", resource.getPhysicalId());
+        assertEquals("arn:renamed", resource.getAttributes().get("Arn"));
+    }
+
+    @Test
     void deleteIsIdempotent() {
         when(config.describeConfigRules("us-east-1", List.of())).thenReturn(List.of());
 
