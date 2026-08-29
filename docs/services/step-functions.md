@@ -40,6 +40,45 @@
 definition, role, logging, tracing, encryption, and tags without replacing the state machine;
 changes to `StateMachineName` or `StateMachineType` use replacement semantics.
 
+## Execution history events
+
+`GetExecutionHistory` emits an event family around a Task state's `TaskStateEntered` and
+`TaskStateExited` pair. Which family depends on the resource type.
+
+- A service integration ARN (`arn:aws:states:::...`) emits `TaskScheduled`, `TaskStarted`,
+  and then `TaskSucceeded` or `TaskFailed`. `taskScheduledEventDetails` carries
+  `resourceType`, `resource`, `region`, and `parameters`. `parameters` is the resolved
+  `Parameters` or `Arguments` payload, serialized as a JSON string. `timeoutInSeconds` and
+  `heartbeatInSeconds` appear only when the state sets `TimeoutSeconds` or
+  `HeartbeatSeconds` as a literal number.
+- A direct Lambda function ARN emits `LambdaFunctionScheduled`, `LambdaFunctionStarted`,
+  and then `LambdaFunctionSucceeded` or `LambdaFunctionFailed`. `LambdaFunctionScheduled`
+  carries `resource` and `input`. `resource` holds the full function ARN. `LambdaFunctionStarted`
+  carries no details at all. This matches AWS.
+- An activity ARN emits the equivalent `Activity*` family.
+
+A `Retry` re-entry emits its own Scheduled, Started, and Failed triple for each attempt. A
+mocked Task (`SFN_MOCK_CONFIG`) emits the same events as a real one, because Step Functions
+Local does the same.
+
+Every event's `previousEventId` points to the id of the event right before it. The one
+exception is the first state's `*StateEntered` event. Its `previousEventId` is `0`. That
+matches `ExecutionStarted`, which is always `id: 1, previousEventId: 0`.
+
+`inputDetails` appears on `ExecutionStarted`, on `stateEnteredEventDetails`, and on
+`LambdaFunctionScheduled`/`ActivityScheduled`. `outputDetails` appears on
+`stateExitedEventDetails`, on `executionSucceededEventDetails`, and on
+`taskSucceededEventDetails`/`lambdaFunctionSucceededEventDetails`. Both are always
+`{"truncated": false}`. Floci never truncates a payload, so the value never changes.
+When the request sets `includeExecutionData` to false, the details objects stay but lose
+`input`, `inputDetails`, `output`, and `outputDetails`. Every other field stays, including
+`taskScheduledEventDetails.parameters`. This matches AWS.
+
+A few gaps remain. `TaskStarted`, `LambdaFunctionStarted`, and `ActivityStarted` fire at
+scheduling time, not when a worker actually picks up the task. Events inside a `Parallel` or
+`Map` branch are not recorded in the parent execution's history. `TaskSubmitted`, which real
+AWS emits for `.sync` and `.waitForTaskToken` integrations, is not emitted yet.
+
 ## Map concurrency
 
 Map states honor `MaxConcurrency` and, for JSONPath state machines, `MaxConcurrencyPath`.

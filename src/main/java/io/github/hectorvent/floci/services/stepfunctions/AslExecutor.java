@@ -352,6 +352,7 @@ public class AslExecutor {
         // Declared outside the try so the terminal handlers below can keep numbering the history
         // where the execution left it.
         AtomicLong eventId = new AtomicLong(history.size());
+        var firstState = true;
         try {
             JsonNode definition = objectMapper.readTree(sm.getDefinition());
             JsonNode states = definition.path("States");
@@ -371,8 +372,10 @@ public class AslExecutor {
                 }
 
                 String type = stateDef.path("Type").asText();
-                addEvent(history, eventId, stateEnteredEventType(type), null,
-                        Map.of("name", currentStateName, "input", currentInput.toString()));
+                addEvent(history, eventId, stateEnteredEventType(type), firstState ? 0L : eventId.get(),
+                        Map.of("name", currentStateName, "input", currentInput.toString(),
+                               "inputDetails", Map.of("truncated", false)));
+                firstState = false;
 
                 // Update per-state context fields
                 updateStateContext(execContext, currentStateName);
@@ -381,8 +384,9 @@ public class AslExecutor {
                 try {
                     var stateResult = executeStateWithRetry(currentStateName, type, stateDef, currentInput,
                             history, eventId, sm, jsonata, topLevelQueryLanguage, execContext, variables);
-                    addEvent(history, eventId, stateExitedEventType(type), eventId.get() - 1,
-                            Map.of("name", currentStateName, "output", stateResult.output().toString()));
+                    addEvent(history, eventId, stateExitedEventType(type),
+                            Map.of("name", currentStateName, "output", stateResult.output().toString(),
+                                   "outputDetails", Map.of("truncated", false)));
 
                     currentInput = stateResult.output();
                     currentStateName = stateResult.nextState();
@@ -393,8 +397,9 @@ public class AslExecutor {
                 } catch (FailStateException e) {
                     StateResult caught = handleCatch(stateDef, currentInput, e, jsonata, execContext, variables);
                     if (caught != null) {
-                        addEvent(history, eventId, stateExitedEventType(type), eventId.get() - 1,
-                                Map.of("name", currentStateName, "output", caught.output().toString()));
+                        addEvent(history, eventId, stateExitedEventType(type),
+                                Map.of("name", currentStateName, "output", caught.output().toString(),
+                                       "outputDetails", Map.of("truncated", false)));
                         currentInput = caught.output();
                         currentStateName = caught.nextState();
                         continue;
@@ -412,8 +417,8 @@ public class AslExecutor {
             exec.setOutput(currentInput.toString());
             exec.setStopDate(System.currentTimeMillis() / 1000.0);
             exec.setStatus("SUCCEEDED");
-            addEvent(history, eventId, "ExecutionSucceeded", null,
-                    Map.of("output", currentInput.toString()));
+            addEvent(history, eventId, "ExecutionSucceeded",
+                    Map.of("output", currentInput.toString(), "outputDetails", Map.of("truncated", false)));
             onUpdate.accept(exec, history);
 
         } catch (Exception e) {
@@ -588,29 +593,40 @@ public class AslExecutor {
             tokenFuture = sfnService.get().registerPendingToken(taskToken);
         }
 
-        JsonNode taskResult;
+        JsonNode effectiveInput;
         if (jsonata) {
-            var effectiveInput = input;
+            effectiveInput = input;
             if (stateDef.has("Arguments")) {
                 var statesVar = buildStatesVar(input, null, context);
                 effectiveInput = jsonataEvaluator.resolveTemplate(stateDef.get("Arguments"), statesVar, variables);
             }
-            taskResult = mockedSteps != null
-                    ? mockedTaskResult(mockedSteps, stateName, attempt)
-                    : invokeResource(effectiveResource, effectiveInput, sm, taskToken);
         } else {
-            var effectiveInput = applyInputPath(stateDef, input);
+            effectiveInput = applyInputPath(stateDef, input);
             if (stateDef.has("Parameters")) {
                 effectiveInput = resolveParameters(stateDef.get("Parameters"), effectiveInput, context);
             }
+        }
+
+        var profile = taskEventProfile(resource, isActivity);
+        addTaskScheduledEvent(history, eventId, profile, stateDef, effectiveInput, sm);
+        addTaskStartedEvent(history, eventId, profile);
+
+        JsonNode taskResult;
+        try {
             taskResult = mockedSteps != null
                     ? mockedTaskResult(mockedSteps, stateName, attempt)
                     : invokeResource(effectiveResource, effectiveInput, sm, taskToken);
+            if (tokenFuture != null) {
+                taskResult = awaitToken(tokenFuture, stateDef);
+            }
+        } catch (Exception e) {
+            var failure = e instanceof FailStateException f ? f : null;
+            addTaskFailedEvent(history, eventId, profile,
+                    failure != null && failure.error != null ? failure.error : "States.Runtime",
+                    failure != null ? failure.cause : e.getMessage());
+            throw e;
         }
-
-        if (tokenFuture != null) {
-            taskResult = awaitToken(tokenFuture, stateDef);
-        }
+        addTaskSucceededEvent(history, eventId, profile, taskResult);
 
         if (jsonata) {
             JsonNode output = applyJsonataOutput(stateDef, input, taskResult, context, variables);
@@ -3347,14 +3363,99 @@ public class AslExecutor {
 
     // ──────────────────────────── History helpers ────────────────────────────
 
-    private void addEvent(List<HistoryEvent> history, AtomicLong counter, String type,
-                          Long prevId, Map<String, Object> details) {
-        HistoryEvent event = new HistoryEvent();
+    private void addEvent(List<HistoryEvent> history, AtomicLong counter, String type, Map<String, Object> details) {
+        addEvent(history, counter, type, counter.get(), details);
+    }
+
+    private void addEvent(List<HistoryEvent> history, AtomicLong counter, String type, long previousEventId,
+                          Map<String, Object> details) {
+        var event = new HistoryEvent();
         event.setId(counter.incrementAndGet());
+        event.setPreviousEventId(previousEventId);
         event.setType(type);
-        event.setPreviousEventId(prevId);
         event.setDetails(details);
         history.add(event);
+    }
+
+    private record TaskEventProfile(String prefix, String resourceType, String resource) {}
+
+    private TaskEventProfile taskEventProfile(String resource, boolean isActivity) {
+        if (isActivity) {
+            return new TaskEventProfile("Activity", null, resource);
+        }
+        if (resource.contains(":lambda:") && resource.contains(":function:")) {
+            return new TaskEventProfile("LambdaFunction", null, resource);
+        }
+        if (resource.startsWith("arn:aws:states:::")) {
+            var tail = resource.substring("arn:aws:states:::".length());
+            var idx = tail.lastIndexOf(':');
+            if (idx < 0) {
+                return new TaskEventProfile("Task", tail, tail);
+            }
+            return new TaskEventProfile("Task", tail.substring(0, idx), tail.substring(idx + 1));
+        }
+        return new TaskEventProfile("Task", resource, resource);
+    }
+
+    private void addTaskScheduledEvent(List<HistoryEvent> history, AtomicLong eventId, TaskEventProfile profile,
+                                       JsonNode stateDef, JsonNode effectiveInput, StateMachine sm) {
+        var details = new LinkedHashMap<String, Object>();
+        if (profile.resourceType() != null) {
+            details.put("resourceType", profile.resourceType());
+        }
+        details.put("resource", profile.resource());
+        if ("Task".equals(profile.prefix())) {
+            details.put("region", extractRegionFromArn(sm.getStateMachineArn()));
+            details.put("parameters", effectiveInput.toString());
+        } else {
+            details.put("input", effectiveInput.toString());
+            details.put("inputDetails", Map.of("truncated", false));
+        }
+        if (stateDef.path("TimeoutSeconds").isNumber()) {
+            details.put("timeoutInSeconds", stateDef.path("TimeoutSeconds").asLong());
+        }
+        if (stateDef.path("HeartbeatSeconds").isNumber()) {
+            details.put("heartbeatInSeconds", stateDef.path("HeartbeatSeconds").asLong());
+        }
+        addEvent(history, eventId, profile.prefix() + "Scheduled", details);
+    }
+
+    private void addTaskStartedEvent(List<HistoryEvent> history, AtomicLong eventId, TaskEventProfile profile) {
+        if ("Task".equals(profile.prefix())) {
+            addEvent(history, eventId, profile.prefix() + "Started",
+                    Map.of("resourceType", profile.resourceType(), "resource", profile.resource()));
+        } else {
+            addEvent(history, eventId, profile.prefix() + "Started", null);
+        }
+    }
+
+    private void addTaskSucceededEvent(List<HistoryEvent> history, AtomicLong eventId, TaskEventProfile profile,
+                                       JsonNode taskResult) {
+        var output = taskResult.toString();
+        if ("Task".equals(profile.prefix())) {
+            addEvent(history, eventId, profile.prefix() + "Succeeded",
+                    Map.of("resourceType", profile.resourceType(), "resource", profile.resource(),
+                           "output", output, "outputDetails", Map.of("truncated", false)));
+        } else {
+            addEvent(history, eventId, profile.prefix() + "Succeeded",
+                    Map.of("output", output, "outputDetails", Map.of("truncated", false)));
+        }
+    }
+
+    private void addTaskFailedEvent(List<HistoryEvent> history, AtomicLong eventId, TaskEventProfile profile,
+                                    String error, String cause) {
+        var details = new LinkedHashMap<String, Object>();
+        if ("Task".equals(profile.prefix())) {
+            details.put("resourceType", profile.resourceType());
+            details.put("resource", profile.resource());
+        }
+        if (error != null) {
+            details.put("error", error);
+        }
+        if (cause != null) {
+            details.put("cause", cause);
+        }
+        addEvent(history, eventId, profile.prefix() + "Failed", details);
     }
 
     private void failExecution(Execution exec, List<HistoryEvent> history, AtomicLong eventId, FailStateException e) {
@@ -3373,7 +3474,7 @@ public class AslExecutor {
         exec.setCause(cause);
         exec.setStopDate(System.currentTimeMillis() / 1000.0);
         exec.setStatus("FAILED");
-        addEvent(history, eventId, "ExecutionFailed", null,
+        addEvent(history, eventId, "ExecutionFailed",
                 Map.of("error", error, "cause", cause));
     }
 
