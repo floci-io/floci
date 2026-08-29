@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.core.common.docker;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
+import java.io.InterruptedIOException;
 
 /**
  * Retry policy for docker daemon calls. Every docker command travels over the single shared
@@ -62,6 +63,9 @@ public final class DockerRetry {
      */
     public static boolean isTransientIo(Throwable t) {
         for (Throwable c = t; c != null; c = c.getCause()) {
+            if (c instanceof InterruptedIOException) {
+                return false;
+            }
             if (c instanceof IOException) {
                 return true;
             }
@@ -79,9 +83,9 @@ public final class DockerRetry {
 
     /**
      * Runs {@code call}, retrying up to {@code maxAttempts} times on a transient docker I/O
-     * error ({@link #isTransientIo}) with a fixed backoff between attempts, and returns its
-     * value. A non-transient failure is rethrown immediately. A {@link RuntimeException} is
-     * rethrown as-is; a checked exception is wrapped.
+     * error ({@link #isTransientIo}) with a capped exponential backoff between attempts
+     * ({@link #backoffDelay}), and returns its value. A non-transient failure is rethrown
+     * immediately. A {@link RuntimeException} is rethrown as-is; a checked exception is wrapped.
      */
     public static <T> T call(int maxAttempts, long backoffMillis, DockerCall<T> call) {
         int attempt = 0;

@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.core.common.docker;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.io.InterruptedIOException;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -37,6 +38,11 @@ class DockerRetryTest {
     @Test
     void plainRuntimeExceptionIsNotTransient() {
         assertFalse(DockerRetry.isTransientIo(new RuntimeException("400 Bad Request")));
+    }
+
+    @Test
+    void interruptedIoExceptionIsNotTransient() {
+        assertFalse(DockerRetry.isTransientIo(new InterruptedIOException("read interrupted")));
     }
 
     @Test
