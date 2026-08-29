@@ -172,6 +172,35 @@ class SesTenantServiceTest {
     }
 
     @Test
+    void parseResourceArn_rejectsMissingOrEmptyName() {
+        // A supported type without a name segment must be rejected as malformed, not resolved to an
+        // empty-name resource that would 404 with a misleading message.
+        assertEquals("Provided resource identifier is not an SES resource",
+                assertThrows(AwsException.class, () -> SesTenantService.parseResourceArn(
+                        "arn:aws:ses:" + REGION + ":" + ACCOUNT + ":identity", ACCOUNT, REGION)).getMessage());
+        assertEquals("Provided resource identifier is not an SES resource",
+                assertThrows(AwsException.class, () -> SesTenantService.parseResourceArn(
+                        "arn:aws:ses:" + REGION + ":" + ACCOUNT + ":identity/", ACCOUNT, REGION)).getMessage());
+    }
+
+    @Test
+    void resourceLookups_dontAliasNamesContainingDelimiter() {
+        // Floci barely restricts resource names, so "x" and "template::x" can both exist; the
+        // lookups must not let a key-suffix match blur them together.
+        Tenant tenant = service.createTenant("acme", List.of(), ACCOUNT, REGION);
+        SesTenantService.AssociationResource plain = SesTenantService.parseResourceArn(
+                "arn:aws:ses:" + REGION + ":" + ACCOUNT + ":template/x", ACCOUNT, REGION);
+        SesTenantService.AssociationResource tricky = SesTenantService.parseResourceArn(
+                "arn:aws:ses:" + REGION + ":" + ACCOUNT + ":template/template::x", ACCOUNT, REGION);
+        service.associate(tenant, tricky, REGION, () -> {});
+
+        assertEquals(0, service.listResourceTenants(plain, REGION).size());
+        assertTrue(service.findAssociationForResource("template", "x", REGION).isEmpty());
+        assertEquals(1, service.listResourceTenants(tricky, REGION).size());
+        assertTrue(service.findAssociationForResource("template", "template::x", REGION).isPresent());
+    }
+
+    @Test
     void associate_duplicateThrows_awsGrammarPreserved() {
         Tenant tenant = service.createTenant("acme", List.of(), ACCOUNT, REGION);
         SesTenantService.AssociationResource ref = identityRef("example.com");

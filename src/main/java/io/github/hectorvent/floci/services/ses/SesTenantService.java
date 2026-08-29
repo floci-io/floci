@@ -197,6 +197,12 @@ public class SesTenantService {
         if (!SUPPORTED_RESOURCE_TYPES.contains(type)) {
             throw new AwsException("BadRequestException", "Unsupported resource type: " + type, 400);
         }
+        if (slash < 0 || slash == resource.length() - 1) {
+            // A supported type with no name segment can never reference a resource; reject it as
+            // malformed rather than letting it 404 with an empty name.
+            throw new AwsException("BadRequestException",
+                    "Provided resource identifier is not an SES resource", 400);
+        }
         if (!region.equals(parts[3])) {
             throw new AwsException("BadRequestException",
                     "Resource <" + resourceArn + "> must be in the same region", 400);
@@ -205,7 +211,7 @@ public class SesTenantService {
             throw new AwsException("BadRequestException",
                     "Resource <" + resourceArn + "> must be in the same account", 400);
         }
-        return new AssociationResource(type, slash < 0 ? "" : resource.substring(slash + 1), resourceArn);
+        return new AssociationResource(type, resource.substring(slash + 1), resourceArn);
     }
 
     /**
@@ -272,11 +278,15 @@ public class SesTenantService {
                 .toList();
     }
 
+    // The resource lookups match on the stored record, not on a key suffix: a resource name may
+    // itself contain the "::" delimiter (Floci barely restricts identity and template names), so a
+    // suffix match on the key could alias one resource's associations to another's.
+
     /** AWS returns a resource's tenants ordered by association time. */
     public List<TenantResourceAssociation> listResourceTenants(AssociationResource ref, String region) {
         String regionPrefix = "tenantAssoc::" + region + "::";
-        String suffix = "::" + ref.type() + "::" + ref.name();
-        return associationStore.scan(k -> k.startsWith(regionPrefix) && k.endsWith(suffix)).stream()
+        return associationStore.scan(k -> k.startsWith(regionPrefix)).stream()
+                .filter(a -> ref.arn().equals(a.resourceArn()))
                 .sorted(Comparator.comparing(TenantResourceAssociation::associatedTimestamp,
                                 Comparator.nullsLast(Comparator.naturalOrder()))
                         .thenComparing(TenantResourceAssociation::tenantName,
@@ -292,9 +302,16 @@ public class SesTenantService {
                                                                           String resourceName,
                                                                           String region) {
         String regionPrefix = "tenantAssoc::" + region + "::";
-        String suffix = "::" + resourceType + "::" + resourceName;
-        return associationStore.scan(k -> k.startsWith(regionPrefix) && k.endsWith(suffix)).stream()
+        return associationStore.scan(k -> k.startsWith(regionPrefix)).stream()
+                .filter(a -> resourceType.equals(a.resourceType())
+                        && resourceName.equals(resourceNameFromArn(a.resourceArn())))
                 .findFirst();
+    }
+
+    // Stored ARNs were validated by parseResourceArn, so the resource part always has a name segment.
+    private static String resourceNameFromArn(String arn) {
+        String resource = arn.split(":", 6)[5];
+        return resource.substring(resource.indexOf('/') + 1);
     }
 
     public static void validateResourceTypeFilter(String value) {
