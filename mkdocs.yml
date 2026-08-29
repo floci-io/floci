@@ -93,10 +93,12 @@ nav:
     - Managed Service for Apache Flink: services/kinesisanalytics.md
     - Secrets Manager: services/secrets-manager.md
     - CloudFormation: services/cloudformation.md
+    - Cloud Control API: services/cloudcontrol.md
     - Step Functions: services/step-functions.md
     - SWF: services/swf.md
     - IAM: services/iam.md
     - STS: services/sts.md
+    - Organizations: services/organizations.md
     - ElastiCache: services/elasticache.md
     - MemoryDB: services/memorydb.md
     - RDS: services/rds.md
@@ -118,6 +120,7 @@ nav:
     - ECS: services/ecs.md
     - ECR: services/ecr.md
     - Resource Groups Tagging API: services/resource-groups-tagging.md
+    - Resource Explorer 2: services/resource-explorer.md
     - EKS: services/eks.md
     - MWAA: services/mwaa.md
     - OpenSearch: services/opensearch.md
@@ -134,6 +137,8 @@ nav:
     - AWS Batch: services/batch.md
     - CodeDeploy: services/codedeploy.md
     - CodePipeline: services/codepipeline.md
+    - Service Quotas: services/servicequotas.md
+    - AWS RAM: services/ram.md
     - AWS Backup: services/backup.md
     - AWS FIS: services/fis.md
     - CloudTrail: services/cloudtrail.md
@@ -146,6 +151,7 @@ nav:
     - AWS Config: services/config.md
     - CloudTrail: services/cloudtrail.md
     - EMR: services/emr.md
+    - EMR Serverless: services/emr-serverless.md
     - WAF v2: services/wafv2.md
     - Textract: services/textract.md
     - Transcribe: services/transcribe.md

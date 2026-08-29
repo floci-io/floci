@@ -133,9 +133,9 @@ class AppSyncTest {
         keyId = resp.apiKey().id();
         assertThat(keyId).isNotBlank();
         assertThat(resp.apiKey().description()).isEqualTo("sdk-test-key");
-        // AWS SDK v2 ApiKey has no apiKey() accessor; Floci returns the da2- secret on the wire.
-        apiKeyValue = fetchApiKeyValue(apiId, keyId);
-        assertThat(apiKeyValue).startsWith("da2-");
+        // As on AWS, the id is the key value sent as x-api-key.
+        assertThat(keyId).matches("da2-[a-z0-9]{26}");
+        apiKeyValue = keyId;
     }
 
     @Test
@@ -623,6 +623,8 @@ class AppSyncTest {
                         .build());
 
         assertThat(resp.status()).isNotNull();
+        SchemaStatus terminal = pollSchemaStatusToTerminal();
+        assertThat(terminal).isEqualTo(SchemaStatus.SUCCESS);
     }
 
     // ── Channel Namespaces ─────────────────────────────────────────────
@@ -1312,25 +1314,5 @@ class AppSyncTest {
         assertThat(location.get("line")).isNotNull();
         assertThat(location.get("column")).isNotNull();
         assertThat(location.get("span")).isEqualTo(-1);
-    }
-
-    @SuppressWarnings("unchecked")
-    private static String fetchApiKeyValue(String apiId, String keyId) throws Exception {
-        String url = TestFixtures.endpoint() + "/v1/apis/" + apiId + "/apikeys";
-        HttpRequest req = HttpRequest.newBuilder()
-                .uri(URI.create(url))
-                .header("Authorization", "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/appsync/aws4_request")
-                .GET()
-                .build();
-        HttpResponse<String> resp = HttpClient.newHttpClient().send(req, HttpResponse.BodyHandlers.ofString());
-        Map<String, Object> body = mapper.readValue(resp.body(), Map.class);
-        List<Map<String, Object>> keys = (List<Map<String, Object>>) body.get("apiKeys");
-        assertThat(keys).isNotEmpty();
-        for (Map<String, Object> key : keys) {
-            if (keyId.equals(key.get("id"))) {
-                return String.valueOf(key.get("apiKey"));
-            }
-        }
-        throw new IllegalStateException("API key not listed for id " + keyId);
     }
 }

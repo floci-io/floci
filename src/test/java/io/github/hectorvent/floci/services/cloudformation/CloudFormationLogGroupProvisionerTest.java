@@ -48,7 +48,7 @@ class CloudFormationLogGroupProvisionerTest {
                 null, null, null, null, null, null, null,
                 null, null, logsService, null, null, null, null,
                 null, null,
-                new CloudFormationResourceRegistry(List.of()));
+                new CloudFormationResourceRegistry(List.of()), null);
     }
 
     @Test

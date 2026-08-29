@@ -17,6 +17,7 @@ import jakarta.inject.Inject;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @ApplicationScoped
@@ -371,6 +372,56 @@ public class AutoScalingService {
         return all;
     }
 
+    public void setInstanceProtection(String region, String groupName, List<String> instanceIds,
+                                      boolean protectedFromScaleIn) {
+        if (instanceIds == null || instanceIds.isEmpty()) {
+            throw new AwsException("ValidationError", "At least one instance ID is required.", 400);
+        }
+        AutoScalingGroup asg = requireGroup(region, groupName);
+        Set<String> requested = new HashSet<>(instanceIds);
+        Set<String> found = asg.getInstances().stream()
+                .map(AsgInstance::getInstanceId)
+                .filter(requested::contains)
+                .collect(Collectors.toSet());
+        if (!found.containsAll(requested)) {
+            String missing = requested.stream()
+                    .filter(id -> !found.contains(id))
+                    .collect(Collectors.joining(", "));
+            throw new AwsException("ValidationError",
+                    "Instance(s) '" + missing + "' is/are not part of Auto Scaling group '" + groupName + "'.", 400);
+        }
+        asg.getInstances().stream()
+                .filter(instance -> requested.contains(instance.getInstanceId()))
+                .forEach(instance -> instance.setProtectedFromScaleIn(protectedFromScaleIn));
+        groups.put(asgKey(region, groupName), asg);
+    }
+
+    /**
+     * {@code shouldRespectGracePeriod} is parsed and accepted for wire fidelity (2011-01-01 model)
+     * but not yet enforced — floci does not currently track instance launch time against
+     * {@link AutoScalingGroup#getHealthCheckGracePeriod()}, so the health status change below always
+     * applies immediately regardless of the flag.
+     */
+    public void setInstanceHealth(String region, String instanceId, String healthStatus,
+                                   boolean shouldRespectGracePeriod) {
+        if (!"Healthy".equals(healthStatus) && !"Unhealthy".equals(healthStatus)) {
+            throw new AwsException("ValidationError",
+                    "HealthStatus must be Healthy or Unhealthy.", 400);
+        }
+        AutoScalingGroup asg = groups.values().stream()
+                .filter(group -> region.equals(group.getRegion()))
+                .filter(group -> group.getInstances().stream()
+                        .anyMatch(instance -> instanceId != null && instanceId.equals(instance.getInstanceId())))
+                .findFirst()
+                .orElseThrow(() -> new AwsException("ValidationError",
+                        "Instance '" + instanceId + "' not found in any Auto Scaling group.", 400));
+        asg.getInstances().stream()
+                .filter(instance -> instanceId.equals(instance.getInstanceId()))
+                .findFirst()
+                .ifPresent(instance -> instance.setHealthStatus(healthStatus));
+        groups.put(asgKey(region, asg.getAutoScalingGroupName()), asg);
+    }
+
     public void attachInstances(String region, String name, List<String> instanceIds) {
         AutoScalingGroup asg = requireGroup(region, name);
         for (String id : instanceIds) {
@@ -560,6 +611,7 @@ public class AutoScalingService {
                                   String roleArn, String notificationMetadata,
                                   Integer heartbeatTimeout, String defaultResult) {
         requireGroup(region, asgName);
+        validateLifecycleHookName(hookName);
         String key = hookKey(region, asgName, hookName);
         LifecycleHook hook = hooks.computeIfAbsent(key, k -> new LifecycleHook());
         hook.setLifecycleHookName(hookName);
@@ -574,6 +626,7 @@ public class AutoScalingService {
     }
 
     public void deleteLifecycleHook(String region, String asgName, String hookName) {
+        validateLifecycleHookName(hookName);
         hooks.remove(hookKey(region, asgName, hookName));
     }
 
@@ -586,6 +639,11 @@ public class AutoScalingService {
         if (hookName == null) {
             return;
         }
+        // The physical id was only ever assigned from a name that already passed this check
+        // (see putLifecycleHook), so this call for parity with deleteLifecycleHook should never
+        // reject a hook created through the normal path — it exists to fail loudly, not silently
+        // no-op, if a corrupted or hand-authored physical id ever reaches this delete path.
+        validateLifecycleHookName(hookName);
         List<String> keys = new ArrayList<>();
         for (Map.Entry<String, LifecycleHook> entry : hooks.entrySet()) {
             LifecycleHook hook = entry.getValue();
@@ -616,6 +674,43 @@ public class AutoScalingService {
                                          String instanceId, String actionResult, String token) {
         // Stored-only — Phase 2 reconciler observes this via the instance lifecycle state
         requireGroup(region, asgName);
+        validateLifecycleHookName(hookName);
+        if (token != null) {
+            validateLifecycleActionToken(token);
+        }
+    }
+
+    /** LifecycleHookName pattern/length from the Auto Scaling model (autoscaling/2011-01-01/service-2.json). */
+    private static final Pattern LIFECYCLE_HOOK_NAME_PATTERN =
+            Pattern.compile("^[A-Za-z0-9\\-_/]+$");
+
+    private static void validateLifecycleHookName(String hookName) {
+        if (hookName == null) {
+            throw new AwsException("ValidationError",
+                    "1 validation error detected: Value null at 'lifecycleHookName' failed to satisfy constraint: "
+                            + "Member must not be null", 400);
+        }
+        if (hookName.length() > 255) {
+            throw new AwsException("ValidationError",
+                    "1 validation error detected: Value '" + hookName
+                            + "' at 'lifecycleHookName' failed to satisfy constraint: Member must have length "
+                            + "less than or equal to 255", 400);
+        }
+        if (!LIFECYCLE_HOOK_NAME_PATTERN.matcher(hookName).matches()) {
+            throw new AwsException("ValidationError",
+                    "1 validation error detected: Value '" + hookName
+                            + "' at 'lifecycleHookName' failed to satisfy constraint: Member must satisfy "
+                            + "regular expression pattern: [A-Za-z0-9\\-_/]+", 400);
+        }
+    }
+
+    /** LifecycleActionToken is modeled as a fixed 36-character token (autoscaling/2011-01-01/service-2.json). */
+    private static void validateLifecycleActionToken(String token) {
+        if (token == null || token.length() != 36) {
+            throw new AwsException("ValidationError",
+                    "1 validation error detected: Value at 'lifecycleActionToken' failed to satisfy constraint: "
+                            + "Member must have length equal to 36", 400);
+        }
     }
 
     // ── Scaling policies ───────────────────────────────────────────────────────
@@ -825,7 +920,7 @@ public class AutoScalingService {
         if (launchTemplateVersions.isEmpty()) {
             throw invalidLaunchTemplate();
         }
-        if (isBlank(launchTemplateVersions.getFirst().getImageId())) {
+        if (isBlank(launchTemplateVersions.getFirst().getData().getImageId())) {
             throw missingLaunchTemplateImageId();
         }
     }

@@ -2,10 +2,12 @@ package io.github.hectorvent.floci.services.apigateway;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 import io.github.hectorvent.floci.services.apigateway.model.EndpointConfiguration;
@@ -309,6 +311,7 @@ public class ApiGatewayService {
         getRestApi(region, apiId);
         ApiGatewayResource parent = getResource(region, apiId, parentId);
         String pathPart = (String) request.get("pathPart");
+        assertNoSiblingPathCollision(region, apiId, parentId, pathPart, null);
 
         ApiGatewayResource resource = new ApiGatewayResource();
         resource.setId(shortId(8));
@@ -383,6 +386,15 @@ public class ApiGatewayService {
             throw new AwsException("NotFoundException", "Invalid response status code specified", 404);
         }
         return mr;
+    }
+
+    public void deleteMethodResponse(String region, String apiId, String resourceId,
+                                     String httpMethod, String statusCode) {
+        MethodConfig method = getMethod(region, apiId, resourceId, httpMethod);
+        if (method.getMethodResponses().remove(statusCode) == null) {
+            throw new AwsException("NotFoundException", "Invalid response status code specified", 404);
+        }
+        resourceStore.put(resourceKey(region, apiId, resourceId), getResource(region, apiId, resourceId));
     }
 
     // ──────────────────────────── Integrations ────────────────────────────
@@ -463,6 +475,35 @@ public class ApiGatewayService {
         return ir;
     }
 
+    public void deleteIntegrationResponse(String region, String apiId, String resourceId,
+                                          String httpMethod, String statusCode) {
+        Integration integration = getIntegration(region, apiId, resourceId, httpMethod);
+        if (integration.getIntegrationResponses().remove(statusCode) == null) {
+            throw new AwsException("NotFoundException", "Invalid response status code specified", 404);
+        }
+        resourceStore.put(resourceKey(region, apiId, resourceId), getResource(region, apiId, resourceId));
+    }
+
+    public IntegrationResponse updateIntegrationResponse(String region, String apiId, String resourceId, String httpMethod, String statusCode, List<Map<String, String>> patchOperations) {
+        IntegrationResponse response = getIntegrationResponse(region, apiId, resourceId, httpMethod, statusCode);
+        String selectionPattern = response.selectionPattern();
+        if (patchOperations != null) {
+            for (Map<String, String> patch : patchOperations) {
+                String op = patch.get("op");
+                String path = patch.get("path");
+                String value = patch.get("value");
+                if (value == null || !("add".equals(op) || "replace".equals(op)) || !"/selectionPattern".equals(path)) {
+                    throw new AwsException("BadRequestException", "Invalid patch operation", 400);
+                }
+                selectionPattern = value;
+            }
+        }
+        IntegrationResponse newResponse = new IntegrationResponse(response.statusCode(), selectionPattern, response.responseParameters(), response.responseTemplates());
+        getIntegration(region, apiId, resourceId, httpMethod).getIntegrationResponses().put(statusCode, newResponse);
+        resourceStore.put(resourceKey(region, apiId, resourceId), getResource(region, apiId, resourceId));
+        return newResponse;
+    }
+
     // ──────────────────────────── Deployments ────────────────────────────
 
     public Deployment createDeployment(String region, String apiId, Map<String, Object> request) {
@@ -523,6 +564,32 @@ public class ApiGatewayService {
     public void deleteDeployment(String region, String apiId, String deploymentId) {
         getDeployment(region, apiId, deploymentId);
         deploymentStore.delete(deploymentKey(region, apiId, deploymentId));
+    }
+
+    public Deployment updateDeployment(String region, String apiId, String deploymentId, List<Map<String, String>> patchOperations) {
+        Deployment existing = getDeployment(region, apiId, deploymentId);
+        if (patchOperations != null) {
+            String newDescription = existing.description();
+            for (Map<String, String> op : patchOperations) {
+                String operation = op.get("op");
+                if (!"add".equals(operation) && !"replace".equals(operation)) {
+                    throw new AwsException("BadRequestException", "Unsupported operation", 400);
+                }
+                String path = op.get("path");
+                String value = op.get("value");
+                if (path == null || value == null) {
+                    throw new AwsException("BadRequestException", "Missing path or value", 400);
+                }
+                if (!"/description".equals(path)) {
+                    throw new AwsException("BadRequestException", "Unsupported operation or path", 400);
+                }
+                newDescription = value;
+            }
+            Deployment updated = new Deployment(existing.id(), newDescription, existing.createdDate());
+            deploymentStore.put(deploymentKey(region, apiId, deploymentId), updated);
+            return updated;
+        }
+        return existing;
     }
 
     // ──────────────────────────── Stages ────────────────────────────
@@ -704,6 +771,58 @@ public class ApiGatewayService {
         authorizerStore.delete(authorizerKey(region, apiId, authorizerId));
     }
 
+    public Authorizer updateAuthorizer(String region, String apiId, String authorizerId, List<Map<String, String>> patchOperations) {
+        Authorizer authorizer = getAuthorizer(region, apiId, authorizerId);
+        // The store hands back live objects, so every op is validated against pending values first and
+        // only applied once the whole patch is known to be good.
+        String newName = authorizer.getName();
+        String newAuthorizerUri = authorizer.getAuthorizerUri();
+        String newIdentitySource = authorizer.getIdentitySource();
+        String newTtl = authorizer.getAuthorizerResultTtlInSeconds();
+        if (patchOperations != null) {
+        for (Map<String, String> op : patchOperations) {
+            if (op == null) {
+                throw new AwsException("BadRequestException", "Invalid patch operation", 400);
+            }
+            String path = op.get("path");
+            String value = op.get("value");
+            String opType = op.get("op");
+            if (!"add".equals(opType) && !"replace".equals(opType)) {
+                throw new AwsException("BadRequestException", "Invalid operation", 400);
+            }
+            if (path == null || value == null) {
+                throw new AwsException("BadRequestException", "Missing path or value", 400);
+            }
+            if ("/name".equals(path)) {
+                newName = value;
+            } else if ("/authorizerUri".equals(path)) {
+                newAuthorizerUri = value;
+            } else if ("/identitySource".equals(path)) {
+                newIdentitySource = value;
+            } else if ("/authorizerResultTtlInSeconds".equals(path)) {
+                // Validate before accepting: the store hands back live objects, and an unparseable TTL
+                // would break serialisation on every later GetAuthorizer/GetAuthorizers.
+                String ttl = value.trim();
+                try {
+                    Integer.parseInt(ttl);
+                } catch (NumberFormatException e) {
+                    throw new AwsException("BadRequestException",
+                            "authorizerResultTtlInSeconds must be an integer", 400);
+                }
+                newTtl = ttl;
+            } else {
+                throw new AwsException("BadRequestException", "Unsupported path: " + path, 400);
+            }
+        }
+        }
+        authorizer.setName(newName);
+        authorizer.setAuthorizerUri(newAuthorizerUri);
+        authorizer.setIdentitySource(newIdentitySource);
+        authorizer.setAuthorizerResultTtlInSeconds(newTtl);
+        authorizerStore.put(authorizerKey(region, apiId, authorizerId), authorizer);
+        return authorizer;
+    }
+
     // ──────────────────────────── API Keys ────────────────────────────
 
     public ApiKey createApiKey(String region, Map<String, Object> request) {
@@ -739,6 +858,81 @@ public class ApiGatewayService {
         apiKeyStore.put(apiKeyGlobalKey(region, apiKey.getId()), apiKey);
         LOG.infov("Created API Key {0}", apiKey.getId());
         return apiKey;
+    }
+
+    /** Result of ImportApiKeys: the generated key ids plus any non-fatal warnings raised for the CSV. */
+    public record ImportApiKeysResult(List<String> ids, List<String> warnings) {}
+
+    /**
+     * Imports API keys from the AWS CSV format. AWS ships a TitleCase header
+     * ({@code Name,Key,Description,Enabled,UsagePlanIds}); columns are addressed by name rather than
+     * position, and {@code value} is accepted as an alias for {@code Key}.
+     */
+    public ImportApiKeysResult importApiKeys(String region, String csv) {
+        List<List<String>> rows;
+        try {
+            rows = ApiKeyCsvParser.parse(csv);
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("BadRequestException", "Invalid CSV: " + e.getMessage(), 400);
+        }
+        if (rows.isEmpty()) {
+            throw new AwsException("BadRequestException", "CSV body is empty", 400);
+        }
+        List<String> header = rows.get(0);
+        Map<String, Integer> columns = new HashMap<>();
+        for (int i = 0; i < header.size(); i++) {
+            String column = header.get(i);
+            if (column == null) {
+                continue;
+            }
+            columns.putIfAbsent(column.trim().toLowerCase(java.util.Locale.ROOT), i);
+        }
+        int nameIndex = columns.getOrDefault("name", -1);
+        int keyIndex = columns.containsKey("key") ? columns.get("key") : columns.getOrDefault("value", -1);
+        if (nameIndex < 0 || keyIndex < 0) {
+            throw new AwsException("BadRequestException",
+                    "CSV header must contain Name and Key columns", 400);
+        }
+        int descriptionIndex = columns.getOrDefault("description", -1);
+        int enabledIndex = columns.getOrDefault("enabled", -1);
+
+        List<String> ids = new ArrayList<>();
+        List<String> warnings = new ArrayList<>();
+        Set<String> seenValues = new HashSet<>();
+        for (int i = 1; i < rows.size(); i++) {
+            List<String> row = rows.get(i);
+            String name = csvCell(row, nameIndex);
+            String value = csvCell(row, keyIndex);
+            if (name.isEmpty() || value.isEmpty()) {
+                throw new AwsException("BadRequestException", "Invalid CSV row", 400);
+            }
+            if (!seenValues.add(value)) {
+                warnings.add("Duplicate key value on row " + i + " for API key '" + name + "'");
+            }
+            String enabled = csvCell(row, enabledIndex);
+            Map<String, Object> request = new HashMap<>();
+            request.put("name", name);
+            request.put("value", value);
+            // Absent or blank Enabled means enabled, matching the AWS default.
+            request.put("enabled", enabled.isEmpty() || Boolean.parseBoolean(enabled));
+            // The CSV Key column is the key VALUE; AWS generates a separate id for the key itself.
+            request.put("generateDistinctId", true);
+            String description = csvCell(row, descriptionIndex);
+            if (!description.isEmpty()) {
+                request.put("description", description);
+            }
+            ids.add(createApiKey(region, request).getId());
+        }
+        return new ImportApiKeysResult(ids, warnings);
+    }
+
+    /** Reads one CSV cell by column index, tolerating rows shorter than the header. */
+    private static String csvCell(List<String> row, int index) {
+        if (index < 0 || index >= row.size()) {
+            return "";
+        }
+        String value = row.get(index);
+        return value == null ? "" : value.trim();
     }
 
     public ApiKey getApiKey(String region, String apiKeyId) {
@@ -824,6 +1018,64 @@ public class ApiGatewayService {
                 .orElseThrow(() -> new AwsException("NotFoundException", "Usage Plan not found", 404));
     }
 
+    public UsagePlan updateUsagePlan(String region, String usagePlanId, List<Map<String, String>> patchOperations) {
+        UsagePlan plan = getUsagePlan(region, usagePlanId);
+        // The store hands back live objects, so every op is validated against pending values first and
+        // only applied once the whole patch is known to be good.
+        String newName = plan.getName();
+        String newDescription = plan.getDescription();
+        List<UsagePlan.ApiStage> newApiStages = new ArrayList<>(plan.getApiStages());
+        if (patchOperations != null) {
+            for (Map<String, String> op : patchOperations) {
+                if (op == null) {
+                    throw new AwsException("BadRequestException", "Invalid patch operation", 400);
+                }
+                String opType = op.get("op");
+                String path = op.get("path");
+                String value = op.get("value");
+                if (path == null || value == null) {
+                    throw new AwsException("BadRequestException", "Missing path or value", 400);
+                }
+                if ("/apiStages".equals(path)) {
+                    // AWS models stage membership as add/remove of an "apiId:stage" pair.
+                    if (!"add".equals(opType) && !"remove".equals(opType)) {
+                        throw new AwsException("BadRequestException", "Invalid operation", 400);
+                    }
+                    String[] parts = value.split(":", 2);
+                    if (parts.length != 2 || parts[0].isEmpty() || parts[1].isEmpty()) {
+                        throw new AwsException("BadRequestException",
+                                "apiStages value must be in the form apiId:stage", 400);
+                    }
+                    UsagePlan.ApiStage stage = new UsagePlan.ApiStage(parts[0], parts[1]);
+                    if ("add".equals(opType)) {
+                        if (!newApiStages.contains(stage)) {
+                            newApiStages.add(stage);
+                        }
+                    } else {
+                        newApiStages.remove(stage);
+                    }
+                    continue;
+                }
+                if (!"add".equals(opType) && !"replace".equals(opType)) {
+                    throw new AwsException("BadRequestException", "Invalid operation", 400);
+                }
+                if ("/name".equals(path)) {
+                    newName = value;
+                } else if ("/description".equals(path)) {
+                    newDescription = value;
+                } else {
+                    throw new AwsException("BadRequestException", "Unsupported path: " + path, 400);
+                }
+            }
+        }
+        plan.setName(newName);
+        plan.setDescription(newDescription);
+        plan.getApiStages().clear();
+        plan.getApiStages().addAll(newApiStages);
+        usagePlanStore.put(usagePlanKey(region, usagePlanId), plan);
+        return plan;
+    }
+
     public List<UsagePlan> getUsagePlans(String region) {
         String prefix = region + "::";
         return usagePlanStore.scan(k -> k.startsWith(prefix));
@@ -900,6 +1152,58 @@ public class ApiGatewayService {
         requestValidatorStore.delete(requestValidatorKey(region, apiId, validatorId));
     }
 
+    public RequestValidator updateRequestValidator(String region, String apiId, String validatorId, List<Map<String, String>> patchOperations) {
+        RequestValidator validator = getRequestValidator(region, apiId, validatorId);
+
+        if (patchOperations == null) {
+            throw new AwsException("BadRequestException", "Invalid patch operation", 400);
+        }
+
+        // The store hands back live objects, so every op is validated against pending values first and
+        // only applied once the whole patch is known to be good.
+        String newName = validator.getName();
+        boolean newValidateRequestBody = validator.isValidateRequestBody();
+        boolean newValidateRequestParameters = validator.isValidateRequestParameters();
+
+        for (Map<String, String> operation : patchOperations) {
+            if (operation == null) {
+                throw new AwsException("BadRequestException", "Invalid patch operation", 400);
+            }
+
+            String op = operation.get("op");
+            String path = operation.get("path");
+            String value = operation.get("value");
+
+            if (op == null || path == null || value == null) {
+                throw new AwsException("BadRequestException", "Invalid patch operation", 400);
+            }
+
+            if (!"add".equals(op) && !"replace".equals(op)) {
+                throw new AwsException("BadRequestException", "Invalid patch operation", 400);
+            }
+
+            switch (path) {
+                case "/name":
+                    newName = value;
+                    break;
+                case "/validateRequestBody":
+                    newValidateRequestBody = Boolean.parseBoolean(value);
+                    break;
+                case "/validateRequestParameters":
+                    newValidateRequestParameters = Boolean.parseBoolean(value);
+                    break;
+                default:
+                    throw new AwsException("BadRequestException", "Invalid patch operation", 400);
+            }
+        }
+
+        validator.setName(newName);
+        validator.setValidateRequestBody(newValidateRequestBody);
+        validator.setValidateRequestParameters(newValidateRequestParameters);
+        requestValidatorStore.put(requestValidatorKey(region, apiId, validatorId), validator);
+        return validator;
+    }
+
     // ──────────────────────────── Models ────────────────────────────
 
     public Model createModel(String region, String apiId, Map<String, Object> request) {
@@ -919,6 +1223,49 @@ public class ApiGatewayService {
     public Model getModel(String region, String apiId, String modelName) {
         return modelStore.get(modelKey(region, apiId, modelName))
                 .orElseThrow(() -> new AwsException("NotFoundException", "Invalid model name specified", 404));
+    }
+
+    public Model updateModel(String region, String apiId, String modelName, List<Map<String, String>> patchOperations) {
+        Model model = getModel(region, apiId, modelName);
+        // The store hands back live objects, so every op is validated against pending values first and
+        // only applied once the whole patch is known to be good.
+        String newDescription = model.getDescription();
+        String newSchema = model.getSchema();
+        String newContentType = model.getContentType();
+        if (patchOperations != null) {
+            for (Map<String, String> op : patchOperations) {
+                if (op == null) {
+                    throw new AwsException("BadRequestException", "Invalid patch operation", 400);
+                }
+                String opType = op.get("op");
+                String path = op.get("path");
+                String value = op.get("value");
+                if (!"add".equals(opType) && !"replace".equals(opType)) {
+                    throw new AwsException("BadRequestException", "Invalid operation", 400);
+                }
+                if (path == null || value == null) {
+                    throw new AwsException("BadRequestException", "Missing path or value", 400);
+                }
+                if ("/description".equals(path)) {
+                    newDescription = value;
+                } else if ("/schema".equals(path)) {
+                    newSchema = value;
+                } else if ("/contentType".equals(path)) {
+                    newContentType = value;
+                } else if ("/name".equals(path)) {
+                    // AWS treats the model name as an immutable identifier.
+                    throw new AwsException("BadRequestException",
+                            "Model name cannot be changed", 400);
+                } else {
+                    throw new AwsException("BadRequestException", "Unsupported path: " + path, 400);
+                }
+            }
+        }
+        model.setDescription(newDescription);
+        model.setSchema(newSchema);
+        model.setContentType(newContentType);
+        modelStore.put(modelKey(region, apiId, modelName), model);
+        return model;
     }
 
     public List<Model> getModels(String region, String apiId) {
@@ -1001,6 +1348,75 @@ public class ApiGatewayService {
         // Delete associated mappings
         String prefix = region + "::" + domainName + "::";
         basePathMappingStore.keys().stream().filter(k -> k.startsWith(prefix)).forEach(basePathMappingStore::delete);
+    }
+
+    public CustomDomain updateDomainName(String region, String domainName, List<Map<String, String>> patchOperations) {
+        String domainKey = domainKey(region, domainName);
+        CustomDomain domain = getDomainName(region, domainName);
+        if (domain == null) {
+            throw new AwsException("BadRequestException", "Domain not found", 400);
+        }
+        if (patchOperations == null) {
+            domainStore.put(domainKey, domain);
+            return domain;
+        }
+        // The store hands back live objects, so every op is validated against pending values first and
+        // only applied once the whole patch is known to be good.
+        String newCertificateName = domain.getCertificateName();
+        String newCertificateArn = domain.getCertificateArn();
+        String newRegionalCertificateName = domain.getRegionalCertificateName();
+        String newRegionalCertificateArn = domain.getRegionalCertificateArn();
+        String newSecurityPolicy = domain.getSecurityPolicy();
+        String newEndpointConfigurationType = domain.getEndpointConfigurationType();
+        for (Map<String, String> op : patchOperations) {
+            if (op == null) {
+                throw new AwsException("BadRequestException", "Invalid patch operation", 400);
+            }
+            String operation = op.get("op");
+            String path = op.get("path");
+            String value = op.get("value");
+            if (operation == null || path == null) {
+                throw new AwsException("BadRequestException", "Invalid patch operation", 400);
+            }
+            if (!"add".equals(operation) && !"replace".equals(operation)) {
+                throw new AwsException("BadRequestException", "Unsupported operation: " + operation, 400);
+            }
+            if (value == null && ("add".equals(operation) || "replace".equals(operation))) {
+                // Check if value is required for the specific path
+                if ("/certificateName".equals(path) || "/certificateArn".equals(path)
+                    || "/regionalCertificateName".equals(path) || "/regionalCertificateArn".equals(path)
+                    || "/securityPolicy".equals(path) || "/endpointConfiguration/types/REGIONAL".equals(path)) {
+                    throw new AwsException("BadRequestException", "Value is required for path: " + path, 400);
+                }
+            }
+
+            if ("/certificateName".equals(path)) {
+                newCertificateName = value;
+            } else if ("/certificateArn".equals(path)) {
+                newCertificateArn = value;
+            } else if ("/regionalCertificateName".equals(path)) {
+                newRegionalCertificateName = value;
+            } else if ("/regionalCertificateArn".equals(path)) {
+                newRegionalCertificateArn = value;
+            } else if ("/securityPolicy".equals(path)) {
+                newSecurityPolicy = value;
+            } else if ("/endpointConfiguration/types/REGIONAL".equals(path)) {
+                if (!"REGIONAL".equals(value) && !"EDGE".equals(value)) {
+                    throw new AwsException("BadRequestException", "Invalid value for endpoint type: " + value, 400);
+                }
+                newEndpointConfigurationType = value;
+            } else {
+                throw new AwsException("BadRequestException", "Unsupported path: " + path, 400);
+            }
+        }
+        domain.setCertificateName(newCertificateName);
+        domain.setCertificateArn(newCertificateArn);
+        domain.setRegionalCertificateName(newRegionalCertificateName);
+        domain.setRegionalCertificateArn(newRegionalCertificateArn);
+        domain.setSecurityPolicy(newSecurityPolicy);
+        domain.setEndpointConfigurationType(newEndpointConfigurationType);
+        domainStore.put(domainKey, domain);
+        return domain;
     }
 
     // ──────────────────────────── Base Path Mappings ────────────────────────────
@@ -1094,6 +1510,47 @@ public class ApiGatewayService {
             throw new AwsException("NotFoundException", "Base path mapping not found", 404);
         }
         basePathMappingStore.delete(key);
+    }
+
+    public BasePathMapping updateBasePathMapping(String region, String domainName, String basePath, List<Map<String, String>> patchOperations) {
+        String normalizedPath = (basePath == null || basePath.isEmpty() || "/".equals(basePath)) ? "(none)" : basePath;
+
+        BasePathMapping mapping = getBasePathMapping(region, domainName, basePath);
+
+        // The store hands back live objects, so every op is validated against pending values first and
+        // only applied once the whole patch is known to be good.
+        String newRestApiId = mapping.getRestApiId();
+        String newStage = mapping.getStage();
+        if (patchOperations != null) {
+            for (Map<String, String> op : patchOperations) {
+                if (op == null) {
+                    throw new AwsException("BadRequestException", "Invalid patch operation", 400);
+                }
+                String path = op.get("path");
+                String value = op.get("value");
+
+                if (path == null || value == null) {
+                    throw new AwsException("BadRequestException", "Invalid patch operation", 400);
+                }
+
+                if (!"add".equals(op.get("op")) && !"replace".equals(op.get("op"))) {
+                    throw new AwsException("BadRequestException", "Unsupported operation: " + op.get("op"), 400);
+                }
+
+                if ("/restApiId".equals(path)) {
+                    newRestApiId = value;
+                } else if ("/stage".equals(path)) {
+                    newStage = value;
+                } else {
+                    throw new AwsException("BadRequestException", "Unsupported path: " + path, 400);
+                }
+            }
+        }
+
+        mapping.setRestApiId(newRestApiId);
+        mapping.setStage(newStage);
+        basePathMappingStore.put(mappingKey(region, domainName, normalizedPath), mapping);
+        return mapping;
     }
 
     // ──────────────────────────── Custom Domain Resolution ────────────────────────────
@@ -1199,10 +1656,136 @@ public class ApiGatewayService {
     }
 
     public ApiGatewayResource updateResource(String region, String apiId, String resourceId, List<Map<String, String>> patchOperations) {
+        if (patchOperations == null) {
+            throw new AwsException("BadRequestException", "Invalid patch operation", 400);
+        }
         ApiGatewayResource resource = getResource(region, apiId, resourceId);
-        // Minimal update support
+        // The store hands back live objects, so every op is validated against pending values first and
+        // only applied once the whole patch (including the sibling-collision check) is known to be good.
+        String newParentId = resource.getParentId();
+        String newPathPart = resource.getPathPart();
+        for (Map<String, String> op : patchOperations) {
+            if (op == null || !op.containsKey("op") || !op.containsKey("path") || !op.containsKey("value")) {
+                throw new AwsException("BadRequestException", "Invalid patch operation", 400);
+            }
+            String opStr = op.get("op");
+            String path = op.get("path");
+            String value = op.get("value");
+            if (!"replace".equals(opStr)) {
+                throw new AwsException("BadRequestException", "Invalid patch operation", 400);
+            }
+            if (path == null || path.isEmpty()) {
+                throw new AwsException("BadRequestException", "Invalid patch operation", 400);
+            }
+            if ("/pathPart".equals(path)) {
+                if (value == null || value.isEmpty()) {
+                    throw new AwsException("BadRequestException", "Invalid patch operation", 400);
+                }
+                newPathPart = value;
+            } else if ("/parentId".equals(path)) {
+                if (value == null) {
+                    throw new AwsException("BadRequestException", "Invalid patch operation", 400);
+                }
+                if (resourceId.equals(value)) {
+                    throw new AwsException("BadRequestException", "Invalid patch operation", 400);
+                }
+                if (value.isEmpty()) {
+                    if (resource.getParentId() != null) {
+                        throw new AwsException("BadRequestException", "Invalid patch operation", 400);
+                    }
+                } else {
+                    try {
+                        getResource(region, apiId, value);
+                    } catch (AwsException e) {
+                        // AWS reports an unknown target parent as a bad request on the patch, not as a
+                        // 404 about the resource being patched.
+                        throw new AwsException("BadRequestException", "Invalid parentId: " + value, 400);
+                    }
+                    if (isDescendant(region, apiId, resourceId, value)) {
+                        throw new AwsException("BadRequestException", "Invalid patch operation", 400);
+                    }
+                    newParentId = value;
+                }
+            } else {
+                throw new AwsException("BadRequestException", "Invalid patch operation", 400);
+            }
+        }
+        assertNoSiblingPathCollision(region, apiId, newParentId, newPathPart, resourceId);
+        resource.setParentId(newParentId);
+        resource.setPathPart(newPathPart);
+        recomputePaths(region, apiId);
         resourceStore.put(resourceKey(region, apiId, resourceId), resource);
         return resource;
+    }
+
+    /**
+     * AWS rejects two children of the same parent sharing a pathPart, because the resulting resources
+     * would have identical paths and request routing would become order-dependent.
+     */
+    private void assertNoSiblingPathCollision(String region, String apiId, String parentId, String pathPart, String selfId) {
+        if (parentId == null || pathPart == null || pathPart.isEmpty()) {
+            return;
+        }
+        for (ApiGatewayResource sibling : getResources(region, apiId)) {
+            if (selfId != null && selfId.equals(sibling.getId())) {
+                continue;
+            }
+            if (!parentId.equals(sibling.getParentId())) {
+                continue;
+            }
+            if (pathPart.equals(sibling.getPathPart())) {
+                throw new AwsException("ConflictException",
+                        "Another resource with the same parent already has this name: " + pathPart, 409);
+            }
+        }
+    }
+
+    private boolean isDescendant(String region, String apiId, String resourceId, String parentId) {
+        String currentId = parentId;
+        while (currentId != null) {
+            if (currentId.equals(resourceId)) {
+                return true;
+            }
+            ApiGatewayResource parent = getResource(region, apiId, currentId);
+            if (parent == null || parent.getParentId() == null) {
+                break;
+            }
+            currentId = parent.getParentId();
+        }
+        return false;
+    }
+
+    private void recomputePaths(String region, String apiId) {
+        List<ApiGatewayResource> allResources = getResources(region, apiId);
+        Map<String, ApiGatewayResource> resourceMap = new java.util.HashMap<>();
+        for (ApiGatewayResource r : allResources) {
+            resourceMap.put(r.getId(), r);
+        }
+        boolean changed = true;
+        while (changed) {
+            changed = false;
+            for (ApiGatewayResource r : allResources) {
+                if (r.getParentId() == null) {
+                    if (!"/".equals(r.getPath())) {
+                        r.setPath("/");
+                        changed = true;
+                    }
+                } else {
+                    ApiGatewayResource parent = resourceMap.get(r.getParentId());
+                    if (parent != null) {
+                        String newPath = parent.getPath().equals("/") ? "/" + r.getPathPart()
+                                : parent.getPath() + "/" + r.getPathPart();
+                        if (!newPath.equals(r.getPath())) {
+                            r.setPath(newPath);
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+        for (ApiGatewayResource r : allResources) {
+            resourceStore.put(resourceKey(region, apiId, r.getId()), r);
+        }
     }
 
     public MethodConfig updateMethod(String region, String apiId, String resourceId, String httpMethod, List<Map<String, String>> patchOperations) {
@@ -1224,13 +1807,43 @@ public class ApiGatewayService {
         Integration integration = getIntegration(region, apiId, resourceId, httpMethod);
         if (patchOperations != null) {
             for (Map<String, String> op : patchOperations) {
-                if (!"replace" .equals(op.get("op"))) continue;
-                String path = op.getOrDefault("path", "");
+                String opType = op.get("op");
+                if (!"add".equals(opType) && !"replace".equals(opType)) {
+                    throw new AwsException("BadRequestException", "Invalid operation", 400);
+                }
+                String path = op.get("path");
+                String value = op.get("value");
+                if (path == null || value == null) {
+                    throw new AwsException("BadRequestException", "Path and value must be non-null", 400);
+                }
+                switch (path) {
+                    case "/type":
+                    case "/httpMethod":
+                    case "/uri":
+                    case "/passthroughBehavior":
+                        break;
+                    default:
+                        throw new AwsException("BadRequestException", "Unsupported path: " + path, 400);
+                }
+            }
+            for (Map<String, String> op : patchOperations) {
+                String path = op.get("path");
                 String value = op.get("value");
                 switch (path) {
-                    case "/type" -> integration.setType(value);
-                    case "/httpMethod" -> integration.setHttpMethod(value);
-                    case "/uri" -> integration.setUri(value);
+                    case "/type":
+                        integration.setType(value);
+                        break;
+                    case "/httpMethod":
+                        integration.setHttpMethod(value);
+                        break;
+                    case "/uri":
+                        integration.setUri(value);
+                        break;
+                    case "/passthroughBehavior":
+                        integration.setPassthroughBehavior(value);
+                        break;
+                    default:
+                        throw new IllegalStateException("Unreachable: validated above");
                 }
             }
         }

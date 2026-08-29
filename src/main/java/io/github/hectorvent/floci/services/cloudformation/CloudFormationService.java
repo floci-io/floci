@@ -38,12 +38,19 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 /**
  * CloudFormation stack lifecycle management — Create, Update, Delete stacks via ChangeSets.
  */
 @ApplicationScoped
-public class CloudFormationService {
+public class CloudFormationService implements ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(CloudFormationService.class);
 
@@ -735,12 +742,27 @@ public class CloudFormationService {
                             // Provisioners work on a copy of the stored resource metadata. Keep the
                             // last known-good identity and status when an update attempt fails so a
                             // later retry or stack deletion still manages the original resource.
-                            // The rollback walker must also know this resource is already restored;
-                            // otherwise an earlier UPDATE_COMPLETE status looks like an unhandled
-                            // mutation and incorrectly turns a safe rollback into ROLLBACK_FAILED.
-                            previousResource.getAttributes().put(
-                                    CloudFormationResourceProvisioner.UPDATE_ROLLBACK_RESTORED_ATTR,
-                                    "true");
+                            // Preserve any additional resources that the failed attempt could not
+                            // clean up, otherwise restoring this object would orphan them.
+                            provisioner.mergeFailedUpdateResourceTracking(previousResource, resource);
+                            String rollbackFailure = resource.getAttributes().get(
+                                    CloudFormationResourceProvisioner.UPDATE_ROLLBACK_FAILURE_ATTR);
+                            if (rollbackFailure == null) {
+                                // The rollback walker must know this resource is already restored;
+                                // otherwise an earlier UPDATE_COMPLETE status looks like an
+                                // unhandled mutation and incorrectly becomes ROLLBACK_FAILED.
+                                previousResource.getAttributes().put(
+                                        CloudFormationResourceProvisioner.UPDATE_ROLLBACK_RESTORED_ATTR,
+                                        "true");
+                            } else {
+                                // Restoration was attempted eagerly by the provisioner but did not
+                                // complete. Carry that failure onto the committed resource so the
+                                // rollback walker reports UPDATE_ROLLBACK_FAILED rather than claiming
+                                // the stale snapshot is live.
+                                previousResource.getAttributes().put(
+                                        CloudFormationResourceProvisioner.UPDATE_ROLLBACK_FAILURE_ATTR,
+                                        rollbackFailure);
+                            }
                             stack.getResources().put(logicalId, previousResource);
                         }
                         break;
@@ -864,7 +886,7 @@ public class CloudFormationService {
      * <p>On a <b>create</b>, rolls back by deleting resources created by the failed execution. On
      * an <b>update</b>, restores the prior resource, template, output, and export state.
      */
-    private void rollbackFailedExecution(
+    void rollbackFailedExecution(
             Stack stack,
             String region,
             boolean isCreate,
@@ -1105,6 +1127,15 @@ public class CloudFormationService {
                             resource.getResourceType(), "DELETE_COMPLETE",
                             "Resource creation cancelled during update rollback");
                     removedResources.add(resource.getLogicalId());
+                } else if (resource.getAttributes().containsKey(
+                        CloudFormationResourceProvisioner.UPDATE_ROLLBACK_FAILURE_ATTR)) {
+                    String reason = resource.getAttributes().remove(
+                            CloudFormationResourceProvisioner.UPDATE_ROLLBACK_FAILURE_ATTR);
+                    failures.add(resource.getLogicalId());
+                    resource.setStatus("UPDATE_FAILED");
+                    resource.setStatusReason(reason);
+                    addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
+                            resource.getResourceType(), "UPDATE_FAILED", reason);
                 } else if ("true".equals(resource.getAttributes().remove(
                         CloudFormationResourceProvisioner.UPDATE_ROLLBACK_RESTORED_ATTR))
                         || provisioner.rollbackUpdate(resource)) {
@@ -1243,10 +1274,14 @@ public class CloudFormationService {
                     resource.getResourceType(), "DELETE_IN_PROGRESS", null);
             try {
                 deleteResourcePhysically(resource, region);
-                resource.setStatus("DELETE_COMPLETE");
-                addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
-                        resource.getResourceType(), "DELETE_COMPLETE", null);
+                completeResourceDeletion(stack, resource);
             } catch (Exception e) {
+                if (isAlreadyDeleted(e)) {
+                    completeResourceDeletion(stack, resource);
+                    LOG.debugv("Resource {0} ({1}) was already deleted while rolling back stack {2}",
+                            resource.getResourceType(), resource.getPhysicalId(), stack.getStackName());
+                    continue;
+                }
                 failedResources.add(resource.getLogicalId());
                 resource.setStatus("DELETE_FAILED");
                 resource.setStatusReason(e.getMessage());
@@ -1345,10 +1380,14 @@ public class CloudFormationService {
                         resource.getResourceType(), "DELETE_IN_PROGRESS", null);
                 try {
                     deleteResourcePhysically(resource, region);
-                    resource.setStatus("DELETE_COMPLETE");
-                    addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
-                            resource.getResourceType(), "DELETE_COMPLETE", null);
+                    completeResourceDeletion(stack, resource);
                 } catch (Exception e) {
+                    if (isAlreadyDeleted(e)) {
+                        completeResourceDeletion(stack, resource);
+                        LOG.debugv("Resource {0} ({1}) was already deleted while deleting stack {2}",
+                                resource.getResourceType(), resource.getPhysicalId(), stack.getStackName());
+                        continue;
+                    }
                     // AWS leaves the stack in DELETE_FAILED when a managed resource cannot be
                     // deleted (e.g. a non-empty S3 bucket raises BucketNotEmpty). The stack must
                     // not be reported as a successful deletion while the resource still exists.
@@ -1417,6 +1456,27 @@ public class CloudFormationService {
         LOG.infov("Retained {0} ({1}) in stack {2}: DeletionPolicy {3}",
                 resource.getResourceType(), resource.getPhysicalId(), stack.getStackName(), policy);
         return true;
+    }
+
+    private void completeResourceDeletion(Stack stack, StackResource resource) {
+        resource.setStatus("DELETE_COMPLETE");
+        resource.setStatusReason(null);
+        addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
+                resource.getResourceType(), "DELETE_COMPLETE", null);
+    }
+
+    /** Returns whether a resource deletion failed solely because the resource is already gone. */
+    private static boolean isAlreadyDeleted(Throwable failure) {
+        Set<Throwable> seen = Collections.newSetFromMap(new IdentityHashMap<>());
+        for (Throwable current = failure; current != null && seen.add(current); current = current.getCause()) {
+            if (current instanceof AwsException awsException
+                    && (awsException.getHttpStatus() == 404
+                    || (awsException.getErrorCode() != null
+                    && awsException.getErrorCode().endsWith("NotFoundException")))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private Map<String, Boolean> resolveConditions(JsonNode template, Map<String, String> params,
@@ -2009,5 +2069,30 @@ public class CloudFormationService {
 
     private static String key(String stackName, String region) {
         return region + ":" + stackName;
+    }
+
+    // ─── Resource Explorer 2 ───────────────────────────────────────────────────
+
+    @Override
+    public List<ExplorerResource> getResources() {
+        List<ExplorerResource> resources = new ArrayList<>();
+        for (Stack stack : stacks.values()) {
+            String arn = stack.getStackId();
+            if (arn == null) {
+                continue;
+            }
+            AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+            resources.add(new ExplorerResource(
+                    arn, "cloudformation:stack", "cloudformation",
+                    parsed.region(), parsed.accountId(),
+                    stack.getCreationTime() != null ? stack.getCreationTime() : Instant.now(),
+                    stack.getTags() != null ? stack.getTags() : Map.of()));
+        }
+        return resources;
+    }
+
+    @Override
+    public Set<SupportedResourceType> getSupportedResourceTypes() {
+        return Set.of(new SupportedResourceType("cloudformation:stack", "cloudformation", true));
     }
 }

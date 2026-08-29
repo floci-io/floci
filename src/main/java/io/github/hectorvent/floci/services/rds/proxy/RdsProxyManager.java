@@ -17,20 +17,24 @@ public class RdsProxyManager {
     private static final Logger LOG = Logger.getLogger(RdsProxyManager.class);
 
     private final RdsSigV4Validator sigV4Validator;
+    private final RdsProxyTlsCertificates tlsCertificates;
     private final ConcurrentHashMap<String, RdsAuthProxy> proxies = new ConcurrentHashMap<>();
 
     @Inject
-    public RdsProxyManager(RdsSigV4Validator sigV4Validator) {
+    public RdsProxyManager(RdsSigV4Validator sigV4Validator, RdsProxyTlsCertificates tlsCertificates) {
         this.sigV4Validator = sigV4Validator;
+        this.tlsCertificates = tlsCertificates;
     }
 
     public synchronized void startProxy(String instanceId, DatabaseEngine engine, boolean iamEnabled,
                                         int proxyPort, String backendHost, int backendPort,
+                                        String advertisedHost,
                                         String masterUsername, String masterPassword, String dbName,
                                         RdsAuthProxy.PasswordValidator passwordValidator) {
+        tlsCertificates.ensureHost(advertisedHost);
         RdsAuthProxy proxy = new RdsAuthProxy(
                 instanceId, backendHost, backendPort, engine, iamEnabled,
-                masterUsername, masterPassword, dbName, sigV4Validator, passwordValidator);
+                masterUsername, masterPassword, dbName, sigV4Validator, tlsCertificates, passwordValidator);
         try {
             proxy.start(proxyPort);
         } catch (IOException e) {

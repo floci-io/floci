@@ -440,13 +440,13 @@ public class AutoScalingReconciler {
                     : asg.getLaunchTemplateVersion();
             return new LaunchSource(
                     null,
-                    version.getImageId(),
-                    version.getInstanceType(),
-                    version.getKeyName(),
-                    version.getSecurityGroupIds(),
-                    version.getInstanceTags(),
-                    version.getUserData(),
-                    version.getIamInstanceProfileArn(),
+                    version.getData().getImageId(),
+                    version.getData().getInstanceType(),
+                    version.getData().getKeyName(),
+                    version.getData().effectiveSecurityGroupIds(),
+                    version.getData().getInstanceTags(),
+                    version.getData().getUserData(),
+                    ec2Service.iamInstanceProfileArn(version.getData()),
                     asg.getLaunchTemplateId(),
                     asg.getLaunchTemplateName(),
                     resolvedVersion,
@@ -470,13 +470,13 @@ public class AutoScalingReconciler {
                 String instanceType = mixedInstancesInstanceType(asg, version);
                 return new LaunchSource(
                         null,
-                        version.getImageId(),
+                        version.getData().getImageId(),
                         instanceType,
-                        version.getKeyName(),
-                        version.getSecurityGroupIds(),
-                        version.getInstanceTags(),
-                        version.getUserData(),
-                        version.getIamInstanceProfileArn(),
+                        version.getData().getKeyName(),
+                        version.getData().effectiveSecurityGroupIds(),
+                        version.getData().getInstanceTags(),
+                        version.getData().getUserData(),
+                        ec2Service.iamInstanceProfileArn(version.getData()),
                         specification.getLaunchTemplateId() == null
                                 ? mixedLaunchTemplate.getLaunchTemplateId()
                                 : specification.getLaunchTemplateId(),
@@ -557,7 +557,7 @@ public class AutoScalingReconciler {
                 }
             }
         }
-        return version.getInstanceType();
+        return version.getData().getInstanceType();
     }
 
     private record LaunchSource(

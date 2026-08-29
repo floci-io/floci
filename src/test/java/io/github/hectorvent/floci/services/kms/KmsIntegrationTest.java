@@ -563,6 +563,8 @@ class KmsIntegrationTest {
                         {
                             "KeyId": "%s",
                             "GranteePrincipal": "arn:aws:iam::000000000000:user/grantee",
+                            "Name": "vellum-tenant-round-trip",
+                            "Constraints": {"EncryptionContextEquals": {"tenant_id": "tenant-001"}},
                             "Operations": ["Encrypt", "Decrypt"]
                         }
                         """.formatted(keyId))
@@ -587,6 +589,8 @@ class KmsIntegrationTest {
                 .body("Grants[0].GrantId", equalTo(grantId))
                 .body("Grants[0].KeyId", startsWith("arn:aws:kms:"))
                 .body("Grants[0].GranteePrincipal", equalTo("arn:aws:iam::000000000000:user/grantee"))
+                .body("Grants[0].Name", equalTo("vellum-tenant-round-trip"))
+                .body("Grants[0].Constraints.EncryptionContextEquals.tenant_id", equalTo("tenant-001"))
                 .body("Grants[0].Operations[0]", equalTo("Encrypt"))
                 .body("Grants[0].Operations[1]", equalTo("Decrypt"))
                 .body("Truncated", equalTo(false));
@@ -782,6 +786,36 @@ class KmsIntegrationTest {
                 .statusCode(200)
                 .body("Grants.size()", equalTo(0))
                 .body("Truncated", equalTo(false));
+    }
+
+    @Test
+    void createGrantWithNonObjectConstraintsReturnsValidationException() {
+        // The handler previously converted any non-object Constraints (e.g. a raw string or
+        // array) to null before it reached KmsService, so a malformed request was silently
+        // treated as "no constraints" instead of rejected.
+        String keyId = given()
+                .header("X-Amz-Target", "TrentService.CreateKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"Description\":\"constraints-type-check\"}")
+                .when().post("/")
+                .then().statusCode(200)
+                .extract().path("KeyMetadata.KeyId");
+
+        given()
+                .header("X-Amz-Target", "TrentService.CreateGrant")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("""
+                        {
+                            "KeyId": "%s",
+                            "GranteePrincipal": "arn:aws:iam::000000000000:user/grantee",
+                            "Operations": ["Encrypt"],
+                            "Constraints": "not-an-object"
+                        }
+                        """.formatted(keyId))
+                .when().post("/")
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"));
     }
 
     @Test

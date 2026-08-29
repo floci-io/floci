@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.services.floci.ui.FlociUiManager;
 import io.github.hectorvent.floci.services.amazonmq.container.RabbitMqManager;
 import io.github.hectorvent.floci.services.kinesisanalytics.container.FlinkContainerManager;
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.elasticache.ElastiCacheService;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheContainerManager;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheMemcachedContainerManager;
 import io.github.hectorvent.floci.services.elasticache.proxy.ElastiCacheProxyManager;
@@ -66,6 +67,7 @@ public class EmulatorLifecycle {
     private final ServiceRegistry serviceRegistry;
     private final EmulatorConfig config;
     private final IamService iamService;
+    private final ElastiCacheService elastiCacheService;
     private final ElastiCacheContainerManager elastiCacheContainerManager;
     private final ElastiCacheMemcachedContainerManager elastiCacheMemcachedContainerManager;
     private final ElastiCacheProxyManager elastiCacheProxyManager;
@@ -97,6 +99,7 @@ public class EmulatorLifecycle {
     public EmulatorLifecycle(StorageFactory storageFactory, ServiceRegistry serviceRegistry,
                              EmulatorConfig config,
                              IamService iamService,
+                             ElastiCacheService elastiCacheService,
                              ElastiCacheContainerManager elastiCacheContainerManager,
                              ElastiCacheMemcachedContainerManager elastiCacheMemcachedContainerManager,
                              ElastiCacheProxyManager elastiCacheProxyManager,
@@ -127,6 +130,7 @@ public class EmulatorLifecycle {
         this.serviceRegistry = serviceRegistry;
         this.config = config;
         this.iamService = iamService;
+        this.elastiCacheService = elastiCacheService;
         this.elastiCacheContainerManager = elastiCacheContainerManager;
         this.elastiCacheMemcachedContainerManager = elastiCacheMemcachedContainerManager;
         this.elastiCacheProxyManager = elastiCacheProxyManager;
@@ -189,6 +193,12 @@ public class EmulatorLifecycle {
         dynamodbStreamsPoller.startPersistedPollers();
         pipesService.startPersistedPollers();
         rdsService.restorePersistedRuntime();
+        if (config.services().elasticache().enabled()) {
+            elastiCacheService.restorePersistedRuntime().exceptionally(ex -> {
+                LOG.warnv("ElastiCache cluster-mode restore failed: {0}", ex.getMessage());
+                return null;
+            });
+        }
         if (config.services().elbv2().enabled()) {
             elbV2Service.restorePersistedRuntime();
         }

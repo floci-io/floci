@@ -17,6 +17,7 @@ import java.nio.charset.StandardCharsets;
 import com.github.dockerjava.api.model.NetworkSettings;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
@@ -30,18 +31,24 @@ import org.junit.jupiter.api.Test;
 
 import java.io.InputStream;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -49,11 +56,12 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Answers.RETURNS_SELF;
 import static org.mockito.Answers.RETURNS_DEEP_STUBS;
+import static org.mockito.Mockito.after;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.withSettings;
@@ -133,7 +141,9 @@ class Ec2ContainerManagerTest {
                 mock(PortAllocator.class),
                 mock(EmulatorConfig.class, RETURNS_DEEP_STUBS),
                 metadataServer,
-                mock(Ec2PortForwardManager.class));
+                mock(Ec2PortForwardManager.class),
+                mock(RegionResolver.class),
+                mock(ContainerNetworkReachability.class));
 
         Instance instance = new Instance();
         instance.setInstanceId("i-restored");
@@ -193,6 +203,178 @@ class Ec2ContainerManagerTest {
                 Ec2ContainerManager.userDataShellScripts(userData));
     }
 
+    private static String gzipBase64(String plain) throws Exception {
+        java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
+        try (java.util.zip.GZIPOutputStream gzip = new java.util.zip.GZIPOutputStream(bytes)) {
+            gzip.write(plain.getBytes(StandardCharsets.UTF_8));
+        }
+        return java.util.Base64.getEncoder().encodeToString(bytes.toByteArray());
+    }
+
+    private static final String CLOUDINIT_MULTIPART = """
+            Content-Type: multipart/mixed; boundary="MIMEBOUNDARY"
+            MIME-Version: 1.0
+
+            --MIMEBOUNDARY
+            Content-Disposition: attachment; filename="bastion-default-cloud-init"
+            Content-Transfer-Encoding: 7bit
+            Content-Type: text/x-shellscript
+            Mime-Version: 1.0
+
+            #!/bin/bash
+            apt-get install -y redis-tools
+
+            --MIMEBOUNDARY--
+            """;
+
+    @Test
+    void userDataShellScriptsDecodesBase64OfGzippedCloudInit() throws Exception {
+        // What data.cloudinit_config { gzip = true, base64_encode = true } renders, as it
+        // reaches the launch-configuration path that stores UserData still wire-encoded.
+        assertEquals(
+                List.of("#!/bin/bash\napt-get install -y redis-tools\n"),
+                Ec2ContainerManager.userDataShellScripts(gzipBase64(CLOUDINIT_MULTIPART)));
+    }
+
+    @Test
+    void userDataShellScriptsDiscardsGzipBombRatherThanExhaustingHeap() throws Exception {
+        // A highly-compressible payload well past the 10 MB decompressed cap this guards
+        // against: ~50 MB of a repeated character gzips down to a few KB on the wire, so an
+        // Auto Scaling launch configuration can smuggle it through in a single UserData field.
+        // Without the bound, GZIPInputStream#readAllBytes materializes the full expansion in
+        // the shared emulator JVM. With it, decoding gives up and no scripts are extracted.
+        String bomb = "A".repeat(50 * 1024 * 1024);
+
+        assertEquals(List.of(), Ec2ContainerManager.userDataShellScripts(gzipBase64(bomb)));
+    }
+
+    @Test
+    void userDataShellScriptsBoundsAggregateConcurrentDecompression() throws Exception {
+        // Each launch decodes its UserData independently on Ec2ContainerManager's unbounded
+        // cached launch executor, so the per-payload 10 MB cap alone does not stop many
+        // concurrent launches from each decompressing near that limit at once (Greptile's
+        // follow-up on the gzip-bomb fix). Drive real concurrent decompressions through the
+        // public entry point and use the test hook to prove no more than
+        // MAX_CONCURRENT_USER_DATA_DECOMPRESSIONS (4) ever run at the same instant, while still
+        // exercising genuine concurrency rather than serialized calls.
+        int concurrentLaunches = 12;
+        AtomicInteger active = new AtomicInteger(0);
+        AtomicInteger peakActive = new AtomicInteger(0);
+        Ec2ContainerManager.userDataDecompressionTestHook = () -> {
+            int now = active.incrementAndGet();
+            peakActive.accumulateAndGet(now, Math::max);
+            try {
+                Thread.sleep(75);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+            } finally {
+                active.decrementAndGet();
+            }
+        };
+
+        List<List<String>> results = new CopyOnWriteArrayList<>();
+        ExecutorService pool = Executors.newFixedThreadPool(concurrentLaunches);
+        try {
+            // ~9 MB of a repeated character: near the 10 MB per-payload cap, well within it.
+            String nearCapPayload = "A".repeat(9 * 1024 * 1024);
+            String gzipped = gzipBase64(nearCapPayload);
+
+            List<Future<List<String>>> futures = new ArrayList<>();
+            for (int i = 0; i < concurrentLaunches; i++) {
+                futures.add(pool.submit(() -> Ec2ContainerManager.userDataShellScripts(gzipped)));
+            }
+            for (Future<List<String>> future : futures) {
+                results.add(future.get(30, TimeUnit.SECONDS));
+            }
+        } finally {
+            pool.shutdownNow();
+            Ec2ContainerManager.userDataDecompressionTestHook = null;
+        }
+
+        assertEquals(concurrentLaunches, results.size());
+        assertTrue(peakActive.get() <= 4,
+                "peak concurrent UserData decompressions was " + peakActive.get() + ", expected <= 4");
+        assertTrue(peakActive.get() >= 2,
+                "test did not exercise real concurrency; peak concurrent decompressions was only "
+                        + peakActive.get());
+    }
+
+    @Test
+    void userDataShellScriptsDecodesPlainBase64ShellScript() {
+        String script = "#!/bin/bash\necho ready\n";
+        String encoded = java.util.Base64.getEncoder().encodeToString(script.getBytes(StandardCharsets.UTF_8));
+
+        assertEquals(List.of(script), Ec2ContainerManager.userDataShellScripts(encoded));
+    }
+
+    @Test
+    void userDataShellScriptsLeavesAccidentallyBase64ShapedScriptAlone() {
+        // Valid base64 by shape, but decodes to nothing cloud-init would recognise, so it must
+        // be treated as the literal script it is rather than decoded into binary noise.
+        String script = "#!/bin/sh\necho deadbeefdeadbeef\n";
+
+        assertEquals(List.of(script), Ec2ContainerManager.userDataShellScripts(script));
+    }
+
+    @Test
+    void userDataShellScriptsIgnoresGarbage() {
+        assertTrue(Ec2ContainerManager.userDataShellScripts("not a script at all").isEmpty());
+    }
+
+    @Test
+    void reachablePublicAddressReportsContainerIpWhenRoutable() {
+        ContainerNetworkReachability reachability = mock(ContainerNetworkReachability.class);
+        when(reachability.isContainerIpRoutable("192.168.215.2")).thenReturn(true);
+        Ec2ContainerManager manager = managerWithReachability(reachability);
+
+        Instance instance = new Instance();
+        instance.setContainerBridgeIp("192.168.215.2");
+
+        assertEquals("192.168.215.2", manager.reachablePublicAddress(instance));
+        manager.exposeReachablePublicAddress(instance);
+        assertEquals("192.168.215.2", instance.getPublicIpAddress());
+        assertEquals("192.168.215.2", instance.getPublicDnsName());
+    }
+
+    @Test
+    void reachablePublicAddressFallsBackToLoopbackWhenContainerNetworkIsUnroutable() {
+        ContainerNetworkReachability reachability = mock(ContainerNetworkReachability.class);
+        when(reachability.isContainerIpRoutable("192.168.215.2")).thenReturn(false);
+        Ec2ContainerManager manager = managerWithReachability(reachability);
+
+        Instance instance = new Instance();
+        instance.setContainerBridgeIp("192.168.215.2");
+
+        assertEquals("127.0.0.1", manager.reachablePublicAddress(instance));
+        manager.exposeReachablePublicAddress(instance);
+        assertEquals("127.0.0.1", instance.getPublicIpAddress());
+        assertEquals("localhost", instance.getPublicDnsName());
+    }
+
+    @Test
+    void reachablePublicAddressIsNullBeforeAContainerExists() {
+        Ec2ContainerManager manager = managerWithReachability(mock(ContainerNetworkReachability.class));
+
+        assertEquals(null, manager.reachablePublicAddress(new Instance()));
+        assertEquals(null, manager.reachablePublicAddress(null));
+    }
+
+    private static Ec2ContainerManager managerWithReachability(ContainerNetworkReachability reachability) {
+        return new Ec2ContainerManager(
+                mock(ContainerBuilder.class),
+                mock(ContainerLifecycleManager.class),
+                mock(ContainerLogStreamer.class),
+                mock(ContainerDetector.class),
+                mock(DockerHostResolver.class),
+                mock(DockerClient.class),
+                mock(PortAllocator.class),
+                mock(EmulatorConfig.class, RETURNS_DEEP_STUBS),
+                mock(Ec2MetadataServer.class),
+                mock(Ec2PortForwardManager.class),
+                mock(RegionResolver.class),
+                reachability);
+    }
+
     @Test
     void userDataShellScriptsIgnoresCloudConfigWithoutShellscript() {
         String userData = """
@@ -236,6 +418,27 @@ class Ec2ContainerManagerTest {
     }
 
     @Test
+    void launchLabelsContainerWithResourceIdentity() throws Exception {
+        LaunchHarness harness = launchHarness();
+        harness.stubSuccessfulExecs(new CountDownLatch(0), new CountDownLatch(0));
+
+        InspectContainerCmd inspect = mock(InspectContainerCmd.class);
+        InspectContainerResponse response = inspectResponse("192.168.215.42");
+        when(harness.dockerClient.inspectContainerCmd(TEST_CONTAINER_ID)).thenReturn(inspect);
+        when(inspect.exec()).thenReturn(response);
+
+        Instance instance = instance("i-labeltest");
+        harness.manager.launch(instance, "ubuntu:24.04", null, "us-west-2");
+
+        verify(harness.builder, timeout(2000)).withLabels(Map.of(
+                "io.floci", "aws",
+                "io.floci.service", "ec2",
+                "io.floci.resource-id", "i-labeltest",
+                "io.floci.account", "000000000000",
+                "io.floci.region", "us-west-2"));
+    }
+
+    @Test
     void metadataProxyInstallCommandInstallsLinkLocalProxyDependencies() {
         String[] command = Ec2ContainerManager.metadataProxyInstallCommand();
 
@@ -266,6 +469,40 @@ class Ec2ContainerManagerTest {
         assertTrue(script.endsWith("command -v sshd >/dev/null 2>&1 || exit 1;"
                 + "command -v scp >/dev/null 2>&1 || exit "
                 + Ec2ContainerManager.SSH_CLIENT_MISSING_EXIT_CODE), script);
+    }
+
+    @Test
+    void sshdInstallProbeHandlesYumForAmazonLinux2() {
+        // public.ecr.aws/amazonlinux/amazonlinux:2 ships only yum -- no dnf, no apt-get, no
+        // apk. It is NOT the default image (image-catalog.yaml pins that to amazonlinux:2023,
+        // which has dnf); it is reached by explicitly requesting ami-amazonlinux2. Without a
+        // yum branch the if/elif chain falls through, the trailing "command -v sshd" fails,
+        // and startSshd() returns early, so such an instance is never reachable over SSH.
+        //
+        // Asserted against the production accessor, not the SSHD_INSTALL_PROBE_CMD copy below,
+        // so removing the yum branch fails THIS test rather than only the withCmd verify.
+        String script = Ec2ContainerManager.sshdInstallProbeCommand()[2];
+
+        assertTrue(script.contains("command -v yum"), script);
+        // The yum branch installs the client package alongside the server, exactly as the dnf
+        // branch does -- an AL2 guest needs scp for the same reason every other guest does.
+        assertTrue(script.contains("yum install -y openssh-server openssh-clients"), script);
+        // dnf must still win where both exist (Amazon Linux 2023, modern Fedora/RHEL), where
+        // yum is only a compatibility shim over dnf.
+        assertTrue(script.indexOf("command -v dnf") < script.indexOf("command -v yum"),
+                "dnf must be probed before yum");
+    }
+
+    @Test
+    void metadataProxyInstallCommandHandlesYumForAmazonLinux2() {
+        // The IMDS proxy dependency install had the same gap, and unlike the sshd probe it
+        // ends in an explicit failure: on an ami-amazonlinux2 instance it reached the else
+        // branch and exited 1 with "No supported package manager found for IMDS proxy
+        // dependencies", leaving the instance without a link-local metadata endpoint.
+        String script = Ec2ContainerManager.metadataProxyInstallCommand()[2];
+
+        assertTrue(script.contains("command -v yum"), script);
+        assertTrue(script.contains("yum install -y iproute socat curl ca-certificates"), script);
     }
 
     @Test
@@ -389,8 +626,116 @@ class Ec2ContainerManagerTest {
         harness.manager.launch(instance, "ubuntu:24.04", null, "us-west-2");
 
         awaitUntil(() -> "terminated".equals(instance.getState().getName()), Duration.ofSeconds(2));
-        assertEquals(TEST_CONTAINER_ID, instance.getDockerContainerId());
+        verify(harness.lifecycleManager, timeout(2_000)).removeIfExists(TEST_CONTAINER_ID);
+        verify(harness.portAllocator, timeout(2_000)).release(2201);
+        assertNull(instance.getDockerContainerId());
         verify(harness.metadataServer, never()).registerContainer(anyString(), anyString(), any());
+    }
+
+    @Test
+    void launchRetriesWithNextPortWhenDockerReportsHostPortCollision() throws Exception {
+        Ec2ContainerManager.containerBridgeIpAttempts = 1;
+        Ec2ContainerManager.containerBridgeIpPollMillis = 1;
+        LaunchHarness harness = launchHarness();
+        when(harness.portAllocator.allocate(anyInt(), anyInt())).thenReturn(2201, 2202);
+        when(harness.lifecycleManager.create(any(ContainerSpec.class)))
+                .thenReturn("container-conflict", TEST_CONTAINER_ID);
+        when(harness.lifecycleManager.startCreated(anyString(), any(ContainerSpec.class)))
+                .thenThrow(new RuntimeException("Bind for 0.0.0.0:2201 failed: port is already allocated"))
+                .thenReturn(null);
+
+        InspectContainerCmd inspect = mock(InspectContainerCmd.class);
+        InspectContainerResponse withIp = inspectResponse("172.18.0.12");
+        when(harness.dockerClient.inspectContainerCmd(TEST_CONTAINER_ID)).thenReturn(inspect);
+        when(inspect.exec()).thenReturn(withIp);
+        harness.stubSuccessfulExecs(new CountDownLatch(0), new CountDownLatch(0));
+
+        Instance instance = instance("i-port-collision");
+        harness.manager.launch(instance, "ubuntu:24.04", null, "us-west-2");
+
+        awaitUntil(() -> "running".equals(instance.getState().getName()), Duration.ofSeconds(2));
+        assertEquals(2202, instance.getSshHostPort());
+        verify(harness.lifecycleManager).removeIfExists("container-conflict");
+        verify(harness.portAllocator).markReserved(2201);
+        verify(harness.builder).withPortBinding(22, 2201);
+        verify(harness.builder).withPortBinding(22, 2202);
+    }
+
+    @Test
+    void launchReleasesPortAndCleansUpContainerAfterNonRetryableStartFailure() throws Exception {
+        LaunchHarness harness = launchHarness();
+        when(harness.lifecycleManager.startCreated(eq(TEST_CONTAINER_ID), any(ContainerSpec.class)))
+                .thenThrow(new RuntimeException("Docker daemon unavailable"));
+
+        Instance instance = instance("i-start-failure");
+        harness.manager.launch(instance, "ubuntu:24.04", null, "us-west-2");
+
+        awaitUntil(() -> "terminated".equals(instance.getState().getName()), Duration.ofSeconds(2));
+        verify(harness.lifecycleManager).removeIfExists(TEST_CONTAINER_ID);
+        verify(harness.portAllocator).release(2201);
+    }
+
+    @Test
+    void launchTerminatesBeforeCleanupFailure() throws Exception {
+        LaunchHarness harness = launchHarness();
+        when(harness.lifecycleManager.startCreated(eq(TEST_CONTAINER_ID), any(ContainerSpec.class)))
+                .thenThrow(new RuntimeException("Docker daemon unavailable"));
+        doThrow(new RuntimeException("port-forward cleanup failed"))
+                .when(harness.portForwardManager).unpublishAll(any(Instance.class));
+
+        Instance instance = instance("i-cleanup-failure");
+        harness.manager.launch(instance, "ubuntu:24.04", null, "us-west-2");
+
+        awaitUntil(() -> "terminated".equals(instance.getState().getName()), Duration.ofSeconds(2));
+        verify(harness.portForwardManager).unpublishAll(instance);
+    }
+
+    @Test
+    void cancelledLaunchRemovesContainerThatStartsAfterCancellation() throws Exception {
+        LaunchHarness harness = launchHarness();
+        CountDownLatch startEntered = new CountDownLatch(1);
+        CountDownLatch allowStart = new CountDownLatch(1);
+        when(harness.lifecycleManager.startCreated(eq(TEST_CONTAINER_ID), any(ContainerSpec.class))).thenAnswer(invocation -> {
+            startEntered.countDown();
+            assertTrue(allowStart.await(2, TimeUnit.SECONDS));
+            return null;
+        });
+
+        Instance instance = instance("i-cancelled-launch");
+        harness.manager.launch(instance, "ubuntu:24.04", null, "us-west-2");
+
+        assertTrue(startEntered.await(2, TimeUnit.SECONDS), "container startup should begin");
+        assertTrue(harness.manager.cancelLaunch(instance));
+        verify(harness.lifecycleManager).removeIfExists(TEST_CONTAINER_ID);
+        verify(harness.portAllocator).release(2201);
+
+        allowStart.countDown();
+        verify(harness.portAllocator, after(500).times(1)).release(2201);
+    }
+
+    @Test
+    void cancelledLaunchRemovesContainerCreatedAfterCancellation() throws Exception {
+        LaunchHarness harness = launchHarness();
+        CountDownLatch createEntered = new CountDownLatch(1);
+        CountDownLatch allowCreate = new CountDownLatch(1);
+        when(harness.lifecycleManager.create(any(ContainerSpec.class))).thenAnswer(invocation -> {
+            createEntered.countDown();
+            assertTrue(allowCreate.await(2, TimeUnit.SECONDS));
+            return TEST_CONTAINER_ID;
+        });
+
+        Instance instance = instance("i-cancelled-during-create");
+        harness.manager.launch(instance, "ubuntu:24.04", null, "us-west-2");
+
+        assertTrue(createEntered.await(2, TimeUnit.SECONDS), "container creation should begin");
+        assertTrue(harness.manager.cancelLaunch(instance));
+        assertEquals("terminated", instance.getState().getName());
+
+        allowCreate.countDown();
+        verify(harness.lifecycleManager, timeout(2_000)).removeIfExists(TEST_CONTAINER_ID);
+        verify(harness.portAllocator, timeout(2_000)).release(2201);
+        verify(harness.lifecycleManager, never()).startCreated(eq(TEST_CONTAINER_ID), any(ContainerSpec.class));
+        assertEquals("terminated", instance.getState().getName());
     }
 
     @Test
@@ -467,6 +812,7 @@ class Ec2ContainerManagerTest {
     private static final String[] SSHD_INSTALL_PROBE_CMD = {"sh", "-c",
             "if ! command -v sshd >/dev/null 2>&1 || ! command -v scp >/dev/null 2>&1; then"
             + "  if command -v dnf >/dev/null 2>&1; then dnf install -y openssh-server openssh-clients >/dev/null 2>&1;"
+            + "  elif command -v yum >/dev/null 2>&1; then yum install -y openssh-server openssh-clients >/dev/null 2>&1;"
             + "  elif command -v apt-get >/dev/null 2>&1; then DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-server openssh-client >/dev/null 2>&1;"
             + "  elif command -v apk >/dev/null 2>&1; then apk add --no-cache openssh >/dev/null 2>&1;"
             + "  fi;"
@@ -593,6 +939,9 @@ class Ec2ContainerManagerTest {
         DockerClient dockerClient = mock(DockerClient.class);
         Ec2MetadataServer metadataServer = mock(Ec2MetadataServer.class);
         ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
+        Ec2PortForwardManager portForwardManager = mock(Ec2PortForwardManager.class);
+        RegionResolver regionResolver = mock(RegionResolver.class);
+        when(regionResolver.getAccountId()).thenReturn("000000000000");
         Ec2ContainerManager manager = new Ec2ContainerManager(
                 containerBuilder,
                 lifecycleManager,
@@ -603,9 +952,11 @@ class Ec2ContainerManagerTest {
                 portAllocator,
                 config,
                 metadataServer,
-                mock(Ec2PortForwardManager.class));
-        return new LaunchHarness(manager, dockerClient, metadataServer, logStreamer, builder,
-                new CopyOnWriteArrayList<>());
+                portForwardManager,
+                regionResolver,
+                mock(ContainerNetworkReachability.class));
+        return new LaunchHarness(manager, lifecycleManager, dockerClient, metadataServer, logStreamer, builder,
+                portAllocator, portForwardManager, new CopyOnWriteArrayList<>());
     }
 
     /**
@@ -649,10 +1000,13 @@ class Ec2ContainerManagerTest {
     }
 
     private record LaunchHarness(Ec2ContainerManager manager,
+                                 ContainerLifecycleManager lifecycleManager,
                                  DockerClient dockerClient,
                                  Ec2MetadataServer metadataServer,
                                  ContainerLogStreamer logStreamer,
                                  ContainerBuilder.Builder builder,
+                                 PortAllocator portAllocator,
+                                 Ec2PortForwardManager portForwardManager,
                                  List<String[]> executedCommands) {
         void stubSuccessfulExecs(CountDownLatch userDataStarted, CountDownLatch finishUserData) throws Exception {
             AtomicReference<String[]> currentCommand = new AtomicReference<>();

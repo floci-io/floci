@@ -142,6 +142,45 @@ class DynamoDbAccessPathIntegrationTest {
 
     @Test
     @Order(5)
+    void queryRejectsKeyConditionValuesWithWrongSchemaTypes() {
+        request("DynamoDB_20120810.Query", """
+                {
+                  "TableName":"%s",
+                  "KeyConditionExpression":"pk = :pk AND sk > :sk",
+                  "ExpressionAttributeValues":{
+                    ":pk":{"S":"p1"},
+                    ":sk":{"N":"1"}
+                  }
+                }
+                """.formatted(TABLE))
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("One or more parameter values were invalid: "
+                    + "Condition parameter type does not match schema type"));
+
+        request("DynamoDB_20120810.Query", """
+                {
+                  "TableName":"%s",
+                  "KeyConditionExpression":"pk = :pk",
+                  "ExpressionAttributeValues":{":pk":{"S":null}}
+                }
+                """.formatted(TABLE))
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
+
+        request("DynamoDB_20120810.Query", """
+                {
+                  "TableName":"%s",
+                  "KeyConditionExpression":"pk = :pk",
+                  "ExpressionAttributeValues":{":pk":{"S":"p1","N":"1"}}
+                }
+                """.formatted(TABLE))
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
+    }
+
+    @Test
+    @Order(6)
     void queryRejectsSelectedKeyInFilterExpression() {
         request("DynamoDB_20120810.Query", """
                 {
@@ -163,7 +202,7 @@ class DynamoDbAccessPathIntegrationTest {
     }
 
     @Test
-    @Order(6)
+    @Order(7)
     void queryAndScanRejectNonProjectedGsiAttribute() {
         String query = """
                 {
@@ -191,7 +230,7 @@ class DynamoDbAccessPathIntegrationTest {
     }
 
     @Test
-    @Order(7)
+    @Order(8)
     void acceptsProjectedGsiAttributesAndLsiTableFetch() {
         request("DynamoDB_20120810.Query", """
                 {
@@ -230,7 +269,7 @@ class DynamoDbAccessPathIntegrationTest {
     }
 
     @Test
-    @Order(8)
+    @Order(9)
     void gsiStillRejectsConsistentReads() {
         request("DynamoDB_20120810.Query", """
                 {
@@ -245,6 +284,108 @@ class DynamoDbAccessPathIntegrationTest {
             .statusCode(400)
             .body("__type", equalTo("ValidationException"))
             .body("message", equalTo("Consistent reads are not supported on global secondary indexes"));
+    }
+
+    @Test
+    @Order(9)
+    void queryAndScanRejectWrongExclusiveStartKeyTypes() {
+        request("DynamoDB_20120810.Query", """
+                {
+                  "TableName":"%s",
+                  "KeyConditionExpression":"pk = :pk",
+                  "ExpressionAttributeValues":{":pk":{"S":"p1"}},
+                  "ExclusiveStartKey":{"pk":{"N":"1"},"sk":{"S":"s1"}}
+                }
+                """.formatted(TABLE))
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("The provided starting key is invalid"));
+
+        request("DynamoDB_20120810.Scan", """
+                {
+                  "TableName":"%s",
+                  "ExclusiveStartKey":{"pk":{"S":"p1"},"sk":{"BOOL":true}}
+                }
+                """.formatted(TABLE))
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("The provided starting key is invalid: "
+                    + "The provided key element does not match the schema"));
+
+        request("DynamoDB_20120810.Query", """
+                {
+                  "TableName":"%s",
+                  "KeyConditionExpression":"pk = :pk",
+                  "ExpressionAttributeValues":{":pk":{"S":"p1"}},
+                  "ExclusiveStartKey":{"pk":{"S":null},"sk":{"S":"s1"}}
+                }
+                """.formatted(TABLE))
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("The provided starting key is invalid"));
+
+        request("DynamoDB_20120810.Scan", """
+                {
+                  "TableName":"%s",
+                  "ExclusiveStartKey":{"pk":{"S":123},"sk":{"S":"s1"}}
+                }
+                """.formatted(TABLE))
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
+    }
+
+    @Test
+    @Order(10)
+    void queryRejectsMalformedNumericExclusiveStartKey() {
+        String numericTable = TABLE + "-numeric";
+        request("DynamoDB_20120810.CreateTable", """
+                {
+                  "TableName":"%s",
+                  "AttributeDefinitions":[{"AttributeName":"pk","AttributeType":"N"}],
+                  "KeySchema":[{"AttributeName":"pk","KeyType":"HASH"}],
+                  "BillingMode":"PAY_PER_REQUEST"
+                }
+                """.formatted(numericTable))
+            .statusCode(200);
+
+        request("DynamoDB_20120810.Query", """
+                {
+                  "TableName":"%s",
+                  "KeyConditionExpression":"pk = :pk",
+                  "ExpressionAttributeValues":{":pk":{"N":"1"}},
+                  "ExclusiveStartKey":{"pk":{"N":"not-a-number"}}
+                }
+                """.formatted(numericTable))
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
+
+        request("DynamoDB_20120810.DeleteTable", """
+                {"TableName":"%s"}
+                """.formatted(numericTable))
+            .statusCode(200);
+    }
+
+    @Test
+    @Order(11)
+    void queryRejectsWrongIndexExclusiveStartKeyType() {
+        request("DynamoDB_20120810.Query", """
+                {
+                  "TableName":"%s",
+                  "IndexName":"status-index",
+                  "KeyConditionExpression":"#status = :status",
+                  "ExpressionAttributeNames":{"#status":"status"},
+                  "ExpressionAttributeValues":{":status":{"S":"open"}},
+                  "ExclusiveStartKey":{
+                    "pk":{"S":"p1"},
+                    "sk":{"S":"s1"},
+                    "status":{"S":"open"},
+                    "createdAt":{"N":"1"}
+                  }
+                }
+                """.formatted(TABLE))
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("The provided starting key is invalid"));
     }
 
     @Test

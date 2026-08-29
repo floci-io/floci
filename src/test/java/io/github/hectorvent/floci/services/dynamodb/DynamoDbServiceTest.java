@@ -147,6 +147,125 @@ class DynamoDbServiceTest {
     }
 
     @Test
+    void createTableRejectsGsiWithMoreThanFourSortKeyAttributes() {
+        GlobalSecondaryIndex gsi = new GlobalSecondaryIndex(
+                "GSI1",
+                List.of(
+                        new KeySchemaElement("PK", "HASH"),
+                        new KeySchemaElement("A", "RANGE"),
+                        new KeySchemaElement("B", "RANGE"),
+                        new KeySchemaElement("C", "RANGE"),
+                        new KeySchemaElement("D", "RANGE"),
+                        new KeySchemaElement("E", "RANGE")),
+                null, "ALL", null);
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.createTable("gsi-too-many-sort-keys",
+                List.of(new KeySchemaElement("PK", "HASH")),
+                List.of(
+                        new AttributeDefinition("PK", "S"),
+                        new AttributeDefinition("A", "S"),
+                        new AttributeDefinition("B", "S"),
+                        new AttributeDefinition("C", "S"),
+                        new AttributeDefinition("D", "S"),
+                        new AttributeDefinition("E", "S")),
+                5L, 5L, List.of(gsi), "eu-west-1"));
+
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void createTableRejectsGsiWithMoreThanFourPartitionKeyAttributes() {
+        GlobalSecondaryIndex gsi = new GlobalSecondaryIndex(
+                "GSI1",
+                List.of(
+                        new KeySchemaElement("A", "HASH"),
+                        new KeySchemaElement("B", "HASH"),
+                        new KeySchemaElement("C", "HASH"),
+                        new KeySchemaElement("D", "HASH"),
+                        new KeySchemaElement("E", "HASH")),
+                null, "ALL", null);
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.createTable("gsi-too-many-hash-keys",
+                List.of(new KeySchemaElement("PK", "HASH")),
+                List.of(
+                        new AttributeDefinition("PK", "S"),
+                        new AttributeDefinition("A", "S"),
+                        new AttributeDefinition("B", "S"),
+                        new AttributeDefinition("C", "S"),
+                        new AttributeDefinition("D", "S"),
+                        new AttributeDefinition("E", "S")),
+                5L, 5L, List.of(gsi), "eu-west-1"));
+
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void updateTableRejectsGsiCreateWithMoreThanFourSortKeyAttributes() {
+        createUsersTable("eu-west-1");
+        GlobalSecondaryIndex gsi = new GlobalSecondaryIndex(
+                "GSI1",
+                List.of(
+                        new KeySchemaElement("userId", "HASH"),
+                        new KeySchemaElement("A", "RANGE"),
+                        new KeySchemaElement("B", "RANGE"),
+                        new KeySchemaElement("C", "RANGE"),
+                        new KeySchemaElement("D", "RANGE"),
+                        new KeySchemaElement("E", "RANGE")),
+                null, "ALL", null);
+        List<AttributeDefinition> newAttrs = List.of(
+                new AttributeDefinition("A", "S"), new AttributeDefinition("B", "S"),
+                new AttributeDefinition("C", "S"), new AttributeDefinition("D", "S"),
+                new AttributeDefinition("E", "S"));
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.updateTable(
+                "Users", null, null, List.of(gsi), List.of(), newAttrs, "eu-west-1"));
+
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void updateTableRejectsGsiArityWithoutApplyingThroughputChange() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+        GlobalSecondaryIndex invalidGsi = new GlobalSecondaryIndex(
+                "GSI1",
+                List.of(
+                        new KeySchemaElement("A", "HASH"),
+                        new KeySchemaElement("B", "HASH"),
+                        new KeySchemaElement("C", "HASH"),
+                        new KeySchemaElement("D", "HASH"),
+                        new KeySchemaElement("E", "HASH")),
+                null, "ALL", null);
+        List<AttributeDefinition> newAttrs = List.of(
+                new AttributeDefinition("A", "S"), new AttributeDefinition("B", "S"),
+                new AttributeDefinition("C", "S"), new AttributeDefinition("D", "S"),
+                new AttributeDefinition("E", "S"));
+
+        assertThrows(AwsException.class, () -> service.updateTable(
+                "Users", 10L, 10L, List.of(invalidGsi), List.of(), newAttrs, region));
+
+        TableDefinition after = service.describeTable("Users", region);
+        assertEquals(5L, after.getProvisionedThroughput().getReadCapacityUnits());
+        assertEquals(5L, after.getProvisionedThroughput().getWriteCapacityUnits());
+        assertTrue(after.getGlobalSecondaryIndexes().isEmpty());
+    }
+
+    @Test
+    void createTableRejectsMissingKeyAttributeDefinition() {
+        AwsException error = assertThrows(AwsException.class, () -> service.createTable(
+                "Users",
+                List.of(new KeySchemaElement("userId", "HASH")),
+                List.of(),
+                5L, 5L, "eu-west-1"));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("Invalid KeySchema: Some index key attribute have no definition", error.getMessage());
+    }
+
+    @Test
     void describeTable() {
         String region = "eu-west-1";
         createUsersTable(region);
@@ -1969,6 +2088,310 @@ class DynamoDbServiceTest {
         AwsException ex = assertThrows(AwsException.class, () ->
                 service.putItem("Orders", itemMissingSk, region));
         assertEquals("ValidationException", ex.getErrorCode());
+    }
+
+    @Test
+    void putItemNullPartitionKeyThrowsTypeMismatch() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode nullKeyItem = mapper.createObjectNode();
+        nullKeyItem.set("userId", mapper.createObjectNode().put("NULL", true));
+        nullKeyItem.set("name", attributeValue("S", "created"));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.putItem("Users", nullKeyItem, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("One or more parameter values were invalid: "
+                + "Type mismatch for key userId expected: S actual: NULL", ex.getMessage());
+    }
+
+    @Test
+    void putItemWrongScalarTypePartitionKeyThrowsTypeMismatch() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode numberKeyItem = mapper.createObjectNode();
+        numberKeyItem.set("userId", attributeValue("N", "42"));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.putItem("Users", numberKeyItem, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("One or more parameter values were invalid: "
+                + "Type mismatch for key userId expected: S actual: N", ex.getMessage());
+    }
+
+    @Test
+    void putItemNullSortKeyThrowsTypeMismatch() {
+        String region = "eu-west-1";
+        createOrdersTable(region);
+
+        ObjectNode nullSkItem = item("customerId", "c1");
+        nullSkItem.set("orderId", mapper.createObjectNode().put("NULL", true));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.putItem("Orders", nullSkItem, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("One or more parameter values were invalid: "
+                + "Type mismatch for key orderId expected: S actual: NULL", ex.getMessage());
+    }
+
+    @Test
+    void putItemNullNonKeyAttributeIsAccepted() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode nullAttrItem = item("userId", "u1");
+        nullAttrItem.set("name", mapper.createObjectNode().put("NULL", true));
+        service.putItem("Users", nullAttrItem, region);
+
+        JsonNode stored = service.getItem("Users", item("userId", "u1"), region);
+        assertNotNull(stored);
+        assertTrue(stored.get("name").get("NULL").asBoolean());
+    }
+
+    @Test
+    void putItemMultiTypeKeyValueThrowsValidationException() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode multiTypeItem = mapper.createObjectNode();
+        multiTypeItem.set("userId", mapper.createObjectNode().put("S", "1").put("NULL", true));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.putItem("Users", multiTypeItem, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("Supplied AttributeValue has more than one datatypes set, "
+                + "must contain exactly one of the supported datatypes", ex.getMessage());
+    }
+
+    @Test
+    void putItemEmptyKeyValueThrowsValidationException() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode emptyValueItem = mapper.createObjectNode();
+        emptyValueItem.set("userId", mapper.createObjectNode());
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.putItem("Users", emptyValueItem, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("Supplied AttributeValue is empty, "
+                + "must contain exactly one of the supported datatypes", ex.getMessage());
+    }
+
+    @Test
+    void putItemNonObjectKeyValueThrowsSerializationException() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode rawValueItem = mapper.createObjectNode();
+        rawValueItem.put("userId", "1");
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.putItem("Users", rawValueItem, region));
+        assertEquals("SerializationException", ex.getErrorCode());
+    }
+
+    private TableDefinition createIndexedTable(String region) {
+        GlobalSecondaryIndex gsi = new GlobalSecondaryIndex("gsi1",
+                List.of(new KeySchemaElement("gsiKey", "HASH")), null, "ALL", null);
+        LocalSecondaryIndex lsi = new LocalSecondaryIndex("lsi1",
+                List.of(
+                        new KeySchemaElement("customerId", "HASH"),
+                        new KeySchemaElement("lsiKey", "RANGE")), null, "ALL");
+        return service.createTable("Indexed",
+                List.of(
+                        new KeySchemaElement("customerId", "HASH"),
+                        new KeySchemaElement("orderId", "RANGE")),
+                List.of(
+                        new AttributeDefinition("customerId", "S"),
+                        new AttributeDefinition("orderId", "S"),
+                        new AttributeDefinition("gsiKey", "S"),
+                        new AttributeDefinition("lsiKey", "N")),
+                5L, 5L, List.of(gsi), List.of(lsi), region);
+    }
+
+    @Test
+    void putItemNullGsiKeyThrowsIndexTypeMismatch() {
+        String region = "eu-west-1";
+        createIndexedTable(region);
+
+        ObjectNode nullGsiItem = item("customerId", "c1", "orderId", "o1");
+        nullGsiItem.set("gsiKey", mapper.createObjectNode().put("NULL", true));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.putItem("Indexed", nullGsiItem, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("One or more parameter values were invalid: "
+                + "Type mismatch for Index Key gsiKey Expected: S Actual: NULL IndexName: gsi1",
+                ex.getMessage());
+    }
+
+    @Test
+    void putItemWrongTypeLsiKeyThrowsIndexTypeMismatch() {
+        String region = "eu-west-1";
+        createIndexedTable(region);
+
+        ObjectNode wrongLsiItem = item("customerId", "c1", "orderId", "o1", "lsiKey", "oops");
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.putItem("Indexed", wrongLsiItem, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("One or more parameter values were invalid: "
+                + "Type mismatch for Index Key lsiKey Expected: N Actual: S IndexName: lsi1",
+                ex.getMessage());
+    }
+
+    @Test
+    void putItemOmittingIndexKeyAttributesIsAccepted() {
+        String region = "eu-west-1";
+        createIndexedTable(region);
+
+        // Sparse index: absent GSI/LSI key attributes are valid.
+        service.putItem("Indexed", item("customerId", "c1", "orderId", "o1"), region);
+
+        assertNotNull(service.getItem("Indexed",
+                item("customerId", "c1", "orderId", "o1"), region));
+    }
+
+    @Test
+    void updateItemSettingWrongTypeGsiKeyThrowsIndexTypeMismatch() {
+        String region = "eu-west-1";
+        createIndexedTable(region);
+        service.putItem("Indexed", item("customerId", "c1", "orderId", "o1"), region);
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":v", mapper.createObjectNode().put("NULL", true));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.updateItem("Indexed", item("customerId", "c1", "orderId", "o1"), null,
+                        "SET gsiKey = :v", null, exprValues, null, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("One or more parameter values were invalid: "
+                + "Type mismatch for Index Key gsiKey Expected: S Actual: NULL IndexName: gsi1",
+                ex.getMessage());
+    }
+
+    @Test
+    void putItemMultiTypeGsiKeyValueThrowsValidationException() {
+        String region = "eu-west-1";
+        createIndexedTable(region);
+
+        ObjectNode multiTypeGsiItem = item("customerId", "c1", "orderId", "o1");
+        multiTypeGsiItem.set("gsiKey", mapper.createObjectNode().put("S", "x").put("N", "1"));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.putItem("Indexed", multiTypeGsiItem, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("Supplied AttributeValue has more than one datatypes set, "
+                + "must contain exactly one of the supported datatypes", ex.getMessage());
+    }
+
+    @Test
+    void putItemEmptyObjectGsiKeyValueThrowsValidationException() {
+        String region = "eu-west-1";
+        createIndexedTable(region);
+
+        ObjectNode emptyGsiItem = item("customerId", "c1", "orderId", "o1");
+        emptyGsiItem.set("gsiKey", mapper.createObjectNode());
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.putItem("Indexed", emptyGsiItem, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("Supplied AttributeValue is empty, "
+                + "must contain exactly one of the supported datatypes", ex.getMessage());
+    }
+
+    @Test
+    void putItemNonObjectGsiKeyValueThrowsSerializationException() {
+        String region = "eu-west-1";
+        createIndexedTable(region);
+
+        ObjectNode rawGsiItem = item("customerId", "c1", "orderId", "o1");
+        rawGsiItem.put("gsiKey", "x");
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.putItem("Indexed", rawGsiItem, region));
+        assertEquals("SerializationException", ex.getErrorCode());
+    }
+
+    @Test
+    void putItemEmptyStringGsiKeyThrowsValidationException() {
+        String region = "eu-west-1";
+        createIndexedTable(region);
+
+        ObjectNode emptyStringGsiItem = item("customerId", "c1", "orderId", "o1", "gsiKey", "");
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.putItem("Indexed", emptyStringGsiItem, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("One or more parameter values are not valid. A value specified for a secondary "
+                + "index key is not supported. The AttributeValue for a key attribute cannot "
+                + "contain an empty string value. IndexName: gsi1, IndexKey: gsiKey", ex.getMessage());
+    }
+
+    @Test
+    void updateItemSettingEmptyStringGsiKeyThrowsValidationException() {
+        String region = "eu-west-1";
+        createIndexedTable(region);
+        service.putItem("Indexed", item("customerId", "c1", "orderId", "o1"), region);
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":v", attributeValue("S", ""));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.updateItem("Indexed", item("customerId", "c1", "orderId", "o1"), null,
+                        "SET gsiKey = :v", null, exprValues, null, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("One or more parameter values are not valid. The update expression attempted to "
+                + "update a secondary index key to a value that is not supported. "
+                + "The AttributeValue for a key attribute cannot contain an empty string value.", ex.getMessage());
+    }
+
+    @Test
+    void updateItemNullPartitionKeyThrowsValidationException() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode nullKey = mapper.createObjectNode();
+        nullKey.set("userId", mapper.createObjectNode().put("NULL", true));
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":val", attributeValue("S", "updated"));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.updateItem("Users", nullKey, null,
+                        "SET name = :val", null, exprValues, null, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("The provided key element does not match the schema", ex.getMessage());
+    }
+
+    @Test
+    void getItemNullPartitionKeyThrowsValidationException() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode nullKey = mapper.createObjectNode();
+        nullKey.set("userId", mapper.createObjectNode().put("NULL", true));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.getItem("Users", nullKey, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("The provided key element does not match the schema", ex.getMessage());
+    }
+
+    @Test
+    void deleteItemNullPartitionKeyThrowsValidationException() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode nullKey = mapper.createObjectNode();
+        nullKey.set("userId", mapper.createObjectNode().put("NULL", true));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.deleteItem("Users", nullKey, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("The provided key element does not match the schema", ex.getMessage());
     }
 
     @Test

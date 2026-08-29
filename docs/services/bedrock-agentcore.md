@@ -26,7 +26,7 @@ gateway/memory primitives.
 | `ListAgentRuntimeEndpoints` | List a runtime's endpoints (paginated) |
 | `DeleteAgentRuntimeEndpoint` | Delete an endpoint |
 | `InvokeAgentRuntime` *(data plane)* | Invoke a runtime; returns a fixed canned response |
-| `TagResource` / `UntagResource` / `ListTagsForResource` | Tag runtimes via the shared `/tags/{arn}` route |
+| `TagResource` / `UntagResource` / `ListTagsForResource` | Tag runtimes, gateways, and memory resources via the shared `/tags/{arn}` route |
 | `CreateWorkloadIdentity` / `GetWorkloadIdentity` / `UpdateWorkloadIdentity` / `DeleteWorkloadIdentity` / `ListWorkloadIdentities` | Manage workload identities (`POST /identities/<Op>`) |
 | `CreateGateway` / `GetGateway` / `UpdateGateway` / `DeleteGateway` / `ListGateways` | Manage gateways (metadata only) |
 | `CreateGatewayTarget` / `GetGatewayTarget` / `UpdateGatewayTarget` / `DeleteGatewayTarget` / `ListGatewayTargets` | Manage gateway targets |
@@ -70,6 +70,10 @@ single non-streaming `200` is returned.
 - Timestamps (`createdAt`, `lastUpdatedAt`) are ISO-8601 strings.
 - Config blobs (`agentRuntimeArtifact`, `networkConfiguration`, …) are stored opaquely
   and echoed back; they are not deeply validated.
+- `CreateMemory` persists `tags`, `encryptionKeyArn`, and `memoryExecutionRoleArn`;
+  `UpdateMemory` applies `description`, `eventExpiryDuration`, and
+  `memoryExecutionRoleArn`. As in AWS, memory tags are returned only by
+  `ListTagsForResource`, never embedded in the `memory` response shape.
 
 ## Examples
 

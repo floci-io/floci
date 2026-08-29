@@ -31,14 +31,19 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 class AppSyncServiceTest {
 
     private static final Instant NOW = Instant.parse("2026-01-01T00:00:00Z");
     private AppSyncService service;
+    private AccountAwareStorageBackend<ApiKey> apiKeyStoreOverride;
 
     @BeforeEach
     void setUp() {
@@ -49,7 +54,36 @@ class AppSyncServiceTest {
     void validateApiKeyLooksUpByValue() {
         GraphqlApi api = service.createGraphqlApi(Map.of("name", "a", "authenticationType", "API_KEY"), "us-east-1");
         ApiKey created = service.createApiKey(api.getApiId(), Map.of());
-        assertTrue(service.validateApiKey(api.getApiId(), created.getApiKey()).isPresent());
+        assertTrue(service.validateApiKey(api.getApiId(), created.getId()).isPresent());
+    }
+
+    @Test
+    void createApiKeyIdIsTheUsableKeyValue() {
+        GraphqlApi api = service.createGraphqlApi(Map.of("name", "fmt", "authenticationType", "API_KEY"), "us-east-1");
+        ApiKey created = service.createApiKey(api.getApiId(), Map.of());
+        assertTrue(created.getId().matches("da2-[a-z0-9]{26}"), created.getId());
+        assertTrue(service.validateApiKey(api.getApiId(), created.getId()).isPresent());
+        assertTrue(service.validateApiKey(api.getApiId(), "da2-" + "x".repeat(26)).isEmpty());
+        assertEquals(created.getId(), service.getApiKey(api.getApiId(), created.getId()).getId());
+    }
+
+    @Test
+    void legacyShortApiKeyIdIsListedButNeverAuthenticates() {
+        // Keys persisted by builds before ApiKey.id became the key value have a 7-character id.
+        AccountAwareStorageBackend<ApiKey> keyStore = AccountAwareStorageBackend.inMemory("000000000000");
+        apiKeyStoreOverride = keyStore;
+        AppSyncService svc = newService(Clock.fixed(NOW, ZoneOffset.UTC));
+        GraphqlApi api = svc.createGraphqlApi(Map.of("name", "legacy", "authenticationType", "API_KEY"), "us-east-1");
+        ApiKey legacy = new ApiKey();
+        legacy.setId("ad6c9b6");
+        legacy.setApiId(api.getApiId());
+        legacy.setExpires(NOW.getEpochSecond() + Duration.ofDays(7).getSeconds());
+        keyStore.put(api.getApiId() + "::ad6c9b6", legacy);
+
+        assertEquals(1, svc.listApiKeys(api.getApiId(), null, null).items().size());
+        assertTrue(svc.validateApiKey(api.getApiId(), "ad6c9b6").isEmpty());
+        svc.deleteApiKey(api.getApiId(), "ad6c9b6");
+        assertEquals(0, svc.listApiKeys(api.getApiId(), null, null).items().size());
     }
 
     @Test
@@ -59,9 +93,9 @@ class AppSyncServiceTest {
         GraphqlApi api = svc.createGraphqlApi(Map.of("name", "b", "authenticationType", "API_KEY"), "us-east-1");
         long expires = NOW.getEpochSecond() + Duration.ofDays(1).getSeconds();
         ApiKey created = svc.createApiKey(api.getApiId(), Map.of("expires", expires));
-        assertTrue(svc.validateApiKey(api.getApiId(), created.getApiKey()).isPresent());
+        assertTrue(svc.validateApiKey(api.getApiId(), created.getId()).isPresent());
         clock.set(NOW.plus(Duration.ofDays(1)));
-        assertTrue(svc.validateApiKey(api.getApiId(), created.getApiKey()).isEmpty());
+        assertTrue(svc.validateApiKey(api.getApiId(), created.getId()).isEmpty());
     }
 
     @Test
@@ -100,7 +134,7 @@ class AppSyncServiceTest {
         GraphqlApi a = service.createGraphqlApi(Map.of("name", "c", "authenticationType", "API_KEY"), "us-east-1");
         GraphqlApi b = service.createGraphqlApi(Map.of("name", "d", "authenticationType", "API_KEY"), "us-east-1");
         ApiKey created = service.createApiKey(a.getApiId(), Map.of());
-        assertTrue(service.validateApiKey(b.getApiId(), created.getApiKey()).isEmpty());
+        assertTrue(service.validateApiKey(b.getApiId(), created.getId()).isEmpty());
     }
 
     @Test
@@ -201,6 +235,75 @@ class AppSyncServiceTest {
     }
 
     @Test
+    void graphqlApiUrisUseConfiguredBaseUrlAndPersist() {
+        AppSyncService configuredService = newService(
+                Clock.fixed(NOW, ZoneOffset.UTC), "http://floci.example:4577/");
+
+        GraphqlApi api = configuredService.createGraphqlApi(
+                Map.of("name", "configured-url", "authenticationType", "API_KEY"), "us-east-1");
+        Map<String, String> expectedUris = Map.of(
+                "GRAPHQL", "http://floci.example:4577/v1/apis/" + api.getApiId() + "/graphql",
+                "REALTIME", "ws://floci.example:4577/v1/apis/" + api.getApiId() + "/graphql/realtime");
+
+        assertEquals(expectedUris, api.getUris());
+        assertEquals(expectedUris, configuredService.getGraphqlApi(api.getApiId()).getUris());
+        assertEquals(expectedUris, configuredService.listGraphqlApis(null, null).items().getFirst().getUris());
+    }
+
+    @Test
+    void graphqlApiRealtimeUriUsesSecureWebSocketForHttpsBaseUrl() {
+        AppSyncService configuredService = newService(
+                Clock.fixed(NOW, ZoneOffset.UTC), "https://floci.example:8443");
+
+        GraphqlApi api = configuredService.createGraphqlApi(
+                Map.of("name", "secure-url", "authenticationType", "API_KEY"), "us-east-1");
+
+        assertEquals(
+                "https://floci.example:8443/v1/apis/" + api.getApiId() + "/graphql",
+                api.getUris().get("GRAPHQL"));
+        assertEquals(
+                "wss://floci.example:8443/v1/apis/" + api.getApiId() + "/graphql/realtime",
+                api.getUris().get("REALTIME"));
+    }
+
+    @Test
+    void persistedGraphqlApiUrisAreRepairedOnGetListAndUpdate() {
+        AccountAwareStorageBackend<GraphqlApi> apiStore = spy(
+                AccountAwareStorageBackend.inMemory("000000000000"));
+        AppSyncService legacyService = newService(
+                Clock.fixed(NOW, ZoneOffset.UTC), "http://localhost:4566", apiStore);
+        GraphqlApi api = legacyService.createGraphqlApi(
+                Map.of("name", "persisted-api", "authenticationType", "API_KEY"), "us-east-1");
+        String apiId = api.getApiId();
+        Map<String, String> staleUris = api.getUris();
+
+        AppSyncService configuredService = newService(
+                Clock.fixed(NOW, ZoneOffset.UTC), "https://floci.example:8443/", apiStore);
+        Map<String, String> expectedUris = Map.of(
+                "GRAPHQL", "https://floci.example:8443/v1/apis/" + apiId + "/graphql",
+                "REALTIME", "wss://floci.example:8443/v1/apis/" + apiId + "/graphql/realtime");
+
+        clearInvocations(apiStore);
+        assertEquals(expectedUris, configuredService.getGraphqlApi(apiId).getUris());
+        verify(apiStore).put(apiId, api);
+
+        api.setUris(staleUris);
+        apiStore.put(apiId, api);
+        clearInvocations(apiStore);
+        assertEquals(expectedUris, configuredService.listGraphqlApis(null, null).items().getFirst().getUris());
+        verify(apiStore).put(apiId, api);
+
+        api.setUris(staleUris);
+        apiStore.put(apiId, api);
+        clearInvocations(apiStore);
+        GraphqlApi updated = configuredService.updateGraphqlApi(
+                apiId, Map.of("name", "updated-api"), "us-east-1");
+        assertEquals("updated-api", updated.getName());
+        assertEquals(expectedUris, updated.getUris());
+        verify(apiStore, times(2)).put(apiId, api);
+    }
+
+    @Test
     void createResolverDoesNotReregisterSchema() {
         GraphqlApi api = service.createGraphqlApi(Map.of("name", "r", "authenticationType", "API_KEY"), "us-east-1");
         service.createDataSource(api.getApiId(), Map.of("name", "none", "type", "NONE"), "us-east-1");
@@ -216,18 +319,37 @@ class AppSyncServiceTest {
 
     @SuppressWarnings("unchecked")
     private AppSyncService newService(Clock clock) {
+        return newService(clock, "http://localhost:4566");
+    }
+
+    @SuppressWarnings("unchecked")
+    private AppSyncService newService(Clock clock, String baseUrl) {
+        return newService(clock, baseUrl, AccountAwareStorageBackend.inMemory("000000000000"));
+    }
+
+    @SuppressWarnings("unchecked")
+    private AppSyncService newService(Clock clock, String baseUrl,
+            AccountAwareStorageBackend<GraphqlApi> apiStore) {
         StorageFactory storageFactory = new StorageFactory(null, null) {
             @Override
             public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
                     TypeReference<Map<String, V>> typeReference) {
+                if ("appsync-apis.json".equals(fileName)) {
+                    return (AccountAwareStorageBackend<V>) apiStore;
+                }
+                if ("appsync-apikeys.json".equals(fileName) && apiKeyStoreOverride != null) {
+                    return (AccountAwareStorageBackend<V>) apiKeyStoreOverride;
+                }
                 return AccountAwareStorageBackend.inMemory("000000000000");
             }
         };
         Instance<RequestContext> requestContext = mock(Instance.class);
         schemaRegistry = mock(SchemaRegistry.class);
+        EmulatorConfig config = mock(EmulatorConfig.class);
+        when(config.effectiveBaseUrl()).thenReturn(baseUrl);
         return new AppSyncService(
                 storageFactory,
-                mock(EmulatorConfig.class),
+                config,
                 new RegionResolver("us-east-1", "000000000000"),
                 schemaRegistry,
                 mock(SchemaCreationWorker.class),

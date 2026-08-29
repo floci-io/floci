@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import org.jboss.logging.Logger;
 
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
@@ -320,8 +321,19 @@ final class CognitoAuthFlowHandler {
         } catch (Exception e) {
             throw new AwsException("InternalErrorException", "SECRET_HASH computation failed", 500);
         }
-        if (!expected.equals(provided)) {
+        if (!MessageDigest.isEqual(expected.getBytes(StandardCharsets.UTF_8),
+                provided.getBytes(StandardCharsets.UTF_8))) {
             throw new AwsException("NotAuthorizedException", "SECRET_HASH does not match", 400);
+        }
+    }
+
+    private String resolveToCanonicalUsername(UserPool pool, String username) {
+        try {
+            return service.adminGetUser(pool.getId(), username).getUsername();
+        } catch (AwsException e) {
+            LOG.debugv("Could not resolve USERNAME {0} in pool {1}: {2}",
+                    username, pool.getId(), e.getMessage());
+            return null;
         }
     }
 
@@ -448,7 +460,7 @@ final class CognitoAuthFlowHandler {
         }
 
         CustomAuthSession state =
-                new CustomAuthSession(pool.getId(), username, client.getClientId());
+                new CustomAuthSession(pool.getId(), user.getUsername(), client.getClientId());
         state.clientMetadata = clientMetadata == null ? Map.of() : clientMetadata;
 
         Map<String, Object> defineResp = defineAuthChallenge(pool, client, user, state);
@@ -466,7 +478,7 @@ final class CognitoAuthFlowHandler {
         state.currentChallengeName = challengeName;
 
         Map<String, String> publicParams = new HashMap<>();
-        publicParams.put("USERNAME", username);
+        publicParams.put("USERNAME", user.getUsername());
         for (Map.Entry<String, String> e : authParameters.entrySet()) {
             if (!"USERNAME".equals(e.getKey()) && !"SRP_A".equals(e.getKey())) {
                 publicParams.putIfAbsent(e.getKey(), e.getValue());
@@ -475,7 +487,7 @@ final class CognitoAuthFlowHandler {
         applyCreateResponse(state, challengeName,
                 createAuthChallenge(pool, client, user, state, challengeName), publicParams);
 
-        String sessionToken = buildSessionToken(pool.getId(), username, client.getClientId());
+        String sessionToken = buildSessionToken(pool.getId(), user.getUsername(), client.getClientId());
         customAuthSessions.put(sessionToken, state);
 
         Map<String, Object> result = new HashMap<>();
@@ -503,9 +515,14 @@ final class CognitoAuthFlowHandler {
         if (answer == null || answer.isBlank()) {
             throw new AwsException("InvalidParameterException", "ANSWER is required", 400);
         }
-        validateSecretHash(client, responses, state.username);
+
+        String suppliedUsername = responses.getOrDefault("USERNAME", state.username);
+        validateSecretHash(client, responses, suppliedUsername);
 
         CognitoUser user = service.adminGetUser(pool.getId(), state.username);
+        if (!user.getUsername().equals(resolveToCanonicalUsername(pool, suppliedUsername))) {
+            throw new AwsException("NotAuthorizedException", "Invalid session for the user.", 400);
+        }
 
         boolean answerCorrect = verifyAuthChallenge(pool, client, user, state, answer);
         if (!state.history.isEmpty()) {

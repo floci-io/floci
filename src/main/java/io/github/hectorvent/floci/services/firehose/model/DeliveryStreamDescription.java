@@ -40,6 +40,13 @@ public class DeliveryStreamDescription {
     @JsonProperty("Tags")
     private List<Tag> tags = new ArrayList<>();
 
+    // Field-level default so streams persisted before this field existed deserialize to
+    // the AWS-shaped DISABLED configuration instead of null (Jackson only overwrites it
+    // when the stored JSON actually carries the property).
+    @JsonProperty("DeliveryStreamEncryptionConfiguration")
+    private DeliveryStreamEncryptionConfiguration deliveryStreamEncryptionConfiguration =
+            DeliveryStreamEncryptionConfiguration.disabled();
+
     public DeliveryStreamDescription() {}
     public DeliveryStreamDescription(String name, String arn, S3Destination s3) {
         this(name, arn, s3, null);
@@ -54,6 +61,7 @@ public class DeliveryStreamDescription {
             s3.applyDefaults();
         }
         this.destinations = List.of(new Destination(s3));
+        this.deliveryStreamEncryptionConfiguration = DeliveryStreamEncryptionConfiguration.disabled();
         if (kinesisStreamSource != null) {
             this.source = new Source(kinesisStreamSource);
         }
@@ -80,6 +88,12 @@ public class DeliveryStreamDescription {
     public void setLastUpdateTimestamp(Instant lastUpdateTimestamp) { this.lastUpdateTimestamp = lastUpdateTimestamp; }
     public List<Destination> getDestinations() { return destinations; }
     public void setDestinations(List<Destination> destinations) { this.destinations = destinations; }
+    public DeliveryStreamEncryptionConfiguration getDeliveryStreamEncryptionConfiguration() {
+        return deliveryStreamEncryptionConfiguration;
+    }
+    public void setDeliveryStreamEncryptionConfiguration(DeliveryStreamEncryptionConfiguration configuration) {
+        this.deliveryStreamEncryptionConfiguration = configuration;
+    }
     public Source getSource() { return source; }
     public void setSource(Source source) { this.source = source; }
 
@@ -364,5 +378,36 @@ public class DeliveryStreamDescription {
         public void setKey(String key) { this.key = key; }
         public String getValue() { return value; }
         public void setValue(String value) { this.value = value; }
+    }
+
+    @RegisterForReflection
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public static class DeliveryStreamEncryptionConfiguration {
+        @JsonProperty("KeyType")
+        private String keyType;
+        @JsonProperty("KeyARN")
+        private String keyArn;
+        @JsonProperty("Status")
+        private String status;
+
+        public DeliveryStreamEncryptionConfiguration() {}
+
+        public DeliveryStreamEncryptionConfiguration(String keyType, String keyArn, String status) {
+            this.keyType = keyType;
+            this.keyArn = keyArn;
+            this.status = status;
+        }
+
+        public static DeliveryStreamEncryptionConfiguration disabled() {
+            return new DeliveryStreamEncryptionConfiguration("AWS_OWNED_CMK", null, "DISABLED");
+        }
+
+        public String getKeyType() { return keyType; }
+        public void setKeyType(String keyType) { this.keyType = keyType; }
+        public String getKeyArn() { return keyArn; }
+        public void setKeyArn(String keyArn) { this.keyArn = keyArn; }
+        public String getStatus() { return status; }
+        public void setStatus(String status) { this.status = status; }
     }
 }

@@ -1,0 +1,95 @@
+# Populates the buildx layer caches that `compatibility.yml`'s test legs read.
+#
+# Why this exists: GitHub Actions caches are ref-scoped. A pull_request run can
+# READ the base branch's caches but its WRITES land in refs/pull/N/merge, private
+# to that PR. `compatibility.yml` is pull_request-only, so before this workflow
+# `main` produced no buildx cache at all: every PR built all eight test images
+# cold and wrote its own ~3 GB copy that no other PR could ever read. Four
+# concurrent PRs pushed the repo to 13.2 GB against GitHub's 10 GB limit, so
+# entries were evicted between a PR's own runs and the sdk-test-java image build
+# swung between 29s (warm) and 211s (cold) at random, on the compat critical path.
+#
+# Producing the caches here, on main, means every PR gets a warm read on its
+# FIRST run, and the legs no longer write (see compatibility.yml). Keep this
+# workflow's scope names identical to the ones the legs read from.
+name: Warm Compat Caches
+
+on:
+  push:
+    branches: [main]
+    # The dependency-bearing inputs only — the files an image's *expensive* layer
+    # is keyed on. Test sources deliberately do not trigger a re-warm where they
+    # sit in a later layer than the dependency install, so a PR still gets the
+    # costly layers from a source-stale cache. Narrow on purpose: 182 commits
+    # touched compatibility-tests/ in the last 90 days but only 31 touched a
+    # dependency manifest, and each warm costs eight arm jobs.
+    paths:
+      - 'compatibility-tests/*/Dockerfile'
+      - 'compatibility-tests/*/pom.xml'            # sdk-test-java
+      - 'compatibility-tests/*/requirements.txt'   # sdk-test-python
+      - 'compatibility-tests/*/package*.json'      # sdk-test-node, compat-cdk
+      # sdk-test-go is the exception: its Dockerfile does `COPY . .` *before*
+      # `go mod init && go mod tidy && go mod download`, so its dependency layer
+      # is invalidated by any source change and no manifest filter can track it.
+      # (go.sum is gitignored, so filtering on it would match nothing.) Only 8
+      # commits in 90 days touch this directory, so watching all of it is cheap.
+      - 'compatibility-tests/sdk-test-go/**'
+      # No *.tf entry: compat-terraform and compat-opentofu resolve nothing at
+      # build time — `COPY . .` is their final layer, after the yum install and
+      # bats clones — so .tf changes invalidate no cached work.
+      - '.github/workflows/warm-compat-caches.yml'
+  schedule:
+    # Safety net. Actions evicts caches at 7 days idle and LRU-evicts over the
+    # 10 GB budget; without a periodic producer an evicted main cache would
+    # leave every PR cold indefinitely, and silently.
+    - cron: '0 6 * * 1'
+  workflow_dispatch:        # Allow a manual re-warm after a cache eviction
+
+permissions:
+  contents: read
+
+concurrency:
+  # A newer main commit supersedes an in-flight warm; never run two at once.
+  # A cancelled run can leave scopes warmed from mixed commits, which is harmless
+  # — each scope is an independently valid cache, and the next warm reconciles it.
+  group: warm-compat-caches
+  cancel-in-progress: true
+
+jobs:
+  warm:
+    name: warm / ${{ matrix.test }}
+    # Must match the legs' runner: the legs run on arm64, and an x64 build would
+    # write useless x64 layers into the arm64 cache scope they read.
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        test:
+          - sdk-test-node
+          - sdk-test-python
+          - sdk-test-java
+          - sdk-test-go
+          - sdk-test-awscli
+          - compat-cdk
+          - compat-terraform
+          - compat-opentofu
+
+    steps:
+      - name: Checkout repository
+        # SHA-pinned rather than @v7.0.1: this workflow runs on main and writes
+        # the caches every PR build consumes, so a moved upstream tag would change
+        # trusted code with no diff in this repo. Matches compatibility.yml:29.
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: compatibility-tests
+
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Build and cache test image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: compatibility-tests/${{ matrix.test }}
+          # No `load:` — the image itself is discarded; only the cache is wanted.
+          cache-from: type=gha,scope=${{ matrix.test }}
+          cache-to: type=gha,scope=${{ matrix.test }},mode=max

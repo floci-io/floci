@@ -7,11 +7,13 @@ on:
     paths:
       - 'src/**'
       - 'pom.xml'
+      - '.github/ci/**'
       - '.github/workflows/ci.yml'
   pull_request:
     paths:
       - 'src/**'
       - 'pom.xml'
+      - '.github/ci/**'
       - '.github/workflows/ci.yml'
 
 permissions:
@@ -21,11 +23,21 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # Hardcoded on purpose: strategy.job-total counts EVERY matrix job, so adding an
+  # unrelated matrix entry later would change the modulus and silently leave part
+  # of the suite running in no shard. Keep in sync with the matrix below.
+  SHARD_TOTAL: 4
+
 jobs:
   test:
-    name: Build and Test
+    name: Build and Test (shard ${{ matrix.shard }})
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v7.0.1
 
@@ -33,7 +45,115 @@ jobs:
         with:
           java-version: '25'
           distribution: 'temurin'
-          cache: maven
+          # no `cache: maven` - broken in this release line (restore misses, save
+          # fails with Path Validation Error); explicit cache steps below.
+
+      # Restore on every shard; save from shard 1 only. With a combined cache step
+      # all four shards would race the same save key: one wins, three spend
+      # post-job time reserving-then-failing plus redundant multi-hundred-MB uploads.
+      - uses: actions/cache/restore@v6.1.0
+        with:
+          path: ~/.m2/repository
+          key: maven-${{ runner.os }}-${{ hashFiles('pom.xml') }}
+          restore-keys: |
+            maven-${{ runner.os }}-
+
+      - name: Prefetch this shard's Docker images (background)
+        run: .github/ci/prefetch-images.sh shard.txt || true
+
+      - name: Compile
+        run: ./mvnw test-compile -B
+
+      - name: Compute shard include list
+        run: |
+          cd target/test-classes
+          find . \( -name '*Test.class' -o -name 'Test*.class' \
+                    -o -name '*Tests.class' -o -name '*TestCase.class' \) \
+                  ! -name '*$*' \
+            | sed 's|^\./||; s|\.class$||' | LC_ALL=C sort \
+            > "$GITHUB_WORKSPACE/all-classes.txt"
+          cd "$GITHUB_WORKSPACE"
+          .github/ci/partition.sh all-classes.txt "$SHARD_TOTAL" "${{ matrix.shard }}" > shard.txt
+          # An empty includesFile makes surefire fall back to its default includes
+          # and run the ENTIRE suite into this shard's timeout.
+          test -s shard.txt
+          echo "shard ${{ matrix.shard }}/$SHARD_TOTAL: $(wc -l < shard.txt) classes"
+          .github/ci/prefetch-images.sh shard.txt || true
 
       - name: Run tests
-        run: mvn test -B
+        run: >
+          ./mvnw surefire:test -B
+          -Dsurefire.includesFile="$GITHUB_WORKSPACE/shard.txt"
+          -Dsurefire.failIfNoTests=true
+
+      # Save from main only, and from shard 1 only. Actions caches are ref-scoped:
+      # a pull_request run's write lands in refs/pull/N/merge where no other PR can
+      # read it, so every open PR was storing a ~201 MB byte-identical duplicate of
+      # the copy main already publishes under this exact key — 1.61 GB across 8 PRs
+      # when measured, against a 10 GB repo budget. PRs restore main's copy instead
+      # (verified: four sampled PR runs all restored maven-Linux-a80d20aaec, the key
+      # main holds), and main gets ~15 qualifying pushes a day so it stays fresh.
+      #
+      # Trade-off: a PR that edits pom.xml misses this exact key, falls back to the
+      # restore-keys prefix for the bulk, and re-downloads its delta on each re-run
+      # rather than caching it. pom.xml changed 21 times in 30 days, so that is a
+      # small minority of PRs paying a small delta.
+      - uses: actions/cache/save@v6.1.0
+        if: always() && matrix.shard == 1 && github.event_name == 'push'
+        with:
+          path: ~/.m2/repository
+          key: maven-${{ runner.os }}-${{ hashFiles('pom.xml') }}
+
+      - name: Upload shard manifest and results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: shard-${{ matrix.shard }}
+          path: |
+            shard.txt
+            all-classes.txt
+            target/surefire-reports/
+          if-no-files-found: error
+
+  # The enforced completeness gate: fails on any shard failure, any class assigned
+  # to two shards, or any class assigned to none - checked against the same
+  # commit's own class list, never a hardcoded count. Intended to become the one
+  # required status check; its name stays stable across re-sharding.
+  ci-summary:
+    name: CI summary
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: test
+    if: always()
+    steps:
+      - name: Fail if any shard failed
+        if: needs.test.result != 'success'
+        run: |
+          echo "shard matrix concluded: ${{ needs.test.result }}"
+          exit 1
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: shard-*
+          path: shards
+
+      - name: Verify shard partition is disjoint and complete
+        run: |
+          set -euo pipefail
+          ls -d shards/shard-*
+          ref=$(ls -d shards/shard-* | head -1)
+          for d in shards/shard-*; do
+            cmp -s "$ref/all-classes.txt" "$d/all-classes.txt" \
+              || { echo "::error::$d computed a different class list than $ref"; exit 1; }
+          done
+          dups=$(cat shards/shard-*/shard.txt | LC_ALL=C sort | uniq -d)
+          [ -z "$dups" ] || { echo "::error::classes assigned to more than one shard:"; echo "$dups"; exit 1; }
+          cat shards/shard-*/shard.txt | LC_ALL=C sort > union.txt
+          cmp -s union.txt "$ref/all-classes.txt" \
+            || { echo "::error::shard union differs from the full class list:"; diff union.txt "$ref/all-classes.txt" | head -50; exit 1; }
+          echo "partition verified: $(wc -l < union.txt) classes across $(ls -d shards/shard-* | wc -l) shards"
+
+      - name: Test summary
+        uses: test-summary/action@37b508cfee6d4d080eedd00b5bb240a6a784a6a5 # v2
+        with:
+          paths: 'shards/shard-*/target/surefire-reports/TEST-*.xml,shards/shard-*/surefire-reports/TEST-*.xml'

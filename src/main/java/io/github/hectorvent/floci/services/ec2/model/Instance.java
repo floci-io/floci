@@ -15,7 +15,7 @@ public class Instance {
 
     private String instanceId;
     private String imageId;
-    private InstanceState state;
+    private volatile InstanceState state;
     private String stateTransitionReason;
     private String instanceType;
     private Placement placement;

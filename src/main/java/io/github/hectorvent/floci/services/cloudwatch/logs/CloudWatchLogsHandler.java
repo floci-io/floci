@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.LogEvent;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.LogGroup;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.LogStream;
+import io.github.hectorvent.floci.services.cloudwatch.logs.model.ResourcePolicy;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.SubscriptionFilter;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -55,6 +56,10 @@ public class CloudWatchLogsHandler {
             case "PutSubscriptionFilter" -> handlePutSubscriptionFilter(request, region);
             case "DescribeSubscriptionFilters" -> handleDescribeSubscriptionFilters(request, region);
             case "DeleteSubscriptionFilter" -> handleDeleteSubscriptionFilter(request, region);
+            case "AssociateKmsKey" -> handleAssociateKmsKey(request, region);
+            case "DisassociateKmsKey" -> handleDisassociateKmsKey(request, region);
+            case "PutResourcePolicy" -> handlePutResourcePolicy(request, region);
+            case "DescribeResourcePolicies" -> handleDescribeResourcePolicies(region);
             case "GetDataProtectionPolicy" -> handleGetDataProtectionPolicy(request, region);
             case "StartQuery" -> handleStartQuery(request, region);
             case "GetQueryResults" -> handleGetQueryResults(request, region);
@@ -71,7 +76,8 @@ public class CloudWatchLogsHandler {
                 ? request.path("retentionInDays").asInt() : null;
         boolean deletionProtectionEnabled = request.path("deletionProtectionEnabled").asBoolean(false);
         Map<String, String> tags = extractTags(request.path("tags"));
-        logsService.createLogGroup(name, retentionInDays, tags, deletionProtectionEnabled, region);
+        String kmsKeyId = request.path("kmsKeyId").asText(null);
+        logsService.createLogGroup(name, retentionInDays, tags, deletionProtectionEnabled, kmsKeyId, region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
@@ -110,12 +116,48 @@ public class CloudWatchLogsHandler {
                 node.put("retentionInDays", g.getRetentionInDays());
             }
             node.put("deletionProtectionEnabled", g.isDeletionProtectionEnabled());
+            if (g.getKmsKeyId() != null) {
+                node.put("kmsKeyId", g.getKmsKeyId());
+            }
             node.put("storedBytes", 0);
             node.put("metricFilterCount", 0);
             groupsArray.add(node);
         }
         response.set("logGroups", groupsArray);
         return Response.ok(response).build();
+    }
+
+    private Response handlePutResourcePolicy(JsonNode request, String region) {
+        String policyName = request.path("policyName").asText(null);
+        if (policyName == null || policyName.isBlank()) {
+            throw new AwsException("InvalidParameterException", "policyName is required.", 400);
+        }
+        String policyDocument = request.path("policyDocument").asText(null);
+        if (policyDocument == null || policyDocument.isBlank()) {
+            throw new AwsException("InvalidParameterException", "policyDocument is required.", 400);
+        }
+
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("resourcePolicy", buildResourcePolicy(
+                logsService.putResourcePolicy(policyName, policyDocument, region)));
+        return Response.ok(response).build();
+    }
+
+    private Response handleDescribeResourcePolicies(String region) {
+        ArrayNode policies = objectMapper.createArrayNode();
+        logsService.describeResourcePolicies(region).forEach(
+                policy -> policies.add(buildResourcePolicy(policy)));
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("resourcePolicies", policies);
+        return Response.ok(response).build();
+    }
+
+    private ObjectNode buildResourcePolicy(ResourcePolicy policy) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("policyName", policy.getPolicyName());
+        node.put("policyDocument", policy.getPolicyDocument());
+        node.put("lastUpdatedTime", policy.getLastUpdatedTime());
+        return node;
     }
 
     private Response handleCreateLogStream(JsonNode request, String region) {
@@ -173,6 +215,7 @@ public class CloudWatchLogsHandler {
         String streamName = request.path("logStreamName").asText();
 
         List<Map<String, Object>> events = new ArrayList<>();
+        requireListSize(request.path("logEvents"), "logEvents", 1, 10000);
         request.path("logEvents").forEach(evt -> {
             Map<String, Object> event = new HashMap<>();
             event.put("timestamp", evt.path("timestamp").asLong());
@@ -214,6 +257,9 @@ public class CloudWatchLogsHandler {
         String nextToken = request.has("nextToken") ? request.path("nextToken").asText(null) : null;
 
         List<String> streamNames = new ArrayList<>();
+        if (request.hasNonNull("logStreamNames")) {
+            requireListSize(request.path("logStreamNames"), "logStreamNames", 1, 100);
+        }
         request.path("logStreamNames").forEach(n -> streamNames.add(resolveLogStreamName(n.asText(null))));
 
         CloudWatchLogsService.FilteredLogEventsResult result =
@@ -316,6 +362,52 @@ public class CloudWatchLogsHandler {
         return Response.ok(response).build();
     }
 
+    private Response handleAssociateKmsKey(JsonNode request, String region) {
+        String groupName = resolveKmsTargetLogGroupName(request);
+        String kmsKeyId = request.path("kmsKeyId").asText(null);
+        logsService.associateKmsKey(groupName, kmsKeyId, region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleDisassociateKmsKey(JsonNode request, String region) {
+        logsService.disassociateKmsKey(resolveKmsTargetLogGroupName(request), region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    /**
+     * Associate/DisassociateKmsKey are the odd ones out in the Logs API: their ARN
+     * alternative is {@code resourceIdentifier}, not the {@code logGroupIdentifier}
+     * the query operations take. AWS requires exactly one of logGroupName or
+     * resourceIdentifier — neither, or both, is an InvalidParameterException.
+     */
+    private String resolveKmsTargetLogGroupName(JsonNode request) {
+        // A present-but-blank member counts as PRESENT: the model pins both fields to
+        // min length 1, so blank never silently degrades to "absent" and hands the
+        // mutation to the other identifier.
+        boolean hasName = request.hasNonNull("logGroupName");
+        boolean hasResourceIdentifier = request.hasNonNull("resourceIdentifier");
+        if (hasName == hasResourceIdentifier) {
+            throw new AwsException("InvalidParameterException",
+                    "Exactly one of logGroupName or resourceIdentifier is required.", 400);
+        }
+        String value = request.path(hasName ? "logGroupName" : "resourceIdentifier").asText();
+        if (value.isBlank()) {
+            throw new AwsException("InvalidParameterException",
+                    (hasName ? "logGroupName" : "resourceIdentifier") + " must not be blank.", 400);
+        }
+        // resourceIdentifier also models the account-wide "arn:...:query-result:*" form,
+        // which targets encryption of future GetQueryResults output rather than a log
+        // group. That is a genuinely separate feature Floci does not implement; reject it
+        // explicitly rather than letting extractLogGroupNameFromArn (which only recognizes
+        // :log-group:) pass it through unchanged and turn it into a misleading
+        // ResourceNotFoundException naming a log group the caller never specified.
+        if (!hasName && value.contains(":query-result:")) {
+            throw new AwsException("InvalidParameterException",
+                    "resourceIdentifier of the query-result form is not supported.", 400);
+        }
+        return extractLogGroupNameFromArn(value);
+    }
+
     private Response handlePutRetentionPolicy(JsonNode request, String region) {
         String groupName = request.path("logGroupName").asText();
         int days = request.path("retentionInDays").asInt();
@@ -390,6 +482,10 @@ public class CloudWatchLogsHandler {
         String filterPattern = request.path("filterPattern").asText();
         String destinationArn = request.path("destinationArn").asText();
         String distribution = request.has("distribution") ? request.path("distribution").asText(null) : null;
+        if (distribution != null && !"Random".equals(distribution) && !"ByLogStream".equals(distribution)) {
+            throw new AwsException("InvalidParameterException",
+                    "distribution must be Random or ByLogStream.", 400);
+        }
 
         logsService.putSubscriptionFilter(logGroupName, filterName, filterPattern, destinationArn, distribution, region);
         return Response.ok(objectMapper.createObjectNode()).build();
@@ -515,4 +611,13 @@ public class CloudWatchLogsHandler {
         return tags;
     }
 
+    /** Enforces a modeled list min/max with the InvalidParameterException these operations model. */
+    private static void requireListSize(JsonNode list,
+                                        String member, int min, int max) {
+        int size = list == null || list.isNull() || !list.isArray() ? 0 : list.size();
+        if (size < min || size > max) {
+            throw new AwsException("InvalidParameterException",
+                    member + " must contain between " + min + " and " + max + " entries.", 400);
+        }
+    }
 }

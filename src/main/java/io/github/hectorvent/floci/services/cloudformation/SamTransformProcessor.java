@@ -210,6 +210,18 @@ class SamTransformProcessor {
         apiProps.set("Name", !name.isMissingNode() ? name.deepCopy() : objectMapper.getNodeFactory().textNode(logicalId));
         apiProps.put("ProtocolType", "HTTP");
         copyIfPresent(properties, "Description", apiProps);
+
+        // Preserve inline OpenAPI route definitions so the ApiGatewayV2 provisioner can
+        // materialize the routes and integrations declared by SAM DefinitionBody.
+        JsonNode definitionBody = properties.path("DefinitionBody");
+        if (!definitionBody.isMissingNode() && !definitionBody.isNull()) {
+            apiProps.set("Body", definitionBody.deepCopy());
+        } else {
+            ObjectNode bodyS3Location = buildHttpApiBodyS3Location(properties.path("DefinitionUri"));
+            if (bodyS3Location != null) {
+                apiProps.set("BodyS3Location", bodyS3Location);
+            }
+        }
         apiDef.set("Properties", apiProps);
         resources.set(logicalId, apiDef);
 
@@ -247,8 +259,133 @@ class SamTransformProcessor {
             if (!logicalId.equals(route.apiLogicalId())) {
                 continue;
             }
+            JsonNode defaultAuthorizer = defaultAuthorizerName == null
+                    ? objectMapper.missingNode() : authorizers.path(defaultAuthorizerName);
+            if (mergeHttpApiRouteIntoDefinitionBody(apiProps.path("Body"), route,
+                    defaultAuthorizerName, defaultAuthorizer)) {
+                expandHttpApiPermission(logicalId, route, resources);
+                continue;
+            }
             expandHttpApiRoute(logicalId, route, defaultAuthorizerLogicalId, resources);
         }
+    }
+
+    /**
+     * SAM merges a Function HttpApi event into an existing OpenAPI operation instead of emitting a
+     * second route with the same key. Preserve the operation's documentation while adding the
+     * Lambda integration only when the body does not already provide one.
+     */
+    private boolean mergeHttpApiRouteIntoDefinitionBody(JsonNode definitionBody, HttpApiRoute route,
+                                                         String defaultAuthorizerName,
+                                                         JsonNode defaultAuthorizer) {
+        JsonNode pathItem = definitionBody.path("paths").path(route.path());
+        if (!pathItem.isObject()) {
+            return false;
+        }
+        String operationName = "ANY".equalsIgnoreCase(route.httpMethod())
+                ? "x-amazon-apigateway-any-method" : route.httpMethod();
+        JsonNode operation = fieldIgnoreCase(pathItem, operationName);
+        if (!operation.isObject()) {
+            return false;
+        }
+        ObjectNode operationObject = (ObjectNode) operation;
+        if (!operationObject.path("x-amazon-apigateway-integration").isObject()) {
+            ObjectNode integration = objectMapper.createObjectNode();
+            integration.put("type", "aws_proxy");
+            integration.put("httpMethod", "POST");
+            integration.put("payloadFormatVersion", "2.0");
+            integration.set("uri", lambdaInvokeUri(route.functionLogicalId()));
+            operationObject.set("x-amazon-apigateway-integration", integration);
+        }
+        applyMergedHttpApiRouteAuthorization(definitionBody, operationObject, route,
+                defaultAuthorizerName, defaultAuthorizer);
+        return true;
+    }
+
+    /**
+     * The SAM translator mutates matching DefinitionBody operations with both the Function event's
+     * integration and its effective authorization. Without the latter, merging an authenticated
+     * event would silently expose the route because the API Gateway V2 body importer defaults the
+     * operation to {@code NONE}.
+     */
+    private void applyMergedHttpApiRouteAuthorization(JsonNode definitionBody, ObjectNode operation,
+                                                       HttpApiRoute route, String defaultAuthorizerName,
+                                                       JsonNode defaultAuthorizer) {
+        if (route.noAuthorizer()) {
+            // SAM represents this opt-out with a synthetic NONE requirement. An empty operation-level
+            // OpenAPI security array is the standard equivalent and is understood by our body importer.
+            operation.set("security", objectMapper.createArrayNode());
+            return;
+        }
+        if (defaultAuthorizerName == null || !defaultAuthorizer.isObject()
+                || hasNonEmptySecurity(operation.get("security"))) {
+            return;
+        }
+
+        // AWS SAM deliberately treats an absent, null, or empty operation security value as unset
+        // when applying DefaultAuthorizer. A public per-event override is represented separately by
+        // Authorizer: NONE and is handled above. Keep this truthiness rule aligned with
+        // OpenApiEditor.set_path_default_authorizer:
+        // https://github.com/aws/serverless-application-model/blob/develop/samtranslator/open_api/open_api.py
+        addOpenApiJwtAuthorizer(definitionBody, defaultAuthorizerName, defaultAuthorizer);
+        ObjectNode requirement = objectMapper.createObjectNode();
+        JsonNode configuredScopes = defaultAuthorizer.path("AuthorizationScopes");
+        requirement.set(defaultAuthorizerName, configuredScopes.isArray()
+                ? configuredScopes.deepCopy() : objectMapper.createArrayNode());
+        ArrayNode security = objectMapper.createArrayNode();
+        security.add(requirement);
+        operation.set("security", security);
+    }
+
+    private static boolean hasNonEmptySecurity(JsonNode security) {
+        return security != null && !security.isNull()
+                && (!security.isContainerNode() || security.size() > 0);
+    }
+
+    /**
+     * Emits the same JWT security-scheme shape as
+     * {@code ApiGatewayV2Authorizer.generate_openapi} in AWS SAM. The ApiGatewayV2 body provisioner
+     * materializes this scheme first, then binds the operation's security requirement to it.
+     */
+    private void addOpenApiJwtAuthorizer(JsonNode definitionBody, String authorizerName,
+                                         JsonNode samAuthorizer) {
+        ObjectNode body = (ObjectNode) definitionBody;
+        ObjectNode components = objectChild(body, "components", "DefinitionBody.components");
+        ObjectNode schemes = objectChild(components, "securitySchemes",
+                "DefinitionBody.components.securitySchemes");
+
+        ObjectNode scheme = objectMapper.createObjectNode();
+        scheme.put("type", "oauth2");
+        ObjectNode extension = objectMapper.createObjectNode();
+        extension.set("identitySource", resolveIdentitySource(authorizerName, samAuthorizer));
+        extension.put("type", "jwt");
+
+        JsonNode samJwt = samAuthorizer.path("JwtConfiguration");
+        ObjectNode jwt = objectMapper.createObjectNode();
+        JsonNode issuer = fieldIgnoreCase(samJwt, "issuer");
+        if (!issuer.isMissingNode()) {
+            jwt.set("issuer", issuer.deepCopy());
+        }
+        JsonNode audience = fieldIgnoreCase(samJwt, "audience");
+        if (audience.isArray()) {
+            jwt.set("audience", audience.deepCopy());
+        }
+        extension.set("jwtConfiguration", jwt);
+        scheme.set("x-amazon-apigateway-authorizer", extension);
+        schemes.set(authorizerName, scheme);
+    }
+
+    private ObjectNode objectChild(ObjectNode parent, String fieldName, String fieldPath) {
+        JsonNode existing = parent.get(fieldName);
+        if (existing == null || existing.isNull()) {
+            ObjectNode created = objectMapper.createObjectNode();
+            parent.set(fieldName, created);
+            return created;
+        }
+        if (!existing.isObject()) {
+            throw new AwsException("ValidationError", fieldPath + " must be an object", 400);
+        }
+        return (ObjectNode) existing;
     }
 
     private ObjectNode buildHttpApiAuthorizer(String apiLogicalId, String authorizerName, JsonNode samAuthorizer) {
@@ -362,6 +499,10 @@ class SamTransformProcessor {
         routeDef.set("Properties", routeProps);
         resources.set(routeLogicalId, routeDef);
 
+        expandHttpApiPermission(apiLogicalId, route, resources);
+    }
+
+    private void expandHttpApiPermission(String apiLogicalId, HttpApiRoute route, ObjectNode resources) {
         String permissionLogicalId = uniqueId(
                 route.functionLogicalId() + "HttpApiPermission" + sanitize(apiLogicalId), resources);
         ObjectNode perm = objectMapper.createObjectNode();
@@ -947,6 +1088,41 @@ class SamTransformProcessor {
         stageDeps.add(deploymentLogicalId);
         stageDef.set("DependsOn", stageDeps);
         resources.set(stageLogicalId, stageDef);
+    }
+
+    /**
+     * {@code DefinitionUri} is SAM's S3-backed OpenAPI source. ApiGatewayV2 accepts the same
+     * source through {@code BodyS3Location}, with the S3 URI split into its bucket and key.
+     */
+    private ObjectNode buildHttpApiBodyS3Location(JsonNode definitionUri) {
+        if (definitionUri == null || definitionUri.isMissingNode() || definitionUri.isNull()) {
+            return null;
+        }
+        ObjectNode location = objectMapper.createObjectNode();
+        if (definitionUri.isTextual()) {
+            String uri = definitionUri.asText();
+            if (!uri.startsWith("s3://")) {
+                return null;
+            }
+            String withoutScheme = uri.substring("s3://".length());
+            int slash = withoutScheme.indexOf('/');
+            if (slash <= 0 || slash == withoutScheme.length() - 1) {
+                return null;
+            }
+            location.put("Bucket", withoutScheme.substring(0, slash));
+            location.put("Key", withoutScheme.substring(slash + 1));
+            return location;
+        }
+        if (definitionUri.isObject()) {
+            copyIfPresent(definitionUri, "Bucket", location);
+            copyIfPresent(definitionUri, "Key", location);
+            copyIfPresent(definitionUri, "Version", location);
+            // An intrinsic expression (for example Ref or Fn::Sub) cannot be split until the
+            // CloudFormation engine resolves it during provisioning. Preserve it as-is instead
+            // of silently dropping the HttpApi definition and its routes.
+            return location.has("Bucket") && location.has("Key") ? location : definitionUri.deepCopy();
+        }
+        return null;
     }
 
     private void copyIfPresent(JsonNode source, String field, ObjectNode target) {

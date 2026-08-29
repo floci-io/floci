@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.LaunchedContainerAwsEnv;
+import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.ecs.model.Container;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.ContainerOverride;
@@ -60,6 +61,7 @@ public class EcsContainerManager {
     private final LaunchedContainerAwsEnv awsEnv;
     private final SsmService ssmService;
     private final SecretsManagerService secretsManagerService;
+    private final EcrRegistryManager ecrRegistryManager;
 
     @Inject
     public EcsContainerManager(ContainerBuilder containerBuilder,
@@ -70,7 +72,8 @@ public class EcsContainerManager {
                                RegionResolver regionResolver,
                                LaunchedContainerAwsEnv awsEnv,
                                SsmService ssmService,
-                               SecretsManagerService secretsManagerService) {
+                               SecretsManagerService secretsManagerService,
+                               EcrRegistryManager ecrRegistryManager) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.logStreamer = logStreamer;
@@ -80,6 +83,7 @@ public class EcsContainerManager {
         this.awsEnv = awsEnv;
         this.ssmService = ssmService;
         this.secretsManagerService = secretsManagerService;
+        this.ecrRegistryManager = ecrRegistryManager;
     }
 
     /**
@@ -114,8 +118,11 @@ public class EcsContainerManager {
 
         Map<String, ContainerOverride> overridesByName = overridesByName(containerOverrides);
         Map<ContainerDefinition, List<String>> envVarsByContainer = new LinkedHashMap<>();
+        // Resolved before any container is created, so a registry-startup failure can't leak one already started.
+        Map<ContainerDefinition, String> imagesByContainer = new LinkedHashMap<>();
         for (ContainerDefinition def : taskDef.getContainerDefinitions()) {
             envVarsByContainer.put(def, buildEnvVars(def, overridesByName.get(def.getName()), region));
+            imagesByContainer.put(def, ecrRegistryManager.rewriteImageUri(def.getImage()));
         }
 
         for (ContainerDefinition def : taskDef.getContainerDefinitions()) {
@@ -126,7 +133,7 @@ public class EcsContainerManager {
             ContainerOverride override = overridesByName.get(def.getName());
 
             // Build container spec
-            ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(def.getImage())
+            ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(imagesByContainer.get(def))
                     .withName(containerName)
                     .withEnv(envVarsByContainer.get(def))
                     .withDockerNetwork(config.services().ecs().dockerNetwork())
@@ -136,7 +143,9 @@ public class EcsContainerManager {
                     // own loopback.
                     .withHostDockerInternalOnLinux()
                     .withEmbeddedDns()
-                    .withLogRotation();
+                    .withLogRotation()
+                    .withLabels(ContainerStorageHelper.resourceIdentityLabels(
+                            "ecs", taskId, regionResolver.getAccountId(), region));
 
             // Add memory limit if specified
             if (def.getMemory() != null) {

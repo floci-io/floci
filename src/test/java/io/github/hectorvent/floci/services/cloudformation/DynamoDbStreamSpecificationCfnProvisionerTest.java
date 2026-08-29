@@ -53,7 +53,7 @@ class DynamoDbStreamSpecificationCfnProvisionerTest {
                 null, null, null, dynamoDbService, null, null, null, null, null, null,
                 null, null, null, null, null, null, mapper, null, null, null, null, null,
                 null, null, null, null, null, null, null, null, null, null, null,
-                new CloudFormationResourceRegistry(List.of()));
+                new CloudFormationResourceRegistry(List.of()), null);
 
         TableDefinition created = new TableDefinition();
         created.setTableName(TABLE);

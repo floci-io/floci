@@ -101,6 +101,7 @@ class RedpandaManagerTest {
 
         lenient().when(logStreamer.generateLogStreamName(any())).thenReturn("log-stream");
         lenient().when(regionResolver.getDefaultRegion()).thenReturn("us-east-1");
+        lenient().when(regionResolver.getAccountId()).thenReturn("000000000000");
     }
 
     @AfterEach
@@ -205,6 +206,28 @@ class RedpandaManagerTest {
                 "container mode must not create host directories from inside the emulator container");
 
         verifyNoInteractions(portAllocator);
+    }
+
+    @Test
+    void startContainerLabelsContainerWithResourceIdentity() {
+        when(containerDetector.isRunningInContainer()).thenReturn(true);
+
+        ContainerInfo info = new ContainerInfo("container-456",
+                Map.of(KAFKA_PORT, new EndpointInfo("172.18.0.5", KAFKA_PORT)));
+        when(lifecycleManager.createAndStart(any())).thenReturn(info);
+
+        ArgumentCaptor<ContainerSpec> specCaptor = ArgumentCaptor.forClass(ContainerSpec.class);
+
+        manager.startContainer(newCluster());
+
+        verify(lifecycleManager).createAndStart(specCaptor.capture());
+        assertEquals(
+                Map.of("io.floci", "aws",
+                        "io.floci.service", "msk",
+                        "io.floci.resource-id", "test-cluster",
+                        "io.floci.account", "000000000000",
+                        "io.floci.region", "us-east-1"),
+                specCaptor.getValue().labels());
     }
 
     @Test

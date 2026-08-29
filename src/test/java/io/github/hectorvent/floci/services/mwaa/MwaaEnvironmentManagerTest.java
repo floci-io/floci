@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.mwaa;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
@@ -40,6 +41,7 @@ class MwaaEnvironmentManagerTest {
 
     private ContainerLifecycleManager lifecycleManager;
     private ContainerDetector containerDetector;
+    private RegionResolver regionResolver;
     private MwaaEnvironmentManager manager;
 
     @BeforeEach
@@ -77,7 +79,12 @@ class MwaaEnvironmentManagerTest {
                 "AWS_SECRET_ACCESS_KEY=test",
                 "AWS_ENDPOINT_URL=http://localhost:4566"));
 
-        manager = new MwaaEnvironmentManager(containerBuilder, lifecycleManager, containerDetector, config, awsEnv);
+        regionResolver = Mockito.mock(RegionResolver.class);
+        when(regionResolver.getAccountId()).thenReturn("000000000000");
+        when(regionResolver.getDefaultRegion()).thenReturn("us-east-1");
+
+        manager = new MwaaEnvironmentManager(containerBuilder, lifecycleManager, containerDetector, config,
+                awsEnv, regionResolver);
     }
 
     @SuppressWarnings("unchecked")
@@ -106,6 +113,19 @@ class MwaaEnvironmentManagerTest {
         assertEquals("172.18.0.5", environment.getAirflowInternalHost());
         assertEquals(8080, environment.getAirflowInternalPort());
         return captor.getValue();
+    }
+
+    @Test
+    void startAirflowContainerLabelsContainerWithResourceIdentity() {
+        ContainerSpec spec = startAirflowAndCaptureSpec(false);
+
+        assertEquals(Map.of(
+                "io.floci", "aws",
+                "io.floci.service", "mwaa",
+                "io.floci.resource-id", "my-env",
+                "io.floci.account", "000000000000",
+                "io.floci.region", "us-east-1"),
+                spec.labels());
     }
 
     @Test

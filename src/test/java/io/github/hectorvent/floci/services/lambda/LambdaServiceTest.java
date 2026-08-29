@@ -223,6 +223,68 @@ class LambdaServiceTest {
     }
 
     @Test
+    void updateFunctionConfigurationRejectsMalformedRoleArn() {
+        service.createFunction(REGION, baseRequest("update-role-function"));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.updateFunctionConfiguration(REGION, "update-role-function",
+                        Map.of("Role", "not-an-arn")));
+
+        assertEquals("InvalidParameterValueException", error.getErrorCode());
+        assertEquals("arn:aws:iam::000000000000:role/test-role",
+                service.getFunction(REGION, "update-role-function").getRole());
+    }
+
+    @Test
+    void updateFunctionConfigurationAcceptsValidRoleArn() {
+        service.createFunction(REGION, baseRequest("update-role-valid-function"));
+
+        LambdaFunction updated = service.updateFunctionConfiguration(REGION, "update-role-valid-function",
+                Map.of("Role", "arn:aws:iam::000000000000:role/new-role"));
+
+        assertEquals("arn:aws:iam::000000000000:role/new-role", updated.getRole());
+    }
+
+    @Test
+    void updateFunctionConfigurationRejectsHandlerWithWhitespace() {
+        service.createFunction(REGION, baseRequest("update-handler-function"));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.updateFunctionConfiguration(REGION, "update-handler-function",
+                        Map.of("Handler", "index handler")));
+
+        assertEquals("InvalidParameterValueException", error.getErrorCode());
+        assertEquals("index.handler",
+                service.getFunction(REGION, "update-handler-function").getHandler());
+    }
+
+    @Test
+    void updateFunctionConfigurationRejectsHandlerLongerThan128Chars() {
+        service.createFunction(REGION, baseRequest("update-handler-length-function"));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.updateFunctionConfiguration(REGION, "update-handler-length-function",
+                        Map.of("Handler", "h".repeat(129))));
+
+        assertEquals("InvalidParameterValueException", error.getErrorCode());
+    }
+
+    @Test
+    void updateFunctionConfigurationRejectsExplicitNullHandler() {
+        service.createFunction(REGION, baseRequest("update-handler-null-function"));
+        Map<String, Object> request = new java.util.HashMap<>();
+        request.put("Handler", null);
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.updateFunctionConfiguration(REGION, "update-handler-null-function", request));
+
+        assertEquals("InvalidParameterValueException", error.getErrorCode());
+        assertEquals("index.handler",
+                service.getFunction(REGION, "update-handler-null-function").getHandler(),
+                "an explicit null must not silently clear the handler");
+    }
+
+    @Test
     void createFunctionFailsWhenMissingFunctionName() {
         Map<String, Object> req = baseRequest("x");
         req.remove("FunctionName");
@@ -884,5 +946,50 @@ class LambdaServiceTest {
                 .collect(java.util.stream.Collectors.toSet());
 
         assertEquals(expectedStatementIds, actualStatementIds);
+    }
+
+    @Test
+    void publishVersionWaitsForAConcurrentHolderOfTheFunctionsConcurrencyLock() throws Exception {
+        // publishVersion reads codeLocalPath and persists a snapshot of it with no
+        // synchronization against extractZipCodeBytes's own reclaim-the-legacy-directory
+        // decision (which runs under this same per-function lock, e.g. from deleteFunction).
+        // Without publishVersion also taking that lock, a version could be published in the
+        // narrow window between that decision and the actual delete, persisting a snapshot
+        // that references a directory which is about to be removed as "unused". Proving
+        // publishVersion blocks on this lock closes that window regardless of the exact
+        // interleaving, rather than relying on timing to catch it in the act.
+        LambdaFunction fn = service.createFunction(REGION, baseRequest("lock-race-fn"));
+        Object lock = service.lockForConcurrencyOp(fn.getFunctionArn());
+
+        ExecutorService pool = Executors.newFixedThreadPool(1);
+        CountDownLatch acquired = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        Thread holder = new Thread(() -> {
+            synchronized (lock) {
+                acquired.countDown();
+                try {
+                    release.await();
+                } catch (InterruptedException ignored) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+        });
+        try {
+            holder.start();
+            assertTrue(acquired.await(2, java.util.concurrent.TimeUnit.SECONDS));
+
+            Future<LambdaFunction> publishFuture = pool.submit(
+                    () -> service.publishVersion(REGION, "lock-race-fn", null));
+            assertThrows(java.util.concurrent.TimeoutException.class,
+                    () -> publishFuture.get(200, java.util.concurrent.TimeUnit.MILLISECONDS),
+                    "publishVersion must block while another operation holds this function's lock");
+
+            release.countDown();
+            holder.join();
+            assertNotNull(publishFuture.get(2, java.util.concurrent.TimeUnit.SECONDS));
+        } finally {
+            release.countDown();
+            pool.shutdownNow();
+        }
     }
 }

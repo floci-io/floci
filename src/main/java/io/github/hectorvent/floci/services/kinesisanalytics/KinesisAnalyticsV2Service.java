@@ -27,6 +27,7 @@ import java.util.Objects;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Pattern;
 
 /**
  * Control plane for Managed Service for Apache Flink (Kinesis Analytics V2). Holds the
@@ -42,6 +43,9 @@ import java.util.concurrent.TimeUnit;
 public class KinesisAnalyticsV2Service {
 
     private static final Logger LOG = Logger.getLogger(KinesisAnalyticsV2Service.class);
+
+    // AWS: ApplicationName Length Constraints: 1-128, Pattern: [a-zA-Z0-9_.-]+
+    private static final Pattern APPLICATION_NAME = Pattern.compile("[a-zA-Z0-9_.-]{1,128}");
 
     // AWS: "the maximum number of user-defined application tags is 50" (the stated 200-tag ceiling
     // on the Tags/TagKeys shapes includes AWS-managed system tags, which floci does not model).
@@ -137,6 +141,11 @@ public class KinesisAnalyticsV2Service {
         if (applicationName == null || applicationName.isBlank()) {
             throw new AwsException("InvalidArgumentException", "ApplicationName is required", 400);
         }
+        if (!APPLICATION_NAME.matcher(applicationName).matches()) {
+            throw new AwsException("InvalidArgumentException",
+                    "ApplicationName '" + applicationName
+                            + "' does not match the required pattern [a-zA-Z0-9_.-]{1,128}", 400);
+        }
         if (runtimeEnvironment == null || runtimeEnvironment.isBlank()) {
             throw new AwsException("InvalidArgumentException", "RuntimeEnvironment is required", 400);
         }
@@ -197,6 +206,20 @@ public class KinesisAnalyticsV2Service {
 
     public FlinkApplication startApplication(String applicationName) {
         FlinkApplication app = describeApplication(applicationName);
+        // Defends state persisted by a floci build older than the ApplicationName check in
+        // createApplication: applicationARN is baked as literal text into the CloudWatch-log-format
+        // config FlinkContainerManager writes on startup, and a name outside AWS's charset (most
+        // notably '$', which can't be escaped to a safe literal there -- see
+        // FlinkContainerManager#literalForLog4j2Pattern) either gets dropped from every emitted
+        // applicationARN (breaking correlation with the real ApplicationARN) or, if ever un-dropped,
+        // risks leaking an environment variable/system property via a log4j2 Lookup. Failing loudly
+        // here beats either outcome, and real AWS could never have had this state to begin with.
+        if (!APPLICATION_NAME.matcher(applicationName).matches()) {
+            throw new AwsException("InvalidArgumentException",
+                    "ApplicationName '" + applicationName + "' does not match the required pattern "
+                            + "[a-zA-Z0-9_.-]{1,128}; this application predates that validation and "
+                            + "must be deleted and recreated with a valid name", 400);
+        }
         if (app.getApplicationStatus() != ApplicationStatus.READY) {
             throw new AwsException("ResourceInUseException",
                     "Application " + applicationName + " cannot be started while in state "

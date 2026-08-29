@@ -41,7 +41,8 @@ class DynamoDbAccessPathValidationTest {
                         attribute("createdAt"), attribute("alternate"))
                 .globalSecondaryIndexes(GlobalSecondaryIndex.builder()
                         .indexName("status-index")
-                        .keySchema(key("status", KeyType.HASH), key("createdAt", KeyType.RANGE))
+                        .keySchema(key("status", KeyType.HASH), key("createdAt", KeyType.RANGE),
+                                key("alternate", KeyType.RANGE))
                         .projection(Projection.builder()
                                 .projectionType(ProjectionType.INCLUDE)
                                 .nonKeyAttributes("summary")
@@ -82,6 +83,16 @@ class DynamoDbAccessPathValidationTest {
                 .expressionAttributeValues(Map.of(
                         ":pk", value("p1"),
                         ":status", value("open")))));
+    }
+
+    @Test
+    void queryRejectsKeyConditionValuesWithWrongSchemaTypes() {
+        assertValidationException(() -> ddb.query(request -> request
+                .tableName(TABLE)
+                .keyConditionExpression("pk = :pk AND sk > :sk")
+                .expressionAttributeValues(Map.of(
+                        ":pk", value("p1"),
+                        ":sk", numberValue("1")))));
     }
 
     @Test
@@ -184,6 +195,62 @@ class DynamoDbAccessPathValidationTest {
                 .expressionAttributeValues(Map.of(":status", value("open")))));
     }
 
+    @Test
+    void queryAndScanRejectWrongExclusiveStartKeyTypes() {
+        Map<String, AttributeValue> invalidStartKey = Map.of(
+                "pk", AttributeValue.builder().n("1").build(),
+                "sk", value("s1"));
+
+        assertValidationException(() -> ddb.query(request -> request
+                .tableName(TABLE)
+                .keyConditionExpression("pk = :pk")
+                .expressionAttributeValues(Map.of(":pk", value("p1")))
+                .exclusiveStartKey(invalidStartKey)));
+
+        assertValidationException(() -> ddb.scan(request -> request
+                .tableName(TABLE)
+                .exclusiveStartKey(invalidStartKey)));
+    }
+
+    @Test
+    @SuppressWarnings("deprecation")
+    void queryRejectsInvalidCompositeSortKeyConditions() {
+        assertValidationException(() -> ddb.query(request -> request
+                .tableName(TABLE)
+                .indexName("status-index")
+                .keyConditionExpression("#status = :status AND alternate = :alternate")
+                .expressionAttributeNames(Map.of("#status", "status"))
+                .expressionAttributeValues(Map.of(
+                        ":status", value("open"),
+                        ":alternate", value("a1")))));
+
+        assertValidationException(() -> ddb.query(request -> request
+                .tableName(TABLE)
+                .indexName("status-index")
+                .keyConditionExpression("#status = :status AND createdAt > :createdAt "
+                        + "AND alternate = :alternate")
+                .expressionAttributeNames(Map.of("#status", "status"))
+                .expressionAttributeValues(Map.of(
+                        ":status", value("open"),
+                        ":createdAt", value("2026-01-01"),
+                        ":alternate", value("a1")))));
+
+        assertValidationException(() -> ddb.query(request -> request
+                .tableName(TABLE)
+                .indexName("status-index")
+                .keyConditions(Map.of(
+                        "status", condition(ComparisonOperator.EQ, "open"),
+                        "alternate", condition(ComparisonOperator.EQ, "a1")))));
+
+        assertValidationException(() -> ddb.query(request -> request
+                .tableName(TABLE)
+                .indexName("status-index")
+                .keyConditions(Map.of(
+                        "status", condition(ComparisonOperator.EQ, "open"),
+                        "createdAt", condition(ComparisonOperator.GT, "2026-01-01"),
+                        "alternate", condition(ComparisonOperator.EQ, "a1")))));
+    }
+
     private static void assertValidationException(org.assertj.core.api.ThrowableAssert.ThrowingCallable call) {
         assertThatThrownBy(call)
                 .isInstanceOf(DynamoDbException.class)
@@ -204,6 +271,10 @@ class DynamoDbAccessPathValidationTest {
 
     private static AttributeValue value(String value) {
         return AttributeValue.builder().s(value).build();
+    }
+
+    private static AttributeValue numberValue(String value) {
+        return AttributeValue.builder().n(value).build();
     }
 
     private static Condition condition(ComparisonOperator operator, String attributeValue) {

@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.PersistentStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.iam.model.AccessKey;
+import io.github.hectorvent.floci.services.iam.model.AccountPasswordPolicy;
 import io.github.hectorvent.floci.services.iam.model.IamGroup;
 import io.github.hectorvent.floci.services.iam.model.IamPolicy;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
@@ -93,6 +94,7 @@ class IamServicePersistenceTest {
                 load(dir, "iam-instance-profiles.json", new TypeReference<Map<String, InstanceProfile>>() {}),
                 load(dir, "iam-sessions.json", new TypeReference<Map<String, SessionCredential>>() {}),
                 load(dir, "iam-account-aliases.json", new TypeReference<Map<String, String>>() {}),
+                load(dir, "iam-password-policy.json", new TypeReference<Map<String, AccountPasswordPolicy>>() {}),
                 load(dir, "iam-oidc-providers.json", new TypeReference<Map<String, OpenIDConnectProvider>>() {}),
                 load(dir, "iam-slr-deletions.json", new TypeReference<Map<String, String>>() {}),
                 new RegionResolver("us-east-1", "000000000000"),

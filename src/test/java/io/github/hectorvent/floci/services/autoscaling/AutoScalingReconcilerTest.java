@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.InstanceState;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
+import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
 import io.github.hectorvent.floci.services.ec2.model.Reservation;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.elbv2.ElbV2Service;
@@ -101,12 +102,16 @@ class AutoScalingReconcilerTest {
         launchTemplate.setLaunchTemplateId("lt-123");
         LaunchTemplate version = new LaunchTemplate();
         version.setLatestVersionNumber("1");
-        version.setImageId("ami-version-1");
-        version.setInstanceType("t3.micro");
-        version.setIamInstanceProfileArn("arn:aws:iam::000000000000:instance-profile/app-profile");
+        version.getData().setImageId("ami-version-1");
+        version.getData().setInstanceType("t3.micro");
+        version.getData().setIamInstanceProfile(new LaunchTemplateData.IamInstanceProfile(
+                "arn:aws:iam::000000000000:instance-profile/app-profile", null));
+        when(ec2Service.iamInstanceProfileArn(version.getData()))
+                .thenReturn("arn:aws:iam::000000000000:instance-profile/app-profile");
         List<Tag> instanceTags = List.of(new Tag("app.ClusterId", "development"));
         List<Tag> propagatedTags = List.of(new Tag("app.ClusterId", "development"), new Tag("job-id", "2001"));
-        version.setInstanceTags(instanceTags);
+        version.getData().setTagSpecifications(List.of(
+                new LaunchTemplateData.TagSpecification("instance", instanceTags)));
         when(ec2Service.describeLaunchTemplates("us-east-1", List.of("lt-123"), List.of(), Map.of()))
                 .thenReturn(List.of(launchTemplate));
         when(ec2Service.describeLaunchTemplateVersions("us-east-1", "lt-123", null, List.of("1")))
@@ -198,8 +203,8 @@ class AutoScalingReconcilerTest {
         launchTemplate.setLaunchTemplateId("lt-123");
         LaunchTemplate version = new LaunchTemplate();
         version.setLatestVersionNumber("7");
-        version.setImageId("ami-version-7");
-        version.setInstanceType("t3.micro");
+        version.getData().setImageId("ami-version-7");
+        version.getData().setInstanceType("t3.micro");
         when(ec2Service.describeLaunchTemplates("us-east-1", List.of("lt-123"), List.of(), Map.of()))
                 .thenReturn(List.of(launchTemplate));
         when(ec2Service.describeLaunchTemplateVersions("us-east-1", "lt-123", null, List.of("$Latest")))
@@ -247,8 +252,8 @@ class AutoScalingReconcilerTest {
         launchTemplate.setLaunchTemplateId("lt-123");
         LaunchTemplate version = new LaunchTemplate();
         version.setLatestVersionNumber("3");
-        version.setImageId("ami-version-3");
-        version.setInstanceType("t3.micro");
+        version.getData().setImageId("ami-version-3");
+        version.getData().setInstanceType("t3.micro");
         when(ec2Service.describeLaunchTemplates("us-east-1", List.of("lt-123"), List.of(), Map.of()))
                 .thenReturn(List.of(launchTemplate));
         when(ec2Service.describeLaunchTemplateVersions("us-east-1", "lt-123", null, List.of("3")))

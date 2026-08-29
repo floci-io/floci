@@ -13,7 +13,10 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.hasItem;
+import static org.hamcrest.Matchers.hasItems;
 import static org.hamcrest.Matchers.not;
+import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
 
 @QuarkusTest
@@ -464,6 +467,272 @@ class SamTransformIntegrationTest {
 
         assertThat(resourcesXml, containsString("<ResourceType>AWS::ApiGateway::RestApi</ResourceType>"));
         assertThat(resourcesXml, not(containsString("AWS::Serverless::Api")));
+    }
+
+    @Test
+    void samHttpApi_definitionBodyCreatesApiGatewayV2Routes() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "sam-http-api-" + suffix;
+        String apiName = "sam-http-api-" + suffix;
+        stacksToDelete.add(stackName);
+
+        String template = """
+            AWSTemplateFormatVersion: '2010-09-09'
+            Transform: AWS::Serverless-2016-10-31
+            Resources:
+              HttpApi:
+                Type: AWS::Serverless::HttpApi
+                Properties:
+                  Name: %s
+                  DefinitionBody:
+                    openapi: 3.0.1
+                    paths:
+                      /hello:
+                        get: {}
+                      /widgets:
+                        post: {}
+            """.formatted(apiName);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackId>"));
+
+        waitForStackStatus(stackName, "CREATE_COMPLETE");
+
+        String apiId = given()
+        .when()
+            .get("/v2/apis")
+        .then()
+            .statusCode(200)
+            .body("items.find { it.name == '" + apiName + "' }.protocolType", equalTo("HTTP"))
+            .extract()
+            .path("items.find { it.name == '" + apiName + "' }.apiId");
+
+        given()
+        .when()
+            .get("/v2/apis/" + apiId + "/routes")
+        .then()
+            .statusCode(200)
+            .body("items.routeKey", hasItems("GET /hello", "POST /widgets"));
+    }
+
+    @Test
+    void samHttpApi_matchingDefinitionBodyAndFunctionEventCreateOneIntegratedRoute() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "sam-http-api-overlap-" + suffix;
+        String apiName = "sam-http-api-overlap-" + suffix;
+        String functionName = "sam-http-overlap-fn-" + suffix;
+        stacksToDelete.add(stackName);
+
+        String template = """
+            AWSTemplateFormatVersion: '2010-09-09'
+            Transform: AWS::Serverless-2016-10-31
+            Resources:
+              HttpApi:
+                Type: AWS::Serverless::HttpApi
+                Properties:
+                  Name: %s
+                  Auth:
+                    DefaultAuthorizer: JwtAuth
+                    Authorizers:
+                      JwtAuth:
+                        IdentitySource: '$request.header.Authorization'
+                        AuthorizationScopes: [read:items]
+                        JwtConfiguration:
+                          issuer: https://issuer.example.com
+                          audience: [items-client]
+                  DefinitionBody:
+                    openapi: 3.0.1
+                    info: {title: overlap, version: '1.0'}
+                    components: {}
+                    paths:
+                      /items:
+                        get:
+                          responses: {'200': {description: ok}}
+              Handler:
+                Type: AWS::Serverless::Function
+                Properties:
+                  FunctionName: %s
+                  Runtime: python3.12
+                  Handler: index.handler
+                  InlineCode: 'def handler(e,c): return {}'
+                  Events:
+                    Api:
+                      Type: HttpApi
+                      Properties:
+                        ApiId: {Ref: HttpApi}
+                        Path: /items
+                        Method: GET
+            """.formatted(apiName, functionName);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        waitForStackStatus(stackName, "CREATE_COMPLETE");
+        String apiId = apiIdForName(apiName);
+
+        given()
+        .when()
+            .get("/v2/apis/" + apiId + "/routes")
+        .then()
+            .statusCode(200)
+            .body("items.size()", equalTo(1))
+            .body("items[0].routeKey", equalTo("GET /items"))
+            .body("items[0].authorizationType", equalTo("JWT"))
+            .body("items[0].authorizationScopes", hasItem("read:items"))
+            .body("items[0].authorizerId", notNullValue())
+            .body("items[0].target", containsString("integrations/"));
+
+        given()
+        .when()
+            .get("/v2/apis/" + apiId + "/integrations")
+        .then()
+            .statusCode(200)
+            .body("items.size()", equalTo(1))
+            .body("items[0].integrationUri", containsString(functionName));
+    }
+
+    @Test
+    void samHttpApi_intrinsicDefinitionUriCreatesApiGatewayV2Routes() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "sam-http-api-uri-" + suffix;
+        String apiName = "sam-http-api-uri-" + suffix;
+        String bucketName = "sam-http-api-spec-" + suffix;
+        stacksToDelete.add(stackName);
+
+        given()
+        .when()
+            .put("/" + bucketName)
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/json")
+            .body("""
+                {"openapi":"3.0.1","paths":{"/from-uri":{"get":{}}}}
+                """)
+        .when()
+            .put("/" + bucketName + "/openapi.json")
+        .then()
+            .statusCode(200);
+
+        String template = """
+            AWSTemplateFormatVersion: '2010-09-09'
+            Transform: AWS::Serverless-2016-10-31
+            Resources:
+              HttpApi:
+                Type: AWS::Serverless::HttpApi
+                Properties:
+                  Name: %s
+                  DefinitionUri:
+                    Fn::Sub: s3://%s/openapi.json
+            """.formatted(apiName, bucketName);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        waitForStackStatus(stackName, "CREATE_COMPLETE");
+
+        String apiId = apiIdForName(apiName);
+        given()
+        .when()
+            .get("/v2/apis/" + apiId + "/routes")
+        .then()
+            .statusCode(200)
+            .body("items.routeKey", hasItem("GET /from-uri"));
+    }
+
+    @Test
+    void samHttpApi_definitionBodyReconcilesRoutesOnStackUpdate() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "sam-http-api-update-" + suffix;
+        String apiName = "sam-http-api-update-" + suffix;
+        stacksToDelete.add(stackName);
+
+        String initialTemplate = httpApiTemplate(apiName, "/before");
+        String updatedTemplate = httpApiTemplate(apiName, "/after");
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", initialTemplate)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        waitForStackStatus(stackName, "CREATE_COMPLETE");
+        String apiId = apiIdForName(apiName);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", updatedTemplate)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        waitForStackStatus(stackName, "UPDATE_COMPLETE");
+
+        given()
+        .when()
+            .get("/v2/apis/" + apiId + "/routes")
+        .then()
+            .statusCode(200)
+            .body("items.routeKey", hasItem("GET /after"))
+            .body("items.routeKey", not(hasItem("GET /before")));
+    }
+
+    private static String httpApiTemplate(String apiName, String path) {
+        return """
+            AWSTemplateFormatVersion: '2010-09-09'
+            Transform: AWS::Serverless-2016-10-31
+            Resources:
+              HttpApi:
+                Type: AWS::Serverless::HttpApi
+                Properties:
+                  Name: %s
+                  DefinitionBody:
+                    openapi: 3.0.1
+                    paths:
+                      %s:
+                        get: {}
+            """.formatted(apiName, path);
+    }
+
+    private static String apiIdForName(String apiName) {
+        return given()
+        .when()
+            .get("/v2/apis")
+        .then()
+            .statusCode(200)
+            .body("items.find { it.name == '" + apiName + "' }.protocolType", equalTo("HTTP"))
+            .extract()
+            .path("items.find { it.name == '" + apiName + "' }.apiId");
     }
 
     @Test

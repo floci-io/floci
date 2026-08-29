@@ -14,10 +14,11 @@ aws login --endpoint-url http://localhost:4566 --region us-east-1
 aws sts get-caller-identity --endpoint-url http://localhost:4566
 ```
 
-The browser callback is still handled by the AWS CLI; Floci does not contact AWS or require a real
-AWS account. This follows the AWS Sign-In `AuthorizeOAuth2Access` and `CreateOAuth2Token` wire
-shapes, including one-time codes, PKCE verification, refresh-token expiry, and the `aws_sigv4`
-temporary credential type.
+The authorize endpoint first presents a local consent page, then redirects back to the callback
+listener owned by the AWS CLI. Floci does not contact AWS or require a real AWS account. This
+follows the AWS Sign-In `AuthorizeOAuth2Access` and `CreateOAuth2Token` wire shapes, including
+one-time codes, PKCE verification, refresh-token expiry, and the `aws_sigv4` temporary credential
+type.
 
 ## Supported Actions
 
@@ -40,6 +41,7 @@ temporary credential type.
 |--------|-------------|
 | CreateGroup | Creates an IAM group. |
 | GetGroup | Returns an IAM group and its users. |
+| UpdateGroup | Renames a group and/or changes its path; ARN and stored users move with it. |
 | DeleteGroup | Deletes an IAM group from the local IAM store. |
 | ListGroups | Lists IAM groups in the local account. |
 | AddUserToGroup | Adds a user to an IAM group. |
@@ -175,6 +177,32 @@ no effect on later starts — the skip is logged at debug with both values. `/_f
 clears the alias without re-seeding it, as it does the optional deployer principal; the seed
 returns on restart.
 
+### Account Password Policy
+
+| Action | Description |
+|--------|-------------|
+| GetAccountPasswordPolicy | Returns the account's password policy. |
+| UpdateAccountPasswordPolicy | Replaces the account's password policy wholesale. |
+| DeleteAccountPasswordPolicy | Removes the account's password policy. |
+
+An account holds one password policy. `UpdateAccountPasswordPolicy` replaces it wholesale rather
+than merging — a field the caller omits resets to its AWS-documented default (`false` for the
+boolean requirements, `AllowUsersToChangePassword` and `HardExpiry`; `6` for
+`MinimumPasswordLength`; unset for the optional `MaxPasswordAge` and `PasswordReusePrevention`)
+rather than carrying over the previous value. Unlike the two optional integer fields,
+`HardExpiry` is never absent from the response — AWS documents it as a boolean that always
+defaults to `false`, so `GetAccountPasswordPolicy` always echoes it back. `ExpirePasswords` is
+derived, not stored: it reports `true` exactly when `MaxPasswordAge` is set.
+
+`GetAccountPasswordPolicy` and `DeleteAccountPasswordPolicy` both return `NoSuchEntity` when no
+policy has ever been set — a documented, expected result the Terraform provider's
+`aws_iam_account_password_policy` resource branches on. `MinimumPasswordLength` must be 6–128,
+`MaxPasswordAge` 1–1095, and `PasswordReusePrevention` 1–24; a value outside those ranges is
+rejected with `ValidationError`. The integer parameters (`MinimumPasswordLength`, `MaxPasswordAge`,
+`PasswordReusePrevention`) and the boolean parameters both reject anything that isn't parseable —
+a malformed integer or a value other than `true`/`false` (case-insensitive) returns
+`ValidationError` rather than silently falling back to a default.
+
 ### OIDC Identity Providers
 
 | Action | Description |
@@ -285,11 +313,48 @@ environment:
 
 Policy evaluation follows the standard AWS precedence:
 
-1. An explicit **Deny** in any identity, session, or boundary policy → request is denied (HTTP 403 `AccessDeniedException`)
-2. An explicit **Allow** in an identity policy creates the base grant
-3. If a session policy is present, it must also explicitly allow the request
-4. If a permission boundary is present, it must also explicitly allow the request
-5. No matching effective allow → implicit deny (HTTP 403)
+1. If [SCP enforcement](#service-control-policies-scps) is active, the action must be allowed at **every** organization level (root, OUs on the path, account) and explicitly denied at none — otherwise the request is denied before identity policies are consulted
+2. An explicit **Deny** in any identity, session, or boundary policy → request is denied (HTTP 403 `AccessDeniedException`)
+3. An explicit **Allow** in an identity policy creates the base grant
+4. If a session policy is present, it must also explicitly allow the request
+5. If a permission boundary is present, it must also explicitly allow the request
+6. No matching effective allow → implicit deny (HTTP 403)
+
+### Service control policies (SCPs)
+
+When the caller's account belongs to an [Organizations](organizations.md) organization,
+SCPs attached to the root, the OUs on the account's path, and the account itself can
+participate in evaluation. Two flags must both be on:
+
+```yaml
+floci:
+  services:
+    iam:
+      enforcement-enabled: true
+    organizations:
+      scp-enforcement-enabled: true
+```
+
+(env: `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED` and
+`FLOCI_SERVICES_ORGANIZATIONS_SCP_ENFORCEMENT_ENABLED`)
+
+SCP semantics match AWS: SCPs never grant permissions — they cap what identity policies
+may allow; the organization's **management account is exempt**; and an account outside
+any organization is unaffected. The `test` credential and unknown access keys are never
+SCP-denied.
+
+**The account-root principal is subject to SCPs.** floci's account root is a bare
+12-digit account-id access key (the LocalStack multi-account convention). It carries no
+registered IAM identity, so it normally takes the unknown-key bypass. But when the access
+key equals its own account ID **and** that account has an effective SCP ceiling
+(`effectiveScpLevels != null` — i.e. it is a non-management member under a root with the
+SCP policy type enabled and at least one attached SCP), floci synthesizes an
+allow-everything root identity and evaluates the request against the SCP chain. In that
+case **SCPs apply and nothing else does** — no identity policies, permission boundary, or
+session policy attaches to the bare account key. If the account has no effective SCP
+ceiling (the management account, an account outside any organization, or the SCP type
+disabled), the bare key still bypasses enforcement entirely, and unknown `AKIA…` keys
+always bypass unconditionally.
 
 ### Bypass rules
 
@@ -301,6 +366,13 @@ These identities always bypass enforcement (backward-compatible defaults):
 | Unknown access key (not in IAM store) | Always allowed — backward-compatible with pre-existing keys |
 | No `Authorization` header | Allowed — unauthenticated path (e.g. health checks) |
 | Unresolvable IAM action for the request | Allowed — unknown mappings are permissive |
+
+**Exception:** a bare 12-digit account-id key that equals its own account and sits under
+an effective SCP ceiling is **not** treated as an unknown key — it is evaluated against
+the SCP chain as the account root (see [Service control policies](#service-control-policies-scps)
+above). Identity-policy enforcement of a member account still requires an assumable,
+account-routable identity such as the `OrganizationAccountAccessRole` session; the bare
+account key carries no identity policies of its own.
 
 ### Supported policy features
 
@@ -319,6 +391,28 @@ These identities always bypass enforcement (backward-compatible defaults):
 - `DateEquals`, `DateNotEquals`, `DateLessThan`, `DateGreaterThan` (and Equals variants)
 - `Bool`, `IpAddress`, `NotIpAddress`, `Null`
 - Supports `...IfExists` variants for all operators.
+
+#### Condition keys floci populates
+
+A `Condition` operator can only match a key floci actually places in the request context.
+floci populates:
+
+- `s3:prefix`, `s3:delimiter`, `s3:max-keys` — from the S3 request parameters.
+- `aws:PrincipalArn` — the caller's ARN, resolved from the signing access key. It is the
+  IAM-user ARN for a user access key, the assumed-role ARN for an STS session, and
+  `arn:aws:iam::<account>:root` for the bare account-id key (floci's account-root principal),
+  matching the ARN shape AWS itself reports for the account root. It is **absent** only for
+  unknown keys, where nothing about the caller can be resolved.
+
+**Any other condition key is absent from the request context.** A plain (non-`IfExists`)
+operator on an absent key makes the whole statement *not apply* — it neither matches nor
+blocks. A `DenyRootUser`-style guardrail keyed on `aws:PrincipalArn` therefore fires against
+the account root the same way it does on real AWS, consistent with the account root already
+being bounded by SCPs (below): both forms of root enforcement now agree.
+
+**Caveat:** `resolveCallerArn` hardcodes the assumed-role session name as `floci-session`,
+so `aws:PrincipalArn` for an assumed-role caller will not match a condition that pins a
+different session name. This matches what `sts:GetCallerIdentity` already reports.
 
 **Not yet supported**: `NotPrincipal`, resource-based policies (S3 bucket policy, Lambda resource policy).
 
@@ -351,6 +445,54 @@ aws iam attach-user-policy --user-name alice --policy-arn $POLICY_ARN
 AWS_ACCESS_KEY_ID=$AKID AWS_SECRET_ACCESS_KEY=$SECRET \
   aws s3 ls
 ```
+
+## Service Control Policies (SCPs)
+
+When `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true` and
+`FLOCI_SERVICES_ORGANIZATIONS_SCP_ENFORCEMENT_ENABLED=true`, service control policies attached to
+the caller account's organization participate in policy evaluation.
+
+The SCP chain is resolved root → OUs on the path → account, and every level must allow the action
+for the request to proceed. SCPs never grant permissions on their own — they are a ceiling applied
+before identity policies are consulted, exactly as on AWS. Organizations is resolved lazily, so IAM
+does not gain a hard dependency on it: with the Organizations service absent or the flag off, the
+chain is skipped entirely and evaluation falls back to identity policies alone.
+
+A member account's own bare 12-digit access key is floci's account-root principal. It is not a
+registered IAM identity, but like the AWS account root it is still bounded by SCPs, so an SCP `Deny`
+(for example a `DenyLeaveOrganization` guardrail) blocks it. What that key does *not* carry is any
+identity policy — it behaves as allow-everything bounded only by the SCP ceiling. To exercise
+**identity-policy** enforcement, use account-routable credentials for the member instead, most
+naturally the `ASIA…` session from assuming its `OrganizationAccountAccessRole`.
+
+Note that `aws:PrincipalArn` is populated for the account-root principal too, as
+`arn:aws:iam::<account>:root`, so a principal-scoped guardrail keyed on `aws:PrincipalArn`
+(for example a `DenyRootUser` statement matching `arn:aws:iam::*:root`) fires against it —
+consistent with the account root already being bounded by SCPs above.
+
+A level containing an SCP document that fails to parse denies every action at that level. The
+ceiling cannot tell what an unreadable guardrail would have said, and every target also carries
+`FullAWSAccess`, so dropping the bad document would leave the level allowing everything.
+
+The ceiling is attached by the request filter, which is the only producer of SCP levels. Two
+evaluation paths therefore run without one and are **not** SCP-bounded: `SimulatePrincipalPolicy`,
+and the field-level authorization check on the AppSync GraphQL IAM-auth path (the coarse AppSync
+request itself still passes through the filter). Both are deliberate non-goals — bounding them
+would require IAM to resolve the caller's organization directly, which is the dependency the
+lazily-resolved `ScpProvider` exists to avoid.
+
+## Bypass rules
+
+Enforcement is deliberately permissive in a few cases, so that enabling it does not break workloads
+the emulator cannot reason about:
+
+| Case | Behaviour |
+| --- | --- |
+| Unresolvable action | Allowed. An action the registry cannot resolve is not evaluated. |
+| `sts:GetCallerIdentity` | Always allowed — AWS returns caller identity even when a policy denies it. |
+| Unknown access key | Allowed. A key that resolves to no IAM identity bypasses enforcement. |
+| Bare account-id key with no SCP ceiling | Allowed. With no organization or SCP enforcement off, the account root keeps the historical bypass. |
+| Bare account-id key **with** an SCP ceiling | Enforced as the account root, bounded by the SCP chain. |
 
 ## Service-linked roles
 

@@ -117,7 +117,9 @@ public class NeptuneContainerManager {
                 .withName(containerName)
                 .withEnv(backendEnv(dbType))
                 .withDockerNetwork(config.services().neptune().dockerNetwork())
-                .withLogRotation();
+                .withLogRotation()
+                .withLabels(ContainerStorageHelper.resourceIdentityLabels(
+                        "neptune", clusterId, regionResolver.getAccountId(), regionResolver.getDefaultRegion()));
 
         if (!containerDetector.isRunningInContainer()) {
             specBuilder.withDynamicPort(backendPort);

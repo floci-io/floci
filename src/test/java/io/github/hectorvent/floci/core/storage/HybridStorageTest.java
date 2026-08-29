@@ -1,12 +1,17 @@
 package io.github.hectorvent.floci.core.storage;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import io.github.hectorvent.floci.services.dynamodb.model.AttributeDefinition;
+import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
+import io.github.hectorvent.floci.services.dynamodb.model.LocalSecondaryIndex;
+import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -47,6 +52,30 @@ class HybridStorageTest {
         var store2 = new HybridStorage<>(filePath, new TypeReference<Map<String, String>>() {}, 60000);
         store2.load();
         assertEquals("value1", store2.get("key1").orElseThrow());
+        store2.shutdown();
+    }
+
+    @Test
+    void dynamoTableWithLocalSecondaryIndexSurvivesRestart() {
+        Path filePath = tempDir.resolve("dynamodb-tables.json");
+        TypeReference<Map<String, TableDefinition>> type = new TypeReference<>() {};
+        var table = new TableDefinition(
+                "ConfigTable",
+                List.of(new KeySchemaElement("pk", "HASH"), new KeySchemaElement("sk", "RANGE")),
+                List.of(new AttributeDefinition("pk", "S"), new AttributeDefinition("sk", "S"),
+                        new AttributeDefinition("lsiSk", "S")));
+        table.setLocalSecondaryIndexes(List.of(new LocalSecondaryIndex(
+                "lsi", List.of(new KeySchemaElement("pk", "HASH"),
+                        new KeySchemaElement("lsiSk", "RANGE")), null, "ALL")));
+
+        var store1 = new HybridStorage<String, TableDefinition>(filePath, type, 60000);
+        store1.put("000000000000/us-east-1::ConfigTable", table);
+        store1.shutdown();
+
+        var store2 = new HybridStorage<String, TableDefinition>(filePath, type, 60000);
+        store2.load();
+        TableDefinition restored = store2.get("000000000000/us-east-1::ConfigTable").orElseThrow();
+        assertEquals("lsiSk", restored.getLocalSecondaryIndexes().getFirst().getSortKeyName());
         store2.shutdown();
     }
 

@@ -1,10 +1,12 @@
 package io.github.hectorvent.floci.services.msk;
 
 import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.services.msk.model.ConfigurationRevision;
 import io.github.hectorvent.floci.services.msk.model.ConfigurationRevisionDetail;
+import io.github.hectorvent.floci.services.msk.model.CreateClusterRequest;
+import io.github.hectorvent.floci.services.msk.model.CreateClusterV2Request;
 import io.github.hectorvent.floci.services.msk.model.MskCluster;
 import io.github.hectorvent.floci.services.msk.model.MskConfiguration;
 import jakarta.inject.Inject;
@@ -23,6 +25,10 @@ import java.util.Map;
 @Consumes(MediaType.APPLICATION_JSON)
 public class MskController {
 
+    // Fallback for clusters persisted before clusterType was stored - everything written back
+    // then was provisioned, since serverless had no representation at all.
+    private static final String PROVISIONED_CLUSTER_TYPE = "PROVISIONED";
+
     private final MskService mskService;
 
     @Inject
@@ -32,51 +38,48 @@ public class MskController {
 
     @POST
     @Path("/v1/clusters")
-    public Response createCluster(Map<String, Object> request) {
-        String clusterName = (String) request.get("clusterName");
-        String kafkaVersion = (String) request.get("kafkaVersion");
-        MskCluster cluster = mskService.createCluster(clusterName, kafkaVersion);
+    public Response createCluster(CreateClusterRequest request) {
+        MskCluster cluster = mskService.createCluster(request);
         return Response.ok(Map.of("clusterArn", cluster.getClusterArn(), "clusterName", cluster.getClusterName(), "state", cluster.getState())).build();
     }
 
     @POST
     @Path("/api/v2/clusters")
-    @SuppressWarnings("unchecked")
-    public Response createClusterV2(Map<String, Object> request) {
-        // Simple mapping to V1 for now
-        String clusterName = (String) request.get("clusterName");
-        Map<String, Object> provisioned = (Map<String, Object>) request.get("provisioned");
-        String kafkaVersion = provisioned != null ? (String) provisioned.get("kafkaVersion") : null;
-        MskCluster cluster = mskService.createCluster(clusterName, kafkaVersion);
-        return Response.ok(Map.of("clusterArn", cluster.getClusterArn(), "clusterName", cluster.getClusterName(), "state", cluster.getState())).build();
+    public Response createClusterV2(CreateClusterV2Request request) {
+        MskCluster cluster = mskService.createCluster(request);
+        return Response.ok(Map.of(
+                "clusterArn", cluster.getClusterArn(),
+                "clusterName", cluster.getClusterName(),
+                "state", cluster.getState(),
+                "clusterType", clusterType(cluster))).build();
     }
 
     @GET
     @Path("/v1/clusters")
     public Response listClusters() {
-        var clusters = mskService.listClusters();
+        var clusters = mskService.listProvisionedClusters().stream().map(this::toClusterViewV1).toList();
         return Response.ok(Map.of("clusterInfoList", clusters)).build();
     }
 
     @GET
     @Path("/api/v2/clusters")
     public Response listClustersV2() {
-        var clusters = mskService.listClusters();
+        var clusters = mskService.listClusters().stream().map(this::toClusterViewV2).toList();
         return Response.ok(Map.of("clusterInfoList", clusters)).build();
     }
 
     @GET
     @Path("/v1/clusters/{clusterArn}")
     public Response describeCluster(@PathParam("clusterArn") String clusterArn) {
-        MskCluster cluster = mskService.describeCluster(clusterArn);
-        return Response.ok(Map.of("clusterInfo", cluster)).build();
+        MskCluster cluster = mskService.describeClusterV1(clusterArn);
+        return Response.ok(Map.of("clusterInfo", toClusterViewV1(cluster))).build();
     }
 
     @GET
     @Path("/api/v2/clusters/{clusterArn}")
     public Response describeClusterV2(@PathParam("clusterArn") String clusterArn) {
         MskCluster cluster = mskService.describeCluster(clusterArn);
-        return Response.ok(Map.of("clusterInfo", cluster)).build();
+        return Response.ok(Map.of("clusterInfo", toClusterViewV2(cluster))).build();
     }
 
     @DELETE
@@ -187,6 +190,73 @@ public class MskController {
         response.put("serverProperties",
                 Base64.getEncoder().encodeToString(detail.getServerProperties().getBytes(StandardCharsets.UTF_8)));
         return Response.ok(response).build();
+    }
+
+    // The v1 ClusterInfo is flat: broker node group, encryption, client auth, monitoring and
+    // logging all sit directly on the cluster object.
+    //
+    // Built explicitly rather than by serializing MskCluster, because that model is also the
+    // persisted shape and carries internal bookkeeping (bootstrapBrokers, containerId,
+    // accountId, volumeId) that must stay in the store but never reach a client.
+    private Map<String, Object> toClusterViewV1(MskCluster cluster) {
+        Map<String, Object> view = commonClusterFields(cluster);
+        view.putAll(provisionedFields(cluster));
+        return view;
+    }
+
+    // The v2 ClusterInfo is NOT the v1 shape with extra members: everything provisioned-specific
+    // nests under "provisioned", and a "clusterType" discriminator selects between that and the
+    // serverless shape. An AWS SDK v2 client - which is what terraform-provider-aws calls -
+    // looks for these fields only there, so returning them flat leaves them invisible to it.
+    private Map<String, Object> toClusterViewV2(MskCluster cluster) {
+        Map<String, Object> view = commonClusterFields(cluster);
+        view.put("clusterType", clusterType(cluster));
+        if (mskService.isServerless(cluster)) {
+            putIfPresent(view, "serverless", cluster.getServerless());
+        } else {
+            view.put("provisioned", provisionedFields(cluster));
+        }
+        return view;
+    }
+
+    private String clusterType(MskCluster cluster) {
+        return cluster.getClusterType() != null ? cluster.getClusterType() : PROVISIONED_CLUSTER_TYPE;
+    }
+
+    // Members that stay top-level in both versions.
+    private Map<String, Object> commonClusterFields(MskCluster cluster) {
+        Map<String, Object> view = new HashMap<>();
+        view.put("clusterArn", cluster.getClusterArn());
+        view.put("clusterName", cluster.getClusterName());
+        view.put("state", cluster.getState());
+        view.put("creationTime", cluster.getCreationTime());
+        view.put("currentVersion", cluster.getCurrentVersion());
+        view.put("tags", cluster.getTags() != null ? cluster.getTags() : Map.of());
+        return view;
+    }
+
+    // Members that are flat on v1's ClusterInfo and nested under v2's "provisioned".
+    private Map<String, Object> provisionedFields(MskCluster cluster) {
+        Map<String, Object> view = new HashMap<>();
+        view.put("numberOfBrokerNodes", cluster.getNumberOfBrokerNodes());
+        view.put("zookeeperConnectString", cluster.getZookeeperConnectString());
+        view.put("currentBrokerSoftwareInfo", cluster.getCurrentBrokerSoftwareInfo());
+        // Absent optional members are omitted rather than sent as null, matching AWS.
+        putIfPresent(view, "brokerNodeGroupInfo", cluster.getBrokerNodeGroupInfo());
+        putIfPresent(view, "encryptionInfo", cluster.getEncryptionInfo());
+        putIfPresent(view, "clientAuthentication", cluster.getClientAuthentication());
+        putIfPresent(view, "enhancedMonitoring", cluster.getEnhancedMonitoring());
+        putIfPresent(view, "loggingInfo", cluster.getLoggingInfo());
+        putIfPresent(view, "openMonitoring", cluster.getOpenMonitoring());
+        putIfPresent(view, "storageMode", cluster.getStorageMode());
+        putIfPresent(view, "rebalancing", cluster.getRebalancing());
+        return view;
+    }
+
+    private void putIfPresent(Map<String, Object> view, String key, Object value) {
+        if (value != null) {
+            view.put(key, value);
+        }
     }
 
     // AWS's Configuration/DescribeConfigurationResponse shape never includes

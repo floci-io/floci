@@ -107,6 +107,7 @@ class ContainerLauncherTest {
         when(config.tls()).thenReturn(tls);
         lenient().when(tls.enabled()).thenReturn(false);
         lenient().when(config.defaultRegion()).thenReturn("us-east-1");
+        lenient().when(config.defaultAccountId()).thenReturn("000000000000");
         lenient().when(config.hostname()).thenReturn(Optional.empty());
         // The large-code path resolves a code-volume completion marker under the storage persistent path.
         lenient().when(config.storage()).thenReturn(storage);
@@ -120,6 +121,10 @@ class ContainerLauncherTest {
         lenient().when(efs.mountGroupAdd()).thenReturn(OptionalInt.empty());
 
         when(embeddedDnsServer.getServerIp()).thenReturn(Optional.empty());
+        // Default: pass images through unchanged, matching the real EcrRegistryManager's
+        // behavior for non-ECR-shaped images. Individual ECR-rewrite tests override this.
+        lenient().when(ecrRegistryManager.rewriteImageUri(any()))
+                .thenAnswer(inv -> inv.getArgument(0));
 
         ContainerBuilder containerBuilder = new ContainerBuilder(config, dockerHostResolver, embeddedDnsServer);
         ContainerReachableEndpoint reachableEndpoint =
@@ -208,6 +213,29 @@ class ContainerLauncherTest {
                 .filter(m -> m.getType() == MountType.VOLUME && "/var/task".equals(m.getTarget()))
                 .findFirst()
                 .orElse(null);
+    }
+
+    @Test
+    void launchFunction_labelsContainerWithResourceIdentity() throws Exception {
+        Path codePath = Files.createDirectory(tempDir.resolve("code"));
+
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("standard-fn");
+        fn.setFunctionArn("arn:aws:lambda:us-west-2:222222222222:function:standard-fn");
+        fn.setRuntime("nodejs20.x");
+        fn.setHandler("index.handler");
+        fn.setCodeLocalPath(codePath.toString());
+
+        launcher.launch(fn);
+
+        ContainerSpec spec = captureRealContainerSpec();
+        assertEquals(Map.of(
+                "io.floci", "aws",
+                "io.floci.service", "lambda",
+                "io.floci.resource-id", "standard-fn",
+                "io.floci.account", "222222222222",
+                "io.floci.region", "us-west-2"),
+                spec.labels());
     }
 
     @Test
@@ -317,10 +345,12 @@ class ContainerLauncherTest {
     }
 
     @Test
-    void launchFunction_fallsBackToTestCredentialsWhenEnvUnset() throws Exception {
-        // When System.getenv returns null for AWS vars, credentials should be test/test/test.
-        // Since we can't control System.getenv in unit tests, we verify the values are either
-        // from the environment or the "test" fallback — both are valid.
+    void launchFunction_injectsOwningAccountAsAccessKeyAndFallsBackForTheRest() throws Exception {
+        // The access key identifies the container's owning account to AccountResolver, so it is
+        // the function's resolved account (here the configured default, since this function has
+        // no ARN to derive one from) rather than the literal "test" placeholder. The secret and
+        // session token carry no account identity, so they still come from the host env or fall
+        // back to "test"; System.getenv can't be controlled here, so both are accepted.
         Path codePath = Files.createDirectory(tempDir.resolve("creds-fallback"));
 
         LambdaFunction fn = new LambdaFunction();
@@ -336,14 +366,43 @@ class ContainerLauncherTest {
         String secretKey = env.stream().filter(e -> e.startsWith("AWS_SECRET_ACCESS_KEY=")).findFirst().orElse("");
         String sessionToken = env.stream().filter(e -> e.startsWith("AWS_SESSION_TOKEN=")).findFirst().orElse("");
 
-        // Value should be either the host env var or "test" fallback
-        String expectedAk = System.getenv("AWS_ACCESS_KEY_ID") != null ? System.getenv("AWS_ACCESS_KEY_ID") : "test";
+        // The owning account wins outright — including over a host env var, which describes the
+        // Floci server process and not the container it launched.
         String expectedSk = System.getenv("AWS_SECRET_ACCESS_KEY") != null ? System.getenv("AWS_SECRET_ACCESS_KEY") : "test";
         String expectedSt = System.getenv("AWS_SESSION_TOKEN") != null ? System.getenv("AWS_SESSION_TOKEN") : "test";
 
-        assertEquals("AWS_ACCESS_KEY_ID=" + expectedAk, accessKey);
+        assertEquals("AWS_ACCESS_KEY_ID=000000000000", accessKey);
         assertEquals("AWS_SECRET_ACCESS_KEY=" + expectedSk, secretKey);
         assertEquals("AWS_SESSION_TOKEN=" + expectedSt, sessionToken);
+    }
+
+    @Test
+    void launchFunction_partialUserCredentialEnvironmentDoesNotSplitOwnerAccountTuple() throws Exception {
+        // A Lambda with no execution role falls onto the owner-account placeholder tuple. If the
+        // function's own Environment config defines only AWS_ACCESS_KEY_ID (no matching secret or
+        // session token), that partial value must not leak in and override just the access key —
+        // it would pair the user's key with the owner-account's "test" secret/token, a tuple
+        // nothing can verify. The injection must be all-or-nothing: since the function does not
+        // define the full triad, none of its credential vars should reach the container.
+        Path codePath = Files.createDirectory(tempDir.resolve("creds-partial"));
+
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("partial-creds-fn");
+        fn.setRuntime("nodejs20.x");
+        fn.setHandler("index.handler");
+        fn.setCodeLocalPath(codePath.toString());
+        fn.setFunctionArn("arn:aws:lambda:us-east-1:111122223333:function:partial-creds-fn");
+        fn.setEnvironment(Map.of("AWS_ACCESS_KEY_ID", "user-partial-key"));
+
+        launcher.launch(fn);
+
+        List<String> env = captureRealContainerSpec().env();
+        assertEquals(1, env.stream().filter(e -> e.startsWith("AWS_ACCESS_KEY_ID=")).count(),
+                "the owner-account access key must not be joined by a second, user-supplied one");
+        assertTrue(env.contains("AWS_ACCESS_KEY_ID=111122223333"),
+                "the owner-account access key must win when the function's own triad is incomplete");
+        assertTrue(env.stream().noneMatch("AWS_ACCESS_KEY_ID=user-partial-key"::equals),
+                "a partial user-supplied access key must never override the owner-account baseline");
     }
 
     @Test
@@ -423,14 +482,13 @@ class ContainerLauncherTest {
         fn.setPackageType("Image");
         fn.setImageUri("123456789012.dkr.ecr.us-east-1.amazonaws.com/backend-user:1");
 
-        when(ecrRegistryManager.getRepositoryUri("123456789012", "us-east-1", "backend-user:1"))
+        when(ecrRegistryManager.rewriteImageUri("123456789012.dkr.ecr.us-east-1.amazonaws.com/backend-user:1"))
                 .thenReturn("123456789012.dkr.ecr.us-east-1.localhost:5100/backend-user:1");
 
         launcher.launch(fn);
 
         ContainerSpec spec = captureRealContainerSpec();
-        verify(ecrRegistryManager).ensureStarted();
-        verify(ecrRegistryManager).getRepositoryUri("123456789012", "us-east-1", "backend-user:1");
+        verify(ecrRegistryManager).rewriteImageUri("123456789012.dkr.ecr.us-east-1.amazonaws.com/backend-user:1");
         assertEquals("123456789012.dkr.ecr.us-east-1.localhost:5100/backend-user:1",
                 spec.image());
     }
@@ -442,14 +500,13 @@ class ContainerLauncherTest {
         fn.setPackageType("Image");
         fn.setImageUri("123456789012.dkr.ecr.us-east-1.amazonaws.com/backend-user:1");
 
-        when(ecrRegistryManager.getRepositoryUri("123456789012", "us-east-1", "backend-user:1"))
+        when(ecrRegistryManager.rewriteImageUri("123456789012.dkr.ecr.us-east-1.amazonaws.com/backend-user:1"))
                 .thenReturn("localhost:5100/123456789012/us-east-1/backend-user:1");
 
         launcher.launch(fn);
 
         ContainerSpec spec = captureRealContainerSpec();
-        verify(ecrRegistryManager).ensureStarted();
-        verify(ecrRegistryManager).getRepositoryUri("123456789012", "us-east-1", "backend-user:1");
+        verify(ecrRegistryManager).rewriteImageUri("123456789012.dkr.ecr.us-east-1.amazonaws.com/backend-user:1");
         assertEquals("localhost:5100/123456789012/us-east-1/backend-user:1",
                 spec.image());
     }

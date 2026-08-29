@@ -59,7 +59,8 @@ public class BedrockAgentCoreMemoryController {
             JsonNode req = objectMapper.readTree(body != null && !body.isBlank() ? body : "{}");
             Integer expiry = req.hasNonNull("eventExpiryDuration") ? req.get("eventExpiryDuration").asInt() : null;
             Memory memory = service.create(text(req, "name"), expiry, text(req, "description"),
-                    text(req, "clientToken"), region);
+                    text(req, "encryptionKeyArn"), text(req, "memoryExecutionRoleArn"),
+                    stringMap(req.get("tags")), text(req, "clientToken"), region);
             return Response.status(202).entity(wrapped(memory, region)).build();
         } catch (Exception e) {
             return error(e, "creating memory");
@@ -84,7 +85,9 @@ public class BedrockAgentCoreMemoryController {
         String region = regionResolver.resolveRegion(headers);
         try {
             JsonNode req = objectMapper.readTree(body != null && !body.isBlank() ? body : "{}");
-            Memory memory = service.update(id, text(req, "description"), region);
+            Integer expiry = req.hasNonNull("eventExpiryDuration") ? req.get("eventExpiryDuration").asInt() : null;
+            Memory memory = service.update(id, text(req, "description"), expiry,
+                    text(req, "memoryExecutionRoleArn"), region);
             return Response.status(202).entity(wrapped(memory, region)).build();
         } catch (Exception e) {
             return error(e, "updating memory");
@@ -148,6 +151,12 @@ public class BedrockAgentCoreMemoryController {
         if (memory.getEventExpiryDuration() != null) {
             node.put("eventExpiryDuration", memory.getEventExpiryDuration());
         }
+        if (memory.getEncryptionKeyArn() != null) {
+            node.put("encryptionKeyArn", memory.getEncryptionKeyArn());
+        }
+        if (memory.getMemoryExecutionRoleArn() != null) {
+            node.put("memoryExecutionRoleArn", memory.getMemoryExecutionRoleArn());
+        }
         putInstant(node, "createdAt", memory.getCreatedAt());
         putInstant(node, "updatedAt", memory.getUpdatedAt());
         return out;
@@ -163,6 +172,15 @@ public class BedrockAgentCoreMemoryController {
     private static String text(JsonNode node, String field) {
         JsonNode v = node.get(field);
         return (v == null || v.isNull()) ? null : v.asText();
+    }
+
+    private static java.util.Map<String, String> stringMap(JsonNode node) {
+        if (node == null || !node.isObject()) {
+            return null;
+        }
+        java.util.Map<String, String> map = new java.util.HashMap<>();
+        node.fields().forEachRemaining(e -> map.put(e.getKey(), e.getValue().asText()));
+        return map;
     }
 
     private Response error(Exception e, String action) {

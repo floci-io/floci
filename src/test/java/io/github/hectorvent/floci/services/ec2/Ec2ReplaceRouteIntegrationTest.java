@@ -303,14 +303,16 @@ class Ec2ReplaceRouteIntegrationTest {
             .body("Response.Errors.Error.Code", equalTo("InvalidParameterCombination"));
     }
 
-    /** An IPv6 or prefix-list ReplaceRoute carries no DestinationCidrBlock; it must not 500. */
+    /**
+     * A ReplaceRoute naming no destination at all cannot identify a route; it must not 500. All
+     * three destination kinds are now accepted — see {@code Ec2Ipv6RouteTest}.
+     */
     @Test
     @Order(7)
-    void replaceRouteWithoutAnIpv4DestinationIsRejected() {
+    void replaceRouteWithoutADestinationIsRejected() {
         given()
             .formParam("Action", "ReplaceRoute")
             .formParam("RouteTableId", routeTableId)
-            .formParam("DestinationIpv6CidrBlock", "::/0")
             .formParam("GatewayId", INTERNET_GATEWAY)
             .header("Authorization", AUTH_HEADER)
         .when()

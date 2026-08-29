@@ -25,6 +25,11 @@ import jakarta.ws.rs.core.Response;
  * when no signing config is attached). Non-existent functions surface a 404 via
  * LambdaService, unblocking Terraform and other tools that call this endpoint as
  * part of their normal Lambda resource lifecycle.
+ *
+ * The class-level prefix matters: without it, requests here fall through to a more
+ * general catch-all route elsewhere (S3's bucket-path matcher) instead of this
+ * controller — see {@link LambdaCodeSigningConfigFunctionsController} for the
+ * separate /2020-04-22 endpoint, which needs its own class for the same reason.
  */
 @Path("/2020-06-30")
 @Produces(MediaType.APPLICATION_JSON)

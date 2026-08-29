@@ -58,7 +58,13 @@ public class MskConfiguration {
     @JsonProperty("serverPropertiesByRevision")
     private Map<Long, String> serverPropertiesByRevision = new ConcurrentHashMap<>();
 
-    @JsonIgnore
+    // Tags live only in the store: AWS's Configuration/DescribeConfigurationResponse shape has
+    // no tags member, so they are reachable through ListTagsForResource only.
+    @JsonProperty("tags")
+    private Map<String, String> tags;
+
+    // Persisted so an async path can write back to the right account partition after a reload.
+    @JsonProperty("accountId")
     private String accountId;
 
     public MskConfiguration() {}
@@ -162,6 +168,9 @@ public class MskConfiguration {
             this.serverPropertiesByRevision.put(legacyRevisionNumber, serverProperties);
         }
     }
+
+    public Map<String, String> getTags() { return tags; }
+    public void setTags(Map<String, String> tags) { this.tags = tags; }
 
     public String getAccountId() { return accountId; }
     public void setAccountId(String accountId) { this.accountId = accountId; }

@@ -17,6 +17,7 @@ import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.security.SecureRandom;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.*;
@@ -26,6 +27,12 @@ import java.util.Base64;
 public class AppSyncService {
     private static final Logger LOG = Logger.getLogger(AppSyncService.class);
 
+    // AWS issues API keys as "da2-" followed by 26 lowercase alphanumerics, and ApiKey.id is
+    // that value: it is what clients send in the x-api-key header.
+    private static final String API_KEY_PREFIX = "da2-";
+    private static final String API_KEY_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789";
+    private static final int API_KEY_RANDOM_LENGTH = 26;
+
     private final StorageBackend<String, GraphqlApi> apiStore;
     private final AccountAwareStorageBackend<String> schemaStore;
     private final AccountAwareStorageBackend<SchemaCreationStatus> schemaStatusStore;
@@ -33,6 +40,8 @@ public class AppSyncService {
     private final StorageBackend<String, Resolver> resolverStore;
     private final StorageBackend<String, FunctionConfiguration> functionStore;
     private final StorageBackend<String, ApiKey> apiKeyStore;
+    // Instance field on purpose: a static SecureRandom would be captured in the native image heap.
+    private final SecureRandom apiKeyRandom = new SecureRandom();
     private final StorageBackend<String, AppSyncType> typeStore;
     private final StorageBackend<String, DomainName> domainStore;
     private final StorageBackend<String, String> associationStore;
@@ -44,6 +53,7 @@ public class AppSyncService {
     private final Instance<RequestContext> requestContextInstance;
     private final ObjectMapper objectMapper;
     private final Clock clock;
+    private final String baseUrl;
 
     @Inject
     public AppSyncService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver,
@@ -70,6 +80,7 @@ public class AppSyncService {
         this.requestContextInstance = requestContextInstance;
         this.objectMapper = objectMapper;
         this.clock = clock;
+        this.baseUrl = trimTrailingSlash(config.effectiveBaseUrl());
     }
 
     // ──────────────────────────── GraphQL API ────────────────────────────
@@ -124,11 +135,7 @@ public class AppSyncService {
 
         api.setArn(buildApiArn(apiId, region));
 
-        Map<String, String> uris = new HashMap<>();
-        String baseUri = "http://localhost:4566";
-        uris.put("GRAPHQL", baseUri + "/v1/apis/" + apiId + "/graphql");
-        uris.put("REALTIME", "ws://localhost:4566/v1/apis/" + apiId + "/graphql/realtime");
-        api.setUris(uris);
+        api.setUris(graphqlApiUris(apiId));
 
         Map<String, Object> tags = castMap(request.get("tags"));
         if (tags != null) {
@@ -144,11 +151,14 @@ public class AppSyncService {
 
     public GraphqlApi getGraphqlApi(String apiId) {
         return apiStore.get(apiId)
+                .map(this::refreshGraphqlApiUris)
                 .orElseThrow(() -> new AwsException("NotFoundException", "GraphQL API not found: " + apiId, 404));
     }
 
     public Page<GraphqlApi> listGraphqlApis(Integer maxResults, String nextToken) {
-        return paginate(apiStore.scan(k -> true), nextToken, maxResults);
+        List<GraphqlApi> apis = apiStore.scan(k -> true);
+        apis.forEach(this::refreshGraphqlApiUris);
+        return paginate(apis, nextToken, maxResults);
     }
 
     @SuppressWarnings("unchecked")
@@ -584,7 +594,7 @@ public class AppSyncService {
                     "The API key exceeded a limit.", 400);
         }
         ApiKey key = new ApiKey();
-        key.setId(generateShortId());
+        key.setId(generateApiKeyId());
         key.setApiId(apiId);
         key.setDescription((String) request.get("description"));
         Object expiresValue = request.get("expires");
@@ -592,8 +602,6 @@ public class AppSyncService {
                 ? clock.instant().getEpochSecond() + Duration.ofDays(7).getSeconds()
                 : parseExpires(expiresValue);
         applyApiKeyExpires(key, expires);
-
-        key.setApiKey("da2-" + generateShortId());
 
         apiKeyStore.put(apiKey(apiId, key.getId()), key);
         return key;
@@ -614,7 +622,9 @@ public class AppSyncService {
         }
         long now = clock.instant().getEpochSecond();
         for (ApiKey key : apiKeyStore.scan(k -> k.startsWith(apiId + "::"))) {
-            if (keyValue.equals(key.getApiKey())) {
+            // Keys persisted by earlier builds have a short id that was never a valid
+            // x-api-key value; keep them listable and deletable but never authenticate them.
+            if (key.getId() != null && key.getId().startsWith(API_KEY_PREFIX) && keyValue.equals(key.getId())) {
                 if (key.getExpires() != null && key.getExpires() <= now) {
                     return Optional.empty();
                 }
@@ -1094,6 +1104,14 @@ public class AppSyncService {
         return UUID.randomUUID().toString().replace("-", "").substring(0, 7);
     }
 
+    private String generateApiKeyId() {
+        StringBuilder sb = new StringBuilder(API_KEY_PREFIX);
+        for (int i = 0; i < API_KEY_RANDOM_LENGTH; i++) {
+            sb.append(API_KEY_ALPHABET.charAt(apiKeyRandom.nextInt(API_KEY_ALPHABET.length())));
+        }
+        return sb.toString();
+    }
+
     private String apiKey(String apiId, String name) {
         return apiId + "::" + name;
     }
@@ -1126,6 +1144,31 @@ public class AppSyncService {
     private String coerceString(Object value, String defaultValue) {
         String result = coerceString(value);
         return result != null ? result : defaultValue;
+    }
+
+    private static String trimTrailingSlash(String value) {
+        return value.endsWith("/") ? value.substring(0, value.length() - 1) : value;
+    }
+
+    private static String toWebSocketBaseUrl(String value) {
+        return value.replaceFirst("^http", "ws");
+    }
+
+    private Map<String, String> graphqlApiUris(String apiId) {
+        String graphqlPath = "/v1/apis/" + apiId + "/graphql";
+        Map<String, String> uris = new HashMap<>();
+        uris.put("GRAPHQL", baseUrl + graphqlPath);
+        uris.put("REALTIME", toWebSocketBaseUrl(baseUrl) + graphqlPath + "/realtime");
+        return uris;
+    }
+
+    private GraphqlApi refreshGraphqlApiUris(GraphqlApi api) {
+        Map<String, String> expectedUris = graphqlApiUris(api.getApiId());
+        if (!expectedUris.equals(api.getUris())) {
+            api.setUris(expectedUris);
+            apiStore.put(api.getApiId(), api);
+        }
+        return api;
     }
 
     private Integer castInt(Object value) {

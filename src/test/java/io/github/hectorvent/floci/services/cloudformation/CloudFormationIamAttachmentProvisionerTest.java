@@ -54,7 +54,7 @@ class CloudFormationIamAttachmentProvisionerTest {
                 null, null, null, null, null, null, null,
                 null, null, null, null, null, null, null,
                 null, null,
-                new CloudFormationResourceRegistry(List.of(new IamRoleCfnProvisioner(iamService))));
+                new CloudFormationResourceRegistry(List.of(new IamRoleCfnProvisioner(iamService))), null);
     }
 
     @Test

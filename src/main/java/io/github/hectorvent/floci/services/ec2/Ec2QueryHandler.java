@@ -40,12 +40,17 @@ public class Ec2QueryHandler {
     private final Ec2Service service;
     private final EmulatorConfig config;
     private final FlowLogService flowLogService;
+    private final Ec2EbsEncryptionService ebsEncryptionService;
+    private final Ec2IpamService ipamService;
 
     @Inject
-    public Ec2QueryHandler(Ec2Service service, EmulatorConfig config, FlowLogService flowLogService) {
+    public Ec2QueryHandler(Ec2Service service, EmulatorConfig config, FlowLogService flowLogService,
+                           Ec2EbsEncryptionService ebsEncryptionService, Ec2IpamService ipamService) {
         this.service = service;
         this.config = config;
         this.flowLogService = flowLogService;
+        this.ebsEncryptionService = ebsEncryptionService;
+        this.ipamService = ipamService;
     }
 
     public Response handle(String action, MultivaluedMap<String, String> params, String region) {
@@ -64,6 +69,13 @@ public class Ec2QueryHandler {
                 case "DescribeInstanceStatus" -> handleDescribeInstanceStatus(params, region);
                 case "DescribeInstanceAttribute" -> handleDescribeInstanceAttribute(params, region);
                 case "ModifyInstanceAttribute" -> handleModifyInstanceAttribute(params, region);
+                // EBS encryption defaults
+                case "GetEbsEncryptionByDefault" -> handleGetEbsEncryptionByDefault(region);
+                case "EnableEbsEncryptionByDefault" -> handleEnableEbsEncryptionByDefault(region);
+                case "DisableEbsEncryptionByDefault" -> handleDisableEbsEncryptionByDefault(region);
+                case "GetEbsDefaultKmsKeyId" -> handleGetEbsDefaultKmsKeyId(region);
+                case "ModifyEbsDefaultKmsKeyId" -> handleModifyEbsDefaultKmsKeyId(params, region);
+                case "ResetEbsDefaultKmsKeyId" -> handleResetEbsDefaultKmsKeyId(region);
                 // VPCs
                 case "CreateVpc" -> handleCreateVpc(params, region);
                 case "DescribeVpcs" -> handleDescribeVpcs(params, region);
@@ -73,6 +85,7 @@ public class Ec2QueryHandler {
                 case "DescribeVpcEndpointServices" -> handleDescribeVpcEndpointServices(params, region);
                 case "CreateVpcEndpoint" -> handleCreateVpcEndpoint(params, region);
                 case "DescribeVpcEndpoints" -> handleDescribeVpcEndpoints(params, region);
+                case "ModifyVpcEndpoint" -> handleModifyVpcEndpoint(params, region);
                 case "DeleteVpcEndpoints" -> handleDeleteVpcEndpoints(params, region);
                 // Flow Logs
                 case "CreateFlowLogs" -> handleCreateFlowLogs(params, region);
@@ -120,6 +133,7 @@ public class Ec2QueryHandler {
                 case "DeleteTransitGatewayRoute" -> handleDeleteTransitGatewayRoute(params, region);
                 case "ReplaceTransitGatewayRoute" -> handleReplaceTransitGatewayRoute(params, region);
                 case "SearchTransitGatewayRoutes" -> handleSearchTransitGatewayRoutes(params, region);
+                case "ExportTransitGatewayRoutes" -> handleExportTransitGatewayRoutes(params, region);
                 case "CreateDefaultVpc" -> handleCreateDefaultVpc(params, region);
                 case "AssociateVpcCidrBlock" -> handleAssociateVpcCidrBlock(params, region);
                 case "DisassociateVpcCidrBlock" -> handleDisassociateVpcCidrBlock(params, region);
@@ -131,6 +145,7 @@ public class Ec2QueryHandler {
                 // Security Groups
                 case "CreateSecurityGroup" -> handleCreateSecurityGroup(params, region);
                 case "DescribeSecurityGroups" -> handleDescribeSecurityGroups(params, region);
+                case "GetSecurityGroupsForVpc" -> handleGetSecurityGroupsForVpc(params, region);
                 case "DeleteSecurityGroup" -> handleDeleteSecurityGroup(params, region);
                 case "AuthorizeSecurityGroupIngress" -> handleAuthorizeSecurityGroupIngress(params, region);
                 case "AuthorizeSecurityGroupEgress" -> handleAuthorizeSecurityGroupEgress(params, region);
@@ -221,6 +236,25 @@ public class Ec2QueryHandler {
                 case "RequestSpotInstances" -> handleRequestSpotInstances(params, region);
                 case "DescribeSpotInstanceRequests" -> handleDescribeSpotInstanceRequests(params, region);
                 case "CancelSpotInstanceRequests" -> handleCancelSpotInstanceRequests(params, region);
+                // IPAM
+                case "EnableIpamOrganizationAdminAccount" -> handleEnableIpamOrgAdmin(params);
+                case "DisableIpamOrganizationAdminAccount" -> handleDisableIpamOrgAdmin(params);
+                case "CreateIpam" -> handleCreateIpam(params, region);
+                case "DescribeIpams" -> handleDescribeIpams(params, region);
+                case "DeleteIpam" -> handleDeleteIpam(params, region);
+                case "ModifyIpam" -> handleModifyIpam(params, region);
+                case "CreateIpamPool" -> handleCreateIpamPool(params, region);
+                case "DescribeIpamPools" -> handleDescribeIpamPools(params, region);
+                case "DeleteIpamPool" -> handleDeleteIpamPool(params, region);
+                case "ModifyIpamPool" -> handleModifyIpamPool(params, region);
+                case "AssociateIpamByoasn" -> handleAssociateIpamByoasn(params, region);
+                case "DescribeIpamByoasn" -> handleDescribeIpamByoasn(params, region);
+                case "DisassociateIpamByoasn" -> handleDisassociateIpamByoasn(params, region);
+                case "ProvisionIpamPoolCidr" -> handleProvisionIpamPoolCidr(params, region);
+                case "GetIpamPoolCidrs" -> handleGetIpamPoolCidrs(params, region);
+                case "AllocateIpamPoolCidr" -> handleAllocateIpamPoolCidr(params, region);
+                case "ReleaseIpamPoolAllocation" -> handleReleaseIpamPoolAllocation(params, region);
+                case "GetIpamPoolAllocations" -> handleGetIpamPoolAllocations(params, region);
                 default -> ec2Error("UnsupportedOperation",
                         "Operation " + action + " is not supported.", 400);
             };
@@ -460,23 +494,6 @@ public class Ec2QueryHandler {
         return tags;
     }
 
-    private List<Tag> parseLaunchTemplateDataTagsForResource(MultivaluedMap<String, String> p, String resourceType) {
-        List<Tag> tags = new ArrayList<>();
-        for (int i = 1; ; i++) {
-            String resType = p.getFirst("LaunchTemplateData.TagSpecification." + i + ".ResourceType");
-            if (resType == null) break;
-            if (resourceType.equals(resType)) {
-                for (int j = 1; ; j++) {
-                    String key = p.getFirst("LaunchTemplateData.TagSpecification." + i + ".Tag." + j + ".Key");
-                    if (key == null) break;
-                    String value = p.getFirst("LaunchTemplateData.TagSpecification." + i + ".Tag." + j + ".Value");
-                    tags.add(new Tag(key, value));
-                }
-            }
-        }
-        return tags;
-    }
-
     // Apply tags supplied inline on a create call (TagSpecification) to the resource, so
     // they round-trip on the next Describe* — otherwise the provider sees phantom tag drift.
     private void applyResourceTags(MultivaluedMap<String, String> p, String region, String resourceType, String resourceId) {
@@ -498,6 +515,56 @@ public class Ec2QueryHandler {
             service.createTags(region, List.of(rule.getSecurityGroupRuleId()), ruleTags);
             rule.setTags(new ArrayList<>(ruleTags));
         }
+    }
+
+    // ─── EBS encryption defaults ─────────────────────────────────────────────
+
+    private Response handleGetEbsEncryptionByDefault(String region) {
+        return ebsEncryptionBooleanResponse("GetEbsEncryptionByDefaultResponse",
+                ebsEncryptionService.getEbsEncryptionByDefault(region));
+    }
+
+    private Response handleEnableEbsEncryptionByDefault(String region) {
+        return ebsEncryptionBooleanResponse("EnableEbsEncryptionByDefaultResponse",
+                ebsEncryptionService.enableEbsEncryptionByDefault(region));
+    }
+
+    private Response handleDisableEbsEncryptionByDefault(String region) {
+        return ebsEncryptionBooleanResponse("DisableEbsEncryptionByDefaultResponse",
+                ebsEncryptionService.disableEbsEncryptionByDefault(region));
+    }
+
+    private Response handleGetEbsDefaultKmsKeyId(String region) {
+        return ebsKmsKeyResponse("GetEbsDefaultKmsKeyIdResponse",
+                ebsEncryptionService.getEbsDefaultKmsKeyId(region));
+    }
+
+    private Response handleModifyEbsDefaultKmsKeyId(MultivaluedMap<String, String> p, String region) {
+        return ebsKmsKeyResponse("ModifyEbsDefaultKmsKeyIdResponse",
+                ebsEncryptionService.modifyEbsDefaultKmsKeyId(region, p.getFirst("KmsKeyId")));
+    }
+
+    private Response handleResetEbsDefaultKmsKeyId(String region) {
+        return ebsKmsKeyResponse("ResetEbsDefaultKmsKeyIdResponse",
+                ebsEncryptionService.resetEbsDefaultKmsKeyId(region));
+    }
+
+    private Response ebsEncryptionBooleanResponse(String rootElement, boolean enabled) {
+        XmlBuilder xml = new XmlBuilder()
+                .start(rootElement, AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .elem("ebsEncryptionByDefault", String.valueOf(enabled))
+                .end(rootElement);
+        return xmlResponse(xml.build());
+    }
+
+    private Response ebsKmsKeyResponse(String rootElement, String kmsKeyId) {
+        XmlBuilder xml = new XmlBuilder()
+                .start(rootElement, AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .elem("kmsKeyId", kmsKeyId)
+                .end(rootElement);
+        return xmlResponse(xml.build());
     }
 
     private Response xmlResponse(String xml) {
@@ -569,9 +636,10 @@ public class Ec2QueryHandler {
             instanceType = firstNonBlank(instanceType, launchTemplateData.getInstanceType());
             keyName = firstNonBlank(keyName, launchTemplateData.getKeyName());
             userData = firstNonBlank(userData, launchTemplateData.getUserData());
-            iamInstanceProfileArn = firstNonBlank(iamInstanceProfileArn, launchTemplateData.getIamInstanceProfileArn());
+            iamInstanceProfileArn = firstNonBlank(iamInstanceProfileArn,
+                    service.iamInstanceProfileArn(launchTemplateData));
             if (sgIds.isEmpty()) {
-                sgIds = new ArrayList<>(launchTemplateData.getSecurityGroupIds());
+                sgIds = new ArrayList<>(launchTemplateData.effectiveSecurityGroupIds());
             }
             if (!launchTemplateData.getInstanceTags().isEmpty()) {
                 Map<String, Tag> mergedTags = new LinkedHashMap<>();
@@ -1092,6 +1160,361 @@ public class Ec2QueryHandler {
         return xmlResponse(xml.build());
     }
 
+    // ─── IPAM ─────────────────────────────────────────────────────────────────
+
+    private Response handleEnableIpamOrgAdmin(MultivaluedMap<String, String> p) {
+        ipamService.enableIpamOrganizationAdminAccount(p.getFirst("DelegatedAdminAccountId"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("EnableIpamOrganizationAdminAccountResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .elem("success", "true")
+                .end("EnableIpamOrganizationAdminAccountResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDisableIpamOrgAdmin(MultivaluedMap<String, String> p) {
+        ipamService.disableIpamOrganizationAdminAccount(p.getFirst("DelegatedAdminAccountId"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("DisableIpamOrganizationAdminAccountResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .elem("success", "true")
+                .end("DisableIpamOrganizationAdminAccountResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleCreateIpam(MultivaluedMap<String, String> p, String region) {
+        List<String> operatingRegions = new ArrayList<>();
+        for (int i = 1; p.getFirst("OperatingRegion." + i + ".RegionName") != null; i++) {
+            operatingRegions.add(p.getFirst("OperatingRegion." + i + ".RegionName"));
+        }
+        if (operatingRegions.isEmpty()) {
+            operatingRegions.add(region);
+        }
+        checkDryRun(p);
+        Ipam ipam = ipamService.createIpam(region, p.getFirst("Description"), operatingRegions,
+                null,
+                p.getFirst("EnablePrivateGua") == null ? false : Boolean.parseBoolean(p.getFirst("EnablePrivateGua")),
+                p.getFirst("MeteredAccount"), p.getFirst("Tier"), p.getFirst("ClientToken"),
+                parseTagsForResource(p, "ipam"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("CreateIpamResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString());
+        writeIpam(xml, "ipam", ipam);
+        xml.end("CreateIpamResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDescribeIpams(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
+        List<String> ids = getList(p, "IpamId");
+        if (ids.isEmpty()) {
+            ids = getList(p, "IpamIds.member");
+        }
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeIpamsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("ipamSet");
+        for (Ipam ipam : ipamService.describeIpams(region, ids)) {
+            writeIpam(xml, "item", ipam);
+        }
+        xml.end("ipamSet").end("DescribeIpamsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDeleteIpam(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
+        Ipam ipam = ipamService.deleteIpam(region, p.getFirst("IpamId"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("DeleteIpamResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString());
+        writeIpam(xml, "ipam", ipam);
+        xml.end("DeleteIpamResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleAssociateIpamByoasn(MultivaluedMap<String, String> params, String region) {
+        checkDryRun(params);
+        AsnAssociation association = ipamService.associateIpamByoasn(region, params.getFirst("Asn"), params.getFirst("Cidr"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("AssociateIpamByoasnResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("asnAssociation")
+                .elem("asn", association.getAsn())
+                .elem("cidr", association.getCidr())
+                .elem("state", association.getState())
+                .elem("statusMessage", association.getStatusMessage())
+                .end("asnAssociation")
+                .end("AssociateIpamByoasnResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDescribeIpamByoasn(MultivaluedMap<String, String> params, String region) {
+        checkDryRun(params);
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeIpamByoasnResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("byoasnSet");
+        for (AsnAssociation association : ipamService.describeIpamByoasn(region)) {
+            xml.start("item")
+                    .elem("asn", association.getAsn())
+                    .elem("ipamId", association.getIpamId())
+                    .elem("state", association.getState())
+                    .elem("statusMessage", association.getStatusMessage())
+                    .end("item");
+        }
+        xml.end("byoasnSet").end("DescribeIpamByoasnResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDisassociateIpamByoasn(MultivaluedMap<String, String> params, String region) {
+        checkDryRun(params);
+        AsnAssociation association = ipamService.disassociateIpamByoasn(
+                region, params.getFirst("Asn"), params.getFirst("Cidr"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("DisassociateIpamByoasnResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("asnAssociation")
+                .elem("asn", association.getAsn())
+                .elem("cidr", association.getCidr())
+                .elem("state", association.getState())
+                .elem("statusMessage", association.getStatusMessage())
+                .end("asnAssociation")
+                .end("DisassociateIpamByoasnResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private void checkDryRun(MultivaluedMap<String, String> params) {
+        if (Boolean.parseBoolean(params.getFirst("DryRun"))) {
+            throw new AwsException("DryRunOperation", "Request would have succeeded, but DryRun flag is set.", 412);
+        }
+    }
+
+    private Response handleModifyIpam(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
+        List<String> addOperatingRegions = new ArrayList<>();
+        for (int i = 1; p.getFirst("AddOperatingRegion." + i + ".RegionName") != null; i++) {
+            addOperatingRegions.add(p.getFirst("AddOperatingRegion." + i + ".RegionName"));
+        }
+        List<String> removeOperatingRegions = new ArrayList<>();
+        for (int i = 1; p.getFirst("RemoveOperatingRegion." + i + ".RegionName") != null; i++) {
+            removeOperatingRegions.add(p.getFirst("RemoveOperatingRegion." + i + ".RegionName"));
+        }
+        Ipam ipam = ipamService.modifyIpam(
+                region,
+                p.getFirst("IpamId"),
+                p.getFirst("Description"),
+                addOperatingRegions,
+                removeOperatingRegions,
+                p.getFirst("EnablePrivateGua") == null ? null : Boolean.parseBoolean(p.getFirst("EnablePrivateGua")),
+                p.getFirst("MeteredAccount"),
+                p.getFirst("Tier"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("ModifyIpamResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString());
+        writeIpam(xml, "ipam", ipam);
+        xml.end("ModifyIpamResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleCreateIpamPool(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
+        IpamPool pool = ipamService.createIpamPool(region,
+                p.getFirst("IpamScopeId"),
+                p.getFirst("Locale"),
+                p.getFirst("SourceIpamPoolId"),
+                p.getFirst("AddressFamily"),
+                p.getFirst("Description"),
+                null,
+                p.getFirst("ClientToken"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("CreateIpamPoolResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString());
+        writeIpamPool(xml, "ipamPool", pool);
+        xml.end("CreateIpamPoolResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDescribeIpamPools(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
+        List<String> ids = getList(p, "IpamPoolId");
+        if (ids.isEmpty()) {
+            ids = getList(p, "IpamPoolIds.member");
+        }
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeIpamPoolsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("ipamPoolSet");
+        for (IpamPool pool : ipamService.describeIpamPools(region, ids)) {
+            writeIpamPool(xml, "item", pool);
+        }
+        xml.end("ipamPoolSet").end("DescribeIpamPoolsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDeleteIpamPool(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
+        IpamPool pool = ipamService.deleteIpamPool(region, p.getFirst("IpamPoolId"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("DeleteIpamPoolResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString());
+        writeIpamPool(xml, "ipamPool", pool);
+        xml.end("DeleteIpamPoolResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleModifyIpamPool(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
+        IpamPool pool = ipamService.modifyIpamPool(
+                region,
+                p.getFirst("IpamPoolId"),
+                p.getFirst("Description"),
+                p.getFirst("AutoImport") == null ? null : Boolean.parseBoolean(p.getFirst("AutoImport")),
+                parseOptionalInt(p.getFirst("AllocationMinNetmaskLength"), "AllocationMinNetmaskLength"),
+                parseOptionalInt(p.getFirst("AllocationMaxNetmaskLength"), "AllocationMaxNetmaskLength"),
+                parseOptionalInt(p.getFirst("AllocationDefaultNetmaskLength"), "AllocationDefaultNetmaskLength"),
+                Boolean.parseBoolean(p.getFirst("ClearAllocationDefaultNetmaskLength")));
+        XmlBuilder xml = new XmlBuilder()
+                .start("ModifyIpamPoolResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString());
+        writeIpamPool(xml, "ipamPool", pool);
+        xml.end("ModifyIpamPoolResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleProvisionIpamPoolCidr(MultivaluedMap<String, String> p, String region) {
+        IpamPoolCidr cidr = ipamService.provisionIpamPoolCidr(region,
+                p.getFirst("IpamPoolId"), p.getFirst("Cidr"), p.getFirst("ClientToken"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("ProvisionIpamPoolCidrResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("ipamPoolCidr")
+                .elem("cidr", cidr.getCidr())
+                .elem("state", cidr.getState())
+                .end("ipamPoolCidr")
+                .end("ProvisionIpamPoolCidrResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleGetIpamPoolCidrs(MultivaluedMap<String, String> p, String region) {
+        XmlBuilder xml = new XmlBuilder()
+                .start("GetIpamPoolCidrsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("ipamPoolCidrSet");
+        for (IpamPoolCidr cidr : ipamService.getIpamPoolCidrs(region, p.getFirst("IpamPoolId"))) {
+            xml.start("item")
+                    .elem("cidr", cidr.getCidr())
+                    .elem("state", cidr.getState())
+                    .end("item");
+        }
+        xml.end("ipamPoolCidrSet").end("GetIpamPoolCidrsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleAllocateIpamPoolCidr(MultivaluedMap<String, String> p, String region) {
+        IpamPoolAllocation allocation = ipamService.allocateIpamPoolCidr(region,
+                p.getFirst("IpamPoolId"),
+                parseOptionalInt(p.getFirst("NetmaskLength"), "NetmaskLength"),
+                p.getFirst("Cidr"),
+                p.getFirst("Description"),
+                p.getFirst("ClientToken"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("AllocateIpamPoolCidrResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString());
+        writeIpamPoolAllocation(xml, "ipamPoolAllocation", allocation);
+        xml.end("AllocateIpamPoolCidrResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleReleaseIpamPoolAllocation(MultivaluedMap<String, String> p, String region) {
+        ipamService.releaseIpamPoolAllocation(region,
+                p.getFirst("IpamPoolId"),
+                p.getFirst("IpamPoolAllocationId"),
+                p.getFirst("Cidr"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("ReleaseIpamPoolAllocationResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .elem("success", "true")
+                .end("ReleaseIpamPoolAllocationResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleGetIpamPoolAllocations(MultivaluedMap<String, String> p, String region) {
+        XmlBuilder xml = new XmlBuilder()
+                .start("GetIpamPoolAllocationsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("ipamPoolAllocationSet");
+        for (IpamPoolAllocation allocation
+                : ipamService.getIpamPoolAllocations(region, p.getFirst("IpamPoolId"))) {
+            writeIpamPoolAllocation(xml, "item", allocation);
+        }
+        xml.end("ipamPoolAllocationSet").end("GetIpamPoolAllocationsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private void writeIpam(XmlBuilder xml, String wrapper, Ipam ipam) {
+        xml.start(wrapper)
+                .elem("ipamId", ipam.getIpamId())
+                .elem("ipamArn", ipam.getIpamArn())
+                .elem("ipamRegion", ipam.getRegion())
+                .elem("ownerId", ipam.getOwnerId())
+                .elem("publicDefaultScopeId", ipam.getPublicDefaultScopeId())
+                .elem("privateDefaultScopeId", ipam.getPrivateDefaultScopeId())
+                .elem("scopeCount", String.valueOf(ipam.getScopes().size()))
+                .elem("state", ipam.getState())
+                .elem("enablePrivateGua", String.valueOf(Boolean.TRUE.equals(ipam.getEnablePrivateGua())))
+                .elem("meteredAccount", ipam.getMeteredAccount())
+                .elem("tier", ipam.getTier());
+        if (ipam.getDescription() != null) {
+            xml.elem("description", ipam.getDescription());
+        }
+        xml.start("operatingRegionSet");
+        for (String operatingRegion : ipam.getOperatingRegions()) {
+            xml.start("item").elem("regionName", operatingRegion).end("item");
+        }
+        xml.end("operatingRegionSet")
+                .raw(tagSetXml(ipam.getTags()))
+                .end(wrapper);
+    }
+
+    private void writeIpamPool(XmlBuilder xml, String wrapper, IpamPool pool) {
+        xml.start(wrapper)
+                .elem("ipamPoolId", pool.getIpamPoolId())
+                .elem("ipamPoolArn", pool.getIpamPoolArn())
+                .elem("ipamScopeId", pool.getIpamScopeId())
+                .elem("ownerId", pool.getOwnerId())
+                .elem("locale", pool.getLocale())
+                .elem("addressFamily", pool.getAddressFamily())
+                .elem("state", pool.getState())
+                .elem("autoImport", String.valueOf(pool.isAutoImport()));
+        if (pool.getSourceIpamPoolId() != null) {
+            xml.elem("sourceIpamPoolId", pool.getSourceIpamPoolId());
+        }
+        if (pool.getDescription() != null) {
+            xml.elem("description", pool.getDescription());
+        }
+        if (pool.getAllocationMinNetmaskLength() != null) {
+            xml.elem("allocationMinNetmaskLength", String.valueOf(pool.getAllocationMinNetmaskLength()));
+        }
+        if (pool.getAllocationMaxNetmaskLength() != null) {
+            xml.elem("allocationMaxNetmaskLength", String.valueOf(pool.getAllocationMaxNetmaskLength()));
+        }
+        if (pool.getAllocationDefaultNetmaskLength() != null) {
+            xml.elem("allocationDefaultNetmaskLength", String.valueOf(pool.getAllocationDefaultNetmaskLength()));
+        }
+        xml.end(wrapper);
+    }
+
+    private void writeIpamPoolAllocation(XmlBuilder xml, String wrapper, IpamPoolAllocation allocation) {
+        xml.start(wrapper)
+                .elem("ipamPoolAllocationId", allocation.getIpamPoolAllocationId())
+                .elem("cidr", allocation.getCidr())
+                .elem("resourceType", allocation.getResourceType());
+        if (allocation.getDescription() != null) {
+            xml.elem("description", allocation.getDescription());
+        }
+        xml.end(wrapper);
+    }
+
     private Response handleCreateVpcEndpoint(MultivaluedMap<String, String> p, String region) {
         VpcEndpoint endpoint = service.createVpcEndpoint(
                 region,
@@ -1102,12 +1525,36 @@ public class Ec2QueryHandler {
                 getList(p, "SubnetId"),
                 getList(p, "SecurityGroupId"),
                 p.getFirst("PrivateDnsEnabled") != null ? Boolean.valueOf(p.getFirst("PrivateDnsEnabled")) : null,
+                p.getFirst("PolicyDocument"),
                 parseTagsForResource(p, "vpc-endpoint"));
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateVpcEndpointResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
                 .start("vpcEndpoint").raw(vpcEndpointXml(endpoint)).end("vpcEndpoint")
                 .end("CreateVpcEndpointResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleModifyVpcEndpoint(MultivaluedMap<String, String> p, String region) {
+        service.modifyVpcEndpoint(
+                region,
+                p.getFirst("VpcEndpointId"),
+                getList(p, "AddRouteTableId"),
+                getList(p, "RemoveRouteTableId"),
+                getList(p, "AddSubnetId"),
+                getList(p, "RemoveSubnetId"),
+                getList(p, "AddSecurityGroupId"),
+                getList(p, "RemoveSecurityGroupId"),
+                p.getFirst("PolicyDocument"),
+                p.getFirst("ResetPolicy") != null ? Boolean.valueOf(p.getFirst("ResetPolicy")) : null,
+                p.getFirst("PrivateDnsEnabled") != null ? Boolean.valueOf(p.getFirst("PrivateDnsEnabled")) : null);
+        // ModifyVpcEndpoint returns only a boolean; the caller re-reads the endpoint
+        // through DescribeVpcEndpoints to see the result.
+        XmlBuilder xml = new XmlBuilder()
+                .start("ModifyVpcEndpointResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .elem("return", true)
+                .end("ModifyVpcEndpointResponse");
         return xmlResponse(xml.build());
     }
 
@@ -1576,6 +2023,17 @@ public class Ec2QueryHandler {
         return xmlResponse(xml.build());
     }
 
+    private Response handleExportTransitGatewayRoutes(MultivaluedMap<String, String> p, String region) {
+        String s3Location = service.exportTransitGatewayRoutes(
+                region, p.getFirst("TransitGatewayRouteTableId"), p.getFirst("S3Bucket"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("ExportTransitGatewayRoutesResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .elem("s3Location", s3Location)
+                .end("ExportTransitGatewayRoutesResponse");
+        return xmlResponse(xml.build());
+    }
+
     private String routeTableXml(TransitGatewayRouteTable routeTable, boolean includeTags) {
         XmlBuilder xml = new XmlBuilder()
                 .elem("transitGatewayRouteTableId", routeTable.getTransitGatewayRouteTableId())
@@ -1769,6 +2227,7 @@ public class Ec2QueryHandler {
         return xmlResponse(xml.build());
     }
 
+
     private Response handleCreateDefaultVpc(MultivaluedMap<String, String> p, String region) {
         Vpc vpc = service.createDefaultVpc(region);
         XmlBuilder xml = new XmlBuilder()
@@ -1885,6 +2344,28 @@ public class Ec2QueryHandler {
             xml.start("item").raw(sgXml(sg)).end("item");
         }
         xml.end("securityGroupInfo").end("DescribeSecurityGroupsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleGetSecurityGroupsForVpc(MultivaluedMap<String, String> p, String region) {
+        String vpcId = p.getFirst("VpcId");
+        Map<String, List<String>> filters = getFilters(p);
+        List<SecurityGroup> sgs = service.getSecurityGroupsForVpc(region, vpcId, filters);
+        XmlBuilder xml = new XmlBuilder()
+                .start("GetSecurityGroupsForVpcResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("securityGroupForVpcSet");
+        for (SecurityGroup sg : sgs) {
+            xml.start("item")
+                    .elem("groupId", sg.getGroupId())
+                    .elem("groupName", sg.getGroupName())
+                    .elem("description", sg.getDescription())
+                    .elem("ownerId", sg.getOwnerId())
+                    .elem("primaryVpcId", sg.getVpcId())
+                    .raw(tagSetXml(sg.getTags()))
+                    .end("item");
+        }
+        xml.end("securityGroupForVpcSet").end("GetSecurityGroupsForVpcResponse");
         return xmlResponse(xml.build());
     }
 
@@ -2405,9 +2886,18 @@ public class Ec2QueryHandler {
     private Response handleCreateRoute(MultivaluedMap<String, String> p, String region) {
         String rtId = p.getFirst("RouteTableId");
         String dest = p.getFirst("DestinationCidrBlock");
+        String destIpv6 = p.getFirst("DestinationIpv6CidrBlock");
+        // A prefix list is a destination in its own right per the CreateRoute reference. The
+        // prefix list itself is not modelled, but the id is stored and reported so the route
+        // stays addressable by DeleteRoute and ReplaceRoute.
+        String destPrefixList = p.getFirst("DestinationPrefixListId");
         String gwId = p.getFirst("GatewayId");
         String natGwId = p.getFirst("NatGatewayId");
-        service.createRoute(region, rtId, dest, gwId, natGwId);
+        // The gateway itself is not modelled (CreateEgressOnlyInternetGateway is still
+        // unimplemented), but the id the caller sent is stored and reported back so an IPv6
+        // egress route is not silently rewritten into a targetless one.
+        String eigwId = p.getFirst("EgressOnlyInternetGatewayId");
+        service.createRoute(region, rtId, dest, destIpv6, destPrefixList, gwId, natGwId, eigwId);
         return booleanResponse("CreateRoute");
     }
 
@@ -2423,6 +2913,8 @@ public class Ec2QueryHandler {
         }
         String rtId = p.getFirst("RouteTableId");
         String dest = p.getFirst("DestinationCidrBlock");
+        String destIpv6 = p.getFirst("DestinationIpv6CidrBlock");
+        String destPrefixList = p.getFirst("DestinationPrefixListId");
         String gwId = p.getFirst("GatewayId");
         String natGwId = p.getFirst("NatGatewayId");
         // Resetting a route to the local target is expressible: `local` is the gateway id the
@@ -2434,14 +2926,16 @@ public class Ec2QueryHandler {
             }
             gwId = LOCAL_GATEWAY_ID;
         }
-        service.replaceRoute(region, rtId, dest, gwId, natGwId);
+        service.replaceRoute(region, rtId, dest, destIpv6, destPrefixList, gwId, natGwId);
         return booleanResponse("ReplaceRoute");
     }
 
     private Response handleDeleteRoute(MultivaluedMap<String, String> p, String region) {
         String rtId = p.getFirst("RouteTableId");
         String dest = p.getFirst("DestinationCidrBlock");
-        service.deleteRoute(region, rtId, dest);
+        String destIpv6 = p.getFirst("DestinationIpv6CidrBlock");
+        String destPrefixList = p.getFirst("DestinationPrefixListId");
+        service.deleteRoute(region, rtId, dest, destIpv6, destPrefixList);
         return booleanResponse("DeleteRoute");
     }
 
@@ -2740,19 +3234,12 @@ public class Ec2QueryHandler {
     // ─── Launch Template handlers ─────────────────────────────────────────────
 
     private Response handleCreateLaunchTemplate(MultivaluedMap<String, String> p, String region) {
-        String encodedUserData = p.getFirst("LaunchTemplateData.UserData");
         LaunchTemplate launchTemplate = service.createLaunchTemplate(
                 region,
                 p.getFirst("LaunchTemplateName"),
-                p.getFirst("LaunchTemplateData.ImageId"),
-                p.getFirst("LaunchTemplateData.InstanceType"),
-                p.getFirst("LaunchTemplateData.KeyName"),
-                parseLaunchTemplateSecurityGroupIds(p),
-                decodeUserData(encodedUserData),
-                encodedUserData,
-                resolveIamInstanceProfileArn(p, "LaunchTemplateData.IamInstanceProfile"),
+                parseLaunchTemplateData(p),
                 parseTagsForResource(p, "launch-template"),
-                parseLaunchTemplateDataTagsForResource(p, "instance"));
+                p.getFirst("VersionDescription"));
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateLaunchTemplateResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -2762,20 +3249,13 @@ public class Ec2QueryHandler {
     }
 
     private Response handleCreateLaunchTemplateVersion(MultivaluedMap<String, String> p, String region) {
-        String encodedUserData = p.getFirst("LaunchTemplateData.UserData");
         LaunchTemplate launchTemplate = service.createLaunchTemplateVersion(
                 region,
                 p.getFirst("LaunchTemplateId"),
                 p.getFirst("LaunchTemplateName"),
                 p.getFirst("SourceVersion"),
-                p.getFirst("LaunchTemplateData.ImageId"),
-                p.getFirst("LaunchTemplateData.InstanceType"),
-                p.getFirst("LaunchTemplateData.KeyName"),
-                parseLaunchTemplateSecurityGroupIds(p),
-                decodeUserData(encodedUserData),
-                encodedUserData,
-                resolveIamInstanceProfileArn(p, "LaunchTemplateData.IamInstanceProfile"),
-                parseLaunchTemplateDataTagsForResource(p, "instance"));
+                parseLaunchTemplateData(p),
+                p.getFirst("VersionDescription"));
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateLaunchTemplateVersionResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -3197,8 +3677,11 @@ public class Ec2QueryHandler {
         for (Route r : rt.getRoutes()) {
             xml.start("item")
                     .elem("destinationCidrBlock", r.getDestinationCidrBlock())
+                    .elem("destinationIpv6CidrBlock", r.getDestinationIpv6CidrBlock())
+                    .elem("destinationPrefixListId", r.getDestinationPrefixListId())
                     .elem("gatewayId", r.getGatewayId())
                     .elem("natGatewayId", r.getNatGatewayId())
+                    .elem("egressOnlyInternetGatewayId", r.getEgressOnlyInternetGatewayId())
                     .elem("state", r.getState())
                     .elem("origin", r.getOrigin())
                     .end("item");
@@ -3301,56 +3784,451 @@ public class Ec2QueryHandler {
             xml.elem("createTime", ISO_FMT.format(launchTemplate.getCreateTime()));
         }
         xml.elem("createdBy", launchTemplate.getCreatedBy())
+                .elem("versionDescription", launchTemplate.getVersionDescription())
                 .start("launchTemplateData")
-                .elem("imageId", launchTemplate.getImageId())
-                .elem("instanceType", launchTemplate.getInstanceType());
-        if (launchTemplate.getKeyName() != null) {
-            xml.elem("keyName", launchTemplate.getKeyName());
-        }
-        if (launchTemplate.getEncodedUserData() != null) {
-            xml.elem("userData", launchTemplate.getEncodedUserData());
-        }
-        if (launchTemplate.getIamInstanceProfileArn() != null) {
-            xml.start("iamInstanceProfile")
-                    .elem("arn", launchTemplate.getIamInstanceProfileArn())
-                    .end("iamInstanceProfile");
-        }
-        xml.start("securityGroupIdSet");
-        for (String securityGroupId : launchTemplate.getSecurityGroupIds()) {
-            xml.elem("item", securityGroupId);
-        }
-        xml.end("securityGroupIdSet");
-        if (launchTemplate.getInstanceTags() != null && !launchTemplate.getInstanceTags().isEmpty()) {
-            xml.start("tagSpecificationSet")
-                    .start("item")
-                    .elem("resourceType", "instance")
-                    .raw(tagSetXml(launchTemplate.getInstanceTags()))
-                    .end("item")
-                    .end("tagSpecificationSet");
-        }
-        xml.end("launchTemplateData");
+                .raw(launchTemplateDataXml(launchTemplate.getData()))
+                .end("launchTemplateData");
         return xml.build();
     }
 
-    private List<String> parseLaunchTemplateSecurityGroupIds(MultivaluedMap<String, String> p) {
-        LinkedHashSet<String> groups = new LinkedHashSet<>(getList(p, "LaunchTemplateData.SecurityGroupId"));
-        for (int i = 1; ; i++) {
-            boolean sawInterface = false;
-            for (String prefix : List.of(
-                    "LaunchTemplateData.NetworkInterface." + i + ".Groups",
-                    "LaunchTemplateData.NetworkInterface." + i + ".GroupId",
-                    "LaunchTemplateData.NetworkInterface." + i + ".SecurityGroupId")) {
-                List<String> values = getList(p, prefix);
-                if (!values.isEmpty()) {
-                    sawInterface = true;
-                    groups.addAll(values);
+    /**
+     * Renders {@code ResponseLaunchTemplateData}. Element names are the {@code locationName}s the
+     * EC2 service model declares, so what the provider reads back matches what it submitted.
+     */
+    private String launchTemplateDataXml(LaunchTemplateData data) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("imageId", data.getImageId())
+                .elem("instanceType", data.getInstanceType())
+                .elem("kernelId", data.getKernelId())
+                .elem("ramDiskId", data.getRamDiskId())
+                .elem("keyName", data.getKeyName())
+                .elem("userData", data.getEncodedUserData())
+                .elem("ebsOptimized", str(data.getEbsOptimized()))
+                .elem("disableApiTermination", str(data.getDisableApiTermination()))
+                .elem("disableApiStop", str(data.getDisableApiStop()))
+                .elem("instanceInitiatedShutdownBehavior", data.getInstanceInitiatedShutdownBehavior());
+
+        LaunchTemplateData.IamInstanceProfile profile = data.getIamInstanceProfile();
+        if (profile != null && (profile.getArn() != null || profile.getName() != null)) {
+            xml.start("iamInstanceProfile")
+                    .elem("arn", profile.getArn())
+                    .elem("name", profile.getName())
+                    .end("iamInstanceProfile");
+        }
+
+        if (!data.getBlockDeviceMappings().isEmpty()) {
+            xml.start("blockDeviceMappingSet");
+            for (LaunchTemplateData.BlockDeviceMapping mapping : data.getBlockDeviceMappings()) {
+                xml.start("item")
+                        .elem("deviceName", mapping.getDeviceName())
+                        .elem("virtualName", mapping.getVirtualName())
+                        .elem("noDevice", mapping.getNoDevice());
+                LaunchTemplateData.Ebs ebs = mapping.getEbs();
+                if (ebs != null) {
+                    xml.start("ebs")
+                            .elem("encrypted", str(ebs.getEncrypted()))
+                            .elem("deleteOnTermination", str(ebs.getDeleteOnTermination()))
+                            .elem("iops", str(ebs.getIops()))
+                            .elem("kmsKeyId", ebs.getKmsKeyId())
+                            .elem("snapshotId", ebs.getSnapshotId())
+                            .elem("volumeSize", str(ebs.getVolumeSize()))
+                            .elem("volumeType", ebs.getVolumeType())
+                            .elem("throughput", str(ebs.getThroughput()))
+                            .end("ebs");
                 }
+                xml.end("item");
             }
-            if (!sawInterface && p.getFirst("LaunchTemplateData.NetworkInterface." + i + ".DeviceIndex") == null) {
+            xml.end("blockDeviceMappingSet");
+        }
+
+        if (!data.getNetworkInterfaces().isEmpty()) {
+            xml.start("networkInterfaceSet");
+            for (LaunchTemplateData.NetworkInterface networkInterface : data.getNetworkInterfaces()) {
+                xml.start("item")
+                        .elem("associatePublicIpAddress", str(networkInterface.getAssociatePublicIpAddress()))
+                        .elem("associateCarrierIpAddress", str(networkInterface.getAssociateCarrierIpAddress()))
+                        .elem("deleteOnTermination", str(networkInterface.getDeleteOnTermination()))
+                        .elem("description", networkInterface.getDescription())
+                        .elem("deviceIndex", str(networkInterface.getDeviceIndex()))
+                        .elem("interfaceType", networkInterface.getInterfaceType())
+                        .elem("ipv6AddressCount", str(networkInterface.getIpv6AddressCount()))
+                        .elem("networkInterfaceId", networkInterface.getNetworkInterfaceId())
+                        .elem("privateIpAddress", networkInterface.getPrivateIpAddress())
+                        .elem("secondaryPrivateIpAddressCount", str(networkInterface.getSecondaryPrivateIpAddressCount()))
+                        .elem("subnetId", networkInterface.getSubnetId())
+                        .elem("networkCardIndex", str(networkInterface.getNetworkCardIndex()));
+                if (!networkInterface.getGroups().isEmpty()) {
+                    xml.start("groupSet");
+                    for (String group : networkInterface.getGroups()) {
+                        xml.elem("item", group);
+                    }
+                    xml.end("groupSet");
+                }
+                xml.end("item");
+            }
+            xml.end("networkInterfaceSet");
+        }
+
+        LaunchTemplateData.MetadataOptions metadataOptions = data.getMetadataOptions();
+        if (metadataOptions != null) {
+            xml.start("metadataOptions")
+                    .elem("state", metadataOptions.getState() != null ? metadataOptions.getState() : "applied")
+                    .elem("httpTokens", metadataOptions.getHttpTokens())
+                    .elem("httpPutResponseHopLimit", str(metadataOptions.getHttpPutResponseHopLimit()))
+                    .elem("httpEndpoint", metadataOptions.getHttpEndpoint())
+                    .elem("httpProtocolIpv6", metadataOptions.getHttpProtocolIpv6())
+                    .elem("instanceMetadataTags", metadataOptions.getInstanceMetadataTags())
+                    .end("metadataOptions");
+        }
+
+        LaunchTemplateData.Monitoring monitoring = data.getMonitoring();
+        if (monitoring != null) {
+            xml.start("monitoring").elem("enabled", str(monitoring.getEnabled())).end("monitoring");
+        }
+
+        LaunchTemplateData.Placement placement = data.getPlacement();
+        if (placement != null) {
+            xml.start("placement")
+                    .elem("availabilityZone", placement.getAvailabilityZone())
+                    .elem("availabilityZoneId", placement.getAvailabilityZoneId())
+                    .elem("affinity", placement.getAffinity())
+                    .elem("groupName", placement.getGroupName())
+                    .elem("groupId", placement.getGroupId())
+                    .elem("hostId", placement.getHostId())
+                    .elem("tenancy", placement.getTenancy())
+                    .elem("spreadDomain", placement.getSpreadDomain())
+                    .elem("hostResourceGroupArn", placement.getHostResourceGroupArn())
+                    .elem("partitionNumber", str(placement.getPartitionNumber()))
+                    .end("placement");
+        }
+
+        LaunchTemplateData.CpuOptions cpuOptions = data.getCpuOptions();
+        if (cpuOptions != null) {
+            xml.start("cpuOptions")
+                    .elem("coreCount", str(cpuOptions.getCoreCount()))
+                    .elem("threadsPerCore", str(cpuOptions.getThreadsPerCore()))
+                    .elem("amdSevSnp", cpuOptions.getAmdSevSnp())
+                    .end("cpuOptions");
+        }
+
+        LaunchTemplateData.CreditSpecification creditSpecification = data.getCreditSpecification();
+        if (creditSpecification != null) {
+            xml.start("creditSpecification")
+                    .elem("cpuCredits", creditSpecification.getCpuCredits())
+                    .end("creditSpecification");
+        }
+
+        LaunchTemplateData.EnclaveOptions enclaveOptions = data.getEnclaveOptions();
+        if (enclaveOptions != null) {
+            xml.start("enclaveOptions").elem("enabled", str(enclaveOptions.getEnabled())).end("enclaveOptions");
+        }
+
+        LaunchTemplateData.HibernationOptions hibernationOptions = data.getHibernationOptions();
+        if (hibernationOptions != null) {
+            xml.start("hibernationOptions")
+                    .elem("configured", str(hibernationOptions.getConfigured()))
+                    .end("hibernationOptions");
+        }
+
+        LaunchTemplateData.MaintenanceOptions maintenanceOptions = data.getMaintenanceOptions();
+        if (maintenanceOptions != null) {
+            xml.start("maintenanceOptions")
+                    .elem("autoRecovery", maintenanceOptions.getAutoRecovery())
+                    .end("maintenanceOptions");
+        }
+
+        LaunchTemplateData.PrivateDnsNameOptions privateDnsNameOptions = data.getPrivateDnsNameOptions();
+        if (privateDnsNameOptions != null) {
+            xml.start("privateDnsNameOptions")
+                    .elem("hostnameType", privateDnsNameOptions.getHostnameType())
+                    .elem("enableResourceNameDnsARecord", str(privateDnsNameOptions.getEnableResourceNameDnsARecord()))
+                    .elem("enableResourceNameDnsAAAARecord", str(privateDnsNameOptions.getEnableResourceNameDnsAAAARecord()))
+                    .end("privateDnsNameOptions");
+        }
+
+        LaunchTemplateData.CapacityReservationSpecification capacityReservation =
+                data.getCapacityReservationSpecification();
+        if (capacityReservation != null) {
+            xml.start("capacityReservationSpecification")
+                    .elem("capacityReservationPreference", capacityReservation.getCapacityReservationPreference());
+            LaunchTemplateData.CapacityReservationTarget target = capacityReservation.getCapacityReservationTarget();
+            if (target != null) {
+                xml.start("capacityReservationTarget")
+                        .elem("capacityReservationId", target.getCapacityReservationId())
+                        .elem("capacityReservationResourceGroupArn", target.getCapacityReservationResourceGroupArn())
+                        .end("capacityReservationTarget");
+            }
+            xml.end("capacityReservationSpecification");
+        }
+
+        if (!data.getSecurityGroupIds().isEmpty()) {
+            xml.start("securityGroupIdSet");
+            for (String securityGroupId : data.getSecurityGroupIds()) {
+                xml.elem("item", securityGroupId);
+            }
+            xml.end("securityGroupIdSet");
+        }
+
+        if (!data.getTagSpecifications().isEmpty()) {
+            xml.start("tagSpecificationSet");
+            for (LaunchTemplateData.TagSpecification spec : data.getTagSpecifications()) {
+                xml.start("item")
+                        .elem("resourceType", spec.getResourceType())
+                        .raw(tagSetXml(spec.getTags()))
+                        .end("item");
+            }
+            xml.end("tagSpecificationSet");
+        }
+        return xml.build();
+    }
+
+    /**
+     * Parses {@code RequestLaunchTemplateData} from the EC2 query wire format. Parameter names are
+     * the ones botocore's EC2 serializer emits — list members carry the model's singular
+     * {@code locationName}, which is why the prefixes are {@code BlockDeviceMapping.N} rather than
+     * {@code BlockDeviceMappings.N}.
+     */
+    private LaunchTemplateData parseLaunchTemplateData(MultivaluedMap<String, String> p) {
+        String prefix = "LaunchTemplateData";
+        LaunchTemplateData data = new LaunchTemplateData();
+        data.setImageId(p.getFirst(prefix + ".ImageId"));
+        data.setInstanceType(p.getFirst(prefix + ".InstanceType"));
+        data.setKeyName(p.getFirst(prefix + ".KeyName"));
+        data.setKernelId(p.getFirst(prefix + ".KernelId"));
+        data.setRamDiskId(p.getFirst(prefix + ".RamDiskId"));
+        data.setInstanceInitiatedShutdownBehavior(p.getFirst(prefix + ".InstanceInitiatedShutdownBehavior"));
+        data.setEbsOptimized(boolParam(p, prefix + ".EbsOptimized"));
+        data.setDisableApiTermination(boolParam(p, prefix + ".DisableApiTermination"));
+        data.setDisableApiStop(boolParam(p, prefix + ".DisableApiStop"));
+
+        String encodedUserData = p.getFirst(prefix + ".UserData");
+        data.setEncodedUserData(encodedUserData);
+        data.setUserData(decodeUserData(encodedUserData));
+
+        String profileArn = p.getFirst(prefix + ".IamInstanceProfile.Arn");
+        String profileName = p.getFirst(prefix + ".IamInstanceProfile.Name");
+        if (isSet(profileArn) || isSet(profileName)) {
+            data.setIamInstanceProfile(new LaunchTemplateData.IamInstanceProfile(
+                    isSet(profileArn) ? profileArn : null,
+                    isSet(profileName) ? profileName : null));
+        }
+
+        // SecurityGroups (the by-name form, as opposed to SecurityGroupId) is deliberately not
+        // parsed here. Resolving names to IDs would need real lookup machinery — scanning the
+        // security-group store, handling "not found", and handling ambiguity across VPCs — that
+        // RunInstances itself doesn't have today (it only accepts SecurityGroupId); see
+        // docs/services/ec2.md's launch-template section.
+        data.setSecurityGroupIds(getList(p, prefix + ".SecurityGroupId"));
+        data.setBlockDeviceMappings(parseLaunchTemplateBlockDeviceMappings(p, prefix));
+        data.setNetworkInterfaces(parseLaunchTemplateNetworkInterfaces(p, prefix));
+        data.setTagSpecifications(parseLaunchTemplateTagSpecifications(p, prefix));
+
+        if (anyParamStartsWith(p, prefix + ".MetadataOptions.")) {
+            LaunchTemplateData.MetadataOptions options = new LaunchTemplateData.MetadataOptions();
+            options.setHttpTokens(p.getFirst(prefix + ".MetadataOptions.HttpTokens"));
+            options.setHttpPutResponseHopLimit(intParam(p, prefix + ".MetadataOptions.HttpPutResponseHopLimit"));
+            options.setHttpEndpoint(p.getFirst(prefix + ".MetadataOptions.HttpEndpoint"));
+            options.setHttpProtocolIpv6(p.getFirst(prefix + ".MetadataOptions.HttpProtocolIpv6"));
+            options.setInstanceMetadataTags(p.getFirst(prefix + ".MetadataOptions.InstanceMetadataTags"));
+            data.setMetadataOptions(options);
+        }
+
+        Boolean monitoringEnabled = boolParam(p, prefix + ".Monitoring.Enabled");
+        if (monitoringEnabled != null) {
+            LaunchTemplateData.Monitoring monitoring = new LaunchTemplateData.Monitoring();
+            monitoring.setEnabled(monitoringEnabled);
+            data.setMonitoring(monitoring);
+        }
+
+        if (anyParamStartsWith(p, prefix + ".Placement.")) {
+            LaunchTemplateData.Placement placement = new LaunchTemplateData.Placement();
+            placement.setAvailabilityZone(p.getFirst(prefix + ".Placement.AvailabilityZone"));
+            placement.setAvailabilityZoneId(p.getFirst(prefix + ".Placement.AvailabilityZoneId"));
+            placement.setAffinity(p.getFirst(prefix + ".Placement.Affinity"));
+            placement.setGroupName(p.getFirst(prefix + ".Placement.GroupName"));
+            placement.setGroupId(p.getFirst(prefix + ".Placement.GroupId"));
+            placement.setHostId(p.getFirst(prefix + ".Placement.HostId"));
+            placement.setTenancy(p.getFirst(prefix + ".Placement.Tenancy"));
+            placement.setSpreadDomain(p.getFirst(prefix + ".Placement.SpreadDomain"));
+            placement.setHostResourceGroupArn(p.getFirst(prefix + ".Placement.HostResourceGroupArn"));
+            placement.setPartitionNumber(intParam(p, prefix + ".Placement.PartitionNumber"));
+            data.setPlacement(placement);
+        }
+
+        if (anyParamStartsWith(p, prefix + ".CpuOptions.")) {
+            LaunchTemplateData.CpuOptions cpuOptions = new LaunchTemplateData.CpuOptions();
+            cpuOptions.setCoreCount(intParam(p, prefix + ".CpuOptions.CoreCount"));
+            cpuOptions.setThreadsPerCore(intParam(p, prefix + ".CpuOptions.ThreadsPerCore"));
+            cpuOptions.setAmdSevSnp(p.getFirst(prefix + ".CpuOptions.AmdSevSnp"));
+            data.setCpuOptions(cpuOptions);
+        }
+
+        String cpuCredits = p.getFirst(prefix + ".CreditSpecification.CpuCredits");
+        if (isSet(cpuCredits)) {
+            LaunchTemplateData.CreditSpecification creditSpecification = new LaunchTemplateData.CreditSpecification();
+            creditSpecification.setCpuCredits(cpuCredits);
+            data.setCreditSpecification(creditSpecification);
+        }
+
+        Boolean enclaveEnabled = boolParam(p, prefix + ".EnclaveOptions.Enabled");
+        if (enclaveEnabled != null) {
+            LaunchTemplateData.EnclaveOptions enclaveOptions = new LaunchTemplateData.EnclaveOptions();
+            enclaveOptions.setEnabled(enclaveEnabled);
+            data.setEnclaveOptions(enclaveOptions);
+        }
+
+        Boolean hibernationConfigured = boolParam(p, prefix + ".HibernationOptions.Configured");
+        if (hibernationConfigured != null) {
+            LaunchTemplateData.HibernationOptions hibernationOptions = new LaunchTemplateData.HibernationOptions();
+            hibernationOptions.setConfigured(hibernationConfigured);
+            data.setHibernationOptions(hibernationOptions);
+        }
+
+        String autoRecovery = p.getFirst(prefix + ".MaintenanceOptions.AutoRecovery");
+        if (isSet(autoRecovery)) {
+            LaunchTemplateData.MaintenanceOptions maintenanceOptions = new LaunchTemplateData.MaintenanceOptions();
+            maintenanceOptions.setAutoRecovery(autoRecovery);
+            data.setMaintenanceOptions(maintenanceOptions);
+        }
+
+        if (anyParamStartsWith(p, prefix + ".PrivateDnsNameOptions.")) {
+            LaunchTemplateData.PrivateDnsNameOptions options = new LaunchTemplateData.PrivateDnsNameOptions();
+            options.setHostnameType(p.getFirst(prefix + ".PrivateDnsNameOptions.HostnameType"));
+            options.setEnableResourceNameDnsARecord(
+                    boolParam(p, prefix + ".PrivateDnsNameOptions.EnableResourceNameDnsARecord"));
+            options.setEnableResourceNameDnsAAAARecord(
+                    boolParam(p, prefix + ".PrivateDnsNameOptions.EnableResourceNameDnsAAAARecord"));
+            data.setPrivateDnsNameOptions(options);
+        }
+
+        if (anyParamStartsWith(p, prefix + ".CapacityReservationSpecification.")) {
+            LaunchTemplateData.CapacityReservationSpecification spec =
+                    new LaunchTemplateData.CapacityReservationSpecification();
+            spec.setCapacityReservationPreference(
+                    p.getFirst(prefix + ".CapacityReservationSpecification.CapacityReservationPreference"));
+            String targetPrefix = prefix + ".CapacityReservationSpecification.CapacityReservationTarget.";
+            if (anyParamStartsWith(p, targetPrefix)) {
+                LaunchTemplateData.CapacityReservationTarget target = new LaunchTemplateData.CapacityReservationTarget();
+                target.setCapacityReservationId(p.getFirst(targetPrefix + "CapacityReservationId"));
+                target.setCapacityReservationResourceGroupArn(
+                        p.getFirst(targetPrefix + "CapacityReservationResourceGroupArn"));
+                spec.setCapacityReservationTarget(target);
+            }
+            data.setCapacityReservationSpecification(spec);
+        }
+        return data;
+    }
+
+    private List<LaunchTemplateData.BlockDeviceMapping> parseLaunchTemplateBlockDeviceMappings(
+            MultivaluedMap<String, String> p, String prefix) {
+        List<LaunchTemplateData.BlockDeviceMapping> mappings = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String base = prefix + ".BlockDeviceMapping." + i;
+            if (!anyParamStartsWith(p, base + ".")) {
                 break;
             }
+            LaunchTemplateData.BlockDeviceMapping mapping = new LaunchTemplateData.BlockDeviceMapping();
+            mapping.setDeviceName(p.getFirst(base + ".DeviceName"));
+            mapping.setVirtualName(p.getFirst(base + ".VirtualName"));
+            mapping.setNoDevice(p.getFirst(base + ".NoDevice"));
+            if (anyParamStartsWith(p, base + ".Ebs.")) {
+                LaunchTemplateData.Ebs ebs = new LaunchTemplateData.Ebs();
+                ebs.setEncrypted(boolParam(p, base + ".Ebs.Encrypted"));
+                ebs.setDeleteOnTermination(boolParam(p, base + ".Ebs.DeleteOnTermination"));
+                ebs.setIops(intParam(p, base + ".Ebs.Iops"));
+                ebs.setKmsKeyId(p.getFirst(base + ".Ebs.KmsKeyId"));
+                ebs.setSnapshotId(p.getFirst(base + ".Ebs.SnapshotId"));
+                ebs.setVolumeSize(intParam(p, base + ".Ebs.VolumeSize"));
+                ebs.setVolumeType(p.getFirst(base + ".Ebs.VolumeType"));
+                ebs.setThroughput(intParam(p, base + ".Ebs.Throughput"));
+                mapping.setEbs(ebs);
+            }
+            mappings.add(mapping);
         }
-        return new ArrayList<>(groups);
+        return mappings;
+    }
+
+    private List<LaunchTemplateData.NetworkInterface> parseLaunchTemplateNetworkInterfaces(
+            MultivaluedMap<String, String> p, String prefix) {
+        List<LaunchTemplateData.NetworkInterface> interfaces = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String base = prefix + ".NetworkInterface." + i;
+            if (!anyParamStartsWith(p, base + ".")) {
+                break;
+            }
+            LaunchTemplateData.NetworkInterface networkInterface = new LaunchTemplateData.NetworkInterface();
+            networkInterface.setAssociatePublicIpAddress(boolParam(p, base + ".AssociatePublicIpAddress"));
+            networkInterface.setAssociateCarrierIpAddress(boolParam(p, base + ".AssociateCarrierIpAddress"));
+            networkInterface.setDeleteOnTermination(boolParam(p, base + ".DeleteOnTermination"));
+            networkInterface.setDescription(p.getFirst(base + ".Description"));
+            networkInterface.setDeviceIndex(intParam(p, base + ".DeviceIndex"));
+            networkInterface.setInterfaceType(p.getFirst(base + ".InterfaceType"));
+            networkInterface.setIpv6AddressCount(intParam(p, base + ".Ipv6AddressCount"));
+            networkInterface.setNetworkInterfaceId(p.getFirst(base + ".NetworkInterfaceId"));
+            networkInterface.setPrivateIpAddress(p.getFirst(base + ".PrivateIpAddress"));
+            networkInterface.setSecondaryPrivateIpAddressCount(intParam(p, base + ".SecondaryPrivateIpAddressCount"));
+            networkInterface.setSubnetId(p.getFirst(base + ".SubnetId"));
+            networkInterface.setNetworkCardIndex(intParam(p, base + ".NetworkCardIndex"));
+            networkInterface.setGroups(getList(p, base + ".SecurityGroupId", base + ".Groups", base + ".GroupId"));
+            interfaces.add(networkInterface);
+        }
+        return interfaces;
+    }
+
+    private List<LaunchTemplateData.TagSpecification> parseLaunchTemplateTagSpecifications(
+            MultivaluedMap<String, String> p, String prefix) {
+        List<LaunchTemplateData.TagSpecification> specs = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String base = prefix + ".TagSpecification." + i;
+            String resourceType = p.getFirst(base + ".ResourceType");
+            if (resourceType == null) {
+                break;
+            }
+            List<Tag> tagList = new ArrayList<>();
+            for (int j = 1; ; j++) {
+                String key = p.getFirst(base + ".Tag." + j + ".Key");
+                if (key == null) {
+                    break;
+                }
+                tagList.add(new Tag(key, p.getFirst(base + ".Tag." + j + ".Value")));
+            }
+            specs.add(new LaunchTemplateData.TagSpecification(resourceType, tagList));
+        }
+        return specs;
+    }
+
+    private boolean anyParamStartsWith(MultivaluedMap<String, String> p, String prefix) {
+        for (String name : p.keySet()) {
+            if (name.startsWith(prefix)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean isSet(String value) {
+        return value != null && !value.isBlank();
+    }
+
+    private Boolean boolParam(MultivaluedMap<String, String> p, String name) {
+        String value = p.getFirst(name);
+        return isSet(value) ? Boolean.valueOf(Boolean.parseBoolean(value)) : null;
+    }
+
+    private Integer intParam(MultivaluedMap<String, String> p, String name) {
+        String value = p.getFirst(name);
+        if (!isSet(value)) {
+            return null;
+        }
+        try {
+            return Integer.valueOf(value);
+        } catch (NumberFormatException e) {
+            throw new AwsException("InvalidParameterValue", name + " is not a valid integer.", 400);
+        }
+    }
+
+    private static String str(Object value) {
+        return value != null ? String.valueOf(value) : null;
     }
 
     private String decodeUserData(String userDataEncoded) {
@@ -3385,6 +4263,9 @@ public class Ec2QueryHandler {
         if (endpoint.getCreationTimestamp() != null) {
             xml.elem("creationTimestamp", ISO_FMT.format(endpoint.getCreationTimestamp()));
         }
+        if (endpoint.getPolicyDocument() != null) {
+            xml.elem("policyDocument", endpoint.getPolicyDocument());
+        }
         xml.start("routeTableIdSet");
         for (String routeTableId : endpoint.getRouteTableIds()) {
             xml.elem("item", routeTableId);
@@ -3399,8 +4280,8 @@ public class Ec2QueryHandler {
         for (String securityGroupId : endpoint.getSecurityGroupIds()) {
             xml.start("item").elem("groupId", securityGroupId).end("item");
         }
-        xml.end("groupSet")
-                .raw(tagSetXml(endpoint.getTags()));
+        xml.end("groupSet");
+        xml.raw(tagSetXml(endpoint.getTags()));
         return xml.build();
     }
 

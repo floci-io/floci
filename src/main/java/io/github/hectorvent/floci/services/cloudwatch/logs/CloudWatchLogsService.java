@@ -4,11 +4,13 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
+import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.LogEvent;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.LogGroup;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.LogStream;
+import io.github.hectorvent.floci.services.cloudwatch.logs.model.ResourcePolicy;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.SubscriptionFilter;
 import com.fasterxml.jackson.core.type.TypeReference;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -29,9 +31,14 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongSupplier;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
+import java.time.Instant;
+import java.util.Set;
 
 @ApplicationScoped
-public class CloudWatchLogsService {
+public class CloudWatchLogsService implements ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(CloudWatchLogsService.class);
 
@@ -50,6 +57,7 @@ public class CloudWatchLogsService {
     private final StorageBackend<String, LogStream> streamStore;
     private final StorageBackend<String, LogEvent> eventStore;
     private final StorageBackend<String, SubscriptionFilter> subscriptionFilterStore;
+    private final StorageBackend<String, ResourcePolicy> resourcePolicyStore;
     private final RegionResolver regionResolver;
     private final int maxEventsPerQuery;
     /**
@@ -94,6 +102,8 @@ public class CloudWatchLogsService {
                         new TypeReference<>() {}),
                 storageFactory.create("cloudwatchlogs", "cwlogs-subscription-filters.json",
                         new TypeReference<>() {}),
+                storageFactory.create("cloudwatchlogs", "cwlogs-resource-policies.json",
+                        new TypeReference<>() {}),
                 config.services().cloudwatchlogs().maxEventsPerQuery(),
                 regionResolver,
                 config.services().cloudwatchlogs().queryCompletionDelayMs(),
@@ -107,7 +117,7 @@ public class CloudWatchLogsService {
                            StorageBackend<String, SubscriptionFilter> subscriptionFilterStore,
                            int maxEventsPerQuery,
                            RegionResolver regionResolver) {
-        this(groupStore, streamStore, eventStore, subscriptionFilterStore,
+        this(groupStore, streamStore, eventStore, subscriptionFilterStore, new InMemoryStorage<>(),
                 maxEventsPerQuery, regionResolver, 0L, System::currentTimeMillis);
     }
 
@@ -119,10 +129,24 @@ public class CloudWatchLogsService {
                            RegionResolver regionResolver,
                            long queryCompletionDelayMs,
                            LongSupplier clock) {
+        this(groupStore, streamStore, eventStore, subscriptionFilterStore, new InMemoryStorage<>(),
+                maxEventsPerQuery, regionResolver, queryCompletionDelayMs, clock);
+    }
+
+    CloudWatchLogsService(StorageBackend<String, LogGroup> groupStore,
+                           StorageBackend<String, LogStream> streamStore,
+                           StorageBackend<String, LogEvent> eventStore,
+                           StorageBackend<String, SubscriptionFilter> subscriptionFilterStore,
+                           StorageBackend<String, ResourcePolicy> resourcePolicyStore,
+                           int maxEventsPerQuery,
+                           RegionResolver regionResolver,
+                           long queryCompletionDelayMs,
+                           LongSupplier clock) {
         this.groupStore = groupStore;
         this.streamStore = streamStore;
         this.eventStore = eventStore;
         this.subscriptionFilterStore = subscriptionFilterStore;
+        this.resourcePolicyStore = resourcePolicyStore;
         this.maxEventsPerQuery = maxEventsPerQuery;
         this.regionResolver = regionResolver;
         long maxSequence = eventStore.scan(k -> true).stream()
@@ -143,7 +167,12 @@ public class CloudWatchLogsService {
 
     public void createLogGroup(String name, Integer retentionInDays, Map<String, String> tags,
                                boolean deletionProtectionEnabled, String region) {
-        createLogGroupForAccount(null, name, retentionInDays, tags, deletionProtectionEnabled, region);
+        createLogGroup(name, retentionInDays, tags, deletionProtectionEnabled, null, region);
+    }
+
+    public void createLogGroup(String name, Integer retentionInDays, Map<String, String> tags,
+                               boolean deletionProtectionEnabled, String kmsKeyId, String region) {
+        createLogGroupForAccount(null, name, retentionInDays, tags, deletionProtectionEnabled, kmsKeyId, region);
     }
 
     public void createLogGroupForAccount(
@@ -155,6 +184,12 @@ public class CloudWatchLogsService {
     public void createLogGroupForAccount(
             String accountId, String name, Integer retentionInDays,
             Map<String, String> tags, boolean deletionProtectionEnabled, String region) {
+        createLogGroupForAccount(accountId, name, retentionInDays, tags, deletionProtectionEnabled, null, region);
+    }
+
+    public void createLogGroupForAccount(
+            String accountId, String name, Integer retentionInDays,
+            Map<String, String> tags, boolean deletionProtectionEnabled, String kmsKeyId, String region) {
         if (name == null || name.isBlank()) {
             throw new AwsException("InvalidParameterException", "logGroupName is required.", 400);
         }
@@ -168,6 +203,9 @@ public class CloudWatchLogsService {
         group.setCreatedTime(System.currentTimeMillis());
         group.setRetentionInDays(retentionInDays);
         group.setDeletionProtectionEnabled(deletionProtectionEnabled);
+        if (kmsKeyId != null && !kmsKeyId.isBlank()) {
+            group.setKmsKeyId(kmsKeyId);
+        }
         if (tags != null) {
             group.setTags(new HashMap<>(tags));
         }
@@ -266,6 +304,36 @@ public class CloudWatchLogsService {
                         "The specified log group does not exist: " + groupName, 400));
         tagKeys.forEach(group.getTags()::remove);
         groupStore.put(key, group);
+    }
+
+    /**
+     * Associates a KMS CMK with a log group so its stored events are encrypted with it.
+     *
+     * <p>The association is a property of the group, not of each event, and it is surfaced by
+     * {@code DescribeLogGroups}: callers converge by reading {@code kmsKeyId} back and only
+     * re-associating when it differs from the key they want.
+     */
+    public void associateKmsKey(String groupName, String kmsKeyId, String region) {
+        if (kmsKeyId == null || kmsKeyId.isBlank()) {
+            throw new AwsException("InvalidParameterException", "kmsKeyId required.", 400);
+        }
+        String key = groupKey(region, groupName);
+        LogGroup group = groupStore.get(key)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "The specified log group does not exist: " + groupName, 400));
+        group.setKmsKeyId(kmsKeyId);
+        groupStore.put(key, group);
+        LOG.infov("Associated KMS key {0} with log group {1}", kmsKeyId, groupName);
+    }
+
+    public void disassociateKmsKey(String groupName, String region) {
+        String key = groupKey(region, groupName);
+        LogGroup group = groupStore.get(key)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "The specified log group does not exist: " + groupName, 400));
+        group.setKmsKeyId(null);
+        groupStore.put(key, group);
+        LOG.infov("Disassociated KMS key from log group {0}", groupName);
     }
 
     public Map<String, String> listTagsLogGroup(String groupName, String region) {
@@ -891,6 +959,24 @@ public class CloudWatchLogsService {
         LOG.infov("Deleted subscription filter: {0} on log group: {1}", filterName, logGroupName);
     }
 
+    // ──────────────────────────── Resource Policies ────────────────────────────
+
+    public ResourcePolicy putResourcePolicy(String policyName, String policyDocument, String region) {
+        ResourcePolicy policy = new ResourcePolicy();
+        policy.setPolicyName(policyName);
+        policy.setPolicyDocument(policyDocument);
+        policy.setLastUpdatedTime(System.currentTimeMillis());
+        resourcePolicyStore.put(resourcePolicyKey(region, policyName), policy);
+        return policy;
+    }
+
+    public List<ResourcePolicy> describeResourcePolicies(String region) {
+        List<ResourcePolicy> policies = resourcePolicyStore.scan(
+                key -> key.startsWith(resourcePolicyKeyPrefix(region)));
+        policies.sort(Comparator.comparing(ResourcePolicy::getPolicyName));
+        return policies;
+    }
+
     // ──────────────────────────── Helpers ────────────────────────────
 
     private void deleteEventsForStream(String region, String groupName, String streamName) {
@@ -954,6 +1040,14 @@ public class CloudWatchLogsService {
         return region + "::" + logGroupName + "::filter::" + filterName;
     }
 
+    private static String resourcePolicyKeyPrefix(String region) {
+        return region + "::policy::";
+    }
+
+    private static String resourcePolicyKey(String region, String policyName) {
+        return resourcePolicyKeyPrefix(region) + policyName;
+    }
+
     private static long toLong(Object value, long defaultValue) {
         if (value == null) {
             return defaultValue;
@@ -966,5 +1060,40 @@ public class CloudWatchLogsService {
         } catch (NumberFormatException e) {
             return defaultValue;
         }
+    }
+
+    // ─── Resource Explorer 2 ───────────────────────────────────────────────────
+
+    /**
+     * Log groups carry no Region of their own — the store keys them {@code region::name} — so the
+     * key is the only place the Region can come from.
+     */
+    @Override
+    public List<ExplorerResource> getResources() {
+        List<ExplorerResource> resources = new ArrayList<>();
+        for (String key : groupStore.keys()) {
+            int separator = key.indexOf("::");
+            if (separator < 0) {
+                continue;
+            }
+            LogGroup group = groupStore.get(key).orElse(null);
+            if (group == null || group.getLogGroupName() == null) {
+                continue;
+            }
+            String region = key.substring(0, separator);
+            resources.add(new ExplorerResource(
+                    "arn:aws:logs:" + region + ":" + regionResolver.getAccountId()
+                            + ":log-group:" + group.getLogGroupName() + ":*",
+                    "logs:log-group", "logs",
+                    region, regionResolver.getAccountId(),
+                    group.getCreatedTime() > 0 ? Instant.ofEpochMilli(group.getCreatedTime()) : Instant.now(),
+                    group.getTags() != null ? group.getTags() : Map.of()));
+        }
+        return resources;
+    }
+
+    @Override
+    public Set<SupportedResourceType> getSupportedResourceTypes() {
+        return Set.of(new SupportedResourceType("logs:log-group", "logs", true));
     }
 }

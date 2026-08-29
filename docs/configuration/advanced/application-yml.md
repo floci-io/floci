@@ -131,8 +131,8 @@ floci:
       ephemeral: false                        # true = remove container after each invocation
       default-memory-mb: 128
       default-timeout-seconds: 3
-      runtime-api-base-port: 9200             # Port range for Lambda Runtime API
-      runtime-api-max-port: 9299
+      runtime-api-base-port: 12000            # Port range for Lambda Runtime API
+      runtime-api-max-port: 12499             # One port per running container = concurrency ceiling
       code-path: ./data/lambda-code           # Where ZIP archives are stored
       poll-interval-ms: 1000
       container-idle-timeout-seconds: 300     # Remove idle containers after this
@@ -154,6 +154,15 @@ floci:
       enabled: true
       enforcement-enabled: false        # Set to true to enforce IAM policies on all requests
       seed-deployer-principal: false    # Set to true to create a local floci-deployer admin principal
+
+    networkfirewall:
+      enabled: true
+
+    servicequotas:
+      enabled: true
+
+    ram:
+      enabled: true
 
     elasticache:
       enabled: true
@@ -231,6 +240,9 @@ floci:
       # docker network is inherited from floci.services.docker-network
 
     ec2:
+      enabled: true
+
+    efs:
       enabled: true
 
     ecs:

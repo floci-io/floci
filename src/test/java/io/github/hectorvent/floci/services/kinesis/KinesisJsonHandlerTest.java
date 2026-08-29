@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.kinesis;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.BinaryNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -13,6 +14,8 @@ import org.junit.jupiter.api.Test;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.Base64;
+import java.util.List;
+import java.util.Map;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.is;
@@ -487,6 +490,179 @@ class KinesisJsonHandlerTest {
     }
 
     @Test
+    void putRecordRejectsNonStringData() {
+        createStream("test-stream");
+
+        ObjectNode missing = MAPPER.createObjectNode();
+        missing.put("StreamName", "test-stream");
+        missing.put("PartitionKey", "pk1");
+        ObjectNode nullData = missing.deepCopy();
+        nullData.putNull("Data");
+        ObjectNode boolData = missing.deepCopy();
+        boolData.put("Data", true);
+        ObjectNode numberData = missing.deepCopy();
+        numberData.put("Data", 1234);
+        ObjectNode containerData = missing.deepCopy();
+        containerData.putObject("Data");
+
+        for (ObjectNode req : List.of(missing, nullData, boolData, numberData, containerData)) {
+            AwsException ex = assertThrows(AwsException.class,
+                    () -> handler.handle("PutRecord", req, REGION));
+            assertEquals("SerializationException", ex.getErrorCode());
+            assertEquals("Data must be a base64-encoded string.", ex.getMessage());
+            assertEquals(400, ex.getHttpStatus());
+        }
+        assertEquals(0, readAllRecords("test-stream").size());
+    }
+
+    @Test
+    void putRecordRejectsUndecodableData() {
+        createStream("test-stream");
+
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("StreamName", "test-stream");
+        req.put("Data", "!!!not-base64!!!");
+        req.put("PartitionKey", "pk1");
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("PutRecord", req, REGION));
+        assertEquals("SerializationException", ex.getErrorCode());
+        assertEquals("Data is not valid base64.", ex.getMessage());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    /**
+     * The CBOR transports decode Data as a binary node, not base64 text — the shape an
+     * unmodified AWS SDK for Java Kinesis client sends — so the non-string gate must
+     * accept it.
+     */
+    @Test
+    void putRecordAcceptsBinaryData() {
+        createStream("test-stream");
+
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("StreamName", "test-stream");
+        req.set("Data", BinaryNode.valueOf(new byte[] {1, 2, 3}));
+        req.put("PartitionKey", "pk1");
+        assertThat(handler.handle("PutRecord", req, REGION).getStatus(), is(200));
+
+        ArrayNode records = readAllRecords("test-stream");
+        assertEquals(1, records.size());
+        assertEquals("AQID", records.get(0).get("Data").asText());
+    }
+
+    @Test
+    void putRecordAcceptsEmptyStringData() {
+        createStream("test-stream");
+
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("StreamName", "test-stream");
+        req.put("Data", "");
+        req.put("PartitionKey", "pk1");
+        assertThat(handler.handle("PutRecord", req, REGION).getStatus(), is(200));
+
+        ArrayNode records = readAllRecords("test-stream");
+        assertEquals(1, records.size());
+        assertEquals("", records.get(0).get("Data").asText());
+    }
+
+    @Test
+    void putRecordsFailsNonStringDataPerRecord() {
+        createStream("test-stream");
+
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("StreamName", "test-stream");
+        ArrayNode records = req.putArray("Records");
+        records.addObject().put("Data", "dGVzdA==").put("PartitionKey", "pk1");
+        records.addObject().put("Data", "").put("PartitionKey", "pk2");
+        records.addObject().put("PartitionKey", "pk3");
+        records.addObject().putNull("Data").put("PartitionKey", "pk4");
+        records.addObject().put("Data", true).put("PartitionKey", "pk5");
+        records.addObject().put("Data", 1234).put("PartitionKey", "pk6");
+        ObjectNode containerRow = records.addObject();
+        containerRow.putObject("Data");
+        containerRow.put("PartitionKey", "pk7");
+        ObjectNode binaryRow = records.addObject();
+        binaryRow.set("Data", BinaryNode.valueOf(new byte[] {1, 2, 3}));
+        binaryRow.put("PartitionKey", "pk8");
+
+        Response resp = handler.handle("PutRecords", req, REGION);
+        assertThat(resp.getStatus(), is(200));
+        ObjectNode body = responseEntity(resp);
+        assertEquals(5, body.get("FailedRecordCount").asInt());
+
+        ArrayNode results = (ArrayNode) body.get("Records");
+        assertTrue(results.get(0).has("SequenceNumber"));
+        assertTrue(results.get(1).has("SequenceNumber"));
+        for (int i = 2; i <= 6; i++) {
+            assertEquals("InternalFailure", results.get(i).get("ErrorCode").asText());
+            assertEquals("Data must be a base64-encoded string.", results.get(i).get("ErrorMessage").asText());
+        }
+        assertTrue(results.get(7).has("SequenceNumber"));
+
+        ArrayNode landed = readAllRecords("test-stream");
+        assertEquals(3, landed.size());
+        assertEquals("dGVzdA==", landed.get(0).get("Data").asText());
+        assertEquals("", landed.get(1).get("Data").asText());
+        assertEquals("AQID", landed.get(2).get("Data").asText());
+    }
+
+    @Test
+    void putRecordsCountsABinaryEntryAtItsDecodedSize() {
+        createStream("test-stream");
+
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("StreamName", "test-stream");
+        ArrayNode records = req.putArray("Records");
+        // 9 x 900,000 decoded bytes = 8.1 MB, under the 10 MiB request cap — while the
+        // base64 rendering of the same entries would exceed it.
+        for (int i = 0; i < 9; i++) {
+            ObjectNode row = records.addObject();
+            row.set("Data", BinaryNode.valueOf(new byte[900_000]));
+            row.put("PartitionKey", "pk" + i);
+        }
+
+        Response resp = handler.handle("PutRecords", req, REGION);
+        assertThat(resp.getStatus(), is(200));
+        assertEquals(0, responseEntity(resp).get("FailedRecordCount").asInt());
+    }
+
+    @Test
+    void putRecordsRejectsWholeBatchOnOversizedBinaryRecord() {
+        createStream("test-stream");
+
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("StreamName", "test-stream");
+        ArrayNode records = req.putArray("Records");
+        records.addObject().put("Data", "dGVzdA==").put("PartitionKey", "pk1");
+        ObjectNode oversized = records.addObject();
+        oversized.set("Data", BinaryNode.valueOf(new byte[1_048_574]));
+        oversized.put("PartitionKey", "pk1");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("PutRecords", req, REGION));
+        assertEquals("InvalidArgumentException", ex.getErrorCode());
+        assertEquals(0, readAllRecords("test-stream").size());
+    }
+
+    @Test
+    void putRecordsCountsThePartitionKeyOfANonStringEntry() {
+        createStream("test-stream");
+
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("StreamName", "test-stream");
+        ArrayNode records = req.putArray("Records");
+        records.addObject().put("Data", "dGVzdA==").put("PartitionKey", "pk1");
+        ObjectNode badRow = records.addObject();
+        badRow.putObject("Data");
+        badRow.put("PartitionKey", "x".repeat(1_048_577));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("PutRecords", req, REGION));
+        assertEquals("InvalidArgumentException", ex.getErrorCode());
+        assertEquals(0, readAllRecords("test-stream").size());
+    }
+
+    @Test
     void putRecordsRejectsUnknownStream() {
         ObjectNode req = MAPPER.createObjectNode();
         req.put("StreamName", "missing-stream");
@@ -494,6 +670,24 @@ class KinesisJsonHandlerTest {
         AwsException ex = assertThrows(AwsException.class,
                 () -> handler.handle("PutRecords", req, REGION));
         assertEquals("ResourceNotFoundException", ex.getErrorCode());
+    }
+
+    private ArrayNode readAllRecords(String streamName) {
+        ObjectNode descReq = MAPPER.createObjectNode();
+        descReq.put("StreamName", streamName);
+        String shardId = responseEntity(handler.handle("DescribeStream", descReq, REGION))
+                .get("StreamDescription").get("Shards").get(0).get("ShardId").asText();
+
+        ObjectNode iterReq = MAPPER.createObjectNode();
+        iterReq.put("StreamName", streamName);
+        iterReq.put("ShardId", shardId);
+        iterReq.put("ShardIteratorType", "TRIM_HORIZON");
+        String iterator = responseEntity(handler.handle("GetShardIterator", iterReq, REGION))
+                .get("ShardIterator").asText();
+
+        ObjectNode recReq = MAPPER.createObjectNode();
+        recReq.put("ShardIterator", iterator);
+        return (ArrayNode) responseEntity(handler.handle("GetRecords", recReq, REGION)).get("Records");
     }
 
     private String streamArn(String name) {
@@ -875,5 +1069,50 @@ class KinesisJsonHandlerTest {
         AwsException ex = assertThrows(AwsException.class,
                 () -> handler.handle("UpdateMaxRecordSize", update, REGION));
         assertEquals("ResourceNotFoundException", ex.getErrorCode());
+    }
+
+    @Test
+    void createStreamAppliesTagsFromTheRequest() {
+        ObjectNode create = MAPPER.createObjectNode();
+        create.put("StreamName", "tagged-stream");
+        create.put("ShardCount", 1);
+        create.putObject("Tags").put("Foo", "Bar").put("gw:example", "kinesis");
+        assertThat(handler.handle("CreateStream", create, REGION).getStatus(), is(200));
+
+        assertEquals(Map.of("Foo", "Bar", "gw:example", "kinesis"),
+                service.listTagsForStream("tagged-stream", REGION));
+    }
+
+    @Test
+    void createStreamWithoutTagsLeavesTheStreamUntagged() {
+        createStream("test-stream");
+
+        assertTrue(service.listTagsForStream("test-stream", REGION).isEmpty());
+    }
+
+    /** An empty Tags object is not an error; it simply leaves the stream untagged. */
+    @Test
+    void createStreamWithAnEmptyTagsObjectLeavesTheStreamUntagged() {
+        ObjectNode create = MAPPER.createObjectNode();
+        create.put("StreamName", "empty-tags-stream");
+        create.put("ShardCount", 1);
+        create.putObject("Tags");
+        assertThat(handler.handle("CreateStream", create, REGION).getStatus(), is(200));
+
+        assertTrue(service.listTagsForStream("empty-tags-stream", REGION).isEmpty());
+    }
+
+    /** CreateStream and AddTagsToStream share one parser, so the same map has to land either way. */
+    @Test
+    void addTagsToStreamAppliesTheSameTagsCreateStreamWould() {
+        createStream("test-stream");
+
+        ObjectNode add = MAPPER.createObjectNode();
+        add.put("StreamName", "test-stream");
+        add.putObject("Tags").put("Foo", "Bar").put("gw:example", "kinesis");
+        assertThat(handler.handle("AddTagsToStream", add, REGION).getStatus(), is(200));
+
+        assertEquals(Map.of("Foo", "Bar", "gw:example", "kinesis"),
+                service.listTagsForStream("test-stream", REGION));
     }
 }

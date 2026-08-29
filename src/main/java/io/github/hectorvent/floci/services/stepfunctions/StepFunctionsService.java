@@ -1,8 +1,12 @@
 package io.github.hectorvent.floci.services.stepfunctions;
 
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -12,6 +16,8 @@ import io.github.hectorvent.floci.services.stepfunctions.model.Activity;
 import io.github.hectorvent.floci.services.stepfunctions.model.ActivityTask;
 import io.github.hectorvent.floci.services.stepfunctions.model.Execution;
 import io.github.hectorvent.floci.services.stepfunctions.model.HistoryEvent;
+import io.github.hectorvent.floci.services.stepfunctions.model.MapRun;
+import io.github.hectorvent.floci.services.stepfunctions.model.MockedTestCase;
 import io.github.hectorvent.floci.services.stepfunctions.model.StateMachine;
 import io.github.hectorvent.floci.services.stepfunctions.model.StateMachineVersion;
 import io.github.hectorvent.floci.core.common.Resettable;
@@ -32,25 +38,40 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
-public class StepFunctionsService implements Resettable {
+public class StepFunctionsService implements Resettable, ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(StepFunctionsService.class);
 
     private final StorageBackend<String, StateMachine> stateMachineStore;
     private final StorageBackend<String, Execution> executionStore;
     private final StorageBackend<String, Activity> activityStore;
+    private final StorageBackend<String, MapRun> mapRunStore;
     private final Map<String, List<HistoryEvent>> historyCache = new ConcurrentHashMap<>();
     private final Map<String, BlockingQueue<ActivityTask>> activityQueues = new ConcurrentHashMap<>();
     private final Map<String, CompletableFuture<JsonNode>> pendingTaskTokens = new ConcurrentHashMap<>();
     private final RegionResolver regionResolver;
     private final AslExecutor aslExecutor;
     private final ObjectMapper objectMapper;
+    private final SfnMockLoader mockLoader;
 
     // Fields that are valid only in JSONPath mode. Validated against real AWS:
     // creating a JSONata state machine with any of these fields returns SCHEMA_VALIDATION_FAILED.
     private static final Set<String> JSONPATH_ONLY_FIELDS = Set.of(
             "InputPath", "OutputPath", "ResultPath", "ResultSelector", "Parameters", "Result", "ItemsPath",
             "MaxConcurrencyPath");
+    // A {% %} string in one of these ASL fields is not an expression on AWS: Comment, Next,
+    // Default and Resource keep it as text, ErrorEquals and Retry hold error names and integers,
+    // ReaderConfig.CSVHeaders holds literal column names, and the JSONata support of
+    // Credentials.RoleArn is hidden behind an ARN check that fires first. ItemProcessor, Iterator
+    // and Branches carry nested states, walked as states of their own.
+    private static final Set<String> ASL_FIELDS_AWS_DOES_NOT_PARSE_AS_JSONATA = Set.of(
+            "Comment", "Next", "Default", "Resource", "ErrorEquals", "Retry", "Credentials",
+            "ItemProcessor", "Iterator", "Branches", "CSVHeaders");
+    // The fields whose value is a user payload rather than ASL. AWS parses every string inside
+    // one, at any depth, so a payload key that happens to be named Next or Comment is an
+    // expression there and the deny list above stops applying once the walk enters one.
+    private static final Set<String> JSONATA_PAYLOAD_FIELDS = Set.of(
+            "Output", "Assign", "Arguments", "ItemSelector", "BatchInput");
     private static final Set<String> ITEM_READER_RESOURCES = Set.of(
             "arn:aws:states:::s3:getObject",
             "arn:aws:states:::s3:listObjectsV2");
@@ -62,16 +83,20 @@ public class StepFunctionsService implements Resettable {
 
     @Inject
     public StepFunctionsService(StorageFactory storageFactory, RegionResolver regionResolver,
-                                AslExecutor aslExecutor, ObjectMapper objectMapper) {
+                                AslExecutor aslExecutor, ObjectMapper objectMapper,
+                                SfnMockLoader mockLoader) {
         this.stateMachineStore = storageFactory.create("stepfunctions", "sfn-state-machines.json",
                 new TypeReference<Map<String, StateMachine>>() {});
         this.executionStore = storageFactory.create("stepfunctions", "sfn-executions.json",
                 new TypeReference<Map<String, Execution>>() {});
         this.activityStore = storageFactory.create("stepfunctions", "sfn-activities.json",
                 new TypeReference<Map<String, Activity>>() {});
+        this.mapRunStore = storageFactory.create("stepfunctions", "sfn-map-runs.json",
+                new TypeReference<Map<String, MapRun>>() {});
         this.regionResolver = regionResolver;
         this.aslExecutor = aslExecutor;
         this.objectMapper = objectMapper;
+        this.mockLoader = mockLoader;
     }
 
     public void clear() {
@@ -79,6 +104,29 @@ public class StepFunctionsService implements Resettable {
         activityQueues.clear();
         pendingTaskTokens.values().forEach(f -> f.completeExceptionally(new RuntimeException("StepFunctionsService cleared")));
         pendingTaskTokens.clear();
+    }
+
+    @Override
+    public List<ExplorerResource> getResources() {
+        List<ExplorerResource> resources = new ArrayList<>();
+        for (StateMachine sm : stateMachineStore.scan(k -> true)) {
+            String arn = sm.getStateMachineArn();
+            if (arn == null) {
+                continue;
+            }
+            AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+            resources.add(new ExplorerResource(
+                    arn, "states:stateMachine", "states",
+                    parsed.region(), parsed.accountId(),
+                    sm.getCreationDate() > 0 ? Instant.ofEpochMilli((long) (sm.getCreationDate() * 1000)) : Instant.now(),
+                    sm.getTags() != null ? sm.getTags() : Map.of()));
+        }
+        return resources;
+    }
+
+    @Override
+    public Set<SupportedResourceType> getSupportedResourceTypes() {
+        return Set.of(new SupportedResourceType("states:stateMachine", "states", true));
     }
 
     // ──────────────────────────── State Machines ────────────────────────────
@@ -457,25 +505,27 @@ public class StepFunctionsService implements Resettable {
     // ──────────────────────────── Executions ────────────────────────────
 
     public Execution startExecution(String stateMachineArn, String name, String input, String region) {
-        StateMachine sm = describeStateMachine(stateMachineArn);
-        String execName = (name != null && !name.isBlank()) ? name : UUID.randomUUID().toString();
-        String arn = regionResolver.buildArn("states", region, "execution:" + sm.getName() + ":" + execName);
+        var selection = splitTestCaseSuffix(stateMachineArn);
+        var sm = describeStateMachine(selection.stateMachineArn());
+        var mockedTestCase = resolveMockedTestCase(sm, selection);
+        var execName = (name != null && !name.isBlank()) ? name : UUID.randomUUID().toString();
+        var arn = regionResolver.buildArn("states", region, "execution:" + sm.getName() + ":" + execName);
 
         if (executionStore.get(arn).isPresent()) {
             throw new AwsException("ExecutionAlreadyExists", "Execution already exists: " + arn, 400);
         }
 
-        Execution exec = new Execution();
+        var exec = new Execution();
         exec.setExecutionArn(arn);
-        exec.setStateMachineArn(stateMachineArn);
+        exec.setStateMachineArn(selection.stateMachineArn());
         exec.setName(execName);
         exec.setInput(input);
         exec.setStatus("RUNNING");
 
         executionStore.put(arn, exec);
 
-        List<HistoryEvent> history = new ArrayList<>();
-        HistoryEvent startEvent = new HistoryEvent();
+        var history = new ArrayList<HistoryEvent>();
+        var startEvent = new HistoryEvent();
         startEvent.setId(1L);
         startEvent.setType("ExecutionStarted");
         startEvent.setDetails(Map.of("input", input != null ? input : "{}",
@@ -485,7 +535,7 @@ public class StepFunctionsService implements Resettable {
 
         LOG.infov("Started execution: {0}", arn);
 
-        aslExecutor.executeAsync(sm, exec, history, (updatedExec, updatedHistory) -> {
+        aslExecutor.executeAsync(sm, exec, history, mockedTestCase, (updatedExec, updatedHistory) -> {
             executionStore.put(updatedExec.getExecutionArn(), updatedExec);
             historyCache.put(updatedExec.getExecutionArn(), updatedHistory);
             LOG.infov("Execution {0} completed with status {1}", updatedExec.getExecutionArn(), updatedExec.getStatus());
@@ -495,7 +545,16 @@ public class StepFunctionsService implements Resettable {
     }
 
     public Execution startSyncExecution(String stateMachineArn, String name, String input, String region) {
-        StateMachine sm = describeStateMachine(stateMachineArn);
+        var selection = splitTestCaseSuffix(stateMachineArn);
+        if (selection.testCaseName() != null) {
+            // Matches Step Functions Local, which rejects a test case suffix here.
+            throw new AwsException("UnsupportedOperation",
+                    "Service integration mocking is not supported for the StartSyncExecution operation.",
+                    400);
+        }
+        // A bare trailing '#' is not stripped on this operation: Step Functions Local looks up
+        // the raw ARN and fails with StateMachineDoesNotExist, so Floci does the same.
+        var sm = describeStateMachine(stateMachineArn);
         if (!"EXPRESS".equals(sm.getType())) {
             throw new AwsException("StateMachineTypeNotSupported",
                     "StartSyncExecution is only supported for EXPRESS state machines", 400);
@@ -510,15 +569,15 @@ public class StepFunctionsService implements Resettable {
         String arn = regionResolver.buildArn("states", region,
                 "express:" + sm.getName() + ":" + startDate + ":" + execName);
 
-        Execution exec = new Execution();
+        var exec = new Execution();
         exec.setExecutionArn(arn);
         exec.setStateMachineArn(stateMachineArn);
         exec.setName(execName);
         exec.setInput(input);
         exec.setStatus("RUNNING");
 
-        List<HistoryEvent> history = new ArrayList<>();
-        HistoryEvent startEvent = new HistoryEvent();
+        var history = new ArrayList<HistoryEvent>();
+        var startEvent = new HistoryEvent();
         startEvent.setId(1L);
         startEvent.setType("ExecutionStarted");
         startEvent.setDetails(Map.of("input", input != null ? input : "{}",
@@ -530,6 +589,61 @@ public class StepFunctionsService implements Resettable {
         });
 
         return exec;
+    }
+
+    private record TestCaseSelection(String stateMachineArn, String testCaseName) {
+    }
+
+    /**
+     * Splits the Step Functions Local mocked service integration suffix off a
+     * {@code StartExecution} ARN: {@code <stateMachineArn>#<testCaseName>} selects the named
+     * test case from the configured mock configuration file. A bare trailing {@code #} selects
+     * no test case and the execution runs unmocked, matching Step Functions Local.
+     */
+    private static TestCaseSelection splitTestCaseSuffix(String stateMachineArn) {
+        var separator = stateMachineArn != null ? stateMachineArn.indexOf('#') : -1;
+        if (separator < 0) {
+            return new TestCaseSelection(stateMachineArn, null);
+        }
+        var testCaseName = stateMachineArn.substring(separator + 1);
+        return new TestCaseSelection(stateMachineArn.substring(0, separator),
+                testCaseName.isBlank() ? null : testCaseName);
+    }
+
+    private MockedTestCase resolveMockedTestCase(StateMachine sm, TestCaseSelection selection) {
+        if (selection.testCaseName() == null) {
+            return null;
+        }
+        var mockedTestCase = mockLoader.requireTestCase(sm.getName(), selection.testCaseName());
+        warnOnMockedStatesMissingFromDefinition(sm, mockedTestCase);
+        return mockedTestCase;
+    }
+
+    private void warnOnMockedStatesMissingFromDefinition(StateMachine sm, MockedTestCase testCase) {
+        try {
+            var stateNames = new HashSet<String>();
+            collectStateNames(objectMapper.readTree(sm.getDefinition()), stateNames);
+            for (var stateName : testCase.stateResponses().keySet()) {
+                if (!stateNames.contains(stateName)) {
+                    LOG.warnv("Mock test case {0} references state {1} which does not exist in state machine {2}",
+                            testCase.testCaseName(), stateName, sm.getName());
+                }
+            }
+        } catch (Exception e) {
+            LOG.debugv("Could not check mocked state names for {0}: {1}", sm.getName(), e.getMessage());
+        }
+    }
+
+    private static void collectStateNames(JsonNode node, Set<String> names) {
+        if (node.isObject()) {
+            var states = node.get("States");
+            if (states != null && states.isObject()) {
+                states.fieldNames().forEachRemaining(names::add);
+            }
+            node.forEach(child -> collectStateNames(child, names));
+        } else if (node.isArray()) {
+            node.forEach(child -> collectStateNames(child, names));
+        }
     }
 
     public Execution describeExecution(String arn) {
@@ -630,30 +744,58 @@ public class StepFunctionsService implements Resettable {
 
     // ──────────────────────────── Tasks ────────────────────────────
 
-    public void sendTaskSuccess(String taskToken, String output) {
-        CompletableFuture<JsonNode> future = pendingTaskTokens.remove(taskToken);
-        if (future != null) {
-            try {
-                future.complete(objectMapper.readTree(output));
-            } catch (Exception e) {
-                future.completeExceptionally(new RuntimeException("Invalid JSON output: " + e.getMessage()));
-            }
-        } else {
+    /**
+     * @return whether the token named a task that was waiting for it. The
+     *         {@code aws-sdk:sfn:sendTaskSuccess} Task integration fails the calling state when it
+     *         did not, the way AWS answers an unknown token with {@code InvalidToken}.
+     */
+    public boolean sendTaskSuccess(String taskToken, String output) {
+        CompletableFuture<JsonNode> future = taskToken != null ? pendingTaskTokens.remove(taskToken) : null;
+        if (future == null) {
             LOG.warnv("SendTaskSuccess: no pending task for token {0}", taskToken);
+            return false;
         }
+        try {
+            future.complete(objectMapper.readTree(output));
+        } catch (Exception e) {
+            future.completeExceptionally(new RuntimeException("Invalid JSON output: " + e.getMessage()));
+        }
+        return true;
     }
 
-    public void sendTaskFailure(String taskToken, String cause, String error) {
-        CompletableFuture<JsonNode> future = pendingTaskTokens.remove(taskToken);
-        if (future != null) {
-            future.completeExceptionally(new AslExecutor.FailStateException(error, cause));
-        } else {
+    /**
+     * @return whether the token named a task that was waiting for it, as in
+     *         {@link #sendTaskSuccess(String, String)}.
+     */
+    public boolean sendTaskFailure(String taskToken, String cause, String error) {
+        CompletableFuture<JsonNode> future = taskToken != null ? pendingTaskTokens.remove(taskToken) : null;
+        if (future == null) {
             LOG.warnv("SendTaskFailure: no pending task for token {0}", taskToken);
+            return false;
         }
+        future.completeExceptionally(new AslExecutor.FailStateException(error, cause));
+        return true;
     }
 
     public void sendTaskHeartbeat(String taskToken) {
         LOG.debugv("Task heartbeat for token {0}", taskToken);
+    }
+
+    // ──────────────────────────── Map runs ────────────────────────────
+
+    /**
+     * Retains a finished Map run so {@code DescribeMapRun} can still report it once the execution
+     * that opened it is over. Reconciliation state machines read those counters from a later state,
+     * or from a later execution altogether, so the run has to outlive the Map that produced it.
+     */
+    public void recordMapRun(MapRun mapRun) {
+        mapRunStore.put(mapRun.getMapRunArn(), mapRun);
+    }
+
+    public MapRun describeMapRun(String mapRunArn) {
+        return mapRunStore.get(mapRunArn)
+                .orElseThrow(() -> new AwsException("ResourceNotFound",
+                        "Resource not found: '" + mapRunArn + "'", 400));
     }
 
     // ──────────────────────────── Tags ────────────────────────────
@@ -906,12 +1048,16 @@ public class StepFunctionsService implements Resettable {
     private static final Set<String> STATE_TYPES = Set.of(
             "Pass", "Task", "Choice", "Wait", "Succeed", "Fail", "Parallel", "Map");
     private static final String PARSE_ERROR_MARKER = "INVALID_JSON_DESCRIPTION:";
+    private static final String UNSUPPORTED_JSONATA_MARKER = "UNSUPPORTED_JSONATA_EXPRESSION:";
 
     // Parse the structured location out of validator flat error strings,
     // which currently encode it as "...field 'X' ... at /States/Y".
     // AWS's published Diagnostic.location format is "/States/<StateName>/<FieldName>".
     private static final Pattern FIELD_PATTERN = Pattern.compile("field '([^']+)'");
     private static final Pattern LOCATION_SUFFIX_PATTERN = Pattern.compile(" at (/States/\\S+)$");
+    // The JSONata errors already carry the full AWS location, state names with spaces included,
+    // so their suffix is read with its own pattern rather than the whitespace-delimited one.
+    private static final Pattern JSONATA_LOCATION_SUFFIX_PATTERN = Pattern.compile(" at (/States/.+)$");
 
     /**
      * Exposes the existing ASL validator as a public, non-throwing API for
@@ -969,28 +1115,39 @@ public class StepFunctionsService implements Resettable {
     }
 
     private static Diagnostic toDiagnostic(String error) {
-        boolean isParseError = error.startsWith(PARSE_ERROR_MARKER);
-        String code = isParseError ? "INVALID_JSON_DESCRIPTION" : "SCHEMA_VALIDATION_FAILED";
-        String message = isParseError
-                ? error.substring(PARSE_ERROR_MARKER.length()).trim() : error;
-        // null when there's no specific location to point to — handler omits the
+        // null location when there's no specific location to point to — handler omits the
         // field from the response in that case, matching AWS's "optional" semantics.
-        String location = null;
-        if (!isParseError) {
-            Matcher locM = LOCATION_SUFFIX_PATTERN.matcher(message);
-            Matcher fieldM = FIELD_PATTERN.matcher(message);
-            if (locM.find() && fieldM.find()) {
-                // Build the structured location and strip the redundant suffix
-                // from the message, matching AWS's wire format.
-                location = locM.group(1);
-                String field = fieldM.group(1);
-                if (!location.endsWith("/" + field)) {
-                    location = location + "/" + field;
-                }
-                message = message.substring(0, locM.start()).trim();
-            }
+        if (error.startsWith(PARSE_ERROR_MARKER)) {
+            return new Diagnostic("ERROR", "INVALID_JSON_DESCRIPTION",
+                    error.substring(PARSE_ERROR_MARKER.length()).trim(), null);
         }
-        return new Diagnostic("ERROR", code, message, location);
+        if (error.startsWith(UNSUPPORTED_JSONATA_MARKER)) {
+            return toJsonataDiagnostic(error.substring(UNSUPPORTED_JSONATA_MARKER.length()).trim());
+        }
+        String message = error;
+        String location = null;
+        Matcher locM = LOCATION_SUFFIX_PATTERN.matcher(message);
+        Matcher fieldM = FIELD_PATTERN.matcher(message);
+        if (locM.find() && fieldM.find()) {
+            // Build the structured location and strip the redundant suffix
+            // from the message, matching AWS's wire format.
+            location = locM.group(1);
+            String field = fieldM.group(1);
+            if (!location.endsWith("/" + field)) {
+                location = location + "/" + field;
+            }
+            message = message.substring(0, locM.start()).trim();
+        }
+        return new Diagnostic("ERROR", "SCHEMA_VALIDATION_FAILED", message, location);
+    }
+
+    private static Diagnostic toJsonataDiagnostic(String message) {
+        Matcher locationMatcher = JSONATA_LOCATION_SUFFIX_PATTERN.matcher(message);
+        if (!locationMatcher.find()) {
+            return new Diagnostic("ERROR", "UNSUPPORTED_JSONATA_EXPRESSION", message, null);
+        }
+        return new Diagnostic("ERROR", "UNSUPPORTED_JSONATA_EXPRESSION",
+                message.substring(0, locationMatcher.start()).trim(), locationMatcher.group(1));
     }
 
     private static void validateStateMachineName(String name) {
@@ -1243,9 +1400,18 @@ public class StepFunctionsService implements Resettable {
             throw new AwsException("InvalidDefinition",
                     "Invalid State Machine Definition: '" + first.substring(PARSE_ERROR_MARKER.length()).trim() + "'", 400);
         }
+        // A JSONata error already carries its own AWS code and location, so it is reported on its
+        // own rather than folded into the schema list.
+        List<String> schemaErrors = errors.stream()
+                .filter(error -> !error.startsWith(UNSUPPORTED_JSONATA_MARKER))
+                .toList();
+        if (schemaErrors.isEmpty()) {
+            throw new AwsException("InvalidDefinition",
+                    "Invalid State Machine Definition: '" + first + "'", 400);
+        }
         throw new AwsException("InvalidDefinition",
                 "Invalid State Machine Definition: 'SCHEMA_VALIDATION_FAILED: "
-                        + String.join(", ", errors) + "'", 400);
+                        + String.join(", ", schemaErrors) + "'", 400);
     }
 
     private List<String> collectValidationErrors(String definition) {
@@ -1326,6 +1492,7 @@ public class StepFunctionsService implements Resettable {
                             + "' is only supported for the 'JSONPath' QueryLanguage at " + statePath);
                 }
             }
+            collectTopLevelReferences(statePath, stateDef, errors);
         }
 
         if ("Map".equals(stateType)) {
@@ -1344,9 +1511,54 @@ public class StepFunctionsService implements Resettable {
             if (branches.isArray()) {
                 for (int i = 0; i < branches.size(); i++) {
                     validateNestedStates(branches.path(i).path("States"),
-                            statePath + "/Branches/" + i + "/States", topLevelJsonata, errors);
+                            statePath + "/Branches[" + i + "]/States", topLevelJsonata, errors);
                 }
             }
+        }
+    }
+
+    /**
+     * Reports every JSONata expression in the state that reads the top-level context, which real
+     * AWS refuses at CreateStateMachine time. Only the fields AWS parses as JSONata are walked:
+     * measured against {@code validate-state-machine-definition}, a {@code {% %}} string in
+     * Comment, Next, Default, Resource, ErrorEquals, Retry, Credentials or ReaderConfig.CSVHeaders
+     * is left alone, while Output, Assign, Arguments, Items, Seconds, Condition, ItemBatcher,
+     * ItemReader, ItemSelector, ResultWriter and the rest are parsed and reported.
+     *
+     * <p>Those names are ASL fields, not payload keys. AWS parses a payload whole, so
+     * {@code Assign: {"Next": "{% phone %}"}} and {@code Arguments: {"Payload": {"Comment":
+     * "{% phone %}"}}} are both refused by name, and the deny list stops applying as soon as the
+     * walk enters one of {@link #JSONATA_PAYLOAD_FIELDS}.
+     */
+    private static void collectTopLevelReferences(String path, JsonNode node, List<String> errors) {
+        collectTopLevelReferences(path, node, false, errors);
+    }
+
+    private static void collectTopLevelReferences(String path, JsonNode node, boolean insidePayload,
+                                                  List<String> errors) {
+        if (node.isObject()) {
+            node.fields().forEachRemaining(field -> {
+                String name = field.getKey();
+                if (insidePayload || !ASL_FIELDS_AWS_DOES_NOT_PARSE_AS_JSONATA.contains(name)) {
+                    collectTopLevelReferences(path + "/" + name, field.getValue(),
+                            insidePayload || JSONATA_PAYLOAD_FIELDS.contains(name), errors);
+                }
+            });
+            return;
+        }
+        if (node.isArray()) {
+            for (int index = 0; index < node.size(); index++) {
+                collectTopLevelReferences(path + "[" + index + "]", node.get(index), insidePayload,
+                        errors);
+            }
+            return;
+        }
+        if (!node.isTextual() || !JsonataEvaluator.isExpression(node.asText())) {
+            return;
+        }
+        for (String reference : JsonataTopLevelReferences.in(JsonataEvaluator.unwrap(node.asText()))) {
+            errors.add(UNSUPPORTED_JSONATA_MARKER + " Reference to '" + reference
+                    + "' at the top level is not supported. at " + path);
         }
     }
 

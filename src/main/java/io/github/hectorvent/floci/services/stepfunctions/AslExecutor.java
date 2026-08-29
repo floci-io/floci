@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.services.cloudformation.CloudFormationQueryHan
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbJsonHandler;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.eventbridge.EventBridgeHandler;
 import io.github.hectorvent.floci.services.ecs.EcsJsonHandler;
 import io.github.hectorvent.floci.services.ecs.EcsService;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
@@ -19,6 +20,10 @@ import io.github.hectorvent.floci.services.ecs.model.NetworkConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import io.github.hectorvent.floci.services.ecs.model.LaunchType;
 import io.github.hectorvent.floci.services.s3.S3Service;
+import io.github.hectorvent.floci.services.scheduler.SchedulerController;
+import io.github.hectorvent.floci.services.scheduler.SchedulerService;
+import io.github.hectorvent.floci.services.scheduler.model.Schedule;
+import io.github.hectorvent.floci.services.scheduler.model.ScheduleRequest;
 import io.github.hectorvent.floci.services.lambda.LambdaExecutorService;
 import io.github.hectorvent.floci.services.lambda.LambdaFunctionStore;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
@@ -28,6 +33,9 @@ import io.github.hectorvent.floci.services.s3.model.S3Object;
 import io.github.hectorvent.floci.services.sqs.SqsJsonHandler;
 import io.github.hectorvent.floci.services.stepfunctions.model.Execution;
 import io.github.hectorvent.floci.services.stepfunctions.model.HistoryEvent;
+import io.github.hectorvent.floci.services.stepfunctions.model.MapRun;
+import io.github.hectorvent.floci.services.stepfunctions.model.MockedResponseStep;
+import io.github.hectorvent.floci.services.stepfunctions.model.MockedTestCase;
 import io.github.hectorvent.floci.services.stepfunctions.model.StateMachine;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -58,6 +66,9 @@ import org.jboss.logging.Logger;
 
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -71,10 +82,12 @@ import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiConsumer;
@@ -102,6 +115,17 @@ public class AslExecutor {
     private static final long ECS_SYNC_POLL_INTERVAL_MS = 100;
 
     private static final String QUERY_LANGUAGE_JSONATA = "JSONata";
+    private static final String AWS_SDK_SFN_PREFIX = "arn:aws:states:::aws-sdk:sfn:";
+    private static final String AWS_SDK_SCHEDULER_PREFIX = "arn:aws:states:::aws-sdk:scheduler:";
+
+    /**
+     * A timestamp inside an {@code aws-sdk:} Task result is the SDK's ISO-8601 rendering of an
+     * {@code Instant} — {@code 2026-08-28T20:34:59.712Z} — where the same field on the wire
+     * response of the underlying API carries epoch seconds.
+     */
+    private static final DateTimeFormatter SDK_TIMESTAMP =
+            DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'").withZone(ZoneOffset.UTC);
+
     private static final Set<String> HTTP_ALLOWED_METHODS = Set.of(
             "GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD");
     private static final Set<String> HTTP_FORBIDDEN_HEADERS = Set.of(
@@ -148,11 +172,15 @@ public class AslExecutor {
     private final S3Service s3Service;
     private final EcsService ecsService;
     private final EcsJsonHandler ecsJsonHandler;
+    private final EventBridgeHandler eventBridgeHandler;
+    private final SchedulerService schedulerService;
+    private final SchedulerController schedulerController;
     private final ObjectMapper objectMapper;
     private final JsonataEvaluator jsonataEvaluator;
     private final Instance<StepFunctionsService> sfnService;
     private final WebClient webClient;
     private final EmulatorConfig config;
+    private final Map<String, MockedTestCase> activeMocks = new ConcurrentHashMap<>();
     private final ExecutorService executor = Executors.newCachedThreadPool(r -> {
         Thread t = new Thread(r, "sfn-executor");
         t.setDaemon(true);
@@ -165,6 +193,8 @@ public class AslExecutor {
                        SqsJsonHandler sqsJsonHandler, CloudFormationQueryHandler cloudFormationHandler,
                        Ec2Service ec2Service, S3Service s3Service,
                        EcsService ecsService, EcsJsonHandler ecsJsonHandler,
+                       EventBridgeHandler eventBridgeHandler, SchedulerService schedulerService,
+                       SchedulerController schedulerController,
                        ObjectMapper objectMapper, JsonataEvaluator jsonataEvaluator,
                        Instance<StepFunctionsService> sfnService, EmulatorConfig config, Vertx vertx) {
         this.lambdaExecutor = lambdaExecutor;
@@ -177,6 +207,9 @@ public class AslExecutor {
         this.s3Service = s3Service;
         this.ecsService = ecsService;
         this.ecsJsonHandler = ecsJsonHandler;
+        this.eventBridgeHandler = eventBridgeHandler;
+        this.schedulerService = schedulerService;
+        this.schedulerController = schedulerController;
         this.objectMapper = objectMapper;
         this.jsonataEvaluator = jsonataEvaluator;
         this.sfnService = sfnService;
@@ -200,7 +233,28 @@ public class AslExecutor {
      */
     public void executeAsync(StateMachine sm, Execution exec, List<HistoryEvent> history,
                              BiConsumer<Execution, List<HistoryEvent>> onUpdate) {
-        executor.submit(() -> runUnderExecutionAccount(sm, () -> doExecute(sm, exec, history, onUpdate)));
+        executeAsync(sm, exec, history, null, onUpdate);
+    }
+
+    /**
+     * Variant of {@link #executeAsync(StateMachine, Execution, List, BiConsumer)} that runs the
+     * execution with a mock test case: Task states named in the test case return their mocked
+     * response instead of calling the integrated service.
+     */
+    public void executeAsync(StateMachine sm, Execution exec, List<HistoryEvent> history,
+                             MockedTestCase mockedTestCase,
+                             BiConsumer<Execution, List<HistoryEvent>> onUpdate) {
+        registerMocks(exec, mockedTestCase);
+        executor.submit(() -> {
+            try {
+                runUnderExecutionAccount(sm, () -> doExecute(sm, exec, history, onUpdate));
+            } catch (RuntimeException | Error e) {
+                // submit() parks whatever the task throws in a Future nobody reads, so without this
+                // the worker dies silently. doExecute has already published the terminal status by
+                // now; this is the only place the stack trace of what killed it reaches the log.
+                LOG.errorv(e, "ASL execution worker failed for {0}", exec.getExecutionArn());
+            }
+        });
     }
 
     /**
@@ -208,6 +262,17 @@ public class AslExecutor {
      */
     public void executeSync(StateMachine sm, Execution exec, List<HistoryEvent> history,
                             BiConsumer<Execution, List<HistoryEvent>> onUpdate) {
+        executeSync(sm, exec, history, null, onUpdate);
+    }
+
+    /**
+     * Variant of {@link #executeSync(StateMachine, Execution, List, BiConsumer)} that runs the
+     * execution with a mock test case.
+     */
+    public void executeSync(StateMachine sm, Execution exec, List<HistoryEvent> history,
+                            MockedTestCase mockedTestCase,
+                            BiConsumer<Execution, List<HistoryEvent>> onUpdate) {
+        registerMocks(exec, mockedTestCase);
         try {
             Future<?> f = executor.submit(() ->
                     runUnderExecutionAccount(sm, () -> doExecute(sm, exec, history, onUpdate)));
@@ -285,8 +350,10 @@ public class AslExecutor {
 
     private void doExecute(StateMachine sm, Execution exec, List<HistoryEvent> history,
                            BiConsumer<Execution, List<HistoryEvent>> onUpdate) {
+        // Declared outside the try so the terminal handlers below can keep numbering the history
+        // where the execution left it.
+        AtomicLong eventId = new AtomicLong(history.size());
         try {
-            AtomicLong eventId = new AtomicLong(history.size());
             JsonNode definition = objectMapper.readTree(sm.getDefinition());
             JsonNode states = definition.path("States");
             String startAt = definition.path("StartAt").asText();
@@ -311,9 +378,9 @@ public class AslExecutor {
                 // Update per-state context fields
                 updateStateContext(execContext, currentStateName);
 
-                boolean jsonata = isJsonata(stateDef, topLevelQueryLanguage);
+                var jsonata = isJsonata(stateDef, topLevelQueryLanguage);
                 try {
-                    StateResult stateResult = executeState(currentStateName, type, stateDef, currentInput,
+                    var stateResult = executeStateWithRetry(currentStateName, type, stateDef, currentInput,
                             history, eventId, sm, jsonata, topLevelQueryLanguage, execContext, variables);
                     addEvent(history, eventId, stateExitedEventType(type), eventId.get() - 1,
                             Map.of("name", currentStateName, "output", stateResult.output().toString()));
@@ -325,7 +392,16 @@ public class AslExecutor {
                         currentStateName = null;
                     }
                 } catch (FailStateException e) {
-                    StateResult caught = handleCatch(stateDef, currentInput, e, jsonata, execContext, variables);
+                    StateResult caught = null;
+                    FailStateException failure = e;
+                    try {
+                        caught = handleCatch(stateDef, currentInput, e, jsonata, execContext, variables);
+                    } catch (FailStateException catchClauseFailure) {
+                        // A matching Catch clause carries its own Assign and Output, and an
+                        // expression there can fail. AWS reports that failure, not the error the
+                        // clause was catching, and no later clause catches it.
+                        failure = catchClauseFailure;
+                    }
                     if (caught != null) {
                         addEvent(history, eventId, stateExitedEventType(type), eventId.get() - 1,
                                 Map.of("name", currentStateName, "output", caught.output().toString()));
@@ -333,18 +409,7 @@ public class AslExecutor {
                         currentStateName = caught.nextState();
                         continue;
                     }
-                    failExecution(exec, history, eventId, e);
-                    onUpdate.accept(exec, history);
-                    return;
-                } catch (Exception e) {
-                    String runtimeError = "States.Runtime";
-                    String runtimeCause = e.getMessage() != null ? e.getMessage() : "Unknown error";
-                    exec.setError(runtimeError);
-                    exec.setCause(runtimeCause);
-                    exec.setStopDate(System.currentTimeMillis() / 1000.0);
-                    exec.setStatus("FAILED");
-                    addEvent(history, eventId, "ExecutionFailed", null,
-                            Map.of("error", runtimeError, "cause", runtimeCause));
+                    failExecution(exec, history, eventId, failure);
                     onUpdate.accept(exec, history);
                     return;
                 }
@@ -365,21 +430,116 @@ public class AslExecutor {
             LOG.warnv("ASL execution failed for {0}: {1}", exec.getExecutionArn(), e.getMessage());
             // This path previously set only the status, leaving error and cause null forever on an
             // execution DescribeExecution reports as FAILED.
-            exec.setError("States.Runtime");
-            exec.setCause(e.getMessage() != null ? e.getMessage() : "Unknown error");
-            exec.setStopDate(System.currentTimeMillis() / 1000.0);
-            exec.setStatus("FAILED");
+            failExecution(exec, history, eventId, "States.Runtime",
+                    e.getMessage() != null ? e.getMessage() : "Unknown error");
             onUpdate.accept(exec, history);
+        } catch (Error e) {
+            // An Error is not a state failure: it says the runtime itself is broken, and no retry
+            // of the state machine can get past it. Publishing the same terminal FAILED an
+            // exception produces is what keeps DescribeExecution from reporting RUNNING forever,
+            // and the rethrow keeps the Error itself from being swallowed here. The cause carries
+            // toString() rather than getMessage(), because an Error's message is often null and
+            // the type name is the whole diagnostic.
+            failExecution(exec, history, eventId, "States.Runtime", e.toString());
+            onUpdate.accept(exec, history);
+            throw e;
+        } finally {
+            activeMocks.remove(exec.getExecutionArn());
+        }
+    }
+
+    private void registerMocks(Execution exec, MockedTestCase mockedTestCase) {
+        if (mockedTestCase != null) {
+            activeMocks.put(exec.getExecutionArn(), mockedTestCase);
+        }
+    }
+
+    /**
+     * Executes a state, honoring its {@code Retry} policy: a {@code FailStateException} matched by
+     * a retrier re-runs the state after the retrier's backoff until its {@code MaxAttempts} are
+     * used up. Errors that no retrier matches (or that exhaust their retrier) propagate to the
+     * caller's Catch handling, preserving Retry-before-Catch order.
+     */
+    private StateResult executeStateWithRetry(String name, String type, JsonNode stateDef, JsonNode input,
+                                              List<HistoryEvent> history, AtomicLong eventId, StateMachine sm,
+                                              boolean jsonata, String topLevelQueryLanguage, JsonNode context,
+                                              ObjectNode variables) throws Exception {
+        var retriers = stateDef.path("Retry");
+        var attemptsPerRetrier = new HashMap<Integer, Integer>();
+        var attempt = 0;
+        while (true) {
+            try {
+                return executeState(name, type, stateDef, input, history, eventId, sm, jsonata,
+                        topLevelQueryLanguage, context, variables, attempt);
+            } catch (FailStateException e) {
+                var retrierIndex = findMatchingRetrier(retriers, e);
+                if (retrierIndex < 0) {
+                    throw e;
+                }
+                var retrier = retriers.get(retrierIndex);
+                var attemptsUsed = attemptsPerRetrier.merge(retrierIndex, 1, Integer::sum);
+                if (attemptsUsed > retrier.path("MaxAttempts").asInt(3)) {
+                    throw e;
+                }
+                sleepBeforeRetry(retrier, attemptsUsed);
+                attempt++;
+                updateRetryCount(context, attempt);
+            }
+        }
+    }
+
+    private int findMatchingRetrier(JsonNode retriers, FailStateException failure) {
+        if (!retriers.isArray()) {
+            return -1;
+        }
+        var error = failure.error != null ? failure.error : "States.Runtime";
+        for (var i = 0; i < retriers.size(); i++) {
+            if (catchMatches(retriers.get(i), error)) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private void sleepBeforeRetry(JsonNode retrier, int attemptsUsed) throws InterruptedException {
+        var delaySeconds = retryDelaySeconds(retrier, attemptsUsed, ThreadLocalRandom.current().nextDouble());
+        if (delaySeconds > 0) {
+            Thread.sleep((long) (delaySeconds * 1000));
+        }
+    }
+
+    /**
+     * Computes the delay before a retry attempt. {@code random} is a value in [0, 1) used when
+     * the retrier declares {@code JitterStrategy: FULL}, which draws the delay uniformly between
+     * zero and the computed delay. Jitter applies after the caps, matching AWS.
+     */
+    static double retryDelaySeconds(JsonNode retrier, int attemptsUsed, double random) {
+        var interval = retrier.path("IntervalSeconds").asDouble(1.0);
+        var backoffRate = retrier.path("BackoffRate").asDouble(2.0);
+        var delaySeconds = interval * Math.pow(backoffRate, attemptsUsed - 1.0);
+        var maxDelay = retrier.path("MaxDelaySeconds").asDouble(MAX_WAIT_SECONDS);
+        // Like the Wait state, cap the delay at MAX_WAIT_SECONDS to keep emulated runs fast.
+        delaySeconds = Math.min(delaySeconds, Math.min(maxDelay, MAX_WAIT_SECONDS));
+        if ("FULL".equals(retrier.path("JitterStrategy").asText(null))) {
+            delaySeconds *= random;
+        }
+        return delaySeconds;
+    }
+
+    private void updateRetryCount(JsonNode context, int retryCount) {
+        if (context.get("State") instanceof ObjectNode state) {
+            state.put("RetryCount", retryCount);
         }
     }
 
     private StateResult executeState(String name, String type, JsonNode stateDef, JsonNode input,
                                      List<HistoryEvent> history, AtomicLong eventId, StateMachine sm,
                                      boolean jsonata, String topLevelQueryLanguage, JsonNode context,
-                                     ObjectNode variables) throws Exception {
+                                     ObjectNode variables, int attempt) throws Exception {
         return switch (type) {
             case "Pass" -> executePassState(stateDef, input, jsonata, context, variables);
-            case "Task" -> executeTaskState(name, stateDef, input, history, eventId, sm, jsonata, context, variables);
+            case "Task" -> executeTaskState(name, stateDef, input, history, eventId, sm, jsonata, context,
+                    variables, attempt);
             case "Choice" -> executeChoiceState(stateDef, input, jsonata, context, variables);
             case "Wait" -> executeWaitState(stateDef, input, jsonata, context, variables);
             case "Succeed" -> executeSucceedState(stateDef, input, jsonata, context, variables);
@@ -417,14 +577,18 @@ public class AslExecutor {
 
     private StateResult executeTaskState(String stateName, JsonNode stateDef, JsonNode input,
                                          List<HistoryEvent> history, AtomicLong eventId, StateMachine sm,
-                                         boolean jsonata, JsonNode context, ObjectNode variables) throws Exception {
-        String resource = stateDef.path("Resource").asText();
-        boolean isWaitForToken = resource.endsWith(".waitForTaskToken");
-        String effectiveResource = isWaitForToken
+                                         boolean jsonata, JsonNode context, ObjectNode variables,
+                                         int attempt) throws Exception {
+        var resource = stateDef.path("Resource").asText();
+        var isWaitForToken = resource.endsWith(".waitForTaskToken");
+        var effectiveResource = isWaitForToken
                 ? resource.substring(0, resource.length() - ".waitForTaskToken".length())
                 : resource;
-        boolean isActivity = isActivityArn(effectiveResource);
-        boolean needsToken = isWaitForToken || isActivity;
+        var isActivity = isActivityArn(effectiveResource);
+        var mockedSteps = findMockedResponses(context, stateName);
+        // A mocked task never calls the integrated service, so it neither registers a task token
+        // nor waits for one; the mocked response stands in for the whole interaction.
+        var needsToken = mockedSteps == null && (isWaitForToken || isActivity);
 
         String taskToken = null;
         CompletableFuture<JsonNode> tokenFuture = null;
@@ -436,18 +600,23 @@ public class AslExecutor {
 
         JsonNode taskResult;
         if (jsonata) {
-            JsonNode effectiveInput = input;
+            var effectiveInput = input;
             if (stateDef.has("Arguments")) {
-                JsonNode statesVar = buildStatesVar(input, null, context);
-                effectiveInput = jsonataEvaluator.resolveTemplate(stateDef.get("Arguments"), statesVar, variables);
+                var statesVar = buildStatesVar(input, null, context);
+                effectiveInput = jsonataEvaluator.resolveTemplate(
+                        stateDef.get("Arguments"), "Arguments", statesVar, variables);
             }
-            taskResult = invokeResource(effectiveResource, effectiveInput, sm, taskToken);
+            taskResult = mockedSteps != null
+                    ? mockedTaskResult(mockedSteps, stateName, attempt)
+                    : invokeResource(effectiveResource, effectiveInput, sm, taskToken);
         } else {
-            JsonNode effectiveInput = applyInputPath(stateDef, input);
+            var effectiveInput = applyInputPath(stateDef, input);
             if (stateDef.has("Parameters")) {
                 effectiveInput = resolveParameters(stateDef.get("Parameters"), effectiveInput, context);
             }
-            taskResult = invokeResource(effectiveResource, effectiveInput, sm, taskToken);
+            taskResult = mockedSteps != null
+                    ? mockedTaskResult(mockedSteps, stateName, attempt)
+                    : invokeResource(effectiveResource, effectiveInput, sm, taskToken);
         }
 
         if (tokenFuture != null) {
@@ -466,6 +635,34 @@ public class AslExecutor {
             output = applyOutputPath(stateDef, input, output);
             return new StateResult(output, stateDef.path("Next").asText(null));
         }
+    }
+
+    private List<MockedResponseStep> findMockedResponses(JsonNode context, String stateName) {
+        if (activeMocks.isEmpty()) {
+            return null;
+        }
+        var executionArn = context.path("Execution").path("Id").asText(null);
+        if (executionArn == null) {
+            return null;
+        }
+        var testCase = activeMocks.get(executionArn);
+        return testCase != null ? testCase.stateResponses().get(stateName) : null;
+    }
+
+    private JsonNode mockedTaskResult(List<MockedResponseStep> steps, String stateName, int attempt) {
+        for (var step : steps) {
+            if (step.covers(attempt)) {
+                if (step.isThrow()) {
+                    // The mocked Error and Cause must reach Retry/Catch unchanged; routing them
+                    // through integration error translation would rewrite the error name that
+                    // catchers match on.
+                    throw new FailStateException(step.errorName(), step.errorCause());
+                }
+                return step.returnResult().deepCopy();
+            }
+        }
+        throw new FailStateException("States.Runtime",
+                "No mocked response defined for attempt " + attempt + " of state '" + stateName + "'");
     }
 
     private JsonNode awaitToken(CompletableFuture<JsonNode> future, JsonNode stateDef) throws Exception {
@@ -540,7 +737,10 @@ public class AslExecutor {
             String region = extractRegionFromArn(sm.getStateMachineArn());
             LambdaFunction fn = functionStore.get(region, functionName).orElse(null);
             if (fn == null) {
-                throw new RuntimeException("Lambda function not found: " + functionName);
+                // A missing function is a task failure on AWS, so it must stay reachable for
+                // Retry and Catch instead of surfacing as States.Runtime.
+                throw new FailStateException("Lambda.ResourceNotFoundException",
+                        "Lambda function not found: " + functionName);
             }
 
             String payloadStr = objectMapper.writeValueAsString(lambdaPayload);
@@ -634,6 +834,26 @@ public class AslExecutor {
                     : resource.substring("arn:aws:states:::ecs:runTask".length());
             String region = extractRegionFromArn(sm.getStateMachineArn());
             return invokeEcsRunTask(mode, input, region);
+        }
+
+        // AWS SDK service integrations: Step Functions
+        if (resource.startsWith(AWS_SDK_SFN_PREFIX)) {
+            String action = resource.substring(AWS_SDK_SFN_PREFIX.length());
+            String region = extractRegionFromArn(sm.getStateMachineArn());
+            return invokeAwsSdkSfn(action, input, region);
+        }
+
+        // AWS SDK service integrations: EventBridge Scheduler
+        if (resource.startsWith(AWS_SDK_SCHEDULER_PREFIX)) {
+            String action = resource.substring(AWS_SDK_SCHEDULER_PREFIX.length());
+            String region = extractRegionFromArn(sm.getStateMachineArn());
+            return invokeAwsSdkScheduler(action, input, region);
+        }
+
+        // EventBridge optimized integration
+        if (resource.equals("arn:aws:states:::events:putEvents")) {
+            String region = extractRegionFromArn(sm.getStateMachineArn());
+            return invokeOptimizedPutEvents(input, region);
         }
 
         // Nested state machine integration
@@ -758,6 +978,219 @@ public class AslExecutor {
 
     private static String capitalizeFirst(String s) {
         return s.isEmpty() ? s : Character.toUpperCase(s.charAt(0)) + s.substring(1);
+    }
+
+    /**
+     * The {@code arn:aws:states:::aws-sdk:sfn:*} family. Every one of these calls Step Functions'
+     * own API and returns its raw response, which is what separates
+     * {@code aws-sdk:sfn:startExecution} from the optimized {@code states:startExecution}
+     * handled by {@link #invokeNestedStateMachine}.
+     */
+    private JsonNode invokeAwsSdkSfn(String action, JsonNode input, String region) throws Exception {
+        return switch (action) {
+            case "startExecution" -> invokeAwsSdkSfnStartExecution(input, region);
+            case "startSyncExecution" -> invokeAwsSdkSfnStartSyncExecution(input, region);
+            case "sendTaskSuccess" -> invokeAwsSdkSfnSendTaskSuccess(input);
+            case "sendTaskFailure" -> invokeAwsSdkSfnSendTaskFailure(input);
+            case "describeMapRun" -> invokeAwsSdkSfnDescribeMapRun(input);
+            default -> throw new FailStateException("States.TaskFailed",
+                    "Unsupported resource: " + AWS_SDK_SFN_PREFIX + action);
+        };
+    }
+
+    /**
+     * An {@code aws-sdk:} Task failure carries the name of the SDK exception class, which always
+     * ends in {@code Exception}. AWS answers a missing state machine with
+     * {@code Sfn.StateMachineDoesNotExistException}, while the StartExecution wire response names
+     * that same error {@code StateMachineDoesNotExist}.
+     */
+    private static String sdkExceptionName(String service, String errorCode) {
+        return errorCode.endsWith("Exception")
+                ? service + "." + errorCode
+                : service + "." + errorCode + "Exception";
+    }
+
+    private static String sdkTimestamp(double epochSeconds) {
+        return SDK_TIMESTAMP.format(Instant.ofEpochMilli(Math.round(epochSeconds * 1000)));
+    }
+
+    /**
+     * Reads an SDK payload argument such as {@code Input} or {@code Output}. Its AWS type is a JSON
+     * string; AWS also accepts the object form and serializes it, and an absent one is an empty
+     * object.
+     */
+    private String sdkPayload(JsonNode node) throws Exception {
+        if (node.isMissingNode() || node.isNull()) {
+            return "{}";
+        }
+        return node.isTextual() ? node.asText() : objectMapper.writeValueAsString(node);
+    }
+
+    /**
+     * AWS SDK integration for {@code sfn:startExecution}. Unlike the optimized
+     * {@code states:startExecution}, which returns {@code executionArn} and {@code startDate} in
+     * the casing of the wire response, this one returns the SDK's own {@code ExecutionArn} and an
+     * ISO-8601 {@code StartDate}. Neither waits for the child.
+     */
+    private JsonNode invokeAwsSdkSfnStartExecution(JsonNode input, String region) throws Exception {
+        String smArn = input.path("StateMachineArn").asText(null);
+        if (smArn == null || smArn.isBlank()) {
+            throw new FailStateException("Sfn.InvalidArnException",
+                    "StateMachineArn is required for StartExecution");
+        }
+        io.github.hectorvent.floci.services.stepfunctions.model.Execution exec;
+        try {
+            exec = sfnService.get().startExecution(smArn, input.path("Name").asText(null),
+                    sdkPayload(input.path("Input")), region);
+        } catch (AwsException e) {
+            throw new FailStateException(sdkExceptionName("Sfn", e.getErrorCode()), e.getMessage());
+        }
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("ExecutionArn", exec.getExecutionArn());
+        response.put("StartDate", sdkTimestamp(exec.getStartDate()));
+        return response;
+    }
+
+    /**
+     * AWS SDK integration for {@code sfn:describeMapRun}. The SDK names every field in PascalCase
+     * and renders both dates as ISO-8601, where the wire response of the same run carries epoch
+     * seconds. Recasing that response is what keeps the two renderings of a Map run in step.
+     */
+    private JsonNode invokeAwsSdkSfnDescribeMapRun(JsonNode input) {
+        String mapRunArn = input.path("MapRunArn").asText(null);
+        if (mapRunArn == null || mapRunArn.isBlank()) {
+            throw new FailStateException("Sfn.InvalidArnException",
+                    "MapRunArn is required for DescribeMapRun");
+        }
+        MapRun mapRun;
+        try {
+            mapRun = sfnService.get().describeMapRun(mapRunArn);
+        } catch (AwsException e) {
+            throw new FailStateException(sdkExceptionName("Sfn", e.getErrorCode()), e.getMessage());
+        }
+        ObjectNode response = (ObjectNode) recaseKeys(objectMapper,
+                StepFunctionsJsonHandler.describeMapRunResponse(objectMapper, mapRun), true);
+        response.put("StartDate", sdkTimestamp(mapRun.getStartDate()));
+        response.put("StopDate", sdkTimestamp(mapRun.getStopDate()));
+        return response;
+    }
+
+    /**
+     * AWS SDK integration for {@code sfn:sendTaskSuccess}. AWS fails the calling task with
+     * {@code Sfn.InvalidTokenException} when the token names no waiting task, so a token that
+     * resolved nothing is never reported as a delivered result.
+     */
+    private JsonNode invokeAwsSdkSfnSendTaskSuccess(JsonNode input) throws Exception {
+        String taskToken = input.path("TaskToken").asText(null);
+        if (!sfnService.get().sendTaskSuccess(taskToken, sdkPayload(input.path("Output")))) {
+            throw new FailStateException("Sfn.InvalidTokenException", "Invalid Token: 'Invalid token'");
+        }
+        return objectMapper.createObjectNode();
+    }
+
+    /** AWS SDK integration for {@code sfn:sendTaskFailure}, token semantics as in SendTaskSuccess. */
+    private JsonNode invokeAwsSdkSfnSendTaskFailure(JsonNode input) {
+        String taskToken = input.path("TaskToken").asText(null);
+        if (!sfnService.get().sendTaskFailure(taskToken, input.path("Cause").asText(null),
+                input.path("Error").asText(null))) {
+            throw new FailStateException("Sfn.InvalidTokenException", "Invalid Token: 'Invalid token'");
+        }
+        return objectMapper.createObjectNode();
+    }
+
+    /**
+     * AWS SDK integrations for {@code scheduler:createSchedule} and {@code scheduler:updateSchedule}.
+     * The Task {@code Arguments} are the CreateSchedule body with {@code Name} folded in, so they go
+     * through the controller's parse, and both actions answer with the schedule ARN alone. The parse
+     * rejects a malformed {@code Target} with the same {@code AwsException} the service raises, so it
+     * belongs inside the translation that makes those failures reachable for {@code Retry} and
+     * {@code Catch}.
+     */
+    private JsonNode invokeAwsSdkScheduler(String action, JsonNode input, String region) {
+        boolean creating = "createSchedule".equals(action);
+        if (!creating && !"updateSchedule".equals(action)) {
+            throw new FailStateException("States.TaskFailed",
+                    "Unsupported resource: " + AWS_SDK_SCHEDULER_PREFIX + action);
+        }
+        try {
+            ScheduleRequest request = schedulerController.parseScheduleRequest(input);
+            request.setName(input.path("Name").asText(null));
+            Schedule schedule = creating
+                    ? schedulerService.createSchedule(request, region)
+                    : schedulerService.updateSchedule(request, region);
+            ObjectNode response = objectMapper.createObjectNode();
+            response.put("ScheduleArn", schedule.getArn());
+            return response;
+        } catch (AwsException e) {
+            throw new FailStateException(sdkExceptionName("Scheduler", e.getErrorCode()), e.getMessage());
+        }
+    }
+
+    /**
+     * Optimized EventBridge integration for {@code events:putEvents}. The task result is the
+     * PutEvents response itself, and one failed entry fails the whole task with
+     * {@code EventBridge.FailedEntry}, carrying the response as the cause so the caller can see
+     * which entry it was.
+     */
+    private JsonNode invokeOptimizedPutEvents(JsonNode input, String region) throws Exception {
+        jakarta.ws.rs.core.Response response;
+        try {
+            response = eventBridgeHandler.handle("PutEvents", input, region);
+        } catch (AwsException e) {
+            throw new FailStateException(sdkExceptionName("EventBridge", e.getErrorCode()), e.getMessage());
+        }
+        if (!(response.getEntity() instanceof JsonNode result)) {
+            throw new FailStateException("EventBridge.SdkClientException", "PutEvents returned no response body");
+        }
+        if (result.path("FailedEntryCount").asInt() > 0) {
+            throw new FailStateException("EventBridge.FailedEntry", objectMapper.writeValueAsString(result));
+        }
+        return result;
+    }
+
+    /**
+     * AWS SDK integration for {@code sfn:startSyncExecution}, the way an EXPRESS child workflow is
+     * called. It differs from the optimized {@code states:startExecution.sync} integration in three
+     * ways: the child must be EXPRESS, the response envelope uses PascalCase field names with
+     * {@code Output} as a JSON string, and a child execution that fails is reported through
+     * {@code Status} rather than failing the calling task.
+     */
+    private JsonNode invokeAwsSdkSfnStartSyncExecution(JsonNode input, String region) throws Exception {
+        String smArn = input.path("StateMachineArn").asText(null);
+        if (smArn == null || smArn.isBlank()) {
+            throw new FailStateException("Sfn.InvalidArnException",
+                    "StateMachineArn is required for StartSyncExecution");
+        }
+        io.github.hectorvent.floci.services.stepfunctions.model.Execution exec;
+        try {
+            exec = sfnService.get().startSyncExecution(smArn, input.path("Name").asText(null),
+                    sdkPayload(input.path("Input")), region);
+        } catch (AwsException e) {
+            throw new FailStateException(sdkExceptionName("Sfn", e.getErrorCode()), e.getMessage());
+        }
+
+        ObjectNode envelope = objectMapper.createObjectNode();
+        envelope.put("ExecutionArn", exec.getExecutionArn());
+        envelope.put("StateMachineArn", exec.getStateMachineArn());
+        envelope.put("Name", exec.getName());
+        envelope.put("Status", exec.getStatus());
+        envelope.put("StartDate", sdkTimestamp(exec.getStartDate()));
+        if (exec.getStopDate() != null) {
+            envelope.put("StopDate", sdkTimestamp(exec.getStopDate()));
+        }
+        if (exec.getInput() != null) {
+            envelope.put("Input", exec.getInput());
+        }
+        if (exec.getOutput() != null) {
+            envelope.put("Output", exec.getOutput());
+        }
+        if (exec.getError() != null) {
+            envelope.put("Error", exec.getError());
+        }
+        if (exec.getCause() != null) {
+            envelope.put("Cause", exec.getCause());
+        }
+        return envelope;
     }
 
     private JsonNode invokeNestedStateMachine(String mode, JsonNode input, String region) throws Exception {
@@ -1253,14 +1686,17 @@ public class AslExecutor {
         if (jsonata) {
             JsonNode statesVar = buildStatesVar(input, null, context);
             JsonNode choices = stateDef.path("Choices");
-            for (JsonNode choice : choices) {
+            for (int i = 0; i < choices.size(); i++) {
+                JsonNode choice = choices.get(i);
                 String condition = choice.path("Condition").asText(null);
                 if (condition != null) {
-                    JsonNode result = jsonataEvaluator.evaluate(condition, statesVar, variables);
+                    JsonNode result = jsonataEvaluator.evaluateField(
+                            condition, "Choices[" + i + "]/Condition", statesVar, variables);
                     if (result.isBoolean() && result.asBoolean()) {
                         // A matched rule carries its own Assign and Output; the state-level ones
                         // belong to the Default path and do not run here.
-                        JsonNode output = applyJsonataAssignAndOutput(choice, statesVar, input, variables);
+                        JsonNode output = applyJsonataAssignAndOutput(
+                                choice, "Choices[" + i + "]/", statesVar, input, variables);
                         return new StateResult(output, choice.path("Next").asText());
                     }
                 }
@@ -1268,7 +1704,7 @@ public class AslExecutor {
             String defaultState = stateDef.path("Default").asText(null);
             if (defaultState != null) {
                 // No rule matched: the state-level Assign and Output apply on the Default path.
-                JsonNode output = applyJsonataAssignAndOutput(stateDef, statesVar, input, variables);
+                JsonNode output = applyJsonataAssignAndOutput(stateDef, "", statesVar, input, variables);
                 return new StateResult(output, defaultState);
             }
             throw new FailStateException("States.NoChoiceMatched", "No choice rule matched and no default state");
@@ -1380,7 +1816,8 @@ public class AslExecutor {
                 JsonNode secondsNode = stateDef.get("Seconds");
                 if (secondsNode.isTextual() && JsonataEvaluator.isExpression(secondsNode.asText())) {
                     JsonNode statesVar = buildStatesVar(input, null, context);
-                    JsonNode result = jsonataEvaluator.evaluate(secondsNode.asText(), statesVar, variables);
+                    JsonNode result = jsonataEvaluator.evaluateField(
+                            secondsNode.asText(), "Seconds", statesVar, variables);
                     seconds = Math.min(result.asInt(), MAX_WAIT_SECONDS);
                 } else {
                     seconds = Math.min(secondsNode.asInt(), MAX_WAIT_SECONDS);
@@ -1421,10 +1858,10 @@ public class AslExecutor {
         if (jsonata) {
             JsonNode statesVar = buildStatesVar(input, null, context);
             if (error != null && JsonataEvaluator.isExpression(error)) {
-                error = jsonataEvaluator.evaluate(error, statesVar, variables).asText();
+                error = jsonataEvaluator.evaluateField(error, "Error", statesVar, variables).asText();
             }
             if (cause != null && JsonataEvaluator.isExpression(cause)) {
-                cause = jsonataEvaluator.evaluate(cause, statesVar, variables).asText();
+                cause = jsonataEvaluator.evaluateField(cause, "Cause", statesVar, variables).asText();
             }
         }
         throw new FailStateException(error, cause);
@@ -1443,13 +1880,16 @@ public class AslExecutor {
             // Each branch gets an isolated copy of the current variables: assignments inside a
             // branch are scoped to that branch and do not leak back to the parent after the state.
             ObjectNode branchVariables = variables.deepCopy();
+            // Each branch also gets its own copy of the context object so State.RetryCount and
+            // Task.Token writes cannot race across concurrent branches.
+            var branchContext = ((ObjectNode) context).deepCopy();
 
             // Run each branch on its own worker thread under the execution's account: the request
             // scope is thread-bound, so without this a branch's Task integrations would resolve to
             // the default account rather than the execution's.
             futures.add(executor.submit(() -> callUnderExecutionAccount(sm,
-                    () -> executeBranch(startAt, branchStates, capturedInput, sm, topLevelQueryLanguage, context,
-                            branchVariables))));
+                    () -> executeBranch(startAt, branchStates, capturedInput, sm, topLevelQueryLanguage,
+                            branchContext, branchVariables))));
         }
 
         int timeoutSeconds = stateDef.path("TimeoutSeconds").asInt(0);
@@ -1475,6 +1915,21 @@ public class AslExecutor {
         } catch (InterruptedException e) {
             futures.forEach(future -> future.cancel(true));
             Thread.currentThread().interrupt();
+            throw e;
+        } catch (ExecutionException e) {
+            futures.forEach(future -> future.cancel(true));
+            // Unwrap so a branch's FailStateException reaches the Parallel state's own Retry and
+            // Catch handling instead of surfacing as States.Runtime, and so an Error reaches the
+            // execution-level handler as itself rather than as an ExecutionException wrapper. The
+            // reported cause is the same either way, since ExecutionException.getMessage() is the
+            // cause's toString(), but only the unwrapped Error is rethrown and logged with its
+            // stack trace.
+            if (e.getCause() instanceof Exception exception) {
+                throw exception;
+            }
+            if (e.getCause() instanceof Error error) {
+                throw error;
+            }
             throw e;
         } catch (Exception | Error e) {
             futures.forEach(future -> future.cancel(true));
@@ -1589,6 +2044,7 @@ public class AslExecutor {
             }
             mapResult = applyResultWriter(name, stateDef, mapInput, results, childInputs, childTimings,
                     sm, context, jsonata, variables);
+            recordMapRun(mapResult, context, childTimings, requestedConcurrency);
         }
 
         if (jsonata) {
@@ -1616,7 +2072,7 @@ public class AslExecutor {
             if (jsonata && value.isTextual() && JsonataEvaluator.isExpression(value.asText())) {
                 jsonataExpression = true;
                 JsonNode statesVar = buildStatesVar(mapInput, null, context);
-                value = jsonataEvaluator.evaluate(value.asText(), statesVar, variables);
+                value = jsonataEvaluator.evaluateField(value.asText(), "MaxConcurrency", statesVar, variables);
             }
         } else {
             return 0;
@@ -1639,6 +2095,42 @@ public class AslExecutor {
                 : INLINE_MAP_MAX_CONCURRENCY;
         int requestedLimit = requestedConcurrency == 0 ? serviceLimit : requestedConcurrency;
         return Math.min(itemCount, Math.min(requestedLimit, serviceLimit));
+    }
+
+    /**
+     * Retains the Map run that {@link #applyResultWriter} just exported, so {@code DescribeMapRun}
+     * can report its counters afterwards. Only an exported run is retained: the Map result is the
+     * one place an ASL author reads the Map run ARN, so a run without a {@code ResultWriter}
+     * {@code Resource} has no ARN anybody could describe.
+     *
+     * <p>The run starts with its first item, taken from the child timings the export record already
+     * collected, and stops here: the {@code ResultWriter} export has just returned, and AWS closes
+     * a Map run's window on the export rather than on the last item. A run over no items starts and
+     * stops at that same instant.
+     */
+    private void recordMapRun(JsonNode mapResult, JsonNode context, List<long[]> childTimings,
+                              int requestedConcurrency) {
+        String mapRunArn = mapResult.path("MapRunArn").asText(null);
+        if (mapRunArn == null) {
+            return;
+        }
+        long stop = System.currentTimeMillis();
+        long start = stop;
+        for (long[] timing : childTimings) {
+            start = Math.min(start, timing[0]);
+        }
+
+        MapRun mapRun = new MapRun();
+        mapRun.setMapRunArn(mapRunArn);
+        mapRun.setExecutionArn(context.path("Execution").path("Id").asText(null));
+        mapRun.setStartDate(start / 1000.0);
+        mapRun.setStopDate(stop / 1000.0);
+        mapRun.setItemCount(childTimings.size());
+        // ASL spells an unbounded Map as MaxConcurrency 0, or by omitting it; DescribeMapRun
+        // reports that same run as Integer.MAX_VALUE.
+        mapRun.setMaxConcurrency(
+                requestedConcurrency == 0 ? Integer.MAX_VALUE : requestedConcurrency);
+        sfnService.get().recordMapRun(mapRun);
     }
 
     /**
@@ -1703,19 +2195,8 @@ public class AslExecutor {
             // InputPath, which is supplied by executeMapState.
             JsonNode loc;
             if (jsonata && writer.has("Arguments")) {
-                JsonNode arguments = writer.get("Arguments");
-                loc = jsonataEvaluator.resolveTemplate(
-                        arguments, buildStatesVar(input, null, context), variables);
-                if (arguments.isObject()) {
-                    if (arguments.has("Bucket") && !loc.has("Bucket")) {
-                        throw new FailStateException("States.QueryEvaluationError",
-                                "ResultWriter Bucket must resolve to a string");
-                    }
-                    if (arguments.has("Prefix") && !loc.has("Prefix")) {
-                        throw new FailStateException("States.QueryEvaluationError",
-                                "ResultWriter Prefix must resolve to a string");
-                    }
-                }
+                loc = jsonataEvaluator.resolveTemplate(writer.get("Arguments"), "ResultWriter/Arguments",
+                        buildStatesVar(input, null, context), variables);
             } else if (writer.has("Parameters")) {
                 loc = resolveParameters(writer.get("Parameters"), input, context);
             } else {
@@ -1872,7 +2353,8 @@ public class AslExecutor {
             JsonNode itemsNode = stateDef.get("Items");
             if (itemsNode.isTextual() && JsonataEvaluator.isExpression(itemsNode.asText())) {
                 JsonNode statesVar = buildStatesVar(input, null, context);
-                return new ResolvedMapItems(jsonataEvaluator.evaluate(itemsNode.asText(), statesVar, variables),
+                return new ResolvedMapItems(
+                        jsonataEvaluator.evaluateField(itemsNode.asText(), "Items", statesVar, variables),
                         MapItemsSource.DEFAULT);
             }
             return new ResolvedMapItems(itemsNode, MapItemsSource.DEFAULT);
@@ -1908,7 +2390,8 @@ public class AslExecutor {
         JsonNode resolvedParameters;
         if (jsonata && itemReader.has("Arguments")) {
             JsonNode statesVar = buildStatesVar(input, null, context);
-            resolvedParameters = jsonataEvaluator.resolveTemplate(itemReader.get("Arguments"), statesVar, variables);
+            resolvedParameters = jsonataEvaluator.resolveTemplate(
+                    itemReader.get("Arguments"), "ItemReader/Arguments", statesVar, variables);
         } else {
             JsonNode parameters = itemReader.path("Parameters");
             resolvedParameters = resolveParameters(parameters, input, context);
@@ -1997,9 +2480,10 @@ public class AslExecutor {
             }
             String type = stateDef.path("Type").asText();
             boolean stateJsonata = isJsonata(stateDef, topLevelQueryLanguage);
+            updateStateContext(context, currentState);
             StateResult result;
             try {
-                result = executeState(currentState, type, stateDef, currentInput, ignored, eventId, sm,
+                result = executeStateWithRetry(currentState, type, stateDef, currentInput, ignored, eventId, sm,
                         stateJsonata, topLevelQueryLanguage, context, variables);
             } catch (FailStateException e) {
                 StateResult caught = handleCatch(stateDef, currentInput, e, stateJsonata, context, variables);
@@ -2103,28 +2587,35 @@ public class AslExecutor {
     private JsonNode applyJsonataOutput(JsonNode holder, JsonNode input, JsonNode result, JsonNode context,
                                         ObjectNode variables) {
         JsonNode statesVar = buildStatesVar(input, result, context);
-        return applyJsonataAssignAndOutput(holder, statesVar, result != null ? result : input, variables);
+        return applyJsonataAssignAndOutput(holder, "", statesVar, result != null ? result : input, variables);
     }
 
     /**
      * Apply the Assign and Output fields of anything that can carry them: a state, a Choice rule, or
-     * a Catch block. {@code fallbackOutput} is the value that becomes the output when Output is absent.
+     * a Catch clause. {@code fallbackOutput} is the value that becomes the output when Output is absent.
+     *
+     * <p>{@code holderPrefix} is what AWS puts before the holder's own field names in the cause of a
+     * States.QueryEvaluationError: empty for a state, {@code "Choices[1]/"} for the second Choice
+     * rule, {@code "Catch[1]/"} for the second Catch clause. AWS names a rule's own Output
+     * {@code Choices[1]/Output/v}, not {@code Output/v}.
      */
-    private JsonNode applyJsonataAssignAndOutput(JsonNode holder, JsonNode statesVar, JsonNode fallbackOutput,
-                                                 ObjectNode variables) {
-        JsonNode assigned = evaluateJsonataAssign(holder, statesVar, variables);
+    private JsonNode applyJsonataAssignAndOutput(JsonNode holder, String holderPrefix, JsonNode statesVar,
+                                                 JsonNode fallbackOutput, ObjectNode variables) {
+        JsonNode assigned = evaluateJsonataAssign(holder, holderPrefix, statesVar, variables);
         JsonNode output = holder.has("Output")
-                ? jsonataEvaluator.resolveTemplate(holder.get("Output"), statesVar, variables)
+                ? jsonataEvaluator.resolveTemplate(holder.get("Output"), holderPrefix + "Output", statesVar, variables)
                 : fallbackOutput;
         commitJsonataAssign(assigned, variables);
         return output;
     }
 
-    private JsonNode evaluateJsonataAssign(JsonNode holder, JsonNode statesVar, ObjectNode variables) {
+    private JsonNode evaluateJsonataAssign(JsonNode holder, String holderPrefix, JsonNode statesVar,
+                                           ObjectNode variables) {
         if (!holder.has("Assign")) {
             return null;
         }
-        JsonNode assigned = jsonataEvaluator.resolveTemplate(holder.get("Assign"), statesVar, variables);
+        JsonNode assigned = jsonataEvaluator.resolveTemplate(
+                holder.get("Assign"), holderPrefix + "Assign", statesVar, variables);
         if (assigned == null || !assigned.isObject()) {
             throw new FailStateException("States.Runtime", "Assign must evaluate to an object");
         }
@@ -2942,14 +3433,23 @@ public class AslExecutor {
     }
 
     private void failExecution(Execution exec, List<HistoryEvent> history, AtomicLong eventId, FailStateException e) {
-        String failError = e.error != null ? e.error : "States.Runtime";
-        String failCause = e.cause != null ? e.cause : "";
-        exec.setError(failError);
-        exec.setCause(failCause);
+        failExecution(exec, history, eventId, e.error != null ? e.error : "States.Runtime",
+                e.cause != null ? e.cause : "");
+    }
+
+    /**
+     * The single terminal-failure write: every way an execution can fail leaves the same
+     * {@code error}, {@code cause} and {@code ExecutionFailed} event behind, so a client cannot
+     * tell a Fail state from a state that threw from a runtime Error by what it reads back.
+     */
+    private void failExecution(Execution exec, List<HistoryEvent> history, AtomicLong eventId,
+                               String error, String cause) {
+        exec.setError(error);
+        exec.setCause(cause);
         exec.setStopDate(System.currentTimeMillis() / 1000.0);
         exec.setStatus("FAILED");
         addEvent(history, eventId, "ExecutionFailed", null,
-                Map.of("error", failError, "cause", failCause));
+                Map.of("error", error, "cause", cause));
     }
 
     private StateResult handleCatch(JsonNode stateDef, JsonNode input, FailStateException failure,
@@ -2960,7 +3460,8 @@ public class AslExecutor {
         }
         String error = failure.error != null ? failure.error : "States.Runtime";
         String cause = failure.cause != null ? failure.cause : "";
-        for (JsonNode catcher : catchers) {
+        for (int i = 0; i < catchers.size(); i++) {
+            JsonNode catcher = catchers.get(i);
             if (!catchMatches(catcher, error)) {
                 continue;
             }
@@ -2976,7 +3477,8 @@ public class AslExecutor {
                 // scope the catching state lives in — so for a Parallel or Map it lands in the outer
                 // scope, not the branch scope that failed.
                 JsonNode statesVar = buildCatchStatesVar(input, errorOutput, context);
-                JsonNode output = applyJsonataAssignAndOutput(catcher, statesVar, errorOutput, variables);
+                JsonNode output = applyJsonataAssignAndOutput(
+                        catcher, "Catch[" + i + "]/", statesVar, errorOutput, variables);
                 return new StateResult(output, next);
             }
             return new StateResult(mergeResult(catcher, input, errorOutput), next);
@@ -2985,22 +3487,25 @@ public class AslExecutor {
     }
 
     private boolean catchMatches(JsonNode catcher, String error) {
-        JsonNode errors = catcher.path("ErrorEquals");
+        var errors = catcher.path("ErrorEquals");
         if (!errors.isArray()) {
             return false;
         }
+        // States.Runtime is never retried or caught, even when named explicitly in
+        // ErrorEquals. Verified against real AWS: the execution fails immediately.
+        if ("States.Runtime".equals(error)) {
+            return false;
+        }
         for (JsonNode candidate : errors) {
-            String expected = candidate.asText();
+            var expected = candidate.asText();
             if (expected.equals(error)) {
                 return true;
             }
             if ("States.TaskFailed".equals(expected)
-                    && !"States.Timeout".equals(error)
-                    && !"States.Runtime".equals(error)) {
+                    && !"States.Timeout".equals(error)) {
                 return true;
             }
             if ("States.ALL".equals(expected)
-                    && !"States.Runtime".equals(error)
                     && !"States.DataLimitExceeded".equals(error)) {
                 return true;
             }

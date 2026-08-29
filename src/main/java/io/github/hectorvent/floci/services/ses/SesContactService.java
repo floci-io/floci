@@ -77,6 +77,7 @@ public class SesContactService {
     public ContactList createContactList(String name, String description, List<Topic> topics,
                                          List<Tag> tags, String region) {
         validateContactListInput(name, description, topics);
+        SesTags.validate(tags);
         ContactList list = new ContactList(name);
         list.setDescription(description);
         list.setTopics(topics);
@@ -102,6 +103,48 @@ public class SesContactService {
     public ContactList getContactList(String name, String region) {
         return contactListStore.get(contactListKey(region, name))
                 .orElseThrow(() -> contactListNotFound(name));
+    }
+
+    public List<Tag> listTags(String name, String region) {
+        ContactList list = contactListStore.get(contactListKey(region, name))
+                .orElseThrow(() -> tagTargetNotFound(name));
+        return new ArrayList<>(list.getTags());
+    }
+
+    /**
+     * Merges the incoming tags into the stored list. The lookup and write share the mutation lock
+     * used by deletion, so tagging can't resurrect a concurrently deleted list or overwrite a
+     * concurrent mutation with a stale object.
+     */
+    public void tag(String name, String region, List<Tag> newTags) {
+        String key = contactListKey(region, name);
+        synchronized (contactMutationLock) {
+            ContactList list = contactListStore.get(key).orElseThrow(() -> tagTargetNotFound(name));
+            list.setTags(SesTags.merge(list.getTags(), newTags));
+            contactListStore.put(key, list);
+        }
+        LOG.infov("Tagged SES contact list: {0} in region {1} (+{2} tags)", name, region, newTags.size());
+    }
+
+    public void untag(String name, String region, List<String> tagKeys) {
+        String key = contactListKey(region, name);
+        synchronized (contactMutationLock) {
+            ContactList list = contactListStore.get(key).orElseThrow(() -> tagTargetNotFound(name));
+            Set<String> toRemove = new HashSet<>(tagKeys);
+            // Copy-on-write: the stored list may be immutable, and unlocked readers iterate it.
+            List<Tag> remaining = new ArrayList<>(list.getTags());
+            remaining.removeIf(t -> toRemove.contains(t.key()));
+            list.setTags(remaining);
+            contactListStore.put(key, list);
+        }
+        LOG.infov("Untagged SES contact list: {0} in region {1} (-{2} keys)", name, region, tagKeys.size());
+    }
+
+    private static AwsException tagTargetNotFound(String name) {
+        // The tag endpoints use AWS's "No ContactList present with name" wording
+        // (probe-confirmed), unlike the CRUD "List with name: X doesn't exist."
+        return new AwsException("NotFoundException",
+                "No ContactList present with name: " + name, 404);
     }
 
     public List<ContactList> listContactLists(String region) {

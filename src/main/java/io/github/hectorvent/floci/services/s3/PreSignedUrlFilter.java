@@ -19,6 +19,7 @@ import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Optional;
 import java.util.stream.Collectors;
 
 @Provider
@@ -218,7 +219,18 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
             return LEGACY_SECRET_KEY;
         }
         if (iamService != null) {
-            return iamService.findSecretKey(accessKeyId).orElse(null);
+            Optional<String> registered = iamService.findSecretKey(accessKeyId);
+            if (registered.isPresent()) {
+                return registered.get();
+            }
+            // Deliberately no fallback for a bare 12-digit account ID here: AccountResolver
+            // reads a 12-digit access key ID as the request's account directly, so trusting an
+            // unregistered numeric key paired with the well-known "test" secret would let any
+            // client forge a signed request for an arbitrary account under S3 auth enforcement.
+            // A launched container's owning-account placeholder credentials (see
+            // LaunchedContainerAwsEnv) are therefore not honored by this enforced path either;
+            // they only work where no signature is required (auth enforcement disabled).
+            return null;
         }
         return null;
     }

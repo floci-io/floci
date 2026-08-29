@@ -59,7 +59,7 @@ class EventBusProvisionOwnershipTest {
                 null, null, null, null, null, null, null,
                 null, null, null, null, null, null, null,
                 null, null,
-                new CloudFormationResourceRegistry(List.of()));
+                new CloudFormationResourceRegistry(List.of()), null);
     }
 
     /**

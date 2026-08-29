@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.dynamodb.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
@@ -63,6 +64,7 @@ public class GlobalSecondaryIndex {
     public long getIndexSizeBytes() { return indexSizeBytes; }
     public void setIndexSizeBytes(long indexSizeBytes) { this.indexSizeBytes = indexSizeBytes; }
 
+    @JsonIgnore
     public String getPartitionKeyName() {
         return keySchema.stream()
                 .filter(k -> "HASH".equals(k.getKeyType()))
@@ -71,6 +73,7 @@ public class GlobalSecondaryIndex {
                 .orElseThrow();
     }
 
+    @JsonIgnore
     public String getSortKeyName() {
         return keySchema.stream()
                 .filter(k -> "RANGE".equals(k.getKeyType()))
@@ -82,7 +85,13 @@ public class GlobalSecondaryIndex {
     /**
      * Returns all sort key attribute names in key-schema order. For a composite sort key this
      * contains more than one element; ordering must consider all of them, not just the first.
+     *
+     * <p>{@code @JsonIgnore}d: it is derived from {@code keySchema} (redundant with
+     * {@link #getSortKeyName()}), and without a backing setter Jackson's getter-as-setter
+     * fallback tries to append into the immutable list this method returns, throwing
+     * {@code UnsupportedOperationException} on deserialization whenever the index has a sort key.
      */
+    @JsonIgnore
     public List<String> getSortKeyNames() {
         return keySchema.stream()
                 .filter(k -> "RANGE".equals(k.getKeyType()))

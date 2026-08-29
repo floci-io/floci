@@ -1186,4 +1186,57 @@ class EcsIntegrationTest {
         .then()
             .statusCode(200);
     }
+
+    /**
+     * A container definition registered with {@code entryPoint} and {@code command} must echo
+     * both back on DescribeTaskDefinition. Without this, re-registering a task definition from
+     * describe output silently drops the overrides and the new revision falls back to the
+     * image's default entrypoint.
+     */
+    @Test
+    @Order(70)
+    void registerAndDescribeTaskDefinitionRoundTripsCommandAndEntryPoint() {
+        String arn = ecs("RegisterTaskDefinition")
+            .body("""
+                {
+                    "family": "entrypoint-roundtrip",
+                    "containerDefinitions": [
+                        {
+                            "name": "app",
+                            "image": "alpine:latest",
+                            "essential": true,
+                            "entryPoint": ["/bin/sh", "-c"],
+                            "command": ["fetch-ca && exec agent --serve"]
+                        },
+                        {
+                            "name": "sidecar",
+                            "image": "alpine:latest",
+                            "essential": false
+                        }
+                    ]
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("taskDefinition.containerDefinitions[0].entryPoint", contains("/bin/sh", "-c"))
+            .body("taskDefinition.containerDefinitions[0].command", contains("fetch-ca && exec agent --serve"))
+        .extract()
+            .path("taskDefinition.taskDefinitionArn");
+
+        ecs("DescribeTaskDefinition")
+            .body("""
+                {"taskDefinition": "%s"}
+                """.formatted(arn))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("taskDefinition.containerDefinitions[0].entryPoint", contains("/bin/sh", "-c"))
+            .body("taskDefinition.containerDefinitions[0].command", contains("fetch-ca && exec agent --serve"))
+            // A container that set neither keeps both keys absent, as real AWS does.
+            .body("taskDefinition.containerDefinitions[1]", not(hasKey("entryPoint")))
+            .body("taskDefinition.containerDefinitions[1]", not(hasKey("command")));
+    }
 }

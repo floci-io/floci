@@ -49,9 +49,12 @@ import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Supplier;
 import java.util.zip.GZIPOutputStream;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 
 @ApplicationScoped
-public class DynamoDbService {
+public class DynamoDbService implements ResourceProvider {
 
     private static final String LOCAL_REPLICA_UPDATE_ERROR =
             "Cannot add, delete, or update the local region through ReplicaUpdates. "
@@ -87,6 +90,8 @@ public class DynamoDbService {
     // rejected with IdempotentParameterMismatchException.
     private final ConcurrentHashMap<String, IdempotencyEntry> txIdempotency = new ConcurrentHashMap<>();
     private static final long TX_IDEMPOTENCY_TTL_NANOS = java.time.Duration.ofMinutes(10).toNanos();
+
+    private static final int MAX_MULTI_ATTRIBUTE_KEY_PART_SIZE = 4;
 
     private record IdempotencyEntry(String requestHash, long insertedAtNanos) {}
     private final RegionResolver regionResolver;
@@ -269,6 +274,15 @@ public class DynamoDbService {
         if (lsis != null) {
             lsis.forEach(l -> l.getKeySchema().forEach(k -> referencedAttrs.add(k.getAttributeName())));
         }
+        Set<String> definedAttrs = attributeDefinitions == null
+                ? Set.of()
+                : attributeDefinitions.stream()
+                        .map(AttributeDefinition::getAttributeName)
+                        .collect(java.util.stream.Collectors.toSet());
+        if (!definedAttrs.containsAll(referencedAttrs)) {
+            throw new AwsException("ValidationException",
+                    "Invalid KeySchema: Some index key attribute have no definition", 400);
+        }
         if (attributeDefinitions != null) {
             for (AttributeDefinition ad : attributeDefinitions) {
                 if (!referencedAttrs.contains(ad.getAttributeName())) {
@@ -314,6 +328,7 @@ public class DynamoDbService {
 
         if (gsis != null && !gsis.isEmpty()) {
             for (GlobalSecondaryIndex gsi : gsis) {
+                validateGsiKeySchemaArity(gsi);
                 gsi.setIndexArn(table.getTableArn() + "/index/" + gsi.getIndexName());
             }
             table.setGlobalSecondaryIndexes(new ArrayList<>(gsis));
@@ -342,6 +357,23 @@ public class DynamoDbService {
         itemsByTable.put(scopedItemsKey(storageKey), new ConcurrentSkipListMap<>());
         LOG.infov("Created table: {0} in region {1}", tableName, region);
         return table;
+    }
+
+    private void validateGsiKeySchemaArity(GlobalSecondaryIndex gsi) {
+        long hashCount = gsi.getKeySchema().stream().filter(k -> "HASH".equals(k.getKeyType())).count();
+        long rangeCount = gsi.getKeySchema().stream().filter(k -> "RANGE".equals(k.getKeyType())).count();
+        if (hashCount > MAX_MULTI_ATTRIBUTE_KEY_PART_SIZE) {
+            throw new AwsException("ValidationException",
+                    "One or more parameter values were invalid: Global secondary index "
+                    + gsi.getIndexName() + " must not have more than "
+                    + MAX_MULTI_ATTRIBUTE_KEY_PART_SIZE + " partition key (HASH) attributes", 400);
+        }
+        if (rangeCount > MAX_MULTI_ATTRIBUTE_KEY_PART_SIZE) {
+            throw new AwsException("ValidationException",
+                    "One or more parameter values were invalid: Global secondary index "
+                    + gsi.getIndexName() + " must not have more than "
+                    + MAX_MULTI_ATTRIBUTE_KEY_PART_SIZE + " sort key (RANGE) attributes", 400);
+        }
     }
 
     public TableDefinition describeTable(String tableName, String region) {
@@ -480,6 +512,7 @@ public class DynamoDbService {
         final JsonNode normalizedItem = DynamoDbNumberUtils.normalizeNumbersInItem(item);
         DynamoDbItemSize.validateSize(normalizedItem);
         String itemKey = buildItemKey(table, normalizedItem);
+        validateIndexKeyTypes(table, normalizedItem, false);
 
         withItemLock(storageKey, itemKey, () -> {
             var tableItems = itemsByTable.computeIfAbsent(scopedItemsKey(storageKey), k -> new ConcurrentSkipListMap<>());
@@ -701,6 +734,9 @@ public class DynamoDbService {
                 }
             }
 
+            // AWS validates index key values against the item the update produces.
+            validateIndexKeyTypes(table, item, true);
+
             items.put(itemKey, item);
             persistItems(storageKey);
             LOG.tracev("Updated item in {0}: key={1} updateExpression={2} item={3}",
@@ -735,7 +771,8 @@ public class DynamoDbService {
 
         DynamoDbAccessPath accessPath = DynamoDbAccessPath.resolve(table, indexName);
         String partitionKeyValuePlaceholder = DynamoDbAccessPathValidator.validateQuery(
-                accessPath, keyConditions, keyConditionExpression, filterExpression, null, exprAttrNames);
+                table, accessPath, keyConditions, keyConditionExpression, filterExpression,
+                null, exprAttrNames, expressionAttrValues);
         String pkName = accessPath.partitionKeyName();
         List<String> pkNames = accessPath.partitionKeyNames();
         String skName = accessPath.sortKeyName();
@@ -1327,6 +1364,7 @@ public class DynamoDbService {
                             "Attribute: " + k.getAttributeName() + " is not defined in AttributeDefinitions", 400);
                 }
             }
+            validateGsiKeySchemaArity(newGsi);
         }
 
         for (String gsiName : gsiDeletes) {
@@ -1732,7 +1770,7 @@ public class DynamoDbService {
                     throw new AwsException("ValidationException",
                             "The parameter cannot be converted to a numeric value", 400);
                 }
-            } else if (valuePart.startsWith("if_not_exists(")) {
+            } else if (startsWithFunctionCall(valuePart, "if_not_exists")) {
                 // if_not_exists(attrRef, fallbackExpr) evaluates to:
                 //   attrRef's current value  — when attrRef exists in the item
                 //   fallbackExpr             — otherwise
@@ -1755,7 +1793,7 @@ public class DynamoDbService {
                         setValueAtPath(item, attrPath, resolved, exprAttrNames);
                     }
                 }
-            } else if (valuePart.toLowerCase().startsWith("list_append(")) {
+            } else if (startsWithFunctionCall(valuePart.toLowerCase(), "list_append")) {
                 int open = valuePart.indexOf('(');
                 int close = valuePart.lastIndexOf(')');
                 if (open >= 0 && close > open) {
@@ -1833,7 +1871,7 @@ public class DynamoDbService {
 
     private JsonNode evaluateSetExpr(ObjectNode item, String expr,
                                      JsonNode exprAttrNames, JsonNode exprAttrValues) {
-        if (expr.toLowerCase().startsWith("if_not_exists(")) {
+        if (startsWithFunctionCall(expr.toLowerCase(), "if_not_exists")) {
             String[] args = extractFunctionArgs(expr);
             if (args.length == 2) {
                 String checkAttr = resolveAttributeName(args[0].trim(), exprAttrNames);
@@ -2433,6 +2471,18 @@ public class DynamoDbService {
         return -1;
     }
 
+    /**
+     * Whether {@code value} opens with a call to {@code functionName}, tolerating optional
+     * whitespace between the function name and the opening parenthesis. DynamoDB's
+     * UpdateExpression grammar is whitespace-insensitive there, but SDKs commonly emit the
+     * spaced form (e.g. PynamoDB always generates {@code "list_append (x, y)"}), which a plain
+     * {@code startsWith(functionName + "(")} rejects.
+     */
+    private static boolean startsWithFunctionCall(String value, String functionName) {
+        return value.startsWith(functionName)
+                && value.substring(functionName.length()).stripLeading().startsWith("(");
+    }
+
     private String[] extractFunctionArgs(String funcCall) {
         int open = funcCall.indexOf('(');
         int close = funcCall.lastIndexOf(')');
@@ -2502,7 +2552,7 @@ public class DynamoDbService {
             throw new AwsException("ValidationException",
                     "One of the required keys was not given a value", 400);
         }
-        validateKeyAttributeValue(pkAttr, pkName);
+        validateKeyAttributeValue(table, pkAttr, pkName, isKeyArg);
 
         String pk = extractScalarValue(pkAttr);
         String skName = table.getSortKeyName();
@@ -2516,17 +2566,113 @@ public class DynamoDbService {
                 throw new AwsException("ValidationException",
                         "One of the required keys was not given a value", 400);
             }
-            validateKeyAttributeValue(skAttr, skName);
+            validateKeyAttributeValue(table, skAttr, skName, isKeyArg);
             return pk + "#" + extractScalarValue(skAttr);
         }
         return pk;
     }
 
-    private void validateKeyAttributeValue(JsonNode attr, String keyName) {
-        if (attr != null && attr.has("S") && attr.get("S").asText().isEmpty()) {
+    // A wire-format AttributeValue must be a JSON object with exactly one type member.
+    // AWS enforces this for every attribute value; floci additionally relies on it
+    // wherever a value becomes part of a storage or index key.
+    private void validateAttributeValueShape(JsonNode attr) {
+        if (!attr.isObject()) {
+            // AWS's protocol layer rejects non-object values before validation runs.
+            throw new AwsException("SerializationException", "Unexpected value type in payload", 400);
+        }
+        if (attr.isEmpty()) {
+            throw new AwsException("ValidationException",
+                    "Supplied AttributeValue is empty, must contain exactly one of the supported datatypes", 400);
+        }
+        if (attr.size() > 1) {
+            throw new AwsException("ValidationException",
+                    "Supplied AttributeValue has more than one datatypes set, "
+                    + "must contain exactly one of the supported datatypes", 400);
+        }
+    }
+
+    private void validateKeyAttributeValue(TableDefinition table, JsonNode attr, String keyName, boolean isKeyArg) {
+        if (attr == null) {
+            return;
+        }
+        validateAttributeValueShape(attr);
+        String expectedType = keyAttributeType(table, keyName);
+        if (expectedType != null && !attr.has(expectedType)) {
+            // AWS words the type mismatch differently for a Key argument
+            // (Get/Delete/Update) than for a PutItem item body.
+            if (isKeyArg) {
+                throw new AwsException("ValidationException",
+                        "The provided key element does not match the schema", 400);
+            }
+            throw new AwsException("ValidationException",
+                    "One or more parameter values were invalid: Type mismatch for key " + keyName
+                    + " expected: " + expectedType + " actual: " + attr.fieldNames().next(), 400);
+        }
+        if (attr.has("S") && attr.get("S").asText().isEmpty()) {
             throw new AwsException("ValidationException",
                     "One or more parameter values were invalid: "
                     + "The AttributeValue for a key attribute cannot contain an empty string value. Key: " + keyName, 400);
+        }
+    }
+
+    private String keyAttributeType(TableDefinition table, String keyName) {
+        if (table.getAttributeDefinitions() == null) {
+            return null;
+        }
+        return table.getAttributeDefinitions().stream()
+                .filter(def -> keyName.equals(def.getAttributeName()))
+                .map(AttributeDefinition::getAttributeType)
+                .findFirst().orElse(null);
+    }
+
+    // AWS validates GSI/LSI key attribute values on every write that produces the item,
+    // but only when the attribute is present — sparse indexes allow it to be absent.
+    private void validateIndexKeyTypes(TableDefinition table, JsonNode item, boolean isUpdate) {
+        if (table.getGlobalSecondaryIndexes() != null) {
+            for (GlobalSecondaryIndex gsi : table.getGlobalSecondaryIndexes()) {
+                validateIndexKeySchema(table, item, gsi.getIndexName(), gsi.getKeySchema(), isUpdate);
+            }
+        }
+        if (table.getLocalSecondaryIndexes() != null) {
+            for (LocalSecondaryIndex lsi : table.getLocalSecondaryIndexes()) {
+                validateIndexKeySchema(table, item, lsi.getIndexName(), lsi.getKeySchema(), isUpdate);
+            }
+        }
+    }
+
+    private void validateIndexKeySchema(TableDefinition table, JsonNode item,
+                                        String indexName, List<KeySchemaElement> keySchema,
+                                        boolean isUpdate) {
+        if (keySchema == null) {
+            return;
+        }
+        for (KeySchemaElement element : keySchema) {
+            String attrName = element.getAttributeName();
+            JsonNode attr = item.get(attrName);
+            if (attr == null) {
+                continue;
+            }
+            validateAttributeValueShape(attr);
+            String expectedType = keyAttributeType(table, attrName);
+            if (expectedType != null && !attr.has(expectedType)) {
+                throw new AwsException("ValidationException",
+                        "One or more parameter values were invalid: Type mismatch for Index Key " + attrName
+                        + " Expected: " + expectedType + " Actual: " + attr.fieldNames().next()
+                        + " IndexName: " + indexName, 400);
+            }
+            if (attr.has("S") && attr.get("S").asText().isEmpty()) {
+                // AWS uses different wording for UpdateItem than for writes of a whole item.
+                if (isUpdate) {
+                    throw new AwsException("ValidationException",
+                            "One or more parameter values are not valid. The update expression attempted to "
+                            + "update a secondary index key to a value that is not supported. "
+                            + "The AttributeValue for a key attribute cannot contain an empty string value.", 400);
+                }
+                throw new AwsException("ValidationException",
+                        "One or more parameter values are not valid. A value specified for a secondary "
+                        + "index key is not supported. The AttributeValue for a key attribute cannot "
+                        + "contain an empty string value. IndexName: " + indexName + ", IndexKey: " + attrName, 400);
+            }
         }
     }
 
@@ -2982,5 +3128,27 @@ public class DynamoDbService {
                 .toList();
 
         return new ListExportsResult(summaries, newNextToken);
+    }
+
+    @Override
+    public List<ExplorerResource> getResources() {
+        List<ExplorerResource> resources = new ArrayList<>();
+        for (TableDefinition table : tableStore.scan(k -> true)) {
+            if (table.getTableArn() == null) {
+                continue;
+            }
+            AwsArnUtils.Arn parsed = AwsArnUtils.parse(table.getTableArn());
+            resources.add(new ExplorerResource(
+                    table.getTableArn(), "dynamodb:table", "dynamodb",
+                    parsed.region(), parsed.accountId(),
+                    table.getCreationDateTime() != null ? table.getCreationDateTime() : Instant.now(),
+                    table.getTags() != null ? table.getTags() : Map.of()));
+        }
+        return resources;
+    }
+
+    @Override
+    public Set<SupportedResourceType> getSupportedResourceTypes() {
+        return Set.of(new SupportedResourceType("dynamodb:table", "dynamodb", true));
     }
 }

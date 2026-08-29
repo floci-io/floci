@@ -137,3 +137,41 @@ teardown() {
     run aws_cmd elasticache delete-cache-subnet-group --cache-subnet-group-name "$SNG_EU"
     assert_success
 }
+
+@test "ElastiCache: replication group keeps its encryption, snapshot settings and tags" {
+    RG="bats-rg-$(unique_name)"
+    run aws_cmd kms create-key --description "$RG"
+    assert_success
+    KEY_ARN=$(json_get "$output" '.KeyMetadata.Arn')
+    KEY_ID=$(json_get "$output" '.KeyMetadata.KeyId')
+    aws_cmd kms create-alias --alias-name "alias/$RG" --target-key-id "$KEY_ID" >/dev/null
+
+    run aws_cmd elasticache create-replication-group --replication-group-id "$RG" --replication-group-description d \
+        --engine redis --cache-node-type cache.t3.micro --num-cache-clusters 1 \
+        --at-rest-encryption-enabled --kms-key-id "alias/$RG" \
+        --snapshot-retention-limit 7 --snapshot-window 06:30-07:30 --tags "Key=Name,Value=$RG"
+    assert_success
+
+    run aws_cmd elasticache describe-replication-groups --replication-group-id "$RG" \
+        --query 'ReplicationGroups[0].[KmsKeyId,AtRestEncryptionEnabled,SnapshotRetentionLimit,SnapshotWindow,ARN]'
+    assert_success
+    assert_output --partial "$KEY_ARN"
+    assert_output --partial 'true'
+    assert_output --partial '7'
+    assert_output --partial '"06:30-07:30"'
+    assert_output --partial "replicationgroup:$RG"
+    ARN=$(aws_cmd elasticache describe-replication-groups --replication-group-id "$RG" --query 'ReplicationGroups[0].ARN' --output text)
+
+    run aws_cmd elasticache list-tags-for-resource --resource-name "$ARN"
+    assert_success
+    assert_output --partial "\"Value\": \"$RG\""
+
+    run aws_cmd elasticache modify-replication-group --replication-group-id "$RG" --snapshot-retention-limit 3 --snapshot-window 01:00-02:00 --apply-immediately
+    assert_success
+    run aws_cmd elasticache describe-replication-groups --replication-group-id "$RG" --query 'ReplicationGroups[0].[SnapshotRetentionLimit,SnapshotWindow]'
+    assert_success
+    assert_output --partial '3'
+    assert_output --partial '"01:00-02:00"'
+
+    aws_cmd elasticache delete-replication-group --replication-group-id "$RG" >/dev/null 2>&1 || true
+}

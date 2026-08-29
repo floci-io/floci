@@ -46,23 +46,35 @@ duplicate override IDs.
 | **APIs** | CreateRestApi, ImportRestApi, PutRestApi, GetRestApi, GetRestApis, UpdateRestApi, DeleteRestApi |
 | **Resources** | CreateResource, GetResource, GetResources, UpdateResource, DeleteResource |
 | **Methods** | PutMethod, GetMethod, UpdateMethod, DeleteMethod |
-| **Method Responses** | PutMethodResponse, GetMethodResponse |
+| **Method Responses** | PutMethodResponse, GetMethodResponse, DeleteMethodResponse |
 | **Integrations** | PutIntegration, GetIntegration, UpdateIntegration, DeleteIntegration |
-| **Integration Responses** | PutIntegrationResponse, GetIntegrationResponse |
-| **Deployments** | CreateDeployment, GetDeployments |
+| **Integration Responses** | PutIntegrationResponse, GetIntegrationResponse, UpdateIntegrationResponse, DeleteIntegrationResponse |
+| **Deployments** | CreateDeployment, GetDeployment, GetDeployments, UpdateDeployment, DeleteDeployment |
 | **Stages** | CreateStage, GetStage, GetStages, UpdateStage, DeleteStage |
-| **Authorizers** | CreateAuthorizer, GetAuthorizer, GetAuthorizers |
-| **API Keys** | CreateApiKey, GetApiKey, GetApiKeys, UpdateApiKey, DeleteApiKey |
-| **Usage Plans** | CreateUsagePlan, GetUsagePlans, DeleteUsagePlan |
+| **Authorizers** | CreateAuthorizer, GetAuthorizer, GetAuthorizers, UpdateAuthorizer, DeleteAuthorizer |
+| **API Keys** | CreateApiKey, ImportApiKeys, GetApiKey, GetApiKeys, UpdateApiKey, DeleteApiKey |
+| **Usage Plans** | CreateUsagePlan, GetUsagePlan, GetUsagePlans, UpdateUsagePlan, DeleteUsagePlan |
 | **Usage Plan Keys** | CreateUsagePlanKey, GetUsagePlanKey, GetUsagePlanKeys, DeleteUsagePlanKey |
-| **Request Validators** | CreateRequestValidator, GetRequestValidator, GetRequestValidators, DeleteRequestValidator |
-| **Models** | CreateModel, GetModel, GetModels, DeleteModel |
-| **Domain Names** | CreateDomainName, GetDomainName, GetDomainNames, DeleteDomainName |
-| **Base Path Mappings** | CreateBasePathMapping, GetBasePathMapping, GetBasePathMappings, DeleteBasePathMapping |
+| **Request Validators** | CreateRequestValidator, GetRequestValidator, GetRequestValidators, UpdateRequestValidator, DeleteRequestValidator |
+| **Models** | CreateModel, GetModel, GetModels, UpdateModel, DeleteModel |
+| **Domain Names** | CreateDomainName, GetDomainName, GetDomainNames, UpdateDomainName, DeleteDomainName |
+| **Base Path Mappings** | CreateBasePathMapping, GetBasePathMapping, GetBasePathMappings, UpdateBasePathMapping, DeleteBasePathMapping |
 | **Account** | GetAccount, UpdateAccount |
 | **Tags** | TagResource, UntagResource, GetTags (ListTagsForResource) |
 
 ### API Key Behaviour Notes
+
+#### `CreateApiKey` and `ImportApiKeys` share one route
+
+Both operations are `POST /apikeys`, and AWS tells them apart by the query string, not by
+`Content-Type`: `ImportApiKeys` carries `?mode=import&format=csv` and a CSV body, `CreateApiKey`
+carries no query parameters and a JSON body. The SDKs send `ImportApiKeys` with no `Content-Type`
+header at all, so Floci accepts any media type on this route and dispatches on `mode`.
+
+The CSV header row is addressed by name, not position. AWS's own column set is
+`Name,Key,Description,Enabled,UsagePlanIds`; a `Key` column is required, and a missing `Enabled`
+column defaults to `true`. Duplicate key values are reported in the `warnings` array, and
+`failonwarnings=true` turns those warnings into a `BadRequestException`.
 
 #### `generateDistinctId`
 
@@ -97,18 +109,15 @@ immediately.
 
 These management-plane operations have no handler in v1. Calls will return `404` or an error:
 
-- Deployment detail and lifecycle: `GetDeployment`, `UpdateDeployment`, `DeleteDeployment`
-- Authorizer lifecycle: `UpdateAuthorizer`, `DeleteAuthorizer`, `TestInvokeAuthorizer`
-- API key detail: `ImportApiKeys`
-- Usage plan detail: `GetUsagePlan`, `UpdateUsagePlan`
-- Model updates and templates: `UpdateModel`, `GetModelTemplate`
+- Authorizer testing: `TestInvokeAuthorizer`
+- Model templates: `GetModelTemplate`
 - Gateway Responses (the entire family: `PutGatewayResponse`, `GetGatewayResponse`, etc.)
 - Documentation parts and versions (the entire family, 10 operations)
 - VPC Links (5 operations)
 - Client Certificates (5 operations)
 - `GetExport` / `ImportDocumentationParts`
 
-The execute plane (actual proxied HTTP traffic via `/restapis/{id}/{stage}/_user_request_/…`) is implemented separately and is not counted as management-plane operations.
+The execute plane (actual proxied HTTP traffic via `/restapis/{id}/{stage}/_user_request_/…`) is implemented separately and is not counted as management-plane operations. It supports `AWS_PROXY` (Lambda proxy), `AWS` (Lambda with VTL request/response templates), and `MOCK` integrations; other integration types return an error.
 
 ### Examples
 
@@ -221,7 +230,7 @@ this default hostname with `404 Not Found`, matching AWS HTTP API behavior.
 
 | Category | Operations |
 |---|---|
-| **APIs** | CreateApi, GetApi, GetApis, UpdateApi, DeleteApi |
+| **APIs** | CreateApi, GetApi, GetApis, UpdateApi, DeleteApi, DeleteCorsConfiguration |
 | **Routes** | CreateRoute, GetRoute, GetRoutes, UpdateRoute, DeleteRoute |
 | **Route Responses** | CreateRouteResponse, GetRouteResponse, GetRouteResponses, UpdateRouteResponse, DeleteRouteResponse |
 | **Integrations** | CreateIntegration, GetIntegration, GetIntegrations, UpdateIntegration, DeleteIntegration |
@@ -232,6 +241,7 @@ this default hostname with `404 Not Found`, matching AWS HTTP API behavior.
 | **Models** | CreateModel, GetModel, GetModels, UpdateModel, DeleteModel |
 | **Domain Names** | CreateDomainName, GetDomainName, GetDomainNames, DeleteDomainName |
 | **API Mappings** | CreateApiMapping, GetApiMapping, GetApiMappings, DeleteApiMapping |
+| **VPC Links** | CreateVpcLink, GetVpcLink, GetVpcLinks, DeleteVpcLink |
 | **Tags** | TagResource, UntagResource, GetTags |
 
 ### WebSocket Data-Plane {#websocket-data-plane}
@@ -294,7 +304,7 @@ DELETE /execute-api/{apiId}/{stageName}/@connections/{connectionId}  — Disconn
 ### Not Implemented
 
 - `ReimportApi`, `ExportApi`, `UpdateDomainName`, `UpdateApiMapping`
-- `CreateVpcLink`, `GetVpcLink`, `GetVpcLinks`, `UpdateVpcLink`, `DeleteVpcLink`
+- `UpdateVpcLink` — the other four VPC Link operations are implemented; see the table above
 
 ### Examples
 

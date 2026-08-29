@@ -1,7 +1,10 @@
 package io.github.hectorvent.floci.services.rds.proxy;
 
+import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.testutil.IamServiceTestHelper;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
@@ -12,22 +15,35 @@ import java.io.IOException;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.security.KeyStore;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLHandshakeException;
+import javax.net.ssl.SSLParameters;
 import javax.net.ssl.SSLSocket;
 import javax.net.ssl.TrustManager;
+import javax.net.ssl.TrustManagerFactory;
 import javax.net.ssl.X509TrustManager;
+import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 class PostgresProtocolHandlerTest {
 
     private static final int SSL_REQUEST_CODE = 80877103;
     private static final int STARTUP_PROTOCOL_VERSION = 196608;
+
+    @TempDir
+    Path tempDir;
 
     @ParameterizedTest
     @CsvSource({
@@ -68,7 +84,7 @@ class PostgresProtocolHandlerTest {
                         PostgresProtocolHandler.handleAuth(
                                 proxyClient, backend,
                                 "dbadmin", "adminpass", "postgres",
-                                false, testSigV4Validator(),
+                                false, testSigV4Validator(), testTlsCertificates(),
                                 (user, pass) -> true);
                     } catch (IOException e) {
                         throw new RuntimeException(e);
@@ -122,7 +138,7 @@ class PostgresProtocolHandlerTest {
                         PostgresProtocolHandler.handleAuth(
                                 proxyClient, backend,
                                 "dbadmin", "adminpass", "postgres",
-                                false, testSigV4Validator(),
+                                false, testSigV4Validator(), testTlsCertificates(),
                                 (user, pass) -> true);
                     } catch (IOException e) {
                         throw new RuntimeException(e);
@@ -176,7 +192,7 @@ class PostgresProtocolHandlerTest {
                         PostgresProtocolHandler.handleAuth(
                                 proxyClient, backend,
                                 "dbadmin", "adminpass", "postgres",
-                                false, testSigV4Validator(),
+                                false, testSigV4Validator(), testTlsCertificates(),
                                 (user, pass) -> true);
                     } catch (IOException e) {
                         throw new RuntimeException(e);
@@ -213,6 +229,106 @@ class PostgresProtocolHandlerTest {
     }
 
     @Test
+    void hostnameVerificationSucceedsForRegisteredAdvertisedHost() throws Exception {
+        try (ServerSocket backendServer = new ServerSocket(0);
+             ServerSocket clientServer = new ServerSocket(0)) {
+
+            RdsProxyTlsCertificates tlsCertificates = testTlsCertificates();
+            String advertisedHost = "172.17.0.5";
+            tlsCertificates.ensureHost(advertisedHost);
+
+            int backendPort = backendServer.getLocalPort();
+            Thread backendThread = Thread.ofVirtual().start(() -> {
+                try {
+                    mockBackendStartup(backendServer, new AtomicReference<>(), false);
+                } catch (IOException e) {
+                    throw new RuntimeException(e);
+                }
+            });
+
+            try (Socket ourClient = new Socket("localhost", clientServer.getLocalPort())) {
+                Socket proxyClient = clientServer.accept();
+                Socket backend = new Socket("localhost", backendPort);
+
+                Thread authThread = Thread.ofVirtual().start(() -> {
+                    try {
+                        PostgresProtocolHandler.handleAuth(
+                                proxyClient, backend,
+                                "dbadmin", "adminpass", "postgres",
+                                false, testSigV4Validator(), tlsCertificates,
+                                (user, pass) -> true);
+                    } catch (IOException e) {
+                        throw new RuntimeException(e);
+                    }
+                });
+
+                DataOutputStream clientOut = new DataOutputStream(ourClient.getOutputStream());
+                DataInputStream clientIn = new DataInputStream(ourClient.getInputStream());
+
+                writeSslRequest(clientOut);
+                assertEquals('S', clientIn.readUnsignedByte());
+
+                Path caCertFile = tempDir.resolve("tls").resolve("rds-ca.crt");
+                SSLSocket sslClient = verifyingClientSocket(ourClient, caCertFile, advertisedHost);
+                sslClient.startHandshake(); // must not throw — advertisedHost is in the cert's SAN
+
+                proxyClient.close();
+                authThread.join(5_000);
+                backendThread.join(5_000);
+            }
+        }
+    }
+
+    @Test
+    void hostnameVerificationFailsForUnregisteredAdvertisedHost() throws Exception {
+        try (ServerSocket backendServer = new ServerSocket(0);
+             ServerSocket clientServer = new ServerSocket(0)) {
+
+            RdsProxyTlsCertificates tlsCertificates = testTlsCertificates();
+            tlsCertificates.ensureHost("172.17.0.5");
+
+            int backendPort = backendServer.getLocalPort();
+            Thread backendThread = Thread.ofVirtual().start(() -> {
+                try {
+                    mockBackendStartup(backendServer, new AtomicReference<>(), false);
+                } catch (IOException e) {
+                    // Backend connection is torn down before completing startup — expected here.
+                }
+            });
+
+            try (Socket ourClient = new Socket("localhost", clientServer.getLocalPort())) {
+                Socket proxyClient = clientServer.accept();
+                Socket backend = new Socket("localhost", backendPort);
+
+                Thread authThread = Thread.ofVirtual().start(() -> {
+                    try {
+                        PostgresProtocolHandler.handleAuth(
+                                proxyClient, backend,
+                                "dbadmin", "adminpass", "postgres",
+                                false, testSigV4Validator(), tlsCertificates,
+                                (user, pass) -> true);
+                    } catch (IOException ignored) {
+                        // Client aborts the handshake below — the handler observing that is expected.
+                    }
+                });
+
+                DataOutputStream clientOut = new DataOutputStream(ourClient.getOutputStream());
+                DataInputStream clientIn = new DataInputStream(ourClient.getInputStream());
+
+                writeSslRequest(clientOut);
+                assertEquals('S', clientIn.readUnsignedByte());
+
+                Path caCertFile = tempDir.resolve("tls").resolve("rds-ca.crt");
+                SSLSocket sslClient = verifyingClientSocket(ourClient, caCertFile, "never-registered.example.com");
+                assertThrows(SSLHandshakeException.class, sslClient::startHandshake);
+
+                proxyClient.close();
+                authThread.join(5_000);
+            }
+        }
+    }
+
+    @Test
     void closesClientWhenBackendClosesDuringBridge() throws Exception {
         try (ServerSocket backendServer = new ServerSocket(0);
              ServerSocket clientServer = new ServerSocket(0)) {
@@ -235,7 +351,7 @@ class PostgresProtocolHandlerTest {
                         PostgresProtocolHandler.handleAuth(
                                 proxyClient, backend,
                                 "dbadmin", "adminpass", "postgres",
-                                false, testSigV4Validator(),
+                                false, testSigV4Validator(), testTlsCertificates(),
                                 (user, pass) -> true);
                     } catch (IOException e) {
                         throw new RuntimeException(e);
@@ -264,6 +380,44 @@ class PostgresProtocolHandlerTest {
 
     private static RdsSigV4Validator testSigV4Validator() {
         return new RdsSigV4Validator(IamServiceTestHelper.iamServiceWithAccessKey("AKIATEST", "secret"));
+    }
+
+    private RdsProxyTlsCertificates testTlsCertificates() {
+        EmulatorConfig.StorageConfig storage = mock(EmulatorConfig.StorageConfig.class);
+        when(storage.persistentPath()).thenReturn(tempDir.toString());
+        EmulatorConfig config = mock(EmulatorConfig.class);
+        when(config.storage()).thenReturn(storage);
+        return new RdsProxyTlsCertificates(config, new CertificateGenerator());
+    }
+
+    /**
+     * Wraps {@code socket} in a client-side {@link SSLSocket} that trusts only {@code caCertFile}
+     * and enforces standard HTTPS-style hostname verification against {@code advertisedHost} —
+     * the same SAN-matching behavior libpq performs for {@code sslmode=verify-full}.
+     */
+    private static SSLSocket verifyingClientSocket(Socket socket, Path caCertFile, String advertisedHost)
+            throws Exception {
+        X509Certificate ca;
+        try (var in = Files.newInputStream(caCertFile)) {
+            ca = (X509Certificate) CertificateFactory.getInstance("X.509").generateCertificate(in);
+        }
+        KeyStore trustStore = KeyStore.getInstance(KeyStore.getDefaultType());
+        trustStore.load(null, null);
+        trustStore.setCertificateEntry("rds-ca", ca);
+
+        TrustManagerFactory tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
+        tmf.init(trustStore);
+
+        SSLContext context = SSLContext.getInstance("TLS");
+        context.init(null, tmf.getTrustManagers(), null);
+
+        SSLSocket sslSocket = (SSLSocket) context.getSocketFactory()
+                .createSocket(socket, advertisedHost, socket.getPort(), true);
+        sslSocket.setUseClientMode(true);
+        SSLParameters params = sslSocket.getSSLParameters();
+        params.setEndpointIdentificationAlgorithm("HTTPS");
+        sslSocket.setSSLParameters(params);
+        return sslSocket;
     }
 
     private static void mockBackendStartup(ServerSocket server, AtomicReference<String> backendDatabase,

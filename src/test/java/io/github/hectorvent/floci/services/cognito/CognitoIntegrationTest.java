@@ -810,7 +810,7 @@ class CognitoIntegrationTest {
                 }
                 """.formatted(poolId))
                 .then()
-                .statusCode(404);
+                .statusCode(400);
     }
 
     // ── UpdateGroup & ListUsersInGroup ────────────────────────────────
@@ -1440,7 +1440,7 @@ class CognitoIntegrationTest {
                 }
                 """.formatted(clientId, poolId))
                 .then()
-                .statusCode(404);
+                .statusCode(400);
     }
 
     @Test

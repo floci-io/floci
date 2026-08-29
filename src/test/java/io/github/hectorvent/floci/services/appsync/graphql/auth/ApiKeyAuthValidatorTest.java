@@ -23,12 +23,12 @@ class ApiKeyAuthValidatorTest {
     @Test
     void validKeyReturnsStoredKey() {
         ApiKey stored = new ApiKey();
-        stored.setApiKey("da2-abc");
+        stored.setId("da2-abc");
         when(appSyncService.validateApiKey("api-1", "da2-abc")).thenReturn(Optional.of(stored));
 
         ApiKey result = new ApiKeyAuthValidator(appSyncService).validate("api-1", "da2-abc");
 
-        assertEquals("da2-abc", result.getApiKey());
+        assertEquals("da2-abc", result.getId());
     }
 
     @Test

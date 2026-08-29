@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.ses;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.route53.Route53Service;
@@ -10,6 +11,7 @@ import io.github.hectorvent.floci.services.route53.model.HostedZone;
 import io.github.hectorvent.floci.services.route53.model.ResourceRecord;
 import io.github.hectorvent.floci.services.route53.model.ResourceRecordSet;
 import io.github.hectorvent.floci.services.ses.model.AccountSuppressionAttributes;
+import io.github.hectorvent.floci.services.ses.model.AccountDetails;
 import io.github.hectorvent.floci.services.ses.model.AccountVdmAttributes;
 import io.github.hectorvent.floci.services.ses.model.ArchivingOptions;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntry;
@@ -33,6 +35,7 @@ import io.github.hectorvent.floci.services.ses.model.TopicPreference;
 import io.github.hectorvent.floci.services.ses.model.TrackingOptions;
 import io.github.hectorvent.floci.services.ses.model.VdmOptions;
 import io.github.hectorvent.floci.services.ses.model.SentEmail;
+import io.github.hectorvent.floci.services.ses.model.Tenant;
 import io.github.hectorvent.floci.services.ses.model.SuppressedDestination;
 import io.github.hectorvent.floci.services.ses.model.SuppressionOptions;
 import io.github.hectorvent.floci.services.ses.model.Tag;
@@ -109,6 +112,8 @@ public class SesService {
     // Custom verification email templates: storage extracted to SesCvetService. The
     // facade keeps the identity-dependent validation and the send path; the service owns the store.
     private final SesCvetService cvetService;
+    // Tenants (multi-tenancy) live in SesTenantService. The facade delegates.
+    private final SesTenantService tenantService;
     private final SmtpRelay smtpRelay;
     private final ObjectMapper objectMapper;
     private final SesEventPublisher eventPublisher;
@@ -117,6 +122,9 @@ public class SesService {
     // placeholder and the List-Unsubscribe header) that resolve to Floci's own unsubscribe endpoint.
     private final String baseUrl;
     private final Route53Service route53Service;
+    // Resolves the caller's account per request so send-event payloads report the sending account, not
+    // the fixed default. Null in the package-private test constructors (falls back to defaultAccountId).
+    private final RegionResolver regionResolver;
     private final Clock clock;
     private final ConcurrentHashMap<String, DkimLookupCacheEntry> dkimLookupCache = new ConcurrentHashMap<>();
 
@@ -126,9 +134,9 @@ public class SesService {
                        SesPolicyService policyService, SesContactService contactService,
                        SesSuppressionService suppressionService, SesDedicatedIpService dedicatedIpService,
                        SesTemplateService templateService, SesSentEmailService sentEmailService,
-                       SmtpRelay smtpRelay, ObjectMapper objectMapper,
+                       SesTenantService tenantService, SmtpRelay smtpRelay, ObjectMapper objectMapper,
                        SesEventPublisher eventPublisher, EmulatorConfig config, Route53Service route53Service,
-                       Clock clock) {
+                       RegionResolver regionResolver, Clock clock) {
         this.identityStore = storageFactory.create("ses", "ses-identities.json",
                 new TypeReference<Map<String, Identity>>() {});
         this.sentEmailService = sentEmailService;
@@ -142,12 +150,14 @@ public class SesService {
         this.policyService = policyService;
         this.receiptRuleService = receiptRuleService;
         this.cvetService = cvetService;
+        this.tenantService = tenantService;
         this.smtpRelay = smtpRelay;
         this.objectMapper = objectMapper;
         this.eventPublisher = eventPublisher;
         this.defaultAccountId = config.defaultAccountId();
         this.baseUrl = config.effectiveBaseUrl();
         this.route53Service = route53Service;
+        this.regionResolver = regionResolver;
         this.clock = clock;
     }
 
@@ -162,12 +172,13 @@ public class SesService {
                SesPolicyService policyService,
                SesReceiptRuleService receiptRuleService,
                SesCvetService cvetService,
+               SesTenantService tenantService,
                SmtpRelay smtpRelay,
                ObjectMapper objectMapper,
                Clock clock) {
         this(identityStore, sentEmailService, accountService, templateService, configSetStore, suppressionService,
                 dedicatedIpService, contactService, policyService,
-                receiptRuleService, cvetService, smtpRelay, objectMapper, null, clock);
+                receiptRuleService, cvetService, tenantService, smtpRelay, objectMapper, null, clock);
     }
 
     SesService(StorageBackend<String, Identity> identityStore,
@@ -181,6 +192,7 @@ public class SesService {
                SesPolicyService policyService,
                SesReceiptRuleService receiptRuleService,
                SesCvetService cvetService,
+               SesTenantService tenantService,
                SmtpRelay smtpRelay,
                ObjectMapper objectMapper,
                Route53Service route53Service,
@@ -196,12 +208,14 @@ public class SesService {
         this.policyService = policyService;
         this.receiptRuleService = receiptRuleService;
         this.cvetService = cvetService;
+        this.tenantService = tenantService;
         this.smtpRelay = smtpRelay;
         this.objectMapper = objectMapper;
         this.eventPublisher = null;
         this.defaultAccountId = "000000000000";
         this.baseUrl = "http://localhost:4566";
         this.route53Service = route53Service;
+        this.regionResolver = null;
         this.clock = clock;
     }
 
@@ -500,7 +514,9 @@ public class SesService {
         List<String> envelope = envelopeDestinations != null
                 ? envelopeDestinations : Collections.emptyList();
         Instant timestamp = Instant.now();
-        String sendingAccountId = defaultAccountId;
+        // Report the caller's account (resolved per request) in the event payload and source ARN,
+        // falling back to the default account outside a request context (e.g. unit tests).
+        String sendingAccountId = regionResolver != null ? regionResolver.getAccountId() : defaultAccountId;
         String sourceArn = (source == null || source.isBlank())
                 ? null
                 : AwsArnUtils.Arn.of("ses", region, sendingAccountId,
@@ -1124,6 +1140,17 @@ public class SesService {
         accountService.setAccountSendingEnabled(region, enabled);
     }
 
+    public Optional<AccountDetails> findAccountDetails(String region) {
+        return accountService.findAccountDetails(region);
+    }
+
+    public AccountDetails putAccountDetails(String region, String mailType, String websiteUrl,
+                                            String contactLanguage, String useCaseDescription,
+                                            List<String> additionalContacts, boolean productionAccessEnabled) {
+        return accountService.putAccountDetails(region, mailType, websiteUrl, contactLanguage,
+                useCaseDescription, additionalContacts, productionAccessEnabled);
+    }
+
     public Optional<AccountVdmAttributes> findAccountVdmAttributes(String region) {
         return accountService.findAccountVdmAttributes(region);
     }
@@ -1360,11 +1387,7 @@ public class SesService {
                     "ConfigurationSetName is required.", 400);
         }
         String key = configSetKey(region, configSet.getName());
-        if (configSet.getTags() != null) {
-            for (Tag tag : configSet.getTags()) {
-                SesTags.validate(tag);
-            }
-        }
+        SesTags.validate(configSet.getTags());
         if (configSet.getSuppressionOptions() != null
                 && configSet.getSuppressionOptions().getSuppressedReasons() != null) {
             for (String reason : configSet.getSuppressionOptions().getSuppressedReasons()) {
@@ -1622,6 +1645,25 @@ public class SesService {
         return "configSet::" + region + "::" + name;
     }
 
+    // ──────────────────────── Tenants (multi-tenancy) ────────────────────────
+    // Tenants live in SesTenantService; the facade forwards.
+
+    public Tenant createTenant(String tenantName, List<Tag> tags, String accountId, String region) {
+        return tenantService.createTenant(tenantName, tags, accountId, region);
+    }
+
+    public Tenant getTenant(String tenantName, String region) {
+        return tenantService.getTenant(tenantName, region);
+    }
+
+    public List<Tenant> listTenants(String region) {
+        return tenantService.listTenants(region);
+    }
+
+    public void deleteTenant(String tenantName, String region) {
+        tenantService.deleteTenant(tenantName, region);
+    }
+
     // ──────────────────────── Receipt rule sets (inbound) ────────────────────────
     //
     // Receipt rule sets live in SesReceiptRuleService; this facade
@@ -1655,8 +1697,9 @@ public class SesService {
 
     // Storage lives in SesDedicatedIpService; the facade forwards.
 
-    public DedicatedIpPool createDedicatedIpPool(String poolName, String scalingMode, String region) {
-        return dedicatedIpService.createDedicatedIpPool(poolName, scalingMode, region);
+    public DedicatedIpPool createDedicatedIpPool(String poolName, String scalingMode, List<Tag> tags,
+                                                 String region) {
+        return dedicatedIpService.createDedicatedIpPool(poolName, scalingMode, tags, region);
     }
 
     public DedicatedIpPool getDedicatedIpPool(String poolName, String region) {
@@ -2024,35 +2067,44 @@ public class SesService {
 
     public List<Tag> listResourceTags(String arn, String region) {
         ResourceRef ref = parseSesArn(arn);
-        return switch (ref.type()) {
-            case "configuration-set" -> listConfigurationSetTags(ref.name(), ref.region());
-            // AWS ListTagsForResource on template / identity ARNs uses the signing region
-            // for lookup (the ARN region is effectively ignored), unlike configuration-set
-            // which routes by the ARN's region.
+        requireCallerAccount(ref);
+        List<Tag> tags = switch (ref.type()) {
+            case "configuration-set" -> listConfigurationSetTags(ref.name(), region);
             case "template" -> listEmailTemplateTags(ref.name(), region);
             case "identity" -> listIdentityTags(ref.name(), region);
+            case "contact-list" -> contactService.listTags(ref.name(), region);
+            case "custom-verification-email-template" -> cvetService.listTags(ref.name(), region);
+            case "dedicated-ip-pool" -> dedicatedIpService.listTags(ref.name(), region);
             default -> throw new AwsException("NotFoundException",
                     "Resource " + arn + " was not found.", 404);
         };
+        // AWS checks existence against the signing region but keys the tag store by the literal
+        // ARN: a mismatched ARN region passes the existence check above yet addresses an ARN
+        // nothing was ever tagged under, so the result is empty (probe-confirmed across all six
+        // resource types).
+        if (!ref.region().equals(region)) {
+            return List.of();
+        }
+        return tags;
     }
 
     public void tagResource(String arn, String region, List<Tag> newTags) {
         ResourceRef ref = parseSesArn(arn);
+        requireCallerAccount(ref);
         if (!ref.region().equals(region)) {
             throw new AwsException("BadRequestException", "Failed to tag resource", 400);
         }
-        if (newTags == null || newTags.isEmpty()) {
-            throw new AwsException("BadRequestException",
-                    "1 validation error detected: Value at 'tags' failed to satisfy constraint: "
-                            + "Member must have length greater than or equal to 1", 400);
-        }
-        for (Tag t : newTags) {
-            SesTags.validate(t);
-        }
+        // An empty Tags list is not an error: AWS still runs the account, region, and existence
+        // checks and then applies the empty merge as a no-op (probe-confirmed).
+        List<Tag> tags = newTags == null ? List.of() : newTags;
+        SesTags.validate(tags);
         switch (ref.type()) {
-            case "configuration-set" -> tagConfigurationSet(ref.name(), ref.region(), newTags);
-            case "template" -> tagEmailTemplate(ref.name(), ref.region(), newTags);
-            case "identity" -> tagIdentity(ref.name(), ref.region(), newTags);
+            case "configuration-set" -> tagConfigurationSet(ref.name(), region, tags);
+            case "template" -> tagEmailTemplate(ref.name(), region, tags);
+            case "identity" -> tagIdentity(ref.name(), region, tags);
+            case "contact-list" -> contactService.tag(ref.name(), region, tags);
+            case "custom-verification-email-template" -> cvetService.tag(ref.name(), region, tags);
+            case "dedicated-ip-pool" -> dedicatedIpService.tag(ref.name(), region, tags);
             default -> throw new AwsException("NotFoundException",
                     "Resource " + arn + " was not found.", 404);
         }
@@ -2060,29 +2112,25 @@ public class SesService {
 
     public void untagResource(String arn, String region, List<String> tagKeys) {
         ResourceRef ref = parseSesArn(arn);
+        requireCallerAccount(ref);
         if (tagKeys == null || tagKeys.isEmpty()) {
-            throw new AwsException("BadRequestException",
-                    "1 validation error detected: Value at 'tagKeys' failed to satisfy constraint: "
-                            + "Member must have length greater than or equal to 1", 400);
+            // AWS rejects a missing/empty TagKeys member with a message-less ValidationException
+            // (probe-confirmed: only the error-type header, empty body), after the account guard
+            // and before the region guard. The null message is deliberate — it surfaces through
+            // Floci's standard error body as "message":null, which restJson1 SDKs parse the same
+            // way as AWS's empty body since they read x-amzn-errortype first.
+            throw new AwsException("ValidationException", null, 400);
+        }
+        if (!ref.region().equals(region)) {
+            throw new AwsException("BadRequestException", "Failed to untag resource", 400);
         }
         switch (ref.type()) {
-            case "configuration-set" -> untagConfigurationSet(ref.name(), ref.region(), tagKeys);
-            case "template" -> {
-                // AWS UntagResource on template / identity ARNs strictly requires the ARN
-                // region to match the signing region (rejects mismatch with
-                // BadRequestException), unlike configuration-set which routes the lookup
-                // to the ARN's region.
-                if (!ref.region().equals(region)) {
-                    throw new AwsException("BadRequestException", "Failed to untag resource", 400);
-                }
-                untagEmailTemplate(ref.name(), region, tagKeys);
-            }
-            case "identity" -> {
-                if (!ref.region().equals(region)) {
-                    throw new AwsException("BadRequestException", "Failed to untag resource", 400);
-                }
-                untagIdentity(ref.name(), region, tagKeys);
-            }
+            case "configuration-set" -> untagConfigurationSet(ref.name(), region, tagKeys);
+            case "template" -> untagEmailTemplate(ref.name(), region, tagKeys);
+            case "identity" -> untagIdentity(ref.name(), region, tagKeys);
+            case "contact-list" -> contactService.untag(ref.name(), region, tagKeys);
+            case "custom-verification-email-template" -> cvetService.untag(ref.name(), region, tagKeys);
+            case "dedicated-ip-pool" -> dedicatedIpService.untag(ref.name(), region, tagKeys);
             default -> throw new AwsException("NotFoundException",
                     "Resource " + arn + " was not found.", 404);
         }
@@ -2100,7 +2148,7 @@ public class SesService {
         ConfigurationSet cs = configSetStore.get(key)
                 .orElseThrow(() -> new AwsException("NotFoundException",
                         "No ConfigurationSet present with name: " + name, 404));
-        cs.setTags(mergeTags(cs.getTags(), newTags));
+        cs.setTags(SesTags.merge(cs.getTags(), newTags));
         configSetStore.put(key, cs);
         LOG.infov("Tagged SES configuration set: {0} (region {1}, +{2} tags)", name, region, newTags.size());
     }
@@ -2111,7 +2159,10 @@ public class SesService {
                 .orElseThrow(() -> new AwsException("NotFoundException",
                         "No ConfigurationSet present with name: " + name, 404));
         Set<String> toRemove = new HashSet<>(tagKeys);
-        cs.getTags().removeIf(t -> toRemove.contains(t.key()));
+        // Copy-on-write: the stored list may be immutable, and unlocked readers iterate it.
+        List<Tag> remaining = new ArrayList<>(cs.getTags());
+        remaining.removeIf(t -> toRemove.contains(t.key()));
+        cs.setTags(remaining);
         configSetStore.put(key, cs);
         LOG.infov("Untagged SES configuration set: {0} (region {1}, -{2} keys)", name, region, tagKeys.size());
     }
@@ -2127,23 +2178,9 @@ public class SesService {
         EmailTemplate template = templateService.find(name, region)
                 .orElseThrow(() -> new AwsException("NotFoundException",
                         "No Template present with name: " + name, 404));
-        template.setTags(mergeTags(template.getTags(), newTags));
+        template.setTags(SesTags.merge(template.getTags(), newTags));
         templateService.save(template, region);
         LOG.infov("Tagged SES template: {0} (region {1}, +{2} tags)", name, region, newTags.size());
-    }
-
-    private static List<Tag> mergeTags(List<Tag> existing,
-                                                         List<Tag> incoming) {
-        Map<String, String> merged = new LinkedHashMap<>();
-        for (Tag t : existing) {
-            merged.put(t.key(), t.value());
-        }
-        for (Tag t : incoming) {
-            merged.put(t.key(), t.value());
-        }
-        List<Tag> out = new ArrayList<>();
-        merged.forEach((k, v) -> out.add(new Tag(k, v)));
-        return out;
     }
 
     private List<Tag> listIdentityTags(String identityValue, String region) {
@@ -2158,7 +2195,7 @@ public class SesService {
         Identity identity = identityStore.get(key)
                 .orElseThrow(() -> new AwsException("NotFoundException",
                         "No EmailIdentity present with name: " + identityValue, 404));
-        identity.setTags(mergeTags(identity.getTags(), newTags));
+        identity.setTags(SesTags.merge(identity.getTags(), newTags));
         identityStore.put(key, identity);
         LOG.infov("Tagged SES identity: {0} (region {1}, +{2} tags)", identityValue, region, newTags.size());
     }
@@ -2169,17 +2206,16 @@ public class SesService {
                 .orElseThrow(() -> new AwsException("NotFoundException",
                         "No EmailIdentity present with name: " + identityValue, 404));
         Set<String> toRemove = new HashSet<>(tagKeys);
-        identity.getTags().removeIf(t -> toRemove.contains(t.key()));
+        // Copy-on-write: the stored list may be immutable, and unlocked readers iterate it.
+        List<Tag> remaining = new ArrayList<>(identity.getTags());
+        remaining.removeIf(t -> toRemove.contains(t.key()));
+        identity.setTags(remaining);
         identityStore.put(key, identity);
         LOG.infov("Untagged SES identity: {0} (region {1}, -{2} keys)", identityValue, region, tagKeys.size());
     }
 
     public void setIdentityTags(String identityValue, String region, List<Tag> tags) {
-        if (tags != null) {
-            for (Tag tag : tags) {
-                SesTags.validate(tag);
-            }
-        }
+        SesTags.validate(tags);
         String key = identityKey(region, identityValue);
         Identity identity = identityStore.get(key)
                 .orElseThrow(() -> new AwsException("NotFoundException",
@@ -2193,12 +2229,28 @@ public class SesService {
                 .orElseThrow(() -> new AwsException("NotFoundException",
                         "No Template present with name: " + name, 404));
         Set<String> toRemove = new HashSet<>(tagKeys);
-        template.getTags().removeIf(t -> toRemove.contains(t.key()));
+        // Copy-on-write: the stored list may be immutable, and unlocked readers iterate it.
+        List<Tag> remaining = new ArrayList<>(template.getTags());
+        remaining.removeIf(t -> toRemove.contains(t.key()));
+        template.setTags(remaining);
         templateService.save(template, region);
         LOG.infov("Untagged SES template: {0} (region {1}, -{2} keys)", name, region, tagKeys.size());
     }
 
-    private record ResourceRef(String region, String type, String name) {}
+    private record ResourceRef(String account, String region, String type, String name) {}
+
+    /**
+     * AWS rejects a tag operation whose ARN carries a different account id before any region or
+     * existence check (probe-confirmed): the account error wins even when the region is also
+     * mismatched or the resource doesn't exist anywhere.
+     */
+    private void requireCallerAccount(ResourceRef ref) {
+        String callerAccountId = regionResolver != null ? regionResolver.getAccountId() : defaultAccountId;
+        if (!ref.account().equals(callerAccountId)) {
+            throw new AwsException("BadRequestException",
+                    "Operations on a resource created in a different account is not allowed", 400);
+        }
+    }
 
     private static ResourceRef parseSesArn(String arn) {
         if (arn == null || arn.isBlank()) {
@@ -2223,7 +2275,8 @@ public class SesService {
         if (slash <= 0 || slash == resource.length() - 1) {
             throw new AwsException("BadRequestException", "Invalid ARN: " + arn, 400);
         }
-        return new ResourceRef(parsed.region(), resource.substring(0, slash), resource.substring(slash + 1));
+        return new ResourceRef(parsed.accountId(), parsed.region(),
+                resource.substring(0, slash), resource.substring(slash + 1));
     }
 
     // ──────────────────── Suppression (account attributes + list) ────────────────────

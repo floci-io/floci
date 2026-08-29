@@ -10,6 +10,9 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.CurrentContainerNetworkResolver;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
@@ -23,6 +26,9 @@ import io.github.hectorvent.floci.services.rds.model.DbCluster;
 import io.github.hectorvent.floci.services.rds.model.DbClusterParameterGroup;
 import io.github.hectorvent.floci.services.rds.model.DbEndpoint;
 import io.github.hectorvent.floci.services.rds.model.DbInstance;
+import io.github.hectorvent.floci.services.kms.KmsService;
+import io.github.hectorvent.floci.services.kms.model.KmsKey;
+import io.github.hectorvent.floci.services.rds.model.DbInstanceSettings;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceStatus;
 import io.github.hectorvent.floci.services.rds.model.DbParameterGroup;
 import io.github.hectorvent.floci.services.rds.model.DbProxy;
@@ -33,6 +39,7 @@ import io.github.hectorvent.floci.services.rds.model.DbSubnetGroup;
 import io.github.hectorvent.floci.services.rds.model.OptionGroup;
 import io.github.hectorvent.floci.services.rds.model.OptionGroupOption;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyManager;
+import io.github.hectorvent.floci.services.resourcegroupstagging.ResourceGroupsTaggingService;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
 import io.github.hectorvent.floci.core.common.Resettable;
@@ -61,7 +68,7 @@ import java.util.regex.Pattern;
  * Starts DB containers and auth proxies on creation.
  */
 @ApplicationScoped
-public class RdsService implements Resettable {
+public class RdsService implements Resettable, ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(RdsService.class);
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -86,7 +93,13 @@ public class RdsService implements Resettable {
             managedDefault("postgres15"),
             managedDefault("postgres16"),
             managedDefault("postgres17"),
-            managedDefault("postgres18"));
+            managedDefault("postgres18"),
+            // DocumentDB clusters name these as their default (the families the DocDB engine
+            // versions map to); DocDbService validates a cluster's parameter group here
+            managedDefault("docdb3.6"),
+            managedDefault("docdb4.0"),
+            managedDefault("docdb5.0"),
+            managedDefault("docdb8.0"));
 
     /**
      * Engines AWS accepts for {@code EngineName} on an option group. Floci can only run
@@ -126,12 +139,21 @@ public class RdsService implements Resettable {
     private final StorageBackend<String, DbProxyTargetGroup> proxyTargetGroups;
     private final RdsContainerManager containerManager;
     private final RdsProxyManager proxyManager;
+    // CreateDBCluster/CreateDBInstance register the new resource only after the
+    // backing container is provisioned, and an image pull can hold that window
+    // open long enough for a client-side retry to pass the exists-check again
+    // and provision a second container for the same identifier. The sentinel
+    // serializes creates per identifier so the duplicate fails fast with the
+    // same fault a completed create produces.
+    private final Set<String> provisioningIds = ConcurrentHashMap.newKeySet();
     private final Ec2Service ec2Service;
     private final RegionResolver regionResolver;
     private final EmulatorConfig config;
     private final SecretsManagerService secretsManagerService;
+    private final KmsService kmsService;
     private final DockerHostResolver dockerHostResolver;
     private final CurrentContainerNetworkResolver currentContainerNetworkResolver;
+    private final ResourceGroupsTaggingService taggingService;
     private final Set<Integer> usedPorts = ConcurrentHashMap.newKeySet();
     private static final Pattern IMAGE_TAG_VERSION_PATTERN = Pattern.compile("^(\\d+(?:\\.\\d+)*)(.*)$");
     private static final Pattern SAFE_IMAGE_TAG_PATTERN = Pattern.compile("[A-Za-z0-9._-]+");
@@ -163,15 +185,19 @@ public class RdsService implements Resettable {
                       StorageFactory storageFactory,
                       SecretsManagerService secretsManagerService,
                       DockerHostResolver dockerHostResolver,
-                      CurrentContainerNetworkResolver currentContainerNetworkResolver) {
+                      CurrentContainerNetworkResolver currentContainerNetworkResolver,
+                      ResourceGroupsTaggingService taggingService,
+                      KmsService kmsService) {
         this.containerManager = containerManager;
         this.proxyManager = proxyManager;
         this.ec2Service = ec2Service;
         this.regionResolver = regionResolver;
         this.config = config;
         this.secretsManagerService = secretsManagerService;
+        this.kmsService = kmsService;
         this.dockerHostResolver = dockerHostResolver;
         this.currentContainerNetworkResolver = currentContainerNetworkResolver;
+        this.taggingService = taggingService;
         this.instances = storageFactory.create("rds", "rds-instances.json",
                 new TypeReference<Map<String, DbInstance>>() {});
         this.clusters = storageFactory.create("rds", "rds-clusters.json",
@@ -280,7 +306,7 @@ public class RdsService implements Resettable {
         this(containerManager, proxyManager, ec2Service, regionResolver, config,
                 instances, clusters, parameterGroups, clusterParameterGroups, subnetGroups,
                 secretsManagerService, dockerHostResolver, currentContainerNetworkResolver,
-                proxies, proxyTargetGroups, new InMemoryStorage<>());
+                proxies, proxyTargetGroups, new InMemoryStorage<>(), null, null);
     }
 
     RdsService(RdsContainerManager containerManager,
@@ -298,13 +324,16 @@ public class RdsService implements Resettable {
                CurrentContainerNetworkResolver currentContainerNetworkResolver,
                StorageBackend<String, DbProxy> proxies,
                StorageBackend<String, DbProxyTargetGroup> proxyTargetGroups,
-               StorageBackend<String, OptionGroup> optionGroups) {
+               StorageBackend<String, OptionGroup> optionGroups,
+               ResourceGroupsTaggingService taggingService,
+               KmsService kmsService) {
         this.containerManager = containerManager;
         this.proxyManager = proxyManager;
         this.ec2Service = ec2Service;
         this.regionResolver = regionResolver;
         this.config = config;
         this.secretsManagerService = secretsManagerService;
+        this.kmsService = kmsService;
         this.dockerHostResolver = dockerHostResolver;
         this.currentContainerNetworkResolver = currentContainerNetworkResolver;
         this.instances = instances;
@@ -315,6 +344,7 @@ public class RdsService implements Resettable {
         this.subnetGroups = subnetGroups;
         this.proxies = proxies;
         this.proxyTargetGroups = proxyTargetGroups;
+        this.taggingService = taggingService;
     }
 
     public void restorePersistedRuntime() {
@@ -322,6 +352,7 @@ public class RdsService implements Resettable {
         restoreInstances();
         restoreProxies();
         backfillManagedSecretOwnership();
+        backfillInstanceEngineIdentifiers();
     }
 
     public void clear() {
@@ -461,6 +492,60 @@ public class RdsService implements Resettable {
                                        String optionGroupName,
                                        String region,
                                        boolean autoMinorVersionUpgrade) {
+        return createDbInstance(id, engineParam, engineVersion, masterUsername, masterPassword,
+                dbName, dbInstanceClass, allocatedStorage, iamEnabled, paramGroupName,
+                dbSubnetGroupName, dbClusterIdentifier, availabilityZone, multiAz,
+                manageMasterUserPassword, masterUserSecretKmsKeyId, tags, vpcSecurityGroupIds,
+                optionGroupName, region, autoMinorVersionUpgrade, DbInstanceSettings.defaults());
+    }
+
+    public DbInstance createDbInstance(String id, String engineParam, String engineVersion,
+                                       String masterUsername, String masterPassword,
+                                       String dbName, String dbInstanceClass,
+                                       int allocatedStorage, boolean iamEnabled,
+                                       String paramGroupName, String dbSubnetGroupName,
+                                       String dbClusterIdentifier, String availabilityZone,
+                                       boolean multiAz, boolean manageMasterUserPassword,
+                                       String masterUserSecretKmsKeyId,
+                                       Map<String, String> tags,
+                                       List<String> vpcSecurityGroupIds,
+                                       String optionGroupName,
+                                       String region,
+                                       boolean autoMinorVersionUpgrade,
+                                       DbInstanceSettings settings) {
+        validateInstanceSettings(settings);
+        String provisioningKey = "instance:" + currentAccountId() + ":"
+                + dbResourceKey(effectiveRegion(region), id);
+        if (!provisioningIds.add(provisioningKey)) {
+            throw new AwsException("DBInstanceAlreadyExists",
+                    "DB instance " + id + " already exists.", 400);
+        }
+        try {
+            return doCreateDbInstance(id, engineParam, engineVersion, masterUsername,
+                    masterPassword, dbName, dbInstanceClass, allocatedStorage, iamEnabled,
+                    paramGroupName, dbSubnetGroupName, dbClusterIdentifier, availabilityZone,
+                    multiAz, manageMasterUserPassword, masterUserSecretKmsKeyId, tags,
+                    vpcSecurityGroupIds, optionGroupName, region, autoMinorVersionUpgrade,
+                    settings);
+        } finally {
+            provisioningIds.remove(provisioningKey);
+        }
+    }
+
+    private DbInstance doCreateDbInstance(String id, String engineParam, String engineVersion,
+                                          String masterUsername, String masterPassword,
+                                          String dbName, String dbInstanceClass,
+                                          int allocatedStorage, boolean iamEnabled,
+                                          String paramGroupName, String dbSubnetGroupName,
+                                          String dbClusterIdentifier, String availabilityZone,
+                                          boolean multiAz, boolean manageMasterUserPassword,
+                                          String masterUserSecretKmsKeyId,
+                                          Map<String, String> tags,
+                                          List<String> vpcSecurityGroupIds,
+                                          String optionGroupName,
+                                          String region,
+                                          boolean autoMinorVersionUpgrade,
+                                          DbInstanceSettings settings) {
         String effectiveRegion = effectiveRegion(region);
         String dbiResourceId = "db-" + java.util.UUID.randomUUID().toString()
                 .replace("-", "").substring(0, 24).toUpperCase();
@@ -478,6 +563,9 @@ public class RdsService implements Resettable {
         validateInstanceParameterGroup(
                 paramGroupName, engineParam, engineVersion, effectiveRegion);
         validateInstanceOptionGroup(optionGroupName, engineParam, engineVersion, effectiveRegion);
+        // resolved with the other validations, before a port is taken or a container started
+        DbInstanceSettings resolvedSettings = withEffectiveWindows(settings, null)
+                .withKmsKeyId(resolveKmsKeyArn(settings.kmsKeyId(), effectiveRegion));
         boolean mock = config.services().rds().mock();
         // Always reserve a unique port (even in mock) so endpoints stay distinct and usedPorts
         // is consistent; mock mode only skips starting the container and auth proxy.
@@ -499,6 +587,8 @@ public class RdsService implements Resettable {
         String instanceStorageResourceId = dbiResourceId;
         PlacementResolution placement;
 
+        String engineIdentifier = engineParam != null && !engineParam.isBlank()
+                ? engineParam.toLowerCase() : null;
         if (dbClusterIdentifier != null && !dbClusterIdentifier.isBlank()) {
             // Cluster member — share the cluster's container (none exists in mock mode)
             DbCluster cluster = Optional.ofNullable(
@@ -507,6 +597,9 @@ public class RdsService implements Resettable {
                     .orElseThrow(() ->
                     new AwsException("DBClusterNotFoundFault",
                             "DB cluster " + dbClusterIdentifier + " not found.", 404));
+            if (engineIdentifier == null && cluster.getEngineIdentifier() != null) {
+                engineIdentifier = cluster.getEngineIdentifier().toLowerCase();
+            }
             backendHost = cluster.getContainerHost();
             backendPort = cluster.getContainerPort();
             containerId = cluster.getContainerId();
@@ -562,6 +655,8 @@ public class RdsService implements Resettable {
         instance.setMultiAz(placement.multiAz());
         instance.setSubnetAvailabilityZones(placement.subnetAvailabilityZones());
         instance.setAutoMinorVersionUpgrade(autoMinorVersionUpgrade);
+        instance.setEngineIdentifier(engineIdentifier);
+        resolvedSettings.applyTo(instance);
 
         instance.setDbiResourceId(dbiResourceId);
         instance.setDbInstanceArn(dbInstanceArn);
@@ -574,6 +669,7 @@ public class RdsService implements Resettable {
             final String instanceRegion = regionFromArn(instance.getDbInstanceArn());
             proxyManager.startProxy(rdsResourceRelayKey(instance.getDbInstanceArn(), id),
                     engine, iamEnabled, proxyPort, backendHost, backendPort,
+                    instance.getEndpoint().address(),
                     masterUsername, masterPassword, dbName,
                     (user, pw) -> validateDbPasswordForScope(
                             accountId, instanceRegion, id, user, pw));
@@ -791,6 +887,47 @@ public class RdsService implements Resettable {
         }
     }
 
+    /**
+     * Gives an instance persisted before {@code engineIdentifier} existed the engine name AWS would
+     * report, and only when that name is known for certain: a cluster member takes its cluster's
+     * stored name (an Aurora member is aurora-postgresql, which the enum alone cannot say); a
+     * standalone instance takes the enum's, since a standalone RDS instance is never Aurora. A
+     * member whose cluster predates the field too is left unset rather than written down as the
+     * enum — a persisted guess would outlive the code that could later tell.
+     */
+    void backfillInstanceEngineIdentifiers() {
+        try {
+            for (DbInstance instance : allInstances()) {
+                if (instance.getEngineIdentifier() != null && !instance.getEngineIdentifier().isBlank()) {
+                    continue;
+                }
+                String accountId = accountIdFromArn(instance.getDbInstanceArn());
+                String region = regionFromArn(instance.getDbInstanceArn());
+                String engineIdentifier;
+                String clusterId = instance.getDbClusterIdentifier();
+                if (clusterId != null && !clusterId.isBlank()) {
+                    DbCluster cluster = findClusterForScope(accountId, region, clusterId);
+                    if (cluster == null || cluster.getEngineIdentifier() == null
+                            || cluster.getEngineIdentifier().isBlank()) {
+                        LOG.debugv("Instance {0} keeps no engine name: its cluster {1} has none stored",
+                                instance.getDbInstanceIdentifier(), clusterId);
+                        continue;
+                    }
+                    engineIdentifier = cluster.getEngineIdentifier().toLowerCase();
+                } else if (instance.getEngine() != null) {
+                    engineIdentifier = instance.getEngine().name().toLowerCase();
+                } else {
+                    continue;
+                }
+                instance.setEngineIdentifier(engineIdentifier);
+                putInstanceForScope(accountId, region, instance.getDbInstanceIdentifier(), instance);
+            }
+        } catch (RuntimeException e) {
+            // Reading persisted state must not be able to stop the emulator from starting.
+            LOG.warnv(e, "Skipped the instance engine name backfill");
+        }
+    }
+
     private void attachManagedMasterUserSecret(DbInstance instance, String region, String kmsKeyId) {
         if (secretsManagerService == null) {
             throw new AwsException("InvalidParameterCombination",
@@ -918,8 +1055,22 @@ public class RdsService implements Resettable {
             String id, String newPassword, Boolean iamEnabled,
             String dbSubnetGroupName, List<String> vpcSecurityGroupIds,
             String optionGroupName, String region, Boolean autoMinorVersionUpgrade) {
+        return modifyDbInstance(id, newPassword, iamEnabled, dbSubnetGroupName,
+                vpcSecurityGroupIds, optionGroupName, region, autoMinorVersionUpgrade,
+                DbInstanceSettings.unchanged());
+    }
+
+    // synchronized like the tag and delete paths: an unguarded read-modify-write here could
+    // write an instance back after deleteDbInstance removed it
+    public synchronized DbInstance modifyDbInstance(
+            String id, String newPassword, Boolean iamEnabled,
+            String dbSubnetGroupName, List<String> vpcSecurityGroupIds,
+            String optionGroupName, String region, Boolean autoMinorVersionUpgrade,
+            DbInstanceSettings settings) {
+        validateInstanceSettings(settings);
         String effectiveRegion = effectiveRegion(region);
         DbInstance instance = getDbInstance(id, effectiveRegion);
+        DbInstanceSettings effective = withEffectiveWindows(settings, instance);
         instance.setStatus(DbInstanceStatus.AVAILABLE);
         if (optionGroupName != null && !optionGroupName.isBlank()) {
             validateInstanceOptionGroup(optionGroupName,
@@ -943,9 +1094,94 @@ public class RdsService implements Resettable {
         if (autoMinorVersionUpgrade != null) {
             instance.setAutoMinorVersionUpgrade(autoMinorVersionUpgrade);
         }
+        effective.applyTo(instance);
         putInstanceForScope(currentAccountId(), effectiveRegion, id, instance);
         LOG.infov("DB instance {0} modified", id);
         return instance;
+    }
+
+    private static void validateInstanceSettings(DbInstanceSettings settings) {
+        settings.validate();
+    }
+
+    /**
+     * The windows that will be in effect after the request, checked against each other the way a
+     * live account checks them. On create ({@code current} null) a window given alone is paired
+     * with the default, or with a window starting where the given one ends when the default would
+     * overlap it — AWS picks a random window clear of the given one. On modify the counterpart is
+     * the instance's.
+     */
+    private static DbInstanceSettings withEffectiveWindows(DbInstanceSettings settings, DbInstance current) {
+        String backup = settings.preferredBackupWindow();
+        String maintenance = settings.preferredMaintenanceWindow();
+        boolean backupGiven = backup != null;
+        boolean maintenanceGiven = maintenance != null;
+        if (current == null) {
+            if (!backupGiven) {
+                backup = maintenanceGiven && DbInstanceSettings.windowsOverlap(
+                        DbInstanceSettings.DEFAULT_BACKUP_WINDOW, maintenance)
+                        ? DbInstanceSettings.backupWindowAfter(maintenance)
+                        : DbInstanceSettings.DEFAULT_BACKUP_WINDOW;
+            }
+            if (!maintenanceGiven) {
+                maintenance = backupGiven && DbInstanceSettings.windowsOverlap(
+                        backup, DbInstanceSettings.DEFAULT_MAINTENANCE_WINDOW)
+                        ? DbInstanceSettings.maintenanceWindowAfter(backup)
+                        : DbInstanceSettings.DEFAULT_MAINTENANCE_WINDOW;
+            }
+            // a derived window is clear unless the given one leaves no 30-minute gap at all
+            if (DbInstanceSettings.windowsOverlap(backup, maintenance)) {
+                if (!maintenanceGiven) {
+                    throw DbInstanceSettings.noRoomForMaintenanceWindow();
+                }
+                if (!backupGiven) {
+                    throw DbInstanceSettings.noRoomForBackupWindow();
+                }
+            }
+        } else {
+            if (!backupGiven) {
+                backup = current.getPreferredBackupWindow() != null
+                        ? current.getPreferredBackupWindow() : DbInstanceSettings.DEFAULT_BACKUP_WINDOW;
+            }
+            if (!maintenanceGiven) {
+                maintenance = current.getPreferredMaintenanceWindow() != null
+                        ? current.getPreferredMaintenanceWindow() : DbInstanceSettings.DEFAULT_MAINTENANCE_WINDOW;
+            }
+        }
+        if (DbInstanceSettings.windowsOverlap(backup, maintenance)) {
+            throw DbInstanceSettings.overlappingWindows();
+        }
+        return new DbInstanceSettings(settings.storageEncrypted(), settings.kmsKeyId(),
+                settings.backupRetentionPeriod(), backup, maintenance, settings.copyTagsToSnapshot());
+    }
+
+    /**
+     * A live account takes the key as an ARN, a key id, an alias ARN or an alias name and reports
+     * the key ARN on the instance; a key it cannot use is one fault whatever the reason.
+     */
+    private String resolveKmsKeyArn(String kmsKeyId, String region) {
+        if (kmsKeyId == null || kmsKeyId.isBlank()) {
+            return null;
+        }
+        if (kmsService == null) {
+            throw new IllegalStateException("RdsService was built without a KmsService; "
+                    + "a KmsKeyId cannot be resolved");
+        }
+        KmsKey key;
+        try {
+            key = kmsService.describeKey(kmsKeyId, region);
+        } catch (AwsException e) {
+            throw kmsKeyNotAccessible(kmsKeyId);
+        }
+        if (!key.isEnabled() || "PendingDeletion".equals(key.getKeyState())) {
+            throw kmsKeyNotAccessible(kmsKeyId);
+        }
+        return key.getArn();
+    }
+
+    private static AwsException kmsKeyNotAccessible(String kmsKeyId) {
+        return new AwsException("KMSKeyNotAccessibleFault", "The specified KMS key [" + kmsKeyId
+                + "] does not exist, is not enabled or you do not have permissions to access it.", 400);
     }
 
     public List<Map<String, String>> describeOrderableDbInstanceOptions(String engine,
@@ -1029,6 +1265,7 @@ public class RdsService implements Resettable {
                     instance.getEngine(),
                     instance.isIamDatabaseAuthenticationEnabled(),
                     instance.getProxyPort(), instance.getContainerHost(), instance.getContainerPort(),
+                    instance.getEndpoint().address(),
                     effectiveMasterUser, instance.getMasterPassword(), instance.getDbName(),
                     (user, pw) -> validateDbPasswordForScope(
                             accountId, instanceRegion, id, user, pw));
@@ -1140,6 +1377,29 @@ public class RdsService implements Resettable {
                                      String availabilityZone, boolean multiAz, String region,
                                      Double serverlessV2MinCapacity, Double serverlessV2MaxCapacity,
                                      Integer serverlessV2SecondsUntilAutoPause) {
+        String provisioningKey = "cluster:" + currentAccountId() + ":"
+                + dbResourceKey(effectiveRegion(region), id);
+        if (!provisioningIds.add(provisioningKey)) {
+            throw new AwsException("DBClusterAlreadyExistsFault",
+                    "DB cluster " + id + " already exists.", 400);
+        }
+        try {
+            return doCreateDbCluster(id, engineParam, engineVersion, masterUsername, masterPassword,
+                    databaseName, iamEnabled, paramGroupName, dbSubnetGroupName, availabilityZone,
+                    multiAz, region, serverlessV2MinCapacity, serverlessV2MaxCapacity,
+                    serverlessV2SecondsUntilAutoPause);
+        } finally {
+            provisioningIds.remove(provisioningKey);
+        }
+    }
+
+    private DbCluster doCreateDbCluster(String id, String engineParam, String engineVersion,
+                                        String masterUsername, String masterPassword,
+                                        String databaseName, boolean iamEnabled,
+                                        String paramGroupName, String dbSubnetGroupName,
+                                        String availabilityZone, boolean multiAz, String region,
+                                        Double serverlessV2MinCapacity, Double serverlessV2MaxCapacity,
+                                        Integer serverlessV2SecondsUntilAutoPause) {
         String effectiveRegion = effectiveRegion(region);
         String clusterResourceId = "cluster-" + java.util.UUID.randomUUID().toString()
                 .replace("-", "").substring(0, 24).toUpperCase();
@@ -1200,6 +1460,7 @@ public class RdsService implements Resettable {
             proxyManager.startProxy(rdsResourceRelayKey(cluster.getDbClusterArn(), id),
                     engine, iamEnabled, proxyPort,
                     cluster.getContainerHost(), cluster.getContainerPort(),
+                    cluster.getEndpoint().address(),
                     effectiveMasterUser, masterPassword, databaseName,
                     (user, pw) -> validateDbClusterPasswordForScope(
                             accountId, clusterRegion, id, user, pw));
@@ -1809,8 +2070,8 @@ public class RdsService implements Resettable {
                 final boolean isCluster = "TRACKED_CLUSTER".equals(target.getType());
                 final String targetRegion = regionFromArn(proxy.getDbProxyArn());
                 proxyManager.startProxy(dbProxyRelayKey(proxy), engine, proxy.isIamAuth(),
-                        proxy.getProxyPort(), backendHost, backendPort, effectiveMasterUser,
-                        masterPassword, dbName,
+                        proxy.getProxyPort(), backendHost, backendPort, proxy.getEndpointHost(),
+                        effectiveMasterUser, masterPassword, dbName,
                         (user, pw) -> isCluster
                                 ? validateDbClusterPasswordForScope(
                                         proxyAccountId, targetRegion, targetId, user, pw)
@@ -2189,6 +2450,15 @@ public class RdsService implements Resettable {
     }
 
     public DbSubnetGroup createDbSubnetGroup(String name, String description, List<String> subnetIds, String region) {
+        return createDbSubnetGroup(name, description, subnetIds, region, Map.of());
+    }
+
+    /**
+     * Tags given at create are stored with the group in the same write — a live account reads
+     * them back from ListTagsForResource straight after CreateDBSubnetGroup.
+     */
+    public DbSubnetGroup createDbSubnetGroup(String name, String description, List<String> subnetIds,
+                                             String region, Map<String, String> tags) {
         if (name == null || name.isBlank()) {
             throw new AwsException("MissingParameter", "The request must contain the parameter DBSubnetGroupName.", 400);
         }
@@ -2205,6 +2475,9 @@ public class RdsService implements Resettable {
         }
 
         DbSubnetGroup group = buildSubnetGroup(name, description, subnetIds, effectiveRegion);
+        if (tags != null && !tags.isEmpty()) {
+            group.setTags(new LinkedHashMap<>(tags));
+        }
         putSubnetGroupForScope(currentAccountId(), effectiveRegion, name, group);
         return group;
     }
@@ -2508,6 +2781,11 @@ public class RdsService implements Resettable {
                 .filter(Objects::nonNull)
                 .forEach(group -> unique.put(group.getDbClusterParameterGroupName(), group));
         return unique.values();
+    }
+
+    /** Whether a name is one of the default cluster parameter groups the service itself provides. */
+    public boolean isManagedClusterParameterGroup(String name) {
+        return managedClusterParameterGroup(name) != null;
     }
 
     private static ManagedClusterParameterGroup managedClusterParameterGroup(String name) {
@@ -3669,7 +3947,7 @@ public class RdsService implements Resettable {
         String effectiveMasterUser = masterUser != null ? masterUser : "root";
         String targetId = target.getRdsResourceId();
         proxyManager.startProxy(dbProxyRelayKey(proxy), engine, proxy.isIamAuth(), proxy.getProxyPort(),
-                backendHost, backendPort, effectiveMasterUser, masterPassword, dbName,
+                backendHost, backendPort, proxy.getEndpointHost(), effectiveMasterUser, masterPassword, dbName,
                 (user, password) -> clusterTarget
                         ? validateDbClusterPasswordForScope(
                                 accountId, proxyRegion, targetId, user, password)
@@ -3756,8 +4034,8 @@ public class RdsService implements Resettable {
                                 cluster.getDbClusterArn(), cluster.getDbClusterIdentifier()),
                         cluster.getEngine(),
                         cluster.isIamDatabaseAuthenticationEnabled(), proxyPort,
-                        restoredHandle.getHost(), restoredHandle.getPort(), effectiveMasterUser,
-                        cluster.getMasterPassword(), cluster.getDatabaseName(),
+                        restoredHandle.getHost(), restoredHandle.getPort(), cluster.getEndpoint().address(),
+                        effectiveMasterUser, cluster.getMasterPassword(), cluster.getDatabaseName(),
                         (user, pw) -> validateDbClusterPasswordForScope(
                                 accountId, clusterRegion,
                                 cluster.getDbClusterIdentifier(), user, pw));
@@ -3877,8 +4155,8 @@ public class RdsService implements Resettable {
                                 instance.getDbInstanceArn(), instance.getDbInstanceIdentifier()),
                         instance.getEngine(),
                         instance.isIamDatabaseAuthenticationEnabled(), proxyPort,
-                        backendHost, backendPort, effectiveMasterUser,
-                        instance.getMasterPassword(), instance.getDbName(),
+                        backendHost, backendPort, instance.getEndpoint().address(),
+                        effectiveMasterUser, instance.getMasterPassword(), instance.getDbName(),
                         (user, pw) -> validateDbPasswordForScope(
                                 accountId, instanceRegion,
                                 instance.getDbInstanceIdentifier(), user, pw));
@@ -5038,5 +5316,49 @@ public class RdsService implements Resettable {
                     cluster.isMultiAz(),
                     cluster.getSubnetAvailabilityZones());
         }
+    }
+
+    @Override
+    public List<ExplorerResource> getResources() {
+        List<ExplorerResource> resources = new ArrayList<>();
+        for (DbInstance instance : listDbInstances(null)) {
+            String arn = instance.getDbInstanceArn();
+            if (arn == null) {
+                continue;
+            }
+            AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+            resources.add(new ExplorerResource(arn, "rds:db", "rds",
+                    parsed.region(), parsed.accountId(),
+                    instance.getCreatedAt() != null ? instance.getCreatedAt() : Instant.now(),
+                    tagsFor(parsed.region(), arn)));
+        }
+        for (DbCluster cluster : listDbClusters(null)) {
+            String arn = cluster.getDbClusterArn();
+            if (arn == null) {
+                continue;
+            }
+            AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+            resources.add(new ExplorerResource(arn, "rds:cluster", "rds",
+                    parsed.region(), parsed.accountId(),
+                    cluster.getCreatedAt() != null ? cluster.getCreatedAt() : Instant.now(),
+                    tagsFor(parsed.region(), arn)));
+        }
+        return resources;
+    }
+
+    /**
+     * Resolves tags for a resource, tolerating a null taggingService. The CDI constructor always
+     * supplies one; the storage-backed test constructors pass null, and unit tests that exercise
+     * getResources() would otherwise NPE.
+     */
+    private Map<String, String> tagsFor(String region, String arn) {
+        return taggingService != null ? taggingService.getTagsForResource(region, arn) : Map.of();
+    }
+
+    @Override
+    public Set<SupportedResourceType> getSupportedResourceTypes() {
+        return Set.of(
+                new SupportedResourceType("rds:db", "rds", true),
+                new SupportedResourceType("rds:cluster", "rds", true));
     }
 }

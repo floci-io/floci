@@ -77,6 +77,8 @@ Floci implements the AWS AppSync Management API, providing local emulation of Gr
 | `DeleteApiKey` | Delete an API key |
 | `ListApiKeys` | List all API keys for an API |
 
+As on AWS, `ApiKey.id` is the key value itself (`da2-` followed by 26 lowercase alphanumerics) and is what clients send in the `x-api-key` header. There is no separate secret field.
+
 ### Tags
 
 | Operation | Description |
@@ -219,7 +221,7 @@ Configured modes are the API default `authenticationType` plus `additionalAuthen
 
 | Mode | Emulator notes |
 |---|---|
-| API_KEY | Lookup by key value (`da2-…`). Identity is absent (not `{}`). Default key expiry is 7 days when `expires` is omitted; stored `expires` is rounded down to the nearest hour. Create/UpdateApiKey require `expires` between 1 and 365 days from now (`ApiKeyValidityOutOfBoundsException`, 400). `deletes` is `expires` plus 60 days. |
+| API_KEY | Lookup by `ApiKey.id`, which is the key value (`da2-…`). Identity is absent (not `{}`). Default key expiry is 7 days when `expires` is omitted; stored `expires` is rounded down to the nearest hour. Create/UpdateApiKey require `expires` between 1 and 365 days from now (`ApiKeyValidityOutOfBoundsException`, 400). `deletes` is `expires` plus 60 days. |
 | AWS_IAM | Parses `Credential=` access key; no HMAC. Known keys evaluate `appsync:GraphQL`. Unknown/`test` keys are emulator ALLOW. |
 | Cognito / OIDC | JWT payload decode only (no JWKS). OIDC as the sole mode skips the `iss` check. OIDC identity is `{sub, issuer, claims}` (no `sourceIp`). |
 | Lambda | AppSync `isAuthorized` contract via `LambdaService.invoke` (not an API Gateway policy document). |

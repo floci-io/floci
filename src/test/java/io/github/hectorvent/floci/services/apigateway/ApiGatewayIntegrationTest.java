@@ -340,7 +340,7 @@ class ApiGatewayIntegrationTest {
         given()
                 .when().delete("/restapis/" + apiId + "/deployments/" + deploymentId)
                 .then()
-                .statusCode(204);
+                .statusCode(202);
 
         given()
                 .when().get("/restapis/" + apiId + "/deployments/" + deploymentId)
@@ -354,7 +354,7 @@ class ApiGatewayIntegrationTest {
         given()
                 .when().delete("/restapis/" + apiId + "/resources/" + resourceId)
                 .then()
-                .statusCode(204);
+                .statusCode(202);
     }
 
     @Test @Order(29)

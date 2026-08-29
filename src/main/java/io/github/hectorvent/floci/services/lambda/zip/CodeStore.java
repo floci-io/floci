@@ -12,7 +12,10 @@ import java.util.Comparator;
 
 /**
  * Manages on-disk locations of extracted Lambda function code.
- * Each function gets its own directory under the configured code path.
+ * Each function gets its own directory under {@code <codePath>/<accountId>/}, mirroring
+ * the account-prefixed S3 key {@code LambdaService.codeObjectKey} uses for the same
+ * deployment package. Without the account segment two accounts' same-named functions in
+ * one region share a single extraction directory and overwrite each other's code.
  */
 @ApplicationScoped
 public class CodeStore {
@@ -30,18 +33,39 @@ public class CodeStore {
         this.baseDir = baseDir;
     }
 
-    public Path getCodePath(String functionName) {
+    public Path getCodePath(String accountId, String functionName) {
+        return baseDir.resolve(sanitizeName(accountId)).resolve(sanitizeName(functionName));
+    }
+
+    /**
+     * The pre-account-scoped path a function's code would have extracted to before this class
+     * added an account segment. Retained so {@link #delete} and code re-extraction can reclaim a
+     * directory left behind by a function created before that migration.
+     */
+    public Path getLegacyCodePath(String functionName) {
         return baseDir.resolve(sanitizeName(functionName));
     }
 
-    public void delete(String functionName) {
-        Path codePath = getCodePath(functionName);
-        if (!Files.exists(codePath)) {
+    public void delete(String accountId, String functionName) {
+        deleteDirectory(getCodePath(accountId, functionName), functionName);
+    }
+
+    /**
+     * Best-effort removal of a function's pre-account-scoped directory. Deliberately NOT called
+     * automatically from {@link #delete}: the pre-account-scoped layout gave every account's
+     * same-named function the exact same directory, so it is only safe to remove once the caller
+     * (see {@code LambdaService}) has confirmed no other account's function still references it.
+     */
+    public void deleteLegacy(String functionName) {
+        deleteDirectory(getLegacyCodePath(functionName), functionName);
+    }
+
+    private void deleteDirectory(Path path, String functionName) {
+        if (!Files.exists(path)) {
             return;
         }
-        try {
-            Files.walk(codePath)
-                    .sorted(Comparator.reverseOrder())
+        try (var walk = Files.walk(path)) {
+            walk.sorted(Comparator.reverseOrder())
                     .forEach(p -> {
                         try {
                             Files.delete(p);
@@ -55,16 +79,29 @@ public class CodeStore {
         }
     }
 
-    public boolean exists(String functionName) {
-        Path codePath = getCodePath(functionName);
-        try {
-            return Files.exists(codePath) && Files.list(codePath).findAny().isPresent();
+    public boolean exists(String accountId, String functionName) {
+        Path codePath = getCodePath(accountId, functionName);
+        if (!Files.exists(codePath)) {
+            return false;
+        }
+        try (var listing = Files.list(codePath)) {
+            return listing.findAny().isPresent();
         } catch (IOException e) {
             return false;
         }
     }
 
+    /**
+     * Replaces disallowed characters, then collapses any segment that consists entirely of dots
+     * ({@code "."}, {@code ".."}, ...) to a safe placeholder: dots alone survive the character
+     * replacement above but are special path segments that {@link Path#resolve} would otherwise
+     * follow outside {@link #baseDir}.
+     */
     private String sanitizeName(String name) {
-        return name.replaceAll("[^a-zA-Z0-9_\\-.]", "_");
+        String sanitized = name.replaceAll("[^a-zA-Z0-9_\\-.]", "_");
+        if (sanitized.isEmpty() || sanitized.chars().allMatch(c -> c == '.')) {
+            return "_";
+        }
+        return sanitized;
     }
 }

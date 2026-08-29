@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.services.stepfunctions.model.Activity;
 import io.github.hectorvent.floci.services.stepfunctions.model.ActivityTask;
 import io.github.hectorvent.floci.services.stepfunctions.model.Execution;
 import io.github.hectorvent.floci.services.stepfunctions.model.HistoryEvent;
+import io.github.hectorvent.floci.services.stepfunctions.model.MapRun;
 import io.github.hectorvent.floci.services.stepfunctions.model.StateMachine;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -48,6 +49,7 @@ public class StepFunctionsJsonHandler {
             case "ListExecutions" -> handleListExecutions(request);
             case "StopExecution" -> handleStopExecution(request);
             case "GetExecutionHistory" -> handleGetExecutionHistory(request);
+            case "DescribeMapRun" -> handleDescribeMapRun(request);
             case "SendTaskSuccess" -> handleSendTaskSuccess(request);
             case "SendTaskFailure" -> handleSendTaskFailure(request);
             case "SendTaskHeartbeat" -> handleSendTaskHeartbeat(request);
@@ -285,6 +287,51 @@ public class StepFunctionsJsonHandler {
         if (exec.getError() != null) response.put("error", exec.getError());
         if (exec.getCause() != null) response.put("cause", exec.getCause());
         return Response.ok(response).build();
+    }
+
+    private Response handleDescribeMapRun(JsonNode request) {
+        MapRun mapRun = service.describeMapRun(requiredText(request, "mapRunArn"));
+        return Response.ok(describeMapRunResponse(objectMapper, mapRun)).build();
+    }
+
+    /**
+     * The wire response of {@code DescribeMapRun}, measured against us-east-1. The
+     * {@code arn:aws:states:::aws-sdk:sfn:describeMapRun} Task integration renders the same node in
+     * PascalCase, so this is the one place the response is described.
+     *
+     * <p>A retained run is one whose every item succeeded, because a Map fails on the first item
+     * that fails. That fixes {@code status}, both zero tolerances and {@code redriveCount}:
+     * {@code redriveDate} is absent until a run is redriven, and no run here ever is.
+     */
+    static ObjectNode describeMapRunResponse(ObjectMapper objectMapper, MapRun mapRun) {
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("mapRunArn", mapRun.getMapRunArn());
+        response.put("executionArn", mapRun.getExecutionArn());
+        response.put("status", "SUCCEEDED");
+        response.put("startDate", mapRun.getStartDate());
+        response.put("stopDate", mapRun.getStopDate());
+        response.put("maxConcurrency", mapRun.getMaxConcurrency());
+        response.put("toleratedFailurePercentage", 0.0);
+        response.put("toleratedFailureCount", 0);
+        putMapRunCounts(response.putObject("itemCounts"), mapRun.getItemCount());
+        // One child execution per item: ItemBatcher is not applied, so no execution covers a batch.
+        putMapRunCounts(response.putObject("executionCounts"), mapRun.getItemCount());
+        response.put("redriveCount", 0);
+        return response;
+    }
+
+    /** The ten counters of a run whose every item succeeded and was written to the result set. */
+    private static void putMapRunCounts(ObjectNode counts, int items) {
+        counts.put("pending", 0);
+        counts.put("running", 0);
+        counts.put("succeeded", items);
+        counts.put("failed", 0);
+        counts.put("timedOut", 0);
+        counts.put("aborted", 0);
+        counts.put("total", items);
+        counts.put("resultsWritten", items);
+        counts.put("failuresNotRedrivable", 0);
+        counts.put("pendingRedrive", 0);
     }
 
     private Response handleListExecutions(JsonNode request) {

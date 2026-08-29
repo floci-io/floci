@@ -234,4 +234,12 @@ class ApiGatewayApiKeyIntegrationTest {
                 .body("id", equalTo(keyId))
                 .body("value", not(equalTo(keyId)));
     }
+    @Test @Order(15)
+    void getDeletedApiKeyNotFound() {
+        given()
+                .when().get("/apikeys/" + apiKeyId)
+                .then()
+                .statusCode(404)
+                .body("__type", equalTo("NotFoundException"));
+    }
 }

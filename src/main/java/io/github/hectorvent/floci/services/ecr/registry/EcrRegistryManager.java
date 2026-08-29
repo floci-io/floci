@@ -47,6 +47,10 @@ public class EcrRegistryManager {
     private static final int CONTAINER_INTERNAL_PORT = 5000;
     private static final String NAMED_VOLUME = "floci-ecr-registry-data";
 
+    /** Matches an AWS-shaped ECR image URI: {@code <account>.dkr.ecr.<region>.amazonaws.com/<repo>[:tag]}. */
+    private static final java.util.regex.Pattern AWS_ECR_URI =
+            java.util.regex.Pattern.compile("^([0-9]{12})\\.dkr\\.ecr\\.([a-z0-9-]+)\\.amazonaws\\.com/(.+)$");
+
     private final ContainerBuilder containerBuilder;
     private final ContainerLifecycleManager lifecycleManager;
     private final ContainerLogStreamer logStreamer;
@@ -81,6 +85,30 @@ public class EcrRegistryManager {
         this.config = config;
         this.regionResolver = regionResolver;
         this.hostPort = config.services().ecr().registryBasePort();
+    }
+
+    /**
+     * Rewrites a real-AWS-shaped ECR image URI to point at Floci's loopback registry,
+     * starting the backing registry container on first use. Any image that doesn't
+     * match the AWS ECR URI shape (e.g. a plain Docker Hub reference or an image
+     * already pointing at Floci's registry) is returned unchanged, without starting
+     * the registry container.
+     */
+    public String rewriteImageUri(String image) {
+        if (image == null) {
+            return null;
+        }
+        java.util.regex.Matcher m = AWS_ECR_URI.matcher(image);
+        if (!m.matches()) {
+            return image;
+        }
+        String account = m.group(1);
+        String region = m.group(2);
+        String repoAndTag = m.group(3);
+        ensureStarted();
+        String rewritten = getRepositoryUri(account, region, repoAndTag);
+        LOG.infov("Rewriting ECR image URI {0} -> {1}", image, rewritten);
+        return rewritten;
     }
 
     /** Returns the docker-pullable repository URI for the given account/region/name. */
@@ -172,7 +200,9 @@ public class EcrRegistryManager {
                     .withEnv(env)
                     .withPortBinding(CONTAINER_INTERNAL_PORT, chosenPort)
                     .withDockerNetwork(resolveRegistryDockerNetwork())
-                    .withLogRotation();
+                    .withLogRotation()
+                    .withLabels(ContainerStorageHelper.resourceIdentityLabels(
+                            "ecr", null, regionResolver.getAccountId(), regionResolver.getDefaultRegion()));
 
             // Handle persistence mounting based on storage configuration
             addPersistenceMounts(specBuilder, env);

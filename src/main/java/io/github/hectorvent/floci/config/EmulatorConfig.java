@@ -268,6 +268,7 @@ public interface EmulatorConfig {
         BackupStorageConfig backup();
         FisStorageConfig fis();
         CloudFrontStorageConfig cloudfront();
+        ResourceExplorer2StorageConfig resourceexplorer2();
         AppSyncStorageConfig appsync();
         BatchStorageConfig batch();
         LightsailStorageConfig lightsail();
@@ -285,6 +286,20 @@ public interface EmulatorConfig {
         RumStorageConfig rum();
         GuardDutyStorageConfig guardduty();
         EmrServerlessStorageConfig emrserverless();
+
+        ControlTowerStorageConfig controltower();
+
+        ApsStorageConfig aps();
+
+        LakeFormationStorageConfig lakeformation();
+        EfsStorageConfig efs();
+    }
+
+    interface ApsStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
     }
 
     interface SsmStorageConfig {
@@ -416,6 +431,13 @@ public interface EmulatorConfig {
         Optional<String> mode();
     }
 
+    interface ResourceExplorer2StorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+
     interface AppSyncStorageConfig {
         Optional<String> mode();
 
@@ -514,6 +536,13 @@ public interface EmulatorConfig {
         long flushIntervalMs();
     }
 
+    interface ControlTowerStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+
     interface GuardDutyStorageConfig {
         Optional<String> mode();
 
@@ -528,6 +557,19 @@ public interface EmulatorConfig {
         long flushIntervalMs();
     }
 
+    interface LakeFormationStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+    interface EfsStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+  
     interface CodeDeployStorageConfig {
         Optional<String> mode();
 
@@ -615,6 +657,7 @@ public interface EmulatorConfig {
         Route53ServiceConfig route53();
         TransferServiceConfig transfer();
         TextractServiceConfig textract();
+        ComprehendServiceConfig comprehend();
         PricingServiceConfig pricing();
         DuckConfig duck();
         TranscribeServiceConfig transcribe();
@@ -624,6 +667,7 @@ public interface EmulatorConfig {
         ConfigServiceConfig configservice();
         CloudTrailServiceConfig cloudtrail();
         CloudControlServiceConfig cloudcontrol();
+        ResourceExplorer2ServiceConfig resourceexplorer2();
         CloudFrontServiceConfig cloudfront();
         AppSyncServiceConfig appsync();
         BatchServiceConfig batch();
@@ -634,9 +678,32 @@ public interface EmulatorConfig {
         IotServiceConfig iot();
         IotDataServiceConfig iotdata();
         CloudHsmV2ServiceConfig cloudhsmv2();
+        OrganizationsServiceConfig organizations();
         RumServiceConfig rum();
         GuardDutyServiceConfig guardduty();
         EmrServerlessServiceConfig emrserverless();
+        Route53ResolverServiceConfig route53resolver();
+        NetworkFirewallServiceConfig networkfirewall();
+        ServiceCatalogServiceConfig servicecatalog();
+        SsoAdminServiceConfig ssoadmin();
+        ServiceQuotasServiceConfig servicequotas();
+        RamServiceConfig ram();
+        ControlTowerServiceConfig controltower();
+
+        ApsServiceConfig aps();
+
+        LakeFormationServiceConfig lakeformation();
+        EfsServiceConfig efs();
+    }
+
+    interface SsoAdminServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface ApsServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
     }
 
     interface IotServiceConfig {
@@ -670,12 +737,52 @@ public interface EmulatorConfig {
         boolean enabled();
     }
 
+    interface ControlTowerServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
     interface GuardDutyServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }
 
     interface EmrServerlessServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface Route53ResolverServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface NetworkFirewallServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface ServiceCatalogServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface ServiceQuotasServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface RamServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface LakeFormationServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+  
+    interface EfsServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }
@@ -748,6 +855,11 @@ public interface EmulatorConfig {
          *  default here is 60s so dev/CI feedback loops stay fast. */
         @WithDefault("60")
         int flushIntervalSeconds();
+    }
+
+    interface ResourceExplorer2ServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
     }
 
     interface AutoScalingServiceConfig {
@@ -823,6 +935,37 @@ public interface EmulatorConfig {
 
         @WithDefault("3600")
         int defaultPresignExpirySeconds();
+
+        /**
+         * When true, S3 bucket/object existence resolution spans every account's partition,
+         * modelling AWS's globally-unique bucket namespace (a bucket owned by one account is
+         * reachable cross-account). Listing (ListBuckets/ListObjects) stays owner-scoped.
+         * Default false preserves per-account bucket isolation.
+         *
+         * <p><strong>Why this widening is deliberate, and what it costs.</strong> Floci's default
+         * is to partition every resource by the caller's account, which is the right model for
+         * services whose names are account-scoped in AWS. S3 bucket names are not: they are unique
+         * across all accounts and partitions, a bucket lives in exactly one owning account, and
+         * whether another account may touch it is decided by policy, not by the name being
+         * unreachable. Emulating that with a hard per-account partition makes two accounts able to
+         * hold different buckets under one name — a state AWS cannot reach — and makes a legitimate
+         * cross-account call (LZA's central logging bucket, a custom-resource Lambda calling back
+         * under the management account) fail with {@code NoSuchBucket} instead of being authorized
+         * or denied on its merits. This flag opts into the AWS-faithful namespace instead.
+         *
+         * <p>The trade-off is that account partitioning stops being a second, implicit line of
+         * defence for S3: with the flag on, a caller that names another account's bucket resolves
+         * it, and only IAM/bucket-policy evaluation stands between the caller and the object —
+         * exactly as in AWS, but stricter than Floci's default elsewhere. Mutations are written
+         * back to the bucket's <em>owning</em> account rather than forked into the caller's, and
+         * listing stays owner-scoped, so the flag never reassigns ownership or leaks a bucket
+         * inventory. It is off by default: turn it on when emulating a multi-account estate whose
+         * real behaviour depends on the global namespace, and leave it off when the per-account
+         * partition is the isolation you are relying on. Account-scoped S3 state — notably the
+         * account-level Block Public Access configuration — is never widened by this flag.
+         */
+        @WithDefault("false")
+        boolean globalBucketNamespace();
     }
 
     interface DynamoDbServiceConfig {
@@ -921,6 +1064,14 @@ public interface EmulatorConfig {
 
         /** Docker network to attach ElastiCache containers to. Empty = default bridge. */
         Optional<String> dockerNetwork();
+
+        /**
+         * Hostname cluster-mode nodes announce in MOVED/ASK redirects and cluster topology,
+         * and that is reported as the ConfigurationEndpoint. Must resolve to Floci from every
+         * client location; set it when the main hostname only resolves inside Floci's Docker
+         * network. Empty = the main hostname.
+         */
+        Optional<String> clusterAnnounceHostname();
     }
 
     interface MemoryDbServiceConfig {
@@ -1161,6 +1312,16 @@ public interface EmulatorConfig {
         /** Allows invoking plain HTTP endpoints. By default, AWS only allows HTTPS. */
         @WithDefault("true")
         boolean allowPlaintextHttp();
+
+        /**
+         * Path to a Step Functions Local compatible mock configuration file
+         * ({@code MockConfigFile.json}). When set, {@code StartExecution} on
+         * {@code <stateMachineArn>#<testCaseName>} runs the state machine with that test
+         * case's mocked service integration responses. The main application.yml defaults
+         * this to the {@code SFN_MOCK_CONFIG} environment variable for drop-in
+         * compatibility with Step Functions Local.
+         */
+        Optional<String> mockConfigFile();
     }
 
     interface SwfServiceConfig {
@@ -1189,6 +1350,19 @@ public interface EmulatorConfig {
 
         @WithDefault("30")
         long deletedStackRetentionSeconds();
+
+        /**
+         * Whether an {@code AWS::Lambda::Function} whose template names code in S3 that cannot be
+         * read should fall back to the built-in stub handler instead of failing the resource.
+         *
+         * <p>Defaults to {@code false}, matching real CloudFormation, which fails the resource and
+         * rolls the stack back. Set to {@code true} to restore the older behaviour for a stack that
+         * deliberately leaves Lambda packages unbuilt — note that such a stack reports
+         * {@code CREATE_COMPLETE} while serving a placeholder that returns
+         * {@code {"statusCode":200}}, so it cannot be used to verify the real function.
+         */
+        @WithDefault("false")
+        boolean allowStubLambdaCode();
     }
 
     interface AcmServiceConfig {
@@ -1203,6 +1377,14 @@ public interface EmulatorConfig {
     interface CloudHsmV2ServiceConfig {
         @WithDefault("true")
         boolean enabled();
+    }
+
+    interface OrganizationsServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        @WithDefault("false")
+        boolean scpEnforcementEnabled();
     }
 
     interface AthenaServiceConfig {
@@ -1358,6 +1540,11 @@ public interface EmulatorConfig {
     }
 
     interface TextractServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface ComprehendServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }
@@ -1520,10 +1707,25 @@ public interface EmulatorConfig {
 
         Optional<String> dockerHostOverride();
 
-        @WithDefault("9200")
+        /**
+         * Runtime API port pool. One port is held for the lifetime of each running Lambda
+         * container, so this range is a hard ceiling on concurrent Lambda executions.
+         *
+         * <p>The former 9200-9299 default was exactly 100 ports, which cannot run a
+         * multi-account landing zone — LZA's LoggingStack fans out ~8 custom-resource Lambdas
+         * per account, so a 14-account org needs ~112 at once. Exhaustion did not read as a
+         * capacity limit either: the custom resource reported FAILED and CloudFormation rolled
+         * the stack back, so it surfaced as an unrelated CFN error (issue #2206).
+         *
+         * <p>12000-12499 rather than a widened 9200 range: 9200 is OpenSearch, 9092 Kafka,
+         * 9644 the Redpanda admin port and 9400-9499 the ECS proxy pool. Those are
+         * sibling-container-internal so they would not truly collide, but a pool this wide
+         * stops being obvious about what it covers. 12000-12499 touches nothing.
+         */
+        @WithDefault("12000")
         int runtimeApiBasePort();
 
-        @WithDefault("9299")
+        @WithDefault("12499")
         int runtimeApiMaxPort();
 
         @WithDefault("./data/lambda-code")
@@ -1681,6 +1883,24 @@ public interface EmulatorConfig {
          */
         @WithDefault("false")
         boolean awsFaithfulPrivateIp();
+
+        /**
+         * Whether an EC2 instance's Docker container IP is routable from the machines that
+         * consume Floci's API responses (Terraform, Terratest, your shell). When true,
+         * DescribeInstances / DescribeAddresses report the container IP, so the address they
+         * hand out accepts connections on the service's real port (22 for SSH, and every other
+         * port the guest listens on) with no port mapping involved. When false, Floci keeps
+         * reporting 127.0.0.1 and reachability depends on the published high host ports.
+         *
+         * Unset (the default) means auto-detect: Floci opens a throwaway TCP connection towards
+         * the container network and treats a refusal as proof of a route. Set it explicitly when
+         * the probe cannot speak for your clients — most notably when Floci itself runs as a
+         * container, where the probe measures container-to-container reachability rather than
+         * host-to-container.
+         *
+         * Env var: FLOCI_SERVICES_EC2_CONTAINER_IPS_ROUTABLE
+         */
+        Optional<Boolean> containerIpsRoutable();
 
         /** Port on the Floci host for the IMDS HTTP server (169.254.169.254 equivalent). */
         @WithDefault("9169")

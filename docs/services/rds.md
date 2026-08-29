@@ -14,17 +14,17 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | Action | Description |
 | --- | --- |
 | `CreateDBInstance` | Start a new database instance |
-| `DescribeDBInstances` | List instances and their connection info |
+| `DescribeDBInstances` | List instances and their connection info — the list form includes DocumentDB and Neptune instances and takes an `engine` filter |
 | `DeleteDBInstance` | Stop and remove an instance |
 | `ModifyDBInstance` | Update instance settings |
 | `RebootDBInstance` | Restart a database instance |
 | `DescribeOrderableDBInstanceOptions` | List deterministic instance class options |
-| `CreateDBSubnetGroup` | Create a DB subnet group |
+| `CreateDBSubnetGroup` | Create a DB subnet group; tags given here are readable through `ListTagsForResource` |
 | `DescribeDBSubnetGroups` | List DB subnet groups |
 | `ModifyDBSubnetGroup` | Update DB subnet group description and subnet list |
 | `DeleteDBSubnetGroup` | Delete a DB subnet group |
 | `CreateDBCluster` | Create an Aurora-compatible cluster |
-| `DescribeDBClusters` | List clusters |
+| `DescribeDBClusters` | List clusters — the list form covers the RDS family, DocumentDB and Neptune clusters included, and takes an `engine` filter |
 | `DeleteDBCluster` | Delete a cluster |
 | `ModifyDBCluster` | Update cluster settings |
 | `CreateDBParameterGroup` | Create a parameter group |
@@ -41,7 +41,7 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | `DescribeOptionGroups` | List option groups, including the implicit `default:` groups |
 | `ModifyOptionGroup` | Add, update, or remove options in an option group |
 | `DeleteOptionGroup` | Delete an option group |
-| `DescribeDBSnapshots` | - |
+| `DescribeDBSnapshots` | Return an empty snapshot list (snapshots are not modeled) |
 | `DescribeDBProxies` | List DB proxies |
 | `CreateDBProxy` | Create a DB proxy |
 | `ModifyDBProxy` | Update mutable DB proxy authentication, logging, timeout, TLS, role, and security-group settings |
@@ -51,12 +51,25 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | `DescribeDBProxyTargetGroups` | List a proxy's target groups |
 | `ModifyDBProxyTargetGroup` | Update target-group connection-pool configuration |
 | `DescribeDBProxyTargets` | List a proxy target group's registered targets |
-| `DescribeDBClusterSnapshots` | - |
+| `DescribeDBClusterSnapshots` | Return an empty cluster-snapshot list (snapshots are not modeled) |
 | `DescribeGlobalClusters` | List global clusters — always empty, as none are modeled |
 | `AddTagsToResource` | Add tags to a DB resource |
 | `ListTagsForResource` | List tags for a DB resource |
 | `RemoveTagsFromResource` | Remove tags from a DB resource |
 <!-- floci:actions:end -->
+
+`CreateDBInstance` stores `StorageEncrypted`, `KmsKeyId`, `BackupRetentionPeriod`,
+`PreferredBackupWindow`, `PreferredMaintenanceWindow` and `CopyTagsToSnapshot`, and
+`DescribeDBInstances` returns them; `ModifyDBInstance` changes the backup settings and
+the windows. The same checks as on AWS apply (`KmsKeyId` needs `StorageEncrypted`,
+windows are at least 30 minutes and may not overlap). `KmsKeyId` is accepted as a key ARN,
+key id, alias ARN or alias name, resolved against the KMS store in the request's region and
+returned as the key ARN; a key that does not exist or is not enabled is
+`KMSKeyNotAccessibleFault`. Where AWS picks a random window,
+Floci uses `04:00-06:00` and `mon:00:00-mon:03:00` (or, when the window given on create overlaps the
+usual default, a 30-minute window starting where the given one ends); a window given on modify is
+checked against the instance's other window. Modifications apply immediately —
+`PendingModifiedValues` is not modeled.
 
 ## Configuration
 
@@ -292,3 +305,34 @@ FLOCI_STORAGE_HOST_PERSISTENT_PATH=/absolute/host/path/data
 The RDS auth proxy validates the master username and password at the proxy layer. All other database users are passed through directly to the backend engine — create them with standard SQL (`CREATE USER`) and connect as normal.
 
 IAM database authentication is also supported. Set `--enable-iam-database-authentication` at instance creation time and use `aws rds generate-db-auth-token` to obtain a token.
+
+## TLS / SSL
+
+The RDS auth proxy terminates TLS itself (the backend container stays plaintext) using a
+self-signed CA whose Subject Alternative Names cover every advertised host Floci has handed
+out for a DB instance, cluster, or RDS Proxy — the Docker bridge IP, `host.docker.internal`,
+`localhost`, or whatever `rds.endpointHost` resolves to. The CA is persisted at
+`{storage.persistent-path}/tls/rds-ca.crt` and grows its SAN list as new hosts appear, so the
+same root survives restarts and works for every local database, not just the one that
+generated it.
+
+Floci logs the certificate path (and the `PGSSLROOTCERT` hint) the first time it generates or
+loads it:
+
+```
+RDS proxy TLS: CA cert at ./data/tls/rds-ca.crt
+RDS proxy TLS: for sslmode=verify-full set PGSSLROOTCERT=./data/tls/rds-ca.crt
+```
+
+Because the SAN matches the address you actually connect to, `verify-full` (the same level
+Aurora enforces in AWS) works locally too — no need to fall back to `sslmode=disable` just to
+exercise the same connection-string settings you use in production:
+
+```bash
+# PostgreSQL
+PGSSLROOTCERT=./data/tls/rds-ca.crt psql "host=localhost port=7001 user=admin sslmode=verify-full"
+
+# MySQL / MariaDB
+mysql -h 127.0.0.1 -P 7002 -u root -psecret123 \
+  --ssl-mode=VERIFY_IDENTITY --ssl-ca=./data/tls/rds-ca.crt
+```

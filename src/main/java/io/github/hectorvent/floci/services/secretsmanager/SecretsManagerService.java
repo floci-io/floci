@@ -34,9 +34,14 @@ import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Predicate;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
+import java.util.LinkedHashMap;
+import java.util.Set;
 
 @ApplicationScoped
-public class SecretsManagerService {
+public class SecretsManagerService implements ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(SecretsManagerService.class);
 
@@ -99,7 +104,13 @@ public class SecretsManagerService {
         String storageKey = regionKey(region, name);
         Secret existing = store.get(storageKey).orElse(null);
 
-        if (existing != null && existing.getDeletedDate() == null) {
+        if (existing != null) {
+            // A name inside its recovery window is still taken: the secret is recoverable via
+            // RestoreSecret, so reusing the name has to be refused rather than allowed to
+            // overwrite it. Without this the create would replace the stored secret at the same
+            // key AND clear its deletedDate, so the original value became unrecoverable and
+            // RestoreSecret then reported "was not deleted" - silent data loss.
+            throwIfPendingDeletion(existing);
             throw new AwsException("ResourceExistsException",
                     "A secret with the name " + name + " already exists.", 400);
         }
@@ -138,11 +149,7 @@ public class SecretsManagerService {
 
     public SecretVersion getSecretValue(String secretId, String versionId, String versionStage, String region) {
         Secret secret = resolveSecret(secretId, region);
-
-        if (secret.getDeletedDate() != null) {
-            throw new AwsException("ResourceNotFoundException",
-                    "Secrets Manager can't find the specified secret.", 400);
-        }
+        throwIfPendingDeletion(secret);
 
         SecretVersion version;
         if (versionId != null && !versionId.isEmpty()) {
@@ -178,11 +185,7 @@ public class SecretsManagerService {
                                         String secretBinary, String clientRequestToken, String region,
                                         List<String> versionStages) {
         Secret secret = resolveSecret(secretId, region);
-
-        if (secret.getDeletedDate() != null) {
-            throw new AwsException("ResourceNotFoundException",
-                    "Secrets Manager can't find the specified secret.", 400);
-        }
+        throwIfPendingDeletion(secret);
 
         if (clientRequestToken != null && (clientRequestToken.length() < 32 || clientRequestToken.length() > 64)) {
             throw new AwsException("InvalidParameterException", "ClientRequestToken must be between 32 and 64 characters long.", 400);
@@ -285,11 +288,7 @@ public class SecretsManagerService {
 
     public Secret updateSecret(String secretId, String description, String kmsKeyId, String region) {
         Secret secret = resolveSecret(secretId, region);
-
-        if (secret.getDeletedDate() != null) {
-            throw new AwsException("ResourceNotFoundException",
-                    "Secrets Manager can't find the specified secret.", 400);
-        }
+        throwIfPendingDeletion(secret);
 
         if (description != null) {
             secret.setDescription(description);
@@ -370,10 +369,7 @@ public class SecretsManagerService {
         Secret resolved = resolveSecret(secretId, region);
         synchronized (lockFor(resolved.getArn())) {
             Secret secret = resolveSecret(resolved.getArn(), region);
-            if (secret.getDeletedDate() != null) {
-                throw new AwsException("ResourceNotFoundException",
-                        "Secrets Manager can't find the specified secret.", 400);
-            }
+            throwIfPendingDeletion(secret);
 
             String existingOwner = secret.getTargetAttachmentOwner();
             if (existingOwner != null && !existingOwner.equals(attachmentOwner)) {
@@ -559,6 +555,13 @@ public class SecretsManagerService {
             return secret;
         }
 
+        // Guard placed AFTER the force-delete branch on purpose: force-deleting a secret that is
+        // already inside its recovery window is a legitimate "skip the window, remove it now"
+        // escape hatch, so only the scheduling path is refused. Re-scheduling an already-scheduled
+        // secret silently moved its DeletionDate, which would quietly extend a window a caller
+        // believed was already counting down.
+        throwIfPendingDeletion(secret);
+
         int windowDays = (recoveryWindowInDays != null) ? recoveryWindowInDays : defaultRecoveryWindowDays;
         Instant deletedDate = Instant.now().plusSeconds((long) windowDays * 86400);
         secret.setDeletedDate(deletedDate);
@@ -585,11 +588,7 @@ public class SecretsManagerService {
     public Secret rotateSecret(String secretId, String clientRequestToken, String rotationLambdaArn, Secret.RotationRules rotationRules,
                                boolean rotateImmediately, String region) {
         Secret secret = resolveSecret(secretId, region);
-
-        if (secret.getDeletedDate() != null) {
-            throw new AwsException("ResourceNotFoundException",
-                    "Secrets Manager can't find the specified secret.", 400);
-        }
+        throwIfPendingDeletion(secret);
 
         if (clientRequestToken != null && (clientRequestToken.length() < 32 || clientRequestToken.length() > 64)) {
             throw new AwsException("InvalidParameterException", "ClientRequestToken must be between 32 and 64 characters long.", 400);
@@ -753,6 +752,7 @@ public class SecretsManagerService {
 
     public void tagResource(String secretId, List<Secret.Tag> tags, String region) {
         Secret secret = resolveSecret(secretId, region);
+        throwIfPendingDeletion(secret);
 
         List<Secret.Tag> existing = secret.getTags() != null ? new ArrayList<>(secret.getTags()) : new ArrayList<>();
         for (Secret.Tag newTag : tags) {
@@ -765,11 +765,39 @@ public class SecretsManagerService {
 
     public void untagResource(String secretId, List<String> tagKeys, String region) {
         Secret secret = resolveSecret(secretId, region);
+        throwIfPendingDeletion(secret);
 
         List<Secret.Tag> existing = secret.getTags() != null ? new ArrayList<>(secret.getTags()) : new ArrayList<>();
         existing.removeIf(t -> tagKeys.contains(t.key()));
         secret.setTags(existing);
         store.put(regionKey(region, secret.getName()), secret);
+    }
+
+    public Secret putResourcePolicy(String secretId, String resourcePolicy, String region) {
+        Secret secret = resolveSecret(secretId, region);
+        throwIfPendingDeletion(secret);
+        secret.setResourcePolicy(resourcePolicy);
+        store.put(regionKey(region, secret.getName()), secret);
+        LOG.infov("Put resource policy on secret: {0}", secret.getName());
+        return secret;
+    }
+
+    // Real AWS rejects GetResourcePolicy on a secret in its recovery window the same way it
+    // rejects the mutating ops; the terraform provider matches that InvalidRequestException's
+    // "marked for deletion" message to treat the policy as gone, so the guard applies here too.
+    public Secret getResourcePolicy(String secretId, String region) {
+        Secret secret = resolveSecret(secretId, region);
+        throwIfPendingDeletion(secret);
+        return secret;
+    }
+
+    public Secret deleteResourcePolicy(String secretId, String region) {
+        Secret secret = resolveSecret(secretId, region);
+        throwIfPendingDeletion(secret);
+        secret.setResourcePolicy(null);
+        store.put(regionKey(region, secret.getName()), secret);
+        LOG.infov("Deleted resource policy on secret: {0}", secret.getName());
+        return secret;
     }
 
     public Map<String, List<String>> listSecretVersionIds(String secretId, String region) {
@@ -838,9 +866,7 @@ public class SecretsManagerService {
         }
 
         Secret secret = resolveSecret(secretId, region);
-        if (secret.getDeletedDate() != null) {
-            throw new AwsException("ResourceNotFoundException", "Secrets Manager can't find the specified secret.", 400);
-        }
+        throwIfPendingDeletion(secret);
 
         SecretVersion versionByStage = findVersionByStage(secret, versionStage);
         String currentVersionId = versionByStage != null
@@ -934,6 +960,22 @@ public class SecretsManagerService {
         }
     }
 
+    /**
+     * A secret found by {@link #resolveSecret} with {@code deletedDate} set is on the
+     * recovery-window path (still in {@code store}, still restorable) - {@link
+     * #deleteSecret} force-deletes by removing the entry from {@code store} outright, so a
+     * fully, permanently gone secret never reaches this check; {@code resolveSecret} throws
+     * ResourceNotFoundException for that case on its own. Real AWS's error for the
+     * recoverable case is InvalidRequestException, matching what {@code batchGetSecretValue}
+     * already does correctly - the other call sites threw ResourceNotFoundException instead.
+     */
+    private void throwIfPendingDeletion(Secret secret) {
+        if (secret.getDeletedDate() != null) {
+            throw new AwsException("InvalidRequestException",
+                    "You can't perform this operation on the secret because it was marked for deletion.", 400);
+        }
+    }
+
     private Secret resolveSecret(String secretId, String region) {
         if (secretId.startsWith("arn:")) {
             // 1. Exact full-ARN match
@@ -999,5 +1041,36 @@ public class SecretsManagerService {
             sb.append(ALPHABET.charAt(rng.nextInt(ALPHABET.length())));
         }
         return sb.toString();
+    }
+
+    // ─── Resource Explorer 2 ───────────────────────────────────────────────────
+
+    @Override
+    public List<ExplorerResource> getResources() {
+        List<ExplorerResource> resources = new ArrayList<>();
+        for (Secret secret : store.scan(k -> true)) {
+            String arn = secret.getArn();
+            if (arn == null) {
+                continue;
+            }
+            AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+            Map<String, String> tags = new LinkedHashMap<>();
+            if (secret.getTags() != null) {
+                for (Secret.Tag tag : secret.getTags()) {
+                    tags.put(tag.key(), tag.value() != null ? tag.value() : "");
+                }
+            }
+            resources.add(new ExplorerResource(
+                    arn, "secretsmanager:secret", "secretsmanager",
+                    parsed.region(), parsed.accountId(),
+                    secret.getCreatedDate() != null ? secret.getCreatedDate() : Instant.now(),
+                    tags));
+        }
+        return resources;
+    }
+
+    @Override
+    public Set<SupportedResourceType> getSupportedResourceTypes() {
+        return Set.of(new SupportedResourceType("secretsmanager:secret", "secretsmanager", true));
     }
 }

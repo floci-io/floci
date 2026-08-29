@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
+import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.services.codebuild.BuildspecParser.ParsedArtifacts;
 import io.github.hectorvent.floci.services.codebuild.BuildspecParser.ParsedBuildspec;
 import io.github.hectorvent.floci.services.codebuild.model.Build;
@@ -220,6 +221,8 @@ public class CodeBuildRunner implements ContainerTeardown {
                     .withHostDockerInternalOnLinux()
                     .withPrivileged(privileged)
                     .withLogRotation()
+                    .withLabels(ContainerStorageHelper.resourceIdentityLabels(
+                            "codebuild", buildId, regionResolver.getAccountId(), region))
                     .build();
 
             ContainerLifecycleManager.ContainerInfo info = lifecycleManager.createAndStart(spec);

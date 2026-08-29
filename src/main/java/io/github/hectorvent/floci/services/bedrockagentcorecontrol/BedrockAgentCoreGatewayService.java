@@ -28,7 +28,8 @@ public class BedrockAgentCoreGatewayService {
     private static final String STATUS_DELETING = "DELETING";
     private static final String LOWER = "abcdefghijklmnopqrstuvwxyz0123456789";
     private static final String ALNUM = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-    private static final int MAX_PAGE = 100;
+    private static final int DEFAULT_PAGE = 100;
+    private static final int MAX_PAGE = 1000;
 
     private final StorageBackend<String, Gateway> storage;
     private final RegionResolver regionResolver;
@@ -140,7 +141,14 @@ public class BedrockAgentCoreGatewayService {
     public PaginatedResult<Gateway> list(Integer maxResults, String nextToken, String region) {
         String prefix = keyPrefix(region);
         List<Gateway> all = storage.scan(k -> k.startsWith(prefix));
-        return Pagination.paginate(all, Gateway::getGatewayId, maxResults, nextToken, MAX_PAGE, "ValidationException");
+        return Pagination.paginate(
+                all,
+                Gateway::getGatewayId,
+                maxResults,
+                nextToken,
+                DEFAULT_PAGE,
+                MAX_PAGE,
+                "ValidationException");
     }
 
     public String gatewayArn(Gateway gateway, String region) {
@@ -199,8 +207,14 @@ public class BedrockAgentCoreGatewayService {
 
     public PaginatedResult<GatewayTarget> listTargets(String gatewayId, Integer maxResults, String nextToken, String region) {
         Gateway gateway = get(gatewayId, region);
-        return Pagination.paginate(gateway.getTargets(), GatewayTarget::getTargetId, maxResults, nextToken,
-                MAX_PAGE, "ValidationException");
+        return Pagination.paginate(
+                gateway.getTargets(),
+                GatewayTarget::getTargetId,
+                maxResults,
+                nextToken,
+                DEFAULT_PAGE,
+                MAX_PAGE,
+                "ValidationException");
     }
 
     private GatewayTarget findTarget(Gateway gateway, String targetId) {

@@ -7,6 +7,11 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackedMap;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
+import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import io.github.hectorvent.floci.services.lambda.model.EventSourceMapping;
 import io.github.hectorvent.floci.services.lambda.model.FunctionEventInvokeConfig;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
@@ -39,6 +44,7 @@ import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Pattern;
@@ -47,7 +53,7 @@ import java.util.regex.Pattern;
  * Business logic for Lambda function management and invocation.
  */
 @ApplicationScoped
-public class LambdaService {
+public class LambdaService implements ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(LambdaService.class);
     private static final Pattern EFS_ACCESS_POINT_ARN = Pattern.compile(
@@ -55,6 +61,11 @@ public class LambdaService {
                     + "(?:(?:-gov)|(?:-iso(?:b)?))?-[a-z]+-\\d:"
                     + "\\d{12}:access-point/fsap-[a-f0-9]{17}$");
     private static final Pattern FILE_SYSTEM_LOCAL_MOUNT_PATH = Pattern.compile("^/mnt/[A-Za-z0-9._-]+$");
+    private static final Pattern LOG_GROUP_PATTERN = Pattern.compile("[.\\-_/#A-Za-z0-9]+");
+    private static final Pattern ROLE_ARN_PATTERN = Pattern.compile(
+            "arn:(aws[a-zA-Z-]*)?:iam::\\d{12}:role/?[a-zA-Z_0-9+=,.@\\-_/]+");
+    private static final Pattern HANDLER_PATTERN = Pattern.compile("\\S+");
+    private static final int MAX_HANDLER_LENGTH = 128;
 
     private final LambdaFunctionStore functionStore;
     private final LambdaExecutorService executorService;
@@ -73,6 +84,7 @@ public class LambdaService {
     private final DynamoDbStreamsEventSourcePoller dynamodbStreamsPoller;
     private final StorageFactory storageFactory;
     private final LambdaLayerService layerService;
+    private final Ec2Service ec2Service;
     private Map<String, Integer> versionCounters = new ConcurrentHashMap<>();
     private Map<String, FunctionEventInvokeConfig> eventInvokeConfigs = new ConcurrentHashMap<>();
     /**
@@ -142,6 +154,7 @@ public class LambdaService {
         this.dynamodbStreamsPoller = null;
         this.storageFactory = storageFactory;
         this.layerService = null;
+        this.ec2Service = null;
     }
 
     @Inject
@@ -161,7 +174,8 @@ public class LambdaService {
                           KinesisEventSourcePoller kinesisPoller,
                           DynamoDbStreamsEventSourcePoller dynamodbStreamsPoller,
                           StorageFactory storageFactory,
-                          LambdaLayerService layerService) {
+                          LambdaLayerService layerService,
+                          Ec2Service ec2Service) {
         this.functionStore = functionStore;
         this.executorService = executorService;
         this.concurrencyLimiter = concurrencyLimiter;
@@ -179,6 +193,7 @@ public class LambdaService {
         this.dynamodbStreamsPoller = dynamodbStreamsPoller;
         this.storageFactory = storageFactory;
         this.layerService = layerService;
+        this.ec2Service = ec2Service;
     }
 
     // Real AWS validates a function's Layers eagerly at CreateFunction/UpdateFunctionConfiguration
@@ -250,6 +265,32 @@ public class LambdaService {
         if (count > 0) {
             LOG.infov("Restored reserved concurrency for {0} function(s)", count);
         }
+    }
+
+    @Override
+    public List<ExplorerResource> getResources() {
+        List<ExplorerResource> resources = new ArrayList<>();
+        for (LambdaFunction fn : functionStore.listAll()) {
+            if (!"$LATEST".equals(fn.getVersion())) {
+                continue;
+            }
+            String arn = fn.getFunctionArn();
+            if (arn == null) {
+                continue;
+            }
+            AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+            resources.add(new ExplorerResource(
+                    arn, "lambda:function", "lambda",
+                    parsed.region(), parsed.accountId(),
+                    fn.getLastModified() > 0 ? Instant.ofEpochMilli(fn.getLastModified()) : Instant.now(),
+                    fn.getTags() != null ? fn.getTags() : Map.of()));
+        }
+        return resources;
+    }
+
+    @Override
+    public Set<SupportedResourceType> getSupportedResourceTypes() {
+        return Set.of(new SupportedResourceType("lambda:function", "lambda", true));
     }
 
     public LambdaFunction createFunction(String region, Map<String, Object> request) {
@@ -354,7 +395,11 @@ public class LambdaService {
             @SuppressWarnings("unchecked")
             Map<String, Object> vpc = (Map<String, Object>) request.get("VpcConfig");
             fn.setVpcConfig(vpc);
+            fn.setVpcId(resolveVpcId(region, vpc));
         }
+
+        applySnapStart(fn, request.get("SnapStart"));
+        applyLoggingConfig(fn, request.get("LoggingConfig"));
 
         List<LambdaFileSystemConfig> fileSystemConfigs =
                 parseFileSystemConfigs(request.get("FileSystemConfigs"));
@@ -496,6 +541,18 @@ public class LambdaService {
         if (request.containsKey("Layers")) {
             validateLayersResolvable(layerList);
         }
+        if (request.containsKey("SnapStart")) {
+            validateSnapStart(request.get("SnapStart"));
+        }
+        if (request.containsKey("LoggingConfig")) {
+            validateLoggingConfig(request.get("LoggingConfig"));
+        }
+        if (request.containsKey("Role")) {
+            validateRoleArn((String) request.get("Role"));
+        }
+        if (request.containsKey("Handler")) {
+            validateHandler((String) request.get("Handler"));
+        }
 
         Map<String, Object> requestedVpcConfig = fn.getVpcConfig();
         if (request.get("VpcConfig") instanceof Map<?, ?>) {
@@ -589,7 +646,16 @@ public class LambdaService {
         if (request.containsKey("VpcConfig")) {
             if (request.get("VpcConfig") instanceof Map<?, ?>) {
                 fn.setVpcConfig(requestedVpcConfig);
+                fn.setVpcId(resolveVpcId(region, requestedVpcConfig));
             }
+        }
+
+        if (request.containsKey("SnapStart")) {
+            applySnapStart(fn, request.get("SnapStart"));
+        }
+
+        if (request.containsKey("LoggingConfig")) {
+            applyLoggingConfig(fn, request.get("LoggingConfig"));
         }
 
         if (request.containsKey("FileSystemConfigs")) {
@@ -644,9 +710,11 @@ public class LambdaService {
             if (concurrencyLimiter != null) {
                 concurrencyLimiter.reset(arn);
             }
-            codeStore.delete(functionName);
+            codeStore.delete(ownerAccount(fn), functionName);
             functionStore.delete(region, functionName);
-            versionCounters.remove(region + "::" + functionName);
+            reclaimLegacyCodeDirectoryIfUnused(functionName);
+            versionCounters.remove(versionCounterKey(region, fn));
+            versionCounters.remove(legacyVersionCounterKey(region, functionName));
             if (aliasStore != null) {
                 for (LambdaAlias alias : aliasStore.list(region, functionName)) {
                     aliasStore.delete(region, functionName, alias.getName());
@@ -663,6 +731,27 @@ public class LambdaService {
             }
         }
         LOG.infov("Deleted Lambda function: {0}", functionName);
+    }
+
+    /**
+     * The pre-account-scoped code layout gave every account's same-named function the exact
+     * same on-disk directory (CodeStore never scoped it by region either), so it is only safe
+     * to reclaim once nothing at all still has {@code codeLocalPath} pointing at it. That
+     * includes published versions, not just {@code $LATEST}: publishVersion snapshots
+     * codeLocalPath verbatim, so a version published while $LATEST was still on the legacy path
+     * keeps that directory alive on its own even after $LATEST itself migrates. Checking only
+     * $LATEST (via listAllAccounts) missed this and let a later delete or code update reclaim
+     * the directory out from under that version's own future invokes. listAll() has no region
+     * or $LATEST filter, matching the fact that the legacy path itself carries neither.
+     */
+    private void reclaimLegacyCodeDirectoryIfUnused(String functionName) {
+        String legacyPath = codeStore.getLegacyCodePath(functionName).toAbsolutePath().normalize().toString();
+        boolean stillLive = functionStore.listAll().stream()
+                .anyMatch(other -> functionName.equals(other.getFunctionName())
+                        && legacyPath.equals(other.getCodeLocalPath()));
+        if (!stillLive) {
+            codeStore.deleteLegacy(functionName);
+        }
     }
 
     public InvokeResult invoke(String region, String functionName, byte[] payload, InvocationType type) {
@@ -1077,64 +1166,102 @@ public class LambdaService {
      * {@code concurrencyOpLocks}) so publishes of unrelated functions do not
      * serialize on the instance monitor for the storage round-trip.
      */
-    private int nextVersionNumber(String counterKey) {
+    private int nextVersionNumber(String counterKey, String legacyCounterKey) {
         synchronized (versionCounterLocks.computeIfAbsent(counterKey, k -> new Object())) {
-            int next = versionCounters.getOrDefault(counterKey, 0) + 1;
+            Integer current = versionCounters.get(counterKey);
+            if (current == null && legacyCounterKey != null) {
+                // Counters persisted before the key carried the owning account. Starting over
+                // from 0 here would re-issue a version number that already names a snapshot.
+                current = versionCounters.remove(legacyCounterKey);
+            }
+            int next = (current != null ? current : 0) + 1;
             versionCounters.put(counterKey, next);
             return next;
         }
     }
 
+    /**
+     * Version numbering belongs to the owning account, not to whichever account's
+     * partition the counter map happens to be reached through.
+     */
+    static String versionCounterKey(String region, LambdaFunction fn) {
+        return region + "::" + ownerAccount(fn) + "::" + fn.getFunctionName();
+    }
+
+    /** The pre-account counter key, still present in persisted state from before this change. */
+    private static String legacyVersionCounterKey(String region, String functionName) {
+        return region + "::" + functionName;
+    }
+
+    /** Package-private accessor for tests that need to seed or inspect counter state. */
+    Map<String, Integer> versionCounters() {
+        return versionCounters;
+    }
+
     public LambdaFunction publishVersion(String region, String functionName, String description) {
         LambdaFunction fn = getFunction(region, functionName);
         functionName = fn.getFunctionName();
-        int version = nextVersionNumber(region + "::" + functionName);
-        LambdaFunction snapshot = new LambdaFunction();
-        snapshot.setAccountId(fn.getAccountId());
-        snapshot.setFunctionName(fn.getFunctionName());
-        snapshot.setVersion(String.valueOf(version));
-        snapshot.setFunctionArn(fn.getFunctionArn().replace(":$LATEST", "") + ":" + version);
-        snapshot.setRuntime(fn.getRuntime());
-        snapshot.setRole(fn.getRole());
-        snapshot.setHandler(fn.getHandler());
-        snapshot.setDescription(description != null ? description : fn.getDescription());
-        snapshot.setTimeout(fn.getTimeout());
-        snapshot.setMemorySize(fn.getMemorySize());
-        snapshot.setPackageType(fn.getPackageType());
-        snapshot.setState(fn.getState());
-        snapshot.setCodeSizeBytes(fn.getCodeSizeBytes());
-        snapshot.setEnvironment(fn.getEnvironment());
-        snapshot.setVpcConfig(fn.getVpcConfig() == null
-                ? null
-                : new java.util.HashMap<>(fn.getVpcConfig()));
-        snapshot.setFileSystemConfigs(new ArrayList<>(fn.getFileSystemConfigs()));
-        snapshot.setLastModified(System.currentTimeMillis());
-        snapshot.setRevisionId(UUID.randomUUID().toString());
+        // Shares the per-function lock deleteFunction and extractZipCodeBytes take around their
+        // own codeLocalPath-affecting work: without it, a version could be published in the
+        // narrow window between reclaimLegacyCodeDirectoryIfUnused's check and its actual
+        // delete, persisting a snapshot.codeLocalPath (below) that names a directory about to
+        // be removed as unreferenced.
+        synchronized (lockForConcurrencyOp(fn.getFunctionArn())) {
+            int version = nextVersionNumber(versionCounterKey(region, fn),
+                    legacyVersionCounterKey(region, functionName));
+            LambdaFunction snapshot = new LambdaFunction();
+            snapshot.setAccountId(fn.getAccountId());
+            snapshot.setFunctionName(fn.getFunctionName());
+            snapshot.setVersion(String.valueOf(version));
+            snapshot.setFunctionArn(fn.getFunctionArn().replace(":$LATEST", "") + ":" + version);
+            snapshot.setRuntime(fn.getRuntime());
+            snapshot.setRole(fn.getRole());
+            snapshot.setHandler(fn.getHandler());
+            snapshot.setDescription(description != null ? description : fn.getDescription());
+            snapshot.setTimeout(fn.getTimeout());
+            snapshot.setMemorySize(fn.getMemorySize());
+            snapshot.setPackageType(fn.getPackageType());
+            snapshot.setState(fn.getState());
+            snapshot.setCodeSizeBytes(fn.getCodeSizeBytes());
+            snapshot.setEnvironment(fn.getEnvironment());
+            snapshot.setVpcConfig(fn.getVpcConfig() == null
+                    ? null
+                    : new java.util.HashMap<>(fn.getVpcConfig()));
+            snapshot.setVpcId(fn.getVpcId());
+            snapshot.setSnapStartApplyOn(fn.getSnapStartApplyOn());
+            snapshot.setLogFormat(fn.getLogFormat());
+            snapshot.setApplicationLogLevel(fn.getApplicationLogLevel());
+            snapshot.setSystemLogLevel(fn.getSystemLogLevel());
+            snapshot.setLogGroup(fn.getLogGroup());
+            snapshot.setFileSystemConfigs(new ArrayList<>(fn.getFileSystemConfigs()));
+            snapshot.setLastModified(System.currentTimeMillis());
+            snapshot.setRevisionId(UUID.randomUUID().toString());
 
-        // Everything that determines what actually runs. Without these the snapshot describes a
-        // function with no code: a version-qualified invoke resolves to it, launches a container
-        // with nothing in it, and hangs to the function timeout instead of failing (#1987). A
-        // published version is an immutable snapshot of code plus configuration, so it carries the
-        // code location for every package type, not only Zip.
-        snapshot.setCodeLocalPath(fn.getCodeLocalPath());
-        snapshot.setCodeSha256(fn.getCodeSha256());
-        snapshot.setS3Bucket(fn.getS3Bucket());
-        snapshot.setS3Key(fn.getS3Key());
-        snapshot.setHotReloadHostPath(fn.getHotReloadHostPath());
-        snapshot.setImageUri(fn.getImageUri());
-        snapshot.setImageConfigCommand(fn.getImageConfigCommand());
-        snapshot.setImageConfigEntryPoint(fn.getImageConfigEntryPoint());
-        snapshot.setImageConfigWorkingDirectory(fn.getImageConfigWorkingDirectory());
-        snapshot.setLayers(fn.getLayers());
-        snapshot.setArchitectures(fn.getArchitectures());
-        snapshot.setEphemeralStorageSize(fn.getEphemeralStorageSize());
-        snapshot.setTracingMode(fn.getTracingMode());
-        snapshot.setDeadLetterTargetArn(fn.getDeadLetterTargetArn());
-        snapshot.setKmsKeyArn(fn.getKmsKeyArn());
+            // Everything that determines what actually runs. Without these the snapshot describes a
+            // function with no code: a version-qualified invoke resolves to it, launches a container
+            // with nothing in it, and hangs to the function timeout instead of failing (#1987). A
+            // published version is an immutable snapshot of code plus configuration, so it carries the
+            // code location for every package type, not only Zip.
+            snapshot.setCodeLocalPath(fn.getCodeLocalPath());
+            snapshot.setCodeSha256(fn.getCodeSha256());
+            snapshot.setS3Bucket(fn.getS3Bucket());
+            snapshot.setS3Key(fn.getS3Key());
+            snapshot.setHotReloadHostPath(fn.getHotReloadHostPath());
+            snapshot.setImageUri(fn.getImageUri());
+            snapshot.setImageConfigCommand(fn.getImageConfigCommand());
+            snapshot.setImageConfigEntryPoint(fn.getImageConfigEntryPoint());
+            snapshot.setImageConfigWorkingDirectory(fn.getImageConfigWorkingDirectory());
+            snapshot.setLayers(fn.getLayers());
+            snapshot.setArchitectures(fn.getArchitectures());
+            snapshot.setEphemeralStorageSize(fn.getEphemeralStorageSize());
+            snapshot.setTracingMode(fn.getTracingMode());
+            snapshot.setDeadLetterTargetArn(fn.getDeadLetterTargetArn());
+            snapshot.setKmsKeyArn(fn.getKmsKeyArn());
 
-        functionStore.save(region, snapshot);
-        LOG.infov("Published version {0} for function {1}", version, functionName);
-        return snapshot;
+            functionStore.save(region, snapshot);
+            LOG.infov("Published version {0} for function {1}", version, functionName);
+            return snapshot;
+        }
     }
 
     private static List<LambdaFileSystemConfig> parseFileSystemConfigs(Object value) {
@@ -1187,6 +1314,155 @@ public class LambdaService {
             throw new AwsException("InvalidParameterValueException",
                     "EFS file system access requires VpcConfig with subnets and security groups", 400);
         }
+    }
+
+    /**
+     * The VpcConfig request shape carries no VpcId; VpcConfigResponse does. AWS derives it from
+     * the subnets the function is attached to, so resolve it once at attach time and store it.
+     * A subnet EC2 has never heard of resolves to null rather than failing the call - Floci's
+     * Lambda accepts unmanaged subnet ids, and CreateFunction must not start rejecting them.
+     */
+    private String resolveVpcId(String region, Map<String, Object> vpcConfig) {
+        if (ec2Service == null || !hasValues(vpcConfig, "SubnetIds")) {
+            return null;
+        }
+        for (Object subnetId : (List<?>) vpcConfig.get("SubnetIds")) {
+            if (subnetId == null) {
+                continue;
+            }
+            try {
+                List<Subnet> found = ec2Service.describeSubnets(region, List.of(subnetId.toString()), Map.of());
+                if (!found.isEmpty() && found.get(0).getVpcId() != null) {
+                    return found.get(0).getVpcId();
+                }
+            } catch (RuntimeException e) {
+                LOG.debugv(e, "Could not resolve VpcId for subnet {0} in {1}", subnetId, region);
+            }
+        }
+        return null;
+    }
+
+    private static void validateSnapStart(Object value) {
+        if (!(value instanceof Map<?, ?> snapStart)) {
+            return;
+        }
+        Object applyOn = snapStart.get("ApplyOn");
+        if (applyOn != null && !"None".equals(applyOn) && !"PublishedVersions".equals(applyOn)) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value '" + applyOn + "' at 'snapStart.applyOn' failed to "
+                            + "satisfy constraint: Member must satisfy enum value set: "
+                            + "[PublishedVersions, None]", 400);
+        }
+    }
+
+    private static void applySnapStart(LambdaFunction fn, Object value) {
+        if (!(value instanceof Map<?, ?> snapStart)) {
+            return;
+        }
+        validateSnapStart(value);
+        Object applyOn = snapStart.get("ApplyOn");
+        fn.setSnapStartApplyOn(applyOn instanceof String s && !s.isBlank() ? s : "None");
+    }
+
+    private static void validateLoggingConfig(Object value) {
+        if (!(value instanceof Map<?, ?> logging)) {
+            return;
+        }
+        validateEnum(logging.get("LogFormat"), "loggingConfig.logFormat", List.of("JSON", "Text"));
+        validateEnum(logging.get("ApplicationLogLevel"), "loggingConfig.applicationLogLevel",
+                List.of("TRACE", "DEBUG", "INFO", "WARN", "ERROR", "FATAL"));
+        validateEnum(logging.get("SystemLogLevel"), "loggingConfig.systemLogLevel",
+                List.of("DEBUG", "INFO", "WARN"));
+        validateLogGroup(logging.get("LogGroup"));
+    }
+
+    private static void validateEnum(Object value, String field, List<String> allowed) {
+        if (value == null || allowed.contains(value)) {
+            return;
+        }
+        throw new AwsException("ValidationException",
+                "1 validation error detected: Value '" + value + "' at '" + field + "' failed to satisfy "
+                        + "constraint: Member must satisfy enum value set: ["
+                        + String.join(", ", allowed) + "]", 400);
+    }
+
+    /**
+     * LogGroup is the one LoggingConfig member with a documented length and character
+     * constraint rather than an enum: 1-512 characters, {@code [.\-_/#A-Za-z0-9]+}.
+     */
+    private static void validateLogGroup(Object value) {
+        if (!(value instanceof String group) || group.isBlank()) {
+            return;
+        }
+        if (group.length() > 512 || !LOG_GROUP_PATTERN.matcher(group).matches()) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value '" + group + "' at 'loggingConfig.logGroup' failed to "
+                            + "satisfy constraint: Member must satisfy regular expression pattern: "
+                            + "[.\\-_/#A-Za-z0-9]+ or member must have length less than or equal to 512", 400);
+        }
+    }
+
+    /**
+     * Role must be an IAM role ARN ({@code arn:aws*:iam::ACCOUNT:role/NAME}); blank/absent is
+     * only valid because callers gate this on {@code containsKey("Role")} beforehand.
+     */
+    private static void validateRoleArn(String role) {
+        if (role == null || !ROLE_ARN_PATTERN.matcher(role).matches()) {
+            throw new AwsException("InvalidParameterValueException",
+                    "1 validation error detected: Value '" + role + "' at 'role' failed to satisfy "
+                            + "constraint: Member must satisfy regular expression pattern: "
+                            + ROLE_ARN_PATTERN.pattern(), 400);
+        }
+    }
+
+    /**
+     * Handler must be a 0-128 character string with no whitespace; unlike {@code Description},
+     * a caller-supplied {@code null} is rejected rather than treated as "clear it" — {@code null}
+     * is not a string at all, and Handler names the file AWS invokes, so silently nulling it out
+     * would break every subsequent invocation instead of failing the request that caused it.
+     */
+    private static void validateHandler(String handler) {
+        if (handler == null) {
+            throw new AwsException("InvalidParameterValueException",
+                    "1 validation error detected: Value 'null' at 'handler' failed to satisfy "
+                            + "constraint: Member must not be null", 400);
+        }
+        if (handler.isEmpty()) {
+            return;
+        }
+        if (handler.length() > MAX_HANDLER_LENGTH || !HANDLER_PATTERN.matcher(handler).matches()) {
+            throw new AwsException("InvalidParameterValueException",
+                    "1 validation error detected: Value '" + handler + "' at 'handler' failed to satisfy "
+                            + "constraint: Member must satisfy regular expression pattern: "
+                            + HANDLER_PATTERN.pattern() + " or member must have length less than or equal to "
+                            + MAX_HANDLER_LENGTH, 400);
+        }
+    }
+
+    /**
+     * LoggingConfig is replaced wholesale, not merged: AWS resets any member the request omits
+     * back to its default, so an update that names only LogFormat drops a previously set LogGroup.
+     *
+     * <p>ApplicationLogLevel and SystemLogLevel are JSON-format-only: {@link #putLoggingConfig}
+     * never surfaces them for a Text-format function. Storing them anyway would leave state
+     * that is accepted, persisted and then never observable through any read path — the same
+     * accepted-then-forgotten shape this fix removes elsewhere — so they are only kept when the
+     * resolved format is JSON.
+     */
+    private static void applyLoggingConfig(LambdaFunction fn, Object value) {
+        if (!(value instanceof Map<?, ?> logging)) {
+            return;
+        }
+        validateLoggingConfig(value);
+        String format = logging.get("LogFormat") instanceof String f && !f.isBlank() ? f : "Text";
+        boolean json = "JSON".equals(format);
+        fn.setLogFormat(format);
+        fn.setApplicationLogLevel(json && logging.get("ApplicationLogLevel") instanceof String level
+                && !level.isBlank() ? level : null);
+        fn.setSystemLogLevel(json && logging.get("SystemLogLevel") instanceof String level
+                && !level.isBlank() ? level : null);
+        fn.setLogGroup(logging.get("LogGroup") instanceof String group && !group.isBlank()
+                ? group : null);
     }
 
     private static boolean hasValues(Map<String, Object> config, String key) {
@@ -1460,6 +1736,31 @@ public class LambdaService {
         return fn.getReservedConcurrentExecutions();
     }
 
+    /**
+     * Aggregates the caller's stored {@code $LATEST} functions in a region: code-size usage,
+     * function count, and the unreserved share of the configured concurrency limit.
+     */
+    public AccountSettings getAccountSettings(String region) {
+        List<LambdaFunction> functions = functionStore.list(region);
+        long totalCodeSize = 0;
+        long reserved = 0;
+        for (LambdaFunction fn : functions) {
+            totalCodeSize += fn.getCodeSizeBytes();
+            if (fn.getReservedConcurrentExecutions() != null) {
+                reserved += fn.getReservedConcurrentExecutions();
+            }
+        }
+        int concurrencyLimit = config != null
+                ? config.services().lambda().regionConcurrencyLimit()
+                : 1000;
+        long unreserved = Math.max(0, concurrencyLimit - reserved);
+        return new AccountSettings(totalCodeSize, functions.size(), concurrencyLimit, unreserved);
+    }
+
+    public record AccountSettings(long totalCodeSize, int functionCount,
+                                  int concurrentExecutions, long unreservedConcurrentExecutions) {
+    }
+
     public void deleteFunctionConcurrency(String region, String functionName) {
         LambdaFunction fn = getFunction(region, functionName);
         String arn = fn.getFunctionArn();
@@ -1483,7 +1784,8 @@ public class LambdaService {
         }
     }
 
-    private Object lockForConcurrencyOp(String functionArn) {
+    /** Package-private (not private) so tests can hold this lock to prove a critical section waits for it. */
+    Object lockForConcurrencyOp(String functionArn) {
         return concurrencyOpLocks.computeIfAbsent(functionArn, k -> new Object());
     }
 
@@ -1519,10 +1821,18 @@ public class LambdaService {
         return "awslambda-" + r + "-tasks";
     }
 
+    /**
+     * The account that owns a function, for keying account-scoped state (its S3 code key,
+     * its on-disk extraction directory, its PublishVersion counter). All three must agree,
+     * so they all derive the account here.
+     */
+    static String ownerAccount(LambdaFunction fn) {
+        return fn.getAccountId() != null ? fn.getAccountId() : "000000000000";
+    }
+
     /** Stable, account-scoped S3 key for a function's current deployment package. */
     public static String codeObjectKey(LambdaFunction fn) {
-        String account = fn.getAccountId() != null ? fn.getAccountId() : "000000000000";
-        return "snapshots/" + account + "/" + fn.getFunctionName();
+        return "snapshots/" + ownerAccount(fn) + "/" + fn.getFunctionName();
     }
 
     /** Stable, account-scoped S3 key for a published layer version's archive. */
@@ -1549,7 +1859,7 @@ public class LambdaService {
     }
 
     private void extractZipCodeBytes(LambdaFunction fn, byte[] zipBytes, String region) {
-        Path codePath = codeStore.getCodePath(fn.getFunctionName());
+        Path codePath = codeStore.getCodePath(ownerAccount(fn), fn.getFunctionName());
         try {
             zipExtractor.extractTo(zipBytes, codePath);
             fn.setCodeLocalPath(codePath.toAbsolutePath().normalize().toString());
@@ -1586,6 +1896,14 @@ public class LambdaService {
             // Deploy succeeded: keep the exact package so GetFunction can serve
             // a real Code.Location.
             storeDeploymentPackage(fn, zipBytes, region);
+            // Reclaim a directory left behind by a function created before account-scoping;
+            // codePath above is already the new location, so this is a no-op once migrated.
+            // Locked against publishVersion (see its own comment) so a version cannot be
+            // persisted, referencing this legacy path, in the window between the check below
+            // and the actual delete.
+            synchronized (lockForConcurrencyOp(fn.getFunctionArn())) {
+                reclaimLegacyCodeDirectoryIfUnused(fn.getFunctionName());
+            }
         } catch (AwsException e) {
             throw e;
         } catch (IOException e) {
@@ -2007,9 +2325,12 @@ public class LambdaService {
     public void onS3ObjectUpdated(@Observes S3ObjectUpdatedEvent event) {
         LOG.debugv("Observing S3 update: {0}/{1}", event.bucketName(), event.key());
         // For simplicity, we scan all functions in the default region
-        // Most local dev setups use a single region
+        // Most local dev setups use a single region.
+        // This runs on the CDI event thread with no RequestContext, so an ambient scan
+        // would only ever see the default account's partition — a function owned by any
+        // other account would silently never hot-reload from S3.
         String region = regionResolver.getDefaultRegion();
-        List<LambdaFunction> functions = functionStore.list(region);
+        List<LambdaFunction> functions = functionStore.listAllAccounts(region);
         for (LambdaFunction fn : functions) {
             if (fn.isHotReload()) {
                 continue;
@@ -2022,7 +2343,7 @@ public class LambdaService {
                     extractZipCodeBytes(fn, obj.getData(), region);
                     fn.setLastModified(Instant.now().toEpochMilli());
                     fn.setRevisionId(UUID.randomUUID().toString());
-                    functionStore.save(region, fn);
+                    functionStore.saveForAccount(ownerAccount(fn), region, fn);
 
                     // Push to warm workers
                     warmPool.pushCodeUpdate(fn);

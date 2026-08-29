@@ -34,6 +34,7 @@ class IamManagedPolicyAccountScopeTest {
 
     private static final String DEFAULT_ACCT = "000000000000";
     private static final String REQUEST_ACCT = "111111111111";
+    private static final String OTHER_ACCT = "222222222222";
 
     @SuppressWarnings("unchecked")
     private static Instance<RequestContext> requestContextFor(String accountId) {
@@ -84,6 +85,7 @@ class IamManagedPolicyAccountScopeTest {
         assertTrue(arns.contains(AwsManagedPolicies.ARN_PREFIX + "/AWSXRayDaemonWriteAccess"));
         assertTrue(arns.contains(AwsManagedPolicies.ARN_PREFIX + "/AWSCloudFormationReadOnlyAccess"));
         assertTrue(arns.contains(AwsManagedPolicies.ARN_PREFIX + "/AWSCloudFormationFullAccess"));
+        assertTrue(arns.contains(AwsManagedPolicies.ARN_PREFIX + "/AWSServiceCatalogEndUserFullAccess"));
         assertTrue(arns.contains(AwsManagedPolicies.ARN_PREFIX + "/AmazonElasticFileSystemClientFullAccess"));
     }
 
@@ -314,12 +316,78 @@ class IamManagedPolicyAccountScopeTest {
         assertEquals("acct-two", otherAccount.getAccountAlias().orElseThrow());
     }
 
+    /**
+     * A principal ARN names its own account. Resolving it against the ambient request account
+     * instead means that when two accounts each hold a same-named role or user, a caller
+     * presenting account A's ARN can be evaluated against account B's policies — a cross-account
+     * authorization bypass in either direction.
+     */
+    @Test
+    void aRoleArnResolvesTheNamedAccountsPoliciesNotTheRequestAccounts() {
+        String roleName = "app-role";
+        String docA = "{\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"s3:GetObject\"}]}";
+        String docB = "{\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"*\"}]}";
+        String trust = "{\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"Service\":\"ec2.amazonaws.com\"}}]}";
+
+        // The request runs as REQUEST_ACCT; only the ARN says which account owns the role.
+        AccountAwareStorageBackend<IamRole> roles = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), requestContextFor(REQUEST_ACCT), DEFAULT_ACCT);
+        IamRole roleA = new IamRole("AROLEA0000000001", roleName, "/",
+                "arn:aws:iam::" + REQUEST_ACCT + ":role/" + roleName, trust);
+        roleA.getInlinePolicies().put("inline", docA);
+        roles.putForAccount(REQUEST_ACCT, roleName, roleA);
+        IamRole roleB = new IamRole("AROLEB0000000001", roleName, "/",
+                "arn:aws:iam::" + OTHER_ACCT + ":role/" + roleName, trust);
+        roleB.getInlinePolicies().put("inline", docB);
+        roles.putForAccount(OTHER_ACCT, roleName, roleB);
+
+        IamService service = new IamService(
+                new InMemoryStorage<>(), new InMemoryStorage<>(), roles,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new RegionResolver("us-east-1", DEFAULT_ACCT));
+
+        assertEquals(List.of(docA), service.resolvePrincipalContext(
+                "arn:aws:iam::" + REQUEST_ACCT + ":role/" + roleName).identityPolicies());
+        assertEquals(List.of(docB), service.resolvePrincipalContext(
+                "arn:aws:iam::" + OTHER_ACCT + ":role/" + roleName).identityPolicies());
+    }
+
+    @Test
+    void aUserArnResolvesTheNamedAccountsPoliciesNotTheRequestAccounts() {
+        String userName = "alice";
+        String docA = "{\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"s3:GetObject\"}]}";
+        String docB = "{\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"*\"}]}";
+
+        AccountAwareStorageBackend<IamUser> users = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), requestContextFor(REQUEST_ACCT), DEFAULT_ACCT);
+        IamUser userA = new IamUser("AIDAA00000000001", userName, "/",
+                "arn:aws:iam::" + REQUEST_ACCT + ":user/" + userName);
+        userA.getInlinePolicies().put("inline", docA);
+        users.putForAccount(REQUEST_ACCT, userName, userA);
+        IamUser userB = new IamUser("AIDAB00000000001", userName, "/",
+                "arn:aws:iam::" + OTHER_ACCT + ":user/" + userName);
+        userB.getInlinePolicies().put("inline", docB);
+        users.putForAccount(OTHER_ACCT, userName, userB);
+
+        IamService service = new IamService(
+                users, new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new RegionResolver("us-east-1", DEFAULT_ACCT));
+
+        assertEquals(List.of(docA), service.resolvePrincipalContext(
+                "arn:aws:iam::" + REQUEST_ACCT + ":user/" + userName).identityPolicies());
+        assertEquals(List.of(docB), service.resolvePrincipalContext(
+                "arn:aws:iam::" + OTHER_ACCT + ":user/" + userName).identityPolicies());
+    }
+
     private static IamService serviceWithAliases(AccountAwareStorageBackend<String> aliases) {
         return new IamService(
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
-                aliases, new InMemoryStorage<>(), new InMemoryStorage<>(),
+                aliases, new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new RegionResolver("us-east-1", DEFAULT_ACCT), false, null);
     }
 }

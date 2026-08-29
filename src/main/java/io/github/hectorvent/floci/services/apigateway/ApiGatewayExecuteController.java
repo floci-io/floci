@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.services.apigateway.model.UsagePlan;
 import io.github.hectorvent.floci.services.apigateway.model.UsagePlanKey;
 import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2Service;
 import io.github.hectorvent.floci.services.apigatewayv2.JwtSignatureVerifier;
+import io.github.hectorvent.floci.services.apigatewayv2.model.Api;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Authorizer;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Route;
 import io.github.hectorvent.floci.services.apigatewayv2.websocket.ConnectionInfo;
@@ -251,6 +252,17 @@ public class ApiGatewayExecuteController {
                                 @PathParam("proxy") String proxy,
                                 byte[] body) {
         return dispatch("PATCH", apiId, stageName, proxy, headers, uriInfo, body);
+    }
+
+    @OPTIONS
+    @Blocking
+    @Path("/{proxy: .*}")
+    public Response handleOptions(@Context HttpHeaders headers, @Context UriInfo uriInfo,
+                                  @PathParam("apiId") String apiId,
+                                  @PathParam("stageName") String stageName,
+                                  @PathParam("proxy") String proxy,
+                                  byte[] body) {
+        return dispatch("OPTIONS", apiId, stageName, proxy, headers, uriInfo, body);
     }
 
     // ──────────────────────────── Core dispatch ────────────────────────────
@@ -1034,15 +1046,38 @@ public class ApiGatewayExecuteController {
 
         // Dispatch to service.
         //
-        // A path-style integration URI (arn:...:{service}:path/...) carries no action: the
-        // rendered template body is the AWS query protocol (form-urlencoded,
+        // Lambda path-style integrations (arn:aws:apigateway:{region}:lambda:path/...) are
+        // handled specially: the function name is extracted from the URI and the rendered
+        // request template body is passed directly as the Lambda payload — just like
+        // AWS_PROXY, but with request/response VTL mapping applied.
+        //
+        // For other services: a path-style integration URI (arn:...:{service}:path/...) carries
+        // no action: the rendered template body is the AWS query protocol (form-urlencoded,
         // "Action=SendMessage&..."). Action-style URIs (arn:...:{service}:action/{Action})
         // carry the action in the URI and render a JSON body.
         Response serviceResponse;
         String errorType = null;
         String errorMessage = null;
         try {
-            if (target.action() == null) {
+            if ("lambda".equals(target.service())) {
+                String functionName = functionNameFromUri(integration.getUri());
+                if (functionName == null || functionName.isBlank()) {
+                    throw new AwsException("InvalidParameterValueException",
+                            "Cannot resolve Lambda function name from URI: " + integration.getUri(), 400);
+                }
+                byte[] payload = transformedBody != null ? transformedBody.getBytes(StandardCharsets.UTF_8) : new byte[0];
+                InvokeResult invokeResult = lambdaService.invoke(region, functionName, payload, InvocationType.RequestResponse);
+                String lambdaResponseBody = invokeResult.getPayload() != null
+                        ? new String(invokeResult.getPayload(), StandardCharsets.UTF_8) : "{}";
+                int lambdaStatus = invokeResult.getStatusCode() > 0 ? invokeResult.getStatusCode() : 200;
+                if (invokeResult.getFunctionError() != null) {
+                    errorType = invokeResult.getFunctionError();
+                    errorMessage = lambdaResponseBody;
+                }
+                serviceResponse = Response.status(lambdaStatus)
+                        .entity(lambdaResponseBody)
+                        .type(MediaType.APPLICATION_JSON).build();
+            } else if (target.action() == null) {
                 MultivaluedMap<String, String> formParams = parseFormUrlEncoded(transformedBody);
 
                 if ("sqs".equals(target.service()) && target.path() != null) {
@@ -1179,13 +1214,18 @@ public class ApiGatewayExecuteController {
         }
 
         Response.ResponseBuilder rb = Response.status(finalStatus)
-                .entity(finalBody)
-                .type(MediaType.APPLICATION_JSON);
+                .entity(finalBody);
+
+        String contentType = null;
 
         // Apply $context.responseOverride header assignments.
         if (templateResult != null && !templateResult.headerOverrides().isEmpty()) {
             for (Map.Entry<String, String> hdr : templateResult.headerOverrides().entrySet()) {
-                rb.header(hdr.getKey(), hdr.getValue());
+                if ("Content-Type".equalsIgnoreCase(hdr.getKey())) {
+                    contentType = hdr.getValue();
+                } else {
+                    rb.header(hdr.getKey(), hdr.getValue());
+                }
             }
         }
 
@@ -1204,11 +1244,16 @@ public class ApiGatewayExecuteController {
                 String headerName = dest.substring("method.response.header.".length());
                 String headerValue = resolveResponseParameter(source, serviceResponseHeaders, responseBodyStr);
                 if (headerValue != null) {
-                    rb.header(headerName, headerValue);
+                    if ("Content-Type".equalsIgnoreCase(headerName)) {
+                        contentType = headerValue;
+                    } else {
+                        rb.header(headerName, headerValue);
+                    }
                 }
             }
         }
 
+        rb.type(contentType != null ? contentType : MediaType.APPLICATION_JSON);
         return rb.build();
     }
 
@@ -1342,6 +1387,51 @@ public class ApiGatewayExecuteController {
 
     // ──────────────────────────── API Gateway v2 dispatch ────────────────────────────
 
+    private static Response httpApiCorsPreflight(Api.Cors cors, String requestOrigin) {
+        Response.ResponseBuilder response = Response.noContent().type(MediaType.TEXT_PLAIN_TYPE);
+        String allowOrigin = matchingCorsOrigin(cors.allowOrigins(), requestOrigin);
+        if (allowOrigin != null) {
+            response.header("Access-Control-Allow-Origin", allowOrigin);
+            if (!"*".equals(allowOrigin)) {
+                response.header("Vary", "Origin");
+            }
+        }
+        putCorsListHeader(response, "Access-Control-Allow-Methods", cors.allowMethods());
+        putCorsListHeader(response, "Access-Control-Allow-Headers", cors.allowHeaders());
+        putCorsListHeader(response, "Access-Control-Expose-Headers", cors.exposeHeaders());
+        if (cors.maxAge() != null) {
+            response.header("Access-Control-Max-Age", cors.maxAge());
+        }
+        if (Boolean.TRUE.equals(cors.allowCredentials())) {
+            response.header("Access-Control-Allow-Credentials", "true");
+        }
+        return response.build();
+    }
+
+    private static String matchingCorsOrigin(List<String> allowedOrigins, String requestOrigin) {
+        if (allowedOrigins == null || requestOrigin == null) {
+            return null;
+        }
+        for (String allowedOrigin : allowedOrigins) {
+            if ("*".equals(allowedOrigin)) {
+                return "*";
+            }
+            if (allowedOrigin != null && (allowedOrigin.equals(requestOrigin)
+                    || (allowedOrigin.endsWith("*")
+                    && requestOrigin.startsWith(allowedOrigin.substring(0, allowedOrigin.length() - 1))))) {
+                return requestOrigin;
+            }
+        }
+        return null;
+    }
+
+    private static void putCorsListHeader(Response.ResponseBuilder response, String headerName,
+                                          List<String> values) {
+        if (values != null && !values.isEmpty()) {
+            response.header(headerName, String.join(", ", values));
+        }
+    }
+
     private Response dispatchV2(String httpMethod, String apiId, String stageName,
                                 String proxy, HttpHeaders headers, UriInfo uriInfo,
                                 byte[] body, String region) {
@@ -1350,8 +1440,10 @@ public class ApiGatewayExecuteController {
         // and the direct /execute-api/{apiId}/{stage}/... route land here. Checking at the single
         // choke point keeps the two entry points from disagreeing about whether an API is invokable.
         // A missing API is not this method's error to report — findMatchingRoute below 404s.
+        Api api = null;
         try {
-            if (apiGatewayV2Service.getApi(region, apiId).isDisableExecuteApiEndpoint()) {
+            api = apiGatewayV2Service.getApi(region, apiId);
+            if (api.isDisableExecuteApiEndpoint()) {
                 return Response.status(Response.Status.NOT_FOUND)
                         .entity(jsonMessage("Not Found"))
                         .type(MediaType.APPLICATION_JSON).build();
@@ -1359,6 +1451,14 @@ public class ApiGatewayExecuteController {
         } catch (AwsException e) {
             LOG.debugv(e, "HTTP API lookup failed before execute-api dispatch: apiId={0}, region={1}",
                     apiId, region);
+        }
+
+        if (api != null && api.getCorsConfiguration() != null
+                && "OPTIONS".equalsIgnoreCase(httpMethod)
+                && headers != null
+                && headers.getHeaderString("Origin") != null
+                && headers.getHeaderString("Access-Control-Request-Method") != null) {
+            return httpApiCorsPreflight(api.getCorsConfiguration(), headers.getHeaderString("Origin"));
         }
 
         String path = "/" + (proxy == null ? "" : proxy);

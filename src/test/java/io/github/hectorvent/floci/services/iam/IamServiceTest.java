@@ -72,6 +72,30 @@ class IamServiceTest {
     }
 
     @Test
+    void accountSummaryUsesAwsDefaultQuotasAndTracksProviders() {
+        Map<String, Long> empty = iamService.getAccountSummary();
+
+        assertEquals(300L, empty.get("GroupsQuota"));
+        assertEquals(1000L, empty.get("RolesQuota"));
+        assertEquals(1500L, empty.get("PoliciesQuota"));
+        assertEquals(1000L, empty.get("InstanceProfilesQuota"));
+        assertEquals(10L, empty.get("AttachedPoliciesPerUserQuota"));
+        assertEquals(10L, empty.get("AttachedPoliciesPerGroupQuota"));
+        assertEquals(20L, empty.get("AttachedPoliciesPerRoleQuota"));
+        assertEquals(6144L, empty.get("PolicySizeQuota"));
+        assertEquals(0L, empty.get("Providers"));
+        assertEquals(0L, empty.get("AccountAccessKeysPresent"));
+
+        iamService.createUser("summary-user", "/");
+        iamService.createAccessKey("summary-user");
+        iamService.createOpenIDConnectProvider(
+                "https://oidc.example.com/id/SUMMARY", List.of(), List.of("thumbprint"), Map.of());
+
+        assertEquals(1L, iamService.getAccountSummary().get("Providers"));
+        assertEquals(0L, iamService.getAccountSummary().get("AccountAccessKeysPresent"));
+    }
+
+    @Test
     void createUserDuplicateFails() {
         iamService.createUser("alice", "/");
         assertThrows(AwsException.class, () -> iamService.createUser("alice", "/"));
@@ -194,6 +218,28 @@ class IamServiceTest {
     // =========================================================================
 
     @Test
+    void createServiceLinkedRoleForEc2AutoScalingUsesAwsCanonicalName() {
+        IamRole role = iamService.createServiceLinkedRole(
+                "autoscaling.amazonaws.com", null, "EC2 Auto Scaling SLR");
+
+        assertEquals("AWSServiceRoleForAutoScaling", role.getRoleName());
+        assertEquals(
+                "arn:aws:iam::000000000000:role/aws-service-role/autoscaling.amazonaws.com/AWSServiceRoleForAutoScaling",
+                role.getArn());
+    }
+
+    @Test
+    void createServiceLinkedRoleForCloud9UsesAwsCanonicalName() {
+        IamRole role = iamService.createServiceLinkedRole(
+                "cloud9.amazonaws.com", null, "Cloud9 SLR");
+
+        assertEquals("AWSServiceRoleForAWSCloud9", role.getRoleName());
+        assertEquals(
+                "arn:aws:iam::000000000000:role/aws-service-role/cloud9.amazonaws.com/AWSServiceRoleForAWSCloud9",
+                role.getArn());
+    }
+
+    @Test
     void createAndGetRole() {
         String trustPolicy = "{\"Version\":\"2012-10-17\",\"Statement\":[]}";
         IamRole role = iamService.createRole("LambdaExec", "/", trustPolicy, "Lambda role", 3600, null);
@@ -241,6 +287,28 @@ class IamServiceTest {
         assertEquals("EntityAlreadyExists", ex.getErrorCode());
         assertEquals(originalDoc, iamService.getRole("LambdaExec").getAssumeRolePolicyDocument(),
                 "rejected update must not have changed the role's trust policy");
+    }
+
+    @Test
+    void createServiceLinkedRoleForAccessAnalyzer() {
+        IamRole role = iamService.createServiceLinkedRole(
+                "access-analyzer.amazonaws.com", null, "Access Analyzer SLR");
+
+        assertEquals("AWSServiceRoleForAccessAnalyzer", role.getRoleName());
+        assertEquals("/aws-service-role/access-analyzer.amazonaws.com/", role.getPath());
+        assertTrue(role.getRoleId().startsWith("AROA"));
+        assertEquals(
+                "arn:aws:iam::000000000000:role/aws-service-role/access-analyzer.amazonaws.com/AWSServiceRoleForAccessAnalyzer",
+                role.getArn());
+        assertTrue(role.getAssumeRolePolicyDocument().contains("access-analyzer.amazonaws.com"),
+                "trust policy should allow the service principal");
+    }
+
+    @Test
+    void createServiceLinkedRoleWithCustomSuffix() {
+        IamRole role = iamService.createServiceLinkedRole(
+                "access-analyzer.amazonaws.com", "myapp", null);
+        assertEquals("AWSServiceRoleForAccessAnalyzer_myapp", role.getRoleName());
     }
 
     @Test
@@ -313,6 +381,100 @@ class IamServiceTest {
         }
         assertThrows(AwsException.class,
                 () -> iamService.createPolicyVersion(arn, "{\"v\":6}", false));
+    }
+
+    @Test
+    void createPolicyVersionAfterDeletionDoesNotReuseVersionIds() {
+        IamPolicy policy = iamService.createPolicy("P", "/", null, "{}", null);
+        String arn = policy.getArn();
+        for (int i = 2; i <= 5; i++) {
+            iamService.createPolicyVersion(arn, "{\"v\":" + i + "}", true);
+        }
+        // Prune the oldest non-default version (what CloudFormation does at the cap) and
+        // create another. AWS version ids are monotonic — a deleted id is never reissued,
+        // so the new version must be v6, not a rewrite of the surviving v5.
+        iamService.deletePolicyVersion(arn, "v1");
+        PolicyVersion next = iamService.createPolicyVersion(arn, "{\"v\":6}", true);
+        assertEquals("v6", next.getVersionId());
+        assertEquals("{\"v\":5}", iamService.getPolicyVersion(arn, "v5").getDocument());
+    }
+
+    @Test
+    void createPolicyVersionAfterDeletingHighestSurvivingIdDoesNotReuseIt() {
+        // Deleting the HIGHEST surviving version (not the oldest, as above) is the case that
+        // breaks a "derive from the live keys" implementation: with v5 gone, the live max is v4,
+        // so a naive next-id computation reissues v5 rather than advancing to v6.
+        IamPolicy policy = iamService.createPolicy("P", "/", null, "{}", null);
+        String arn = policy.getArn();
+        for (int i = 2; i <= 5; i++) {
+            iamService.createPolicyVersion(arn, "{\"v\":" + i + "}", false);
+        }
+        iamService.deletePolicyVersion(arn, "v5");
+        PolicyVersion next = iamService.createPolicyVersion(arn, "{\"v\":6}", false);
+        assertEquals("v6", next.getVersionId());
+        assertEquals("{\"v\":4}", iamService.getPolicyVersion(arn, "v4").getDocument());
+    }
+
+    @Test
+    void createPolicyVersionOnLegacyRehydratedPolicyDoesNotReuseADeletedTopVersion() {
+        // Simulates a policy persisted by a Floci version that predates nextVersionNumber: the
+        // field is absent from the old JSON, so it rehydrates at the class's fresh-policy default
+        // (2) regardless of how many versions actually existed historically. Here we seed the
+        // versions map directly (bypassing createPolicyVersion, which is the only path that would
+        // have kept nextVersionNumber honest) to reproduce exactly that rehydrated shape: v1-v4
+        // live, as if v5 had been created and deleted before this field ever existed on disk.
+        IamPolicy policy = iamService.createPolicy("LegacyP", "/", null, "{\"v\":1}", null);
+        String arn = policy.getArn();
+        for (int i = 2; i <= 4; i++) {
+            policy.getVersions().put("v" + i,
+                    new io.github.hectorvent.floci.services.iam.model.PolicyVersion(
+                            "v" + i, "{\"v\":" + i + "}", false));
+        }
+        policy.setNextVersionNumber(null); // Jackson leaves this null when absent from old JSON
+        PolicyVersion next = iamService.createPolicyVersion(arn, "{\"v\":next}", false);
+        assertNotEquals("v5", next.getVersionId(),
+                "a legacy-rehydrated policy must not reissue the id of a version deleted before upgrade");
+    }
+
+    @Test
+    void updateGroupMalformedNewGroupNameIsRejected() {
+        iamService.createGroup("orig-group", "/");
+        assertThrows(AwsException.class,
+                () -> iamService.updateGroup("orig-group", "not a valid name!", null));
+    }
+
+    @Test
+    void groupRenamePreservesPolicyResolutionForExistingMembers() {
+        iamService.createGroup("g-rename", "/");
+        iamService.putGroupPolicy("g-rename", "p",
+                "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"*\",\"Resource\":\"*\"}]}");
+        iamService.createUser("member-user", "/");
+        iamService.addUserToGroup("g-rename", "member-user");
+        AccessKey key = iamService.createAccessKey("member-user");
+
+        iamService.updateGroup("g-rename", "g-renamed", null);
+
+        List<String> policies = iamService.resolveCallerPolicies(key.getAccessKeyId());
+        assertNotNull(policies);
+        assertTrue(policies.stream().anyMatch(doc -> doc.contains("\"Resource\":\"*\"")),
+                "group policy should still resolve for the member after the group is renamed");
+        assertTrue(iamService.listGroupsForUser("member-user").stream()
+                        .anyMatch(g -> g.getGroupName().equals("g-renamed")),
+                "ListGroupsForUser should reflect the new group name");
+    }
+
+    @Test
+    void instanceProfileSetTagsRejectsNullAndDefensivelyCopies() {
+        InstanceProfile profile = new InstanceProfile("AIPAX", "p", "/", "arn:aws:iam::111111111111:instance-profile/p");
+        profile.setTags(null);
+        assertNotNull(profile.getTags());
+        assertTrue(profile.getTags().isEmpty());
+
+        Map<String, String> source = new java.util.HashMap<>(Map.of("k", "v"));
+        profile.setTags(source);
+        source.put("k2", "v2");
+        assertFalse(profile.getTags().containsKey("k2"),
+                "setTags should defensively copy, not alias the caller's map");
     }
 
     @Test
@@ -743,6 +905,28 @@ class IamServiceTest {
         IamPolicy bedrockReadOnly = iamService.getPolicy("arn:aws:iam::aws:policy/AmazonBedrockReadOnly");
         assertEquals("AmazonBedrockReadOnly", bedrockReadOnly.getPolicyName());
         assertEquals("/", bedrockReadOnly.getPath());
+
+        // LZA's OperationsStack attaches these to its AWS Backup service roles.
+        IamPolicy backup = iamService.getPolicy(
+                "arn:aws:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForBackup");
+        assertEquals("AWSBackupServiceRolePolicyForBackup", backup.getPolicyName());
+        assertEquals("/service-role/", backup.getPath());
+
+        IamPolicy restore = iamService.getPolicy(
+                "arn:aws:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForRestores");
+        assertEquals("AWSBackupServiceRolePolicyForRestores", restore.getPolicyName());
+        assertEquals("/service-role/", restore.getPath());
+
+        // The S3 variants live at the root path in real AWS, not /service-role/.
+        IamPolicy s3Backup = iamService.getPolicy(
+                "arn:aws:iam::aws:policy/AWSBackupServiceRolePolicyForS3Backup");
+        assertEquals("AWSBackupServiceRolePolicyForS3Backup", s3Backup.getPolicyName());
+        assertEquals("/", s3Backup.getPath());
+
+        IamPolicy s3Restore = iamService.getPolicy(
+                "arn:aws:iam::aws:policy/AWSBackupServiceRolePolicyForS3Restore");
+        assertEquals("AWSBackupServiceRolePolicyForS3Restore", s3Restore.getPolicyName());
+        assertEquals("/", s3Restore.getPath());
     }
 
     @Test
