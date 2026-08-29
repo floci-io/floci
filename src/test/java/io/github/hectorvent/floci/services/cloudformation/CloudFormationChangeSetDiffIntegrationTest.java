@@ -580,4 +580,132 @@ class CloudFormationChangeSetDiffIntegrationTest {
             .body(containsString("<LogicalResourceId>Q</LogicalResourceId>"))
             .body(containsString("<Action>Modify</Action>"));
     }
+
+    @Test
+    void parameterChangeFlippingConditionToTrue_isReportedAsAnAdd() {
+        String stackName = "cs-diff-condition-add-stack";
+        stacksToDelete.add(stackName);
+
+        String template = """
+            {
+              "Parameters": {
+                "Env": {"Type": "String"}
+              },
+              "Conditions": {
+                "IsProd": {"Fn::Equals": [{"Ref": "Env"}, "prod"]}
+              },
+              "Resources": {
+                "Q": {
+                  "Type": "AWS::SQS::Queue",
+                  "Condition": "IsProd",
+                  "Properties": {"QueueName": "cs-diff-condition-add-queue"}
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+            .formParam("Parameters.member.1.ParameterKey", "Env")
+            .formParam("Parameters.member.1.ParameterValue", "dev")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // Q's definition text is unchanged, but Env flips IsProd from false to true - Q was never
+        // created, and ExecuteChangeSet would create it now.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateChangeSet")
+            .formParam("StackName", stackName)
+            .formParam("ChangeSetName", "condition-add-cs")
+            .formParam("ChangeSetType", "UPDATE")
+            .formParam("TemplateBody", template)
+            .formParam("Parameters.member.1.ParameterKey", "Env")
+            .formParam("Parameters.member.1.ParameterValue", "prod")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeChangeSet")
+            .formParam("StackName", stackName)
+            .formParam("ChangeSetName", "condition-add-cs")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<LogicalResourceId>Q</LogicalResourceId>"))
+            .body(containsString("<Action>Add</Action>"));
+    }
+
+    @Test
+    void parameterChangeFlippingConditionToFalse_isReportedAsARemove() {
+        String stackName = "cs-diff-condition-remove-stack";
+        stacksToDelete.add(stackName);
+
+        String template = """
+            {
+              "Parameters": {
+                "Env": {"Type": "String"}
+              },
+              "Conditions": {
+                "IsProd": {"Fn::Equals": [{"Ref": "Env"}, "prod"]}
+              },
+              "Resources": {
+                "Q": {
+                  "Type": "AWS::SQS::Queue",
+                  "Condition": "IsProd",
+                  "Properties": {"QueueName": "cs-diff-condition-remove-queue"}
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+            .formParam("Parameters.member.1.ParameterKey", "Env")
+            .formParam("Parameters.member.1.ParameterValue", "prod")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // Q's definition text is unchanged, but Env flips IsProd from true to false - Q was created,
+        // and ExecuteChangeSet would delete it now.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateChangeSet")
+            .formParam("StackName", stackName)
+            .formParam("ChangeSetName", "condition-remove-cs")
+            .formParam("ChangeSetType", "UPDATE")
+            .formParam("TemplateBody", template)
+            .formParam("Parameters.member.1.ParameterKey", "Env")
+            .formParam("Parameters.member.1.ParameterValue", "dev")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeChangeSet")
+            .formParam("StackName", stackName)
+            .formParam("ChangeSetName", "condition-remove-cs")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<LogicalResourceId>Q</LogicalResourceId>"))
+            .body(containsString("<Action>Remove</Action>"));
+    }
 }

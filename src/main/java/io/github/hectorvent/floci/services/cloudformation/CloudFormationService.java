@@ -316,7 +316,7 @@ public class CloudFormationService implements ResourceProvider {
     /**
      * Computes the per-resource changes a change set would apply, by diffing its template against
      * the stack's currently deployed template. CREATE-type change sets (and stacks that have never
-     * executed a template) report every resource as an Add.
+     * executed a template) report every resource with a truthy {@code Condition} as an Add.
      */
     public List<ResourceChange> computeChangeSetChanges(ChangeSet cs, String region) {
         Stack stack = getStackOrThrow(cs.getStackName(), region);
@@ -376,15 +376,44 @@ public class CloudFormationService implements ResourceProvider {
                 }
             });
 
+            // A resource whose Condition depends on a changed parameter can flip from excluded to
+            // included (or back) even when its own definition text is unchanged; ExecuteChangeSet
+            // applies that as an Add or Remove (see hasRemovedOrConditionFalseResources /
+            // deleteRemovedOrConditionFalseResources), so the preview must evaluate Conditions too
+            // rather than only scanning each resource's own Ref/Sub usage. A resource is "active" in
+            // the deployed stack precisely when it's present in stack.getResources() - the same
+            // ground truth execution uses - so no separate old-conditions evaluation is needed.
+            Map<String, Boolean> newConditions = resolveConditions(
+                    newTemplate, newResolvedParams, null, region, regionResolver.getAccountId());
+            Set<String> deployedIds = stack.getResources().keySet();
+
             List<ResourceChange> changes = new ArrayList<>();
             newResources.fields().forEachRemaining(e -> {
                 String logicalId = e.getKey();
                 JsonNode newDef = e.getValue();
                 String resourceType = newDef.path("Type").asText();
                 JsonNode oldDef = oldResources.get(logicalId);
+                String newConditionName = newDef.path("Condition").asText(null);
+                boolean newActive = newConditionName == null
+                        || newConditions.getOrDefault(newConditionName, false);
                 if (oldDef == null) {
+                    if (newActive) {
+                        changes.add(new ResourceChange("Add", logicalId, null, resourceType, null));
+                    }
+                    return;
+                }
+                boolean wasDeployed = deployedIds.contains(logicalId);
+                if (wasDeployed && !newActive) {
+                    // Condition flipped true -> false: the definition text is unchanged, but
+                    // ExecuteChangeSet deletes the resource (see deleteRemovedOrConditionFalseResources).
+                    changes.add(new ResourceChange("Remove", logicalId,
+                            resourcePhysicalId(stack, logicalId), oldDef.path("Type").asText(), null));
+                } else if (!wasDeployed && newActive) {
+                    // Condition flipped false -> true: never created before, ExecuteChangeSet creates
+                    // it now.
                     changes.add(new ResourceChange("Add", logicalId, null, resourceType, null));
-                } else if (!oldDef.equals(newDef) || referencesAnyParameter(newDef, changedParams)) {
+                } else if (newActive
+                        && (!oldDef.equals(newDef) || referencesAnyParameter(newDef, changedParams))) {
                     boolean typeChanged = !oldDef.path("Type").asText().equals(resourceType);
                     changes.add(new ResourceChange("Modify", logicalId,
                             resourcePhysicalId(stack, logicalId), resourceType,
@@ -1240,12 +1269,16 @@ public class CloudFormationService implements ResourceProvider {
 
         List<String> rollbackFailures = rollbackUpdatedResources(
                 stack, previousState.resources(), attemptedResourceIds, region);
+        // Parameters are independent of resource-rollback outcome - always restore them to the last
+        // successfully deployed values, even when resource rollback itself fails and the stack lands
+        // in UPDATE_ROLLBACK_FAILED, so DescribeStacks and later change-set previews don't keep
+        // serving the failed update's attempted values.
+        stack.getParameters().clear();
+        stack.getParameters().putAll(previousState.parameters());
+        stack.getResolvedParameters().clear();
+        stack.getResolvedParameters().putAll(previousState.resolvedParameters());
         if (rollbackFailures.isEmpty()) {
             stack.setTemplateBody(previousState.templateBody());
-            stack.getParameters().clear();
-            stack.getParameters().putAll(previousState.parameters());
-            stack.getResolvedParameters().clear();
-            stack.getResolvedParameters().putAll(previousState.resolvedParameters());
         }
         try {
             restoreOutputAndExportState(stack, region, previousState);

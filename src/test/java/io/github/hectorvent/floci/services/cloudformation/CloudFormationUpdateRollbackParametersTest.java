@@ -118,4 +118,87 @@ class CloudFormationUpdateRollbackParametersTest {
         .when()
             .post("/");
     }
+
+    /**
+     * When resource rollback itself also fails (not just the template update), the stack lands in
+     * UPDATE_ROLLBACK_FAILED rather than UPDATE_ROLLBACK_COMPLETE. Parameter restoration must not be
+     * skipped in that path — the last successfully deployed values are independent of whether the
+     * resource rollback succeeded.
+     */
+    @Test
+    void failedUpdateWithFailedResourceRollback_stillRetainsLastSuccessfulParameterValues() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "rollback-failed-params-stack-" + suffix;
+        String parameterName = "/cfn/test/rollback-failed-params-" + suffix;
+        String template = """
+            {
+              "Parameters": {
+                "Suffix": {"Type": "String"}
+              },
+              "Resources": {
+                "Parameter": {
+                  "Type": "AWS::SSM::Parameter",
+                  "Properties": {
+                    "Name": "%s",
+                    "Type": "String",
+                    "Value": {"Fn::Sub": "value-${Suffix}"}
+                  }
+                }
+                %s
+              }
+            }
+            """;
+        String initialTemplate = template.formatted(parameterName, "");
+        String failingTemplate = template.formatted(parameterName, """
+            ,
+            "BadSecret": {
+              "Type": "AWS::SecretsManager::Secret",
+              "DependsOn": "Parameter",
+              "Properties": {
+                "Name": "rollback-failed-params-secret-%s",
+                "SecretString": "explicit",
+                "GenerateSecretString": {"PasswordLength": 32}
+              }
+            }
+            """.formatted(suffix));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", initialTemplate)
+            .formParam("Parameters.member.1.ParameterKey", "Suffix")
+            .formParam("Parameters.member.1.ParameterValue", "one")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // The update changes Suffix (which the Parameter resource's Value depends on) and also
+        // introduces BadSecret, which fails to create. Rollback must then also fail: rollback isn't
+        // implemented for AWS::SSM::Parameter, so the stack lands in UPDATE_ROLLBACK_FAILED.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", failingTemplate)
+            .formParam("Parameters.member.1.ParameterKey", "Suffix")
+            .formParam("Parameters.member.1.ParameterValue", "two")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackStatus>UPDATE_ROLLBACK_FAILED</StackStatus>"))
+            .body(containsString("<ParameterValue>one</ParameterValue>"))
+            .body(not(containsString("<ParameterValue>two</ParameterValue>")));
+    }
 }
