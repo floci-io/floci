@@ -199,8 +199,21 @@ public class TlsConfigSource implements ConfigSource {
     }
 
     /** Service infixes that AWS virtual-hosts with an extra resource-id label before the region. */
-    private static final List<String> MULTI_LABEL_REGIONAL_SERVICE_INFIXES =
-            List.of("execute-api", "dkr.ecr", "lambda-url", "s3.dualstack");
+    private static final List<String> MULTI_LABEL_REGIONAL_SERVICE_INFIXES = List.of(
+            "execute-api", "dkr.ecr", "lambda-url", "s3.dualstack", "s3-website",
+            "s3-fips", "s3-fips.dualstack");
+
+    /**
+     * S3 endpoint prefixes that join the region with a hyphen instead of a dot — the legacy
+     * {@code s3-<region>} form and its website counterpart {@code s3-website-<region>} — per
+     * {@link io.github.hectorvent.floci.services.s3.S3VirtualHostFilter#isS3QualifierTail}, the
+     * authoritative list of endpoint forms Floci itself recognizes as S3.
+     */
+    private static final List<String> HYPHEN_JOINED_REGIONAL_S3_PREFIXES = List.of("s3", "s3-website");
+
+    /** Regionless S3 transfer-acceleration endpoints, with and without dualstack. */
+    private static final List<String> REGIONLESS_S3_SANS =
+            List.of("*.s3-accelerate.amazonaws.com", "*.s3-accelerate.dualstack.amazonaws.com");
 
     /**
      * SANs covering AWS endpoint hostnames spoofed by the embedded DNS server.
@@ -221,12 +234,22 @@ public class TlsConfigSource implements ConfigSource {
      * {@code <url-id>.lambda-url.<region>.amazonaws.com}, and
      * {@code <bucket>.s3.dualstack.<region>.amazonaws.com}. DNS spoofing routes these the same
      * as any other AWS host, so each needs its own {@code *.<infix>.<region>.amazonaws.com} SAN.
+     *
+     * <p>S3 itself publishes several more forms — some joining the region with a hyphen instead
+     * of a dot ({@code <bucket>.s3-<region>.amazonaws.com},
+     * {@code <bucket>.s3-website-<region>.amazonaws.com}), and two regionless
+     * transfer-acceleration endpoints ({@code <bucket>.s3-accelerate.amazonaws.com},
+     * {@code <bucket>.s3-accelerate.dualstack.amazonaws.com}). The full set is taken from
+     * {@link io.github.hectorvent.floci.services.s3.S3VirtualHostFilter#isS3QualifierTail}, which
+     * documents every S3 endpoint form Floci itself routes — keep the two in sync rather than
+     * letting the SAN list drift from what actually gets DNS-spoofed to Floci.
      */
     private List<String> awsSpoofSans() {
         if (!"true".equalsIgnoreCase(resolveProperty("floci.dns.spoof-aws-endpoints", "false"))) {
             return List.of();
         }
         List<String> sans = new ArrayList<>(List.of("*.amazonaws.com", "*.s3.amazonaws.com"));
+        sans.addAll(REGIONLESS_S3_SANS);
         for (String region : AwsRegions.KNOWN_IDS) {
             // A wildcard matches exactly one label (RFC 6125 6.4.3), so the two broad
             // wildcards miss virtual-hosted addressing, where the bucket adds a label:
@@ -237,6 +260,9 @@ public class TlsConfigSource implements ConfigSource {
             sans.add("*.s3." + region + ".amazonaws.com");
             for (String infix : MULTI_LABEL_REGIONAL_SERVICE_INFIXES) {
                 sans.add("*." + infix + "." + region + ".amazonaws.com");
+            }
+            for (String prefix : HYPHEN_JOINED_REGIONAL_S3_PREFIXES) {
+                sans.add("*." + prefix + "-" + region + ".amazonaws.com");
             }
         }
         return sans;

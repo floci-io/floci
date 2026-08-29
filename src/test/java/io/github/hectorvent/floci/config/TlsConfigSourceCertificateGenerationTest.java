@@ -343,6 +343,60 @@ class TlsConfigSourceCertificateGenerationTest {
     }
 
     /**
+     * S3 static website hosting publishes two regional endpoint forms —
+     * {@code my-bucket.s3-website-us-east-1.amazonaws.com} (legacy, region joined to the
+     * "s3-website" label with a hyphen) and {@code my-bucket.s3-website.us-east-1.amazonaws.com}
+     * (region as its own label). DNS spoofing routes both to Floci, so the cert needs a SAN for
+     * each shape, not just the dotted {@code s3.dualstack} family already covered.
+     */
+    @Test
+    void testCertificateCoversS3WebsiteEndpointsWhenSpoofEnabled() throws Exception {
+        // Arrange
+        System.setProperty("floci.dns.spoof-aws-endpoints", "true");
+
+        // Act
+        new TlsConfigSource();
+
+        // Assert
+        List<String> sans = extractSansFromCertificate(tempDir.resolve("tls/floci-selfsigned.crt"));
+        assertTrue(sans.contains("*.s3-website-us-east-1.amazonaws.com"),
+            "Certificate SANs should cover the hyphenated S3 website endpoint form");
+        assertTrue(sans.contains("*.s3-website.us-east-1.amazonaws.com"),
+            "Certificate SANs should cover the dotted S3 website endpoint form");
+    }
+
+    /**
+     * S3VirtualHostFilter#isS3QualifierTail documents the full set of endpoint forms AWS
+     * publishes for S3 itself (not counting the multi-label services and website forms already
+     * covered above): the legacy hyphenated regional form ({@code s3-<region>}), the FIPS
+     * endpoint and its dualstack variant ({@code s3-fips.<region>},
+     * {@code s3-fips.dualstack.<region>}), and the regionless transfer-acceleration endpoint and
+     * its dualstack variant ({@code s3-accelerate}, {@code s3-accelerate.dualstack}). DNS
+     * spoofing routes every one of these to Floci, so each needs a SAN.
+     */
+    @Test
+    void testCertificateCoversRemainingS3EndpointFormsWhenSpoofEnabled() throws Exception {
+        // Arrange
+        System.setProperty("floci.dns.spoof-aws-endpoints", "true");
+
+        // Act
+        new TlsConfigSource();
+
+        // Assert
+        List<String> sans = extractSansFromCertificate(tempDir.resolve("tls/floci-selfsigned.crt"));
+        assertTrue(sans.contains("*.s3-us-east-1.amazonaws.com"),
+            "Certificate SANs should cover the legacy hyphenated S3 regional endpoint form");
+        assertTrue(sans.contains("*.s3-fips.us-east-1.amazonaws.com"),
+            "Certificate SANs should cover the S3 FIPS endpoint");
+        assertTrue(sans.contains("*.s3-fips.dualstack.us-east-1.amazonaws.com"),
+            "Certificate SANs should cover the dualstack S3 FIPS endpoint");
+        assertTrue(sans.contains("*.s3-accelerate.amazonaws.com"),
+            "Certificate SANs should cover the regionless S3 transfer-acceleration endpoint");
+        assertTrue(sans.contains("*.s3-accelerate.dualstack.amazonaws.com"),
+            "Certificate SANs should cover the dualstack S3 transfer-acceleration endpoint");
+    }
+
+    /**
      * Test that no AWS wildcards are included when spoof-aws-endpoints is disabled
      */
     @Test
