@@ -77,7 +77,8 @@ class AslExecutorTaskHistoryEventsTest {
                 mock(io.github.hectorvent.floci.services.scheduler.SchedulerController.class),
                 objectMapper,
                 new JsonataEvaluator(objectMapper),
-                mock(Instance.class), mock(EmulatorConfig.class), vertx);
+                mock(Instance.class), mock(EmulatorConfig.class), vertx,
+                mock(io.github.hectorvent.floci.core.common.CustomResourceLiveness.class));
     }
 
     @Test
