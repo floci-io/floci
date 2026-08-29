@@ -530,10 +530,7 @@ public class CodeBuildRunner implements ContainerTeardown {
                             ? build.getEnvironment().getImage()
                             : project.getEnvironment().getImage());
 
-            boolean privileged = (project.getEnvironment() != null
-                    && Boolean.TRUE.equals(project.getEnvironment().getPrivilegedMode()))
-                    || (build.getEnvironment() != null
-                    && Boolean.TRUE.equals(build.getEnvironment().getPrivilegedMode()));
+            boolean privileged = resolvePrivilegedMode(project, build);
 
             String computeType = build.getEnvironment() != null && build.getEnvironment().getComputeType() != null
                     ? build.getEnvironment().getComputeType()
@@ -786,6 +783,20 @@ public class CodeBuildRunner implements ContainerTeardown {
 
     static String secondarySourceDir(String sourceIdentifier) {
         return "/codebuild/output/src-" + sourceIdentifier + "/src";
+    }
+
+    /**
+     * {@code CodeBuildService.startBuild} already resolves {@code build.getEnvironment()} to the
+     * fully-merged environment (falling back per-field to the project's when a field wasn't
+     * overridden), so it alone carries the effective privileged-mode value — ORing it with the
+     * project's own would make an explicit {@code privilegedModeOverride=false} unable to disable
+     * a privileged project.
+     */
+    static boolean resolvePrivilegedMode(Project project, Build build) {
+        if (build.getEnvironment() != null) {
+            return Boolean.TRUE.equals(build.getEnvironment().getPrivilegedMode());
+        }
+        return project.getEnvironment() != null && Boolean.TRUE.equals(project.getEnvironment().getPrivilegedMode());
     }
 
     static int resolveComputeTypeMemoryMb(String computeType) {

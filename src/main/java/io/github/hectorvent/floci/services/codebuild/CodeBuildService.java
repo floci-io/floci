@@ -455,14 +455,16 @@ public class CodeBuildService {
         build.setQueuedTimeoutInMinutes(project.getQueuedTimeoutInMinutes());
         build.setEncryptionKey(project.getEncryptionKey());
 
-        ProjectEnvironment env = environmentOverride != null ? environmentOverride : project.getEnvironment();
+        ProjectEnvironment projectEnv = project.getEnvironment();
         boolean hasVariablesOverride = environmentVariablesOverride != null && !environmentVariablesOverride.isEmpty();
-        if (imageOverride != null || computeTypeOverride != null || hasVariablesOverride) {
+        if (environmentOverride != null || imageOverride != null || computeTypeOverride != null || hasVariablesOverride) {
             ProjectEnvironment merged = new ProjectEnvironment();
-            merged.setType(env != null ? env.getType() : null);
-            merged.setImage(imageOverride != null ? imageOverride : (env != null ? env.getImage() : null));
-            merged.setComputeType(computeTypeOverride != null ? computeTypeOverride : (env != null ? env.getComputeType() : null));
-            List<Map<String, String>> baseVariables = env != null ? env.getEnvironmentVariables() : null;
+            merged.setType(environmentOverride != null && environmentOverride.getType() != null
+                    ? environmentOverride.getType() : (projectEnv != null ? projectEnv.getType() : null));
+            merged.setImage(imageOverride != null ? imageOverride : (projectEnv != null ? projectEnv.getImage() : null));
+            merged.setComputeType(computeTypeOverride != null ? computeTypeOverride
+                    : (projectEnv != null ? projectEnv.getComputeType() : null));
+            List<Map<String, String>> baseVariables = projectEnv != null ? projectEnv.getEnvironmentVariables() : null;
             if (hasVariablesOverride) {
                 List<Map<String, String>> variables =
                         new ArrayList<>(baseVariables != null ? baseVariables : List.of());
@@ -471,10 +473,11 @@ public class CodeBuildService {
             } else {
                 merged.setEnvironmentVariables(baseVariables);
             }
-            merged.setPrivilegedMode(env != null ? env.getPrivilegedMode() : null);
+            merged.setPrivilegedMode(environmentOverride != null && environmentOverride.getPrivilegedMode() != null
+                    ? environmentOverride.getPrivilegedMode() : (projectEnv != null ? projectEnv.getPrivilegedMode() : null));
             build.setEnvironment(merged);
         } else {
-            build.setEnvironment(env);
+            build.setEnvironment(projectEnv);
         }
 
         build.setPhases(new CopyOnWriteArrayList<>());

@@ -119,6 +119,34 @@ class CodeBuildServicePersistenceTest {
     }
 
     @Test
+    void startBuildWithSparseEnvironmentTypeOverrideRetainsProjectImageAndComputeType() {
+        CodeBuildService service = serviceWithStorage(new SharedStorageFactory());
+        ProjectEnvironment environment = new ProjectEnvironment();
+        environment.setType("LINUX_CONTAINER");
+        environment.setImage("aws/codebuild/standard:7.0");
+        environment.setComputeType("BUILD_GENERAL1_SMALL");
+        environment.setPrivilegedMode(true);
+        service.createProject(REGION, ACCOUNT, "p1", "demo",
+                source("NO_SOURCE"), null, null, artifacts("NO_ARTIFACTS"), null,
+                environment, "arn:aws:iam::" + ACCOUNT + ":role/cb",
+                null, null, null, null, null, null, null);
+
+        // Only environmentTypeOverride is present on the request: CodeBuildJsonHandler.buildEnvOverride
+        // builds a sparse ProjectEnvironment carrying just the type, leaving image/computeType/
+        // privilegedMode null. The merge must still fall back to the project's own environment for
+        // those, not to this sparse override object.
+        ProjectEnvironment sparseOverride = new ProjectEnvironment();
+        sparseOverride.setType("LINUX_CONTAINER");
+        Build response = service.startBuild(REGION, ACCOUNT, "p1", null,
+                sparseOverride, null, null, null, null, null, null, null, null, null);
+
+        Build stored = service.getBuild(REGION, response.getId());
+        assertEquals("aws/codebuild/standard:7.0", stored.getEnvironment().getImage());
+        assertEquals("BUILD_GENERAL1_SMALL", stored.getEnvironment().getComputeType());
+        assertEquals(Boolean.TRUE, stored.getEnvironment().getPrivilegedMode());
+    }
+
+    @Test
     void startBuildMergesEnvironmentVariableAndSecondarySourceOverrides() {
         CodeBuildService service = serviceWithStorage(new SharedStorageFactory());
         ProjectEnvironment environment = new ProjectEnvironment();
