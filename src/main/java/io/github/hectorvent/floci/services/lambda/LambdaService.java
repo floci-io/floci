@@ -423,7 +423,7 @@ public class LambdaService implements ResourceProvider {
 
         if (request.containsKey("KMSKeyArn")) {
             Object kmsKeyArn = request.get("KMSKeyArn");
-            validatePattern(kmsKeyArn, "kMSKeyArn", KMS_KEY_ARN_PATTERN);
+            validatePattern(kmsKeyArn, "kmsKeyArn", KMS_KEY_ARN_PATTERN);
             fn.setKmsKeyArn((String) kmsKeyArn);
         }
 

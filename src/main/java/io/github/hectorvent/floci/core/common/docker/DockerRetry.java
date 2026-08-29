@@ -1,9 +1,9 @@
 package io.github.hectorvent.floci.core.common.docker;
 
-import org.apache.hc.core5.http.ConnectionRequestTimeoutException;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
+import java.io.InterruptedIOException;
 
 /**
  * Retry policy for docker daemon calls. Every docker command travels over the single shared
@@ -63,12 +63,13 @@ public final class DockerRetry {
      */
     public static boolean isTransientIo(Throwable t) {
         for (Throwable c = t; c != null; c = c.getCause()) {
-            // ConnectionRequestTimeoutException extends IOException (via InterruptedIOException),
-            // but it means the httpclient5 pool has no free connection lease after waiting the
-            // full request timeout — the pool is exhausted, not a socket blip. Retrying just
-            // re-enters another full wait and adds more pressure to an already-starved pool, so
-            // it must be excluded from the general "any IOException is transient" rule below.
-            if (c instanceof ConnectionRequestTimeoutException) {
+            // InterruptedIOException covers both a genuine thread interruption (masking it would
+            // delay shutdown) and httpclient5's ConnectionRequestTimeoutException — the pool has
+            // no free connection lease after waiting the full request timeout, meaning the pool
+            // is exhausted rather than a socket blip. Retrying either just re-enters another wait
+            // and adds pressure to an already-starved pool, so both must be excluded from the
+            // general "any IOException is transient" rule below.
+            if (c instanceof InterruptedIOException) {
                 return false;
             }
             if (c instanceof IOException) {
@@ -88,9 +89,9 @@ public final class DockerRetry {
 
     /**
      * Runs {@code call}, retrying up to {@code maxAttempts} times on a transient docker I/O
-     * error ({@link #isTransientIo}) with a fixed backoff between attempts, and returns its
-     * value. A non-transient failure is rethrown immediately. A {@link RuntimeException} is
-     * rethrown as-is; a checked exception is wrapped.
+     * error ({@link #isTransientIo}) with a capped exponential backoff between attempts
+     * ({@link #backoffDelay}), and returns its value. A non-transient failure is rethrown
+     * immediately. A {@link RuntimeException} is rethrown as-is; a checked exception is wrapped.
      */
     public static <T> T call(int maxAttempts, long backoffMillis, DockerCall<T> call) {
         int attempt = 0;

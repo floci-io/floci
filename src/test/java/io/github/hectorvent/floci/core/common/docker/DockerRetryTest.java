@@ -4,6 +4,7 @@ import org.apache.hc.core5.http.ConnectionRequestTimeoutException;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.io.InterruptedIOException;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -48,6 +49,15 @@ class DockerRetryTest {
     @Test
     void connectionRequestTimeoutIsNotTransient() {
         assertFalse(DockerRetry.isTransientIo(new ConnectionRequestTimeoutException("Timeout waiting for connection from pool")));
+    }
+
+    // A plain InterruptedIOException (e.g. from Thread.interrupt() during a blocking read) signals
+    // cancellation/shutdown, not a socket blip. Retrying it masks the interrupt and delays
+    // shutdown, so it must not be classified as transient either — same rule as its
+    // ConnectionRequestTimeoutException subtype above, just not pool-exhaustion-specific.
+    @Test
+    void plainInterruptedIoExceptionIsNotTransient() {
+        assertFalse(DockerRetry.isTransientIo(new InterruptedIOException("interrupted")));
     }
 
     @Test
