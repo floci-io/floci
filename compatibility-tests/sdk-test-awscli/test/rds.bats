@@ -220,6 +220,19 @@ teardown() {
     aws_cmd ec2 delete-vpc --vpc-id "$VPC_ID" >/dev/null 2>&1 || true
 }
 
+@test "docdb: an engine version a live account does not list is refused" {
+    CLUSTER_ID="bats-docdb-version-$(unique_name)"
+    run aws_cmd docdb create-db-cluster --db-cluster-identifier "$CLUSTER_ID" --engine docdb \
+        --engine-version 9.9.9 --master-username u --master-user-password pw12345678
+    assert_failure
+    assert_output --partial 'InvalidParameterCombination'
+    assert_output --partial 'Cannot find version 9.9.9 for docdb'
+
+    run aws_cmd docdb describe-db-clusters --db-cluster-identifier "$CLUSTER_ID"
+    assert_failure
+    assert_output --partial 'DBClusterNotFoundFault'
+}
+
 @test "docdb: cluster settings given on create are returned by describe" {
     CLUSTER_ID="bats-docdb-settings-$(unique_name)"
     run aws_cmd kms create-key --description "$CLUSTER_ID"
@@ -280,4 +293,65 @@ teardown() {
     assert_output --partial 'Unrecognized engine name: nothing'
 
     aws_cmd docdb delete-db-cluster --db-cluster-identifier "$CLUSTER_ID" --skip-final-snapshot >/dev/null 2>&1 || true
+}
+
+@test "rds: storage and backup settings given on create are returned by describe and modify" {
+    run aws_cmd kms create-key --description "$DB_ID"
+    assert_success
+    KEY_ARN=$(json_get "$output" '.KeyMetadata.Arn')
+    KEY_ID=$(json_get "$output" '.KeyMetadata.KeyId')
+    aws_cmd kms create-alias --alias-name "alias/$DB_ID" --target-key-id "$KEY_ID" >/dev/null
+
+    # the key is given as an alias and must come back as the key ARN, as on AWS
+    run aws_cmd rds create-db-instance \
+        --db-instance-identifier "$DB_ID" \
+        --engine postgres \
+        --db-instance-class db.t3.micro \
+        --allocated-storage 10 \
+        --storage-encrypted --kms-key-id "alias/$DB_ID" \
+        --backup-retention-period 7 --copy-tags-to-snapshot \
+        --preferred-backup-window 23:30-00:00 --preferred-maintenance-window Sun:03:08-Sun:03:38
+    assert_success
+
+    run aws_cmd rds describe-db-instances --db-instance-identifier "$DB_ID" \
+        --query 'DBInstances[0].[StorageEncrypted,KmsKeyId,BackupRetentionPeriod,PreferredBackupWindow,CopyTagsToSnapshot,PreferredMaintenanceWindow]'
+    assert_success
+    assert_output --partial 'true'
+    assert_output --partial "$KEY_ARN"
+    assert_output --partial '7'
+    assert_output --partial '"23:30-00:00"'
+    assert_output --partial '"sun:03:08-sun:03:38"'
+
+    run aws_cmd rds modify-db-instance --db-instance-identifier "$DB_ID" \
+        --backup-retention-period 3 --preferred-backup-window 01:00-01:30 --apply-immediately
+    assert_success
+
+    run aws_cmd rds describe-db-instances --db-instance-identifier "$DB_ID" \
+        --query 'DBInstances[0].[BackupRetentionPeriod,PreferredBackupWindow,CopyTagsToSnapshot]'
+    assert_success
+    assert_output --partial '3'
+    assert_output --partial '"01:00-01:30"'
+    assert_output --partial 'true'
+}
+
+@test "rds: a KmsKeyId that names no key is refused as on AWS" {
+    run aws_cmd rds create-db-instance \
+        --db-instance-identifier "$DB_ID" \
+        --engine postgres \
+        --db-instance-class db.t3.micro \
+        --allocated-storage 10 \
+        --storage-encrypted --kms-key-id "alias/does-not-exist-$DB_ID"
+    assert_failure
+    assert_output --partial 'KMSKeyNotAccessibleFault'
+}
+
+@test "rds: KmsKeyId without StorageEncrypted is refused as on AWS" {
+    run aws_cmd rds create-db-instance \
+        --db-instance-identifier "$DB_ID" \
+        --engine postgres \
+        --db-instance-class db.t3.micro \
+        --allocated-storage 10 \
+        --no-storage-encrypted --kms-key-id "arn:aws:kms:us-east-1:000000000000:key/00000000-0000-0000-0000-000000000000"
+    assert_failure
+    assert_output --partial 'InvalidParameterCombination'
 }

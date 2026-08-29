@@ -58,6 +58,19 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | `RemoveTagsFromResource` | Remove tags from a DB resource |
 <!-- floci:actions:end -->
 
+`CreateDBInstance` stores `StorageEncrypted`, `KmsKeyId`, `BackupRetentionPeriod`,
+`PreferredBackupWindow`, `PreferredMaintenanceWindow` and `CopyTagsToSnapshot`, and
+`DescribeDBInstances` returns them; `ModifyDBInstance` changes the backup settings and
+the windows. The same checks as on AWS apply (`KmsKeyId` needs `StorageEncrypted`,
+windows are at least 30 minutes and may not overlap). `KmsKeyId` is accepted as a key ARN,
+key id, alias ARN or alias name, resolved against the KMS store in the request's region and
+returned as the key ARN; a key that does not exist or is not enabled is
+`KMSKeyNotAccessibleFault`. Where AWS picks a random window,
+Floci uses `04:00-06:00` and `mon:00:00-mon:03:00` (or, when the window given on create overlaps the
+usual default, a 30-minute window starting where the given one ends); a window given on modify is
+checked against the instance's other window. Modifications apply immediately —
+`PendingModifiedValues` is not modeled.
+
 ## Configuration
 
 | Variable | Default | Description |

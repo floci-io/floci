@@ -40,6 +40,15 @@ public class DocDbService {
 
     private static final Logger LOG = Logger.getLogger(DocDbService.class);
     private static final String ENGINE_VERSION_DEFAULT = "5.0.0";
+
+    /** The engine versions a live account lists for docdb, each with its parameter group family. */
+    static final Map<String, String> ENGINE_VERSION_FAMILIES = Map.of(
+            "3.6.0", "docdb3.6",
+            "4.0.0", "docdb4.0",
+            "5.0.0", "docdb5.0",
+            "5.0.1", "docdb5.0",
+            "8.0.0", "docdb8.0",
+            "8.0.1", "docdb8.0");
     private static final int MONGO_PORT = 27017;
 
     private final StorageBackend<String, DocDbCluster> clusters;
@@ -195,7 +204,7 @@ public class DocDbService {
                                         Map<String, String> tags) {
         String region = regionResolver.getRegion();
         settings.validate();
-        String effectiveEngineVersion = engineVersion != null ? engineVersion : ENGINE_VERSION_DEFAULT;
+        String effectiveEngineVersion = requireKnownEngineVersion(engineVersion);
         // every reference checked and every default chosen before a container is started
         DocDbClusterSettings resolved = resolveClusterSettings(settings, null, effectiveEngineVersion, region);
         synchronized (lockFor("cluster:" + key(region, id))) {
@@ -207,7 +216,7 @@ public class DocDbService {
             DocDbCluster cluster = new DocDbCluster();
             cluster.setDbClusterIdentifier(id);
             cluster.setStatus("available");
-            cluster.setEngineVersion(engineVersion != null ? engineVersion : ENGINE_VERSION_DEFAULT);
+            cluster.setEngineVersion(effectiveEngineVersion);
             cluster.setMasterUsername(masterUsername);
             cluster.setIamDatabaseAuthenticationEnabled(iamEnabled);
             cluster.setDbClusterArn(regionResolver.buildArn("rds", region, "cluster:" + id));
@@ -388,9 +397,33 @@ public class DocDbService {
         }
     }
 
-    /** The parameter group family an engine version belongs to: {@code 5.0.0} is {@code docdb5.0}. */
+    /**
+     * The version a request names, refused as a live account refuses one it does not list. The
+     * {@code major.minor} form of a listed version is accepted as given.
+     */
+    static String requireKnownEngineVersion(String engineVersion) {
+        if (engineVersion == null || engineVersion.isBlank()) {
+            return ENGINE_VERSION_DEFAULT;
+        }
+        if (ENGINE_VERSION_FAMILIES.containsKey(engineVersion)
+                || ENGINE_VERSION_FAMILIES.containsValue("docdb" + engineVersion)) {
+            return engineVersion;
+        }
+        throw new AwsException("InvalidParameterCombination",
+                "Cannot find version " + engineVersion + " for docdb", 400);
+    }
+
+    /**
+     * The parameter group family an engine version belongs to: {@code 5.0.0} is {@code docdb5.0}.
+     * A version outside the catalogue can only come from a record persisted before versions were
+     * checked; its family is still derived so the record keeps describing the way it always has.
+     */
     static String parameterGroupFamily(String engineVersion) {
         String version = engineVersion == null || engineVersion.isBlank() ? ENGINE_VERSION_DEFAULT : engineVersion;
+        String known = ENGINE_VERSION_FAMILIES.get(version);
+        if (known != null) {
+            return known;
+        }
         String[] parts = version.split("\\.");
         return "docdb" + parts[0] + "." + (parts.length > 1 ? parts[1] : "0");
     }
@@ -573,7 +606,7 @@ public class DocDbService {
             DocDbCluster cluster = getDbCluster(id);
             // every check before any change: the store hands out its own object
             String effectiveEngineVersion = engineVersion != null && !engineVersion.isBlank()
-                    ? engineVersion : cluster.getEngineVersion();
+                    ? requireKnownEngineVersion(engineVersion) : cluster.getEngineVersion();
             DocDbClusterSettings resolved = resolveClusterSettings(settings, cluster, effectiveEngineVersion, region);
             cluster.setEngineVersion(effectiveEngineVersion);
             if (iamEnabled != null) {

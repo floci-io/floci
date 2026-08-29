@@ -8,6 +8,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.zip.CRC32;
@@ -267,25 +268,62 @@ class ZipExtractorTest {
     }
 
     @Test
-    void leavesNoStagedArchiveInTheCodeStore(@TempDir Path codeStore) throws IOException {
-        // ZipFile needs a seekable file, so the archive is staged on disk next to the target
-        // rather than in the shared java.io.tmpdir. That puts a stray file one level above the
-        // function's code directory, so pin that none survives: a leaked staging archive would
-        // sit in the code store indefinitely, and one leaked *inside* a function directory
-        // would be tar-copied into that function's container at launch.
-        Path target = codeStore.resolve("fn");
+    void replacesThePreviousExtractionInsteadOfOverlayingIt(@TempDir Path target) throws IOException {
+        // Issue #2647: a deployment package is the complete contents of the function, so a file
+        // present in one deploy and absent from the next has to disappear. Extracting in place
+        // only ever adds and overwrites, so removed files survived and stayed loadable — a
+        // handler pointing at a deleted module kept resolving and running stale code.
+        byte[] v1 = zipWith("index.js", "v1");
+        extractor.extractTo(v1, target);
+        Files.writeString(target.resolve("removed.js"), "STALE");
+        Files.createDirectories(target.resolve("legacy"));
+        Files.writeString(target.resolve("legacy").resolve("old.js"), "STALE");
+
+        byte[] v2 = zipWith("index.js", "v2");
+        extractor.extractTo(v2, target);
+
+        assertEquals("v2", Files.readString(target.resolve("index.js")), "new package must land");
+        assertFalse(Files.exists(target.resolve("removed.js")),
+                "a file absent from the new package must not survive the deploy");
+        assertFalse(Files.exists(target.resolve("legacy")),
+                "a directory absent from the new package must not survive the deploy");
+    }
+
+    @Test
+    void leavesThePreviousExtractionIntactWhenExtractionFailsPartWay(@TempDir Path target) throws IOException {
+        // Extraction is all-or-nothing: a failure must not leave the function holding a mixture
+        // of the old package and part of the new one. The archive below opens cleanly and only
+        // fails once its entry has been streamed out, which is exactly when writing directly
+        // into the target would already have clobbered the previous deploy.
         extractor.extractTo(zipWith("index.js", "v1"), target);
-        assertNoStagedFiles(codeStore);
 
         byte[] corrupt = corruptedPayloadZip("index.js", "v2-but-corrupted-in-transit");
         assertThrows(IOException.class, () -> extractor.extractTo(corrupt, target));
-        assertNoStagedFiles(codeStore);
+
+        assertEquals("v1", Files.readString(target.resolve("index.js")),
+                "a failed deploy must leave the previous package in place");
     }
 
-    private static void assertNoStagedFiles(Path codeStore) throws IOException {
+    @Test
+    void leavesNoStagingArtefactsInTheCodeStore(@TempDir Path codeStore) throws IOException {
+        // Extraction stages two things beside the target rather than in java.io.tmpdir: the
+        // archive itself (so ZipFile has a seekable source) and the directory it unpacks into
+        // before the swap. Both sit one level above the function's code directory, so pin that
+        // neither survives — an orphan would accumulate one per deploy, and anything leaked
+        // *inside* a function directory would be tar-copied into its container at launch.
+        Path target = codeStore.resolve("fn");
+        extractor.extractTo(zipWith("index.js", "v1"), target);
+        assertNoStagingArtefacts(codeStore);
+
+        byte[] corrupt = corruptedPayloadZip("index.js", "v2-but-corrupted-in-transit");
+        assertThrows(IOException.class, () -> extractor.extractTo(corrupt, target));
+        assertNoStagingArtefacts(codeStore);
+    }
+
+    private static void assertNoStagingArtefacts(Path codeStore) throws IOException {
         try (var entries = Files.list(codeStore)) {
             assertEquals(List.of("fn"), entries.map(p -> p.getFileName().toString()).sorted().toList(),
-                    "no staged archive may survive extraction, successful or failed");
+                    "no staged archive or staging directory may survive extraction, successful or failed");
         }
     }
 
@@ -355,5 +393,79 @@ class ZipExtractorTest {
         le32(out, centralOffset);
         le16(out, 0);
         return out.toByteArray();
+    }
+
+    @Test
+    void aFailedInstallPutsThePreviousPackageBack(@TempDir Path codeStore) throws IOException {
+        // The install used to delete the live tree and then move the new one in, so a failure in
+        // the move left the function with no code and nothing to restore: a failed update
+        // destroyed a working deployment. Driving install() directly is the only way to reach
+        // that branch, since a rename between siblings does not fail under any condition a test
+        // can arrange through extractTo.
+        Path target = Files.createDirectories(codeStore.resolve("fn"));
+        Files.writeString(target.resolve("index.js"), "v1");
+        Path staging = codeStore.resolve("fn.floci-staging-never-created");
+
+        assertThrows(IOException.class, () -> ZipExtractor.install(staging, target));
+
+        assertTrue(Files.isRegularFile(target.resolve("index.js")),
+                "a failed install must put the previous package back, not leave the function empty");
+        assertEquals("v1", Files.readString(target.resolve("index.js")));
+        try (var entries = Files.list(codeStore)) {
+            assertEquals(List.of("fn"), entries.map(p -> p.getFileName().toString()).sorted().toList(),
+                    "the restored package must not leave a renamed copy behind");
+        }
+    }
+
+    @Test
+    void aSuccessfulInstallReplacesAndLeavesNoCopyBehind(@TempDir Path codeStore) throws IOException {
+        Path target = Files.createDirectories(codeStore.resolve("fn"));
+        Files.writeString(target.resolve("index.js"), "v1");
+        Files.writeString(target.resolve("removed.js"), "STALE");
+        Path staging = Files.createDirectories(codeStore.resolve("fn.floci-staging-x"));
+        Files.writeString(staging.resolve("index.js"), "v2");
+
+        ZipExtractor.install(staging, target);
+
+        assertEquals("v2", Files.readString(target.resolve("index.js")));
+        assertFalse(Files.exists(target.resolve("removed.js")), "install must replace, not merge");
+        try (var entries = Files.list(codeStore)) {
+            assertEquals(List.of("fn"), entries.map(p -> p.getFileName().toString()).sorted().toList(),
+                    "neither the staging tree nor the superseded package may survive");
+        }
+    }
+
+    @Test
+    void aFailureToDropTheSupersededPackageDoesNotFailTheDeployment(@TempDir Path codeStore)
+            throws IOException {
+        // Once the new tree is installed the deployment has happened. Reporting failure because
+        // the superseded copy could not be deleted would make the caller skip its metadata and
+        // warm pool updates while the new code is already serving, which is worse than leaving a
+        // directory behind. Deletion is blocked by removing write permission on a subdirectory,
+        // so its contents cannot be unlinked.
+        Path target = Files.createDirectories(codeStore.resolve("fn"));
+        Files.writeString(target.resolve("index.js"), "v1");
+        Path locked = Files.createDirectories(target.resolve("locked"));
+        Files.writeString(locked.resolve("held.txt"), "cannot be removed");
+        Files.setPosixFilePermissions(locked, PosixFilePermissions.fromString("r-xr-xr-x"));
+
+        Path staging = Files.createDirectories(codeStore.resolve("fn.floci-staging-x"));
+        Files.writeString(staging.resolve("index.js"), "v2");
+
+        try {
+            ZipExtractor.install(staging, target);
+
+            assertEquals("v2", Files.readString(target.resolve("index.js")),
+                    "the new package must be installed even though the old one could not be removed");
+        } finally {
+            try (var stream = Files.list(codeStore)) {
+                for (Path p : stream.toList()) {
+                    Path stuck = p.resolve("locked");
+                    if (Files.isDirectory(stuck)) {
+                        Files.setPosixFilePermissions(stuck, PosixFilePermissions.fromString("rwxr-xr-x"));
+                    }
+                }
+            }
+        }
     }
 }

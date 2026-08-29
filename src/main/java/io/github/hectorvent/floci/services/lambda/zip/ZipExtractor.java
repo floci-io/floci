@@ -6,15 +6,19 @@ import org.jboss.logging.Logger;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.util.Comparator;
+import java.util.UUID;
 import java.util.zip.CRC32;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipException;
 import java.util.zip.ZipFile;
 
 /**
- * Extracts ZIP bytes to a target directory.
+ * Extracts ZIP bytes to a target directory, replacing whatever was there before.
  * Guards against path traversal attacks by validating entry names.
  */
 @ApplicationScoped
@@ -27,7 +31,17 @@ public class ZipExtractor {
     public void extractTo(byte[] zipBytes, Path targetDir) throws IOException {
         // Resolve to absolute path so that normalize() on entry paths stays comparable
         Path absTarget = targetDir.toAbsolutePath().normalize();
-        Files.createDirectories(absTarget);
+        Files.createDirectories(absTarget.getParent());
+
+        // Extract into a staging directory and swap it in, rather than writing over the target
+        // in place. A deployment package is the complete contents of the function, so a file
+        // dropped between two deploys has to disappear — writing in place only ever adds and
+        // overwrites, leaving removed files behind to stay loadable (issue #2647). Staging also
+        // makes extraction all-or-nothing: a failure part-way through leaves the previous
+        // deployment intact instead of a half-replaced mixture of the two.
+        Path staging = absTarget.resolveSibling(
+                absTarget.getFileName() + ".floci-staging-" + UUID.randomUUID());
+        Files.createDirectories(staging);
 
         // Read the archive through its central directory (ZipFile) rather than sequentially
         // over the local file headers (ZipInputStream). A streaming packager cannot seek back
@@ -71,8 +85,8 @@ public class ZipExtractor {
                         continue;
                     }
 
-                    Path targetPath = absTarget.resolve(entryName).normalize();
-                    if (!targetPath.startsWith(absTarget)) {
+                    Path targetPath = staging.resolve(entryName).normalize();
+                    if (!targetPath.startsWith(staging)) {
                         LOG.warnv("Skipping out-of-bounds ZIP entry: {0}", entryName);
                         continue;
                     }
@@ -85,11 +99,96 @@ public class ZipExtractor {
                     }
                 }
             }
+            // Extraction succeeded in full: install the new tree.
+            install(staging, absTarget);
         } finally {
             Files.deleteIfExists(staged);
+            // A no-op once install() moved it; on failure this discards the partial staging tree
+            // and leaves the previous extraction untouched.
+            deleteRecursively(staging);
         }
 
         LOG.debugv("Extracted ZIP to: {0}", absTarget);
+    }
+
+    /**
+     * Installs the freshly extracted tree at {@code absTarget}, keeping the package already there
+     * until the new one is in place.
+     *
+     * <p>The old tree is renamed aside and deleted only after the new one lands, rather than
+     * deleted up front. Deleting first means a failure in the move leaves the function with no
+     * code at all and nothing to restore, turning a failed update into a destroyed deployment.
+     * Every failure path here ends with one complete package on disk.
+     *
+     * <p>Both steps are renames within one directory, so the interval in which the target is
+     * absent is two metadata operations rather than a recursive delete followed by a move. It is
+     * not zero: POSIX cannot atomically exchange two directories, so a launch landing exactly
+     * between the renames can still observe a missing code path. Closing that window entirely
+     * needs a lock shared with the launcher, which is wider than this change.
+     *
+     * <p>Package-private so the failure path can be exercised directly; it is not reachable
+     * otherwise, because a move between siblings only fails under conditions a test cannot
+     * arrange through {@link #extractTo}.
+     */
+    static void install(Path staging, Path absTarget) throws IOException {
+        Path previous = null;
+        if (Files.exists(absTarget)) {
+            previous = absTarget.resolveSibling(
+                    absTarget.getFileName() + ".floci-previous-" + UUID.randomUUID());
+            moveIntoPlace(absTarget, previous);
+        }
+        try {
+            moveIntoPlace(staging, absTarget);
+        } catch (IOException e) {
+            if (previous != null) {
+                try {
+                    // Put the working package back before giving up.
+                    moveIntoPlace(previous, absTarget);
+                } catch (IOException restoreFailed) {
+                    // Both renames failed, so the function has no code at the canonical path and
+                    // the working package is sitting under a generated name nobody will look for.
+                    // Keep the original failure as the one thrown, attach this one, and say
+                    // exactly where the package went so it can be put back by hand.
+                    e.addSuppressed(restoreFailed);
+                    LOG.errorv("Could not restore the previous deployment at {0}. The working "
+                            + "package is stranded at {1}; move it back to recover.",
+                            absTarget, previous);
+                }
+            }
+            throw e;
+        }
+        if (previous != null) {
+            // Best effort from here. The new package is already live, so failing to drop the
+            // superseded tree must not be reported as a failed deployment: the caller would skip
+            // its metadata and warm pool updates while the new code is already serving. Leaving
+            // the tree behind costs disk and is recoverable; lying about the outcome is not.
+            try {
+                deleteRecursively(previous);
+            } catch (IOException e) {
+                LOG.warnv("Installed {0} but could not remove the superseded package at {1}: {2}",
+                        absTarget, previous, e.getMessage());
+            }
+        }
+    }
+
+    private static void moveIntoPlace(Path source, Path destination) throws IOException {
+        try {
+            Files.move(source, destination, StandardCopyOption.ATOMIC_MOVE);
+        } catch (AtomicMoveNotSupportedException e) {
+            // Some filesystems (and bind mounts inside containers) cannot rename atomically.
+            Files.move(source, destination);
+        }
+    }
+
+    private static void deleteRecursively(Path root) throws IOException {
+        if (!Files.exists(root)) {
+            return;
+        }
+        try (var paths = Files.walk(root)) {
+            for (Path p : paths.sorted(Comparator.reverseOrder()).toList()) {
+                Files.deleteIfExists(p);
+            }
+        }
     }
 
     /**

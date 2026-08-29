@@ -53,6 +53,34 @@ class StepFunctionsJsonataIntegrationTest {
     }
 
     @Test
+    void passStateWithJsonataStringOfALargeWholeNumber() throws Exception {
+        // $string of an id feeds a MessageGroupId, an S3 key or a DynamoDB key, so exponent
+        // notation writes a different key without failing the execution.
+        String definition = """
+                {
+                    "QueryLanguage": "JSONata",
+                    "StartAt": "Stringify",
+                    "States": {
+                        "Stringify": {
+                            "Type": "Pass",
+                            "Output": {
+                                "underTheBoundary": "{% $string(1e20) %}",
+                                "atTheBoundary": "{% $string(1e21) %}"
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("jsonata-string-large-whole-number", definition);
+        JsonNode output = objectMapper.readTree(waitForExecution(startExecution(smArn, "{}")));
+
+        assertEquals("100000000000000000000", output.get("underTheBoundary").asText());
+        assertEquals("1e+21", output.get("atTheBoundary").asText());
+    }
+
+    @Test
     void choiceStateWithJsonataCondition() throws Exception {
         // Choice state using JSONata Condition instead of Variable/StringEquals
         String definition = """

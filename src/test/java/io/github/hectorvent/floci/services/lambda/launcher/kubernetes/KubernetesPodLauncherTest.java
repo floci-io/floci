@@ -32,6 +32,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.tuple;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.lenient;
@@ -128,6 +129,48 @@ class KubernetesPodLauncherTest {
             pod.setStatus(new PodStatusBuilder().withPhase(phase).build());
             client.pods().inNamespace("default").resource(pod).updateStatus();
         });
+    }
+
+    @Test
+    void launchPassesTheFunctionsOwningAccountIntoTheBaselineAwsEnv() {
+        // A pod-launched Lambda is subject to the same placeholder-credential bug as a
+        // Docker-launched one: without the owning account it resolves to the emulator's
+        // default account and reads the wrong partition.
+        markPodPhaseInBackground("floci-lambda-my-fn-", "Running");
+        var fn = function();
+        fn.setAccountId("222222222222");
+        fn.setFunctionArn("arn:aws:lambda:us-east-1:222222222222:function:my-fn");
+
+        launcher.launch(fn);
+
+        verify(awsEnv).sdkBaselineEnv(eq("us-east-1"), eq(Optional.empty()),
+                eq("http://10.0.0.5:4566"), eq(Optional.empty()), eq("222222222222"));
+    }
+
+    @Test
+    void launchDoesNotLetAPartialUserCredentialEnvironmentSplitTheBaselineTuple() {
+        // This launcher never has execution-role credentials, so every pod rides the
+        // owner-account/placeholder baseline. If the function's own Environment config defines
+        // only AWS_ACCESS_KEY_ID (no matching secret or session token), that partial value must
+        // not override just the baseline's access key and leave its secret/token in place.
+        markPodPhaseInBackground("floci-lambda-my-fn-", "Running");
+        lenient().when(awsEnv.sdkBaselineEnv(anyString(), any(), anyString(), any(), anyString()))
+                .thenReturn(List.of(
+                        "AWS_ACCESS_KEY_ID=000000000000",
+                        "AWS_SECRET_ACCESS_KEY=test",
+                        "AWS_SESSION_TOKEN=test"));
+        var fn = function();
+        fn.setEnvironment(Map.of("AWS_ACCESS_KEY_ID", "user-partial-key"));
+
+        launcher.launch(fn);
+
+        var pod = client.pods().inNamespace("default").list().getItems().stream()
+                .filter(p -> p.getMetadata().getName().startsWith("floci-lambda-my-fn-"))
+                .findFirst().orElseThrow();
+        var envVars = pod.getSpec().getContainers().getFirst().getEnv();
+        assertThat(envVars).extracting(EnvVar::getName, EnvVar::getValue)
+                .contains(tuple("AWS_ACCESS_KEY_ID", "000000000000"))
+                .doesNotContain(tuple("AWS_ACCESS_KEY_ID", "user-partial-key"));
     }
 
     @Test

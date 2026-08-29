@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.services.rds.model.DbEndpoint;
 import io.github.hectorvent.floci.services.docdb.DocDbQueryHandler;
 import io.github.hectorvent.floci.services.neptune.NeptuneQueryHandler;
 import io.github.hectorvent.floci.services.rds.model.DbInstance;
+import io.github.hectorvent.floci.services.rds.model.DbInstanceSettings;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceStatus;
 import io.github.hectorvent.floci.services.rds.model.DbParameterGroup;
 import io.github.hectorvent.floci.services.rds.model.DbProxy;
@@ -156,12 +157,13 @@ public class RdsQueryHandler {
         }
 
         try {
+            DbInstanceSettings settings = instanceSettings(params);
             List<String> vpcSecurityGroupIds = vpcSecurityGroupIds(params);
             DbInstance instance = service.createDbInstance(id, engine, engineVersion, masterUsername,
                     masterPassword, dbName, dbInstanceClass, allocatedStorage, iamEnabled,
                     paramGroupName, dbSubnetGroupName, dbClusterIdentifier, availabilityZone, multiAz,
                     manageMasterUserPassword, masterUserSecretKmsKeyId, tags, vpcSecurityGroupIds,
-                    optionGroupName, region, autoMinorVersionUpgrade);
+                    optionGroupName, region, autoMinorVersionUpgrade, settings);
             String result = dbInstanceXml(instance);
             return Response.ok(AwsQueryResponse.envelope("CreateDBInstance", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {
@@ -250,14 +252,50 @@ public class RdsQueryHandler {
         Boolean autoMinorVersionUpgrade = autoMinorVersionUpgradeStr != null
                 ? Boolean.parseBoolean(autoMinorVersionUpgradeStr) : null;
         try {
+            DbInstanceSettings settings = instanceSettings(params, false);
             List<String> vpcSecurityGroupIds = vpcSecurityGroupIds(params);
             DbInstance instance = service.modifyDbInstance(
                     id, newPassword, iamEnabled, dbSubnetGroupName,
-                    vpcSecurityGroupIds, optionGroupName, region, autoMinorVersionUpgrade);
+                    vpcSecurityGroupIds, optionGroupName, region, autoMinorVersionUpgrade, settings);
             String result = dbInstanceXml(instance);
             return Response.ok(AwsQueryResponse.envelope("ModifyDBInstance", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {
             return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
+        }
+    }
+
+    private static DbInstanceSettings instanceSettings(MultivaluedMap<String, String> params) {
+        return instanceSettings(params, true);
+    }
+
+    /**
+     * ModifyDBInstance has no StorageEncrypted or KmsKeyId in its request shape — encryption is
+     * fixed at create — so a modify reads only the backup settings and the windows.
+     */
+    private static DbInstanceSettings instanceSettings(MultivaluedMap<String, String> params,
+                                                       boolean includeEncryption) {
+        return new DbInstanceSettings(
+                includeEncryption ? optionalBoolean(params.getFirst("StorageEncrypted")) : null,
+                includeEncryption ? params.getFirst("KmsKeyId") : null,
+                optionalInt(params.getFirst("BackupRetentionPeriod")),
+                params.getFirst("PreferredBackupWindow"),
+                params.getFirst("PreferredMaintenanceWindow"),
+                optionalBoolean(params.getFirst("CopyTagsToSnapshot")));
+    }
+
+    private static Boolean optionalBoolean(String value) {
+        return value == null ? null : Boolean.parseBoolean(value);
+    }
+
+    private static Integer optionalInt(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            return Integer.parseInt(value.trim());
+        } catch (NumberFormatException e) {
+            throw new AwsException("InvalidParameterValue",
+                    "Value " + value + " is not a valid integer.", 400);
         }
     }
 
@@ -1264,14 +1302,22 @@ public class RdsQueryHandler {
            .elem("StorageType", "gp2")
            .elem("PubliclyAccessible", false)
            .elem("AvailabilityZone", i.getAvailabilityZone() != null ? i.getAvailabilityZone() : config.defaultAvailabilityZone())
-           .elem("PreferredMaintenanceWindow", "mon:00:00-mon:03:00")
-           .elem("PreferredBackupWindow", "04:00-06:00")
+           .elem("PreferredMaintenanceWindow", i.getPreferredMaintenanceWindow() != null
+                   ? i.getPreferredMaintenanceWindow() : DbInstanceSettings.DEFAULT_MAINTENANCE_WINDOW)
+           .elem("PreferredBackupWindow", i.getPreferredBackupWindow() != null
+                   ? i.getPreferredBackupWindow() : DbInstanceSettings.DEFAULT_BACKUP_WINDOW)
+           .elem("BackupRetentionPeriod", i.getBackupRetentionPeriod())
+           .elem("StorageEncrypted", i.isStorageEncrypted())
+           .elem("CopyTagsToSnapshot", i.isCopyTagsToSnapshot())
            .raw(vpcSecurityGroupsXml(i))
            .raw(dbParameterGroupsXml(i))
            .raw(optionGroupMembershipsXml(i))
            .raw(dbSubnetGroupXml(dbSubnetGroupForInstance(i)))
            .elem("DbiResourceId", i.getDbiResourceId())
            .elem("DBInstanceArn", i.getDbInstanceArn());
+        if (i.getKmsKeyId() != null && !i.getKmsKeyId().isBlank()) {
+            xml.elem("KmsKeyId", i.getKmsKeyId());
+        }
         if (i.getMasterUserSecretArn() != null && !i.getMasterUserSecretArn().isBlank()) {
             xml.start("MasterUserSecret")
                     .elem("SecretArn", i.getMasterUserSecretArn())

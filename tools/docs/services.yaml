@@ -34,6 +34,10 @@ services:
     doc: docs/services/cloudtrail.md
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/cloudtrail/CloudTrailJsonHandler.java, mode: switch }
+  - service: comprehend
+    doc: docs/services/comprehend.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/comprehend/ComprehendJsonHandler.java, mode: switch }
   - service: docdb
     doc: docs/services/docdb.md
     sources:

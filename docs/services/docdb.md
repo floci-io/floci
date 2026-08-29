@@ -43,7 +43,9 @@ and so are the windows (30-minute minimum, no overlap). Omitted values take the 
 `default`, `default.docdb<family>`, the VPC's default security group, one day of backups — with
 deterministic windows `04:00-06:00` / `mon:00:00-mon:03:00` where AWS picks random ones.
 `CreateDBInstance` keeps `AutoMinorVersionUpgrade`, `PreferredMaintenanceWindow`,
-`CopyTagsToSnapshot`, `PromotionTier` and `Tags`.
+`CopyTagsToSnapshot`, `PromotionTier` and `Tags`. `EngineVersion` must be one a live account lists
+(`3.6.0`, `4.0.0`, `5.0.0`, `5.0.1`, `8.0.0`, `8.0.1`, or the `major.minor` form of one); any other
+is refused with `Cannot find version X for docdb`, on create and on modify.
 
 ## Configuration
 

@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.services.rds.model.DbClusterParameterGroup;
 import io.github.hectorvent.floci.services.docdb.DocDbQueryHandler;
 import io.github.hectorvent.floci.services.neptune.NeptuneQueryHandler;
 import io.github.hectorvent.floci.services.rds.model.DbInstance;
+import io.github.hectorvent.floci.services.rds.model.DbInstanceSettings;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceStatus;
 import io.github.hectorvent.floci.services.rds.model.DbParameterGroup;
 import io.github.hectorvent.floci.services.rds.model.DbProxy;
@@ -217,7 +218,7 @@ class RdsQueryHandlerTest {
         when(service.listDbInstances(null, "us-west-2")).thenReturn(List.of());
         when(service.getDbInstance("mydb", "us-west-2")).thenReturn(instance);
         when(service.modifyDbInstance(
-                eq("mydb"), isNull(), isNull(), isNull(), anyList(), isNull(), eq("us-west-2"), isNull()))
+                eq("mydb"), isNull(), isNull(), isNull(), anyList(), isNull(), eq("us-west-2"), isNull(), any(DbInstanceSettings.class)))
                 .thenReturn(instance);
         when(service.rebootDbInstance("mydb", "us-west-2")).thenReturn(instance);
         when(service.listDbClusters(null, "us-west-2")).thenReturn(List.of());
@@ -243,7 +244,7 @@ class RdsQueryHandlerTest {
         verify(service).getDbInstance("mydb", "us-west-2");
         verify(service).deleteDbInstance("mydb", "us-west-2");
         verify(service).modifyDbInstance(
-                eq("mydb"), isNull(), isNull(), isNull(), anyList(), isNull(), eq("us-west-2"), isNull());
+                eq("mydb"), isNull(), isNull(), isNull(), anyList(), isNull(), eq("us-west-2"), isNull(), any(DbInstanceSettings.class));
         verify(service).rebootDbInstance("mydb", "us-west-2");
         verify(service).listDbClusters(null, "us-west-2");
         verify(service).getDbCluster("mycluster", "us-west-2");
@@ -357,7 +358,7 @@ class RdsQueryHandlerTest {
         when(service.createDbInstance(eq("mydb"), eq("postgres"), eq("16.3"),
                 eq(null), eq(null), eq(null), eq("db.t3.micro"),
                 eq(20), eq(false), eq(null), eq(null), eq(null), eq(null), eq(false), eq(false), eq(null),
-                eq(java.util.Map.of("example:ClusterId", "cluster-a", "Name", "mydb")), eq(List.of()), isNull(), isNull(), eq(true)))
+                eq(java.util.Map.of("example:ClusterId", "cluster-a", "Name", "mydb")), eq(List.of()), isNull(), isNull(), eq(true), any(DbInstanceSettings.class)))
                 .thenReturn(instance);
 
         MultivaluedMap<String, String> p = params();
@@ -371,7 +372,7 @@ class RdsQueryHandlerTest {
 
         verify(service).createDbInstance("mydb", "postgres", "16.3",
                 null, null, null, "db.t3.micro", 20, false, null, null, null, null, false, false, null,
-                java.util.Map.of("example:ClusterId", "cluster-a", "Name", "mydb"), List.of(), null, null, true);
+                java.util.Map.of("example:ClusterId", "cluster-a", "Name", "mydb"), List.of(), null, null, true, DbInstanceSettings.defaults());
     }
 
     @Test
@@ -381,7 +382,7 @@ class RdsQueryHandlerTest {
         when(service.createDbInstance(eq("mydb"), eq("postgres"), eq("16.3"),
                 eq(null), eq(null), eq(null), eq("db.t3.micro"),
                 eq(20), eq(false), eq(null), eq(null), eq(null), eq(null), eq(false), eq(false), eq(null),
-                eq(java.util.Map.of()), eq(List.of("sg-123", "sg-456")), isNull(), isNull(), eq(true)))
+                eq(java.util.Map.of()), eq(List.of("sg-123", "sg-456")), isNull(), isNull(), eq(true), any(DbInstanceSettings.class)))
                 .thenReturn(instance);
 
         MultivaluedMap<String, String> p = params();
@@ -396,7 +397,7 @@ class RdsQueryHandlerTest {
         assertTrue(body.contains("<VpcSecurityGroupId>sg-456</VpcSecurityGroupId>"));
         verify(service).createDbInstance("mydb", "postgres", "16.3",
                 null, null, null, "db.t3.micro", 20, false, null, null, null, null, false, false, null,
-                java.util.Map.of(), List.of("sg-123", "sg-456"), null, null, true);
+                java.util.Map.of(), List.of("sg-123", "sg-456"), null, null, true, DbInstanceSettings.defaults());
     }
 
     @Test
@@ -512,7 +513,7 @@ class RdsQueryHandlerTest {
         when(service.createDbInstance(eq("mydb"), eq("postgres"), eq("16.3"),
                 eq("admin"), eq("secret"), eq("dbname"), eq("db.t3.micro"),
                 eq(20), eq(false), eq(null), eq(null), eq(null), eq(null), eq(false), eq(false),
-                eq(null), eq(java.util.Map.of()), eq(List.of()), isNull(), isNull(), eq(true)))
+                eq(null), eq(java.util.Map.of()), eq(List.of()), isNull(), isNull(), eq(true), any(DbInstanceSettings.class)))
                 .thenReturn(instance);
 
         MultivaluedMap<String, String> p = params();
@@ -526,7 +527,7 @@ class RdsQueryHandlerTest {
 
         verify(service).createDbInstance("mydb", "postgres", "16.3",
                 "admin", "secret", "dbname", "db.t3.micro", 20, false, null, null, null, null, false, false,
-                null, java.util.Map.of(), List.of(), null, null, true);
+                null, java.util.Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults());
     }
 
     @Test
@@ -538,7 +539,7 @@ class RdsQueryHandlerTest {
         when(service.createDbInstance(eq("mydb"), eq("postgres"), eq("16.3"),
                 eq("admin"), eq(null), eq("dbname"), eq("db.t3.micro"),
                 eq(20), eq(false), eq(null), eq(null), eq(null), eq(null), eq(false), eq(true),
-                eq("kms-key-1"), eq(java.util.Map.of()), eq(List.of()), isNull(), isNull(), eq(true)))
+                eq("kms-key-1"), eq(java.util.Map.of()), eq(List.of()), isNull(), isNull(), eq(true), any(DbInstanceSettings.class)))
                 .thenReturn(instance);
 
         MultivaluedMap<String, String> p = params();
@@ -557,7 +558,7 @@ class RdsQueryHandlerTest {
         assertTrue(body.contains("<KmsKeyId>kms-key-1</KmsKeyId>"));
         verify(service).createDbInstance("mydb", "postgres", "16.3",
                 "admin", null, "dbname", "db.t3.micro", 20, false, null, null, null, null, false, true,
-                "kms-key-1", java.util.Map.of(), List.of(), null, null, true);
+                "kms-key-1", java.util.Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults());
     }
 
     @Test
@@ -570,7 +571,7 @@ class RdsQueryHandlerTest {
         when(service.createDbInstance(eq("mydb"), eq("postgres"), eq("16.3"),
                 eq("admin"), eq("secret"), eq("dbname"), eq("db.t3.micro"),
                 eq(20), eq(false), eq(null), eq("default"), eq(null), eq("ap-northeast-1a"), eq(true),
-                eq(false), eq(null), eq(java.util.Map.of()), eq(List.of()), isNull(), isNull(), eq(true)))
+                eq(false), eq(null), eq(java.util.Map.of()), eq(List.of()), isNull(), isNull(), eq(true), any(DbInstanceSettings.class)))
                 .thenReturn(instance);
 
         MultivaluedMap<String, String> p = params();
@@ -600,7 +601,7 @@ class RdsQueryHandlerTest {
         when(service.createDbInstance(eq("mydb"), eq("postgres"), eq("16.3"),
                 eq(null), eq(null), eq(null), eq("db.t3.micro"),
                 eq(20), eq(false), eq(null), eq(null), eq(null), eq(null), eq(false),
-                eq(false), eq(null), eq(java.util.Map.of()), eq(List.of()), isNull(), isNull(), eq(false)))
+                eq(false), eq(null), eq(java.util.Map.of()), eq(List.of()), isNull(), isNull(), eq(false), any(DbInstanceSettings.class)))
                 .thenReturn(instance);
 
         MultivaluedMap<String, String> p = params();
@@ -620,7 +621,7 @@ class RdsQueryHandlerTest {
         when(service.createDbInstance(eq("mydb"), eq("postgres"), eq("16.3"),
                 eq("admin"), eq("secret"), eq("dbname"), eq("db.t3.micro"),
                 eq(20), eq(false), eq(null), eq("missing-subnet-group"), eq(null), eq(null), eq(false),
-                eq(false), eq(null), eq(java.util.Map.of()), eq(List.of()), isNull(), isNull(), eq(true)))
+                eq(false), eq(null), eq(java.util.Map.of()), eq(List.of()), isNull(), isNull(), eq(true), any(DbInstanceSettings.class)))
                 .thenThrow(new AwsException("DBSubnetGroupNotFoundFault",
                         "DB subnet group missing-subnet-group not found.", 404));
 
@@ -712,7 +713,7 @@ class RdsQueryHandlerTest {
         when(service.createDbInstance(eq("mydb"), eq("oracle"), eq("1.0"),
                 eq(null), eq(null), eq(null), eq("db.t3.micro"),
                 eq(20), eq(false), eq(null), eq(null), eq(null), eq(null), eq(false), eq(false),
-                eq(null), eq(java.util.Map.of()), eq(List.of()), isNull(), isNull(), eq(true)))
+                eq(null), eq(java.util.Map.of()), eq(List.of()), isNull(), isNull(), eq(true), any(DbInstanceSettings.class)))
                 .thenThrow(new AwsException("InvalidParameterValue",
                         "Unsupported engine: oracle. Supported: postgres, mysql, mariadb.", 400));
 
@@ -1941,7 +1942,7 @@ class RdsQueryHandlerTest {
         DbInstance instance = makeInstance("mydb");
         when(service.createDbInstance(any(), any(), any(), any(), any(), any(), any(),
                 anyInt(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), anyBoolean(),
-                any(), any(), anyList(), any(), any(), anyBoolean()))
+                any(), any(), anyList(), any(), any(), anyBoolean(), any(DbInstanceSettings.class)))
                 .thenReturn(instance);
 
         MultivaluedMap<String, String> p = params();
@@ -1953,7 +1954,7 @@ class RdsQueryHandlerTest {
         assertEquals(200, response.getStatus());
         verify(service).createDbInstance(eq("mydb"), eq("mysql"), any(), any(), any(), any(),
                 any(), anyInt(), anyBoolean(), any(), any(), any(), any(), anyBoolean(),
-                anyBoolean(), any(), any(), anyList(), eq("og1"), any(), anyBoolean());
+                anyBoolean(), any(), any(), anyList(), eq("og1"), any(), anyBoolean(), any(DbInstanceSettings.class));
     }
 
     // ──────────────────────────── Helpers ────────────────────────────
@@ -2219,5 +2220,138 @@ class RdsQueryHandlerTest {
 
         String body = (String) handler.handle("DescribeDBInstances", params()).getEntity();
         assertTrue(body.contains("<DBInstanceIdentifier>graph-1</DBInstanceIdentifier>"), body);
+    }
+
+    @Test
+    void createDbInstance_passesStorageAndBackupSettingsToService() {
+        DbInstance instance = makeInstance("mydb");
+        when(service.createDbInstance(any(), any(), any(), any(), any(), any(), any(),
+                anyInt(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), anyBoolean(),
+                any(), any(), anyList(), any(), any(), anyBoolean(), any(DbInstanceSettings.class)))
+                .thenReturn(instance);
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBInstanceIdentifier", "mydb");
+        p.add("Engine", "postgres");
+        p.add("StorageEncrypted", "true");
+        p.add("KmsKeyId", "arn:aws:kms:us-east-1:123456789012:key/k1");
+        p.add("BackupRetentionPeriod", "7");
+        p.add("PreferredBackupWindow", "23:30-00:00");
+        p.add("PreferredMaintenanceWindow", "sun:03:08-sun:03:38");
+        p.add("CopyTagsToSnapshot", "true");
+
+        assertEquals(200, handler.handle("CreateDBInstance", p).getStatus());
+
+        ArgumentCaptor<DbInstanceSettings> captor = ArgumentCaptor.forClass(DbInstanceSettings.class);
+        verify(service).createDbInstance(any(), any(), any(), any(), any(), any(), any(),
+                anyInt(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), anyBoolean(),
+                any(), any(), anyList(), any(), any(), anyBoolean(), captor.capture());
+        DbInstanceSettings settings = captor.getValue();
+        assertEquals(Boolean.TRUE, settings.storageEncrypted());
+        assertEquals("arn:aws:kms:us-east-1:123456789012:key/k1", settings.kmsKeyId());
+        assertEquals(7, settings.backupRetentionPeriod());
+        assertEquals("23:30-00:00", settings.preferredBackupWindow());
+        assertEquals("sun:03:08-sun:03:38", settings.preferredMaintenanceWindow());
+        assertEquals(Boolean.TRUE, settings.copyTagsToSnapshot());
+    }
+
+    @Test
+    void createDbInstance_omittedSettingsReachServiceAsNull() {
+        DbInstance instance = makeInstance("mydb");
+        when(service.createDbInstance(any(), any(), any(), any(), any(), any(), any(),
+                anyInt(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), anyBoolean(),
+                any(), any(), anyList(), any(), any(), anyBoolean(), any(DbInstanceSettings.class)))
+                .thenReturn(instance);
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBInstanceIdentifier", "mydb");
+        p.add("Engine", "postgres");
+        handler.handle("CreateDBInstance", p);
+
+        ArgumentCaptor<DbInstanceSettings> captor = ArgumentCaptor.forClass(DbInstanceSettings.class);
+        verify(service).createDbInstance(any(), any(), any(), any(), any(), any(), any(),
+                anyInt(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), anyBoolean(),
+                any(), any(), anyList(), any(), any(), anyBoolean(), captor.capture());
+        assertEquals(DbInstanceSettings.defaults(), captor.getValue());
+    }
+
+    @Test
+    void createDbInstance_nonNumericBackupRetentionIsAQueryError() {
+        MultivaluedMap<String, String> p = params();
+        p.add("DBInstanceIdentifier", "mydb");
+        p.add("Engine", "postgres");
+        p.add("BackupRetentionPeriod", "seven");
+
+        Response response = handler.handle("CreateDBInstance", p);
+
+        assertEquals(400, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<Code>InvalidParameterValue</Code>"), body);
+        verify(service, never()).createDbInstance(any(), any(), any(), any(), any(), any(), any(),
+                anyInt(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), anyBoolean(),
+                any(), any(), anyList(), any(), any(), anyBoolean(), any(DbInstanceSettings.class));
+    }
+
+    @Test
+    void describeDbInstances_emitsStoredStorageAndBackupSettings() {
+        DbInstance instance = makeInstance("mydb");
+        instance.setStorageEncrypted(true);
+        instance.setKmsKeyId("arn:aws:kms:us-east-1:123456789012:key/k1");
+        instance.setBackupRetentionPeriod(7);
+        instance.setPreferredBackupWindow("23:30-00:00");
+        instance.setPreferredMaintenanceWindow("sun:03:08-sun:03:38");
+        instance.setCopyTagsToSnapshot(true);
+        when(service.listDbInstances("mydb", null)).thenReturn(List.of(instance));
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBInstanceIdentifier", "mydb");
+        String body = (String) handler.handle("DescribeDBInstances", p).getEntity();
+
+        assertTrue(body.contains("<StorageEncrypted>true</StorageEncrypted>"), body);
+        assertTrue(body.contains("<KmsKeyId>arn:aws:kms:us-east-1:123456789012:key/k1</KmsKeyId>"), body);
+        assertTrue(body.contains("<BackupRetentionPeriod>7</BackupRetentionPeriod>"), body);
+        assertTrue(body.contains("<PreferredBackupWindow>23:30-00:00</PreferredBackupWindow>"), body);
+        assertTrue(body.contains("<PreferredMaintenanceWindow>sun:03:08-sun:03:38</PreferredMaintenanceWindow>"), body);
+        assertTrue(body.contains("<CopyTagsToSnapshot>true</CopyTagsToSnapshot>"), body);
+    }
+
+    @Test
+    void describeDbInstances_recordWithoutSettingsReadsAsAwsDefaults() {
+        // a record persisted before these fields existed deserializes with them unset
+        DbInstance instance = makeInstance("mydb");
+        when(service.listDbInstances("mydb", null)).thenReturn(List.of(instance));
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBInstanceIdentifier", "mydb");
+        String body = (String) handler.handle("DescribeDBInstances", p).getEntity();
+
+        assertTrue(body.contains("<StorageEncrypted>false</StorageEncrypted>"), body);
+        assertFalse(body.contains("<KmsKeyId>"), body);
+        assertTrue(body.contains("<BackupRetentionPeriod>1</BackupRetentionPeriod>"), body);
+        assertTrue(body.contains("<PreferredBackupWindow>04:00-06:00</PreferredBackupWindow>"), body);
+        assertTrue(body.contains("<PreferredMaintenanceWindow>mon:00:00-mon:03:00</PreferredMaintenanceWindow>"), body);
+        assertTrue(body.contains("<CopyTagsToSnapshot>false</CopyTagsToSnapshot>"), body);
+    }
+
+    @Test
+    void modifyDbInstance_passesBackupSettingsToService() {
+        DbInstance instance = makeInstance("mydb");
+        when(service.modifyDbInstance(eq("mydb"), isNull(), isNull(), isNull(), anyList(), isNull(),
+                isNull(), isNull(), any(DbInstanceSettings.class))).thenReturn(instance);
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBInstanceIdentifier", "mydb");
+        p.add("BackupRetentionPeriod", "3");
+        p.add("PreferredBackupWindow", "01:00-01:30");
+        p.add("CopyTagsToSnapshot", "true");
+        // not part of the ModifyDBInstance shape: encryption is fixed at create
+        p.add("StorageEncrypted", "true");
+        p.add("KmsKeyId", "arn:aws:kms:us-east-1:123456789012:key/other");
+        assertEquals(200, handler.handle("ModifyDBInstance", p).getStatus());
+
+        ArgumentCaptor<DbInstanceSettings> captor = ArgumentCaptor.forClass(DbInstanceSettings.class);
+        verify(service).modifyDbInstance(eq("mydb"), isNull(), isNull(), isNull(), anyList(), isNull(),
+                isNull(), isNull(), captor.capture());
+        assertEquals(new DbInstanceSettings(null, null, 3, "01:00-01:30", null, true), captor.getValue());
     }
 }

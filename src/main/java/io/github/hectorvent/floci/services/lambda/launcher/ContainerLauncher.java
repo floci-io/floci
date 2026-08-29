@@ -256,12 +256,23 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         }
         env.addAll(awsEnv.sdkBaselineEnv(lambdaRegion,
                 awsConfigPath.isPresent() ? Optional.of("/opt/aws-config") : Optional.empty(),
-                roleCredentials));
+                roleCredentials, lambdaAccountId));
         env.addAll(flociCaEnv(flociCaCert));
         if (fn.getEnvironment() != null) {
             boolean hasExecutionRoleCredentials = roleCredentials.isPresent();
+            boolean userDefinesFullCredentialTriad = definesFullCredentialTriad(fn.getEnvironment());
             fn.getEnvironment().forEach((k, v) -> {
-                if (!hasExecutionRoleCredentials || !isAwsCredentialVariable(k)) {
+                if (isAwsCredentialVariable(k)) {
+                    // Credential injection is all-or-nothing: a partial override (e.g. only
+                    // AWS_ACCESS_KEY_ID set) must never join the baseline's other two values —
+                    // that pairs a user-chosen key with the owner-account/execution-role secret
+                    // and session token, a tuple nothing can verify. Only let the user's triad
+                    // through when it is complete, and only when there is no execution role
+                    // (which is already the authoritative credential source).
+                    if (!hasExecutionRoleCredentials && userDefinesFullCredentialTriad) {
+                        env.add(k + "=" + v);
+                    }
+                } else {
                     env.add(k + "=" + v);
                 }
             });
@@ -557,10 +568,23 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         }
     }
 
-    private static boolean isAwsCredentialVariable(String name) {
+    public static boolean isAwsCredentialVariable(String name) {
         return "AWS_ACCESS_KEY_ID".equals(name)
                 || "AWS_SECRET_ACCESS_KEY".equals(name)
                 || "AWS_SESSION_TOKEN".equals(name);
+    }
+
+    /**
+     * Whether a Lambda's own Environment config defines all three AWS credential variables,
+     * the only condition under which any of them may override the baseline env — a partial
+     * set must never leak through and split the baseline's credential tuple. Public: both the
+     * Docker and Kubernetes launchers append the function's Environment after the same baseline
+     * and must apply this rule identically.
+     */
+    public static boolean definesFullCredentialTriad(java.util.Map<String, String> environment) {
+        return environment.containsKey("AWS_ACCESS_KEY_ID")
+                && environment.containsKey("AWS_SECRET_ACCESS_KEY")
+                && environment.containsKey("AWS_SESSION_TOKEN");
     }
 
     /**

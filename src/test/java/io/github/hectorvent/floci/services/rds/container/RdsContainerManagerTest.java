@@ -21,6 +21,8 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
+import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.command.CopyArchiveToContainerCmd;
 import com.github.dockerjava.api.model.Bind;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 
@@ -52,6 +54,91 @@ class RdsContainerManagerTest {
         assertTrue(sql.contains("pg_roles"));
         assertTrue(sql.contains("rolname = 'rds_iam'"));
         assertTrue(sql.contains("CREATE ROLE rds_iam"));
+    }
+
+    @Test
+    void mysqlMasterGrantSqlGrantsGlobalPrivilegesWithGrantOption() {
+        String sql = RdsContainerManager.mysqlMasterGrantSql("admin");
+
+        assertTrue(sql.contains("GRANT ALL PRIVILEGES ON *.*"));
+        assertTrue(sql.contains("'admin'@'%'"));
+        assertTrue(sql.contains("WITH GRANT OPTION"));
+    }
+
+    @Test
+    void mysqlMasterGrantSqlEscapesQuotesAndBackslashes() {
+        // Floci does not enforce AWS's MasterUsername charset, so a quote must not be able to
+        // break out of the string literal in SQL executed as root.
+        assertEquals("GRANT ALL PRIVILEGES ON *.* TO 'we\\'ird\\\\'@'%' WITH GRANT OPTION;",
+                RdsContainerManager.mysqlMasterGrantSql("we'ird\\"));
+    }
+
+    @Test
+    void needsMasterGrantSkipsRootAndPostgres() {
+        assertTrue(RdsContainerManager.needsMasterGrant(DatabaseEngine.MYSQL, "admin"));
+        assertTrue(RdsContainerManager.needsMasterGrant(DatabaseEngine.MARIADB, "admin"));
+        assertFalse(RdsContainerManager.needsMasterGrant(DatabaseEngine.MYSQL, "root"));
+        assertFalse(RdsContainerManager.needsMasterGrant(DatabaseEngine.POSTGRES, "admin"));
+        assertFalse(RdsContainerManager.needsMasterGrant(DatabaseEngine.MYSQL, null));
+    }
+
+    @Test
+    void mysqlRootMasterStartDoesNotInstallAnInitScript() {
+        EmulatorConfig config = config(tempDir.resolve("host-root"));
+        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+        stubStarts(lifecycleManager, new ContainerLifecycleManager.ContainerInfo(
+                "container-id", Map.of(3306, new ContainerLifecycleManager.EndpointInfo("db1", 3306))));
+        ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
+        lenient().when(logStreamer.generateLogStreamName(any())).thenReturn("log-stream");
+
+        RdsContainerManager manager = new RdsContainerManager(
+                new ContainerBuilder(config, mock(DockerHostResolver.class), mock(EmbeddedDnsServer.class)),
+                lifecycleManager, logStreamer, mock(ContainerDetector.class), config,
+                new RegionResolver("us-east-1", "000000000000"),
+                mock(ServiceConfigAccess.class));
+
+        manager.start("db1", "vol1", DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db");
+
+        verify(lifecycleManager, never()).getDockerClient();
+    }
+
+    @Test
+    void mysqlNonRootMasterStartInstallsGrantInitScriptBeforeStart() throws Exception {
+        EmulatorConfig config = config(tempDir.resolve("host-root"));
+        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+        stubStarts(lifecycleManager, new ContainerLifecycleManager.ContainerInfo(
+                "container-id", Map.of(3306, new ContainerLifecycleManager.EndpointInfo("db1", 3306))));
+        DockerClient dockerClient = mock(DockerClient.class);
+        when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+        CopyArchiveToContainerCmd copyCmd = mock(CopyArchiveToContainerCmd.class);
+        when(dockerClient.copyArchiveToContainerCmd(any())).thenReturn(copyCmd);
+        when(copyCmd.withRemotePath(any())).thenReturn(copyCmd);
+        when(copyCmd.withTarInputStream(any())).thenReturn(copyCmd);
+        ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
+        lenient().when(logStreamer.generateLogStreamName(any())).thenReturn("log-stream");
+
+        RdsContainerManager manager = new RdsContainerManager(
+                new ContainerBuilder(config, mock(DockerHostResolver.class), mock(EmbeddedDnsServer.class)),
+                lifecycleManager, logStreamer, mock(ContainerDetector.class), config,
+                new RegionResolver("us-east-1", "000000000000"),
+                mock(ServiceConfigAccess.class));
+
+        manager.start("db1", "vol1", DatabaseEngine.MYSQL, "mysql:8.0", "admin", "password", "db");
+
+        verify(copyCmd).withRemotePath("/docker-entrypoint-initdb.d");
+        var tarCaptor = org.mockito.ArgumentCaptor.forClass(java.io.InputStream.class);
+        verify(copyCmd).withTarInputStream(tarCaptor.capture());
+        try (var tar = new org.apache.commons.compress.archivers.tar.TarArchiveInputStream(tarCaptor.getValue())) {
+            var entry = tar.getNextEntry();
+            assertEquals("floci-master-grants.sql", entry.getName());
+            assertEquals(RdsContainerManager.mysqlMasterGrantSql("admin"),
+                    new String(tar.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8));
+        }
+        // The script lands on the created container before it starts, so the entrypoint's
+        // one-time init phase is the thing that runs it.
+        var order = org.mockito.Mockito.inOrder(dockerClient, lifecycleManager);
+        order.verify(dockerClient).copyArchiveToContainerCmd("container-id");
+        order.verify(lifecycleManager).startCreated(org.mockito.ArgumentMatchers.eq("container-id"), any());
     }
 
     @Test

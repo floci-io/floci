@@ -2875,19 +2875,7 @@ public class CloudFormationResourceProvisioner {
     private record LambdaCodeSpec(Map<String, Object> request, String identity) {}
 
     private static String sourceToZipBase64(String source, String handler, String runtime) {
-        String module = handler.contains(".") ? handler.substring(0, handler.lastIndexOf('.')) : "index";
-        String ext = runtime.startsWith("python") ? ".py" : ".js";
-        try {
-            var baos = new ByteArrayOutputStream();
-            try (var zos = new ZipOutputStream(baos)) {
-                zos.putNextEntry(new ZipEntry(module + ext));
-                zos.write(source.getBytes(StandardCharsets.UTF_8));
-                zos.closeEntry();
-            }
-            return Base64.getEncoder().encodeToString(baos.toByteArray());
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to create zip from ZipFile source", e);
-        }
+        return InlineZipPackager.sourceToZipBase64(source, handler, runtime);
     }
 
     private static String defaultHandlerZipBase64() {

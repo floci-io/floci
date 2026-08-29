@@ -221,7 +221,16 @@ public class AslExecutor {
                              MockedTestCase mockedTestCase,
                              BiConsumer<Execution, List<HistoryEvent>> onUpdate) {
         registerMocks(exec, mockedTestCase);
-        executor.submit(() -> runUnderExecutionAccount(sm, () -> doExecute(sm, exec, history, onUpdate)));
+        executor.submit(() -> {
+            try {
+                runUnderExecutionAccount(sm, () -> doExecute(sm, exec, history, onUpdate));
+            } catch (RuntimeException | Error e) {
+                // submit() parks whatever the task throws in a Future nobody reads, so without this
+                // the worker dies silently. doExecute has already published the terminal status by
+                // now; this is the only place the stack trace of what killed it reaches the log.
+                LOG.errorv(e, "ASL execution worker failed for {0}", exec.getExecutionArn());
+            }
+        });
     }
 
     /**
@@ -317,8 +326,10 @@ public class AslExecutor {
 
     private void doExecute(StateMachine sm, Execution exec, List<HistoryEvent> history,
                            BiConsumer<Execution, List<HistoryEvent>> onUpdate) {
+        // Declared outside the try so the terminal handlers below can keep numbering the history
+        // where the execution left it.
+        AtomicLong eventId = new AtomicLong(history.size());
         try {
-            AtomicLong eventId = new AtomicLong(history.size());
             JsonNode definition = objectMapper.readTree(sm.getDefinition());
             JsonNode states = definition.path("States");
             String startAt = definition.path("StartAt").asText();
@@ -368,17 +379,6 @@ public class AslExecutor {
                     failExecution(exec, history, eventId, e);
                     onUpdate.accept(exec, history);
                     return;
-                } catch (Exception e) {
-                    String runtimeError = "States.Runtime";
-                    String runtimeCause = e.getMessage() != null ? e.getMessage() : "Unknown error";
-                    exec.setError(runtimeError);
-                    exec.setCause(runtimeCause);
-                    exec.setStopDate(System.currentTimeMillis() / 1000.0);
-                    exec.setStatus("FAILED");
-                    addEvent(history, eventId, "ExecutionFailed", null,
-                            Map.of("error", runtimeError, "cause", runtimeCause));
-                    onUpdate.accept(exec, history);
-                    return;
                 }
             }
 
@@ -397,11 +397,19 @@ public class AslExecutor {
             LOG.warnv("ASL execution failed for {0}: {1}", exec.getExecutionArn(), e.getMessage());
             // This path previously set only the status, leaving error and cause null forever on an
             // execution DescribeExecution reports as FAILED.
-            exec.setError("States.Runtime");
-            exec.setCause(e.getMessage() != null ? e.getMessage() : "Unknown error");
-            exec.setStopDate(System.currentTimeMillis() / 1000.0);
-            exec.setStatus("FAILED");
+            failExecution(exec, history, eventId, "States.Runtime",
+                    e.getMessage() != null ? e.getMessage() : "Unknown error");
             onUpdate.accept(exec, history);
+        } catch (Error e) {
+            // An Error is not a state failure: it says the runtime itself is broken, and no retry
+            // of the state machine can get past it. Publishing the same terminal FAILED an
+            // exception produces is what keeps DescribeExecution from reporting RUNNING forever,
+            // and the rethrow keeps the Error itself from being swallowed here. The cause carries
+            // toString() rather than getMessage(), because an Error's message is often null and
+            // the type name is the whole diagnostic.
+            failExecution(exec, history, eventId, "States.Runtime", e.toString());
+            onUpdate.accept(exec, history);
+            throw e;
         } finally {
             activeMocks.remove(exec.getExecutionArn());
         }
@@ -1655,12 +1663,17 @@ public class AslExecutor {
             throw e;
         } catch (ExecutionException e) {
             futures.forEach(future -> future.cancel(true));
-            // Unwrap so a branch's FailStateException reaches the Parallel state's own
-            // Retry and Catch handling instead of surfacing as States.Runtime. An Error
-            // cause stays wrapped so the execution-level Exception handlers still
-            // publish a terminal FAILED update instead of leaving the execution RUNNING.
+            // Unwrap so a branch's FailStateException reaches the Parallel state's own Retry and
+            // Catch handling instead of surfacing as States.Runtime, and so an Error reaches the
+            // execution-level handler as itself rather than as an ExecutionException wrapper. The
+            // reported cause is the same either way, since ExecutionException.getMessage() is the
+            // cause's toString(), but only the unwrapped Error is rethrown and logged with its
+            // stack trace.
             if (e.getCause() instanceof Exception exception) {
                 throw exception;
+            }
+            if (e.getCause() instanceof Error error) {
+                throw error;
             }
             throw e;
         } catch (Exception | Error e) {
@@ -3130,14 +3143,23 @@ public class AslExecutor {
     }
 
     private void failExecution(Execution exec, List<HistoryEvent> history, AtomicLong eventId, FailStateException e) {
-        String failError = e.error != null ? e.error : "States.Runtime";
-        String failCause = e.cause != null ? e.cause : "";
-        exec.setError(failError);
-        exec.setCause(failCause);
+        failExecution(exec, history, eventId, e.error != null ? e.error : "States.Runtime",
+                e.cause != null ? e.cause : "");
+    }
+
+    /**
+     * The single terminal-failure write: every way an execution can fail leaves the same
+     * {@code error}, {@code cause} and {@code ExecutionFailed} event behind, so a client cannot
+     * tell a Fail state from a state that threw from a runtime Error by what it reads back.
+     */
+    private void failExecution(Execution exec, List<HistoryEvent> history, AtomicLong eventId,
+                               String error, String cause) {
+        exec.setError(error);
+        exec.setCause(cause);
         exec.setStopDate(System.currentTimeMillis() / 1000.0);
         exec.setStatus("FAILED");
         addEvent(history, eventId, "ExecutionFailed", null,
-                Map.of("error", failError, "cause", failCause));
+                Map.of("error", error, "cause", cause));
     }
 
     private StateResult handleCatch(JsonNode stateDef, JsonNode input, FailStateException failure,

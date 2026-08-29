@@ -223,6 +223,34 @@ class StepFunctionsJsonataFunctionsIntegrationTest {
                 "cause does not name the rejected algorithm: " + resp.jsonPath().getString("cause"));
     }
 
+    @Test
+    void aFailedJsonataExpressionReportsTheErrorCodeAndTheTypeItWanted() throws Exception {
+        // The reproduction in #2668, end to end: DescribeExecution is where a caller reads the
+        // cause, and the malformed one there said Object "n" and {{type}}.
+        String definition = """
+                {
+                    "QueryLanguage": "JSONata",
+                    "StartAt": "Sum",
+                    "States": {
+                        "Sum": {
+                            "Type": "Pass",
+                            "Output": {
+                                "v": "{% $sum(['a']) %}"
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("jsonata-error-cause", definition);
+        Response resp = waitForExecutionFailure(startExecution(smArn, "{}"));
+
+        assertEquals("States.QueryEvaluationError", resp.jsonPath().getString("error"));
+        assertEquals("T0412: Argument [\"a\"] must be an array of \"numbers\"",
+                resp.jsonPath().getString("cause"));
+    }
+
     // ---- helpers ----
 
     private String createStateMachine(String name, String definition) {

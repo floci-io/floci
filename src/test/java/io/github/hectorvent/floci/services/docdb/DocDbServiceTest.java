@@ -67,7 +67,7 @@ class DocDbServiceTest {
         kmsService = Mockito.mock(KmsService.class);
         when(kmsService.describeKey(any(), any())).thenThrow(new AwsException("NotFoundException", "Key not found", 404));
         when(rdsService.isManagedClusterParameterGroup(any())).thenAnswer(inv ->
-                List.of("default.docdb3.6", "default.docdb4.0", "default.docdb5.0").contains(inv.<String>getArgument(0)));
+                List.of("default.docdb3.6", "default.docdb4.0", "default.docdb5.0", "default.docdb8.0").contains(inv.<String>getArgument(0)));
         docDbService = new DocDbService(config, regionResolver, containerManager, storageFactory,
                 rdsService, ec2Service, kmsService);
     }
@@ -457,6 +457,30 @@ class DocDbServiceTest {
         DocDbCluster stored = docDbService.getDbCluster("c1");
         assertEquals("22:00-23:50", stored.getPreferredBackupWindow());
         assertFalse(BackupWindows.overlap(stored.getPreferredBackupWindow(), stored.getPreferredMaintenanceWindow()));
+    }
+
+    @Test
+    void engineVersionsOutsideTheCatalogueAreRefusedBeforeAnythingChanges() {
+        for (String version : List.of("9.9.9", "5", "abc", "5.0.2")) {
+            AwsException e = assertThrows(AwsException.class, () -> docDbService.createDbCluster(
+                    "c1", version, "u", "pw", false, DocDbClusterSettings.unchanged(), Map.of()));
+            assertEquals("InvalidParameterCombination", e.getErrorCode());
+            assertEquals("Cannot find version " + version + " for docdb", e.getMessage());
+            assertThrows(AwsException.class, () -> docDbService.getDbCluster("c1"));
+        }
+
+        docDbService.createDbCluster("c1", "8.0.1", "u", "pw", false);
+        assertEquals("default.docdb8.0", docDbService.getDbCluster("c1").getDbClusterParameterGroupName());
+        docDbService.createDbCluster("c2", "5.0", "u", "pw", false);
+        assertEquals("5.0", docDbService.getDbCluster("c2").getEngineVersion());
+        assertEquals("default.docdb5.0", docDbService.getDbCluster("c2").getDbClusterParameterGroupName());
+        docDbService.createDbCluster("c3", null, "u", "pw", false);
+        assertEquals("5.0.0", docDbService.getDbCluster("c3").getEngineVersion());
+
+        AwsException e = assertThrows(AwsException.class, () -> docDbService.modifyDbCluster("c1", "9.9.9", null));
+        assertEquals("Cannot find version 9.9.9 for docdb", e.getMessage());
+        assertEquals("8.0.1", docDbService.getDbCluster("c1").getEngineVersion());
+        assertEquals("default.docdb8.0", docDbService.getDbCluster("c1").getDbClusterParameterGroupName());
     }
 
     private AwsException refused(DocDbClusterSettings settings) {

@@ -64,6 +64,7 @@ public class GlobalSecondaryIndex {
     public long getIndexSizeBytes() { return indexSizeBytes; }
     public void setIndexSizeBytes(long indexSizeBytes) { this.indexSizeBytes = indexSizeBytes; }
 
+    @JsonIgnore
     public String getPartitionKeyName() {
         return keySchema.stream()
                 .filter(k -> "HASH".equals(k.getKeyType()))
@@ -72,6 +73,7 @@ public class GlobalSecondaryIndex {
                 .orElseThrow();
     }
 
+    @JsonIgnore
     public String getSortKeyName() {
         return keySchema.stream()
                 .filter(k -> "RANGE".equals(k.getKeyType()))
