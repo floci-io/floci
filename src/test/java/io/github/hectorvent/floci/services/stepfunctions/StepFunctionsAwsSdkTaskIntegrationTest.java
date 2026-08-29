@@ -378,6 +378,61 @@ class StepFunctionsAwsSdkTaskIntegrationTest {
                 "a target the parser rejects must reach Catch as an SDK exception, not States.Runtime");
     }
 
+    @Test
+    @Order(14)
+    void createScheduleWithAMalformedListIsCatchableAsASerializationException() throws Exception {
+        // A malformed EcsParameters list is refused before the conversion runs, so it reaches Catch
+        // as the SDK exception AWS sends rather than as States.Runtime.
+        for (String[] shape : new String[][]{
+                {"scalar-strategy", "\"CapacityProviderStrategy\": [\"FARGATE\"]"},
+                {"non-list-strategy", "\"CapacityProviderStrategy\": \"FARGATE\""},
+                {"scalar-subnet",
+                    "\"NetworkConfiguration\": {\"awsvpcConfiguration\": {\"Subnets\": [123]}}"},
+                {"non-list-subnet",
+                    "\"NetworkConfiguration\": {\"awsvpcConfiguration\": {\"Subnets\": \"subnet-a\"}}"}}) {
+            var smArn = createStateMachine("aws-sdk-create-schedule-" + shape[0], """
+                    {
+                      "QueryLanguage": "JSONata",
+                      "StartAt": "Schedule",
+                      "States": {
+                        "Schedule": {
+                          "Type": "Task",
+                          "Resource": "arn:aws:states:::aws-sdk:scheduler:createSchedule",
+                          "Arguments": {
+                            "Name": "payout-SHAPE",
+                            "ScheduleExpression": "rate(1 day)",
+                            "FlexibleTimeWindow": {"Mode": "OFF"},
+                            "Target": {
+                              "Arn": "TARGET_ARN",
+                              "RoleArn": "ROLE",
+                              "EcsParameters": {
+                                "TaskDefinitionArn": "arn:aws:ecs:us-east-1:000000000000:task-definition/p:1",
+                                MALFORMED_FIELD
+                              }
+                            }
+                          },
+                          "Catch": [{
+                            "ErrorEquals": ["Scheduler.SerializationException"],
+                            "Next": "Recovered",
+                            "Output": {"caughtError": "{% $states.errorOutput.Error %}"}
+                          }],
+                          "End": true
+                        },
+                        "Recovered": {"Type": "Pass", "End": true}
+                      }
+                    }
+                    """
+                    .replace("MALFORMED_FIELD", shape[1])
+                    .replace("SHAPE", shape[0])
+                    .replace("TARGET_ARN", quickChildArn)
+                    .replace("ROLE", ROLE_ARN));
+
+            var result = mapper.readTree(succeedingOutputOf(smArn, "{}"));
+            assertEquals("Scheduler.SerializationException", result.path("caughtError").asText(),
+                    shape[0] + " must reach Catch as an SDK exception, not States.Runtime");
+        }
+    }
+
     private static String scheduleTask(String action, String scheduleName, String expression) {
         return """
                 {
