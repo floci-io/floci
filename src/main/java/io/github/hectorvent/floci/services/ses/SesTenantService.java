@@ -99,7 +99,7 @@ public class SesTenantService {
 
     public Tenant createTenant(String tenantName, List<Tag> tags, List<String> suppressedReasons,
                                String suppressionScope, String accountId, String region) {
-        validateTenantName(tenantName);
+        validateTenantName(tenantName, true);
         SesTags.validate(tags);
         TenantSuppressionAttributes attrs =
                 validateSuppressionAttributesPair(suppressedReasons, suppressionScope);
@@ -125,7 +125,7 @@ public class SesTenantService {
     public Tenant getTenant(String tenantName, String region) {
         // TenantName is a required, min-length-1 member, so a malformed name is a BadRequest, not a
         // lookup miss.
-        validateTenantName(tenantName);
+        validateTenantName(tenantName, false);
         return tenantStore.get(tenantKey(region, tenantName))
                 .orElseThrow(() -> tenantNotFound(tenantName));
     }
@@ -151,7 +151,7 @@ public class SesTenantService {
      * DeleteTenant) rather than orphans no API call can remove.
      */
     public void deleteTenant(String tenantName, String region, Consumer<Tenant> dependentCascade) {
-        validateTenantName(tenantName);
+        validateTenantName(tenantName, false);
         String key = tenantKey(region, tenantName);
         synchronized (tenantMutationLock) {
             Tenant tenant = tenantStore.get(key).orElseThrow(() -> tenantNotFound(tenantName));
@@ -184,12 +184,9 @@ public class SesTenantService {
      * service-level message instead of the Smithy one.
      */
     public Tenant tenantForAssociation(String tenantName, String region) {
-        if (tenantName == null) {
-            throw new AwsException("BadRequestException",
-                    "1 validation error detected: Value at 'tenantName' failed to satisfy constraint: "
-                            + "Member must not be null", 400);
-        }
-        if (tenantName.isBlank()) {
+        // Absent and empty both get the service-level message here (probe-confirmed 2026-08-30) —
+        // the Smithy not-null variant exists only on CreateTenant.
+        if (tenantName == null || tenantName.isBlank()) {
             throw new AwsException("BadRequestException", "TenantName cannot be empty", 400);
         }
         return tenantStore.get(tenantKey(region, tenantName))
@@ -459,14 +456,18 @@ public class SesTenantService {
         return new TenantSuppressionAttributes(List.copyOf(suppressedReasons), suppressionScope);
     }
 
-    // Validation order and messages verified against real AWS (2026-08-22): an empty string is the
-    // Smithy min-length violation, a whitespace-only value is "cannot be empty", then length, then the
-    // character-set rule.
-    private static void validateTenantName(String name) {
+    // Validation order and messages verified against real AWS (2026-08-22 and 2026-08-30): an empty
+    // string is the Smithy min-length violation, a whitespace-only value is "cannot be empty", then
+    // length, then the character-set rule. An ABSENT name gets the Smithy not-null message only on
+    // CreateTenant; every other tenant operation collapses it to "TenantName cannot be empty".
+    private static void validateTenantName(String name, boolean smithyNotNull) {
         if (name == null) {
-            throw new AwsException("BadRequestException",
-                    "1 validation error detected: Value at 'tenantName' failed to satisfy constraint: "
-                            + "Member must not be null", 400);
+            if (smithyNotNull) {
+                throw new AwsException("BadRequestException",
+                        "1 validation error detected: Value at 'tenantName' failed to satisfy "
+                                + "constraint: Member must not be null", 400);
+            }
+            throw new AwsException("BadRequestException", "TenantName cannot be empty", 400);
         }
         if (name.isEmpty()) {
             throw new AwsException("BadRequestException",

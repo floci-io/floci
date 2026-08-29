@@ -132,6 +132,12 @@ class SesTenantServiceTest {
         assertEquals("BadRequestException", g.getErrorCode());
         AwsException d = assertThrows(AwsException.class, () -> service.deleteTenant("   ", REGION));
         assertEquals("BadRequestException", d.getErrorCode());
+        // Unlike CreateTenant, an absent name collapses to the service-level message here
+        // (probe-confirmed 2026-08-30).
+        assertEquals("TenantName cannot be empty",
+                assertThrows(AwsException.class, () -> service.getTenant(null, REGION)).getMessage());
+        assertEquals("TenantName cannot be empty",
+                assertThrows(AwsException.class, () -> service.deleteTenant(null, REGION)).getMessage());
     }
 
     // ──────────────────────── Resource associations (Phase 2) ────────────────────────
@@ -305,9 +311,11 @@ class SesTenantServiceTest {
         AwsException empty = assertThrows(AwsException.class,
                 () -> service.tenantForAssociation("", REGION));
         assertEquals("TenantName cannot be empty", empty.getMessage());
+        // An absent TenantName gets the same message (probe-confirmed) — the Smithy not-null
+        // variant exists only on CreateTenant.
         AwsException absent = assertThrows(AwsException.class,
                 () -> service.tenantForAssociation(null, REGION));
-        assertTrue(absent.getMessage().contains("'tenantName'"));
+        assertEquals("TenantName cannot be empty", absent.getMessage());
         AwsException missing = assertThrows(AwsException.class,
                 () -> service.tenantForAssociation("ghost", REGION));
         assertEquals("NotFoundException", missing.getErrorCode());

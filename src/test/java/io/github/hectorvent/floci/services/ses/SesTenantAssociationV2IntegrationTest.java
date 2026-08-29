@@ -130,6 +130,10 @@ class SesTenantAssociationV2IntegrationTest {
         v2().body("{\"TenantName\":\"\",\"ResourceArn\":\"" + IDENTITY_ARN + "\"}")
                 .when().post("/v2/email/tenants/resources").then().statusCode(400)
                 .body("message", equalTo("TenantName cannot be empty"));
+        // An absent TenantName gets the same message (probe-confirmed) — no Smithy not-null here.
+        v2().body("{\"ResourceArn\":\"" + IDENTITY_ARN + "\"}")
+                .when().post("/v2/email/tenants/resources").then().statusCode(400)
+                .body("message", equalTo("TenantName cannot be empty"));
         v2().body("{\"TenantName\":\"" + TENANT + "\"}")
                 .when().post("/v2/email/tenants/resources").then().statusCode(400)
                 .body("message", equalTo("1 validation error detected: Value at 'resourceArn' failed "
