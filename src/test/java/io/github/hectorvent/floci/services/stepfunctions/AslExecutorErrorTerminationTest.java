@@ -84,7 +84,8 @@ class AslExecutorErrorTerminationTest {
                 mock(io.github.hectorvent.floci.services.ecs.EcsJsonHandler.class),
                 objectMapper,
                 new CrashingJsonataEvaluator(objectMapper),
-                mock(Instance.class), mock(EmulatorConfig.class), vertx);
+                mock(Instance.class), mock(EmulatorConfig.class), vertx,
+                mock(io.github.hectorvent.floci.core.common.CustomResourceLiveness.class));
     }
 
     private static final String PASS_WITH_JSONATA_OUTPUT = """
