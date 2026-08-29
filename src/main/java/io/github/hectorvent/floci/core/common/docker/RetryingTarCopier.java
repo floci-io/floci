@@ -13,6 +13,7 @@ import java.io.PipedInputStream;
 import java.io.PipedOutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Retryable tar-copies into containers, shared by every service that pushes content into a
@@ -105,14 +106,19 @@ public final class RetryingTarCopier {
                                     String label, TarWriter tarWriter,
                                     int maxAttempts, long backoffMillis) {
         retry(label, containerId, maxAttempts, backoffMillis, () -> {
+            AtomicReference<Throwable> writerFailure = new AtomicReference<>();
             try (PipedOutputStream pos = new PipedOutputStream();
                  PipedInputStream pis = new PipedInputStream(pos, TAR_PIPE_BUFFER_BYTES)) {
                 Thread streamer = new Thread(() -> {
                     try (pos) {
                         tarWriter.write(pos);
-                    } catch (IOException e) {
-                        // The reader side sees the truncated stream and fails the attempt; an
-                        // abandoned pipe from a retried attempt lands here too, harmlessly.
+                    } catch (Throwable e) {
+                        // Recorded and rechecked below instead of just logged: closing the pipe
+                        // here without producing output looks like a clean, empty tar to the
+                        // reader — the daemon accepts it and exec() below returns normally,
+                        // so a writer failure (e.g. the source file went missing) would otherwise
+                        // report success while nothing (or a truncated file) was actually copied.
+                        writerFailure.set(e);
                         LOG.debugv("Tar streamer for {0} ended early: {1}", label, e.getMessage());
                     }
                 }, "tar-streamer-" + label);
@@ -121,6 +127,18 @@ public final class RetryingTarCopier {
                         .withRemotePath(remotePath)
                         .withTarInputStream(pis)
                         .exec();
+                // Joined before the try-with-resources closes pos/pis on the way out: a real
+                // exec() only returns after consuming the tar to EOF, which the streamer causes
+                // by closing pos once it's done, so this never blocks in production — but closing
+                // pos out from under a still-writing streamer (as a mocked/short-circuited exec()
+                // would) turns its own write into a spurious "Pipe closed" failure.
+                streamer.join();
+            }
+            Throwable failure = writerFailure.get();
+            if (failure instanceof Exception ex) {
+                throw ex;
+            } else if (failure != null) {
+                throw new IOException("Tar streamer for " + label + " failed", failure);
             }
         });
     }

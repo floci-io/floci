@@ -93,6 +93,30 @@ class RetryingTarCopierTest {
         assertEquals(1, calls.get());
     }
 
+    // copyFile streams tarWriter through a pipe on its own thread; if the writer fails before
+    // producing any bytes (e.g. the source file vanished), closing the pipe with nothing written
+    // looks like a clean, empty tar to a reader that isn't checking for that — the daemon accepts
+    // it and exec() returns normally, so the caller would otherwise see a false success instead
+    // of the real failure.
+    @Test
+    void copyFileFailsTheAttemptWhenTheSourceFileIsMissingInsteadOfReportingSuccess(@TempDir Path tempDir) {
+        DockerClient docker = mock(DockerClient.class);
+        CopyArchiveToContainerCmd cmd = mock(CopyArchiveToContainerCmd.class, RETURNS_SELF);
+        when(cmd.exec()).thenAnswer(inv -> null);
+        when(docker.copyArchiveToContainerCmd(any())).thenReturn(cmd);
+        Path missing = tempDir.resolve("does-not-exist");
+
+        RuntimeException thrown = assertThrows(RuntimeException.class,
+                () -> RetryingTarCopier.copyFile(docker, "c-1", "/etc", "f", missing, 0644, 1, 0L));
+
+        Throwable cause = thrown.getCause();
+        while (cause != null && !(cause instanceof java.nio.file.NoSuchFileException)) {
+            cause = cause.getCause();
+        }
+        assertEquals(java.nio.file.NoSuchFileException.class, cause == null ? null : cause.getClass(),
+                "the streamer's real failure must surface, not a phantom success");
+    }
+
     @Test
     void copyFileRebuildsThePipePerAttempt(@TempDir Path dir) throws IOException {
         Path file = dir.resolve("bootstrap");

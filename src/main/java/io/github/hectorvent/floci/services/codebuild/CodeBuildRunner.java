@@ -79,6 +79,18 @@ public class CodeBuildRunner implements ContainerTeardown {
     private static final String PHASE_START_SENTINEL = "___FLOCI_PHASE_START___";
     private static final String PHASE_END_SENTINEL = "___FLOCI_PHASE_END___";
 
+    /**
+     * botocore's {@code ProjectSource.sourceIdentifier} documentation: "can only contain
+     * alphanumeric characters and underscores, and must be less than 128 characters in length".
+     * Enforced here (the sink) rather than only at the API boundary, since a project's stored
+     * secondarySources reach this method too, not just a StartBuild override: an unvalidated
+     * identifier is resolved directly into a host filesystem path and interpolated unquoted into
+     * an in-container shell command, so a value like {@code ../../etc} or one containing shell
+     * metacharacters would otherwise escape the source-staging directory or inject a command.
+     */
+    private static final java.util.regex.Pattern SECONDARY_SOURCE_IDENTIFIER_PATTERN =
+            java.util.regex.Pattern.compile("^[A-Za-z0-9_]{1,127}$");
+
     // Unix file-type mask and S_IFLNK marker: a zip stores a symlink with these bits
     // in its unix mode and the link target as the entry's content. LZA's installer
     // zips with `zip -y`, so all of node_modules/.bin/* arrive as symlink entries.
@@ -752,11 +764,16 @@ public class CodeBuildRunner implements ContainerTeardown {
 
     /** Downloads and extracts each S3 secondary source into its own local directory,
      *  keyed by source identifier, mirroring the primary source's lenient S3 handling. */
-    private Map<String, Path> acquireSecondarySources(Build build, Path root) throws IOException {
+    Map<String, Path> acquireSecondarySources(Build build, Path root) throws IOException {
         Map<String, Path> dirs = new LinkedHashMap<>();
         for (ProjectSource secondary : build.getSecondarySources()) {
             String identifier = secondary.getSourceIdentifier();
             if (identifier == null || identifier.isBlank()) {
+                continue;
+            }
+            if (!SECONDARY_SOURCE_IDENTIFIER_PATTERN.matcher(identifier).matches()) {
+                LOG.warnv("Secondary source identifier {0} of build {1} is not alphanumeric/underscore-only; "
+                        + "skipping rather than resolving it into a path or shell command", identifier, build.getId());
                 continue;
             }
             Path dir = Files.createDirectories(root.resolve(identifier));

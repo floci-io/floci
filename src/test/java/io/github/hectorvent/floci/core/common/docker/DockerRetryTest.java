@@ -60,6 +60,15 @@ class DockerRetryTest {
         assertFalse(DockerRetry.isTransientIo(new InterruptedIOException("interrupted")));
     }
 
+    // A single forward walk returns true as soon as it hits the outer IOException, never
+    // reaching the InterruptedIOException wrapped inside it — the exclusion must be checked
+    // over the whole chain before the general "any IOException is transient" rule applies.
+    @Test
+    void interruptedIoExceptionWrappedInAnotherIOExceptionIsStillNotTransient() {
+        assertFalse(DockerRetry.isTransientIo(
+                new IOException("wrapper", new InterruptedIOException("interrupted"))));
+    }
+
     @Test
     void recoversAfterTransientFailures() {
         AtomicInteger calls = new AtomicInteger();

@@ -62,16 +62,23 @@ public final class DockerRetry {
      * possibly wrapped by docker-java in a {@link RuntimeException}.
      */
     public static boolean isTransientIo(Throwable t) {
+        // InterruptedIOException covers both a genuine thread interruption (masking it would
+        // delay shutdown) and httpclient5's ConnectionRequestTimeoutException — the pool has no
+        // free connection lease after waiting the full request timeout, meaning the pool is
+        // exhausted rather than a socket blip. Retrying either just re-enters another wait and
+        // adds pressure to an already-starved pool, so both must be excluded from the general
+        // "any IOException is transient" rule below — checked over the WHOLE chain first, since
+        // an outer wrapper IOException would otherwise short-circuit the walk before it ever
+        // reaches an inner InterruptedIOException cause.
         for (Throwable c = t; c != null; c = c.getCause()) {
-            // InterruptedIOException covers both a genuine thread interruption (masking it would
-            // delay shutdown) and httpclient5's ConnectionRequestTimeoutException — the pool has
-            // no free connection lease after waiting the full request timeout, meaning the pool
-            // is exhausted rather than a socket blip. Retrying either just re-enters another wait
-            // and adds pressure to an already-starved pool, so both must be excluded from the
-            // general "any IOException is transient" rule below.
             if (c instanceof InterruptedIOException) {
                 return false;
             }
+            if (c.getCause() == c) {
+                break;
+            }
+        }
+        for (Throwable c = t; c != null; c = c.getCause()) {
             if (c instanceof IOException) {
                 return true;
             }
