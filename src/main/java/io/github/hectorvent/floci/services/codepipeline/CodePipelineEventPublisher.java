@@ -66,7 +66,8 @@ public class CodePipelineEventPublisher {
                 .put("provider", action.getProvider())
                 .put("category", action.getCategory())
                 .put("version", "1");
-        if (action.getExternalExecutionId() != null || action.getErrorDetails() != null) {
+        if (action.getExternalExecutionId() != null || action.getSummary() != null
+                || action.getErrorDetails() != null) {
             ObjectNode result = detail.putObject("execution-result");
             if (action.getExternalExecutionId() != null) {
                 result.put("external-execution-id", action.getExternalExecutionId());
@@ -75,7 +76,10 @@ public class CodePipelineEventPublisher {
                 result.put("external-execution-summary", action.getSummary());
             }
             if (action.getErrorDetails() != null) {
-                result.put("error-code", String.valueOf(action.getErrorDetails().get("code")));
+                Object code = action.getErrorDetails().get("code");
+                if (code != null) {
+                    result.put("error-code", code.toString());
+                }
             }
         }
         publish(execution, "CodePipeline Action Execution State Change", detail);

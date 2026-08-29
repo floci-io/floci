@@ -381,6 +381,29 @@ class CodePipelineServiceTest {
     }
 
     @Test
+    void variableCheckMatchesRejectsAnOverlongPatternInsteadOfRunningIt() {
+        ObjectNode deploy = lambdaStage("Deploy");
+        ObjectNode condition = deploy.putObject("onSuccess").putArray("conditions").addObject();
+        condition.put("result", "FAIL");
+        ObjectNode rule = condition.putArray("rules").addObject();
+        rule.put("name", "check-pattern");
+        rule.putObject("ruleTypeId")
+                .put("category", "Rule").put("owner", "AWS").put("provider", "VariableCheck").put("version", "1");
+        rule.putObject("configuration")
+                .put("Variable", "#{variables.env}")
+                .put("Value", "a".repeat(257))
+                .put("Operator", "MATCHES");
+        createPipeline("matches-overlong", sourceStage(), deploy);
+
+        String executionId = startExecution("matches-overlong");
+        CodePipelineExecution failed = awaitStatus(executionId, "Failed");
+        assertEquals(1, failed.getRuleExecutions().size());
+        assertEquals("Failed", failed.getRuleExecutions().get(0).get("status"));
+        assertTrue(failed.getRuleExecutions().get(0).get("summary").toString()
+                .contains("exceeds 256 characters"));
+    }
+
+    @Test
     void beforeEntrySkipConditionSkipsStage() {
         ObjectNode deploy = lambdaStage("Deploy");
         ObjectNode condition = deploy.putObject("beforeEntry").putArray("conditions").addObject();
@@ -688,6 +711,36 @@ class CodePipelineServiceTest {
         assertTrue(execution.getArtifactRevisions().stream().anyMatch(r ->
                 "github.com/awslabs/landing-zone-accelerator-on-aws@release/v1.16.0"
                         .equals(r.get("revisionSummary"))));
+    }
+
+    @Test
+    void gitHubSourceActionRejectsPathTraversalInOwnerRepoOrBranch() {
+        ObjectNode source = mapper.createObjectNode();
+        source.put("name", "Fetch");
+        ObjectNode action = source.putArray("actions").addObject();
+        action.put("name", "GitHubSource");
+        action.putObject("actionTypeId")
+                .put("category", "Source").put("owner", "ThirdParty")
+                .put("provider", "GitHub").put("version", "1");
+        action.putObject("configuration")
+                .put("Owner", "awslabs").put("Repo", "../../etc").put("Branch", "main");
+        action.putArray("outputArtifacts").addObject().put("name", "Source");
+        action.put("runOrder", 1);
+
+        ObjectNode declaration = mapper.createObjectNode();
+        declaration.put("name", "traversal-repo");
+        declaration.put("roleArn", "arn:aws:iam::000000000000:role/cp");
+        declaration.putObject("artifactStore").put("type", "S3").put("location", "bucket");
+        declaration.putArray("stages").add(source).add(lambdaStage("Deploy"));
+        service.handle("CreatePipeline",
+                mapper.createObjectNode().set("pipeline", declaration), REGION, ACCOUNT);
+
+        String executionId = service.handle("StartPipelineExecution",
+                mapper.createObjectNode().put("name", "traversal-repo"), REGION, ACCOUNT)
+                .path("pipelineExecutionId").asText();
+        CodePipelineExecution failed = awaitStatus(executionId, "Failed");
+        assertTrue(failed.getActionExecutions().get(0).getErrorDetails().get("message").toString()
+                .contains("path separators or traversal"));
     }
 
     @Test

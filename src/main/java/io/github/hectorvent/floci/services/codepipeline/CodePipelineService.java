@@ -1145,6 +1145,10 @@ public class CodePipelineService {
         return result.getFunctionError() == null && result.getStatusCode() < 400;
     }
 
+    /** Above this length, a MATCHES pattern or subject is rejected rather than risking
+     * catastrophic regex backtracking on pipeline-declared input. */
+    private static final int MAX_VARIABLE_CHECK_MATCH_LENGTH = 256;
+
     private boolean variableCheckPasses(CodePipelineExecution execution, JsonNode rule) {
         JsonNode config = rule.path("configuration");
         String variable = resolveVariableReference(execution, config.path("Variable").asText(""));
@@ -1153,7 +1157,15 @@ public class CodePipelineService {
             case "EQ" -> variable.equals(value);
             case "NE" -> !variable.equals(value);
             case "CONTAINS" -> variable.contains(value);
-            case "MATCHES" -> variable.matches(value);
+            case "MATCHES" -> {
+                if (value.length() > MAX_VARIABLE_CHECK_MATCH_LENGTH
+                        || variable.length() > MAX_VARIABLE_CHECK_MATCH_LENGTH) {
+                    throw new AwsException("ValidationException",
+                            "VariableCheck MATCHES pattern or value exceeds "
+                                    + MAX_VARIABLE_CHECK_MATCH_LENGTH + " characters", 400);
+                }
+                yield variable.matches(value);
+            }
             default -> throw new AwsException("ValidationException",
                     "Unknown VariableCheck operator", 400);
         };
@@ -1324,6 +1336,12 @@ public class CodePipelineService {
             throw new AwsException("InvalidActionDeclarationException",
                     "GitHub source actions require Owner and Repo", 400);
         }
+        if (!isValidGitHubPathSegment(repoOwner) || !isValidGitHubPathSegment(repo)
+                || !isValidGitHubRef(branch)) {
+            throw new AwsException("InvalidActionDeclarationException",
+                    "GitHub source Owner, Repo, and Branch must not contain path separators "
+                            + "or traversal segments", 400);
+        }
         byte[] archive = fetchGitHubArchive(java.net.URI.create(
                 "https://codeload.github.com/" + repoOwner + "/" + repo
                         + "/zip/refs/heads/" + branch));
@@ -1343,14 +1361,29 @@ public class CodePipelineService {
         state.setExternalExecutionUrl("https://github.com/" + repoOwner + "/" + repo);
     }
 
+    /** repoOwner/repo path segments: no '/', no '..', non-empty. */
+    private static boolean isValidGitHubPathSegment(String segment) {
+        return !segment.isEmpty() && !segment.contains("/") && !segment.contains("..");
+    }
+
+    /** Branch ref: slashes are legal (e.g. {@code release/v1.16.0}), but no '..' traversal,
+     * leading slash, or whitespace/control characters that could reshape the request path. */
+    private static boolean isValidGitHubRef(String ref) {
+        return !ref.isEmpty() && !ref.startsWith("/") && !ref.contains("..")
+                && ref.chars().noneMatch(Character::isWhitespace);
+    }
+
     /** Overridable seam for tests; production goes to github.com with the JVM's proxy settings. */
     byte[] fetchGitHubArchive(java.net.URI uri) {
         try {
             java.net.http.HttpClient client = java.net.http.HttpClient.newBuilder()
+                    .connectTimeout(java.time.Duration.ofSeconds(10))
                     .followRedirects(java.net.http.HttpClient.Redirect.NORMAL)
                     .build();
             java.net.http.HttpResponse<byte[]> response = client.send(
-                    java.net.http.HttpRequest.newBuilder(uri).GET().build(),
+                    java.net.http.HttpRequest.newBuilder(uri)
+                            .timeout(java.time.Duration.ofSeconds(30))
+                            .GET().build(),
                     java.net.http.HttpResponse.BodyHandlers.ofByteArray());
             if (response.statusCode() != 200) {
                 throw new AwsException("ActionExecutionFailed",
