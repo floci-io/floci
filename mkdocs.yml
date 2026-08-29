@@ -116,6 +116,7 @@ nav:
     - CloudWatch: services/cloudwatch.md
     - CloudWatch RUM: services/rum.md
     - GuardDuty: services/guardduty.md
+    - Connect: services/connect.md
     - ACM: services/acm.md
     - ECS: services/ecs.md
     - ECR: services/ecr.md

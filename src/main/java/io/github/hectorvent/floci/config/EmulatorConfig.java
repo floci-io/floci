@@ -690,11 +690,17 @@ public interface EmulatorConfig {
         ServiceQuotasServiceConfig servicequotas();
         RamServiceConfig ram();
         ControlTowerServiceConfig controltower();
+        ConnectServiceConfig connect();
 
         ApsServiceConfig aps();
 
         LakeFormationServiceConfig lakeformation();
         EfsServiceConfig efs();
+    }
+
+    interface ConnectServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
     }
 
     interface SsoAdminServiceConfig {
