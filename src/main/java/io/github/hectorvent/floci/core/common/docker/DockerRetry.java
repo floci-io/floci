@@ -69,9 +69,12 @@ public final class DockerRetry {
         // adds pressure to an already-starved pool, so both must be excluded from the general
         // "any IOException is transient" rule below — checked over the WHOLE chain first, since
         // an outer wrapper IOException would otherwise short-circuit the walk before it ever
-        // reaches an inner InterruptedIOException cause.
+        // reaches an inner InterruptedIOException cause. java.net.SocketTimeoutException is ALSO
+        // an InterruptedIOException subtype but means something different (the daemon just took
+        // too long to answer, not that the pool is exhausted or the thread was interrupted) and
+        // must stay retryable, so it's excluded from this exclusion.
         for (Throwable c = t; c != null; c = c.getCause()) {
-            if (c instanceof InterruptedIOException) {
+            if (c instanceof InterruptedIOException && !(c instanceof java.net.SocketTimeoutException)) {
                 return false;
             }
             if (c.getCause() == c) {

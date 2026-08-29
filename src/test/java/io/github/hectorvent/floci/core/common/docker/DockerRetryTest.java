@@ -69,6 +69,14 @@ class DockerRetryTest {
                 new IOException("wrapper", new InterruptedIOException("interrupted"))));
     }
 
+    // java.net.SocketTimeoutException extends InterruptedIOException, but a slow daemon
+    // response is a socket blip like Broken pipe/Connection reset, not a genuine interrupt or
+    // pool exhaustion -- it must stay retryable.
+    @Test
+    void socketTimeoutExceptionIsStillTransientDespiteExtendingInterruptedIOException() {
+        assertTrue(DockerRetry.isTransientIo(new java.net.SocketTimeoutException("Read timed out")));
+    }
+
     @Test
     void recoversAfterTransientFailures() {
         AtomicInteger calls = new AtomicInteger();

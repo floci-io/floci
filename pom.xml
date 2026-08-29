@@ -193,6 +193,19 @@
             <groupId>org.apache.commons</groupId>
             <artifactId>commons-compress</artifactId>
         </dependency>
+        <!-- commons-compress 1.28.0 optionally depends on org.tukaani:xz (not pulled
+             transitively, since Maven never resolves an "optional=true" dependency of a
+             dependency); GraalVM native image's static analysis reaches XZ-support classes
+             via commons-compress's CompressorStreamFactory service registration regardless of
+             whether Floci ever reads/writes .xz archives, and needs to resolve the type at
+             bytecode-parse time, a link-time step that initialize-at-run-time cannot defer,
+             so the jar has to actually be on the classpath, same as the org.brotli:dec case
+             above. -->
+        <dependency>
+            <groupId>org.tukaani</groupId>
+            <artifactId>xz</artifactId>
+            <version>1.10</version>
+        </dependency>
 
         <!-- BouncyCastle for X.509 certificate generation and PEM handling (ACM service) -->
         <dependency>
