@@ -411,4 +411,85 @@ class ApiGatewayV2OpenApiImportTest {
                 .then().statusCode(201);
         assertNotNull(get("/v2/apis/" + apiId).get("warnings"));
     }
+
+    @Test
+    @Order(13)
+    void rejectedAuthorizerLeavesThePreviousDefinitionIntact() throws Exception {
+        // Syntactically valid, but HTTP APIs have no such authorizer type. The rejection has to
+        // happen before the existing routes are deleted.
+        String badAuthorizerSpec = """
+                {
+                  "openapi": "3.0.1",
+                  "info": {"title": "BadAuthApi", "version": "1.0"},
+                  "security": [{"Tokenish": []}],
+                  "components": {"securitySchemes": {"Tokenish": {
+                    "type": "apiKey", "name": "Authorization", "in": "header",
+                    "x-amazon-apigateway-authorizer": {"type": "token", "authorizerUri": "arn:aws:lambda:x"}
+                  }}},
+                  "paths": {"/x": {"get": {}}}
+                }
+                """;
+
+        String created = given().contentType(ContentType.JSON)
+                .body("{\"name\": \"badAuthorizerTarget\", \"protocolType\": \"HTTP\"}")
+                .when().post("/v2/apis")
+                .then().statusCode(201).extract().asString();
+        String apiId = mapper.readTree(created).get("apiId").asText();
+
+        given().contentType(ContentType.JSON)
+                .body(envelope(SPEC_WITH_AUTHORIZER))
+                .when().put("/v2/apis/" + apiId)
+                .then().statusCode(201);
+        assertEquals(2, get("/v2/apis/" + apiId + "/routes").get("items").size());
+        assertEquals(1, get("/v2/apis/" + apiId + "/authorizers").get("items").size());
+
+        given().contentType(ContentType.JSON)
+                .body(envelope(badAuthorizerSpec))
+                .when().put("/v2/apis/" + apiId)
+                .then().statusCode(400);
+
+        JsonNode routes = get("/v2/apis/" + apiId + "/routes");
+        assertEquals(2, routes.get("items").size());
+        assertNotNull(findRoute(routes, "GET /api/items"));
+        assertEquals(2, get("/v2/apis/" + apiId + "/integrations").get("items").size());
+        assertEquals(1, get("/v2/apis/" + apiId + "/authorizers").get("items").size());
+    }
+
+    @Test
+    @Order(14)
+    void securityThatResolvesToNoAuthorizerIsWarnedAbout() throws Exception {
+        // A plain bearer scheme carries no AWS binding, so the route can only be imported as NONE.
+        // Silently doing so would make a document that declares security produce a public route.
+        String spec = """
+                {
+                  "openapi": "3.0.1",
+                  "info": {"title": "UnboundSecurityApi", "version": "1.0"},
+                  "components": {"securitySchemes": {"BearerAuth": {"type": "http", "scheme": "bearer"}}},
+                  "paths": {"/secret": {"get": {"security": [{"BearerAuth": []}]}}}
+                }
+                """;
+
+        String response = given().contentType(ContentType.JSON)
+                .body(envelope(spec))
+                .when().put("/v2/apis")
+                .then().statusCode(201)
+                .extract().asString();
+        String apiId = mapper.readTree(response).get("apiId").asText();
+
+        JsonNode warnings = get("/v2/apis/" + apiId).get("warnings");
+        assertNotNull(warnings);
+        assertTrue(warnings.toString().contains("GET /secret"));
+        assertTrue(warnings.toString().contains("BearerAuth"));
+
+        JsonNode route = findRoute(get("/v2/apis/" + apiId + "/routes"), "GET /secret");
+        assertNotNull(route);
+        assertEquals("NONE", route.get("authorizationType").asText());
+
+        // failOnWarnings turns that same document into a rejection.
+        given().contentType(ContentType.JSON)
+                .queryParam("failOnWarnings", "true")
+                .body(envelope(spec))
+                .when().put("/v2/apis")
+                .then().statusCode(400);
+    }
 }

@@ -2306,7 +2306,9 @@ public class ApiGatewayController {
         if (api.getRouteSelectionExpression() != null) node.put("routeSelectionExpression", api.getRouteSelectionExpression());
         if (api.getDescription() != null) node.put("description", api.getDescription());
         if (api.getApiKeySelectionExpression() != null) node.put("apiKeySelectionExpression", api.getApiKeySelectionExpression());
-        if (api.getVersion() != null) node.put("version", api.getVersion());
+        if (api.getVersion() != null) {
+            node.put("version", api.getVersion());
+        }
         if (api.getWarnings() != null && !api.getWarnings().isEmpty()) {
             ArrayNode warnings = node.putArray("warnings");
             api.getWarnings().forEach(warnings::add);
@@ -2434,7 +2436,9 @@ public class ApiGatewayController {
             ObjectNode tags = node.putObject("tags");
             s.getTags().forEach(tags::put);
         }
-        if (s.getDescription() != null) node.put("description", s.getDescription());
+        if (s.getDescription() != null) {
+            node.put("description", s.getDescription());
+        }
         if (s.getAccessLogSettings() != null) {
             ObjectNode logs = node.putObject("accessLogSettings");
             if (s.getAccessLogSettings().destinationArn() != null) {
@@ -2456,11 +2460,21 @@ public class ApiGatewayController {
 
     private ObjectNode toV2RouteSettingsNode(Stage.RouteSettings rs) {
         ObjectNode node = objectMapper.createObjectNode();
-        if (rs.detailedMetricsEnabled() != null) node.put("detailedMetricsEnabled", rs.detailedMetricsEnabled());
-        if (rs.dataTraceEnabled() != null) node.put("dataTraceEnabled", rs.dataTraceEnabled());
-        if (rs.loggingLevel() != null) node.put("loggingLevel", rs.loggingLevel());
-        if (rs.throttlingBurstLimit() != null) node.put("throttlingBurstLimit", rs.throttlingBurstLimit());
-        if (rs.throttlingRateLimit() != null) node.put("throttlingRateLimit", rs.throttlingRateLimit());
+        if (rs.detailedMetricsEnabled() != null) {
+            node.put("detailedMetricsEnabled", rs.detailedMetricsEnabled());
+        }
+        if (rs.dataTraceEnabled() != null) {
+            node.put("dataTraceEnabled", rs.dataTraceEnabled());
+        }
+        if (rs.loggingLevel() != null) {
+            node.put("loggingLevel", rs.loggingLevel());
+        }
+        if (rs.throttlingBurstLimit() != null) {
+            node.put("throttlingBurstLimit", rs.throttlingBurstLimit());
+        }
+        if (rs.throttlingRateLimit() != null) {
+            node.put("throttlingRateLimit", rs.throttlingRateLimit());
+        }
         return node;
     }
 

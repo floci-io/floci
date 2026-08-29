@@ -23,6 +23,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.function.BiConsumer;
 
 /**
  * OpenAPI import for HTTP APIs (ImportApi / ReimportApi).
@@ -145,8 +146,8 @@ public class ApiGatewayV2OpenApiImporter {
      * A parsed document plus everything decided before the first write: the route path prefix the
      * basepath mode implies, and the diagnostics AWS reports back on the Api.
      */
-    private record ImportPlan(OpenAPI openAPI, String pathPrefix, List<String> warnings,
-                              List<String> importInfo) {}
+    private record ImportPlan(OpenAPI openAPI, String pathPrefix, List<AuthorizerSpec> authorizerSpecs,
+                              List<String> warnings, List<String> importInfo) {}
 
     private ImportPlan plan(String specBody, String basePathMode, boolean failOnWarnings) {
         if (specBody == null || specBody.isBlank()) {
@@ -176,11 +177,66 @@ public class ApiGatewayV2OpenApiImporter {
         String pathPrefix = pathPrefix(openAPI, mode, importInfo);
         collectImportInfo(openAPI, importInfo);
 
+        // Resolve the authorizers here rather than during application: this is what makes a
+        // rejected reimport leave the previous definition intact.
+        List<AuthorizerSpec> authorizerSpecs = authorizerSpecs(openAPI);
+        collectUnresolvedSecurity(openAPI, authorizerSpecs, warnings);
+
         if (failOnWarnings && !warnings.isEmpty()) {
             throw new AwsException("BadRequestException",
                     "Warnings found during import: " + String.join(", ", warnings), 400);
         }
-        return new ImportPlan(openAPI, pathPrefix, warnings, importInfo);
+        return new ImportPlan(openAPI, pathPrefix, authorizerSpecs, warnings, importInfo);
+    }
+
+    /**
+     * Flags security requirements that name a scheme HTTP APIs cannot enforce — a plain bearer or
+     * apiKey scheme with no {@code x-amazon-apigateway-authorizer}, or a misspelled scheme name.
+     * Such a route is imported as NONE, so without this the document would appear to secure an
+     * endpoint that ends up publicly invokable. Raised as a warning rather than an error so
+     * failOnWarnings decides whether it is fatal.
+     */
+    private static void collectUnresolvedSecurity(OpenAPI openAPI, List<AuthorizerSpec> specs,
+                                                  List<String> warnings) {
+        if (openAPI.getPaths() == null) {
+            return;
+        }
+        java.util.Set<String> bindable = new java.util.HashSet<>();
+        specs.forEach(spec -> bindable.add(spec.schemeName()));
+
+        java.util.Set<String> reported = new java.util.LinkedHashSet<>();
+        BiConsumer<String, List<SecurityRequirement>> check = (routeKey, security) -> {
+            if (security == null || security.isEmpty()) {
+                return;
+            }
+            boolean anyResolves = security.stream()
+                    .flatMap(requirement -> requirement.keySet().stream())
+                    .anyMatch(bindable::contains);
+            if (!anyResolves) {
+                String names = security.stream()
+                        .flatMap(requirement -> requirement.keySet().stream())
+                        .distinct()
+                        .collect(java.util.stream.Collectors.joining(", "));
+                reported.add("Security requirement (" + names + ") on " + routeKey
+                        + " does not resolve to a supported authorizer; the route is imported as NONE"
+                        + " and will accept unauthenticated requests");
+            }
+        };
+
+        List<SecurityRequirement> globalSecurity = openAPI.getSecurity();
+        openAPI.getPaths().forEach((path, pathItem) -> {
+            if (pathItem == null) {
+                return;
+            }
+            pathItem.readOperationsMap().forEach((method, operation) -> {
+                List<SecurityRequirement> security =
+                        operation != null && operation.getSecurity() != null
+                                ? operation.getSecurity()
+                                : globalSecurity;
+                check.accept(method.name() + " " + path, security);
+            });
+        });
+        warnings.addAll(reported);
     }
 
     /**
@@ -283,7 +339,7 @@ public class ApiGatewayV2OpenApiImporter {
 
     private void applySpec(String region, String apiId, ImportPlan plan) {
         OpenAPI openAPI = plan.openAPI();
-        Map<String, SchemeBinding> schemes = createAuthorizers(region, apiId, openAPI);
+        Map<String, SchemeBinding> schemes = createAuthorizers(region, apiId, plan);
         List<SecurityRequirement> globalSecurity = openAPI.getSecurity();
 
         if (openAPI.getPaths() == null) {
@@ -391,10 +447,23 @@ public class ApiGatewayV2OpenApiImporter {
     /** What a security scheme name resolves to once its authorizer (if any) has been created. */
     private record SchemeBinding(String authorizationType, String authorizerId) {}
 
-    private Map<String, SchemeBinding> createAuthorizers(String region, String apiId, OpenAPI openAPI) {
-        Map<String, SchemeBinding> bindings = new LinkedHashMap<>();
+    /**
+     * A security scheme resolved to the CreateAuthorizer call it implies. {@code request} is null
+     * for schemes that select an authorization type without an authorizer of their own — sigv4,
+     * which is simply AWS_IAM.
+     */
+    private record AuthorizerSpec(String schemeName, String authorizationType, Map<String, Object> request) {}
+
+    /**
+     * Turns the document's security schemes into CreateAuthorizer calls, rejecting anything HTTP
+     * APIs cannot express. Deliberately side-effect free: {@link #plan} runs this before
+     * {@link #reimportApi} deletes anything, so a definition that is syntactically valid but
+     * carries an unusable authorizer is refused with the previous definition still intact.
+     */
+    private static List<AuthorizerSpec> authorizerSpecs(OpenAPI openAPI) {
+        List<AuthorizerSpec> specs = new ArrayList<>();
         if (openAPI.getComponents() == null || openAPI.getComponents().getSecuritySchemes() == null) {
-            return bindings;
+            return specs;
         }
 
         for (Map.Entry<String, SecurityScheme> entry : openAPI.getComponents().getSecuritySchemes().entrySet()) {
@@ -411,7 +480,7 @@ public class ApiGatewayV2OpenApiImporter {
                 if ("awsSigv4".equalsIgnoreCase(scheme.getName())
                         || SecurityScheme.Type.HTTP.equals(scheme.getType())
                         && "aws.v4".equalsIgnoreCase(scheme.getScheme())) {
-                    bindings.put(schemeName, new SchemeBinding("AWS_IAM", null));
+                    specs.add(new AuthorizerSpec(schemeName, "AWS_IAM", null));
                 }
                 continue;
             }
@@ -460,9 +529,22 @@ public class ApiGatewayV2OpenApiImporter {
                 }
             }
 
-            Authorizer authorizer = service.createAuthorizer(region, apiId, request);
-            bindings.put(schemeName,
-                    new SchemeBinding("JWT".equals(authorizerType) ? "JWT" : "CUSTOM", authorizer.getAuthorizerId()));
+            specs.add(new AuthorizerSpec(schemeName,
+                    "JWT".equals(authorizerType) ? "JWT" : "CUSTOM", request));
+        }
+        return specs;
+    }
+
+    private Map<String, SchemeBinding> createAuthorizers(String region, String apiId, ImportPlan plan) {
+        Map<String, SchemeBinding> bindings = new LinkedHashMap<>();
+        for (AuthorizerSpec spec : plan.authorizerSpecs()) {
+            if (spec.request() == null) {
+                bindings.put(spec.schemeName(), new SchemeBinding(spec.authorizationType(), null));
+                continue;
+            }
+            Authorizer authorizer = service.createAuthorizer(region, apiId, spec.request());
+            bindings.put(spec.schemeName(),
+                    new SchemeBinding(spec.authorizationType(), authorizer.getAuthorizerId()));
         }
         return bindings;
     }

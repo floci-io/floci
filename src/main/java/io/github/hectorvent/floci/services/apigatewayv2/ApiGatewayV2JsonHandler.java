@@ -666,7 +666,9 @@ public class ApiGatewayV2JsonHandler {
             ObjectNode tags = node.putObject("Tags");
             s.getTags().forEach(tags::put);
         }
-        if (s.getDescription() != null) node.put("Description", s.getDescription());
+        if (s.getDescription() != null) {
+            node.put("Description", s.getDescription());
+        }
         if (s.getAccessLogSettings() != null) {
             ObjectNode logs = node.putObject("AccessLogSettings");
             if (s.getAccessLogSettings().destinationArn() != null) {
@@ -688,11 +690,21 @@ public class ApiGatewayV2JsonHandler {
 
     private ObjectNode toRouteSettingsNode(Stage.RouteSettings rs) {
         ObjectNode node = objectMapper.createObjectNode();
-        if (rs.detailedMetricsEnabled() != null) node.put("DetailedMetricsEnabled", rs.detailedMetricsEnabled());
-        if (rs.dataTraceEnabled() != null) node.put("DataTraceEnabled", rs.dataTraceEnabled());
-        if (rs.loggingLevel() != null) node.put("LoggingLevel", rs.loggingLevel());
-        if (rs.throttlingBurstLimit() != null) node.put("ThrottlingBurstLimit", rs.throttlingBurstLimit());
-        if (rs.throttlingRateLimit() != null) node.put("ThrottlingRateLimit", rs.throttlingRateLimit());
+        if (rs.detailedMetricsEnabled() != null) {
+            node.put("DetailedMetricsEnabled", rs.detailedMetricsEnabled());
+        }
+        if (rs.dataTraceEnabled() != null) {
+            node.put("DataTraceEnabled", rs.dataTraceEnabled());
+        }
+        if (rs.loggingLevel() != null) {
+            node.put("LoggingLevel", rs.loggingLevel());
+        }
+        if (rs.throttlingBurstLimit() != null) {
+            node.put("ThrottlingBurstLimit", rs.throttlingBurstLimit());
+        }
+        if (rs.throttlingRateLimit() != null) {
+            node.put("ThrottlingRateLimit", rs.throttlingRateLimit());
+        }
         return node;
     }
 
