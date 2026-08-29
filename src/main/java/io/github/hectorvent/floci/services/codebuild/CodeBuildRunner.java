@@ -20,6 +20,7 @@ import io.github.hectorvent.floci.services.codebuild.BuildspecParser.ParsedBuild
 import io.github.hectorvent.floci.services.codebuild.model.Build;
 import io.github.hectorvent.floci.services.codebuild.model.BuildPhase;
 import io.github.hectorvent.floci.services.codebuild.model.Project;
+import io.github.hectorvent.floci.services.lambda.launcher.ContainerLauncher;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
@@ -229,6 +230,8 @@ public class CodeBuildRunner implements ContainerTeardown {
             containerId = info.containerId();
             runningContainers.put(buildId, containerId);
 
+            stageFlociCaCertIfNeeded(containerId);
+
             logHandle = logStreamer.attach(containerId, logGroup, logStream, region, "codebuild:" + buildId);
 
             String containerSrcDir = "/codebuild/output/src/src";
@@ -422,7 +425,7 @@ public class CodeBuildRunner implements ContainerTeardown {
         throw new AwsException("InvalidInputException", "No buildspec found in source or request", 400);
     }
 
-    private List<String> buildEnvList(String region, Build build, Project project,
+    List<String> buildEnvList(String region, Build build, Project project,
                                       ParsedBuildspec buildspec, String logStream) {
         Map<String, String> env = new LinkedHashMap<>();
 
@@ -439,6 +442,17 @@ public class CodeBuildRunner implements ContainerTeardown {
         env.put("AWS_ACCESS_KEY_ID", "test");
         env.put("AWS_SECRET_ACCESS_KEY", "test");
         env.put("AWS_ENDPOINT_URL", resolveEndpointUrl());
+
+        // When floci.dns.spoof-aws-endpoints routes an explicit AWS endpoint hit from inside
+        // the build container to Floci, self-signed TLS still fails the handshake unless the
+        // container trusts Floci's cert — mirrors the same trust wiring launched Lambda
+        // containers get via ContainerLauncher.flociCaEnv/resolveFlociCaCertPath.
+        if (config.tls().enabled()
+                && ContainerLauncher.resolveFlociCaCertPath(
+                        true, config.tls().certPath(), config.storage().persistentPath()).isPresent()) {
+            env.put("NODE_EXTRA_CA_CERTS", ContainerLauncher.FLOCI_CA_CONTAINER_PATH);
+            env.put("AWS_CA_BUNDLE", ContainerLauncher.FLOCI_CA_CONTAINER_PATH);
+        }
 
         env.putAll(buildspec.envVariables());
 
@@ -487,6 +501,42 @@ public class CodeBuildRunner implements ContainerTeardown {
             return "http://" + suffix + ":" + config.port();
         } else {
             return "http://host.docker.internal:" + config.port();
+        }
+    }
+
+    // Stages Floci's CA cert into the container's trust anchor path, mirroring the trust wiring
+    // launched Lambda containers get (ContainerLauncher.flociCaEnv/resolveFlociCaCertPath) — the
+    // NODE_EXTRA_CA_CERTS/AWS_CA_BUNDLE env vars in buildEnvList only help once the file exists
+    // where they point.
+    private void stageFlociCaCertIfNeeded(String containerId) {
+        if (!config.tls().enabled()) {
+            return;
+        }
+        Optional<Path> flociCaCert = ContainerLauncher.resolveFlociCaCertPath(
+                true, config.tls().certPath(), config.storage().persistentPath());
+        if (flociCaCert.isEmpty()) {
+            return;
+        }
+        try {
+            ByteArrayOutputStream bos = new ByteArrayOutputStream();
+            try (TarArchiveOutputStream tar = newTarStream(bos)) {
+                Path certFile = flociCaCert.get();
+                TarArchiveEntry entry = new TarArchiveEntry(ContainerLauncher.FLOCI_CA_FILE_NAME);
+                entry.setSize(Files.size(certFile));
+                entry.setMode(0644);
+                tar.putArchiveEntry(entry);
+                try (var fis = Files.newInputStream(certFile)) {
+                    fis.transferTo(tar);
+                }
+                tar.closeArchiveEntry();
+            }
+            dockerClient.copyArchiveToContainerCmd(containerId)
+                    .withRemotePath(ContainerLauncher.FLOCI_CA_DIR)
+                    .withTarInputStream(new ByteArrayInputStream(bos.toByteArray()))
+                    .exec();
+        } catch (Exception e) {
+            LOG.warnv("Could not stage Floci CA certificate into CodeBuild container {0}: {1}",
+                    containerId, e.getMessage());
         }
     }
 

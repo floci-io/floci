@@ -102,8 +102,8 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
      * container trusts Floci's self-signed HTTPS endpoint. {@code /etc} exists in every Lambda
      * base image, so no directory needs to be created.
      */
-    private static final String FLOCI_CA_DIR = "/etc";
-    private static final String FLOCI_CA_FILE_NAME = "floci-ca.crt";
+    public static final String FLOCI_CA_DIR = "/etc";
+    public static final String FLOCI_CA_FILE_NAME = "floci-ca.crt";
     /** Shared with the kubernetes executor, which mounts the CA ConfigMap at the same path. */
     public static final String FLOCI_CA_CONTAINER_PATH = FLOCI_CA_DIR + "/" + FLOCI_CA_FILE_NAME;
     /** Self-signed cert filename produced by {@code TlsConfigSource} under {persistent-path}/tls/. */
