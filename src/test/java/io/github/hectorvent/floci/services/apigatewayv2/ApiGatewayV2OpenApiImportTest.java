@@ -572,4 +572,36 @@ class ApiGatewayV2OpenApiImportTest {
         JsonNode route = findRoute(get("/v2/apis/" + apiId + "/routes"), "GET /both");
         assertEquals("CUSTOM", route.get("authorizationType").asText());
     }
+
+    @Test
+    @Order(17)
+    void sigv4ImportsAsAwsIamAndSaysItIsNotEnforced() throws Exception {
+        // The route records AWS_IAM because that is what AWS records, but this emulator's HTTP API
+        // dispatch only enforces JWT and CUSTOM, so the document's guarantee does not hold locally.
+        String spec = """
+                {
+                  "openapi": "3.0.1",
+                  "info": {"title": "SigV4Api", "version": "1.0"},
+                  "components": {"securitySchemes": {"sigv4": {
+                    "type": "http", "scheme": "aws.v4"
+                  }}},
+                  "paths": {"/signed": {"get": {"security": [{"sigv4": []}]}}}
+                }
+                """;
+
+        String response = given().contentType(ContentType.JSON)
+                .body(envelope(spec))
+                .when().put("/v2/apis")
+                .then().statusCode(201)
+                .extract().asString();
+        String apiId = mapper.readTree(response).get("apiId").asText();
+
+        JsonNode route = findRoute(get("/v2/apis/" + apiId + "/routes"), "GET /signed");
+        assertNotNull(route);
+        assertEquals("AWS_IAM", route.get("authorizationType").asText());
+
+        String warnings = get("/v2/apis/" + apiId).get("warnings").toString();
+        assertTrue(warnings.contains("GET /signed"), warnings);
+        assertTrue(warnings.contains("does not enforce"), warnings);
+    }
 }

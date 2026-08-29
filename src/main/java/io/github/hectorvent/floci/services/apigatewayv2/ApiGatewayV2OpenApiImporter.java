@@ -198,8 +198,8 @@ public class ApiGatewayV2OpenApiImporter {
      */
     private static void collectUnresolvedSecurity(OpenAPI openAPI, List<AuthorizerSpec> specs,
                                                   List<String> warnings) {
-        java.util.Set<String> bindable = new java.util.HashSet<>();
-        specs.forEach(spec -> bindable.add(spec.schemeName()));
+        Map<String, String> bindable = new LinkedHashMap<>();
+        specs.forEach(spec -> bindable.put(spec.schemeName(), spec.authorizationType()));
 
         java.util.Set<String> reported = new java.util.LinkedHashSet<>();
         BiConsumer<String, List<SecurityRequirement>> check = (routeKey, security) -> {
@@ -208,7 +208,7 @@ public class ApiGatewayV2OpenApiImporter {
             }
             boolean anyResolves = security.stream()
                     .flatMap(requirement -> requirement.keySet().stream())
-                    .anyMatch(bindable::contains);
+                    .anyMatch(bindable::containsKey);
             if (!anyResolves) {
                 String names = security.stream()
                         .flatMap(requirement -> requirement.keySet().stream())
@@ -227,7 +227,7 @@ public class ApiGatewayV2OpenApiImporter {
                     .findFirst()
                     .ifPresent(requirement -> {
                         String enforced = requirement.keySet().stream()
-                                .filter(bindable::contains)
+                                .filter(bindable::containsKey)
                                 .findFirst()
                                 .orElse(null);
                         reported.add("Security requirement on " + routeKey + " combines ("
@@ -235,6 +235,17 @@ public class ApiGatewayV2OpenApiImporter {
                                 + "); HTTP API routes carry a single authorizer, so only "
                                 + enforced + " is enforced and the remaining schemes are dropped");
                     });
+
+            // AWS_IAM is recorded on the route because that is what AWS records, but the HTTP API
+            // dispatcher only enforces JWT and CUSTOM, so nothing checks the signature. Say so
+            // rather than let a sigv4-protected document look enforced locally.
+            security.stream()
+                    .flatMap(requirement -> requirement.keySet().stream())
+                    .filter(scheme -> "AWS_IAM".equals(bindable.get(scheme)))
+                    .findFirst()
+                    .ifPresent(scheme -> reported.add("Security scheme " + scheme + " on " + routeKey
+                            + " imports as AWS_IAM, which this emulator records but does not enforce;"
+                            + " requests reach the integration without a verified SigV4 signature"));
         };
 
         List<SecurityRequirement> globalSecurity = openAPI.getSecurity();
