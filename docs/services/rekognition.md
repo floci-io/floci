@@ -31,8 +31,16 @@
   — an honest "nothing detected" response, matching the Comprehend PII-detection
   stub's precedent.
 - **Real input validation:** `Image` (or `SourceImage`/`TargetImage` for
-  `CompareFaces`) is required and must specify `Bytes` or `S3Object`, matching
-  AWS's own modeling — this is protocol compatibility, not content analysis.
+  `CompareFaces`) is required, must be a JSON structure, and must specify
+  `Bytes` (string-typed) or `S3Object` (structure-typed) — matching AWS's own
+  modeling and rejecting wrong JSON types as `SerializationException`. This is
+  protocol compatibility, not content analysis.
+- **Intentional deviations:** `Bytes`'s content is not validated as
+  well-formed base64 (the `S3Object` shape has no required members in AWS's
+  own model, so its fields aren't validated either), and supplying both
+  `Bytes` and `S3Object` is accepted rather than rejected — nothing in the
+  Rekognition API model declares that combination invalid, and the stub
+  never reads either field's content regardless.
 - **Out of scope:** face-collection persistence (`CreateCollection`,
   `IndexFaces`, `SearchFaces`), custom-model training (`Projects`, `Datasets`,
   `ProjectVersions`), live video (`StreamProcessor`), async video jobs

@@ -6,6 +6,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
+import java.util.function.Predicate;
 /**
  * JSON 1.1 handler for Amazon Rekognition API operations.
  * Dispatches X-Amz-Target: RekognitionService.* actions to {@link RekognitionService}.
@@ -72,9 +73,26 @@ public class RekognitionJsonHandler {
             throw new AwsException("SerializationException",
                     "Unable to unmarshal request; the value for '" + field + "' is not a structure.", 400);
         }
+        requireCorrectTypeIfPresent(image, "Bytes", JsonNode::isTextual, field);
+        requireCorrectTypeIfPresent(image, "S3Object", JsonNode::isObject, field);
         if (!image.hasNonNull("Bytes") && !image.hasNonNull("S3Object")) {
             throw new AwsException("InvalidParameterException",
                     field + " must specify Bytes or S3Object.", 400);
+        }
+    }
+    /**
+     * Bytes (a blob shape, base64-encoded string on the wire) and S3Object (a structure)
+     * must each carry their modeled JSON type when present. Content-level correctness
+     * (valid base64, S3Object.Bucket/Name presence — S3Object has no required members
+     * in the modeled shape) is not validated: this stub never reads image content, and
+     * enforcing more than the wire shape declares would invent stricter validation than
+     * AWS's own model.
+     */
+    private void requireCorrectTypeIfPresent(JsonNode image, String member, Predicate<JsonNode> isCorrectType, String field) {
+        JsonNode value = image.get(member);
+        if (value != null && !value.isNull() && !isCorrectType.test(value)) {
+            throw new AwsException("SerializationException",
+                    "Unable to unmarshal request; the value for '" + field + "." + member + "' has the wrong type.", 400);
         }
     }
 }

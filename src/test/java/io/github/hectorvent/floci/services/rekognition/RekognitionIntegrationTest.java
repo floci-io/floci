@@ -77,6 +77,47 @@ class RekognitionIntegrationTest {
             .body("__type", equalTo("SerializationException"));
     }
     @Test
+    void detectLabels_nonStringBytes_returnsSerializationException() {
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "RekognitionService.DetectLabels")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"Image\":{\"Bytes\":12345}}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("SerializationException"));
+    }
+    @Test
+    void detectLabels_nonObjectS3Object_returnsSerializationException() {
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "RekognitionService.DetectLabels")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"Image\":{\"S3Object\":\"not-an-object\"}}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("SerializationException"));
+    }
+    @Test
+    void detectLabels_bothBytesAndS3ObjectAccepted() {
+        // Neither field's content is read, and nothing in the Rekognition model
+        // declares supplying both invalid.
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "RekognitionService.DetectLabels")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"Image\":{\"Bytes\":\"aGVsbG8=\",\"S3Object\":{\"Bucket\":\"my-bucket\",\"Name\":\"photo.jpg\"}}}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Labels", hasSize(1));
+    }
+    @Test
     void detectFaces_returnsEmptyFaceDetails() {
         given()
             .contentType(CONTENT_TYPE)
