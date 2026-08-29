@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.ContainerInfo;
+import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.EndpointInfo;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.PortAllocator;
@@ -26,6 +27,8 @@ import java.nio.file.Path;
 public class OpenSearchDomainManager {
 
     private static final Logger LOG = Logger.getLogger(OpenSearchDomainManager.class);
+    /** Sentinel for the in-container path, which publishes no host port to release. */
+    private static final int NO_HOST_PORT = -1;
     private static final int OPENSEARCH_PORT = 9200;
 
     private final ContainerBuilder containerBuilder;
@@ -57,21 +60,34 @@ public class OpenSearchDomainManager {
         LOG.infov("Starting OpenSearch container for domain: {0} (version={1}, image={2})",
                 domain.getDomainName(), domain.getEngineVersion(), image);
 
-        int hostPort = portAllocator.allocate(
-                config.services().opensearch().proxyBasePort(),
-                config.services().opensearch().proxyMaxPort());
-
         lifecycleManager.removeIfExists(containerName);
 
         ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
                 .withName(containerName)
                 .withEnv("discovery.type", "single-node")
-                .withPortBinding(OPENSEARCH_PORT, hostPort)
                 .withDockerNetwork(config.services().dockerNetwork())
                 .withLogRotation()
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(
                         "opensearch", domain.getDomainName(), regionResolver.getAccountId(),
                         regionResolver.getDefaultRegion()));
+
+        // Container-name DNS only resolves on a user-defined Docker network, and
+        // nothing guarantees the spawned OpenSearch container and floci itself land
+        // on one together (see withDockerNetwork's own fallback chain) — a default
+        // `docker run` leaves both on the anonymous bridge, which routes IPs
+        // between containers but does no by-name resolution. The other
+        // container-backed services (Neptune, MemoryDB, RDS) already address their
+        // backends via the container's resolved IP (EndpointInfo) rather than its
+        // Docker name; this container follows the same pattern below.
+        int hostPort = NO_HOST_PORT;
+        if (!containerDetector.isRunningInContainer()) {
+            hostPort = portAllocator.allocate(
+                    config.services().opensearch().proxyBasePort(),
+                    config.services().opensearch().proxyMaxPort());
+            specBuilder.withPortBinding(OPENSEARCH_PORT, hostPort);
+        } else {
+            specBuilder.withExposedPort(OPENSEARCH_PORT);
+        }
 
         applyEngineEnv(specBuilder, domain.getEngineVersion());
 
@@ -93,22 +109,30 @@ public class OpenSearchDomainManager {
 
         ContainerSpec spec = specBuilder.build();
 
-        ContainerInfo info = lifecycleManager.createAndStart(spec);
+        ContainerInfo info;
+        try {
+            info = lifecycleManager.createAndStart(spec);
+        } catch (RuntimeException e) {
+            if (hostPort != NO_HOST_PORT) {
+                portAllocator.release(hostPort);
+            }
+            throw e;
+        }
         domain.setContainerId(info.containerId());
 
-        if (containerDetector.isRunningInContainer()) {
-            domain.setEndpoint("http://" + containerName + ":" + OPENSEARCH_PORT);
-        } else {
-            domain.setEndpoint("http://localhost:" + hostPort);
-        }
+        EndpointInfo endpoint = info.getEndpoint(OPENSEARCH_PORT);
+        domain.setEndpoint("http://" + endpoint.host() + ":" + endpoint.port());
 
-        LOG.infov("OpenSearch container {0} started for domain {1} on port {2}",
-                info.containerId(), domain.getDomainName(), String.valueOf(hostPort));
+        LOG.infov("OpenSearch container {0} started for domain {1} at {2}",
+                info.containerId(), domain.getDomainName(), endpoint);
     }
 
     public boolean isReady(Domain domain) {
-        String containerName = containerName(domain);
-        String url = "http://" + containerName + ":" + OPENSEARCH_PORT + "/_cluster/health";
+        String endpoint = domain.getEndpoint();
+        if (endpoint == null || endpoint.isBlank()) {
+            return false;
+        }
+        String url = endpoint + "/_cluster/health";
         try {
             HttpURLConnection conn = (HttpURLConnection) URI.create(url).toURL().openConnection();
             conn.setConnectTimeout(2000);
