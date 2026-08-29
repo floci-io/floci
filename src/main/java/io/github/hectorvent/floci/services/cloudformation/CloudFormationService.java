@@ -337,14 +337,41 @@ public class CloudFormationService implements ResourceProvider {
 
             Map<String, String> oldParams = stack.getParameters() != null
                     ? stack.getParameters() : Map.of();
+            // Prefer the SSM-resolved values captured by the last executeTemplate run; fall back to
+            // the raw parameters for stacks persisted before resolvedParameters existed.
+            Map<String, String> oldResolvedParams = stack.getResolvedParameters() != null
+                    && !stack.getResolvedParameters().isEmpty()
+                    ? stack.getResolvedParameters() : oldParams;
             // A parameter omitted from the update falls back to the template's Default when
             // ExecuteChangeSet actually runs it, so the preview must resolve the same defaults or
             // it will under-report changes to resources that depend on that fallback value.
             Map<String, String> newParams = resolveDefaultParameters(newTemplate,
                     cs.getParameters() != null ? cs.getParameters() : Map.of());
+            // ExecuteChangeSet also resolves AWS::SSM::Parameter::Value<String> parameters against
+            // the live Parameter Store before applying resource changes, and the stored SSM value
+            // can drift between deploys even when the referencing parameter name is unchanged. Diff
+            // on the resolved values, like execution does, so the preview agrees with what actually
+            // gets applied. A preview must not fail harder than the operation it previews though: if
+            // the referenced SSM parameter is missing, fall back to the unresolved values here and
+            // let ExecuteChangeSet raise that ValidationError when it actually resolves them.
+            Map<String, String> ssmResolvedNewParams;
+            try {
+                ssmResolvedNewParams = resolveSsmParameters(newTemplate, newParams, region);
+            } catch (AwsException e) {
+                ssmResolvedNewParams = newParams;
+            }
+            final Map<String, String> newResolvedParams = ssmResolvedNewParams;
             Set<String> changedParams = new HashSet<>();
-            newParams.forEach((k, v) -> {
-                if (!Objects.equals(v, oldParams.get(k))) {
+            newResolvedParams.forEach((k, v) -> {
+                if (!Objects.equals(v, oldResolvedParams.get(k))) {
+                    changedParams.add(k);
+                }
+            });
+            // A parameter that was deployed but is omitted from this update with no template
+            // Default is dropped entirely by resolveDefaultParameters (matching what
+            // ExecuteChangeSet does); flag its disappearance too, not just a value change.
+            oldResolvedParams.keySet().forEach(k -> {
+                if (!newResolvedParams.containsKey(k)) {
                     changedParams.add(k);
                 }
             });
@@ -793,6 +820,7 @@ public class CloudFormationService implements ResourceProvider {
             stack.getParameters().clear();
             stack.getParameters().putAll(givenParams);
             Map<String, String> resolvedParams = resolveSsmParameters(template, givenParams, region);
+            stack.setResolvedParameters(new LinkedHashMap<>(resolvedParams));
 
             // Resolve conditions first
             Map<String, Boolean> conditions = resolveConditions(template, resolvedParams, stack, region, accountId);
@@ -1216,6 +1244,8 @@ public class CloudFormationService implements ResourceProvider {
             stack.setTemplateBody(previousState.templateBody());
             stack.getParameters().clear();
             stack.getParameters().putAll(previousState.parameters());
+            stack.getResolvedParameters().clear();
+            stack.getResolvedParameters().putAll(previousState.resolvedParameters());
         }
         try {
             restoreOutputAndExportState(stack, region, previousState);
@@ -1360,6 +1390,7 @@ public class CloudFormationService implements ResourceProvider {
         return new StackUpdateSnapshot(
                 stack.getTemplateBody(),
                 new LinkedHashMap<>(stack.getParameters()),
+                new LinkedHashMap<>(stack.getResolvedParameters()),
                 new LinkedHashMap<>(stack.getOutputs()),
                 new LinkedHashMap<>(stack.getExports()),
                 new LinkedHashMap<>(stack.getOutputExportNames()),
@@ -1391,6 +1422,7 @@ public class CloudFormationService implements ResourceProvider {
     private record StackUpdateSnapshot(
             String templateBody,
             Map<String, String> parameters,
+            Map<String, String> resolvedParameters,
             Map<String, String> outputs,
             Map<String, String> exports,
             Map<String, String> outputExportNames,

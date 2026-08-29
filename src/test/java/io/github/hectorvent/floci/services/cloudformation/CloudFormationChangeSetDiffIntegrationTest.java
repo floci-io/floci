@@ -22,6 +22,8 @@ import static org.hamcrest.Matchers.not;
 @QuarkusTest
 class CloudFormationChangeSetDiffIntegrationTest {
 
+    private static final String SSM_CONTENT_TYPE = "application/x-amz-json-1.1";
+
     private final List<String> stacksToDelete = new ArrayList<>();
 
     @BeforeAll
@@ -224,6 +226,145 @@ class CloudFormationChangeSetDiffIntegrationTest {
     }
 
     @Test
+    void omittedParameterWithNoDefault_isReportedAsAChange() {
+        String stackName = "cs-diff-omitted-param-no-default-stack";
+        stacksToDelete.add(stackName);
+
+        String template = """
+            {
+              "Parameters": {
+                "Suffix": {"Type": "String"}
+              },
+              "Resources": {
+                "Q": {
+                  "Type": "AWS::SQS::Queue",
+                  "Properties": {
+                    "QueueName": {"Fn::Sub": "cs-diff-omit-nodefault-${Suffix}"}
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+            .formParam("Parameters.member.1.ParameterKey", "Suffix")
+            .formParam("Parameters.member.1.ParameterValue", "override")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // Same template, but the update omits Suffix entirely and the template has no Default -
+        // resolveDefaultParameters drops the parameter, and ExecuteChangeSet would apply the
+        // resulting (missing) value. The preview must flag the resource as changed too.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateChangeSet")
+            .formParam("StackName", stackName)
+            .formParam("ChangeSetName", "omitted-param-no-default-cs")
+            .formParam("ChangeSetType", "UPDATE")
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeChangeSet")
+            .formParam("StackName", stackName)
+            .formParam("ChangeSetName", "omitted-param-no-default-cs")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<LogicalResourceId>Q</LogicalResourceId>"))
+            .body(containsString("<Action>Modify</Action>"));
+    }
+
+    @Test
+    void missingSsmParameterInPreview_doesNotFailTheDescribe() {
+        String stackName = "cs-diff-ssm-missing-stack";
+        stacksToDelete.add(stackName);
+        String deployedSsmParamName = "/cfn/test/cs-diff-ssm-missing-deployed";
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.PutParameter")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                {
+                    "Name": "%s",
+                    "Value": "one",
+                    "Type": "String",
+                    "Overwrite": true
+                }
+                """.formatted(deployedSsmParamName))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String template = """
+            {
+              "Parameters": {
+                "QueueSuffix": {"Type": "AWS::SSM::Parameter::Value<String>"}
+              },
+              "Resources": {
+                "Q": {
+                  "Type": "AWS::SQS::Queue",
+                  "Properties": {
+                    "QueueName": {"Fn::Sub": "cs-diff-ssm-missing-${QueueSuffix}"}
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+            .formParam("Parameters.member.1.ParameterKey", "QueueSuffix")
+            .formParam("Parameters.member.1.ParameterValue", deployedSsmParamName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // The update points QueueSuffix at an SSM parameter that was never put. ExecuteChangeSet
+        // would fail resolving it, but DescribeChangeSet is only a preview - it must not 400 just
+        // because the current value can't be resolved.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateChangeSet")
+            .formParam("StackName", stackName)
+            .formParam("ChangeSetName", "ssm-missing-cs")
+            .formParam("ChangeSetType", "UPDATE")
+            .formParam("TemplateBody", template)
+            .formParam("Parameters.member.1.ParameterKey", "QueueSuffix")
+            .formParam("Parameters.member.1.ParameterValue", "/cfn/test/cs-diff-ssm-missing-never-put")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeChangeSet")
+            .formParam("StackName", stackName)
+            .formParam("ChangeSetName", "ssm-missing-cs")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
     void samStackNoOpUpdate_doesNotReportSpuriousChanges() {
         String stackName = "cs-diff-sam-noop-stack";
         stacksToDelete.add(stackName);
@@ -341,5 +482,102 @@ class CloudFormationChangeSetDiffIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("<Replacement>True</Replacement>"));
+    }
+
+    @Test
+    void ssmParameterValueDrift_isReportedAsAChange() {
+        String stackName = "cs-diff-ssm-drift-stack";
+        stacksToDelete.add(stackName);
+        String ssmParamName = "/cfn/test/cs-diff-ssm-drift-suffix";
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.PutParameter")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                {
+                    "Name": "%s",
+                    "Value": "one",
+                    "Type": "String",
+                    "Overwrite": true
+                }
+                """.formatted(ssmParamName))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String template = """
+            {
+              "Parameters": {
+                "QueueSuffix": {"Type": "AWS::SSM::Parameter::Value<String>"}
+              },
+              "Resources": {
+                "Q": {
+                  "Type": "AWS::SQS::Queue",
+                  "Properties": {
+                    "QueueName": {"Fn::Sub": "cs-diff-ssm-${QueueSuffix}"}
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+            .formParam("Parameters.member.1.ParameterKey", "QueueSuffix")
+            .formParam("Parameters.member.1.ParameterValue", ssmParamName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // The SSM parameter's value changes in Parameter Store; the referencing template parameter
+        // (the SSM parameter *name*) is resubmitted unchanged. Real CloudFormation re-resolves the
+        // SSM value at CreateChangeSet time, so ExecuteChangeSet would apply "two" to the queue —
+        // the preview must report that Modify, not compare the unchanged raw parameter name.
+        given()
+            .header("X-Amz-Target", "AmazonSSM.PutParameter")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                {
+                    "Name": "%s",
+                    "Value": "two",
+                    "Type": "String",
+                    "Overwrite": true
+                }
+                """.formatted(ssmParamName))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateChangeSet")
+            .formParam("StackName", stackName)
+            .formParam("ChangeSetName", "ssm-drift-cs")
+            .formParam("ChangeSetType", "UPDATE")
+            .formParam("TemplateBody", template)
+            .formParam("Parameters.member.1.ParameterKey", "QueueSuffix")
+            .formParam("Parameters.member.1.ParameterValue", ssmParamName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeChangeSet")
+            .formParam("StackName", stackName)
+            .formParam("ChangeSetName", "ssm-drift-cs")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<LogicalResourceId>Q</LogicalResourceId>"))
+            .body(containsString("<Action>Modify</Action>"));
     }
 }

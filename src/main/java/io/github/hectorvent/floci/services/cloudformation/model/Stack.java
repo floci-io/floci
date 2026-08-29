@@ -20,6 +20,10 @@ public class Stack {
     private String originalTemplateBody;
     private List<String> capabilities = new ArrayList<>();
     private Map<String, String> parameters = new LinkedHashMap<>();
+    // Parameters after AWS::SSM::Parameter::Value<String> resolution, as last applied by
+    // executeTemplate — used to detect drift in the live SSM value between deploys even when the
+    // referencing parameter (name) is unchanged, so change-set previews agree with execution.
+    private Map<String, String> resolvedParameters = new LinkedHashMap<>();
     private Map<String, String> outputs = new LinkedHashMap<>();
     private Map<String, String> exports = new LinkedHashMap<>();
     // Maps output key to its export name (when Export.Name is defined on an output)
@@ -52,6 +56,8 @@ public class Stack {
     public void setCapabilities(List<String> capabilities) { this.capabilities = capabilities; }
     public Map<String, String> getParameters() { return parameters; }
     public void setParameters(Map<String, String> parameters) { this.parameters = parameters; }
+    public Map<String, String> getResolvedParameters() { return resolvedParameters; }
+    public void setResolvedParameters(Map<String, String> resolvedParameters) { this.resolvedParameters = resolvedParameters; }
     public Map<String, String> getOutputs() { return outputs; }
     public void setOutputs(Map<String, String> outputs) { this.outputs = outputs; }
     public Map<String, String> getExports() { return exports; }
