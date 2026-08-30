@@ -60,6 +60,13 @@ public class OpenSearchDomainManager {
 
         lifecycleManager.removeIfExists(containerName);
 
+        // A restart of an existing domain has just removed the old container, so its
+        // reservation is stale; hand the port back before allocating a fresh one.
+        if (domain.getHostPort() != null) {
+            portAllocator.release(domain.getHostPort());
+            domain.setHostPort(null);
+        }
+
         ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
                 .withName(containerName)
                 .withEnv("discovery.type", "single-node")
@@ -116,6 +123,7 @@ public class OpenSearchDomainManager {
             throw e;
         }
         domain.setContainerId(info.containerId());
+        domain.setHostPort(hostPort);
 
         EndpointInfo endpoint = info.getEndpoint(OPENSEARCH_PORT);
         domain.setEndpoint("http://" + endpoint.host() + ":" + endpoint.port());
@@ -159,6 +167,14 @@ public class OpenSearchDomainManager {
             return;
         }
         lifecycleManager.stopAndRemove(domain.getContainerId(), null);
+        // The container no longer holds the binding, so the reservation must go with
+        // it. Repeated create/delete would otherwise exhaust the configured range.
+        // The keep-running early return above deliberately keeps the reservation:
+        // the surviving container still owns the binding.
+        if (domain.getHostPort() != null) {
+            portAllocator.release(domain.getHostPort());
+            domain.setHostPort(null);
+        }
         LOG.infov("Stopped OpenSearch container for domain {0}", domain.getDomainName());
     }
 

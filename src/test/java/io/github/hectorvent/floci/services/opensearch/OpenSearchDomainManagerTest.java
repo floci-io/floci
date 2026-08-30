@@ -15,11 +15,13 @@ import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -138,5 +140,71 @@ class OpenSearchDomainManagerTest {
         verify(portAllocator).allocate(9400, 9499);
         verify(builder).withPortBinding(9200, 9401);
         assertEquals("http://172.17.0.5:9200", domain.getEndpoint());
+        assertEquals(Integer.valueOf(9401), domain.getHostPort());
+    }
+
+    /**
+     * The reservation must die with the container: without the release, repeated
+     * create/delete cycles exhaust the configured port range and later domains
+     * can never start.
+     */
+    @Test
+    void stopDomainReleasesTheHostPort() {
+        EmulatorConfig config = mock(EmulatorConfig.class);
+        EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
+        EmulatorConfig.OpenSearchServiceConfig opensearch = mock(EmulatorConfig.OpenSearchServiceConfig.class);
+        when(config.services()).thenReturn(services);
+        when(services.opensearch()).thenReturn(opensearch);
+        when(opensearch.keepRunningOnShutdown()).thenReturn(false);
+
+        PortAllocator portAllocator = mock(PortAllocator.class);
+        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+
+        OpenSearchDomainManager manager = new OpenSearchDomainManager(mock(ContainerBuilder.class),
+                lifecycleManager, mock(ContainerDetector.class), portAllocator, config,
+                mock(RegionResolver.class));
+
+        Domain domain = new Domain();
+        domain.setDomainName("teardown");
+        domain.setContainerId("container-id");
+        domain.setHostPort(9401);
+
+        manager.stopDomain(domain);
+
+        verify(lifecycleManager).stopAndRemove("container-id", null);
+        verify(portAllocator).release(9401);
+        assertNull(domain.getHostPort());
+    }
+
+    /**
+     * Keep-running shutdown leaves the container holding its Docker binding, so
+     * the reservation has to survive with it.
+     */
+    @Test
+    void stopDomainKeepsTheReservationWhenTheContainerKeepsRunning() {
+        EmulatorConfig config = mock(EmulatorConfig.class);
+        EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
+        EmulatorConfig.OpenSearchServiceConfig opensearch = mock(EmulatorConfig.OpenSearchServiceConfig.class);
+        when(config.services()).thenReturn(services);
+        when(services.opensearch()).thenReturn(opensearch);
+        when(opensearch.keepRunningOnShutdown()).thenReturn(true);
+
+        PortAllocator portAllocator = mock(PortAllocator.class);
+        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+
+        OpenSearchDomainManager manager = new OpenSearchDomainManager(mock(ContainerBuilder.class),
+                lifecycleManager, mock(ContainerDetector.class), portAllocator, config,
+                mock(RegionResolver.class));
+
+        Domain domain = new Domain();
+        domain.setDomainName("keep-running");
+        domain.setContainerId("container-id");
+        domain.setHostPort(9401);
+
+        manager.stopDomain(domain);
+
+        verify(lifecycleManager, never()).stopAndRemove(anyString(), any());
+        verify(portAllocator, never()).release(9401);
+        assertEquals(Integer.valueOf(9401), domain.getHostPort());
     }
 }
