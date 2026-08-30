@@ -1728,6 +1728,88 @@ public class SesService {
         return tenantService.listResourceTenants(ref, region);
     }
 
+    /**
+     * The tenant send gate (Phase 4): resolves the tenant with the send-flavored not-found wording,
+     * then requires every resource the send uses to be associated with it. The tenant's
+     * SendingStatus is not checked — no API can move it off ENABLED, so the DISABLED gate is not
+     * emulated. Placement is probe-confirmed: request-shape validation (a missing Content, an empty
+     * inline template, a missing FromEmailAddress on Simple, the bulk template-content checks) runs
+     * before the tenant lookup, while the recipient checks, the raw MIME-From derivation, and
+     * identity verification all lose to the tenant 404.
+     */
+    public void checkTenantSendAccess(String tenantName, String fromEmailAddress,
+                                      String configurationSetName, String templateName,
+                                      String accountId, String region) {
+        if (tenantName == null) {
+            return;
+        }
+        Tenant tenant = tenantService.tenantForSending(tenantName, region, accountId);
+        String arnPrefix = "arn:aws:ses:" + region + ":" + accountId + ":";
+        List<SesTenantService.AssociationResource> used = new ArrayList<>();
+        if (fromEmailAddress != null && !fromEmailAddress.isBlank()) {
+            String identityName = sendIdentityName(fromEmailAddress, region);
+            used.add(new SesTenantService.AssociationResource(
+                    SesTenantService.RESOURCE_TYPE_IDENTITY, identityName,
+                    arnPrefix + "identity/" + identityName));
+        }
+        // The gate covers the EFFECTIVE configuration set: an omitted name resolves to the sender
+        // identity's default, and that one needs the association just as an explicit one does.
+        String effectiveConfigSet =
+                resolveDefaultConfigurationSet(configurationSetName, fromEmailAddress, region);
+        if (effectiveConfigSet != null && !effectiveConfigSet.isBlank()) {
+            used.add(new SesTenantService.AssociationResource(
+                    SesTenantService.RESOURCE_TYPE_CONFIGURATION_SET, effectiveConfigSet,
+                    arnPrefix + "configuration-set/" + effectiveConfigSet));
+        }
+        if (templateName != null && !templateName.isBlank()) {
+            used.add(new SesTenantService.AssociationResource(
+                    SesTenantService.RESOURCE_TYPE_TEMPLATE, templateName,
+                    arnPrefix + "template/" + templateName));
+        }
+        tenantService.requireResourcesAssociated(tenant, used, region);
+    }
+
+    /**
+     * The raw-content variant of the tenant send gate: when {@code FromEmailAddress} is omitted,
+     * the effective sender comes from the MIME {@code From} header — the same derivation
+     * {@code sendRawEmail} applies — so the gate must resolve it the same way before checking.
+     */
+    public void checkTenantRawSendAccess(String tenantName, String fromEmailAddress,
+                                         String rawMessage, String configurationSetName,
+                                         String accountId, String region) {
+        if (tenantName == null) {
+            return;
+        }
+        String effectiveSource = fromEmailAddress;
+        if (effectiveSource == null || effectiveSource.isBlank()) {
+            SmtpRelay.RawMessageHeaders headers = SmtpRelay.parseRawHeaders(rawMessage);
+            effectiveSource = headers != null && !headers.from().isBlank() ? headers.from() : null;
+        }
+        checkTenantSendAccess(tenantName, effectiveSource, configurationSetName, null,
+                accountId, region);
+    }
+
+    // The gate names the identity the way AWS did in the probed error: the exact address identity
+    // when one exists, otherwise the domain identity the address falls under. The sender may carry
+    // display-name syntax ("Name <a@b>"), so the bare address is extracted first.
+    private String sendIdentityName(String fromEmailAddress, String region) {
+        String email = extractEmailAddress(fromEmailAddress);
+        if (email.isBlank()) {
+            return fromEmailAddress.trim();
+        }
+        if (identityStore.get(identityKey(region, email)).isPresent()) {
+            return email;
+        }
+        int at = email.lastIndexOf('@');
+        if (at >= 0) {
+            String domain = email.substring(at + 1);
+            if (identityStore.get(identityKey(region, domain)).isPresent()) {
+                return domain;
+            }
+        }
+        return email;
+    }
+
     // The association APIs 404 with a per-type message when the referenced resource is missing; the
     // trailing colon on the configuration-set variant is AWS's own.
     private void requireTenantResourceExists(SesTenantService.AssociationResource ref, String region) {
@@ -2812,13 +2894,12 @@ public class SesService {
         return "===_floci_" + HexFormat.of().formatHex(bytes) + "_===";
     }
 
-    public String sendInlineTemplatedEmail(String source, List<String> toAddresses, List<String> ccAddresses,
-                                            List<String> bccAddresses, List<String> replyToAddresses,
-                                            String subject, String textPart, String htmlPart,
-                                            JsonNode templateData,
-                                            String configurationSetName, List<MessageTag> emailTags,
-                                            List<MessageHeader> additionalHeaders,
-                                            ListManagementOptions listManagement, String region) {
+    /**
+     * Also called by the controller ahead of the tenant send gate: AWS reports an empty inline
+     * template before it looks the tenant up (probe-confirmed), so the check must not stay behind
+     * the gate for tenant sends.
+     */
+    static void requireInlineTemplateContent(String subject, String textPart, String htmlPart) {
         boolean hasSubject = subject != null && !subject.isBlank();
         boolean hasText = textPart != null && !textPart.isBlank();
         boolean hasHtml = htmlPart != null && !htmlPart.isBlank();
@@ -2826,6 +2907,16 @@ public class SesService {
             throw new AwsException("InvalidTemplate",
                     "Template must have at least a subject, text, or html part.", 400);
         }
+    }
+
+    public String sendInlineTemplatedEmail(String source, List<String> toAddresses, List<String> ccAddresses,
+                                            List<String> bccAddresses, List<String> replyToAddresses,
+                                            String subject, String textPart, String htmlPart,
+                                            JsonNode templateData,
+                                            String configurationSetName, List<MessageTag> emailTags,
+                                            List<MessageHeader> additionalHeaders,
+                                            ListManagementOptions listManagement, String region) {
+        requireInlineTemplateContent(subject, textPart, htmlPart);
         return sendEmail(source, toAddresses, ccAddresses, bccAddresses, replyToAddresses,
                 applyTemplateData(subject, templateData),
                 applyTemplateData(textPart, templateData),
