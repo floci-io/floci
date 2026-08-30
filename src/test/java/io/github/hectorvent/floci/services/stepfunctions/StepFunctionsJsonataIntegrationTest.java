@@ -1266,13 +1266,24 @@ class StepFunctionsJsonataIntegrationTest {
         // executing the state 'Transform' (entered at the event id #2). The JSONata expression
         // '$states.input.missing' specified for the field 'Output/v' returned nothing (undefined)."
         // Floci does not yet render the "An error occurred while executing the state" prefix (#2668).
+        //
+        // Transform is a Task, not a Pass: measured against real AWS, Catch (used below) is refused
+        // on Pass regardless of query language — SCHEMA_VALIDATION_FAILED, "Field 'Catch' is not
+        // supported" — so only Task, Parallel and Map can carry the Catch this test exercises.
+        createBucket("jsonata-output-returned-nothing");
         String definition = """
                 {
                     "QueryLanguage": "JSONata",
                     "StartAt": "Transform",
                     "States": {
                         "Transform": {
-                            "Type": "Pass",
+                            "Type": "Task",
+                            "Resource": "arn:aws:states:::s3:putObject",
+                            "Arguments": {
+                                "Bucket": "jsonata-output-returned-nothing",
+                                "Key": "object.txt",
+                                "Body": "hello"
+                            },
                             "Output": {"v": "{% $states.input.missing %}"},
                             "End": true
                         }
