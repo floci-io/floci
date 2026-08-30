@@ -921,6 +921,35 @@ class JsonataEvaluatorTest {
     }
 
     @Test
+    void evaluateFieldWrapsAThrownJsonataErrorWithTheSentenceAndACodedSeparator() throws Exception {
+        // A coded JSONata failure carries AWS's sentence in front of the code, joined by ". ".
+        JsonNode statesVar = objectMapper.createObjectNode();
+
+        AslExecutor.FailStateException failure = assertThrows(AslExecutor.FailStateException.class,
+                () -> evaluator.evaluateField("{% $sum(['a']) %}", "Output/v", statesVar, null));
+
+        assertEquals("States.QueryEvaluationError", failure.error);
+        assertEquals("The JSONata expression '$sum(['a'])' specified for the field 'Output/v' threw an error "
+                + "during evaluation. T0412: Argument [\"a\"] must be an array of \"numbers\"", failure.cause);
+    }
+
+    @Test
+    void evaluateFieldWrapsABoundFailureWithTheSentenceAndAColonSeparator() throws Exception {
+        // A failure with no JSONata code and no template to render (see
+        // aNonJsonataFailureKeepsTheMessageItCameWith) carries AWS's sentence in front of the bare
+        // message it came with, joined by ": " where a coded one joins with ". ".
+        JsonNode statesVar = objectMapper.createObjectNode();
+
+        AslExecutor.FailStateException failure = assertThrows(AslExecutor.FailStateException.class,
+                () -> evaluator.evaluateField("{% $toMillis('nope') %}", "Output/v", statesVar, null));
+
+        assertEquals("States.QueryEvaluationError", failure.error);
+        assertTrue(failure.cause.startsWith("The JSONata expression '$toMillis('nope')' specified for the field "
+                + "'Output/v' threw an error during evaluation: "), failure.cause);
+        assertTrue(failure.cause.contains("nope"), failure.cause);
+    }
+
+    @Test
     void anExplicitNullIsAValueAndKeepsEveryPositionEvaluating() throws Exception {
         JsonNode statesVar = objectMapper.readTree("{\"input\": {\"bar\": null}}");
 

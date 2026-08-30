@@ -190,25 +190,25 @@ public class JsonataEvaluator {
             Object result = jsonataExpr.evaluate(null, frame);
             return toJsonNode(result);
         } catch (Exception e) {
-            throw new AslExecutor.FailStateException("States.QueryEvaluationError", queryEvaluationCause(e));
+            throw queryEvaluationFailure(e);
         }
     }
 
     /**
-     * The cause AWS reports for a failed JSONata expression: the error code, then the message
-     * jsonata-js renders for it, as in {@code T0412: Argument 1 of function "sum" must be an array
-     * of "numbers"}. AWS puts a sentence naming the expression and the field in front of that,
-     * which needs the field path {@link #resolveTemplate} does not thread today (#2665).
+     * The state failure AWS reports for an expression that threw. Its cause is the error code and
+     * the message jsonata-js renders for it, as in {@code T0412: Argument 1 of function "sum" must
+     * be an array of "numbers"}; for the handful of failures with no JSONata code of their own (a
+     * timeout, a stack-depth bound) it is the bare message the exception came with.
      *
-     * <p>The dashjoin port renders the message itself, and three things go wrong on the way. Its
-     * copy of the catalog has the word "function" replaced by "Object" throughout; its substituter
-     * fills the first two placeholders of a template and leaves a third one standing; and it quotes
-     * every value it inserts, where jsonata-js JSON-renders it. So the message is composed here
-     * from the code and the values {@link JException} carries instead.
+     * <p>The dashjoin port renders the coded message itself, and three things go wrong on the way.
+     * Its copy of the catalog has the word "function" replaced by "Object" throughout; its
+     * substituter fills the first two placeholders of a template and leaves a third one standing;
+     * and it quotes every value it inserts, where jsonata-js JSON-renders it. So the message is
+     * composed here from the code and the values {@link JException} carries instead.
      */
-    private String queryEvaluationCause(Exception e) {
+    private QueryEvaluationFailure queryEvaluationFailure(Exception e) {
         if (!(e instanceof JException jsonataError) || jsonataError.getError() == null) {
-            return e.getMessage();
+            return new QueryEvaluationFailure(e.getMessage(), ": ");
         }
         String code = jsonataError.getError();
         Object current = jsonataError.getCurrent();
@@ -217,9 +217,9 @@ public class JsonataEvaluator {
         // message in the code slot. The catalog lookup then misses and dashjoin prefixes its own
         // class name, which AWS never emits; the message is the code slot itself.
         if ((UNKNOWN_CODE_PREFIX + code).equals(jsonataError.getMessage())) {
-            return code;
+            return new QueryEvaluationFailure(code, ". ");
         }
-        return switch (code) {
+        String tail = switch (code) {
             // The only two templates in the catalog with a third placeholder. Neither third value
             // reaches the exception: T0412 carries the offending argument and the element type it
             // wanted but not the argument index nor the function name, and T2009 carries the two
@@ -230,6 +230,22 @@ public class JsonataEvaluator {
                     + " either side of the operator must be of the same data type";
             default -> code + ": " + renderTemplate(code, current, expected);
         };
+        return new QueryEvaluationFailure(tail, ". ");
+    }
+
+    /**
+     * A States.QueryEvaluationError the expression itself raised, carrying the punctuation that
+     * joins its cause to the sentence {@link #evaluateField} puts in front: {@code ". "} after a
+     * coded JSONata message, which is a sentence of its own, and {@code ": "} before a bare one.
+     */
+    private static final class QueryEvaluationFailure extends FailStateException {
+
+        final String sentenceSeparator;
+
+        QueryEvaluationFailure(String cause, String sentenceSeparator) {
+            super("States.QueryEvaluationError", cause);
+            this.sentenceSeparator = sentenceSeparator;
+        }
     }
 
     /**
@@ -256,19 +272,29 @@ public class JsonataEvaluator {
     }
 
     /**
-     * Evaluate the single expression an ASL field holds, failing the state when it returns nothing.
-     * AWS names the field in the cause and a {@code Catch} on States.QueryEvaluationError fires:
-     * a Wait whose Seconds returned nothing does not wait zero seconds, it fails.
+     * Evaluate the single expression an ASL field holds, failing the state when it returns nothing
+     * or when the expression itself throws. AWS names the expression and the field in the cause
+     * either way and a {@code Catch} on States.QueryEvaluationError fires: a Wait whose Seconds
+     * returned nothing does not wait zero seconds, it fails, and {@code $abs("x")} in a field fails
+     * it with AWS's "threw an error during evaluation" sentence in front of the JSONata message.
      *
      * <p>{@code field} is the field's path relative to the state, as AWS writes it: {@code Seconds},
      * {@code Choices[1]/Condition}, {@code Output/a/b}.
      */
     JsonNode evaluateField(String expression, String field, JsonNode statesVar, JsonNode variables) {
-        JsonNode value = evaluate(expression, statesVar, variables);
+        String expr = isExpression(expression) ? unwrap(expression) : expression;
+        JsonNode value;
+        try {
+            value = evaluate(expression, statesVar, variables);
+        } catch (QueryEvaluationFailure failure) {
+            throw new FailStateException(failure.error,
+                    "The JSONata expression '" + expr + "' specified for the field '" + field
+                            + "' threw an error during evaluation" + failure.sentenceSeparator + failure.cause);
+        }
         if (value.isMissingNode()) {
             throw new FailStateException("States.QueryEvaluationError",
-                    "The JSONata expression '" + (isExpression(expression) ? unwrap(expression) : expression)
-                            + "' specified for the field '" + field + "' returned nothing (undefined).");
+                    "The JSONata expression '" + expr + "' specified for the field '" + field
+                            + "' returned nothing (undefined).");
         }
         return value;
     }
