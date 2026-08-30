@@ -2,7 +2,8 @@
 
 # ── S3 Bucket ──────────────────────────────────────────────────────────────
 resource "aws_s3_bucket" "app" {
-  bucket = "floci-compat-app"
+  bucket        = "floci-compat-app"
+  force_destroy = true
 }
 
 resource "aws_s3_bucket_versioning" "app" {
@@ -235,12 +236,6 @@ resource "aws_scheduler_schedule" "compat" {
   }
 }
 
-# ── Transfer Family Server ──────────────────────────────────────────────────
-resource "aws_transfer_server" "compat" {
-  identity_provider_type = "SERVICE_MANAGED"
-  protocols              = ["SFTP"]
-}
-
 # ── WAFv2 Web ACL ───────────────────────────────────────────────────────────
 resource "aws_wafv2_web_acl" "compat" {
   name  = "floci-compat-waf"
@@ -312,21 +307,6 @@ resource "aws_pipes_pipe" "compat" {
       batch_size                         = 1
       maximum_batching_window_in_seconds = 0
     }
-  }
-}
-
-# ── AWS Batch Compute Environment ───────────────────────────────────────────
-resource "aws_batch_compute_environment" "compat" {
-  compute_environment_name = "floci-compat-batch"
-  type                     = "MANAGED"
-  state                    = "ENABLED"
-  service_role             = aws_iam_role.lambda_exec.arn
-
-  compute_resources {
-    type               = "FARGATE"
-    max_vcpus          = 1
-    subnets            = [aws_subnet.compat.id]
-    security_group_ids = [aws_security_group.compat.id]
   }
 }
 

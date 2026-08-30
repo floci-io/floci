@@ -697,11 +697,11 @@ The [`compatibility-tests`](./compatibility-tests/) directory validates Floci ac
 | `sdk-test-python` | Python 3 | boto3 | 311 |
 | `sdk-test-go` | Go | AWS SDK for Go v2 + RDS Data API SDK v1 | 157 |
 | `sdk-test-awscli` | Bash | AWS CLI v2 | 205 |
-| `compat-terraform` | Terraform | v1.10+ | 70 |
-| `compat-opentofu` | OpenTofu | v1.9+ | 44 |
+| `compat-terraform` | Terraform | v1.10+ | 68 |
+| `compat-opentofu` | OpenTofu | v1.9+ | 42 |
 | `compat-cdk` | AWS CDK | v2+ | 20 |
 
-**2,582 automated compatibility tests across 5 SDKs and 3 IaC tools.**
+**2,578 automated compatibility tests across 5 SDKs and 3 IaC tools.**
 
 ## Migrating from LocalStack
 

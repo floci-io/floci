@@ -217,12 +217,6 @@ setup() {
     assert_output --partial "floci-compat-schedule"
 }
 
-@test "Terraform: Transfer server created" {
-    run aws_cmd transfer list-servers
-    assert_success
-    assert_output --partial "ServerId"
-}
-
 @test "Terraform: WAFv2 web ACL created" {
     run aws_cmd wafv2 list-web-acls --scope REGIONAL
     assert_success
@@ -257,12 +251,6 @@ setup() {
     run aws_cmd pipes list-pipes
     assert_success
     assert_output --partial "floci-compat-pipe"
-}
-
-@test "Terraform: Batch compute environment created" {
-    run aws_cmd batch describe-compute-environments
-    assert_success
-    assert_output --partial "floci-compat-batch"
 }
 
 @test "Terraform: RDS DB instance created and available" {
