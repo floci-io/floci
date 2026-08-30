@@ -152,13 +152,13 @@ public class RedshiftService {
             cluster.setEndpoint(endpoint);
             cluster.setClusterStatus("available");
         } catch (AwsException e) {
-            try { proxyManager.stopProxy(relayKey(clusters.accountId(), identifier)); } catch (Exception ignored) {}
-            try { containerManager.stop(clusters.accountId(), identifier); } catch (Exception ignored) {}
+            try { proxyManager.stopProxy(relayKey(clusters.accountId(), identifier)); } catch (Exception ex) { LOG.warnv(ex, "Failed to stop proxy during rollback of cluster {0}", identifier); }
+            try { containerManager.stop(clusters.accountId(), identifier); } catch (Exception ex) { LOG.warnv(ex, "Failed to stop container during rollback of cluster {0}", identifier); }
             releaseProxyPort(proxyPort);
             throw e;
         } catch (Exception e) {
-            try { proxyManager.stopProxy(relayKey(clusters.accountId(), identifier)); } catch (Exception ignored) {}
-            try { containerManager.stop(clusters.accountId(), identifier); } catch (Exception ignored) {}
+            try { proxyManager.stopProxy(relayKey(clusters.accountId(), identifier)); } catch (Exception ex) { LOG.warnv(ex, "Failed to stop proxy during rollback of cluster {0}", identifier); }
+            try { containerManager.stop(clusters.accountId(), identifier); } catch (Exception ex) { LOG.warnv(ex, "Failed to stop container during rollback of cluster {0}", identifier); }
             releaseProxyPort(proxyPort);
             throw new AwsException("InternalFailure", "Failed to start container: " + e.getMessage(), 500);
         }
@@ -286,8 +286,8 @@ public class RedshiftService {
         } finally {
             try {
                 Files.deleteIfExists(tempDump);
-            } catch (IOException ignored) {
-                // best-effort cleanup of a temp file
+            } catch (IOException ex) {
+                LOG.warnv(ex, "Failed to clean up temporary dump file {0} after rebooting cluster {1}", tempDump, clusterIdentifier);
             }
         }
 
@@ -488,13 +488,13 @@ public class RedshiftService {
 
             cluster.setClusterStatus("available");
         } catch (AwsException e) {
-            try { proxyManager.stopProxy(relayKey(clusters.accountId(), clusterIdentifier)); } catch (Exception ignored) {}
-            try { containerManager.stop(clusters.accountId(), clusterIdentifier); } catch (Exception ignored) {}
+            try { proxyManager.stopProxy(relayKey(clusters.accountId(), clusterIdentifier)); } catch (Exception ex) { LOG.warnv(ex, "Failed to stop proxy during rollback of cluster {0}", clusterIdentifier); }
+            try { containerManager.stop(clusters.accountId(), clusterIdentifier); } catch (Exception ex) { LOG.warnv(ex, "Failed to stop container during rollback of cluster {0}", clusterIdentifier); }
             releaseProxyPort(proxyPort);
             throw e;
         } catch (Exception e) {
-            try { proxyManager.stopProxy(relayKey(clusters.accountId(), clusterIdentifier)); } catch (Exception ignored) {}
-            try { containerManager.stop(clusters.accountId(), clusterIdentifier); } catch (Exception ignored) {}
+            try { proxyManager.stopProxy(relayKey(clusters.accountId(), clusterIdentifier)); } catch (Exception ex) { LOG.warnv(ex, "Failed to stop proxy during rollback of cluster {0}", clusterIdentifier); }
+            try { containerManager.stop(clusters.accountId(), clusterIdentifier); } catch (Exception ex) { LOG.warnv(ex, "Failed to stop container during rollback of cluster {0}", clusterIdentifier); }
             releaseProxyPort(proxyPort);
             throw new AwsException("InternalFailure", "Failed to restore cluster from snapshot: " + e.getMessage(), 500);
         }
