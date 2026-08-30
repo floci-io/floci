@@ -1402,6 +1402,8 @@ public interface EmulatorConfig {
 
         @WithDefault("false")
         boolean scpEnforcementEnabled();
+
+        Optional<String> managementAccountEmail();
     }
 
     interface AthenaServiceConfig {

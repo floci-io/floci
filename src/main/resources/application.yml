@@ -562,6 +562,7 @@ floci:
       enabled: true
     organizations:
       enabled: true
+      # management-account-email: ""  # When set, overrides the management-account email reported by DescribeOrganization and account listings.
     rum:
       enabled: true
     networkfirewall:
