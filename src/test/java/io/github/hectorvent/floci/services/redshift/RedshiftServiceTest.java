@@ -522,6 +522,58 @@ class RedshiftServiceTest {
     }
 
     @Test
+    void deleteClusterStopsTheProxyAndReleasesThePort() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("c1");
+        cluster.setProxyPort(7105);
+        when(clusterBackend.get("c1")).thenReturn(Optional.of(cluster));
+        when(clusterBackend.accountId()).thenReturn("111111111111");
+
+        service.deleteCluster("c1");
+
+        verify(proxyManager).stopProxy("111111111111:c1");
+    }
+
+    @Test
+    void modifyClusterPasswordUpdatesTheProxySnapshot() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("c1");
+        cluster.setMasterUsername("admin");
+        cluster.setMasterPassword("old");
+        when(clusterBackend.get("c1")).thenReturn(Optional.of(cluster));
+        when(clusterBackend.accountId()).thenReturn("111111111111");
+
+        service.modifyCluster("c1", null, null, "NewSecret1", null, null);
+
+        verify(proxyManager).updateMasterPassword("111111111111:c1", "NewSecret1");
+    }
+
+    @Test
+    void restoreFromSnapshotStartsAProxyForTheNewCluster() {
+        Snapshot snap = new Snapshot();
+        snap.setSnapshotIdentifier("s1");
+        snap.setClusterIdentifier("src");
+        snap.setMasterUsername("admin");
+        snap.setMasterPassword("Secret123");
+        snap.setSqlDump(null);
+        when(snapshotBackend.get("s1")).thenReturn(Optional.of(snap));
+        when(clusterBackend.get("restored")).thenReturn(Optional.empty());
+        when(clusterBackend.accountId()).thenReturn("111111111111");
+        RedshiftContainerHandle handle = mock(RedshiftContainerHandle.class);
+        when(handle.getHost()).thenReturn("172.17.0.10");
+        when(handle.getPort()).thenReturn(32810);
+        when(cm.start(eq("111111111111"), eq("restored"), eq("admin"), eq("Secret123"))).thenReturn(handle);
+
+        Cluster restored = service.restoreFromClusterSnapshot("restored", "s1");
+
+        assertEquals("localhost", restored.getEndpoint().getAddress());
+        assertEquals(restored.getEndpoint().getPort(), restored.getProxyPort());
+        verify(proxyManager).startProxy(eq("111111111111:restored"), anyInt(),
+                eq("172.17.0.10"), eq(32810), eq("localhost"),
+                eq("admin"), eq("Secret123"), eq("dev"), any());
+    }
+
+    @Test
     void testCreateClusterParameterGroup() {
         when(parameterGroupBackend.get("my-pg")).thenReturn(Optional.empty());
 

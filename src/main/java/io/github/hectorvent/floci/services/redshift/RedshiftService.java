@@ -123,10 +123,12 @@ public class RedshiftService {
 
         // Start container, then front it with an auth proxy so the advertised endpoint is
         // reachable from outside the Docker network.
+        // Hoisted out of the try so a failure after allocateProxyPort() still returns the port.
+        int proxyPort = -1;
         try {
             String accountId = clusters.accountId();
             RedshiftContainerHandle handle = containerManager.start(accountId, identifier, username, password);
-            int proxyPort = allocateProxyPort();
+            proxyPort = allocateProxyPort();
             Endpoint endpoint = proxyEndpoint(proxyPort);
             proxyManager.startProxy(relayKey(accountId, identifier), proxyPort,
                     handle.getHost(), handle.getPort(), endpoint.getAddress(),
@@ -139,10 +141,12 @@ public class RedshiftService {
             cluster.setClusterStatus("available");
         } catch (AwsException e) {
             cluster.setClusterStatus("failed");
+            releaseProxyPort(proxyPort);
             clusters.flush();
             throw e;
         } catch (Exception e) {
             cluster.setClusterStatus("failed");
+            releaseProxyPort(proxyPort);
             clusters.flush();
             throw new AwsException("InternalFailure", "Failed to start container: " + e.getMessage(), 500);
         }
@@ -169,7 +173,12 @@ public class RedshiftService {
             throw new AwsException("ClusterNotFound", "Cluster " + identifier + " not found", 404);
         }
         Cluster cluster = clusterOpt.get();
-        
+
+        // Tear down the auth proxy and return its port before stopping the container.
+        String accountId = clusters.accountId();
+        proxyManager.stopProxy(relayKey(accountId, identifier));
+        releaseProxyPort(cluster.getProxyPort());
+
         containerManager.stop(clusters.accountId(), identifier);
         clusters.delete(identifier);
         clusters.flush();
@@ -190,6 +199,9 @@ public class RedshiftService {
             containerManager.alterUserPassword(clusters.accountId(), clusterIdentifier,
                     cluster.getMasterUsername(), masterUserPassword);
             cluster.setMasterPassword(masterUserPassword);
+            // Keep the proxy's password check in sync so new connections use the new secret.
+            proxyManager.updateMasterPassword(
+                    relayKey(clusters.accountId(), clusterIdentifier), masterUserPassword);
         }
 
         // NodeType only updates metadata — it does not resize the underlying Postgres container
@@ -431,11 +443,20 @@ public class RedshiftService {
         clusters.put(clusterIdentifier, cluster);
         clusters.flush();
 
+        // Hoisted out of the try so a failure after allocateProxyPort() still returns the port.
+        int proxyPort = -1;
         try {
-            RedshiftContainerHandle handle = containerManager.start(clusters.accountId(), clusterIdentifier, username, password);
-            Endpoint endpoint = new Endpoint();
-            endpoint.setAddress(handle.getHost());
-            endpoint.setPort(handle.getPort());
+            String accountId = clusters.accountId();
+            RedshiftContainerHandle handle = containerManager.start(accountId, clusterIdentifier, username, password);
+            proxyPort = allocateProxyPort();
+            Endpoint endpoint = proxyEndpoint(proxyPort);
+            proxyManager.startProxy(relayKey(accountId, clusterIdentifier), proxyPort,
+                    handle.getHost(), handle.getPort(), endpoint.getAddress(),
+                    username, password, CLUSTER_DB_NAME,
+                    passwordValidatorFor(accountId, clusterIdentifier));
+            cluster.setContainerHost(handle.getHost());
+            cluster.setContainerPort(handle.getPort());
+            cluster.setProxyPort(proxyPort);
             cluster.setEndpoint(endpoint);
 
             if (hasDump) {
@@ -445,10 +466,12 @@ public class RedshiftService {
             cluster.setClusterStatus("available");
         } catch (AwsException e) {
             cluster.setClusterStatus("failed");
+            releaseProxyPort(proxyPort);
             clusters.flush();
             throw e;
         } catch (Exception e) {
             cluster.setClusterStatus("failed");
+            releaseProxyPort(proxyPort);
             clusters.flush();
             throw new AwsException("InternalFailure", "Failed to restore cluster from snapshot: " + e.getMessage(), 500);
         }
