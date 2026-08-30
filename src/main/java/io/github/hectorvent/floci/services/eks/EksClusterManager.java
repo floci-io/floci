@@ -89,7 +89,10 @@ public class EksClusterManager {
      */
     public void startCluster(Cluster cluster) {
         String image = config.services().eks().defaultImage();
-        String containerName = ContainerStorageHelper.resourceName(config, "eks", null, cluster.getName());
+        if (cluster.getDockerName() == null) {
+            cluster.setDockerName(accountQualifiedName(cluster));
+        }
+        String containerName = cluster.getDockerName();
 
         LOG.infov("Starting k3s container for EKS cluster: {0} using image {1}",
                 cluster.getName(), image);
@@ -113,10 +116,15 @@ public class EksClusterManager {
         // socket (kine.sock) on macOS APFS, which returns EINVAL on chmod — crashing
         // k3s before it can start. Named volumes live in the Docker VM's Linux
         // filesystem, so chmod works correctly and data persists across container restarts.
-        String volumeName = ContainerStorageHelper.resourceName(config, "eks", null, cluster.getName());
+        String volumeName = cluster.getDockerName();
 
         List<String> serverArgs = buildServerArgs(config.services().eks().disableCni());
 
+        // The account label comes from the cluster record when set (restore runs with no request
+        // context); regionResolver is the fallback for the create path.
+        String labelAccountId = cluster.getAccountId() != null
+                ? cluster.getAccountId()
+                : regionResolver.getAccountId();
         ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
                 .withName(containerName)
                 .withEnv("K3S_KUBECONFIG_MODE", "644")
@@ -126,7 +134,7 @@ public class EksClusterManager {
                 .withPrivileged(true)
                 .withLogRotation()
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(
-                        "eks", cluster.getName(), regionResolver.getAccountId(), regionResolver.getDefaultRegion()));
+                        "eks", cluster.getName(), labelAccountId, regionResolver.getDefaultRegion()));
 
         // Wire a token-authentication webhook so `aws eks get-token` bearer tokens are validated by
         // Floci and mapped to cluster-admin. The k3s API server POSTs a TokenReview to Floci's
@@ -169,15 +177,75 @@ public class EksClusterManager {
         injectEcrRegistryMirror(containerId, cluster.getName());
         ContainerInfo info = lifecycleManager.startCreated(containerId, spec);
 
-        // Public endpoint: see floci.services.eks.endpoint-mode. `host` (default) is the host-reachable
-        // published port (k3s cert carries `--tls-san=localhost`, so it verifies against the CA that
-        // describe-cluster returns); `network` is the container DNS name (pre-#1118 behaviour).
+        applyEndpoints(cluster, containerName, hostPort, info);
+
+        LOG.infov("k3s container {0} started for cluster {1} on port {2} (internal: {3})",
+                containerId, cluster.getName(), String.valueOf(hostPort), cluster.getInternalEndpoint());
+    }
+
+    /**
+     * Re-latches a persisted cluster onto its k3s container after a Floci restart. A surviving
+     * container — running, or stopped by a Docker daemon reboot — is adopted (started if needed),
+     * keeping its published API server port and data volume, so the cluster's workloads come back
+     * as they were. When the container is gone, the cluster is recreated via {@link #startCluster};
+     * the named k3s data volume is reused if it survived. Callers should put the cluster back into
+     * CREATING so the readiness poller re-verifies the API server and re-extracts the certificate
+     * authority before marking it ACTIVE again.
+     */
+    public void restoreCluster(Cluster cluster) {
+        if (cluster.getDockerName() == null) {
+            cluster.setDockerName(resolveRestoredDockerName(cluster));
+        }
+        String containerName = cluster.getDockerName();
+        var existing = lifecycleManager.findByName(containerName);
+        if (existing.isEmpty()) {
+            LOG.infov("No surviving k3s container for EKS cluster {0}; recreating it "
+                    + "(a surviving data volume is reused)", cluster.getName());
+            startCluster(cluster);
+            return;
+        }
+
+        ContainerInfo info;
+        try {
+            info = lifecycleManager.adopt(existing.get().getId(), List.of(K3S_API_SERVER_PORT));
+        } catch (Exception e) {
+            LOG.warnv("Could not adopt surviving k3s container {0} for EKS cluster {1} ({2}); recreating it",
+                    containerName, cluster.getName(), e.getMessage());
+            startCluster(cluster);
+            return;
+        }
+
+        var publishedPort = info.publishedHostPort(K3S_API_SERVER_PORT);
+        if (publishedPort.isEmpty()) {
+            LOG.warnv("Surviving k3s container {0} publishes no API server port; recreating it", containerName);
+            startCluster(cluster);
+            return;
+        }
+
+        int hostPort = publishedPort.getAsInt();
+        // Keep the allocator away from a port Docker already holds for this cluster.
+        portAllocator.markReserved(hostPort);
+        cluster.setContainerId(info.containerId());
+        cluster.setHostPort(hostPort);
+        applyEndpoints(cluster, containerName, hostPort, info);
+
+        LOG.infov("Adopted surviving k3s container {0} for EKS cluster {1} on port {2} (internal: {3})",
+                info.containerId(), cluster.getName(), String.valueOf(hostPort), cluster.getInternalEndpoint());
+    }
+
+    /**
+     * Sets the cluster's public and internal endpoints for a started or adopted container.
+     * Public endpoint: see floci.services.eks.endpoint-mode. `host` (default) is the host-reachable
+     * published port (k3s cert carries `--tls-san=localhost`, so it verifies against the CA that
+     * describe-cluster returns); `network` is the container DNS name (pre-#1118 behaviour).
+     * The internal endpoint uses the resolved container IP so the readiness poller works from inside
+     * the Docker network (where localhost:<hostPort> would not reach the k3s container).
+     */
+    private void applyEndpoints(Cluster cluster, String containerName, int hostPort, ContainerInfo info) {
         cluster.setEndpoint(resolvePublicEndpoint(
                 containerDetector.isRunningInContainer(), config.services().eks().endpointMode(),
                 containerName, hostPort));
 
-        // Internal endpoint uses the resolved container IP so the readiness poller works from inside
-        // the Docker network (where localhost:<hostPort> would not reach the k3s container).
         if (containerDetector.isRunningInContainer()) {
             ContainerLifecycleManager.EndpointInfo ep = info.getEndpoint(K3S_API_SERVER_PORT);
             cluster.setInternalEndpoint(ep != null
@@ -186,9 +254,6 @@ public class EksClusterManager {
         } else {
             cluster.setInternalEndpoint("https://localhost:" + hostPort);
         }
-
-        LOG.infov("k3s container {0} started for cluster {1} on port {2} (internal: {3})",
-                containerId, cluster.getName(), String.valueOf(hostPort), cluster.getInternalEndpoint());
     }
 
     /**
@@ -250,7 +315,10 @@ public class EksClusterManager {
     }
 
     /**
-     * Stops and removes the k3s container for the given cluster.
+     * Stops and removes the k3s container for the given cluster. The k3s data volume follows the
+     * storage prune policy ({@link ContainerStorageHelper#removeNamedVolume}): it is only removed
+     * in {@code memory} storage mode or when {@code prune-volumes-on-delete} is set, so a persisted
+     * cluster's workloads survive a Floci restart and are re-latched by {@link #restoreCluster}.
      */
     public void stopCluster(Cluster cluster) {
         if (cluster.getContainerId() == null) {
@@ -261,8 +329,105 @@ public class EksClusterManager {
             return;
         }
         lifecycleManager.stopAndRemove(cluster.getContainerId(), null);
-        lifecycleManager.removeVolume(ContainerStorageHelper.resourceName(config, "eks", null, cluster.getName()));
+        ContainerStorageHelper.removeNamedVolume(config, lifecycleManager, clusterResourceName(cluster));
         LOG.infov("Stopped k3s container for cluster {0}", cluster.getName());
+    }
+
+    /**
+     * Docker container/volume name for a cluster: the name already resolved for this record
+     * ({@link Cluster#getDockerName()}, set by startCluster/restoreCluster), or the
+     * account-qualified name for a record no container operation has touched yet.
+     */
+    String clusterResourceName(Cluster cluster) {
+        return cluster.getDockerName() != null ? cluster.getDockerName() : accountQualifiedName(cluster);
+    }
+
+    /**
+     * Account-qualified Docker name for a cluster. Cluster names are unique only within an
+     * account, so a non-default account's cluster is qualified with its account ID — otherwise
+     * two accounts' same-named clusters would resolve to the same container and data volume,
+     * letting one account reach (or, via startCluster's stale-container removal, destroy) the
+     * other's workloads. The default account keeps the historical unqualified name so existing
+     * containers, volumes, and {@code endpoint-mode=network} DNS names keep working.
+     *
+     * <p>The qualifier separator is a dot: EksService validates cluster names against the AWS
+     * charset ({@code [0-9A-Za-z][A-Za-z0-9\-_]*}), which admits no dot, so no default-account
+     * cluster name can spell out {@code <accountId>.<name>} and collide with another account's
+     * qualified name — a dash separator would (cluster "999999999999-demo" vs account
+     * 999999999999's "demo"). Dots are valid in Docker container and volume names.
+     *
+     * <p>The record's accountId is set before every call path reaches here (createCluster on
+     * create; the startup account rehydration on restore/stop); a null falls back to the
+     * default-account name.
+     */
+    private String accountQualifiedName(Cluster cluster) {
+        String accountId = cluster.getAccountId();
+        boolean defaultAccount = accountId == null || accountId.equals(config.defaultAccountId());
+        return ContainerStorageHelper.resourceName(config, "eks", null,
+                defaultAccount ? cluster.getName() : accountId + "." + cluster.getName());
+    }
+
+    /**
+     * Resolves which Docker name a restored record's resources actually live under. Clusters
+     * created before account-qualified naming used the account-independent legacy name
+     * {@code floci-eks-<name>} for every account — a non-default account's cluster must keep
+     * that name when its own container survived there, or the upgrade would recreate the
+     * cluster under the qualified name and orphan the historical workloads. The legacy
+     * container is claimed only when its {@code io.floci.account} label matches the owning
+     * account; another account's container — or one with no verifiable owner — is left
+     * untouched and the cluster starts fresh under the qualified name. A surviving legacy
+     * volume without its container carries no ownership label and is deliberately not claimed —
+     * it is reported via {@link #warnUnclaimedLegacyState} so the operator can migrate the data
+     * by hand. The result is deterministic across restarts for a given Docker state.
+     */
+    private String resolveRestoredDockerName(Cluster cluster) {
+        String qualified = accountQualifiedName(cluster);
+        String legacy = ContainerStorageHelper.resourceName(config, "eks", null, cluster.getName());
+        if (legacy.equals(qualified)) {
+            return legacy; // default account: the names never diverged
+        }
+        var legacySurvivor = lifecycleManager.findByName(legacy);
+        if (legacySurvivor.isPresent()) {
+            var labels = legacySurvivor.get().getLabels();
+            String owner = labels != null ? labels.get("io.floci.account") : null;
+            if (cluster.getAccountId() != null && cluster.getAccountId().equals(owner)) {
+                LOG.infov("EKS cluster {0} (account {1}) keeps its pre-upgrade Docker name {2}",
+                        cluster.getName(), cluster.getAccountId(), legacy);
+                return legacy;
+            }
+            if (owner == null) {
+                warnUnclaimedLegacyState(cluster, legacy, "container");
+            }
+            // A container labeled with another account is simply not this cluster's — no warning.
+        } else if (volumeExists(legacy)) {
+            warnUnclaimedLegacyState(cluster, legacy, "data volume");
+        }
+        return qualified;
+    }
+
+    /**
+     * A legacy-named container or volume whose owning account cannot be verified is never claimed
+     * for a non-default account — handing it over on a guess would expose another account's data,
+     * the very cross-bind the qualified names exist to prevent. It is reported instead of being
+     * silently orphaned, so an operator who knows the data belongs to this cluster can migrate it
+     * into the qualified volume by hand.
+     */
+    private void warnUnclaimedLegacyState(Cluster cluster, String legacy, String kind) {
+        LOG.warnv("EKS cluster {0} (account {1}) starts under its account-qualified Docker name; "
+                + "a pre-upgrade {2} named {3} survives but carries no verifiable owning account, "
+                + "so it is NOT adopted. If its data belongs to this cluster, copy it into the "
+                + "cluster's qualified volume manually (docker volume inspect {3}).",
+                cluster.getName(), cluster.getAccountId(), kind, legacy);
+    }
+
+    /** Whether a Docker volume with this exact name exists. Any lookup failure counts as absent. */
+    private boolean volumeExists(String volumeName) {
+        try {
+            lifecycleManager.getDockerClient().inspectVolumeCmd(volumeName).exec();
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     /**

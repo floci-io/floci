@@ -73,6 +73,29 @@ services:
 !!! note "No port mapping needed for k3s ports"
     k3s containers bind their API server port (6500–6599) directly on the host via Docker — no `ports:` entry is required in `docker-compose.yml`. See [Ports Reference](../configuration/ports.md#ports-65006599-eks-real-mode) for the full explanation.
 
+#### Clusters survive a restart
+
+With a persistent [storage mode](../configuration/storage.md) (the default), clusters recorded in
+`eks-clusters.json` are **re-latched to their k3s containers when Floci starts**:
+
+- A surviving container (for example after a Docker Desktop / daemon reboot) is adopted and
+  started in place, keeping its published API server port and data volume — deployments come
+  back as they were.
+- A missing container is recreated. Its named k3s data volume (`floci-eks-<name>`; for a
+  [non-default account](../configuration/multi-account.md), `floci-eks-<account>.<name>`) is
+  reused if it survived; volumes follow the global prune policy
+  (`FLOCI_STORAGE_PRUNE_VOLUMES_ON_DELETE`, default `false`), so they are retained when the
+  container is stopped or the cluster deleted, except in `memory` storage mode.
+- A non-default-account cluster created before account-qualified naming keeps its historical
+  `floci-eks-<name>` container and volume: restoration adopts the surviving container when its
+  `io.floci.account` label matches the owning account, so pre-upgrade workloads are not
+  orphaned.
+
+A restored cluster reports `CREATING` until its API server answers again, then returns to
+`ACTIVE` with a freshly extracted certificate authority. If the container cannot be brought
+back (for example Docker is unavailable), the cluster is marked `FAILED` instead of appearing
+`ACTIVE` while unreachable.
+
 ## Configuration
 
 | Variable | Default | Description |
