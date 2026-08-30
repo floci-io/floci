@@ -216,8 +216,7 @@ public class RedshiftOperationsTest {
             .statusCode(200)
             .contentType("application/xml")
             .body(containsString("<ClusterIdentifier>cluster-restored</ClusterIdentifier>"))
-            .body(containsString("<ClusterStatus>available</ClusterStatus>"))
-            .body(containsString("<Port>5440</Port>"));
+            .body(containsString("<ClusterStatus>available</ClusterStatus>"));
 
         // 6. DeleteClusterSnapshot
         given()

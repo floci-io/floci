@@ -383,6 +383,7 @@ public class RedshiftContainerManager {
         String effectiveUser = (username != null && !username.isBlank()) ? username : "postgres";
         String[] cmd = {
                 "psql",
+                "-h", "127.0.0.1",
                 "-v", "ON_ERROR_STOP=1",
                 "-U", effectiveUser,
                 "-d", dbName,
