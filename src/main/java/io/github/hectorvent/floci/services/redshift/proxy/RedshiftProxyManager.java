@@ -37,6 +37,7 @@ public class RedshiftProxyManager {
                                         String backendHost, int backendPort, String advertisedHost,
                                         String masterUsername, String masterPassword, String dbName,
                                         RdsAuthProxy.PasswordValidator passwordValidator) {
+        failedCleanups.remove(relayKey);
         // Make sure the self-signed proxy certificate covers the host clients will connect to,
         // so sslmode=prefer/require handshakes succeed.
         tlsCertificates.ensureHost(advertisedHost);
@@ -74,12 +75,13 @@ public class RedshiftProxyManager {
     }
 
     public synchronized void stopProxy(String relayKey) {
-        if (failedCleanups.remove(relayKey)) {
+        if (failedCleanups.contains(relayKey)) {
             throw new RuntimeException("Proxy listener cleanup previously failed for " + relayKey);
         }
-        RedshiftAuthProxy proxy = proxies.remove(relayKey);
+        RedshiftAuthProxy proxy = proxies.get(relayKey);
         if (proxy != null) {
             proxy.stop();
+            proxies.remove(relayKey);
             LOG.infov("Stopped Redshift proxy for cluster {0}", relayKey);
         }
     }
