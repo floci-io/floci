@@ -2,7 +2,6 @@ package io.github.hectorvent.floci.services.stepfunctions;
 
 import com.dashjoin.jsonata.Parser;
 import io.quarkus.runtime.annotations.RegisterForReflection;
-import org.jboss.logging.Logger;
 
 import java.lang.reflect.Field;
 import java.util.ArrayList;
@@ -14,7 +13,8 @@ import java.util.Objects;
 import java.util.Set;
 
 /**
- * Names every reference a Step Functions JSONata expression makes against the top-level context.
+ * Parses a Step Functions JSONata expression once and reports either the message the parser refused
+ * it with, or every reference it makes against the top-level context.
  *
  * <p>A Step Functions expression is evaluated with no context item: the input arrives as
  * {@code $states.input} and workflow variables as {@code $name}. A path that starts from neither
@@ -39,10 +39,19 @@ import java.util.Set;
 @RegisterForReflection(targets = Parser.Symbol.class, fields = true)
 final class JsonataTopLevelReferences {
 
-    private static final Logger LOG = Logger.getLogger(JsonataTopLevelReferences.class);
-
     /** The name AWS prints for {@code $}, the context item itself. */
     private static final String CONTEXT_ITEM = "$";
+
+    /** The pseudo-reference reported for {@code $$}, AWS's separate name rule. */
+    static final String ROOT_REFERENCE = "$$";
+
+    /**
+     * The pseudo-reference reported for a {@code $states.errorOutput} path, wherever it starts.
+     * Not a top-level context read like the others: {@code $states} is always in scope, but the
+     * {@code errorOutput} field only exists on it inside a {@code Catch} entry's own {@code Output}
+     * and {@code Assign}, and only the caller knows whether the walk is there.
+     */
+    static final String STATES_ERROR_OUTPUT = "$states.errorOutput";
 
     private static final Map<String, Field> TREE_FIELDS = resolveTreeFields(
             "type", "value", "steps", "lhs", "rhs", "expression", "expressions",
@@ -52,22 +61,32 @@ final class JsonataTopLevelReferences {
     }
 
     /**
-     * The distinct top-level references in {@code expression}, in the order they are written.
-     * An expression that does not parse names none: a syntax error is AWS's separate
-     * {@code INVALID_JSONATA_EXPRESSION} rule, and naming nothing leaves the definition accepted.
+     * What parsing {@code expression} once finds: either the parser's own message, unchanged
+     * (AWS's {@code INVALID_JSONATA_EXPRESSION} refuses it with the same sentence, its
+     * {@code S0xxx: } code prefix stripped, and {@link com.dashjoin.jsonata.JException#getMessage()}
+     * never carries that prefix), or the distinct top-level references the expression makes, in
+     * the order they are written.
      */
-    static List<String> in(String expression) {
+    record Analysis(List<String> topLevelReferences, String parseError) {
+        static Analysis parseError(String message) {
+            return new Analysis(List.of(), message);
+        }
+
+        static Analysis references(List<String> names) {
+            return new Analysis(names, null);
+        }
+    }
+
+    static Analysis analyze(String expression) {
         Parser.Symbol root;
         try {
             root = new Parser().parse(expression);
         } catch (Exception e) {
-            LOG.debugf(e, "JSONata expression not parsed, so no top-level reference is named: %s",
-                    expression);
-            return List.of();
+            return Analysis.parseError(e.getMessage());
         }
         Set<String> names = new LinkedHashSet<>();
         collect(root, names);
-        return new ArrayList<>(names);
+        return Analysis.references(new ArrayList<>(names));
     }
 
     private static void collect(Parser.Symbol node, Set<String> names) {
@@ -76,7 +95,12 @@ final class JsonataTopLevelReferences {
             return;
         }
         switch (type) {
-            case "path" -> collect(first(node, "steps"), names);
+            case "path" -> {
+                collect(first(node, "steps"), names);
+                if (isStatesErrorOutputPath(node)) {
+                    names.add(STATES_ERROR_OUTPUT);
+                }
+            }
             case "name" -> names.add(String.valueOf(read(node, "value")));
             case "variable" -> collectContextItem(node, names);
             case "unary" -> collectUnary(node, names);
@@ -105,13 +129,34 @@ final class JsonataTopLevelReferences {
 
     /**
      * {@code $} carries the empty name and is the context item AWS refuses. {@code $$} carries the
-     * name {@code "$"} and AWS refuses it under a different message, which is a separate rule.
-     * Every other variable is a workflow variable or a function, and AWS accepts an undefined one.
+     * name {@code "$"} and AWS refuses it too, under a different message. Every other variable is a
+     * workflow variable or a function, and AWS accepts an undefined one.
      */
     private static void collectContextItem(Parser.Symbol variable, Set<String> names) {
-        if ("".equals(read(variable, "value"))) {
+        String value = String.valueOf(read(variable, "value"));
+        if (value.isEmpty()) {
             names.add(CONTEXT_ITEM);
+        } else if (CONTEXT_ITEM.equals(value)) {
+            // "$$" parses as a variable named "$": the sigil is consumed twice, once as the
+            // variable marker and once as its name.
+            names.add(ROOT_REFERENCE);
         }
+    }
+
+    /**
+     * Whether {@code path}'s first step is {@code $states} and its second is {@code errorOutput}.
+     * Only those two steps matter: whatever follows ({@code $states.errorOutput.Cause}) still reads
+     * the same field on {@code $states} first.
+     */
+    private static boolean isStatesErrorOutputPath(Parser.Symbol path) {
+        List<Parser.Symbol> steps = children(path, "steps");
+        if (steps == null || steps.size() < 2) {
+            return false;
+        }
+        Parser.Symbol first = steps.get(0);
+        Parser.Symbol second = steps.get(1);
+        return "variable".equals(read(first, "type")) && "states".equals(read(first, "value"))
+                && "name".equals(read(second, "type")) && "errorOutput".equals(read(second, "value"));
     }
 
     /**
