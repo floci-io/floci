@@ -3220,6 +3220,8 @@ public class CloudFormationResourceProvisioner {
         boolean createdPolicy = false;
         String previousDefaultVersionId = null;
         io.github.hectorvent.floci.services.iam.model.PolicyVersion createdVersionForRollback = null;
+        List<io.github.hectorvent.floci.services.iam.model.PolicyVersion> prunedVersionsForRollback =
+                new ArrayList<>();
         List<String> detachedObsoleteRoles = new ArrayList<>();
         try {
             policy = iamService.createPolicy(policyName, "/", null, document, Map.of());
@@ -3254,7 +3256,12 @@ public class CloudFormationResourceProvisioner {
                             v -> Integer.parseInt(v.getVersionId().substring(1))))
                     .toList();
             for (int i = 0; i <= versions.size() - 4; i++) {
-                iamService.deletePolicyVersion(existingArn, versions.get(i).getVersionId());
+                var pruned = versions.get(i);
+                // Captured before deletion so a later failure in this same update can recreate
+                // the content — the version id itself is gone for good (AWS never reissues one),
+                // but the document must survive a rollback that reports COMPLETE.
+                prunedVersionsForRollback.add(pruned);
+                iamService.deletePolicyVersion(existingArn, pruned.getVersionId());
             }
             createdVersionForRollback = iamService.createPolicyVersion(existingArn, document, true);
             // Roles this stack attached on the previous pass but no longer listed in the
@@ -3275,7 +3282,8 @@ public class CloudFormationResourceProvisioner {
                             if (!"NoSuchEntity".equals(detachFailure.getErrorCode())) {
                                 restoreManagedPolicyOnUpdateFailure(detachFailure, r, existingArn,
                                         false, Set.of(), detachedObsoleteRoles,
-                                        previousDefaultVersionId, createdVersionForRollback);
+                                        previousDefaultVersionId, createdVersionForRollback,
+                                        prunedVersionsForRollback);
                                 throw detachFailure;
                             }
                         }
@@ -3312,7 +3320,8 @@ public class CloudFormationResourceProvisioner {
             }
         } catch (RuntimeException failure) {
             restoreManagedPolicyOnUpdateFailure(failure, r, policyArn, createdPolicy, attachedRoleNames,
-                    detachedObsoleteRoles, previousDefaultVersionId, createdVersionForRollback);
+                    detachedObsoleteRoles, previousDefaultVersionId, createdVersionForRollback,
+                    prunedVersionsForRollback);
             throw failure;
         }
     }
@@ -3332,7 +3341,8 @@ public class CloudFormationResourceProvisioner {
             Set<String> attachedRoleNames,
             List<String> detachedObsoleteRoles,
             String previousDefaultVersionId,
-            io.github.hectorvent.floci.services.iam.model.PolicyVersion createdVersionForRollback) {
+            io.github.hectorvent.floci.services.iam.model.PolicyVersion createdVersionForRollback,
+            List<io.github.hectorvent.floci.services.iam.model.PolicyVersion> prunedVersionsForRollback) {
         List<String> rollbackRoles = new ArrayList<>(attachedRoleNames);
         Collections.reverse(rollbackRoles);
         boolean cleanupSucceeded = true;
@@ -3373,6 +3383,21 @@ public class CloudFormationResourceProvisioner {
                 String pruneDescription = "delete stray policy version " + strayVersionId + " on " + policyArn;
                 if (!CfnRollback.attemptIamCleanup(failure, pruneDescription,
                         () -> iamService.deletePolicyVersion(policyArn, strayVersionId))) {
+                    cleanupSucceeded = false;
+                }
+            }
+            // Versions pruned to stay under IAM's 5-version cap before publishing this attempt's
+            // new default are gone for good under their original version id, but the document
+            // itself must not be — restoring only the default and deleting the stray version
+            // (above) frees exactly the slot(s) needed to recreate their content now, so a
+            // "successful" rollback doesn't quietly destroy policy history that predates this
+            // update.
+            for (var prunedVersion : prunedVersionsForRollback) {
+                String document = prunedVersion.getDocument();
+                String restoreContentDescription =
+                        "restore pruned policy version content on " + policyArn;
+                if (!CfnRollback.attemptIamCleanup(failure, restoreContentDescription,
+                        () -> iamService.createPolicyVersion(policyArn, document, false))) {
                     cleanupSucceeded = false;
                 }
             }

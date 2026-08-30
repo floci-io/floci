@@ -495,4 +495,57 @@ class CloudFormationManagedPolicyUpdateIntegrationTest {
         updateStack(stackName, literalRoleManagedPolicyTemplate(policyName, "s3:PutObject", badRole));
         assertStackStatus(stackName, "UPDATE_ROLLBACK_FAILED");
     }
+
+    @Test
+    void prunedPolicyVersionContentSurvivesRollbackAfterUpdateFailure() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-mp-prunefail-" + suffix;
+        String policyName = "mp-prunefail-" + suffix;
+        String oldRole = "mp-prunefail-old-" + suffix;
+        String badRole = "mp-prunefail-missing-" + suffix;
+
+        iam("CreateRole", "RoleName", oldRole, "AssumeRolePolicyDocument",
+                "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Principal\":{\"Service\":\"ec2.amazonaws.com\"},\"Action\":\"sts:AssumeRole\"}]}");
+
+        createStack(stackName, literalRoleManagedPolicyTemplate(policyName, "s3:GetObject", oldRole));
+        assertStackStatus(stackName, "CREATE_COMPLETE");
+
+        // Four more successful updates bring the policy to IAM's 5-version cap (v1..v5, v5
+        // default) — the next update must prune the oldest (v1, "s3:GetObject") to publish a
+        // new default version.
+        for (String action : new String[] {
+                "s3:PutObject", "s3:DeleteObject", "s3:ListBucket", "s3:GetBucketLocation"}) {
+            updateStack(stackName, literalRoleManagedPolicyTemplate(policyName, action, oldRole));
+            assertStackStatus(stackName, "UPDATE_COMPLETE");
+        }
+
+        // Retargeting to a role that does not exist fails the attach loop AFTER the update path
+        // has already pruned v1 (to stay under the cap) and published v6 as the new default.
+        updateStack(stackName,
+                literalRoleManagedPolicyTemplate(policyName, "s3:AbortMultipartUpload", badRole));
+        assertStackStatus(stackName, "UPDATE_ROLLBACK_COMPLETE");
+
+        // The default version correctly reverted to v5, the version active before this attempt.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", IAM_AUTH)
+            .formParam("Action", "GetPolicy")
+            .formParam("PolicyArn", policyArn(policyName))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<DefaultVersionId>v5</DefaultVersionId>"));
+
+        // v1's content ("s3:GetObject") — pruned to make room for v6 before the failure — must
+        // still be recoverable as some surviving version. A rollback that reports
+        // UPDATE_ROLLBACK_COMPLETE while having permanently destroyed it is exactly the bug
+        // under test: the stack claims a clean restore of state that predates this update, but
+        // that state is gone.
+        boolean prunedContentSurvives = iamService.listPolicyVersions(policyArn(policyName)).stream()
+                .anyMatch(v -> v.getDocument().contains("s3:GetObject"));
+        org.junit.jupiter.api.Assertions.assertTrue(prunedContentSurvives,
+                "pruned v1 content (s3:GetObject) was permanently lost despite UPDATE_ROLLBACK_COMPLETE");
+    }
 }
