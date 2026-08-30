@@ -24,7 +24,7 @@ needs rollup, compatibility evidence, or release documentation before it can be 
 
 | ID | Service / area | Status | Evidence / gap | Next step |
 | --- | --- | --- | --- | --- |
-| PAR-001 | Account and region scoping across services | Open | [issues/0009](../issues/0009-epic-account-region-scoping-audit.md) records that the earlier CFN sweep did not cover the remaining service tree or the region-ambient variant. Its static pre-filter identifies 13 async/ambient-account candidates: Amazon MQ, AppSync, Backup, CloudMap, CloudTrail, CodeDeploy, EKS, Floci UI, Kinesis Analytics, MSK, MWAA, OpenSearch, and SQS. | Re-run `sh scripts/static-checks/find-ambient-account-region-candidates.sh`, then perform bounded, evidence-backed service batches. Record each finding in a numbered issue and exclude only the confirmed global-resource exceptions documented by the epic. |
+| PAR-001 | Account and region scoping across services | Open | A prior sweep of the CloudFormation provisioning path (provisioners, IAM, EC2, SQS, StackSets, Lambda launch/store) found and fixed 13 instances of code reaching for an ambient account/region (`RegionResolver.getAccountId()`/`getDefaultRegion()`, an unscoped `RequestContext`) instead of an already-resolved value passed to it. That sweep did not cover the rest of the service tree, nor the region-ambient variant of the same bug shape. A grep-based candidate filter currently flags 13 files: Amazon MQ, AppSync, Backup, CloudMap, CloudTrail, CodeDeploy, EKS, Floci UI, Kinesis Analytics, MSK, MWAA, OpenSearch, and SQS. | Grep `src/main/java` for `regionResolver\.getAccountId\(\)\|requestContext\.getAccountId\(\)\|regionResolver\.getDefaultRegion\(\)`, cross-reference hits against files using `ExecutorService`, `CompletableFuture`, `Executors.`, `.submit(`, `@Scheduled`, `ScheduledExecutorService`, or `new Thread(` (ambient reads are structurally wrong once code crosses off the originating request thread), then perform bounded, evidence-backed service batches. Record each finding in a numbered issue and exclude only confirmed global-resource exceptions. |
 | PAR-002 | LZA CloudFormation replay/idempotency | Implemented — verify | Branch `feature/lza-cloudformation-idempotency` commit `13687fee` adds status filtering, per-resource checkpoints, security-group/custom-resource idempotency, VPC update handling, and a governed-pipeline integration test. | Roll the branch into integration and run the net-new LZA matrix (including the supported 1.14/1.15/1.16 compatibility targets). Preserve exact stack events and restart behavior as the acceptance record. |
 | PAR-003 | CodeBuild execution backend | Open investigation | [CodeBuild local-agent epic](services/codebuild-local-agent-investigation-epic.md) separates the AWS-compatible control plane from the execution backend. The published local agent is not the same image as `aws/codebuild/standard:7.0`; image mapping, output translation, cancellation, secrets, artifacts, and restart behavior remain decisions. | Characterize the published agent with deterministic fixtures, pin image digests, define a versioned backend seam, and run differential native-vs-agent tests before selecting preferred, opt-in, oracle-only, or rejected adoption. |
 | PAR-004 | CodePipeline V2 | Open follow-up | [CodePipeline V2 epic](services/codepipeline-v2-epic.md) documents that current support is partial and that LZA currently exercises V1. Trigger execution, validation, queued/superseded/parallel isolation, condition providers, artifact lineage, retry/rollback, events, and CloudFormation round-trips remain. | Implement in slices beginning with V2 validation and trigger fixtures; require AWS SDK integration tests and preserve the existing V1/LZA suite as a regression gate. |
@@ -62,15 +62,15 @@ needs rollup, compatibility evidence, or release documentation before it can be 
 
 These are not new implementation TODOs, but they must not be lost during branch consolidation:
 
-| Area | Branch / commit | Required close-out |
-| --- | --- | --- |
-| KMS grant metadata | `feature/kms-grant-fidelity` / `0b8724a8` | Roll up and run KMS integration plus persistence/reload assertions. |
-| SNS / Control Tower prerequisite | `feature/controltower-sns-prerequisite` / `6e7c1155` | Roll up and run the Control Tower/SNS prerequisite slice. |
-| CodeBuild image mapping | `feature/codebuild-local-image` / `ad79c668`, docs `f99bdc39` | Verify the selected ARM image digest and keep the curated-vs-public image distinction in docs. |
-| CodePipeline retry artifacts | `feature/codepipeline-artifact-retry` / `cbbd9305` | Run retry/rollback and persistence tests before V2 work changes lineage. |
-| DynamoDB index persistence | `feature/dynamodb-hybrid-persistence` / `90a9062f` | Run hybrid-storage reload coverage. |
-| RAM persistence | `feature/ram-persistence` / `eeb10ad4` | Pair with the open RAM API work above. |
-| Network Firewall and Service Catalog | `feature/network-firewall` / `399d454f`; `feature/service-catalog` / `76eed019` | Roll up service and CloudFormation provisioner tests, then update the service count once both are present. |
+| Area | Required close-out |
+| --- | --- |
+| KMS grant metadata | Roll up and run KMS integration plus persistence/reload assertions. |
+| SNS / Control Tower prerequisite | Roll up and run the Control Tower/SNS prerequisite slice. |
+| CodeBuild image mapping | Verify the selected ARM image digest and keep the curated-vs-public image distinction in docs. |
+| CodePipeline retry artifacts | Run retry/rollback and persistence tests before V2 work changes lineage. |
+| DynamoDB index persistence | Run hybrid-storage reload coverage. |
+| RAM persistence | Pair with the open RAM API work above. |
+| Network Firewall and Service Catalog | Roll up service and CloudFormation provisioner tests, then update the service count once both are present. |
 
 ## Working rules for turning rows into issues
 
