@@ -92,6 +92,7 @@ public class RedshiftService {
                 int proxyPort = cluster.getProxyPort() > 0 ? cluster.getProxyPort() : allocateProxyPort();
                 usedPorts.add(proxyPort);
                 Endpoint endpoint = proxyEndpoint(proxyPort);
+                cluster.setProxyPort(proxyPort);
                 proxyManager.startProxy(
                         relayKey(entry.accountId(), cluster.getClusterIdentifier()), proxyPort,
                         handle.getHost(), handle.getPort(), endpoint.getAddress(),
@@ -99,7 +100,6 @@ public class RedshiftService {
                         passwordValidatorFor(entry.accountId(), cluster.getClusterIdentifier()));
                 cluster.setContainerHost(handle.getHost());
                 cluster.setContainerPort(handle.getPort());
-                cluster.setProxyPort(proxyPort);
                 cluster.setEndpoint(endpoint);
                 clusters.putForAccount(entry.accountId(), entry.key(), cluster);
             } catch (Exception e) {
@@ -142,13 +142,13 @@ public class RedshiftService {
             RedshiftContainerHandle handle = containerManager.start(accountId, identifier, username, password);
             proxyPort = allocateProxyPort();
             Endpoint endpoint = proxyEndpoint(proxyPort);
+            cluster.setProxyPort(proxyPort);
             proxyManager.startProxy(relayKey(accountId, identifier), proxyPort,
                     handle.getHost(), handle.getPort(), endpoint.getAddress(),
                     username, password, CLUSTER_DB_NAME,
                     passwordValidatorFor(accountId, identifier));
             cluster.setContainerHost(handle.getHost());
             cluster.setContainerPort(handle.getPort());
-            cluster.setProxyPort(proxyPort);
             cluster.setEndpoint(endpoint);
             cluster.setClusterStatus("available");
         } catch (AwsException e) {
@@ -265,12 +265,12 @@ public class RedshiftService {
             int proxyPort = cluster.getProxyPort() > 0 ? cluster.getProxyPort() : allocateProxyPort();
             usedPorts.add(proxyPort);
             Endpoint endpoint = proxyEndpoint(proxyPort);
+            cluster.setProxyPort(proxyPort);
             proxyManager.startProxy(key, proxyPort, handle.getHost(), handle.getPort(),
                     endpoint.getAddress(), cluster.getMasterUsername(), password, CLUSTER_DB_NAME,
                     passwordValidatorFor(accountId, clusterIdentifier));
             cluster.setContainerHost(handle.getHost());
             cluster.setContainerPort(handle.getPort());
-            cluster.setProxyPort(proxyPort);
             cluster.setEndpoint(endpoint);
 
             containerManager.restoreSnapshot(accountId, clusterIdentifier, cluster.getMasterUsername(), tempDump);
@@ -473,13 +473,13 @@ public class RedshiftService {
             RedshiftContainerHandle handle = containerManager.start(accountId, clusterIdentifier, username, password);
             proxyPort = allocateProxyPort();
             Endpoint endpoint = proxyEndpoint(proxyPort);
+            cluster.setProxyPort(proxyPort);
             proxyManager.startProxy(relayKey(accountId, clusterIdentifier), proxyPort,
                     handle.getHost(), handle.getPort(), endpoint.getAddress(),
                     username, password, CLUSTER_DB_NAME,
                     passwordValidatorFor(accountId, clusterIdentifier));
             cluster.setContainerHost(handle.getHost());
             cluster.setContainerPort(handle.getPort());
-            cluster.setProxyPort(proxyPort);
             cluster.setEndpoint(endpoint);
 
             if (hasDump) {
