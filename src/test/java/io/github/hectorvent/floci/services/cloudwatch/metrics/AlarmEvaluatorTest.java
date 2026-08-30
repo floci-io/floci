@@ -93,9 +93,14 @@ class AlarmEvaluatorTest {
         verify(handler).handle(eq(POLICY_ARN), eq(alarm), eq(90.0), eq(REGION));
     }
 
+    /**
+     * AWS reaches {@code INSUFFICIENT_DATA} only when every period in the evaluation range is
+     * empty; a range holding fewer real datapoints than {@code EvaluationPeriods} is still
+     * evaluated on the real data it does have.
+     */
     @Test
-    void insufficientDataWhenFewerDatapointsThanEvaluationPeriods() {
-        stubMetrics(datapoints(80));
+    void insufficientDataOnlyWhenTheWholeEvaluationRangeIsEmpty() {
+        stubMetrics(List.of());
 
         MetricAlarm alarm = alarm();
         alarm.setStateValue("OK");

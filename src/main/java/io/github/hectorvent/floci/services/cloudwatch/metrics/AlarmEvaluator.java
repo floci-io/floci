@@ -12,6 +12,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -90,11 +91,20 @@ public class AlarmEvaluator {
     }
 
     /**
-     * Evaluates the last {@code evaluationPeriods} <em>complete</em> periods, not counting
-     * whichever period is still accumulating right now — matching real CloudWatch, which
-     * evaluates elapsed periods only. Counting the in-progress period would make it look
-     * "missing" on nearly every tick even under perfectly healthy, continuous reporting,
-     * since data for it typically hasn't arrived yet.
+     * Queries the <em>evaluation range</em> — more periods than {@code evaluationPeriods} — and
+     * resolves the state with CloudWatch's documented precedence ("How alarm state is evaluated
+     * when data is missing"): real datapoints reaching further back are preferred, and {@code
+     * TreatMissingData} only fills what real data cannot cover.
+     *
+     * <p>Once the range holds at least {@code evaluationPeriods} real datapoints, the most recent
+     * of those decide the state and {@code TreatMissingData} is not consulted at all — AWS: "the
+     * value you set for how to treat missing data is not needed and is ignored". Reaching further
+     * back is precisely what makes that branch reachable, so widening the query narrows how often
+     * the fallback applies without changing what any of its modes mean.</p>
+     *
+     * <p>Only <em>complete</em> periods are considered; the period still accumulating right now
+     * is excluded, since data for it typically has not arrived yet and counting it would make it
+     * look missing on nearly every tick even under perfectly healthy reporting.</p>
      */
     void evaluate(MetricAlarm alarm) {
         if (!isEvaluable(alarm)) {
@@ -103,50 +113,71 @@ public class AlarmEvaluator {
         String region = alarm.getRegion();
         int period = alarm.getPeriod();
         int evaluationPeriods = alarm.getEvaluationPeriods();
+        int range = evaluationRange(evaluationPeriods);
         long nowBucket = (Instant.now().getEpochSecond() / period) * period;
         long lastCompleteBucket = nowBucket - period;
-        long oldestBucket = lastCompleteBucket - (long) period * (evaluationPeriods - 1);
+        long oldestBucket = lastCompleteBucket - (long) period * (range - 1);
         Instant start = Instant.ofEpochSecond(oldestBucket);
         Instant end = Instant.ofEpochSecond(lastCompleteBucket + period - 1);
 
-        List<CloudWatchMetricsService.Datapoint> recent = metricsService.getMetricStatistics(
+        List<CloudWatchMetricsService.Datapoint> retrieved = metricsService.getMetricStatistics(
                 alarm.getNamespace(), alarm.getMetricName(), alarm.getDimensions(),
                 start, end, period, List.of(alarm.getStatistic()), alarm.getUnit(), region);
-        int missing = evaluationPeriods - recent.size();
 
-        int breaching = 0;
-        double latestValue = Double.NaN;
-        for (CloudWatchMetricsService.Datapoint dp : recent) {
-            double value = CloudWatchMetricsService.resolveStatValue(dp, alarm.getStatistic());
-            if (breaches(value, alarm.getComparisonOperator(), alarm.getThreshold())) {
-                breaching++;
-                latestValue = value;
+        Double[] buckets = new Double[range];
+        for (CloudWatchMetricsService.Datapoint dp : retrieved) {
+            long bucket = (dp.timestamp().getEpochSecond() / period) * period;
+            int index = (int) ((bucket - oldestBucket) / period);
+            if (index >= 0 && index < range) {
+                buckets[index] = CloudWatchMetricsService.resolveStatValue(dp, alarm.getStatistic());
+            }
+        }
+
+        List<Double> real = new ArrayList<>();
+        for (Double value : buckets) {
+            if (value != null) {
+                real.add(value);
             }
         }
 
         String newState;
         String reason;
-        if (missing > 0) {
+        double latestValue;
+        if (real.size() >= evaluationPeriods) {
+            List<Double> evaluated = real.subList(real.size() - evaluationPeriods, real.size());
+            int breaching = countBreaches(evaluated, alarm);
+            latestValue = latestBreachingValue(evaluated, alarm);
+            newState = evaluateBreachCount(breaching, alarm, evaluationPeriods);
+            reason = ("ALARM".equals(newState) ? "Threshold Crossed: " : "Threshold Not Crossed: ")
+                    + breaching + " datapoint(s) breaching the threshold.";
+        } else {
+            int fill = evaluationPeriods - real.size();
+            int breaching = countBreaches(real, alarm);
+            latestValue = latestBreachingValue(real, alarm);
             String treatMissingData = alarm.getTreatMissingData();
             if ("ignore".equalsIgnoreCase(treatMissingData)) {
                 newState = alarm.getStateValue();
                 reason = alarm.getStateReason();
             } else if ("breaching".equalsIgnoreCase(treatMissingData)) {
-                newState = evaluateBreachCount(breaching + missing, alarm, evaluationPeriods);
+                newState = evaluateBreachCount(breaching + fill, alarm, evaluationPeriods);
                 reason = "Threshold Crossed (missing datapoints treated as breaching): "
-                        + (breaching + missing) + " datapoint(s) breaching the threshold.";
+                        + (breaching + fill) + " datapoint(s) breaching the threshold.";
             } else if ("notBreaching".equalsIgnoreCase(treatMissingData)) {
                 newState = evaluateBreachCount(breaching, alarm, evaluationPeriods);
                 reason = "Threshold evaluated with missing datapoints treated as not breaching: "
                         + breaching + " datapoint(s) breaching the threshold.";
-            } else {
+            } else if (real.isEmpty()) {
                 newState = "INSUFFICIENT_DATA";
-                reason = "Insufficient Data: " + recent.size() + " of " + evaluationPeriods + " datapoints available";
+                reason = "Insufficient Data: 0 of " + evaluationPeriods + " datapoints available";
+            } else if (settledBreach(buckets, alarm, evaluationPeriods)) {
+                newState = "ALARM";
+                reason = "Threshold Crossed: the oldest breaching datapoint is old enough to alarm "
+                        + "and every more recent datapoint is breaching or missing.";
+            } else {
+                newState = evaluateBreachCount(breaching, alarm, evaluationPeriods);
+                reason = ("ALARM".equals(newState) ? "Threshold Crossed: " : "Threshold Not Crossed: ")
+                        + breaching + " real datapoint(s) breaching the threshold.";
             }
-        } else {
-            newState = evaluateBreachCount(breaching, alarm, evaluationPeriods);
-            reason = ("ALARM".equals(newState) ? "Threshold Crossed: " : "Threshold Not Crossed: ")
-                    + breaching + " datapoint(s) breaching the threshold.";
         }
 
         if (!newState.equals(alarm.getStateValue())) {
@@ -156,6 +187,68 @@ public class AlarmEvaluator {
         if ("ALARM".equals(newState) && alarm.isActionsEnabled()) {
             dispatch(alarm, latestValue, region);
         }
+    }
+
+    /**
+     * How many periods to retrieve. AWS states only that it is "a higher number of data points
+     * than the number specified as Evaluation Periods", varying with period length and metric
+     * resolution, without publishing the formula; its one worked example pairs
+     * {@code EvaluationPeriods = 3} with an evaluation range of 5, which is what this reproduces.
+     */
+    private static int evaluationRange(int evaluationPeriods) {
+        return evaluationPeriods + 2;
+    }
+
+    /**
+     * CloudWatch's premature-transition rule, which fires when {@code TreatMissingData} is left at
+     * its {@code missing} default: an alarm goes to {@code ALARM} "when the oldest available
+     * breaching datapoint during the Evaluation Periods number of data points is at least as old
+     * as the value of Datapoints to Alarm" and every more recent datapoint is breaching or
+     * missing. A lone breach at the very end of the window ({@code - - - - X}) deliberately does
+     * not qualify — the next datapoint may be non-breaching — while one that has already aged past
+     * {@code DatapointsToAlarm} ({@code - - X - -}) does, even with fewer real datapoints than M.
+     *
+     * <p>"All other" spans the whole evaluation range, not just the most recent {@code
+     * EvaluationPeriods}: a single non-breaching reading anywhere in the range disqualifies the
+     * shortcut. That is what separates {@code 0 - X - -} (documented {@code OK} at
+     * {@code DatapointsToAlarm = 2}) from {@code - - X - -} (documented {@code ALARM}), since the
+     * two are indistinguishable across their most recent three buckets alone.</p>
+     */
+    private static boolean settledBreach(Double[] buckets, MetricAlarm alarm, int evaluationPeriods) {
+        int datapointsToAlarm = alarm.getDatapointsToAlarm() > 0
+                ? alarm.getDatapointsToAlarm() : evaluationPeriods;
+        int oldestBreachingAge = 0;
+        for (int age = 1; age <= buckets.length; age++) {
+            Double value = buckets[buckets.length - age];
+            if (value == null) {
+                continue;
+            }
+            if (!breaches(value, alarm.getComparisonOperator(), alarm.getThreshold())) {
+                return false;
+            }
+            oldestBreachingAge = age;
+        }
+        return oldestBreachingAge >= datapointsToAlarm;
+    }
+
+    private static int countBreaches(List<Double> values, MetricAlarm alarm) {
+        int breaching = 0;
+        for (Double value : values) {
+            if (breaches(value, alarm.getComparisonOperator(), alarm.getThreshold())) {
+                breaching++;
+            }
+        }
+        return breaching;
+    }
+
+    private static double latestBreachingValue(List<Double> values, MetricAlarm alarm) {
+        double latest = Double.NaN;
+        for (Double value : values) {
+            if (breaches(value, alarm.getComparisonOperator(), alarm.getThreshold())) {
+                latest = value;
+            }
+        }
+        return latest;
     }
 
     private static String evaluateBreachCount(int breaching, MetricAlarm alarm, int evaluationPeriods) {

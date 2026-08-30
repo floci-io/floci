@@ -138,15 +138,17 @@ arn:aws:iam::<account>:role/aws-service-role/<namespace>.application-autoscaling
   validated; the configuration block is not stored.
 - Pagination is not implemented — `DescribeScalableTargets` and `DescribeScalingPolicies`
   return all matching results and never emit a `NextToken`.
-- **Missing-data evaluation uses a fixed window, not AWS's sliding one.** Real CloudWatch
-  queries a wider "evaluation range" than `Period × EvaluationPeriods` and, whenever enough
-  *real* datapoints exist within that wider range, evaluates using those and ignores
-  `TreatMissingData` entirely — falling back to it only when genuinely too few real
-  datapoints exist even with the extra lookback. Real CloudWatch also has "premature
-  transition" avoidance logic that can delay a move into `ALARM` when trailing data is
-  missing. Floci's evaluator queries exactly `EvaluationPeriods` period-aligned buckets and
-  applies `TreatMissingData` as soon as any of them is empty — correct for the common case
-  (continuous metric reporting) but less faithful once data has partial, intermittent gaps.
+- **The evaluation range's exact width is an approximation.** Alarm evaluation follows
+  CloudWatch's documented precedence: a wider "evaluation range" than
+  `Period × EvaluationPeriods` is queried, and whenever enough *real* datapoints exist within
+  it the alarm is evaluated on those and `TreatMissingData` is ignored entirely; the setting
+  fills in only what real data cannot cover. The premature-transition rule is implemented too,
+  so a breach that has aged past `DatapointsToAlarm` with only missing periods after it reaches
+  `ALARM`, while a breach at the very end of the window does not. AWS does not publish how wide
+  the range is (only that it varies with period length and metric resolution), so Floci uses
+  `EvaluationPeriods + 2`, which reproduces the single worked example in AWS's documentation.
+  Both published example tables are transcribed as tests in
+  `AlarmEvaluatorMissingDataTablesTest`.
 - **Scale-out cooldown rarely blocks a repeated scale-out in practice.** Its "proceed if
   larger than the last applied capacity" carve-out (see above) is almost always satisfied
   when nothing external has changed capacity, because both capacity formulas grow
