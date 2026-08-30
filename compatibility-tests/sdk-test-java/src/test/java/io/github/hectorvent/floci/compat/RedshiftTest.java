@@ -16,6 +16,7 @@ import software.amazon.awssdk.services.redshift.model.DeleteClusterResponse;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 public class RedshiftTest {
@@ -44,8 +45,13 @@ public class RedshiftTest {
         Cluster cluster = describeRes.clusters().get(0);
         assertEquals("test-cluster", cluster.clusterIdentifier());
         assertNotNull(cluster.endpoint());
-        // No JDBC connection here: the endpoint carries the backing container's own host/port
-        // (Redshift has no RDS-style auth proxy yet), which isn't reachable from the harness.
+        String address = cluster.endpoint().address();
+        int port = cluster.endpoint().port();
+        String jdbcUrl = "jdbc:postgresql://" + address + ":" + port + "/dev";
+        try (java.sql.Connection conn =
+                     java.sql.DriverManager.getConnection(jdbcUrl, "admin", "Password123")) {
+            assertTrue(conn.isValid(5));
+        }
     }
 
     @Test

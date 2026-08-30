@@ -192,6 +192,7 @@ jobs:
           DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)
           docker run -d --name floci --network compat-net \
             -p 4566:4566 \
+            -p 7100-7199:7100-7199 \
             -v /var/run/docker.sock:/var/run/docker.sock \
             --group-add "$DOCKER_GID" \
             -e FLOCI_BASE_URL=http://floci:4566 \
@@ -201,6 +202,7 @@ jobs:
             -e FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ENABLED=true \
             -e FLOCI_TLS_ENABLED=true \
             -e FLOCI_SERVICES_EC2_MOCK=true \
+            -e FLOCI_SERVICES_REDSHIFT_ENDPOINT_HOST=floci \
             floci:test-native
 
       - name: Wait for floci to be ready
