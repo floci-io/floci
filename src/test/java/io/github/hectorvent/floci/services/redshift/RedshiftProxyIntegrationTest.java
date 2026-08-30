@@ -35,13 +35,25 @@ class RedshiftProxyIntegrationTest {
         return "jdbc:postgresql://" + c.getEndpoint().getAddress() + ":" + c.getEndpoint().getPort() + "/dev";
     }
 
+    private static Connection waitForConnection(Cluster cluster, String username, String password) throws SQLException {
+        try {
+            return org.awaitility.Awaitility.await()
+                    .atMost(java.time.Duration.ofSeconds(30))
+                    .pollInterval(java.time.Duration.ofMillis(500))
+                    .ignoreExceptions()
+                    .until(() -> DriverManager.getConnection(jdbcUrl(cluster), username, password), java.util.Objects::nonNull);
+        } catch (org.awaitility.core.ConditionTimeoutException e) {
+            return DriverManager.getConnection(jdbcUrl(cluster), username, password); // throw original
+        }
+    }
+
     @Test
     void roundTripsSqlThroughTheAdvertisedEndpoint() throws SQLException {
         clusterId = "it-proxy-roundtrip";
         Cluster cluster = service.createCluster(clusterId, "dc2.large", "admin", "Secret123");
 
-        try (Connection conn = DriverManager.getConnection(jdbcUrl(cluster), "admin", "Secret123");
-             Statement st = conn.createStatement()) {
+        try (Connection conn = waitForConnection(cluster, "admin", "Secret123");
+            Statement st = conn.createStatement()) {
             st.execute("CREATE TABLE people (name text)");
             st.execute("INSERT INTO people VALUES ('Alice')");
             try (ResultSet rs = st.executeQuery("SELECT count(*) FROM people")) {
@@ -52,9 +64,14 @@ class RedshiftProxyIntegrationTest {
     }
 
     @Test
-    void rejectsAWrongPasswordAtTheProxy() {
+    void rejectsAWrongPasswordAtTheProxy() throws SQLException {
         clusterId = "it-proxy-badpass";
         Cluster cluster = service.createCluster(clusterId, "dc2.large", "admin", "Secret123");
+
+        // Ensure it's ready first
+        try (Connection conn = waitForConnection(cluster, "admin", "Secret123")) {
+            assertTrue(conn.isValid(5));
+        }
 
         assertThrows(SQLException.class, () ->
                 DriverManager.getConnection(jdbcUrl(cluster), "admin", "wrong-password"));
@@ -64,6 +81,11 @@ class RedshiftProxyIntegrationTest {
     void reflectsAPasswordChangeForNewConnections() throws SQLException {
         clusterId = "it-proxy-rotate";
         Cluster cluster = service.createCluster(clusterId, "dc2.large", "admin", "Secret123");
+
+        // Ensure it's ready before testing rotation
+        try (Connection conn = waitForConnection(cluster, "admin", "Secret123")) {
+            assertTrue(conn.isValid(5));
+        }
 
         service.modifyCluster(clusterId, null, null, "Rotated123", null, null);
 
@@ -80,8 +102,8 @@ class RedshiftProxyIntegrationTest {
         Cluster cluster = service.createCluster(clusterId, "dc2.large", "admin", "Secret123");
         int portBefore = cluster.getEndpoint().getPort();
 
-        try (Connection conn = DriverManager.getConnection(jdbcUrl(cluster), "admin", "Secret123");
-             Statement st = conn.createStatement()) {
+        try (Connection conn = waitForConnection(cluster, "admin", "Secret123");
+            Statement st = conn.createStatement()) {
             st.execute("CREATE TABLE t (n int)");
             st.execute("INSERT INTO t VALUES (42)");
         }
@@ -89,7 +111,7 @@ class RedshiftProxyIntegrationTest {
         Cluster rebooted = service.rebootCluster(clusterId);
         assertEquals(portBefore, rebooted.getEndpoint().getPort());
 
-        try (Connection conn = DriverManager.getConnection(jdbcUrl(rebooted), "admin", "Secret123");
+        try (Connection conn = waitForConnection(rebooted, "admin", "Secret123");
              Statement st = conn.createStatement();
              ResultSet rs = st.executeQuery("SELECT n FROM t")) {
             assertTrue(rs.next());
