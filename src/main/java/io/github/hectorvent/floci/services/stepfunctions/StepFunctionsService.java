@@ -49,6 +49,9 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
     private final Map<String, List<HistoryEvent>> historyCache = new ConcurrentHashMap<>();
     private final Map<String, BlockingQueue<ActivityTask>> activityQueues = new ConcurrentHashMap<>();
     private final Map<String, CompletableFuture<JsonNode>> pendingTaskTokens = new ConcurrentHashMap<>();
+    // When each pending token last showed progress, so a Task's HeartbeatSeconds can bound the gap
+    // between heartbeats instead of the whole wait.
+    private final Map<String, Long> taskHeartbeatNanos = new ConcurrentHashMap<>();
     private final RegionResolver regionResolver;
     private final AslExecutor aslExecutor;
     private final ObjectMapper objectMapper;
@@ -104,6 +107,7 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
         activityQueues.clear();
         pendingTaskTokens.values().forEach(f -> f.completeExceptionally(new RuntimeException("StepFunctionsService cleared")));
         pendingTaskTokens.clear();
+        taskHeartbeatNanos.clear();
     }
 
     @Override
@@ -744,7 +748,30 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
     public CompletableFuture<JsonNode> registerPendingToken(String token) {
         CompletableFuture<JsonNode> future = new CompletableFuture<>();
         pendingTaskTokens.put(token, future);
+        taskHeartbeatNanos.put(token, System.nanoTime());
         return future;
+    }
+
+    /**
+     * When the token last showed progress: the moment its task was scheduled, then every
+     * SendTaskHeartbeat that named it. A token that is no longer pending reads as having just
+     * reported, so a task whose result already arrived is never failed on a heartbeat gap.
+     */
+    public long lastTaskHeartbeatNanos(String taskToken) {
+        Long reportedAt = taskToken != null ? taskHeartbeatNanos.get(taskToken) : null;
+        return reportedAt != null ? reportedAt : System.nanoTime();
+    }
+
+    /**
+     * Forgets a token the waiting task has stopped listening for, so a later SendTaskSuccess,
+     * SendTaskFailure or SendTaskHeartbeat naming it reports no pending task.
+     */
+    public void discardPendingToken(String taskToken) {
+        if (taskToken == null) {
+            return;
+        }
+        pendingTaskTokens.remove(taskToken);
+        taskHeartbeatNanos.remove(taskToken);
     }
 
     // ──────────────────────────── Tasks ────────────────────────────
@@ -782,8 +809,16 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
         return true;
     }
 
+    /**
+     * Resets the gap a Task's {@code HeartbeatSeconds} allows. A heartbeat for a token nobody is
+     * waiting for is logged and changes nothing, as in {@link #sendTaskSuccess(String, String)}.
+     */
     public void sendTaskHeartbeat(String taskToken) {
-        LOG.debugv("Task heartbeat for token {0}", taskToken);
+        if (taskToken == null || !pendingTaskTokens.containsKey(taskToken)) {
+            LOG.warnv("SendTaskHeartbeat: no pending task for token {0}", taskToken);
+            return;
+        }
+        taskHeartbeatNanos.put(taskToken, System.nanoTime());
     }
 
     // ──────────────────────────── Map runs ────────────────────────────
