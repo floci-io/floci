@@ -154,6 +154,34 @@ class RedshiftServiceTest {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
+    void onStartRestartsTheProxyForAnAdoptedCluster() {
+        Cluster persisted = new Cluster();
+        persisted.setClusterIdentifier("c1");
+        persisted.setMasterUsername("admin");
+        persisted.setMasterPassword("Secret123");
+        persisted.setClusterStatus("available");
+        persisted.setProxyPort(7108);
+
+        var entry = mock(AccountAwareStorageBackend.AccountEntry.class);
+        when(entry.value()).thenReturn(persisted);
+        when(entry.accountId()).thenReturn("111111111111");
+        when(entry.key()).thenReturn("c1");
+        when(clusterBackend.scanAllAccountEntries(any())).thenReturn(List.of(entry));
+        when(cm.getContainer("111111111111", "c1")).thenReturn(Optional.empty());
+        RedshiftContainerHandle handle = mock(RedshiftContainerHandle.class);
+        when(handle.getHost()).thenReturn("172.17.0.12");
+        when(handle.getPort()).thenReturn(32830);
+        when(cm.adoptOrStart("111111111111", "c1", "admin", "Secret123")).thenReturn(handle);
+
+        service.onStart(null);
+
+        verify(proxyManager).startProxy(eq("111111111111:c1"), eq(7108),
+                eq("172.17.0.12"), eq(32830), eq("localhost"),
+                eq("admin"), eq("Secret123"), eq("dev"), any());
+    }
+
+    @Test
     void testCreateCluster() {
         when(clusterBackend.get(anyString())).thenReturn(Optional.empty());
         when(cm.start(any(), any(), any(), any())).thenReturn(new RedshiftContainerHandle("c1", "my-cluster", "localhost", 5432));
@@ -251,10 +279,38 @@ class RedshiftServiceTest {
         Cluster rebooted = service.rebootCluster("my-cluster");
 
         assertEquals("available", rebooted.getClusterStatus());
-        assertEquals(5555, rebooted.getEndpoint().getPort());
+        // Endpoint now advertises the auth proxy; the restarted container is tracked separately.
+        assertEquals(5555, rebooted.getContainerPort());
+        assertTrue(rebooted.getEndpoint().getPort() >= 7100 && rebooted.getEndpoint().getPort() <= 7199);
         verify(cm).stop("111111111111", "my-cluster");
         verify(cm).start("111111111111", "my-cluster", "admin", "pw");
         verify(cm).restoreSnapshot(eq("111111111111"), eq("my-cluster"), eq("admin"), any(java.nio.file.Path.class));
+    }
+
+    @Test
+    void rebootClusterRestartsTheProxyOnTheSamePort() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("c1");
+        cluster.setMasterUsername("admin");
+        cluster.setMasterPassword("Secret123");
+        cluster.setProxyPort(7107);
+        cluster.setEndpoint(new Endpoint("localhost", 7107));
+        when(clusterBackend.get("c1")).thenReturn(Optional.of(cluster));
+        when(clusterBackend.accountId()).thenReturn("111111111111");
+        RedshiftContainerHandle handle = mock(RedshiftContainerHandle.class);
+        when(handle.getHost()).thenReturn("172.17.0.11");
+        when(handle.getPort()).thenReturn(32820);
+        when(cm.start(eq("111111111111"), eq("c1"), eq("admin"), eq("Secret123"))).thenReturn(handle);
+
+        Cluster rebooted = service.rebootCluster("c1");
+
+        assertEquals(7107, rebooted.getEndpoint().getPort());
+        assertEquals("localhost", rebooted.getEndpoint().getAddress());
+        assertEquals("172.17.0.11", rebooted.getContainerHost());
+        verify(proxyManager).stopProxy("111111111111:c1");
+        verify(proxyManager).startProxy(eq("111111111111:c1"), eq(7107),
+                eq("172.17.0.11"), eq(32820), eq("localhost"),
+                eq("admin"), eq("Secret123"), eq("dev"), any());
     }
 
     @Test

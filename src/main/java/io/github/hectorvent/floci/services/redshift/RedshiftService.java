@@ -85,9 +85,21 @@ public class RedshiftService {
                 LOG.infov("Recovering container for persisted cluster: {0}", cluster.getClusterIdentifier());
                 RedshiftContainerHandle handle = containerManager.adoptOrStart(
                         entry.accountId(), cluster.getClusterIdentifier(), cluster.getMasterUsername(), password);
-                Endpoint endpoint = new Endpoint();
-                endpoint.setAddress(handle.getHost());
-                endpoint.setPort(handle.getPort());
+
+                // A cluster persisted before the auth proxy existed has proxyPort == 0. Allocate one
+                // now; its endpoint changes exactly once after this upgrade. Existing clusters keep
+                // their stored port so the endpoint is stable across restarts.
+                int proxyPort = cluster.getProxyPort() > 0 ? cluster.getProxyPort() : allocateProxyPort();
+                usedPorts.add(proxyPort);
+                Endpoint endpoint = proxyEndpoint(proxyPort);
+                proxyManager.startProxy(
+                        relayKey(entry.accountId(), cluster.getClusterIdentifier()), proxyPort,
+                        handle.getHost(), handle.getPort(), endpoint.getAddress(),
+                        cluster.getMasterUsername(), password, CLUSTER_DB_NAME,
+                        passwordValidatorFor(entry.accountId(), cluster.getClusterIdentifier()));
+                cluster.setContainerHost(handle.getHost());
+                cluster.setContainerPort(handle.getPort());
+                cluster.setProxyPort(proxyPort);
                 cluster.setEndpoint(endpoint);
                 clusters.putForAccount(entry.accountId(), entry.key(), cluster);
             } catch (Exception e) {
@@ -238,19 +250,30 @@ public class RedshiftService {
         }
 
         try {
-            containerManager.takeSnapshot(clusters.accountId(), clusterIdentifier, cluster.getMasterUsername(), tempDump);
-            containerManager.stop(clusters.accountId(), clusterIdentifier);
+            String accountId = clusters.accountId();
+            String key = relayKey(accountId, clusterIdentifier);
+
+            containerManager.takeSnapshot(accountId, clusterIdentifier, cluster.getMasterUsername(), tempDump);
+            proxyManager.stopProxy(key);
+            containerManager.stop(accountId, clusterIdentifier);
 
             String password = cluster.getMasterPassword() != null ? cluster.getMasterPassword() : "admin";
             RedshiftContainerHandle handle = containerManager.start(
-                    clusters.accountId(), clusterIdentifier, cluster.getMasterUsername(), password);
-            Endpoint endpoint = new Endpoint();
-            endpoint.setAddress(handle.getHost());
-            endpoint.setPort(handle.getPort());
+                    accountId, clusterIdentifier, cluster.getMasterUsername(), password);
+
+            // Reuse the stored proxy port so the advertised endpoint is unchanged by a reboot.
+            int proxyPort = cluster.getProxyPort() > 0 ? cluster.getProxyPort() : allocateProxyPort();
+            usedPorts.add(proxyPort);
+            Endpoint endpoint = proxyEndpoint(proxyPort);
+            proxyManager.startProxy(key, proxyPort, handle.getHost(), handle.getPort(),
+                    endpoint.getAddress(), cluster.getMasterUsername(), password, CLUSTER_DB_NAME,
+                    passwordValidatorFor(accountId, clusterIdentifier));
+            cluster.setContainerHost(handle.getHost());
+            cluster.setContainerPort(handle.getPort());
+            cluster.setProxyPort(proxyPort);
             cluster.setEndpoint(endpoint);
 
-            containerManager.restoreSnapshot(clusters.accountId(), clusterIdentifier, cluster.getMasterUsername(), tempDump);
-
+            containerManager.restoreSnapshot(accountId, clusterIdentifier, cluster.getMasterUsername(), tempDump);
             cluster.setClusterStatus("available");
         } catch (AwsException e) {
             cluster.setClusterStatus("failed");
