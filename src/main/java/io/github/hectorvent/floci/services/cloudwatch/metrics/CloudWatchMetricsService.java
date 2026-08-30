@@ -221,7 +221,9 @@ public class CloudWatchMetricsService {
         return results;
     }
 
-    private double resolveStatValue(Datapoint dp, String stat) {
+    /** Shared with {@link AlarmEvaluator}, which resolves the same statistic against
+     * freshly-fetched datapoints when evaluating an alarm's threshold. */
+    public static double resolveStatValue(Datapoint dp, String stat) {
         return switch (stat) {
             case "Average" -> dp.average();
             case "Sum" -> dp.sum();
@@ -239,9 +241,16 @@ public class CloudWatchMetricsService {
         if (alarm.getAlarmArn() == null) {
             alarm.setAlarmArn(regionResolver.buildArn("cloudwatch", region, "alarm:" + alarm.getAlarmName()));
         }
+        alarm.setRegion(region);
         alarm.setAlarmConfigurationUpdatedTimestamp(Instant.now().getEpochSecond());
         alarmStore.put(region + "::" + alarm.getAlarmName(), alarm);
         LOG.infov("PutMetricAlarm: {0} in {1}", alarm.getAlarmName(), region);
+    }
+
+    /** Every stored alarm, across all regions. Used by the background {@link AlarmEvaluator}
+     * tick, which has no per-request region to scope a lookup to. */
+    public List<MetricAlarm> allAlarms() {
+        return alarmStore.scan(k -> true);
     }
 
     public List<MetricAlarm> describeAlarms(List<String> alarmNames, String alarmNamePrefix, String region) {

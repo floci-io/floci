@@ -352,4 +352,46 @@ class OrganizationsServiceTest {
                 .getAccountId();
         assertNull(disabled.effectiveScpLevels(member));
     }
+
+    @Test
+    void managementAccountEmailDefaultsToSynthesizedAddress() {
+        Organization organization = service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+
+        assertEquals("master@" + MANAGEMENT_ACCOUNT + ".example.com", organization.getMasterAccountEmail());
+    }
+
+    @Test
+    void managementAccountEmailOverrideIsUsedForOrganizationAndAccount() {
+        OrganizationsService configured = new OrganizationsService(
+                new ObjectMapper(),
+                AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT),
+                AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT),
+                AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT),
+                AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT),
+                AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT),
+                AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT),
+                true,
+                "root@corp.example");
+        Organization organization = configured.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+
+        assertEquals("root@corp.example", organization.getMasterAccountEmail());
+        assertEquals("root@corp.example",
+                configured.describeAccount(MANAGEMENT_ACCOUNT, MANAGEMENT_ACCOUNT).getEmail());
+        assertEquals("root@corp.example",
+                configured.describeOrganization(MANAGEMENT_ACCOUNT).getMasterAccountEmail());
+    }
+
+    @Test
+    void malformedManagementAccountEmailOverrideIsRejected() {
+        assertThrows(IllegalArgumentException.class, () -> new OrganizationsService(
+                new ObjectMapper(),
+                AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT),
+                AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT),
+                AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT),
+                AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT),
+                AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT),
+                AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT),
+                true,
+                "not-an-email"));
+    }
 }

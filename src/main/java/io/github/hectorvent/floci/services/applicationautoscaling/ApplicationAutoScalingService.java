@@ -7,11 +7,13 @@ import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.applicationautoscaling.model.Alarm;
 import io.github.hectorvent.floci.services.applicationautoscaling.model.ScalableTarget;
+import io.github.hectorvent.floci.services.applicationautoscaling.model.ScalingActivity;
 import io.github.hectorvent.floci.services.applicationautoscaling.model.ScalingPolicy;
 import io.github.hectorvent.floci.services.applicationautoscaling.model.StepScalingConfiguration;
 import io.github.hectorvent.floci.services.applicationautoscaling.model.SuspendedState;
 import io.github.hectorvent.floci.services.applicationautoscaling.model.TargetTrackingConfiguration;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.CloudWatchMetricsService;
+import io.github.hectorvent.floci.services.cloudwatch.metrics.model.Dimension;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricAlarm;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -78,6 +80,7 @@ public class ApplicationAutoScalingService {
 
     private final StorageBackend<String, ScalableTarget> targets;
     private final StorageBackend<String, ScalingPolicy> policies;
+    private final StorageBackend<String, ScalingActivity> activities;
     private final RegionResolver regionResolver;
     private final CloudWatchMetricsService cloudWatchMetricsService;
 
@@ -89,16 +92,20 @@ public class ApplicationAutoScalingService {
                         new TypeReference<Map<String, ScalableTarget>>() {}),
                 factory.create("applicationautoscaling", "application-autoscaling-policies.json",
                         new TypeReference<Map<String, ScalingPolicy>>() {}),
+                factory.create("applicationautoscaling", "application-autoscaling-activities.json",
+                        new TypeReference<Map<String, ScalingActivity>>() {}),
                 regionResolver,
                 cloudWatchMetricsService);
     }
 
     ApplicationAutoScalingService(StorageBackend<String, ScalableTarget> targets,
                                   StorageBackend<String, ScalingPolicy> policies,
+                                  StorageBackend<String, ScalingActivity> activities,
                                   RegionResolver regionResolver,
                                   CloudWatchMetricsService cloudWatchMetricsService) {
         this.targets = targets;
         this.policies = policies;
+        this.activities = activities;
         this.regionResolver = regionResolver;
         this.cloudWatchMetricsService = cloudWatchMetricsService;
     }
@@ -348,11 +355,13 @@ public class ApplicationAutoScalingService {
             String alarmName = "TargetTracking-" + policy.getResourceId() + "-" + suffix + "-"
                     + UUID.randomUUID();
             MetricAlarm alarm = new MetricAlarm();
+            alarm.setActionsEnabled(true);
             alarm.setAlarmName(alarmName);
             alarm.setAlarmDescription("DO NOT EDIT OR DELETE. For TargetTrackingScaling policy "
                     + policy.getPolicyArn() + ".");
             alarm.setNamespace(cloudWatchNamespace(policy.getServiceNamespace()));
             alarm.setMetricName(predefinedMetricType(policy));
+            alarm.setDimensions(resolveDimensions(policy));
             alarm.setStatistic("Average");
             alarm.setPeriod(60);
             alarm.setEvaluationPeriods("AlarmHigh".equals(suffix) ? 3 : 15);
@@ -377,6 +386,22 @@ public class ApplicationAutoScalingService {
             // Alarm cleanup is best-effort: a user may have deleted them out of band.
             LOG.debugv(e, "Could not delete target-tracking alarms {0} in {1}", names, region);
         }
+    }
+
+    /**
+     * The alarm needs the same dimensions AWS attaches to the real metric, or the evaluator
+     * will never find data an operator pushes in the real ECS shape. Real AWS keys ECS
+     * service metrics by {@code ClusterName} + {@code ServiceName}; other namespaces are left
+     * without dimensions, matching their existing "stored but inert" behavior.
+     */
+    private static List<Dimension> resolveDimensions(ScalingPolicy policy) {
+        if ("ecs".equals(policy.getServiceNamespace()) && policy.getResourceId() != null) {
+            String[] parts = policy.getResourceId().split("/");
+            if (parts.length == 3 && "service".equals(parts[0])) {
+                return List.of(new Dimension("ClusterName", parts[1]), new Dimension("ServiceName", parts[2]));
+            }
+        }
+        return List.of();
     }
 
     private static String cloudWatchNamespace(String serviceNamespace) {
@@ -489,5 +514,51 @@ public class ApplicationAutoScalingService {
     Optional<ScalableTarget> findTarget(String region, String serviceNamespace, String resourceId,
                                         String scalableDimension) {
         return targets.get(targetKey(region, serviceNamespace, resourceId, scalableDimension));
+    }
+
+    /** Looked up by {@link ScalingPolicyAlarmActionHandler} when an alarm's AlarmActions
+     * references a scaling-policy ARN. */
+    Optional<ScalingPolicy> findPolicyByArn(String policyArn, String region) {
+        String prefix = region + "::";
+        return policies.scan(k -> k.startsWith(prefix)).stream()
+                .filter(p -> policyArn.equals(p.getPolicyArn()))
+                .findFirst();
+    }
+
+    /** Persists a policy after the control loop stamps a cooldown timestamp on it. */
+    void savePolicy(ScalingPolicy policy, String region) {
+        policies.put(policyKey(region, policy.getServiceNamespace(), policy.getResourceId(),
+                policy.getScalableDimension(), policy.getPolicyName()), policy);
+    }
+
+    /** Records that the control loop changed capacity, mirroring what AWS reports through
+     * DescribeScalingActivities. */
+    void recordScalingActivity(ScalingPolicy policy, String description, String cause, String region) {
+        ScalingActivity activity = new ScalingActivity();
+        activity.setActivityId(UUID.randomUUID().toString());
+        activity.setServiceNamespace(policy.getServiceNamespace());
+        activity.setResourceId(policy.getResourceId());
+        activity.setScalableDimension(policy.getScalableDimension());
+        activity.setDescription(description);
+        activity.setCause(cause);
+        double now = nowEpochSeconds();
+        activity.setStartTime(now);
+        activity.setEndTime(now);
+        activity.setStatusCode("Successful");
+        String key = region + "::" + policy.getServiceNamespace() + "::" + policy.getScalableDimension()
+                + "::" + policy.getResourceId() + "::" + activity.getActivityId();
+        activities.put(key, activity);
+        LOG.infov("Scaling activity for policy {0}: {1}", policy.getPolicyName(), description);
+    }
+
+    public List<ScalingActivity> describeScalingActivities(String serviceNamespace, String resourceId,
+                                                            String scalableDimension, String region) {
+        requireNamespace(serviceNamespace);
+        String prefix = region + "::" + serviceNamespace + "::";
+        return activities.scan(k -> k.startsWith(prefix)).stream()
+                .filter(a -> resourceId == null || resourceId.equals(a.getResourceId()))
+                .filter(a -> scalableDimension == null || scalableDimension.equals(a.getScalableDimension()))
+                .sorted(Comparator.comparingDouble(ScalingActivity::getStartTime).reversed())
+                .toList();
     }
 }

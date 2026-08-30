@@ -346,6 +346,50 @@ class CloudFormationStackSetsIntegrationTest {
     }
 
     @Test
+    void updateStackSetWithUsePreviousValuePreservesTheDeployedParameter() {
+        // UpdateStackSet, unlike UpdateStack, resolves its Parameters through the single-arg
+        // extractParameters() overload that has no previous-value map to consult. A member
+        // with UsePreviousValue=true and no ParameterValue must still resolve to the StackSet's
+        // currently deployed value, not an empty string that clobbers it.
+        String setName = "upv-" + UUID.randomUUID().toString().substring(0, 8);
+        String q1 = "upv-q1-" + UUID.randomUUID().toString().substring(0, 8);
+        String original = "orig-" + UUID.randomUUID().toString().substring(0, 8);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStackSet")
+            .formParam("StackSetName", setName)
+            .formParam("TemplateBody", queueTemplate(q1))
+            .formParam("Parameters.member.1.ParameterKey", "Suffix")
+            .formParam("Parameters.member.1.ParameterValue", original)
+            .header("Authorization", auth(ADMIN, "cloudformation"))
+        .when().post("/")
+        .then().statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateStackSet")
+            .formParam("StackSetName", setName)
+            .formParam("TemplateBody", queueTemplate(q1))
+            .formParam("Parameters.member.1.ParameterKey", "Suffix")
+            .formParam("Parameters.member.1.UsePreviousValue", "true")
+            .header("Authorization", auth(ADMIN, "cloudformation"))
+        .when().post("/")
+        .then().statusCode(200)
+            .body(containsString("<OperationId>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackSet")
+            .formParam("StackSetName", setName)
+            .header("Authorization", auth(ADMIN, "cloudformation"))
+        .when().post("/")
+        .then().statusCode(200)
+            .body(containsString("<ParameterValue>" + original + "</ParameterValue>"))
+            .body(not(containsString("<ParameterValue></ParameterValue>")));
+    }
+
+    @Test
     void stackSetErrorPaths() {
         String setName = "errset-" + UUID.randomUUID().toString().substring(0, 8);
         String queue = "errq-" + UUID.randomUUID().toString().substring(0, 8);

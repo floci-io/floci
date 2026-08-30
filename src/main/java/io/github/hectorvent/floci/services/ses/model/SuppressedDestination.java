@@ -19,6 +19,10 @@ public class SuppressedDestination {
     @JsonProperty("LastUpdateTime")
     private Instant lastUpdateTime;
 
+    // Set only on tenant-scoped entries; account-level entries keep it null (AWS renders the null).
+    @JsonProperty("TenantName")
+    private String tenantName;
+
     public SuppressedDestination() {}
 
     public SuppressedDestination(String emailAddress, String reason) {
@@ -35,4 +39,7 @@ public class SuppressedDestination {
 
     public Instant getLastUpdateTime() { return lastUpdateTime; }
     public void setLastUpdateTime(Instant lastUpdateTime) { this.lastUpdateTime = lastUpdateTime; }
+
+    public String getTenantName() { return tenantName; }
+    public void setTenantName(String tenantName) { this.tenantName = tenantName; }
 }

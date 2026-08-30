@@ -156,6 +156,11 @@ public class ResolvedServiceCatalog {
                         5000L, AwsNamespaces.RDS, ServiceProtocol.QUERY,
                         protocols(ServiceProtocol.QUERY),
                         Set.of(), Set.of("docdb"), Set.of(), Set.of()),
+                descriptor("redshift", "redshift", config.services().redshift().enabled(), true,
+                        "redshift", storageMode(config.storage().services().redshift().mode(), config.storage().mode()),
+                        5000L, AwsNamespaces.REDSHIFT, ServiceProtocol.QUERY,
+                        protocols(ServiceProtocol.QUERY),
+                        Set.of(), Set.of("redshift"), Set.of(), Set.of()),
                 
                 descriptor("events", "eventbridge", config.services().eventbridge().enabled(), true,
                         "eventbridge", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
@@ -450,6 +455,10 @@ public class ResolvedServiceCatalog {
                         null, null, 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
                         Set.of("Comprehend_20171127."), Set.of("comprehend"), Set.of(), Set.of()),
+                descriptor("rekognition", "rekognition", config.services().rekognition().enabled(), true,
+                        null, null, 5000L, null, ServiceProtocol.JSON,
+                        protocols(ServiceProtocol.JSON),
+                        Set.of("RekognitionService."), Set.of("rekognition"), Set.of(), Set.of()),
                 descriptor("pricing", "pricing", config.services().pricing().enabled(), true,
                         null, null, 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
@@ -528,6 +537,11 @@ public class ResolvedServiceCatalog {
                         "route53resolver", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
                         Set.of("Route53Resolver."), Set.of("route53resolver"), Set.of(), Set.of()),
+                descriptor("connect", "connect", config.services().connect().enabled(), true,
+                        "connect", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON),
+                        Set.of(), Set.of("connect"), Set.of(),
+                        Set.of(io.github.hectorvent.floci.services.connect.ConnectController.class)),
                 descriptor("network-firewall", "networkfirewall", config.services().networkfirewall().enabled(), true,
                         "networkfirewall", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
@@ -557,7 +571,13 @@ public class ResolvedServiceCatalog {
                         storageMode(config.storage().services().efs().mode(), config.storage().mode()),
                         config.storage().services().efs().flushIntervalMs(), null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
-                        Set.of(), Set.of("elasticfilesystem"), Set.of(), Set.of(EfsController.class))
+                        Set.of(), Set.of("elasticfilesystem"), Set.of(), Set.of(EfsController.class)),
+                descriptor("codeguru-reviewer", "codegurureviewer",
+                        config.services().codegurureviewer().enabled(), true,
+                        "codegurureviewer", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON),
+                        Set.of(), Set.of("codeguru-reviewer"), Set.of(),
+                        Set.of(io.github.hectorvent.floci.services.codegurureviewer.CodeGuruReviewerController.class))
         ));
     }
 

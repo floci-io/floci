@@ -50,7 +50,8 @@ class OpenSearchDomainManagerTest {
 
         ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
         when(lifecycleManager.createAndStart(any())).thenReturn(
-                new ContainerLifecycleManager.ContainerInfo("container-id", Map.of()));
+                new ContainerLifecycleManager.ContainerInfo("container-id", Map.of(
+                        9200, new ContainerLifecycleManager.EndpointInfo("172.17.0.5", 9200))));
 
         ContainerBuilder containerBuilder = mock(ContainerBuilder.class);
         ContainerBuilder.Builder builder = mock(ContainerBuilder.Builder.class, RETURNS_SELF);

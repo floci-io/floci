@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ReservedTags;
+import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
 import io.github.hectorvent.floci.core.resource.SupportedResourceType;
@@ -23,6 +24,7 @@ import io.github.hectorvent.floci.services.cognito.model.RevokedTokenInfo;
 import io.github.hectorvent.floci.services.cognito.model.UserPool;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolClient;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolClientSecret;
+import io.github.hectorvent.floci.services.cognito.model.UserPoolDomain;
 import io.github.hectorvent.floci.services.cognito.verification.CognitoMessageDispatcher;
 import io.github.hectorvent.floci.services.cognito.verification.VerificationCode;
 import io.github.hectorvent.floci.services.cognito.verification.VerificationCodeException;
@@ -105,6 +107,7 @@ public class CognitoService implements ResourceProvider {
     private final StorageBackend<String, UserPool> poolStore;
     private final StorageBackend<String, UserPoolClient> clientStore;
     private final StorageBackend<String, ResourceServer> resourceServerStore;
+    private final StorageBackend<String, UserPoolDomain> domainStore;
     private final StorageBackend<String, CognitoUser> userStore;
     private final StorageBackend<String, CognitoGroup> groupStore;
     private final StorageBackend<String, RevokedTokenInfo> revokedTokenStore;
@@ -128,6 +131,8 @@ public class CognitoService implements ResourceProvider {
                         new TypeReference<Map<String, UserPoolClient>>() {}),
                 storageFactory.create("cognito", "cognito-resource-servers.json",
                         new TypeReference<Map<String, ResourceServer>>() {}),
+                storageFactory.create("cognito", "cognito-domains.json",
+                        new TypeReference<Map<String, UserPoolDomain>>() {}),
                 storageFactory.create("cognito", "cognito-users.json",
                         new TypeReference<Map<String, CognitoUser>>() {}),
                 storageFactory.create("cognito", "cognito-groups.json",
@@ -151,13 +156,15 @@ public class CognitoService implements ResourceProvider {
                    String baseUrl,
                    RegionResolver regionResolver,
                    LambdaService lambdaService) {
-        this(poolStore, clientStore, resourceServerStore, userStore, groupStore, revokedTokenStore, baseUrl,
+        this(poolStore, clientStore, resourceServerStore, new InMemoryStorage<>(),
+                userStore, groupStore, revokedTokenStore, baseUrl,
                 regionResolver, lambdaService, null, null);
     }
 
     CognitoService(StorageBackend<String, UserPool> poolStore,
             StorageBackend<String, UserPoolClient> clientStore,
             StorageBackend<String, ResourceServer> resourceServerStore,
+            StorageBackend<String, UserPoolDomain> domainStore,
             StorageBackend<String, CognitoUser> userStore,
             StorageBackend<String, CognitoGroup> groupStore,
             StorageBackend<String, RevokedTokenInfo> revokedTokenStore,
@@ -168,6 +175,7 @@ public class CognitoService implements ResourceProvider {
         this.poolStore = poolStore;
         this.clientStore = clientStore;
         this.resourceServerStore = resourceServerStore;
+        this.domainStore = domainStore;
         this.userStore = userStore;
         this.groupStore = groupStore;
         this.revokedTokenStore = revokedTokenStore;
@@ -401,6 +409,14 @@ public class CognitoService implements ResourceProvider {
     }
 
     public void deleteUserPool(String id) {
+        // AWS refuses to delete a pool that still has a hosted UI / custom domain; the
+        // DeleteUserPool API reference documents this exact InvalidParameterException.
+        boolean hasDomain = domainStore.scan(k -> true).stream()
+                .anyMatch(d -> id.equals(d.getUserPoolId()));
+        if (hasDomain) {
+            throw new AwsException("InvalidParameterException",
+                    "User pool cannot be deleted. It has a domain configured that should be deleted first.", 400);
+        }
         String prefix = id + "::";
         groupStore.scan(k -> k.startsWith(prefix))
                 .forEach(g -> groupStore.delete(groupKey(id, g.getGroupName())));
@@ -819,6 +835,77 @@ public class CognitoService implements ResourceProvider {
     public void deleteResourceServer(String userPoolId, String identifier) {
         describeResourceServer(userPoolId, identifier);
         resourceServerStore.delete(resourceServerKey(userPoolId, identifier));
+    }
+
+    // ──────────────────────────── User Pool Domains ────────────────────────────
+
+    /**
+     * Creates either an Amazon Cognito prefix domain ({@code customDomainConfig == null})
+     * or a custom domain fronted by an ACM certificate. Domain names are globally unique
+     * across pools, matching AWS's shared namespace for hosted UI/managed login domains.
+     */
+    public UserPoolDomain createUserPoolDomain(String domain, String userPoolId,
+            Map<String, Object> customDomainConfig, Integer managedLoginVersion) {
+        describeUserPool(userPoolId);
+        if (domain == null || domain.isBlank()) {
+            throw new AwsException("InvalidParameterException", "Domain is required", 400);
+        }
+        if (domainStore.get(domain).isPresent()) {
+            throw new AwsException("InvalidParameterException",
+                    "Domain " + domain + " already associated with another user pool", 400);
+        }
+
+        UserPoolDomain userPoolDomain = new UserPoolDomain();
+        userPoolDomain.setDomain(domain);
+        userPoolDomain.setUserPoolId(userPoolId);
+        userPoolDomain.setAwsAccountId(regionResolver.getAccountId());
+        userPoolDomain.setManagedLoginVersion(managedLoginVersion);
+        userPoolDomain.setStatus("ACTIVE");
+        userPoolDomain.setVersion(generateDomainVersion());
+        userPoolDomain.setS3Bucket("aws-cognito-prod-" + regionResolver.getRegion() + "-assets");
+
+        if (customDomainConfig != null) {
+            String certificateArn = (String) customDomainConfig.get("CertificateArn");
+            if (certificateArn == null || certificateArn.isBlank()) {
+                throw new AwsException("InvalidParameterException",
+                        "CertificateArn is required in CustomDomainConfig", 400);
+            }
+            userPoolDomain.setCertificateArn(certificateArn);
+            Object securityPolicy = customDomainConfig.get("SecurityPolicy");
+            userPoolDomain.setSecurityPolicy(securityPolicy != null ? securityPolicy.toString() : "TLS_V1_2_2021");
+            userPoolDomain.setCloudFrontDistribution(generateCloudFrontDomain());
+        }
+
+        domainStore.put(domain, userPoolDomain);
+        LOG.infov("Created User Pool Domain: {0} for pool {1}", domain, userPoolId);
+        return userPoolDomain;
+    }
+
+    public UserPoolDomain describeUserPoolDomain(String domain) {
+        if (domain == null || domain.isBlank()) {
+            throw new AwsException("InvalidParameterException", "Domain is required", 400);
+        }
+        return domainStore.get(domain)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Domain does not exist", 404));
+    }
+
+    public void deleteUserPoolDomain(String domain, String userPoolId) {
+        UserPoolDomain userPoolDomain = describeUserPoolDomain(domain);
+        if (!userPoolDomain.getUserPoolId().equals(userPoolId)) {
+            throw new AwsException("ResourceNotFoundException", "Domain does not exist", 404);
+        }
+        domainStore.delete(domain);
+        LOG.infov("Deleted User Pool Domain: {0} for pool {1}", domain, userPoolId);
+    }
+
+    private String generateCloudFrontDomain() {
+        return UUID.randomUUID().toString().replace("-", "").substring(0, 14) + ".cloudfront.net";
+    }
+
+    private String generateDomainVersion() {
+        return java.time.format.DateTimeFormatter.ofPattern("yyyyMMddHHmmss")
+                .withZone(java.time.ZoneOffset.UTC)
+                .format(java.time.Instant.now());
     }
 
     // ──────────────────────────── Users ────────────────────────────

@@ -380,6 +380,11 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
 
     // ---
 
+    /** Returns the account ID that keys are currently being prefixed with. */
+    public String accountId() {
+        return prefix();
+    }
+
     private String prefix() {
         if (requestContextInstance != null) {
             try {

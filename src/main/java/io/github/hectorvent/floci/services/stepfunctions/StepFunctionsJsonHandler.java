@@ -17,8 +17,10 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 @ApplicationScoped
 public class StepFunctionsJsonHandler {
@@ -374,12 +376,21 @@ public class StepFunctionsJsonHandler {
             item.put("timestamp", e.getTimestamp());
             item.put("type", e.getType());
             if (e.getPreviousEventId() != null) item.put("previousEventId", e.getPreviousEventId());
-            if (includeExecutionData && e.getDetails() != null) {
-                item.set(historyEventDetailsField(e.getType()), objectMapper.valueToTree(e.getDetails()));
+            if (e.getDetails() != null) {
+                var details = e.getDetails();
+                if (!includeExecutionData) {
+                    var filtered = new LinkedHashMap<>(details);
+                    filtered.keySet().removeAll(EXECUTION_DATA_FIELDS);
+                    details = filtered;
+                }
+                item.set(historyEventDetailsField(e.getType()), objectMapper.valueToTree(details));
             }
         }
         return Response.ok(response).build();
     }
+
+    private static final Set<String> EXECUTION_DATA_FIELDS =
+            Set.of("input", "inputDetails", "output", "outputDetails");
 
     static String historyEventDetailsField(String type) {
         if (type.endsWith("StateEntered")) {

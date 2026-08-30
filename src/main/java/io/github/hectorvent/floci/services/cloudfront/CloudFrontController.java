@@ -29,6 +29,7 @@ public class CloudFrontController {
 
     private static final String NS = AwsNamespaces.CLOUDFRONT;
     private static final String XML = "application/xml";
+    private static final String OCTET_STREAM = "application/octet-stream";
     private static final String GEO_RESTRICTION = "GeoRestriction";
     private static final String ORIGIN_GROUPS = "OriginGroups";
     private static final String ITEMS = "Items";
@@ -854,6 +855,20 @@ public class CloudFrontController {
 
     @GET
     @Path("/function/{Name}")
+    public Response getFunction(@PathParam("Name") String name,
+                                @QueryParam("Stage") String stage) {
+        try {
+            CloudFrontFunction fn = service.describeFunction(name, stage);
+            return Response.ok(fn.getFunctionCode() != null ? fn.getFunctionCode() : "", OCTET_STREAM)
+                    .header("ETag", fn.getEtag())
+                    .build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    @GET
+    @Path("/function/{Name}/describe")
     public Response describeFunction(@PathParam("Name") String name,
                                      @QueryParam("Stage") String stage) {
         try {

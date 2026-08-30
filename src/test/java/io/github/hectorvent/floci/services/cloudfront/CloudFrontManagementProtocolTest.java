@@ -6,6 +6,8 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.util.UUID;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
@@ -103,6 +105,87 @@ class CloudFrontManagementProtocolTest {
             .body(hasXPath(
                     "//*[local-name()='Code']/text()",
                     equalTo("InvalidArgument")));
+    }
+
+    @Test
+    void describeAndPublishFunctionPreserveBothStages() {
+        String name = "describe-test-" + UUID.randomUUID();
+        String createBody = """
+                <CreateFunctionRequest xmlns="http://cloudfront.amazonaws.com/doc/2020-05-31/">
+                  <Name>%s</Name>
+                  <FunctionConfig>
+                    <Comment>routing function</Comment>
+                    <Runtime>cloudfront-js-2.0</Runtime>
+                  </FunctionConfig>
+                  <FunctionCode>function handler(event) { return event.request; }</FunctionCode>
+                </CreateFunctionRequest>
+                """.formatted(name);
+
+        String developmentEtag = given()
+            .contentType("application/xml")
+            .body(createBody)
+        .when()
+            .post(API + "function")
+        .then()
+            .statusCode(201)
+            .extract().header("ETag");
+
+        given()
+            .queryParam("Stage", "DEVELOPMENT")
+        .when()
+            .get(API + "function/" + name + "/describe")
+        .then()
+            .statusCode(200)
+            .header("ETag", equalTo(developmentEtag))
+            .body(hasXPath("//*[local-name()='Stage']/text()", equalTo("DEVELOPMENT")));
+
+        given()
+            .header("If-Match", developmentEtag)
+        .when()
+            .post(API + "function/" + name + "/publish")
+        .then()
+            .statusCode(200)
+            .body(hasXPath("//*[local-name()='Stage']/text()", equalTo("LIVE")));
+
+        given()
+            .queryParam("Stage", "DEVELOPMENT")
+        .when()
+            .get(API + "function/" + name + "/describe")
+        .then()
+            .statusCode(200)
+            .header("ETag", equalTo(developmentEtag));
+
+        given()
+            .queryParam("Stage", "LIVE")
+        .when()
+            .get(API + "function/" + name + "/describe")
+        .then()
+            .statusCode(200)
+            .body(hasXPath("//*[local-name()='Stage']/text()", equalTo("LIVE")));
+
+        given()
+            .queryParam("Stage", "TESTING")
+        .when()
+            .get(API + "function/" + name + "/describe")
+        .then()
+            .statusCode(400)
+            .body(hasXPath("//*[local-name()='Code']/text()", equalTo("InvalidArgument")));
+
+        given()
+            .queryParam("Stage", "DEVELOPMENT")
+        .when()
+            .get(API + "function/" + name)
+        .then()
+            .statusCode(200)
+            .contentType("application/octet-stream")
+            .body(equalTo("function handler(event) { return event.request; }"));
+
+        given()
+            .header("If-Match", developmentEtag)
+        .when()
+            .delete(API + "function/" + name)
+        .then()
+            .statusCode(204);
     }
 
     @Test

@@ -75,6 +75,7 @@ class AslExecutorResultWriterTest {
                 new JsonataEvaluator(mapper),
                 sfnService,
                 mock(EmulatorConfig.class),
+                null,
                 null);
 
         sm = new StateMachine();

@@ -15,6 +15,7 @@ import java.util.HashMap;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -44,17 +45,21 @@ class IamRoleCfnProvisionerTest {
 
     private ProvisionContext ctx() {
         CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
+
         when(engine.resolve(any())).thenAnswer(inv -> {
-            JsonNode node = inv.getArgument(0);
-            return node == null ? null : node.asText();
+                JsonNode node = inv.getArgument(0);
+                return node == null ? null : node.asText();
         });
+
         when(engine.resolveNode(any())).thenAnswer(inv -> inv.getArgument(0));
+
         when(engine.resolveJsonAttribute(any())).thenAnswer(inv -> {
-            JsonNode node = inv.getArgument(0);
-            return node != null && node.isTextual() ? node.asText() : node.toString();
+                JsonNode node = inv.getArgument(0);
+                return node != null && node.isTextual() ? node.asText() : node.toString();
         });
+
         return new ProvisionContext(engine, "us-east-1", ACCOUNT_ID, "test-stack");
-    }
+        }
 
     private StackResource resource() {
         StackResource r = new StackResource();
@@ -364,4 +369,84 @@ class IamRoleCfnProvisionerTest {
         assertEquals("AccessDenied", failure.getErrorCode());
         verify(iam, never()).deleteRole("denied-role");
     }
+@Test
+void assumeRolePolicyIntrinsicsAreResolved() {
+    stubCreate("app-role");
+    StackResource r = resource();
+
+    CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
+
+    when(engine.resolve(any())).thenAnswer(inv -> {
+        JsonNode node = inv.getArgument(0);
+        return node == null ? null : node.asText();
+    });
+
+    JsonNode assumeRolePolicy = props("""
+        {
+          "Version": "2012-10-17",
+          "Statement": [{
+            "Effect": "Allow",
+            "Principal": {
+              "AWS": {
+                "Fn::Sub": "arn:aws:iam::${AWS::AccountId}:root"
+              }
+            },
+            "Action": "sts:AssumeRole"
+          }]
+        }
+        """);
+
+    when(engine.resolveJsonAttribute(any())).thenReturn(
+            "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+            + "\"Principal\":{\"AWS\":\"arn:aws:iam::" + ACCOUNT_ID + ":root\"},"
+            + "\"Action\":\"sts:AssumeRole\"}]}"
+    );
+
+    ProvisionContext ctx = new ProvisionContext(
+            engine,
+            "us-east-1",
+            ACCOUNT_ID,
+            "test-stack"
+    );
+
+    JsonNode roleProps = props("""
+        {
+          "RoleName": "app-role",
+          "AssumeRolePolicyDocument": {
+            "Version": "2012-10-17",
+            "Statement": [{
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::Sub": "arn:aws:iam::${AWS::AccountId}:root"
+                }
+              },
+              "Action": "sts:AssumeRole"
+            }]
+          }
+        }
+        """);
+
+    provisioner.provision(r, roleProps, ctx);
+
+    ArgumentCaptor<String> docCaptor = ArgumentCaptor.forClass(String.class);
+
+    verify(iam).createRole(
+            eq("app-role"),
+            eq("/"),
+            docCaptor.capture(),
+            any(),
+            eq(3600),
+            eq(Map.of())
+    );
+
+    String storedDoc = docCaptor.getValue();
+
+    assertFalse(storedDoc.contains("Fn::Sub"));
+    assertFalse(storedDoc.contains("\"Ref\""));
+    assertTrue(storedDoc.contains(
+            "arn:aws:iam::" + ACCOUNT_ID + ":root"
+    ));
+}
+
 }
