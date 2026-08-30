@@ -24,6 +24,8 @@ class LambdaArnUtilsTest {
             "arn:aws:lambda:us-east-1:000000000000:function:my-fn:prod, my-fn, prod, us-east-1",
             "arn:aws:lambda:us-east-1:000000000000:function:my-fn:$LATEST, my-fn, $LATEST, us-east-1",
             "arn:aws:lambda:us-east-1:000000000000:function:my_fn-1, my_fn-1, , us-east-1",
+            "my.fn.v2, my.fn.v2, , ",
+            "arn:aws:lambda:us-east-1:000000000000:function:my.fn.v2, my.fn.v2, , us-east-1",
     })
     void resolveAcceptsValidForms(String input, String expectedName, String expectedQualifier, String expectedRegion) {
         LambdaArnUtils.ResolvedFunctionRef ref = LambdaArnUtils.resolve(input);
@@ -54,6 +56,21 @@ class LambdaArnUtilsTest {
         AwsException ex = assertThrows(AwsException.class, () -> LambdaArnUtils.resolve(input));
         assertEquals("InvalidParameterValueException", ex.getErrorCode());
         assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void resolveRejectsNameLongerThan256Chars() {
+        String tooLong = "a".repeat(257);
+        AwsException ex = assertThrows(AwsException.class, () -> LambdaArnUtils.resolve(tooLong));
+        assertEquals("InvalidParameterValueException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void resolveAccepts256CharName() {
+        String maxLen = "a".repeat(256);
+        LambdaArnUtils.ResolvedFunctionRef ref = LambdaArnUtils.resolve(maxLen);
+        assertEquals(maxLen, ref.name());
     }
 
     @Test
@@ -141,5 +158,30 @@ class LambdaArnUtilsTest {
         // API Gateway v1 uses a longer URI format
         String uri = "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:000000000000:function:myFn/invocations";
         assertEquals("myFn", LambdaArnUtils.extractFunctionNameFromUri(uri));
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            // Qualified targets (alias / numbered version) must preserve the :qualifier
+            // so downstream invoke resolves the configured target instead of $LATEST.
+            "arn:aws:lambda:us-east-1:000000000000:function:myFn:PROD/invocations, myFn:PROD",
+            "arn:aws:lambda:us-east-1:000000000000:function:myFn:PROD, myFn:PROD",
+            "arn:aws:lambda:us-east-1:000000000000:function:myFn:1/invocations, myFn:1",
+            "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:000000000000:function:myFn:PROD/invocations, myFn:PROD",
+            "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:000000000000:function:myFn:42/invocations, myFn:42",
+    })
+    void extractFunctionNameFromUri_preservesQualifier(String uri, String expected) {
+        assertEquals(expected, LambdaArnUtils.extractFunctionNameFromUri(uri));
+    }
+
+    @Test
+    void extractFunctionNameFromUri_qualifiedRef_resolvesToNameAndQualifier() {
+        // The extracted "myFn:PROD" must resolve into a distinct name + qualifier,
+        // which is what invoke() relies on to target the alias/version.
+        String extracted = LambdaArnUtils.extractFunctionNameFromUri(
+                "arn:aws:lambda:us-east-1:000000000000:function:myFn:PROD/invocations");
+        LambdaArnUtils.ResolvedFunctionRef ref = LambdaArnUtils.resolve(extracted);
+        assertEquals("myFn", ref.name());
+        assertEquals("PROD", ref.qualifier());
     }
 }

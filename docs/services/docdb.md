@@ -4,7 +4,7 @@
 **Management Endpoint:** `POST http://localhost:4566/` with `Action=` param
 **Data Endpoint:** the `Endpoint` and `Port` returned by `DescribeDBClusters` (MongoDB wire protocol)
 
-Floci emulates Amazon DocumentDB by managing real [MongoDB](https://www.mongodb.com/) Docker containers behind an RDS-shaped control plane. DocumentDB is MongoDB-compatible, so the cluster endpoint returned by `DescribeDBClusters` speaks the MongoDB wire protocol and works with any standard MongoDB driver.
+Floci emulates Amazon DocumentDB by managing real [MongoDB](https://www.mongodb.com/) Docker containers behind an RDS-shaped control plane. As on AWS, the list form of `DescribeDBClusters` / `DescribeDBInstances` — on the `docdb` endpoint and the `rds` endpoint alike — returns DocumentDB, Neptune and RDS records together; the `engine` filter (`docdb`, `neptune`, `aurora-postgresql`, ...) narrows it. DocumentDB is MongoDB-compatible, so the cluster endpoint returned by `DescribeDBClusters` speaks the MongoDB wire protocol and works with any standard MongoDB driver.
 
 > **Always read the host and port from `DescribeDBClusters`** rather than assuming a fixed port. MongoDB listens on `27017` *inside* the container, but the port you connect to depends on how Floci runs:
 >
@@ -21,14 +21,31 @@ The management API shares the RDS Query endpoint (`POST /` with an `Action=` par
 | --- | --- |
 | `CreateDBCluster` | Create a DocumentDB cluster and start a MongoDB container |
 | `DescribeDBClusters` | List clusters and their connection details |
-| `DescribeDBClusterSnapshots` | - |
+| `DescribeDBClusterSnapshots` | Return an empty cluster-snapshot list (snapshots are not modeled) |
+| `DescribeGlobalClusters` | List global clusters — always empty, as none are modeled |
 | `DeleteDBCluster` | Stop and remove a cluster (must have no instances) |
 | `ModifyDBCluster` | Update engine version or IAM auth setting |
 | `CreateDBInstance` | Add an instance to a cluster |
 | `DescribeDBInstances` | List instances |
 | `DeleteDBInstance` | Remove an instance from a cluster |
 | `ModifyDBInstance` | Update instance class or IAM auth setting |
+| `ListTagsForResource` | List a cluster's or instance's tags |
+| `AddTagsToResource` | Add or overwrite tags on a cluster or instance |
+| `RemoveTagsFromResource` | Remove tags by key from a cluster or instance |
 <!-- floci:actions:end -->
+
+`CreateDBCluster` stores `DBSubnetGroupName`, `DBClusterParameterGroupName`, `VpcSecurityGroupIds`,
+`StorageEncrypted`, `KmsKeyId` (resolved to the key ARN), `BackupRetentionPeriod`, both windows,
+`Port`, `DeletionProtection` and `Tags`, and `DescribeDBClusters` returns them; `ModifyDBCluster`
+changes the ones AWS lets change. References are checked as on AWS (the subnet group and cluster
+parameter group are the RDS records, security groups are EC2's, the key must exist and be enabled),
+and so are the windows (30-minute minimum, no overlap). Omitted values take the AWS defaults —
+`default`, `default.docdb<family>`, the VPC's default security group, one day of backups — with
+deterministic windows `04:00-06:00` / `mon:00:00-mon:03:00` where AWS picks random ones.
+`CreateDBInstance` keeps `AutoMinorVersionUpgrade`, `PreferredMaintenanceWindow`,
+`CopyTagsToSnapshot`, `PromotionTier` and `Tags`. `EngineVersion` must be one a live account lists
+(`3.6.0`, `4.0.0`, `5.0.0`, `5.0.1`, `8.0.0`, `8.0.1`, or the `major.minor` form of one); any other
+is refused with `Cannot find version X for docdb`, on create and on modify.
 
 ## Configuration
 
@@ -139,6 +156,6 @@ print(cluster["DBCluster"]["Endpoint"])
 
 - IAM database authentication for MongoDB connections (the flag is stored and echoed back, but connections are not SigV4-proxied).
 - TLS / `--tls` enforced connections.
-- Snapshot creation and restore (`DescribeDBClusterSnapshots` returns an empty stub result; snapshots are not modeled).
+- Snapshot and restore operations.
 - Global clusters, replicas, and read-scaling beyond a single MongoDB container per cluster.
 - Parameter groups, subnet groups, and maintenance windows.

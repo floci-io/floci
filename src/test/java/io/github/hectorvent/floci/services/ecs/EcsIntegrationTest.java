@@ -363,21 +363,24 @@ class EcsIntegrationTest {
                             "essential": true,
                             "secrets": [
                                 {"name": "DB_PASSWORD", "valueFrom": "%s"},
+                                {"name": "DB_TOKEN", "valueFrom": "%s:token::"},
                                 {"name": "CONFIG_VALUE", "valueFrom": "/app/config"}
                             ]
                         }
                     ]
                 }
-                """.formatted(secretArn))
+                """.formatted(secretArn, secretArn))
         .when()
             .post("/")
         .then()
             .statusCode(200)
-            .body("taskDefinition.containerDefinitions[0].secrets", hasSize(2))
+            .body("taskDefinition.containerDefinitions[0].secrets", hasSize(3))
             .body("taskDefinition.containerDefinitions[0].secrets[0].name", equalTo("DB_PASSWORD"))
             .body("taskDefinition.containerDefinitions[0].secrets[0].valueFrom", equalTo(secretArn))
-            .body("taskDefinition.containerDefinitions[0].secrets[1].name", equalTo("CONFIG_VALUE"))
-            .body("taskDefinition.containerDefinitions[0].secrets[1].valueFrom", equalTo("/app/config"))
+            .body("taskDefinition.containerDefinitions[0].secrets[1].name", equalTo("DB_TOKEN"))
+            .body("taskDefinition.containerDefinitions[0].secrets[1].valueFrom", equalTo(secretArn + ":token::"))
+            .body("taskDefinition.containerDefinitions[0].secrets[2].name", equalTo("CONFIG_VALUE"))
+            .body("taskDefinition.containerDefinitions[0].secrets[2].valueFrom", equalTo("/app/config"))
         .extract()
             .path("taskDefinition.taskDefinitionArn");
 
@@ -389,11 +392,13 @@ class EcsIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("taskDefinition.containerDefinitions[0].secrets", hasSize(2))
+            .body("taskDefinition.containerDefinitions[0].secrets", hasSize(3))
             .body("taskDefinition.containerDefinitions[0].secrets[0].name", equalTo("DB_PASSWORD"))
             .body("taskDefinition.containerDefinitions[0].secrets[0].valueFrom", equalTo(secretArn))
-            .body("taskDefinition.containerDefinitions[0].secrets[1].name", equalTo("CONFIG_VALUE"))
-            .body("taskDefinition.containerDefinitions[0].secrets[1].valueFrom", equalTo("/app/config"));
+            .body("taskDefinition.containerDefinitions[0].secrets[1].name", equalTo("DB_TOKEN"))
+            .body("taskDefinition.containerDefinitions[0].secrets[1].valueFrom", equalTo(secretArn + ":token::"))
+            .body("taskDefinition.containerDefinitions[0].secrets[2].name", equalTo("CONFIG_VALUE"))
+            .body("taskDefinition.containerDefinitions[0].secrets[2].valueFrom", equalTo("/app/config"));
     }
 
     @Test
@@ -556,6 +561,82 @@ class EcsIntegrationTest {
         .then()
             .statusCode(200)
             .body("taskArns", empty());
+    }
+
+    @Test
+    @Order(25)
+    void registerTaskDefinitionRoundTripsRuntimePlatformAndLogConfiguration() {
+        String platformTaskDefArn = ecs("RegisterTaskDefinition")
+            .body("""
+                {
+                    "family": "task-with-runtime-platform",
+                    "requiresCompatibilities": ["FARGATE"],
+                    "networkMode": "awsvpc",
+                    "cpu": "256",
+                    "memory": "512",
+                    "runtimePlatform": {"cpuArchitecture": "ARM64", "operatingSystemFamily": "LINUX"},
+                    "containerDefinitions": [
+                        {
+                            "name": "app",
+                            "image": "nginx:latest",
+                            "essential": true,
+                            "logConfiguration": {
+                                "logDriver": "awslogs",
+                                "options": {
+                                    "awslogs-group": "/ecs/task-with-runtime-platform",
+                                    "awslogs-region": "%s",
+                                    "awslogs-stream-prefix": "ecs"
+                                },
+                                "secretOptions": []
+                            }
+                        }
+                    ]
+                }
+                """.formatted(REGION))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("taskDefinition.runtimePlatform.cpuArchitecture", equalTo("ARM64"))
+            .body("taskDefinition.runtimePlatform.operatingSystemFamily", equalTo("LINUX"))
+            .body("taskDefinition.containerDefinitions[0].logConfiguration.logDriver", equalTo("awslogs"))
+            .body("taskDefinition.containerDefinitions[0].logConfiguration.options.'awslogs-group'",
+                    equalTo("/ecs/task-with-runtime-platform"))
+            .body("taskDefinition.containerDefinitions[0].logConfiguration.options.'awslogs-region'", equalTo(REGION))
+            .body("taskDefinition.containerDefinitions[0].logConfiguration.options.'awslogs-stream-prefix'", equalTo("ecs"))
+        .extract()
+            .path("taskDefinition.taskDefinitionArn");
+
+        ecs("DescribeTaskDefinition")
+            .body("""
+                {"taskDefinition": "%s"}
+                """.formatted(platformTaskDefArn))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("taskDefinition.runtimePlatform.cpuArchitecture", equalTo("ARM64"))
+            .body("taskDefinition.runtimePlatform.operatingSystemFamily", equalTo("LINUX"))
+            .body("taskDefinition.containerDefinitions[0].logConfiguration.logDriver", equalTo("awslogs"))
+            .body("taskDefinition.containerDefinitions[0].logConfiguration.options.'awslogs-group'",
+                    equalTo("/ecs/task-with-runtime-platform"))
+            .body("taskDefinition.containerDefinitions[0].logConfiguration.options.'awslogs-region'", equalTo(REGION))
+            .body("taskDefinition.containerDefinitions[0].logConfiguration.options.'awslogs-stream-prefix'", equalTo("ecs"));
+    }
+
+    @Test
+    @Order(26)
+    void describeTaskDefinitionWithoutRuntimePlatformOrLogConfigurationOmitsBothKeys() {
+        ecs("DescribeTaskDefinition")
+            .body("""
+                {"taskDefinition": "%s:1"}
+                """.formatted(TASK_DEF_FAMILY))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("taskDefinition", not(hasKey("runtimePlatform")))
+            .body("taskDefinition.containerDefinitions[0]", not(hasKey("logConfiguration")));
     }
 
     // ── Services ──────────────────────────────────────────────────────────────
@@ -1104,5 +1185,58 @@ class EcsIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+    }
+
+    /**
+     * A container definition registered with {@code entryPoint} and {@code command} must echo
+     * both back on DescribeTaskDefinition. Without this, re-registering a task definition from
+     * describe output silently drops the overrides and the new revision falls back to the
+     * image's default entrypoint.
+     */
+    @Test
+    @Order(70)
+    void registerAndDescribeTaskDefinitionRoundTripsCommandAndEntryPoint() {
+        String arn = ecs("RegisterTaskDefinition")
+            .body("""
+                {
+                    "family": "entrypoint-roundtrip",
+                    "containerDefinitions": [
+                        {
+                            "name": "app",
+                            "image": "alpine:latest",
+                            "essential": true,
+                            "entryPoint": ["/bin/sh", "-c"],
+                            "command": ["fetch-ca && exec agent --serve"]
+                        },
+                        {
+                            "name": "sidecar",
+                            "image": "alpine:latest",
+                            "essential": false
+                        }
+                    ]
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("taskDefinition.containerDefinitions[0].entryPoint", contains("/bin/sh", "-c"))
+            .body("taskDefinition.containerDefinitions[0].command", contains("fetch-ca && exec agent --serve"))
+        .extract()
+            .path("taskDefinition.taskDefinitionArn");
+
+        ecs("DescribeTaskDefinition")
+            .body("""
+                {"taskDefinition": "%s"}
+                """.formatted(arn))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("taskDefinition.containerDefinitions[0].entryPoint", contains("/bin/sh", "-c"))
+            .body("taskDefinition.containerDefinitions[0].command", contains("fetch-ca && exec agent --serve"))
+            // A container that set neither keeps both keys absent, as real AWS does.
+            .body("taskDefinition.containerDefinitions[1]", not(hasKey("entryPoint")))
+            .body("taskDefinition.containerDefinitions[1]", not(hasKey("command")));
     }
 }

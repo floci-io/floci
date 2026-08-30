@@ -2,6 +2,9 @@ package io.github.hectorvent.floci.services.route53.model;
 
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
+import java.util.ArrayList;
+import java.util.List;
+
 @RegisterForReflection
 public class HostedZone {
 
@@ -11,6 +14,7 @@ public class HostedZone {
     private String comment;
     private boolean privateZone;
     private int resourceRecordSetCount;
+    private List<VpcAssociation> vpcAssociations = new ArrayList<>();
 
     public HostedZone() {}
 
@@ -22,6 +26,14 @@ public class HostedZone {
         this.comment = comment;
         this.privateZone = privateZone;
         this.resourceRecordSetCount = 2;
+    }
+
+    public HostedZone(String id, String name, String callerReference,
+                      String comment, VpcAssociation vpcAssociation) {
+        this(id, name, callerReference, comment, vpcAssociation != null);
+        if (vpcAssociation != null) {
+            this.vpcAssociations.add(vpcAssociation);
+        }
     }
 
     public String getId() { return id; }
@@ -42,5 +54,10 @@ public class HostedZone {
     public int getResourceRecordSetCount() { return resourceRecordSetCount; }
     public void setResourceRecordSetCount(int resourceRecordSetCount) {
         this.resourceRecordSetCount = resourceRecordSetCount;
+    }
+
+    public List<VpcAssociation> getVpcAssociations() { return vpcAssociations; }
+    public void setVpcAssociations(List<VpcAssociation> vpcAssociations) {
+        this.vpcAssociations = vpcAssociations != null ? vpcAssociations : new ArrayList<>();
     }
 }

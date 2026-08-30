@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ssm.model.Command;
 import io.github.hectorvent.floci.services.ssm.model.CommandInvocation;
 import io.github.hectorvent.floci.services.ssm.model.InstanceInformation;
+import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -77,6 +78,11 @@ public class SsmCommandService implements Resettable {
             thread.setDaemon(true);
             return thread;
         });
+    }
+
+    @PreDestroy
+    void stop() {
+        directExecutionExecutor.shutdownNow();
     }
 
     public void clear() {
@@ -258,10 +264,16 @@ public class SsmCommandService implements Resettable {
         for (String instanceId : targets) {
             String invKey = invocationKey(region, commandId, instanceId);
             invocationStore.get(invKey).ifPresent(inv -> {
-                if ("Pending".equals(inv.getStatus()) || "InProgress".equals(inv.getStatus())) {
-                    inv.setStatus("Cancelled");
-                    inv.setStatusDetails("Cancelled");
-                    invocationStore.put(invKey, inv);
+                // Same lock discipline as the command-level fields: invocationStore returns the same
+                // shared CommandInvocation object on every get(), and multiple methods here (direct
+                // completion, agent SendReply/FailMessage, timeout sweeps) can race this cancellation
+                // on the same instance's invocation.
+                synchronized (inv) {
+                    if ("Pending".equals(inv.getStatus()) || "InProgress".equals(inv.getStatus())) {
+                        inv.setStatus("Cancelled");
+                        inv.setStatusDetails("Cancelled");
+                        invocationStore.put(invKey, inv);
+                    }
                 }
                 // Remove any queued (not-yet-polled) messages for this instance
                 Queue<PendingMessage> q = messageQueues.get(instanceId);
@@ -271,9 +283,13 @@ public class SsmCommandService implements Resettable {
             });
         }
 
-        command.setStatus("Cancelled");
-        command.setStatusDetails("Cancelled");
-        commandStore.put(commandKey(region, commandId), command);
+        // Same lock updateCommandStatus takes on this exact object, so a rollup completing this
+        // command concurrently can't have its own status+statusDetails write interleave with this one.
+        synchronized (command) {
+            command.setStatus("Cancelled");
+            command.setStatusDetails("Cancelled");
+            commandStore.put(commandKey(region, commandId), command);
+        }
         LOG.infov("CancelCommand: commandId={0}", commandId);
     }
 
@@ -297,11 +313,13 @@ public class SsmCommandService implements Resettable {
             if (!isActiveInvocation(invocation.getStatus())) {
                 continue;
             }
-            invocation.setStatus("Failed");
-            invocation.setStatusDetails(statusDetails);
-            invocation.setResponseCode(-1);
-            invocation.setExecutionEndDateTime(now);
-            invocationStore.put(invocationKey(region, invocation.getCommandId(), invocation.getInstanceId()), invocation);
+            synchronized (invocation) {
+                invocation.setStatus("Failed");
+                invocation.setStatusDetails(statusDetails);
+                invocation.setResponseCode(-1);
+                invocation.setExecutionEndDateTime(now);
+                invocationStore.put(invocationKey(region, invocation.getCommandId(), invocation.getInstanceId()), invocation);
+            }
             commandIds.add(invocation.getCommandId());
             failed++;
         }
@@ -363,11 +381,13 @@ public class SsmCommandService implements Resettable {
 
         String invKey = invocationKey(region, commandId, instanceId);
         invocationStore.get(invKey).ifPresent(inv -> {
-            if ("Pending".equals(inv.getStatus())) {
-                inv.setStatus("InProgress");
-                inv.setStatusDetails(statusDetails("InProgress"));
-                inv.setExecutionStartDateTime(Instant.now());
-                invocationStore.put(invKey, inv);
+            synchronized (inv) {
+                if ("Pending".equals(inv.getStatus())) {
+                    inv.setStatus("InProgress");
+                    inv.setStatusDetails(statusDetails("InProgress"));
+                    inv.setExecutionStartDateTime(Instant.now());
+                    invocationStore.put(invKey, inv);
+                }
             }
         });
         LOG.debugv("AcknowledgeMessage: messageId={0} commandId={1}", messageId, commandId);
@@ -418,13 +438,15 @@ public class SsmCommandService implements Resettable {
             String invKey = invocationKey(region, commandId, instanceId);
             CommandInvocation inv = invocationStore.get(invKey).orElse(null);
             if (inv != null) {
-                inv.setStatus(toInvocationStatus(status));
-                inv.setStatusDetails(statusDetails(toInvocationStatus(status)));
-                inv.setStandardOutputContent(stdout);
-                inv.setStandardErrorContent(stderr);
-                inv.setResponseCode(returnCode);
-                inv.setExecutionEndDateTime(endTime);
-                invocationStore.put(invKey, inv);
+                synchronized (inv) {
+                    inv.setStatus(toInvocationStatus(status));
+                    inv.setStatusDetails(statusDetails(toInvocationStatus(status)));
+                    inv.setStandardOutputContent(stdout);
+                    inv.setStandardErrorContent(stderr);
+                    inv.setResponseCode(returnCode);
+                    inv.setExecutionEndDateTime(endTime);
+                    invocationStore.put(invKey, inv);
+                }
             }
 
             // Recalculate command status
@@ -446,10 +468,12 @@ public class SsmCommandService implements Resettable {
 
         String invKey = invocationKey(region, commandId, instanceId);
         invocationStore.get(invKey).ifPresent(inv -> {
-            inv.setStatus("Failed");
-            inv.setStatusDetails("Failed: " + failureType);
-            inv.setExecutionEndDateTime(Instant.now());
-            invocationStore.put(invKey, inv);
+            synchronized (inv) {
+                inv.setStatus("Failed");
+                inv.setStatusDetails("Failed: " + failureType);
+                inv.setExecutionEndDateTime(Instant.now());
+                invocationStore.put(invKey, inv);
+            }
         });
         updateCommandStatus(commandId, region);
         LOG.warnv("FailMessage: commandId={0} instanceId={1} failureType={2}", commandId, instanceId, failureType);
@@ -527,15 +551,19 @@ public class SsmCommandService implements Resettable {
                     .executeIfSupported(instanceId, documentName, parameters, timeoutSeconds)
                     .orElse(null);
             if (result == null) {
-                invocation.setStatus("Pending");
-                invocation.setStatusDetails(statusDetails("Pending"));
-                invocationStore.put(invKey, invocation);
+                synchronized (invocation) {
+                    invocation.setStatus("Pending");
+                    invocation.setStatusDetails(statusDetails("Pending"));
+                    invocationStore.put(invKey, invocation);
+                }
                 queueMessage(commandId, instanceId, documentName, parameters, timeoutSeconds, region);
                 updateCommandStatus(commandId, region);
                 return;
             }
-            applyDirectResult(invocation, result);
-            invocationStore.put(invKey, invocation);
+            synchronized (invocation) {
+                applyDirectResult(invocation, result);
+                invocationStore.put(invKey, invocation);
+            }
             updateCommandStatus(commandId, region);
         }, directExecutionExecutor);
     }
@@ -677,16 +705,30 @@ public class SsmCommandService implements Resettable {
             }
         }
 
-        command.setCompletedCount(completed);
-        command.setErrorCount(errors);
+        // Synchronized on the shared Command object itself (commandStore's get() always returns the
+        // same instance for a given key, not a defensive copy) so this status+statusDetails write
+        // can't interleave with cancelCommand's own status+statusDetails write on the same object -
+        // without this, cancelCommand's whole pair could land inside the gap between this method's
+        // two field writes, leaving status=Cancelled but statusDetails reflecting this call's stale
+        // completion status (or the reverse), even though each method's own two fields individually
+        // agree with each other when read right after being written.
+        synchronized (command) {
+            command.setCompletedCount(completed);
+            command.setErrorCount(errors);
 
-        if (!anyInProgress && completed == instanceIds.size()) {
-            String status = commandStatus(errors, timedOut, instanceIds.size());
-            command.setStatus(status);
-            command.setStatusDetails(statusDetails(command.getStatus()));
+            if (!anyInProgress && completed == instanceIds.size()) {
+                // Use the local status, not a re-read of command.getStatus(): re-reading it here left
+                // a second, narrower window where a concurrent updateCommandStatus call for the same
+                // command (e.g. another instance's async completion racing this one) could mutate the
+                // shared object in between, so this call's own statusDetails ended up reflecting a
+                // DIFFERENT call's status than the one it had just written to status itself.
+                String status = commandStatus(errors, timedOut, instanceIds.size());
+                command.setStatus(status);
+                command.setStatusDetails(statusDetails(status));
+            }
+
+            commandStore.put(commandKey(region, commandId), command);
         }
-
-        commandStore.put(commandKey(region, commandId), command);
     }
 
     private static String commandStatus(int errors, int timedOut, int targetCount) {

@@ -57,6 +57,7 @@ public final class CognitoMessageDispatcher {
                     null,          // configurationSetName
                     List.of(),     // emailTags
                     List.of(),     // additionalHeaders
+                    null,          // listManagement
                     DEFAULT_REGION
                 );
             } else if ("SMS".equalsIgnoreCase(medium) && phone != null) {

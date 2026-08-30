@@ -128,12 +128,16 @@ class S3VectorsTest {
                                 PutInputVector.builder()
                                         .key("v1")
                                         .data(VectorData.builder().float32(1.0f, 0.0f, 0.0f).build())
-                                        .metadata(Document.fromMap(Map.of("label", Document.fromString("first"))))
+                                        .metadata(Document.fromMap(Map.of(
+                                                "label", Document.fromString("first"),
+                                                "tenant", Document.fromString("tenant-a"))))
                                         .build(),
                                 PutInputVector.builder()
                                         .key("v2")
                                         .data(VectorData.builder().float32(0.0f, 1.0f, 0.0f).build())
-                                        .metadata(Document.fromMap(Map.of("label", Document.fromString("second"))))
+                                        .metadata(Document.fromMap(Map.of(
+                                                "label", Document.fromString("second"),
+                                                "tenant", Document.fromString("tenant-b"))))
                                         .build()
                         )
                         .build()
@@ -173,6 +177,7 @@ class S3VectorsTest {
                         .queryVector(VectorData.builder().float32(1.0f, 0.1f, 0.0f).build())
                         .topK(1)
                         .returnMetadata(true)
+                        .returnDistance(true)
                         .build()
         );
         assertThat(response.vectors()).hasSize(1);
@@ -184,6 +189,26 @@ class S3VectorsTest {
 
     @Test
     @Order(10)
+    void queryVectorsWithMetadataFilter() {
+        QueryVectorsResponse response = client.queryVectors(
+                QueryVectorsRequest.builder()
+                        .vectorBucketName(bucketName)
+                        .indexName(indexName)
+                        .queryVector(VectorData.builder().float32(1.0f, 0.0f, 0.0f).build())
+                        .topK(1)
+                        .filter(Document.fromMap(Map.of("tenant", Document.fromString("tenant-b"))))
+                        .returnMetadata(true)
+                        .build()
+        );
+
+        assertThat(response.vectors()).singleElement().satisfies(result -> {
+            assertThat(result.key()).isEqualTo("v2");
+            assertThat(result.metadata().asMap().get("tenant").asString()).isEqualTo("tenant-b");
+        });
+    }
+
+    @Test
+    @Order(11)
     void deleteVectors() {
         client.deleteVectors(
                 DeleteVectorsRequest.builder()
@@ -205,7 +230,7 @@ class S3VectorsTest {
     }
 
     @Test
-    @Order(11)
+    @Order(12)
     void testConflictException() {
         assertThatThrownBy(() -> client.createVectorBucket(
                 CreateVectorBucketRequest.builder()
@@ -215,7 +240,7 @@ class S3VectorsTest {
     }
 
     @Test
-    @Order(12)
+    @Order(13)
     void testNotFoundException() {
         assertThatThrownBy(() -> client.getVectorBucket(
                 GetVectorBucketRequest.builder()
@@ -225,7 +250,7 @@ class S3VectorsTest {
     }
 
     @Test
-    @Order(13)
+    @Order(14)
     void testValidationException() {
         assertThatThrownBy(() -> client.createIndex(
                 CreateIndexRequest.builder()

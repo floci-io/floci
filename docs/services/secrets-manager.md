@@ -16,7 +16,7 @@
 | `ListSecrets` | List all secrets |
 | `DeleteSecret` | Delete a secret (with recovery window) |
 | `RestoreSecret` | - |
-| `RotateSecret` | Trigger secret rotation via a Lambda |
+| `RotateSecret` | Trigger secret rotation, via a Lambda or by the owning service |
 | `TagResource` | Tag a secret |
 | `UntagResource` | Remove tags |
 | `ListSecretVersionIds` | List all versions of a secret |

@@ -36,6 +36,23 @@ class S3AclPolicyTest {
     }
 
     @Test
+    void parsesCanonicalUserReadGrant() {
+        S3AclPolicy policy = parse(acl("""
+                <Grant>
+                  <Grantee xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                           xsi:type="CanonicalUser">
+                    <ID>cloudfront-canonical-id</ID>
+                  </Grantee>
+                  <Permission>READ</Permission>
+                </Grant>
+                """));
+
+        S3AclPolicy.Grant grant = policy.grants().getFirst();
+        assertEquals("cloudfront-canonical-id", grant.grantee().id());
+        assertTrue(grant.allowsCanonicalUserRead("cloudfront-canonical-id"));
+    }
+
+    @Test
     void ignoresGrantOutsideAccessControlList() {
         String grant = groupGrant(S3AclPolicy.ALL_USERS_GROUP_URI, "READ");
         S3AclPolicy policy = parse("""

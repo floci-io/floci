@@ -1,0 +1,28 @@
+{
+  "StateMachines": {
+    "sfn-mock-test": {
+      "TestCases": {
+        "HappyPath": { "Call API": "Ok200" },
+        "Throw422": { "Call API": "Throw422" },
+        "RetryOnce": { "Call API": "ThrowThenOk" }
+      }
+    },
+    "sfn-mock-ddb-test": {
+      "TestCases": {
+        "MockedApiRealDdb": { "Call API": "Ok200" }
+      }
+    }
+  },
+  "MockedResponses": {
+    "Ok200": {
+      "0": { "Return": { "StatusCode": 200, "ResponseBody": { "id": 1 } } }
+    },
+    "Throw422": {
+      "0": { "Throw": { "Error": "ApiGateway.422", "Cause": "Unprocessable" } }
+    },
+    "ThrowThenOk": {
+      "0": { "Throw": { "Error": "ApiGateway.429", "Cause": "Too many requests" } },
+      "1-2": { "Return": { "StatusCode": 200, "ResponseBody": { "retried": true } } }
+    }
+  }
+}

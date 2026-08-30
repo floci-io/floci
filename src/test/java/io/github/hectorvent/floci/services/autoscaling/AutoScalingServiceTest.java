@@ -98,7 +98,7 @@ class AutoScalingServiceTest {
         Ec2Service ec2Service = mock(Ec2Service.class);
         service.ec2Service = ec2Service;
         LaunchTemplate version = new LaunchTemplate();
-        version.setImageId(null);
+        version.getData().setImageId(null);
         when(ec2Service.describeLaunchTemplateVersions(REGION, "lt-no-image", null, List.of("1")))
                 .thenReturn(List.of(version));
 
@@ -242,7 +242,7 @@ class AutoScalingServiceTest {
         Ec2Service ec2Service = mock(Ec2Service.class);
         service.ec2Service = ec2Service;
         LaunchTemplate version = new LaunchTemplate();
-        version.setImageId("");
+        version.getData().setImageId("");
         when(ec2Service.describeLaunchTemplateVersions(REGION, "lt-no-image", null, List.of("2")))
                 .thenReturn(List.of(version));
 
@@ -634,6 +634,137 @@ class AutoScalingServiceTest {
                 0,
                 List.of("Default"),
                 java.util.Map.of(), java.util.Map.of());
+    }
+
+    @Test
+    void putLifecycleHookRejectsNameOutsideModeledPattern() {
+        AwsException ex = assertThrows(AwsException.class, () -> service.putLifecycleHook(REGION, "test-asg",
+                "bad name!", "autoscaling:EC2_INSTANCE_LAUNCHING", null, null, null, null, null));
+        assertEquals("ValidationError", ex.getErrorCode());
+    }
+
+    @Test
+    void deleteLifecycleHookRejectsNameOutsideModeledPattern() {
+        assertThrows(AwsException.class,
+                () -> service.deleteLifecycleHook(REGION, "test-asg", "bad name!"));
+    }
+
+    @Test
+    void completeLifecycleActionRejectsNameOutsideModeledPattern() {
+        assertThrows(AwsException.class,
+                () -> service.completeLifecycleAction(REGION, "test-asg", "bad name!",
+                        "i-0123456789abcdef0", "CONTINUE", "12345678-1234-1234-1234-123456789012"));
+    }
+
+    @Test
+    void completeLifecycleActionRejectsTokenOfWrongLength() {
+        service.putLifecycleHook(REGION, "test-asg", "hook-1", "autoscaling:EC2_INSTANCE_LAUNCHING",
+                null, null, null, null, null);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.completeLifecycleAction(REGION, "test-asg", "hook-1",
+                        "i-0123456789abcdef0", "CONTINUE", "not-a-uuid"));
+        assertEquals("ValidationError", ex.getErrorCode());
+    }
+
+    @Test
+    void completeLifecycleActionAllowsNullTokenWhenInstanceIdIdentifiesTheAction() {
+        service.putLifecycleHook(REGION, "test-asg", "hook-1", "autoscaling:EC2_INSTANCE_LAUNCHING",
+                null, null, null, null, null);
+
+        assertDoesNotThrow(() -> service.completeLifecycleAction(REGION, "test-asg", "hook-1",
+                "i-0123456789abcdef0", "CONTINUE", null));
+    }
+
+    @Test
+    void deleteLifecycleHookByNameRejectsNameOutsideModeledPattern() {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.deleteLifecycleHookByName(REGION, "bad name!"));
+        assertEquals("ValidationError", ex.getErrorCode());
+    }
+
+    @Test
+    void deleteLifecycleHookByNameIsIdempotentOnNullPhysicalId() {
+        assertDoesNotThrow(() -> service.deleteLifecycleHookByName(REGION, null));
+    }
+
+    @Test
+    void putLifecycleHookRejectsNullNameWithNotNullMessage() {
+        AwsException ex = assertThrows(AwsException.class, () -> service.putLifecycleHook(REGION, "test-asg",
+                null, "autoscaling:EC2_INSTANCE_LAUNCHING", null, null, null, null, null));
+        assertTrue(ex.getMessage().contains("must not be null"));
+    }
+
+    @Test
+    void putLifecycleHookRejectsOverlongNameWithLengthMessage() {
+        String tooLong = "h".repeat(256);
+        AwsException ex = assertThrows(AwsException.class, () -> service.putLifecycleHook(REGION, "test-asg",
+                tooLong, "autoscaling:EC2_INSTANCE_LAUNCHING", null, null, null, null, null));
+        assertTrue(ex.getMessage().contains("length less than or equal to 255"),
+                "expected a length-specific message, got: " + ex.getMessage());
+    }
+
+    @Test
+    void putLifecycleHookRejectsBadCharsWithPatternMessage() {
+        AwsException ex = assertThrows(AwsException.class, () -> service.putLifecycleHook(REGION, "test-asg",
+                "bad name!", "autoscaling:EC2_INSTANCE_LAUNCHING", null, null, null, null, null));
+        assertTrue(ex.getMessage().contains("regular expression pattern"));
+    }
+
+    @Test
+    void setInstanceProtectionValidatesEmptyInstanceIdsBeforeGroupLookup() {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.setInstanceProtection(REGION, "no-such-group", List.of(), true));
+        assertEquals("ValidationError", ex.getErrorCode());
+        assertTrue(ex.getMessage().contains("At least one instance ID is required"),
+                "a doubly-bad request (unknown group + empty list) must surface the missing-parameter "
+                        + "error, not 'Group not found'; got: " + ex.getMessage());
+    }
+
+    @Test
+    void setInstanceProtectionReportsAllMissingInstanceIds() {
+        AsgInstance instance = new AsgInstance();
+        instance.setInstanceId("i-real");
+        instance.setLifecycleState("InService");
+        instance.setHealthStatus("Healthy");
+        service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst().getInstances().add(instance);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.setInstanceProtection(REGION, "test-asg",
+                        List.of("i-missing-1", "i-missing-2"), true));
+        assertTrue(ex.getMessage().contains("i-missing-1") && ex.getMessage().contains("i-missing-2"),
+                "expected both missing IDs in the message, got: " + ex.getMessage());
+    }
+
+    @Test
+    void setInstanceProtectionUsesSetContainmentAgainstDuplicateStoredInstanceIds() {
+        AsgInstance dup1 = new AsgInstance();
+        dup1.setInstanceId("i-dup");
+        dup1.setLifecycleState("InService");
+        dup1.setHealthStatus("Healthy");
+        AsgInstance dup2 = new AsgInstance();
+        dup2.setInstanceId("i-dup");
+        dup2.setLifecycleState("InService");
+        dup2.setHealthStatus("Healthy");
+        var instances = service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst().getInstances();
+        instances.add(dup1);
+        instances.add(dup2);
+
+        assertDoesNotThrow(() -> service.setInstanceProtection(REGION, "test-asg", List.of("i-dup"), true));
+        assertTrue(instances.stream().allMatch(AsgInstance::isProtectedFromScaleIn));
+    }
+
+    @Test
+    void setInstanceHealthAcceptsShouldRespectGracePeriodFlag() {
+        AsgInstance instance = new AsgInstance();
+        instance.setInstanceId("i-health");
+        instance.setLifecycleState("InService");
+        instance.setHealthStatus("Healthy");
+        service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst().getInstances().add(instance);
+
+        assertDoesNotThrow(() -> service.setInstanceHealth(REGION, "i-health", "Unhealthy", true));
+        assertEquals("Unhealthy", service.describeAutoScalingInstances(REGION, List.of("i-health"))
+                .getFirst().getHealthStatus());
     }
 
     private static final class AutoScalingGroupFixture {

@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.services.dynamodb.model.ExportSummary;
 import io.github.hectorvent.floci.services.dynamodb.model.GlobalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.LocalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
+import io.github.hectorvent.floci.services.dynamodb.model.StreamDescription;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 import io.github.hectorvent.floci.services.dynamodb.model.ConditionalCheckFailedException;
 import io.github.hectorvent.floci.services.s3.S3Service;
@@ -48,11 +49,29 @@ import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Supplier;
 import java.util.zip.GZIPOutputStream;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 
 @ApplicationScoped
-public class DynamoDbService {
+public class DynamoDbService implements ResourceProvider {
+
+    private static final String LOCAL_REPLICA_UPDATE_ERROR =
+            "Cannot add, delete, or update the local region through ReplicaUpdates. "
+                    + "Use CreateTable, DeleteTable, or UpdateTable as required.";
 
     private static final Logger LOG = Logger.getLogger(DynamoDbService.class);
+
+    /**
+     * View type applied when a stream is requested without an explicit StreamViewType.
+     *
+     * <p>Not an AWS default: the CloudFormation schema marks StreamViewType required inside
+     * StreamSpecification, and the DynamoDB API documents no default either. This mirrors the
+     * lenient handling {@code DynamoDbJsonHandler} already applies on CreateTable/UpdateTable
+     * ({@code path("StreamViewType").asText("NEW_AND_OLD_IMAGES")}), so an under-specified
+     * template gets a working stream instead of a rejection, and every entry point agrees.
+     */
+    private static final String DEFAULT_STREAM_VIEW_TYPE = "NEW_AND_OLD_IMAGES";
 
     private final StorageBackend<String, TableDefinition> tableStore;
     private final StorageBackend<String, Map<String, JsonNode>> itemStore;
@@ -71,6 +90,8 @@ public class DynamoDbService {
     // rejected with IdempotentParameterMismatchException.
     private final ConcurrentHashMap<String, IdempotencyEntry> txIdempotency = new ConcurrentHashMap<>();
     private static final long TX_IDEMPOTENCY_TTL_NANOS = java.time.Duration.ofMinutes(10).toNanos();
+
+    private static final int MAX_MULTI_ATTRIBUTE_KEY_PART_SIZE = 4;
 
     private record IdempotencyEntry(String requestHash, long insertedAtNanos) {}
     private final RegionResolver regionResolver;
@@ -138,15 +159,23 @@ public class DynamoDbService {
 
     private void loadPersistedItems() {
         if (itemStore == null) return;
+        // No request scope at startup, so itemStore.keys() would only see the default account.
+        // scanAllAccountsRaw() returns every account's items already in the "accountId/
+        // region::tableName" key format itemsByTable expects.
+        if (itemStore instanceof AccountAwareStorageBackend<Map<String, JsonNode>> aware) {
+            aware.scanAllAccountsRaw().forEach((rawKey, items) ->
+                itemsByTable.put(rawKey, new ConcurrentSkipListMap<>(items)));
+            return;
+        }
         for (String key : itemStore.keys()) {
             itemStore.get(key).ifPresent(items ->
-                itemsByTable.put(key, new ConcurrentSkipListMap<>(items)));
+                itemsByTable.put(scopedItemsKey(key), new ConcurrentSkipListMap<>(items)));
         }
     }
 
     private void persistItems(String storageKey) {
         if (itemStore == null) return;
-        var items = itemsByTable.get(storageKey);
+        var items = itemsByTable.get(scopedItemsKey(storageKey));
         if (items != null) {
             itemStore.put(storageKey, new HashMap<>(items));
         } else {
@@ -245,6 +274,15 @@ public class DynamoDbService {
         if (lsis != null) {
             lsis.forEach(l -> l.getKeySchema().forEach(k -> referencedAttrs.add(k.getAttributeName())));
         }
+        Set<String> definedAttrs = attributeDefinitions == null
+                ? Set.of()
+                : attributeDefinitions.stream()
+                        .map(AttributeDefinition::getAttributeName)
+                        .collect(java.util.stream.Collectors.toSet());
+        if (!definedAttrs.containsAll(referencedAttrs)) {
+            throw new AwsException("ValidationException",
+                    "Invalid KeySchema: Some index key attribute have no definition", 400);
+        }
         if (attributeDefinitions != null) {
             for (AttributeDefinition ad : attributeDefinitions) {
                 if (!referencedAttrs.contains(ad.getAttributeName())) {
@@ -290,6 +328,7 @@ public class DynamoDbService {
 
         if (gsis != null && !gsis.isEmpty()) {
             for (GlobalSecondaryIndex gsi : gsis) {
+                validateGsiKeySchemaArity(gsi);
                 gsi.setIndexArn(table.getTableArn() + "/index/" + gsi.getIndexName());
             }
             table.setGlobalSecondaryIndexes(new ArrayList<>(gsis));
@@ -303,15 +342,38 @@ public class DynamoDbService {
                     throw new AwsException("ValidationException",
                             "LocalSecondaryIndex partition key must match table partition key", 400);
                 }
+                if (lsi.getSortKeyNames().size() != 1) {
+                    throw new AwsException("ValidationException",
+                            "One or more parameter values were invalid: Local Secondary Index "
+                            + lsi.getIndexName() + " must have a sort key consisting of exactly "
+                            + "one scalar attribute", 400);
+                }
                 lsi.setIndexArn(table.getTableArn() + "/index/" + lsi.getIndexName());
             }
             table.setLocalSecondaryIndexes(new ArrayList<>(lsis));
         }
 
         tableStore.put(storageKey, table);
-        itemsByTable.put(storageKey, new ConcurrentSkipListMap<>());
+        itemsByTable.put(scopedItemsKey(storageKey), new ConcurrentSkipListMap<>());
         LOG.infov("Created table: {0} in region {1}", tableName, region);
         return table;
+    }
+
+    private void validateGsiKeySchemaArity(GlobalSecondaryIndex gsi) {
+        long hashCount = gsi.getKeySchema().stream().filter(k -> "HASH".equals(k.getKeyType())).count();
+        long rangeCount = gsi.getKeySchema().stream().filter(k -> "RANGE".equals(k.getKeyType())).count();
+        if (hashCount > MAX_MULTI_ATTRIBUTE_KEY_PART_SIZE) {
+            throw new AwsException("ValidationException",
+                    "One or more parameter values were invalid: Global secondary index "
+                    + gsi.getIndexName() + " must not have more than "
+                    + MAX_MULTI_ATTRIBUTE_KEY_PART_SIZE + " partition key (HASH) attributes", 400);
+        }
+        if (rangeCount > MAX_MULTI_ATTRIBUTE_KEY_PART_SIZE) {
+            throw new AwsException("ValidationException",
+                    "One or more parameter values were invalid: Global secondary index "
+                    + gsi.getIndexName() + " must not have more than "
+                    + MAX_MULTI_ATTRIBUTE_KEY_PART_SIZE + " sort key (RANGE) attributes", 400);
+        }
     }
 
     public TableDefinition describeTable(String tableName, String region) {
@@ -321,7 +383,7 @@ public class DynamoDbService {
                 .orElseThrow(() -> resourceNotFoundException(canonicalTableName));
 
         // Update dynamic counts
-        var items = itemsByTable.get(storageKey);
+        var items = itemsByTable.get(scopedItemsKey(storageKey));
         if (items != null) {
             table.setItemCount(items.size());
         }
@@ -333,6 +395,56 @@ public class DynamoDbService {
         tableStore.put(regionKey(region, canonicalTableName), table);
     }
 
+    /**
+     * Turns on the table's stream and persists the result, so DescribeTable reports
+     * StreamSpecification / LatestStreamArn and event source mappings can find the stream.
+     *
+     * <p>Callers that reach DynamoDB through the service rather than the JSON handler — notably
+     * CloudFormation provisioning — need this: the handler enables the stream inline on
+     * CreateTable/UpdateTable, and without an equivalent entry point a table created by any other
+     * path is left streamless. A null {@code viewType} falls back to
+     * {@link #DEFAULT_STREAM_VIEW_TYPE}, matching the leniency the JSON handler already applies
+     * rather than any documented AWS default.
+     *
+     * @return the updated table, or the unchanged table when no stream service is wired.
+     */
+    public TableDefinition enableStream(String tableName, String viewType, String region) {
+        TableDefinition table = describeTable(tableName, region);
+        if (streamService == null) {
+            return table;
+        }
+        String effectiveViewType = (viewType == null || viewType.isBlank())
+                ? DEFAULT_STREAM_VIEW_TYPE
+                : viewType;
+        StreamDescription sd = streamService.enableStream(
+                table.getTableName(), table.getTableArn(), effectiveViewType, region);
+        table.setStreamEnabled(true);
+        table.setStreamArn(sd.getStreamArn());
+        table.setStreamViewType(effectiveViewType);
+        persistTable(tableName, table, region);
+        return table;
+    }
+
+    /**
+     * Turns the table's stream off and persists the result, so it stops producing records.
+     *
+     * <p>The counterpart to {@link #enableStream}, for the same service-layer callers. The stream
+     * ARN is retained on the table, matching what UpdateTable does through the JSON handler: AWS
+     * keeps reporting {@code LatestStreamArn} for a disabled stream.
+     *
+     * @return the updated table, or the unchanged table when no stream service is wired.
+     */
+    public TableDefinition disableStream(String tableName, String region) {
+        TableDefinition table = describeTable(tableName, region);
+        if (streamService == null) {
+            return table;
+        }
+        streamService.disableStream(table.getTableName(), region);
+        table.setStreamEnabled(false);
+        persistTable(tableName, table, region);
+        return table;
+    }
+
     public void deleteTable(String tableName, String region) {
         String canonicalTableName = canonicalTableName(region, tableName);
         String storageKey = regionKey(region, canonicalTableName);
@@ -340,8 +452,8 @@ public class DynamoDbService {
             throw resourceNotFoundException(canonicalTableName);
         }
         tableStore.delete(storageKey);
-        itemsByTable.remove(storageKey);
-        itemLocks.remove(storageKey);
+        itemsByTable.remove(scopedItemsKey(storageKey));
+        itemLocks.remove(scopedItemsKey(storageKey));
         if (itemStore != null) {
             itemStore.delete(storageKey);
         }
@@ -400,9 +512,10 @@ public class DynamoDbService {
         final JsonNode normalizedItem = DynamoDbNumberUtils.normalizeNumbersInItem(item);
         DynamoDbItemSize.validateSize(normalizedItem);
         String itemKey = buildItemKey(table, normalizedItem);
+        validateIndexKeyTypes(table, normalizedItem, false);
 
         withItemLock(storageKey, itemKey, () -> {
-            var tableItems = itemsByTable.computeIfAbsent(storageKey, k -> new ConcurrentSkipListMap<>());
+            var tableItems = itemsByTable.computeIfAbsent(scopedItemsKey(storageKey), k -> new ConcurrentSkipListMap<>());
 
             JsonNode existing = tableItems.get(itemKey);
 
@@ -432,7 +545,7 @@ public class DynamoDbService {
                 .orElseThrow(() -> resourceNotFoundException(canonicalTableName));
 
         String itemKey = buildItemKey(table, key, true);
-        var items = itemsByTable.get(storageKey);
+        var items = itemsByTable.get(scopedItemsKey(storageKey));
         if (items == null) {
             LOG.tracev("Got item from {0}: key={1} item=<not found>", canonicalTableName, itemKey);
             return null;
@@ -462,7 +575,7 @@ public class DynamoDbService {
         String itemKey = buildItemKey(table, key, true);
 
         return withItemLock(storageKey, itemKey, () -> {
-            var items = itemsByTable.get(storageKey);
+            var items = itemsByTable.get(scopedItemsKey(storageKey));
             if (items == null) return null;
 
             if (conditionExpression != null) {
@@ -509,7 +622,7 @@ public class DynamoDbService {
         String itemKey = buildItemKey(table, key, true);
 
         return withItemLock(storageKey, itemKey, () -> {
-            var items = itemsByTable.computeIfAbsent(storageKey, k -> new ConcurrentSkipListMap<>());
+            var items = itemsByTable.computeIfAbsent(scopedItemsKey(storageKey), k -> new ConcurrentSkipListMap<>());
 
             // Get existing item or create new one from key
             JsonNode existing = items.get(itemKey);
@@ -621,6 +734,9 @@ public class DynamoDbService {
                 }
             }
 
+            // AWS validates index key values against the item the update produces.
+            validateIndexKeyTypes(table, item, true);
+
             items.put(itemKey, item);
             persistItems(storageKey);
             LOG.tracev("Updated item in {0}: key={1} updateExpression={2} item={3}",
@@ -653,80 +769,71 @@ public class DynamoDbService {
         TableDefinition table = tableStore.get(storageKey)
                 .orElseThrow(() -> resourceNotFoundException(canonicalTableName));
 
-        var items = itemsByTable.get(storageKey);
-        if (items == null) return new QueryResult(List.of(), 0, null);
+        DynamoDbAccessPath accessPath = DynamoDbAccessPath.resolve(table, indexName);
+        String partitionKeyValuePlaceholder = DynamoDbAccessPathValidator.validateQuery(
+                table, accessPath, keyConditions, keyConditionExpression, filterExpression,
+                null, exprAttrNames, expressionAttrValues);
+        String pkName = accessPath.partitionKeyName();
+        List<String> pkNames = accessPath.partitionKeyNames();
+        String skName = accessPath.sortKeyName();
+        List<String> sortKeyNames = accessPath.sortKeyNames();
 
-        // Resolve key names: use GSI or table keys
-        String pkName;
-        String skName;
-        if (indexName != null) {
-            var gsi = table.findGsi(indexName);
-            if (gsi.isPresent()) {
-                pkName = gsi.get().getPartitionKeyName();
-                skName = gsi.get().getSortKeyName();
-            } else {
-                var lsi = table.findLsi(indexName)
-                        .orElseThrow(() -> new AwsException("ValidationException",
-                                "The table does not have the specified index: " + indexName, 400));
-                pkName = lsi.getPartitionKeyName();
-                skName = lsi.getSortKeyName();
-            }
-        } else {
-            pkName = table.getPartitionKeyName();
-            skName = table.getSortKeyName();
-        }
+        var items = itemsByTable.get(scopedItemsKey(storageKey));
+        if (items == null) return new QueryResult(List.of(), 0, null);
 
         List<JsonNode> results = new ArrayList<>();
 
         if (keyConditions != null) {
-            // Legacy KeyConditions format
-            JsonNode pkCondition = keyConditions.get(pkName);
-            String pkValue = extractComparisonValue(pkCondition);
-
             for (JsonNode item : items.values()) {
-                if (!item.has(pkName)) continue;
-                if (matchesAttributeValue(item.get(pkName), pkValue)) {
-                    if (skName != null && keyConditions.has(skName)) {
-                        JsonNode skCondition = keyConditions.get(skName);
-                        if (matchesKeyCondition(item.get(skName), skCondition)) {
-                            results.add(item);
-                        }
-                    } else {
+                boolean partitionKeyMatches = pkNames.stream().allMatch(name -> item.has(name)
+                        && matchesAttributeValue(item.get(name), extractComparisonValue(keyConditions.get(name))));
+                if (!partitionKeyMatches) continue;
+                if (skName != null && keyConditions.has(skName)) {
+                    JsonNode skCondition = keyConditions.get(skName);
+                    if (matchesKeyCondition(item.get(skName), skCondition)) {
                         results.add(item);
                     }
+                } else {
+                    results.add(item);
                 }
             }
         } else if (keyConditionExpression != null) {
-            // Modern expression format with exprAttrNames support
-            results = queryWithExpression(items, pkName, skName, keyConditionExpression,
-                                          expressionAttrValues, exprAttrNames);
+            results = queryWithExpression(items, pkName, partitionKeyValuePlaceholder,
+                    keyConditionExpression, expressionAttrValues, exprAttrNames);
         }
 
         // Filter out items without GSI key attributes (sparse index behavior).
         // DynamoDB excludes items from a GSI if any key attribute is null/missing.
-        if (indexName != null) {
-            String finalPkName = pkName;
-            String finalSkName = skName;
+        if (accessPath.isIndex()) {
+            Set<String> indexKeys = accessPath.keyAttributeNames();
             results = results.stream()
-                    .filter(item -> item.has(finalPkName) && hasNonNullAttribute(item, finalPkName))
-                    .filter(item -> finalSkName == null || (item.has(finalSkName) && hasNonNullAttribute(item, finalSkName)))
+                    .filter(item -> indexKeys.stream().allMatch(
+                            key -> item.has(key) && hasNonNullAttribute(item, key)))
                     .toList();
         }
 
         // Filter out TTL-expired items
         results = results.stream().filter(item -> !isExpired(item, table)).toList();
 
-        // Sort by sort key if present
-        if (skName != null) {
-            String finalSkName = skName;
+        // Sort by the full (possibly composite) sort key, comparing each attribute in key-schema
+        // order. Using only the first sort-key attribute would ignore the remaining components
+        // (e.g. a "requestStateQuery RANGE, createdAt RANGE" index would never order by createdAt),
+        // which in turn breaks ScanIndexForward=false. See floci-io/floci#1675.
+        if (!sortKeyNames.isEmpty()) {
+            List<String> finalSortKeyNames = sortKeyNames;
             results = new ArrayList<>(results);
             results.sort((a, b) -> {
-                JsonNode aAttr = a.get(finalSkName);
-                JsonNode bAttr = b.get(finalSkName);
-                if (aAttr == null && bAttr == null) return 0;
-                if (aAttr == null) return -1;
-                if (bAttr == null) return 1;
-                return ExpressionEvaluator.compareAttributeValues(aAttr, bAttr);
+                for (String name : finalSortKeyNames) {
+                    JsonNode aAttr = a.get(name);
+                    JsonNode bAttr = b.get(name);
+                    int cmp;
+                    if (aAttr == null && bAttr == null) cmp = 0;
+                    else if (aAttr == null) cmp = -1;
+                    else if (bAttr == null) cmp = 1;
+                    else cmp = ExpressionEvaluator.compareAttributeValues(aAttr, bAttr);
+                    if (cmp != 0) return cmp;
+                }
+                return 0;
             });
             if (Boolean.FALSE.equals(scanIndexForward)) {
                 Collections.reverse(results);
@@ -741,13 +848,13 @@ public class DynamoDbService {
 
             String startItemKey = hasTableKeys
                     ? buildItemKeyFromNode(exclusiveStartKey, tablePkName, tableSkName)
-                    : buildItemKeyFromNode(exclusiveStartKey, pkName, skName);
+                    : buildItemKeyFromNode(exclusiveStartKey, pkName, sortKeyNames);
 
             int startIdx = -1;
             for (int i = 0; i < results.size(); i++) {
                 String thisKey = hasTableKeys
                         ? buildItemKeyFromNode(results.get(i), tablePkName, tableSkName)
-                        : buildItemKeyFromNode(results.get(i), pkName, skName);
+                        : buildItemKeyFromNode(results.get(i), pkName, sortKeyNames);
                 if (thisKey.equals(startItemKey)) {
                     startIdx = i;
                     break;
@@ -761,26 +868,33 @@ public class DynamoDbService {
         List<JsonNode> evaluatedItems = results;
         JsonNode lastEvaluatedKey = null;
 
-        // Apply Limit (stops at N items)
-        if (limit != null && limit > 0 && evaluatedItems.size() > limit) {
-            JsonNode lastItem = evaluatedItems.get(limit - 1);
-            lastEvaluatedKey = buildKeyNode(table, lastItem, pkName, skName, indexName != null);
-            evaluatedItems = new ArrayList<>(evaluatedItems.subList(0, limit));
-        }
-
-        // Apply 1MB response size limit (DynamoDB stops reading when scanned data exceeds 1MB)
-        if (lastEvaluatedKey == null) {
-            final int MAX_RESPONSE_BYTES = 1024 * 1024;
-            int accSize = 0;
-            for (int i = 0; i < evaluatedItems.size(); i++) {
-                int sz = DynamoDbItemSize.calculateItemSize(evaluatedItems.get(i));
-                if (accSize > 0 && accSize + sz > MAX_RESPONSE_BYTES) {
-                    lastEvaluatedKey = buildKeyNode(table, evaluatedItems.get(i - 1), pkName, skName, indexName != null);
-                    evaluatedItems = new ArrayList<>(evaluatedItems.subList(0, i));
-                    break;
-                }
-                accSize += sz;
+        // Stop at whichever boundary the read reaches first: the 1 MB cap or Limit.
+        // The size check comes first for each item — per the Query API reference,
+        // "if the processed dataset size exceeds 1 MB before DynamoDB reaches this
+        // limit, it stops the operation", so an item that would cross the 1 MB cap
+        // is not read and does not count toward Limit. DynamoDB does not look ahead
+        // either way: a read that stops at a boundary always returns a
+        // LastEvaluatedKey, even when the boundary happens to be the last item of
+        // the result set ("the absence of LastEvaluatedKey is the only way to know
+        // that you have reached the end of the result set").
+        final int MAX_RESPONSE_BYTES = 1024 * 1024;
+        int accSize = 0;
+        int included = -1; // index one past the last included item; -1 = no boundary hit
+        for (int i = 0; i < evaluatedItems.size(); i++) {
+            int sz = DynamoDbItemSize.calculateItemSize(evaluatedItems.get(i));
+            if (accSize > 0 && accSize + sz > MAX_RESPONSE_BYTES) {
+                included = i; // the 1 MB cap stops the read BEFORE this item
+                break;
             }
+            accSize += sz;
+            if (limit != null && limit > 0 && i + 1 >= limit) {
+                included = i + 1; // the Limit cap stops the read AFTER this item
+                break;
+            }
+        }
+        if (included > 0) {
+            lastEvaluatedKey = buildKeyNode(table, evaluatedItems.get(included - 1), pkName, sortKeyNames, indexName != null);
+            evaluatedItems = new ArrayList<>(evaluatedItems.subList(0, included));
         }
 
         int scannedCount = evaluatedItems.size();
@@ -814,7 +928,9 @@ public class DynamoDbService {
         TableDefinition table = tableStore.get(storageKey)
                 .orElseThrow(() -> resourceNotFoundException(canonicalTableName));
 
-        var items = itemsByTable.get(storageKey);
+        DynamoDbAccessPath accessPath = DynamoDbAccessPath.resolve(table, indexName);
+
+        var items = itemsByTable.get(scopedItemsKey(storageKey));
         if (items == null) return new ScanResult(List.of(), 0, null);
 
         // ConcurrentSkipListMap keeps items sorted by base item key — no sort needed.
@@ -825,60 +941,62 @@ public class DynamoDbService {
         // When scanning a secondary index, the LastEvaluatedKey must carry the index key
         // attributes in addition to the base table key. Cursor navigation still uses the
         // (unique) base table key, which is a total order even when index sort keys tie.
-        boolean indexScan = indexName != null;
+        boolean indexScan = accessPath.isIndex();
         String lekPkName = pkName;
         String lekSkName = skName;
         if (indexScan) {
-            var gsi = table.findGsi(indexName);
-            var lsi = table.findLsi(indexName);
-            if (gsi.isPresent()) {
-                lekPkName = gsi.get().getPartitionKeyName();
-                lekSkName = gsi.get().getSortKeyName();
-            } else if (lsi.isPresent()) {
-                lekPkName = lsi.get().getPartitionKeyName();
-                lekSkName = lsi.get().getSortKeyName();
-            }
+            lekPkName = accessPath.partitionKeyName();
+            lekSkName = accessPath.sortKeyName();
         }
 
         var source = exclusiveStartKey != null
                 ? items.tailMap(buildItemKeyFromNode(exclusiveStartKey, pkName, skName), false).values()
                 : items.values();
 
+        final int MAX_RESPONSE_BYTES = 1024 * 1024;
         int totalScanned = 0;
+        int accSize = 0;
         List<JsonNode> results = new ArrayList<>();
         JsonNode lastEvaluatedKey = null;
-        Iterator<JsonNode> it = source.iterator();
-        while (it.hasNext()) {
-            JsonNode item = it.next();
+        JsonNode lastScanned = null;
+        for (JsonNode item : source) {
+            // Sparse index behavior: a scan of a secondary index reads the index
+            // itself, and base-table items missing any index key attribute do not
+            // exist in the index — they are never read, never counted, and can
+            // never anchor a cursor.
+            if (indexScan && !(hasNonNullAttribute(item, lekPkName)
+                    && (lekSkName == null || hasNonNullAttribute(item, lekSkName)))) {
+                continue;
+            }
+            // Stop at whichever boundary the read reaches first: the 1 MB cap or
+            // Limit. The size check comes first — per the API reference, "if the
+            // processed dataset size exceeds 1 MB before DynamoDB reaches this
+            // limit, it stops the operation" — so an item that would cross the cap
+            // is not read, does not count toward ScannedCount, and the cursor
+            // anchors to the previous scanned item (which, with a filter, may well
+            // be an item that was not returned).
+            int sz = DynamoDbItemSize.calculateItemSize(item);
+            if (accSize > 0 && accSize + sz > MAX_RESPONSE_BYTES) {
+                lastEvaluatedKey = buildKeyNode(table, lastScanned, lekPkName, lekSkName, indexScan);
+                break;
+            }
+            accSize += sz;
             totalScanned++;
+            lastScanned = item;
             if (!isExpired(item, table)) {
                 boolean matched = (filterExpression == null
                         || matchesFilterExpression(item, filterExpression, expressionAttrNames, expressionAttrValues))
                         && (scanFilter == null || matchesScanFilter(item, scanFilter));
                 if (matched) results.add(item);
             }
-            // Limit caps SCANNED items (those read), not matched items. Stop at the
-            // limit and surface a cursor when more items remain to be examined.
+            // Limit caps SCANNED items (those read), not matched items. DynamoDB does
+            // not look ahead when it stops at the Limit boundary: it always surfaces a
+            // cursor, even when the boundary happens to be the last item of the result
+            // set. The client only learns it reached the end when a follow-up request
+            // comes back without a LastEvaluatedKey.
             if (limit != null && limit > 0 && totalScanned >= limit) {
-                if (it.hasNext()) {
-                    lastEvaluatedKey = buildKeyNode(table, item, lekPkName, lekSkName, indexScan);
-                }
+                lastEvaluatedKey = buildKeyNode(table, item, lekPkName, lekSkName, indexScan);
                 break;
-            }
-        }
-
-        // Apply 1MB response size limit (only when not already truncated by Limit)
-        if (lastEvaluatedKey == null) {
-            final int MAX_RESPONSE_BYTES = 1024 * 1024;
-            int accSize = 0;
-            for (int i = 0; i < results.size(); i++) {
-                int sz = DynamoDbItemSize.calculateItemSize(results.get(i));
-                if (accSize > 0 && accSize + sz > MAX_RESPONSE_BYTES) {
-                    lastEvaluatedKey = buildKeyNode(table, results.get(i - 1), lekPkName, lekSkName, indexScan);
-                    results = new ArrayList<>(results.subList(0, i));
-                    break;
-                }
-                accSize += sz;
             }
         }
 
@@ -970,7 +1088,7 @@ public class DynamoDbService {
         //   * Same token + different request body  → IdempotentParameterMismatchException.
         //   * No token, or expired token           → proceed normally.
         if (clientRequestToken != null && !clientRequestToken.isEmpty() && rawRequest != null) {
-            String cacheKey = region + "::" + clientRequestToken;
+            String cacheKey = regionResolver.getAccountId() + "::" + region + "::" + clientRequestToken;
             String requestHash = sha256(rawRequest.toString());
             long nowNanos = System.nanoTime();
 
@@ -1149,7 +1267,7 @@ public class DynamoDbService {
                 .orElseThrow(() -> resourceNotFoundException(canonicalTableName));
 
         String itemKey = buildItemKey(table, key);
-        var tableItems = itemsByTable.get(storageKey);
+        var tableItems = itemsByTable.get(scopedItemsKey(storageKey));
         JsonNode existing = tableItems != null ? tableItems.get(itemKey) : null;
 
         try {
@@ -1246,6 +1364,7 @@ public class DynamoDbService {
                             "Attribute: " + k.getAttributeName() + " is not defined in AttributeDefinitions", 400);
                 }
             }
+            validateGsiKeySchemaArity(newGsi);
         }
 
         for (String gsiName : gsiDeletes) {
@@ -1285,6 +1404,84 @@ public class DynamoDbService {
         tableStore.put(storageKey, table);
         LOG.infov("Updated table: {0} in region {1}", canonicalTableName, region);
         return table;
+    }
+
+    // --- Global-table replicas ---
+
+    /**
+     * Applies global-table replica changes (the {@code ReplicaUpdates} of UpdateTable, and the
+     * legacy {@code dynamodb.Table.replicationRegions} replica custom resource). This single-process
+     * emulator serves every region from the same table, so a replica is tracked as metadata and
+     * surfaced by DescribeTable as an ACTIVE Replica; no cross-region copy is performed. Regions are
+     * de-duplicated and adding an existing / removing an absent one is a no-op, keeping
+     * CloudFormation re-applies and cleanup idempotent. Update remains strict because it represents
+     * a settings change and has no target when the replica is absent.
+     */
+    public TableDefinition applyReplicaUpdates(String tableName, List<String> addRegions,
+                                               List<String> removeRegions, String region) {
+        return applyReplicaUpdates(tableName, addRegions, removeRegions, Collections.emptyList(), region);
+    }
+
+    public TableDefinition applyReplicaUpdates(String tableName, List<String> addRegions,
+                                               List<String> removeRegions, List<String> updateRegions, String region) {
+        TableDefinition table = validateReplicaUpdatesAndGetTable(
+                tableName, addRegions, removeRegions, updateRegions, region);
+        List<String> replicas = new ArrayList<>(table.getReplicaRegions());
+        if (removeRegions != null) {
+            replicas.removeAll(removeRegions);
+        }
+        if (addRegions != null) {
+            for (String r : addRegions) {
+                if (r != null && !r.isBlank() && !replicas.contains(r)) {
+                    replicas.add(r);
+                }
+            }
+        }
+        table.setReplicaRegions(replicas);
+        String canonicalTableName = canonicalTableName(region, tableName);
+        tableStore.put(regionKey(region, canonicalTableName), table);
+        LOG.infov("Updated replicas for table {0} in region {1}: {2}", canonicalTableName, region, replicas);
+        return table;
+    }
+
+    public void validateReplicaUpdates(String tableName, List<String> addRegions,
+                                       List<String> removeRegions, List<String> updateRegions, String region) {
+        validateReplicaUpdatesAndGetTable(tableName, addRegions, removeRegions, updateRegions, region);
+    }
+
+    private TableDefinition validateReplicaUpdatesAndGetTable(
+            String tableName, List<String> addRegions, List<String> removeRegions,
+            List<String> updateRegions, String region) {
+        validateReplicaRegions(addRegions, region);
+        validateReplicaRegions(removeRegions, region);
+        validateReplicaRegions(updateRegions, region);
+        String canonicalTableName = canonicalTableName(region, tableName);
+        String storageKey = regionKey(region, canonicalTableName);
+        TableDefinition table = tableStore.get(storageKey)
+                .orElseThrow(() -> resourceNotFoundException(canonicalTableName));
+        if (updateRegions != null) {
+            for (String replicaRegion : updateRegions) {
+                if (!table.getReplicaRegions().contains(replicaRegion)) {
+                    throw new AwsException("ValidationException",
+                            "Replica " + replicaRegion + " does not exist", 400);
+                }
+            }
+        }
+        return table;
+    }
+
+    private static void validateReplicaRegions(List<String> replicaRegions, String localRegion) {
+        if (replicaRegions == null) {
+            return;
+        }
+        for (String replicaRegion : replicaRegions) {
+            if (replicaRegion == null || replicaRegion.isBlank()) {
+                throw new AwsException("ValidationException", "Replica RegionName must not be empty", 400);
+            }
+            if (replicaRegion.equals(localRegion)) {
+                throw new AwsException("ValidationException", LOCAL_REPLICA_UPDATE_ERROR, 400);
+            }
+        }
     }
 
     // --- TTL ---
@@ -1328,20 +1525,22 @@ public class DynamoDbService {
 
     void deleteExpiredItems() {
         int totalDeleted = 0;
+        // Runs with no request scope and must sweep every account's tables, not just the
+        // default one — scanAllAccountsRaw()'s key matches itemsByTable's directly.
         Map<String, TableDefinition> allTables;
         if (tableStore instanceof AccountAwareStorageBackend<TableDefinition> aware) {
-            allTables = aware.scanAllAccountsAsMap();
+            allTables = aware.scanAllAccountsRaw();
         } else {
             allTables = new HashMap<>();
-            tableStore.keys().forEach(k -> tableStore.get(k).ifPresent(v -> allTables.put(k, v)));
+            tableStore.keys().forEach(k -> tableStore.get(k).ifPresent(v -> allTables.put(scopedItemsKey(k), v)));
         }
         for (Map.Entry<String, TableDefinition> entry : allTables.entrySet()) {
-            String storageKey = entry.getKey();
+            String rawKey = entry.getKey();
             TableDefinition table = entry.getValue();
             if (!table.isTtlEnabled() || table.getTtlAttributeName() == null) {
                 continue;
             }
-            var items = itemsByTable.get(storageKey);
+            var items = itemsByTable.get(rawKey);
             if (items == null) continue;
 
             List<String> expiredKeys = items.entrySet().stream()
@@ -1351,6 +1550,9 @@ public class DynamoDbService {
 
             if (expiredKeys.isEmpty()) continue;
 
+            int slash = rawKey.indexOf('/');
+            String accountId = slash >= 0 ? rawKey.substring(0, slash) : null;
+            String storageKey = slash >= 0 ? rawKey.substring(slash + 1) : rawKey;
             String region = storageKey.split("::", 2)[0];
             for (String itemKey : expiredKeys) {
                 JsonNode removed = items.remove(itemKey);
@@ -1363,11 +1565,21 @@ public class DynamoDbService {
                     }
                 }
             }
-            persistItems(storageKey);
+            persistItemsForAccount(accountId, storageKey, items);
             totalDeleted += expiredKeys.size();
         }
         if (totalDeleted > 0) {
             LOG.infov("TTL sweeper removed {0} expired items", totalDeleted);
+        }
+    }
+
+    /** Like {@link #persistItems}, but for callers with no ambient request account to rely on. */
+    private void persistItemsForAccount(String accountId, String storageKey, Map<String, JsonNode> items) {
+        if (itemStore == null) return;
+        if (accountId != null && itemStore instanceof AccountAwareStorageBackend<Map<String, JsonNode>> aware) {
+            aware.putForAccount(accountId, storageKey, new HashMap<>(items));
+        } else {
+            itemStore.put(storageKey, new HashMap<>(items));
         }
     }
 
@@ -1420,7 +1632,7 @@ public class DynamoDbService {
                                     JsonNode exprAttrNames, JsonNode exprAttrValues, String returnValuesOnConditionCheckFailure) {
         DynamoDbReservedWords.check(conditionExpression, "ConditionExpression");
         if (!matchesFilterExpression(existingItem, conditionExpression, exprAttrNames, exprAttrValues)) {
-            if ("ALL_OLD".equals(returnValuesOnConditionCheckFailure)){                
+            if ("ALL_OLD".equals(returnValuesOnConditionCheckFailure)){
                 throw new ConditionalCheckFailedException(existingItem);
             }
             else {
@@ -1439,8 +1651,14 @@ public class DynamoDbService {
             throw new AwsException("ValidationException",
                     "Invalid UpdateExpression: The expression can not be empty;", 400);
         }
-        DynamoDbReservedWords.check(expression, "UpdateExpression");
-        String remaining = expression.trim();
+        // AWS tokenizes UpdateExpression whitespace-insensitively, so collapse runs of
+        // whitespace (newlines, tabs, multiple spaces) so clause-keyword dispatch and the
+        // comma-separated action parsing below work regardless of formatting. Normalize
+        // before the reserved-word check too: its function-call lookahead skips only
+        // literal spaces, so on a raw "if_not_exists\n(...)" it would read the function
+        // name as a bare identifier instead.
+        String remaining = expression.trim().replaceAll("\\s+", " ");
+        DynamoDbReservedWords.check(remaining, "UpdateExpression");
 
         while (!remaining.isEmpty()) {
             String upper = remaining.toUpperCase();
@@ -1552,7 +1770,7 @@ public class DynamoDbService {
                     throw new AwsException("ValidationException",
                             "The parameter cannot be converted to a numeric value", 400);
                 }
-            } else if (valuePart.startsWith("if_not_exists(")) {
+            } else if (startsWithFunctionCall(valuePart, "if_not_exists")) {
                 // if_not_exists(attrRef, fallbackExpr) evaluates to:
                 //   attrRef's current value  — when attrRef exists in the item
                 //   fallbackExpr             — otherwise
@@ -1575,7 +1793,7 @@ public class DynamoDbService {
                         setValueAtPath(item, attrPath, resolved, exprAttrNames);
                     }
                 }
-            } else if (valuePart.toLowerCase().startsWith("list_append(")) {
+            } else if (startsWithFunctionCall(valuePart.toLowerCase(), "list_append")) {
                 int open = valuePart.indexOf('(');
                 int close = valuePart.lastIndexOf(')');
                 if (open >= 0 && close > open) {
@@ -1586,16 +1804,22 @@ public class DynamoDbService {
                         String arg2 = inner.substring(commaPos + 1).trim();
                         JsonNode list1 = evaluateSetExpr(snapshot, arg1, exprAttrNames, exprAttrValues);
                         JsonNode list2 = evaluateSetExpr(snapshot, arg2, exprAttrNames, exprAttrValues);
-                        if (list1 != null && list2 != null && list1.has("L") && list2.has("L")) {
-                            com.fasterxml.jackson.databind.node.ArrayNode merged =
-                                    com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.arrayNode();
-                            list1.get("L").forEach(merged::add);
-                            list2.get("L").forEach(merged::add);
-                            com.fasterxml.jackson.databind.node.ObjectNode result =
-                                    com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode();
-                            result.set("L", merged);
-                            item.set(attrName, result);
+                        if (list1 == null || list2 == null) {
+                            throw new AwsException("ValidationException",
+                                    "The provided expression refers to an attribute that does not exist in the item", 400);
                         }
+                        if (!list1.has("L") || !list2.has("L")) {
+                            throw new AwsException("ValidationException",
+                                    "An operand in the update expression has an incorrect data type", 400);
+                        }
+                        com.fasterxml.jackson.databind.node.ArrayNode merged =
+                                com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.arrayNode();
+                        list1.get("L").forEach(merged::add);
+                        list2.get("L").forEach(merged::add);
+                        com.fasterxml.jackson.databind.node.ObjectNode result =
+                                com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode();
+                        result.set("L", merged);
+                        item.set(attrName, result);
                     }
                 }
             } else if (valuePart.startsWith(":") && exprAttrValues != null) {
@@ -1647,7 +1871,7 @@ public class DynamoDbService {
 
     private JsonNode evaluateSetExpr(ObjectNode item, String expr,
                                      JsonNode exprAttrNames, JsonNode exprAttrValues) {
-        if (expr.toLowerCase().startsWith("if_not_exists(")) {
+        if (startsWithFunctionCall(expr.toLowerCase(), "if_not_exists")) {
             String[] args = extractFunctionArgs(expr);
             if (args.length == 2) {
                 String checkAttr = resolveAttributeName(args[0].trim(), exprAttrNames);
@@ -1710,15 +1934,15 @@ public class DynamoDbService {
             String[] parts = clause.split("\\s+", 3);
             if (parts.length < 2) break;
 
-            String attrName = resolveAttributeName(parts[0], exprAttrNames);
+            String attrPath = parts[0];
             String valuePlaceholder = parts[1].replaceAll(",.*", "").trim();
 
             if (valuePlaceholder.startsWith(":") && exprAttrValues != null) {
                 JsonNode addValue = exprAttrValues.get(valuePlaceholder);
                 if (addValue != null) {
-                    JsonNode existingValue = item.get(attrName);
+                    JsonNode existingValue = getValueAtPath(item, attrPath, exprAttrNames);
                     JsonNode newValue = applyAddOperation(existingValue, addValue);
-                    item.set(attrName, newValue);
+                    setValueAtPath(item, attrPath, newValue, exprAttrNames);
                 }
             }
 
@@ -1821,19 +2045,19 @@ public class DynamoDbService {
             String[] parts = clause.split("\\s+", 3);
             if (parts.length < 2) break;
 
-            String attrName = resolveAttributeName(parts[0], exprAttrNames);
+            String attrPath = parts[0];
             String valuePlaceholder = parts[1].replaceAll(",.*", "").trim();
 
             if (valuePlaceholder.startsWith(":") && exprAttrValues != null) {
                 JsonNode deleteValue = exprAttrValues.get(valuePlaceholder);
                 if (deleteValue != null) {
-                    JsonNode existingValue = item.get(attrName);
+                    JsonNode existingValue = getValueAtPath(item, attrPath, exprAttrNames);
                     if (existingValue != null) {
                         JsonNode newValue = applyDeleteOperation(existingValue, deleteValue);
                         if (newValue == null) {
-                            item.remove(attrName);
+                            removeValueAtPath(item, attrPath, exprAttrNames);
                         } else {
-                            item.set(attrName, newValue);
+                            setValueAtPath(item, attrPath, newValue, exprAttrNames);
                         }
                     }
                 }
@@ -2247,6 +2471,18 @@ public class DynamoDbService {
         return -1;
     }
 
+    /**
+     * Whether {@code value} opens with a call to {@code functionName}, tolerating optional
+     * whitespace between the function name and the opening parenthesis. DynamoDB's
+     * UpdateExpression grammar is whitespace-insensitive there, but SDKs commonly emit the
+     * spaced form (e.g. PynamoDB always generates {@code "list_append (x, y)"}), which a plain
+     * {@code startsWith(functionName + "(")} rejects.
+     */
+    private static boolean startsWithFunctionCall(String value, String functionName) {
+        return value.startsWith(functionName)
+                && value.substring(functionName.length()).stripLeading().startsWith("(");
+    }
+
     private String[] extractFunctionArgs(String funcCall) {
         int open = funcCall.indexOf('(');
         int close = funcCall.lastIndexOf(')');
@@ -2267,9 +2503,17 @@ public class DynamoDbService {
         return region + "::" + tableName;
     }
 
+    // itemsByTable/itemLocks are plain fields, unlike tableStore/itemStore, so they get no
+    // automatic account prefixing — without this, two accounts with a same-named table would
+    // share one item map. Matches scanAllAccountsRaw()'s key format, so a raw key from there
+    // can be used directly as an itemsByTable/itemLocks key.
+    private String scopedItemsKey(String storageKey) {
+        return regionResolver.getAccountId() + "/" + storageKey;
+    }
+
     private ReentrantLock lockFor(String storageKey, String itemKey) {
         return itemLocks
-                .computeIfAbsent(storageKey, k -> new ConcurrentHashMap<>())
+                .computeIfAbsent(scopedItemsKey(storageKey), k -> new ConcurrentHashMap<>())
                 .computeIfAbsent(itemKey, k -> new ReentrantLock());
     }
 
@@ -2308,7 +2552,7 @@ public class DynamoDbService {
             throw new AwsException("ValidationException",
                     "One of the required keys was not given a value", 400);
         }
-        validateKeyAttributeValue(pkAttr, pkName);
+        validateKeyAttributeValue(table, pkAttr, pkName, isKeyArg);
 
         String pk = extractScalarValue(pkAttr);
         String skName = table.getSortKeyName();
@@ -2322,31 +2566,136 @@ public class DynamoDbService {
                 throw new AwsException("ValidationException",
                         "One of the required keys was not given a value", 400);
             }
-            validateKeyAttributeValue(skAttr, skName);
+            validateKeyAttributeValue(table, skAttr, skName, isKeyArg);
             return pk + "#" + extractScalarValue(skAttr);
         }
         return pk;
     }
 
-    private void validateKeyAttributeValue(JsonNode attr, String keyName) {
-        if (attr != null && attr.has("S") && attr.get("S").asText().isEmpty()) {
+    // A wire-format AttributeValue must be a JSON object with exactly one type member.
+    // AWS enforces this for every attribute value; floci additionally relies on it
+    // wherever a value becomes part of a storage or index key.
+    private void validateAttributeValueShape(JsonNode attr) {
+        if (!attr.isObject()) {
+            // AWS's protocol layer rejects non-object values before validation runs.
+            throw new AwsException("SerializationException", "Unexpected value type in payload", 400);
+        }
+        if (attr.isEmpty()) {
+            throw new AwsException("ValidationException",
+                    "Supplied AttributeValue is empty, must contain exactly one of the supported datatypes", 400);
+        }
+        if (attr.size() > 1) {
+            throw new AwsException("ValidationException",
+                    "Supplied AttributeValue has more than one datatypes set, "
+                    + "must contain exactly one of the supported datatypes", 400);
+        }
+    }
+
+    private void validateKeyAttributeValue(TableDefinition table, JsonNode attr, String keyName, boolean isKeyArg) {
+        if (attr == null) {
+            return;
+        }
+        validateAttributeValueShape(attr);
+        String expectedType = keyAttributeType(table, keyName);
+        if (expectedType != null && !attr.has(expectedType)) {
+            // AWS words the type mismatch differently for a Key argument
+            // (Get/Delete/Update) than for a PutItem item body.
+            if (isKeyArg) {
+                throw new AwsException("ValidationException",
+                        "The provided key element does not match the schema", 400);
+            }
+            throw new AwsException("ValidationException",
+                    "One or more parameter values were invalid: Type mismatch for key " + keyName
+                    + " expected: " + expectedType + " actual: " + attr.fieldNames().next(), 400);
+        }
+        if (attr.has("S") && attr.get("S").asText().isEmpty()) {
             throw new AwsException("ValidationException",
                     "One or more parameter values were invalid: "
                     + "The AttributeValue for a key attribute cannot contain an empty string value. Key: " + keyName, 400);
         }
     }
 
+    private String keyAttributeType(TableDefinition table, String keyName) {
+        if (table.getAttributeDefinitions() == null) {
+            return null;
+        }
+        return table.getAttributeDefinitions().stream()
+                .filter(def -> keyName.equals(def.getAttributeName()))
+                .map(AttributeDefinition::getAttributeType)
+                .findFirst().orElse(null);
+    }
+
+    // AWS validates GSI/LSI key attribute values on every write that produces the item,
+    // but only when the attribute is present — sparse indexes allow it to be absent.
+    private void validateIndexKeyTypes(TableDefinition table, JsonNode item, boolean isUpdate) {
+        if (table.getGlobalSecondaryIndexes() != null) {
+            for (GlobalSecondaryIndex gsi : table.getGlobalSecondaryIndexes()) {
+                validateIndexKeySchema(table, item, gsi.getIndexName(), gsi.getKeySchema(), isUpdate);
+            }
+        }
+        if (table.getLocalSecondaryIndexes() != null) {
+            for (LocalSecondaryIndex lsi : table.getLocalSecondaryIndexes()) {
+                validateIndexKeySchema(table, item, lsi.getIndexName(), lsi.getKeySchema(), isUpdate);
+            }
+        }
+    }
+
+    private void validateIndexKeySchema(TableDefinition table, JsonNode item,
+                                        String indexName, List<KeySchemaElement> keySchema,
+                                        boolean isUpdate) {
+        if (keySchema == null) {
+            return;
+        }
+        for (KeySchemaElement element : keySchema) {
+            String attrName = element.getAttributeName();
+            JsonNode attr = item.get(attrName);
+            if (attr == null) {
+                continue;
+            }
+            validateAttributeValueShape(attr);
+            String expectedType = keyAttributeType(table, attrName);
+            if (expectedType != null && !attr.has(expectedType)) {
+                throw new AwsException("ValidationException",
+                        "One or more parameter values were invalid: Type mismatch for Index Key " + attrName
+                        + " Expected: " + expectedType + " Actual: " + attr.fieldNames().next()
+                        + " IndexName: " + indexName, 400);
+            }
+            if (attr.has("S") && attr.get("S").asText().isEmpty()) {
+                // AWS uses different wording for UpdateItem than for writes of a whole item.
+                if (isUpdate) {
+                    throw new AwsException("ValidationException",
+                            "One or more parameter values are not valid. The update expression attempted to "
+                            + "update a secondary index key to a value that is not supported. "
+                            + "The AttributeValue for a key attribute cannot contain an empty string value.", 400);
+                }
+                throw new AwsException("ValidationException",
+                        "One or more parameter values are not valid. A value specified for a secondary "
+                        + "index key is not supported. The AttributeValue for a key attribute cannot "
+                        + "contain an empty string value. IndexName: " + indexName + ", IndexKey: " + attrName, 400);
+            }
+        }
+    }
+
     private String buildItemKeyFromNode(JsonNode item, String pkName, String skName) {
+        return buildItemKeyFromNode(item, pkName, skName == null ? List.of() : List.of(skName));
+    }
+
+    // Builds a cursor-matching string from the partition key plus every sort-key component in
+    // key-schema order. A composite (multi-RANGE) index cursor must incorporate all components,
+    // otherwise rows sharing the first RANGE value collapse to the same key and pagination can
+    // skip or duplicate items. See floci-io/floci#1675.
+    private String buildItemKeyFromNode(JsonNode item, String pkName, List<String> skNames) {
         JsonNode pkAttr = item.get(pkName);
         if (pkAttr == null) return "";
         String pk = extractScalarValue(pkAttr);
-        if (skName != null) {
+        StringBuilder key = new StringBuilder(pk != null ? pk : "");
+        for (String skName : skNames) {
             JsonNode skAttr = item.get(skName);
             if (skAttr != null) {
-                return pk + "#" + extractScalarValue(skAttr);
+                key.append("#").append(extractScalarValue(skAttr));
             }
         }
-        return pk != null ? pk : "";
+        return key.toString();
     }
 
     JsonNode buildKeyNode(TableDefinition table, JsonNode item, String pkName, String skName) {
@@ -2355,13 +2704,23 @@ public class DynamoDbService {
 
     JsonNode buildKeyNode(TableDefinition table, JsonNode item,
                           String pkName, String skName, boolean isIndexQuery) {
+        return buildKeyNode(table, item, pkName,
+                skName == null ? List.of() : List.of(skName), isIndexQuery);
+    }
+
+    // Emits a LastEvaluatedKey carrying the partition key plus every sort-key component in
+    // key-schema order (a composite index has more than one), and, for index queries, the base
+    // table key so the cursor uniquely identifies a row. Emitting only the first RANGE attribute
+    // loses composite key identity. See floci-io/floci#1675.
+    JsonNode buildKeyNode(TableDefinition table, JsonNode item,
+                          String pkName, List<String> skNames, boolean isIndexQuery) {
         com.fasterxml.jackson.databind.node.ObjectNode keyNode =
                 com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode();
         JsonNode pkAttr = item.get(pkName);
         if (pkAttr != null) {
             keyNode.set(pkName, pkAttr);
         }
-        if (skName != null) {
+        for (String skName : skNames) {
             JsonNode skAttr = item.get(skName);
             if (skAttr != null) {
                 keyNode.set(skName, skAttr);
@@ -2373,7 +2732,7 @@ public class DynamoDbService {
             if (!tablePk.equals(pkName) && item.get(tablePk) != null) {
                 keyNode.set(tablePk, item.get(tablePk));
             }
-            if (tableSk != null && !tableSk.equals(skName) && item.get(tableSk) != null) {
+            if (tableSk != null && !skNames.contains(tableSk) && item.get(tableSk) != null) {
                 keyNode.set(tableSk, item.get(tableSk));
             }
         }
@@ -2418,14 +2777,18 @@ public class DynamoDbService {
 
         return switch (op) {
             case "EQ" -> {
-                if (attrValue == null) yield false;
-                yield ExpressionEvaluator.compareAttributeValues(attrValue, compareAttr != null ? compareAttr : attrValue) == 0
-                        && actual != null && actual.equals(compareValue);
+                if (attrValue == null || compareAttr == null) {
+                    yield false;
+                }
+                // Deep equality, so set/list/map values compare by content rather than
+                // collapsing to an empty scalar and matching everything.
+                yield attributeValuesEqual(attrValue, compareAttr);
             }
             case "NE" -> {
-                if (attrValue == null) yield true;
-                if (actual == null || compareValue == null) yield true;
-                yield !actual.equals(compareValue);
+                if (attrValue == null || compareAttr == null) {
+                    yield true;
+                }
+                yield !attributeValuesEqual(attrValue, compareAttr);
             }
             case "NULL" -> attrValue == null;
             case "NOT_NULL" -> attrValue != null;
@@ -2481,61 +2844,24 @@ public class DynamoDbService {
     }
 
     private List<JsonNode> queryWithExpression(ConcurrentSkipListMap<String, JsonNode> items,
-                                                String pkName, String skName,
+                                                String partitionKeyName,
+                                                String partitionKeyValuePlaceholder,
                                                 String expression,
                                                 JsonNode expressionAttrValues,
                                                 JsonNode exprAttrNames) {
         List<JsonNode> results = new ArrayList<>();
-
-        // Use token-based splitting that correctly handles BETWEEN...AND and compact format
-        String[] keyParts = ExpressionEvaluator.splitKeyCondition(expression);
-        String pkExpression = keyParts[0];
-        String skExpression = keyParts[1];
-
-        // Extract pk attr name from expression (may use #alias)
-        // Strip outer parens for PK extraction (e.g. "(#f0 = :v0)" → "#f0 = :v0")
-        String pkExprStripped = pkExpression.trim();
-        while (pkExprStripped.startsWith("(") && pkExprStripped.endsWith(")")) {
-            pkExprStripped = pkExprStripped.substring(1, pkExprStripped.length() - 1).trim();
-        }
-        String pkAttrInExpr = pkExprStripped.split("\\s*=\\s*")[0].trim();
-        String resolvedPkName = resolveAttributeName(pkAttrInExpr, exprAttrNames);
-
-        // Validate the PK attribute in the expression matches the actual table/index PK
-        if (!resolvedPkName.equals(pkName)) {
-            throw new AwsException("ValidationException",
-                    "Query condition missed key schema element: " + pkName, 400);
-        }
-
-        // Extract pk value placeholder
-        int colonIdx = pkExprStripped.indexOf(':');
-        String pkPlaceholder = null;
-        if (colonIdx >= 0) {
-            int end = colonIdx + 1;
-            while (end < pkExprStripped.length() && (Character.isLetterOrDigit(pkExprStripped.charAt(end)) || pkExprStripped.charAt(end) == '_')) {
-                end++;
-            }
-            pkPlaceholder = pkExprStripped.substring(colonIdx, end);
-        }
-        String pkValue = pkPlaceholder != null && expressionAttrValues != null
-                ? extractScalarValue(expressionAttrValues.get(pkPlaceholder))
+        String partitionKeyValue = expressionAttrValues != null && partitionKeyValuePlaceholder != null
+                ? extractScalarValue(expressionAttrValues.get(partitionKeyValuePlaceholder))
                 : null;
-
         for (JsonNode item : items.values()) {
-            if (!item.has(resolvedPkName)) continue;
-            if (pkValue != null && !matchesAttributeValue(item.get(resolvedPkName), pkValue)) {
+            if (partitionKeyValue != null
+                    && !matchesAttributeValue(item.get(partitionKeyName), partitionKeyValue)) {
                 continue;
             }
-
-            if (skExpression != null && skName != null) {
-                if (!ExpressionEvaluator.matches(skExpression, item, exprAttrNames, expressionAttrValues)) {
-                    continue;
-                }
+            if (ExpressionEvaluator.matches(expression, item, exprAttrNames, expressionAttrValues)) {
+                results.add(item);
             }
-
-            results.add(item);
         }
-
         return results;
     }
 
@@ -2600,7 +2926,7 @@ public class DynamoDbService {
         }
 
         ExportDescription finalDesc = desc;
-        ConcurrentSkipListMap<String, JsonNode> tableItems = itemsByTable.get(storageKey);
+        ConcurrentSkipListMap<String, JsonNode> tableItems = itemsByTable.get(scopedItemsKey(storageKey));
         List<JsonNode> snapshot = tableItems != null
                 ? List.copyOf(tableItems.values())
                 : List.of();
@@ -2802,5 +3128,27 @@ public class DynamoDbService {
                 .toList();
 
         return new ListExportsResult(summaries, newNextToken);
+    }
+
+    @Override
+    public List<ExplorerResource> getResources() {
+        List<ExplorerResource> resources = new ArrayList<>();
+        for (TableDefinition table : tableStore.scan(k -> true)) {
+            if (table.getTableArn() == null) {
+                continue;
+            }
+            AwsArnUtils.Arn parsed = AwsArnUtils.parse(table.getTableArn());
+            resources.add(new ExplorerResource(
+                    table.getTableArn(), "dynamodb:table", "dynamodb",
+                    parsed.region(), parsed.accountId(),
+                    table.getCreationDateTime() != null ? table.getCreationDateTime() : Instant.now(),
+                    table.getTags() != null ? table.getTags() : Map.of()));
+        }
+        return resources;
+    }
+
+    @Override
+    public Set<SupportedResourceType> getSupportedResourceTypes() {
+        return Set.of(new SupportedResourceType("dynamodb:table", "dynamodb", true));
     }
 }

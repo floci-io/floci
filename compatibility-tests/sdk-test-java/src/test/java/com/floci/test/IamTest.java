@@ -27,6 +27,8 @@ import software.amazon.awssdk.services.iam.model.DeleteRolePolicyRequest;
 import software.amazon.awssdk.services.iam.model.DeleteUserRequest;
 import software.amazon.awssdk.services.iam.model.DetachRolePolicyRequest;
 import software.amazon.awssdk.services.iam.model.DetachUserPolicyRequest;
+import software.amazon.awssdk.services.iam.model.GetAccountSummaryResponse;
+import software.amazon.awssdk.services.iam.model.SummaryKeyType;
 import software.amazon.awssdk.services.iam.model.GetGroupRequest;
 import software.amazon.awssdk.services.iam.model.GetGroupResponse;
 import software.amazon.awssdk.services.iam.model.GetInstanceProfileRequest;
@@ -45,6 +47,7 @@ import software.amazon.awssdk.services.iam.model.ListAttachedRolePoliciesRequest
 import software.amazon.awssdk.services.iam.model.ListAttachedRolePoliciesResponse;
 import software.amazon.awssdk.services.iam.model.ListAttachedUserPoliciesRequest;
 import software.amazon.awssdk.services.iam.model.ListAttachedUserPoliciesResponse;
+import software.amazon.awssdk.services.iam.model.ListEntitiesForPolicyResponse;
 import software.amazon.awssdk.services.iam.model.ListGroupsForUserRequest;
 import software.amazon.awssdk.services.iam.model.ListGroupsForUserResponse;
 import software.amazon.awssdk.services.iam.model.ListInstanceProfilesResponse;
@@ -112,6 +115,13 @@ class IamTest {
                     iam.detachUserPolicy(DetachUserPolicyRequest.builder()
                             .userName(USER_NAME).policyArn(policyArn).build());
                 } catch (Exception ignored) {}
+                try {
+                    iam.detachGroupPolicy(request -> request
+                            .groupName(GROUP_NAME).policyArn(policyArn));
+                } catch (Exception cleanupError) {
+                    System.err.printf("Could not detach IAM test group policy during cleanup: %s%n",
+                            cleanupError.getMessage());
+                }
             }
             try {
                 iam.deleteRole(DeleteRoleRequest.builder().roleName(ROLE_NAME).build());
@@ -374,6 +384,46 @@ class IamTest {
 
         assertThat(response.attachedPolicies())
                 .anyMatch(p -> policyArn.equals(p.policyArn()));
+    }
+
+    @Test
+    @Order(100)
+    void listEntitiesForPolicy() {
+        Assumptions.assumeTrue(policyArn != null);
+
+        iam.attachGroupPolicy(request -> request
+                .groupName(GROUP_NAME).policyArn(policyArn));
+
+        ListEntitiesForPolicyResponse response = iam.listEntitiesForPolicy(request -> request
+                .policyArn(policyArn));
+
+        assertThat(response.policyRoles()).anySatisfy(role -> {
+            assertThat(role.roleName()).isEqualTo(ROLE_NAME);
+            assertThat(role.roleId()).isNotBlank();
+        });
+        assertThat(response.policyUsers()).anySatisfy(user -> {
+            assertThat(user.userName()).isEqualTo(USER_NAME);
+            assertThat(user.userId()).isNotBlank();
+        });
+        assertThat(response.policyGroups()).anySatisfy(group -> {
+            assertThat(group.groupName()).isEqualTo(GROUP_NAME);
+            assertThat(group.groupId()).isNotBlank();
+        });
+        assertThat(response.isTruncated()).isFalse();
+    }
+
+    @Test
+    @Order(101)
+    void getAccountSummary() {
+        GetAccountSummaryResponse response = iam.getAccountSummary();
+        assertThat(response.summaryMap()).hasSize(34);
+        assertThat(response.summaryMap().get(SummaryKeyType.USERS_QUOTA)).isEqualTo(5000);
+        assertThat(response.summaryMap().get(SummaryKeyType.GROUPS_QUOTA)).isEqualTo(300);
+        assertThat(response.summaryMap().get(SummaryKeyType.ROLES_QUOTA)).isEqualTo(1000);
+        assertThat(response.summaryMap().get(SummaryKeyType.POLICIES_QUOTA)).isEqualTo(1500);
+        assertThat(response.summaryMap().get(SummaryKeyType.INSTANCE_PROFILES_QUOTA)).isEqualTo(1000);
+        assertThat(response.summaryMap().get(SummaryKeyType.ATTACHED_POLICIES_PER_ROLE_QUOTA)).isEqualTo(20);
+        assertThat(response.summaryMap().get(SummaryKeyType.POLICY_SIZE_QUOTA)).isEqualTo(6144);
     }
 
     @Test

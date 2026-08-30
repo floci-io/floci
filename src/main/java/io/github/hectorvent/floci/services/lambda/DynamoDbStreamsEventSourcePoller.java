@@ -62,10 +62,36 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
     public void startPersistedPollers() {
         for (EventSourceMapping esm : esmStore.listAll()) {
             if (esm.isEnabled() && esm.getEventSourceArn().contains(":dynamodb:")) {
+                discardStaleShardCheckpoints(esm);
                 startPolling(esm);
             }
         }
         LOG.infov("DynamoDbStreamsEventSourcePoller initialized");
+    }
+
+    /**
+     * Discards any shard checkpoints a DynamoDB Streams ESM persisted during a previous run,
+     * before its poller is (re)started at startup.
+     *
+     * <p>A DynamoDB stream is volatile: its record buffer and its {@code AtomicLong} sequence
+     * counter live only in memory (see {@link DynamoDbStreamService}) and are never persisted, so a
+     * restart recreates the stream empty and its sequence numbers start over from
+     * {@code 000000000000000000001}. A {@code shardSequenceNumbers} checkpoint saved during the
+     * previous run therefore points <em>past</em> every record in the new stream epoch: resuming
+     * from it with an {@code AFTER_SEQUENCE_NUMBER} iterator silently skips every freshly written
+     * record — no invoke, no error, no log — until the new sequence numbers climb back above the
+     * stale value. Clearing the checkpoint lets the poller resume from {@code TRIM_HORIZON}, which
+     * matches the volatility of the stream itself. See issue #2076.
+     */
+    private void discardStaleShardCheckpoints(EventSourceMapping esm) {
+        if (esm.getShardSequenceNumbers().isEmpty()) {
+            return;
+        }
+        LOG.infov("DynamoDB Streams ESM {0}: discarding {1} stale shard checkpoint(s) persisted by a "
+                        + "previous run (stream sequence numbers reset on restart); resuming from TRIM_HORIZON",
+                esm.getUuid(), esm.getShardSequenceNumbers().size());
+        esm.getShardSequenceNumbers().clear();
+        esmStore.saveForAccount(esm.getAccountId(), esm);
     }
 
     @PreDestroy
@@ -105,7 +131,7 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
         }
     }
 
-    private void pollAndInvoke(EventSourceMapping esm) {
+    void pollAndInvoke(EventSourceMapping esm) {
         if (activePolls.putIfAbsent(esm.getUuid(), Boolean.TRUE) != null) {
             return;
         }

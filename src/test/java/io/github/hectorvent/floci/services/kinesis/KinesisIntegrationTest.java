@@ -10,7 +10,9 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.math.BigDecimal;
 import java.nio.ByteBuffer;
+import java.util.regex.Pattern;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
@@ -21,6 +23,9 @@ import static org.junit.jupiter.api.Assertions.*;
 class KinesisIntegrationTest {
 
     private static final String KINESIS_CONTENT_TYPE = "application/x-amz-json-1.1";
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final Pattern CREATION_TIMESTAMP_PATTERN = Pattern.compile(
+            "\\\"StreamCreationTimestamp\\\"\\s*:\\s*(-?\\d+(?:\\.\\d+)?)(?=\\s*[,}])");
 
     @BeforeAll
     static void configureRestAssured() {
@@ -87,6 +92,38 @@ class KinesisIntegrationTest {
         .then()
             .statusCode(200)
             .body("Shards.size()", equalTo(2));
+    }
+
+    @Test
+    @Order(4)
+    void describeStreamReturnsPlainDecimalCreationTimestamp() throws Exception {
+        String responseBody = given()
+            .header("X-Amz-Target", "Kinesis_20131202.DescribeStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "list-shards-test"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+
+        var matcher = CREATION_TIMESTAMP_PATTERN.matcher(responseBody);
+        assertTrue(matcher.find(), "timestamp must be serialized as a plain JSON decimal: " + responseBody);
+        String timestampLexeme = matcher.group(1);
+        BigDecimal timestamp = new BigDecimal(timestampLexeme);
+        assertTrue(timestamp.signum() > 0);
+        assertTrue(timestamp.stripTrailingZeros().scale() <= 3);
+
+        JsonNode timestampNode = MAPPER.readTree(responseBody)
+                .path("StreamDescription")
+                .path("StreamCreationTimestamp");
+        assertTrue(timestampNode.isNumber());
+        assertEquals(0, timestamp.compareTo(timestampNode.decimalValue()),
+                "serialized timestamp must preserve the numeric value");
+        assertFalse(timestampLexeme.contains("E"));
+        assertFalse(timestampLexeme.contains("e"));
     }
 
     @Test
@@ -1028,6 +1065,132 @@ class KinesisIntegrationTest {
         .then()
             .statusCode(400)
             .body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    @Order(63)
+    void putRecordRejectsRecordOverSizeLimit() {
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.CreateStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"StreamName\": \"size-limit-test\", \"ShardCount\": 1}")
+        .when().post("/")
+        .then().statusCode(200);
+
+        String oversized = java.util.Base64.getEncoder().encodeToString(new byte[1_048_577]);
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.PutRecord")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"StreamName\": \"size-limit-test\","
+                + "\"Data\": \"" + oversized + "\","
+                + "\"PartitionKey\": \"pk1\"}")
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidArgumentException"));
+    }
+
+    @Test
+    @Order(64)
+    void putRecordsRejectsWholeBatchOverSizeLimit() {
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.CreateStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"StreamName\": \"batch-size-limit-test\", \"ShardCount\": 1}")
+        .when().post("/")
+        .then().statusCode(200);
+
+        String oversized = java.util.Base64.getEncoder().encodeToString(new byte[1_048_577]);
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.PutRecords")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"StreamName\": \"batch-size-limit-test\","
+                + "\"Records\": ["
+                + "{\"Data\": \"dGVzdA==\", \"PartitionKey\": \"pk1\"},"
+                + "{\"Data\": \"" + oversized + "\", \"PartitionKey\": \"pk2\"}"
+                + "]}")
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidArgumentException"));
+
+        // The valid first record must not have landed either
+        String iterator = given()
+            .header("X-Amz-Target", "Kinesis_20131202.GetShardIterator")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"StreamName\": \"batch-size-limit-test\", \"ShardId\": \"shardId-000000000000\", \"ShardIteratorType\": \"TRIM_HORIZON\"}")
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().jsonPath().getString("ShardIterator");
+
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.GetRecords")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"ShardIterator\": \"" + iterator + "\"}")
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body("Records.size()", equalTo(0));
+    }
+
+    @Test
+    @Order(65)
+    void createStreamAppliesTagsFromTheRequest() {
+        // CreateStream's Tags member used to be dropped, which Terraform surfaces as a
+        // permanent tags diff: aws_kinesis_stream tags at create time, then reads back
+        // with ListTagsForStream and finds nothing.
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.CreateStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "create-with-tags", "ShardCount": 1,
+                 "Tags": {"Foo": "Bar", "gw:example": "kinesis"}}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.ListTagsForStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "create-with-tags"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Tags.size()", equalTo(2))
+            .body("Tags.find { it.Key == 'Foo' }.Value", equalTo("Bar"))
+            .body("Tags.find { it.Key == 'gw:example' }.Value", equalTo("kinesis"));
+    }
+
+    @Test
+    @Order(66)
+    void createStreamWithoutTagsLeavesTheStreamUntagged() {
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.CreateStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "create-without-tags", "ShardCount": 1}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.ListTagsForStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "create-without-tags"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Tags.size()", equalTo(0));
     }
 
     private JsonNode decodeFirstEventStreamMessage(byte[] data) throws Exception {

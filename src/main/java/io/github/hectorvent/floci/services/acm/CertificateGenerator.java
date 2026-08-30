@@ -84,7 +84,7 @@ public class CertificateGenerator {
      * or using virtual threads for concurrent certificate generation.</p>
      */
     public GeneratedCertificate generateCertificate(String domainName, List<String> sans, KeyAlgorithm keyAlgorithm) {
-        return buildCertificate(domainName, sans, keyAlgorithm, ISSUER_DN, false);
+        return buildCertificate(domainName, sans, keyAlgorithm, ISSUER_DN, false, null);
     }
 
     /**
@@ -95,13 +95,25 @@ public class CertificateGenerator {
      * Floci once the certificate is installed in their CA bundle.
      */
     public GeneratedCertificate generateSelfSignedCertificate(String domainName, List<String> sans, KeyAlgorithm keyAlgorithm) {
-        return buildCertificate(domainName, sans, keyAlgorithm, "CN=" + domainName, true);
+        return buildCertificate(domainName, sans, keyAlgorithm, "CN=" + domainName, true, null);
+    }
+
+    /**
+     * Same as {@link #generateSelfSignedCertificate(String, List, KeyAlgorithm)}, but signs the
+     * certificate with a caller-supplied key pair instead of minting a new one. Use this to reissue
+     * a trust anchor with an updated SAN list without changing its key: a client that already
+     * trusts a certificate sharing this key will still validate the new one, since the reissued
+     * certificate's signature verifies against the same public key.
+     */
+    public GeneratedCertificate generateSelfSignedCertificate(String domainName, List<String> sans,
+                                                              KeyAlgorithm keyAlgorithm, KeyPair keyPair) {
+        return buildCertificate(domainName, sans, keyAlgorithm, "CN=" + domainName, true, keyPair);
     }
 
     private GeneratedCertificate buildCertificate(String domainName, List<String> sans, KeyAlgorithm keyAlgorithm,
-                                                  String issuerDn, boolean asCa) {
+                                                  String issuerDn, boolean asCa, KeyPair suppliedKeyPair) {
         try {
-            KeyPair keyPair = generateKeyPair(keyAlgorithm);
+            KeyPair keyPair = suppliedKeyPair != null ? suppliedKeyPair : generateKeyPair(keyAlgorithm);
 
             Instant now = Instant.now();
             Instant notBefore = now;

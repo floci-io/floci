@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.stepfunctions;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbJsonHandler;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
 import io.github.hectorvent.floci.services.lambda.LambdaExecutorService;
@@ -41,9 +42,15 @@ class AslExecutorPathIntrinsicsTest {
                 mock(io.github.hectorvent.floci.services.s3.S3Service.class),
                 mock(io.github.hectorvent.floci.services.ecs.EcsService.class),
                 mock(io.github.hectorvent.floci.services.ecs.EcsJsonHandler.class),
+                mock(io.github.hectorvent.floci.services.eventbridge.EventBridgeHandler.class),
+                mock(io.github.hectorvent.floci.services.scheduler.SchedulerService.class),
+                mock(io.github.hectorvent.floci.services.scheduler.SchedulerController.class),
                 mapper,
                 new JsonataEvaluator(mapper),
-                mock(Instance.class));
+                mock(Instance.class),
+                mock(EmulatorConfig.class),
+                null,
+                null);
     }
 
     @Test
@@ -89,6 +96,14 @@ class AslExecutorPathIntrinsicsTest {
     void numericBracketSegmentIndexesIntoArray() throws Exception {
         JsonNode root = mapper.readTree("{\"items\":[\"a\",\"b\",\"c\"]}");
         assertEquals("b", executor.resolvePath("$.items[1]", root).asText());
+    }
+
+    @Test
+    void bracketQuotedMembersSupportNamesOutsideDotShorthand() throws Exception {
+        JsonNode root = mapper.readTree("{\"config\":{\"max-limit\":2},\"a.b\":3}");
+
+        assertEquals(2, executor.resolvePath("$['config']['max-limit']", root).asInt());
+        assertEquals(3, executor.resolvePath("$['a.b']", root).asInt());
     }
 
     @Test

@@ -18,9 +18,15 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicLong;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import java.util.ArrayList;
+import java.util.Set;
 
 @ApplicationScoped
-public class KinesisService {
+public class KinesisService implements ResourceProvider {
     private static final Logger LOG = Logger.getLogger(KinesisService.class);
     private static final Set<String> VALID_SHARD_LEVEL_METRICS = Set.of(
             "IncomingBytes", "IncomingRecords", "OutgoingBytes", "OutgoingRecords",
@@ -28,6 +34,14 @@ public class KinesisService {
             "IteratorAgeMilliseconds", "ALL");
     private static final Set<String> VALID_STREAM_MODES = Set.of("PROVISIONED", "ON_DEMAND");
     private static final String DEFAULT_STREAM_MODE = "PROVISIONED";
+    private static final int DEFAULT_INSPECTION_RECORD_LIMIT = 100;
+    private static final int MAX_INSPECTION_RECORD_LIMIT = 1000;
+    // MaxRecordSizeInKiB bounds, as AWS constrains them on CreateStream and
+    // UpdateMaxRecordSize. The per-stream default lives on KinesisStream.
+    private static final int MIN_RECORD_SIZE_KIB = 1024;
+    private static final int MAX_RECORD_SIZE_KIB = 10240;
+    private static final int MAX_RECORDS_PER_REQUEST = 500;
+    private static final int MAX_REQUEST_SIZE_BYTES = 10 * 1024 * 1024;
 
     private final StorageBackend<String, KinesisStream> store;
     private final StorageBackend<String, KinesisConsumer> consumerStore;
@@ -56,10 +70,23 @@ public class KinesisService {
     }
 
     public KinesisStream createStream(String streamName, int shardCount, String streamMode, String region) {
+        return createStream(streamName, shardCount, streamMode, null, region);
+    }
+
+    /**
+     * @param maxRecordSizeInKiB CreateStream's optional MaxRecordSizeInKiB; null leaves the stream
+     *                           at the AWS default. It is a distinct value from 0, which AWS
+     *                           rejects as below the documented minimum.
+     */
+    public KinesisStream createStream(String streamName, int shardCount, String streamMode,
+                                      Integer maxRecordSizeInKiB, String region) {
         String resolvedMode = streamMode != null ? streamMode : DEFAULT_STREAM_MODE;
         if (!VALID_STREAM_MODES.contains(resolvedMode)) {
             throw new AwsException("InvalidArgumentException",
                     "StreamMode must be PROVISIONED or ON_DEMAND, got: " + resolvedMode, 400);
+        }
+        if (maxRecordSizeInKiB != null) {
+            validateMaxRecordSize(maxRecordSizeInKiB, "InvalidArgumentException");
         }
 
         String storageKey = regionKey(region, streamName);
@@ -71,6 +98,9 @@ public class KinesisService {
         KinesisStream stream = new KinesisStream(streamName, arn);
         stream.setAccountId(regionResolver.getAccountId());
         stream.setStreamMode(resolvedMode);
+        if (maxRecordSizeInKiB != null) {
+            stream.setMaxRecordSizeInKiB(maxRecordSizeInKiB);
+        }
 
         for (int i = 0; i < shardCount; i++) {
             String shardId = String.format("shardId-%012d", i);
@@ -109,6 +139,13 @@ public class KinesisService {
         return store.scan(key -> key.startsWith(prefix)).stream()
                 .map(KinesisStream::getStreamName)
                 .sorted()
+                .toList();
+    }
+
+    public List<KinesisStream> listStreamDetails(String region) {
+        String prefix = region + "::";
+        return store.scan(key -> key.startsWith(prefix)).stream()
+                .sorted(Comparator.comparing(KinesisStream::getStreamName))
                 .toList();
     }
 
@@ -359,8 +396,82 @@ public class KinesisService {
         return putRecordWithShardId(streamName, data, partitionKey, region).sequenceNumber();
     }
 
+    /** Record size as AWS measures it: the data blob plus the partition key. */
+    static int recordSize(int dataBytes, String partitionKey) {
+        return dataBytes
+                + (partitionKey != null ? partitionKey.getBytes(StandardCharsets.UTF_8).length : 0);
+    }
+
+    public void validateRecordSize(KinesisStream stream, byte[] data, String partitionKey) {
+        int size = recordSize(data != null ? data.length : 0, partitionKey);
+        int max = stream.getMaxRecordSizeInKiB() * 1024;
+        if (size > max) {
+            throw new AwsException("InvalidArgumentException",
+                    "Record size (data + partition key) of " + size + " bytes exceeds the maximum of "
+                            + max + " bytes.", 400);
+        }
+    }
+
+    /**
+     * The request-wide PutRecords caps. Both reject the whole request rather than failing records
+     * individually, because PutRecordsResultEntry.ErrorCode carries only throughput and internal
+     * errors — the same reason the per-record size check aborts the batch.
+     */
+    void validateRecordCount(int recordCount) {
+        if (recordCount < 1) {
+            throw new AwsException("InvalidArgumentException",
+                    "A PutRecords request requires at least one record.", 400);
+        }
+        if (recordCount > MAX_RECORDS_PER_REQUEST) {
+            throw new AwsException("InvalidArgumentException",
+                    "A PutRecords request supports at most " + MAX_RECORDS_PER_REQUEST
+                            + " records, got " + recordCount + ".", 400);
+        }
+    }
+
+    void validateRequestSize(long totalBytes) {
+        if (totalBytes > MAX_REQUEST_SIZE_BYTES) {
+            throw new AwsException("InvalidArgumentException",
+                    "A PutRecords request (data + partition keys) is limited to " + MAX_REQUEST_SIZE_BYTES
+                            + " bytes, got " + totalBytes + ".", 400);
+        }
+    }
+
+    /**
+     * The bounds are the same on both actions but the code each publishes for a violation is not:
+     * UpdateMaxRecordSize documents ValidationException for an out-of-range size, while CreateStream
+     * reserves ValidationException for the on-demand case and describes InvalidArgumentException as
+     * "a specified parameter exceeds its restrictions".
+     */
+    private static void validateMaxRecordSize(int maxRecordSizeInKiB, String errorCode) {
+        if (maxRecordSizeInKiB < MIN_RECORD_SIZE_KIB || maxRecordSizeInKiB > MAX_RECORD_SIZE_KIB) {
+            throw new AwsException(errorCode,
+                    "MaxRecordSizeInKiB must be between " + MIN_RECORD_SIZE_KIB + " and "
+                            + MAX_RECORD_SIZE_KIB + ", got " + maxRecordSizeInKiB + ".", 400);
+        }
+    }
+
+    public void updateMaxRecordSize(String streamName, int maxRecordSizeInKiB, String region) {
+        KinesisStream stream = resolveStream(streamName, region);
+        validateMaxRecordSize(maxRecordSizeInKiB, "ValidationException");
+        if ("ON_DEMAND".equals(stream.getStreamMode())) {
+            throw new AwsException("ValidationException",
+                    "UpdateMaxRecordSize is only supported for data streams with the provisioned capacity mode.",
+                    400);
+        }
+        if (!"ACTIVE".equals(stream.getStreamStatus())) {
+            throw new AwsException("ResourceInUseException",
+                    "Stream " + streamName + " is not ACTIVE (current state: "
+                            + stream.getStreamStatus() + ")", 400);
+        }
+        stream.setMaxRecordSizeInKiB(maxRecordSizeInKiB);
+        store.put(regionKey(region, streamName), stream);
+        LOG.infov("Updated max record size for {0} to {1} KiB", streamName, maxRecordSizeInKiB);
+    }
+
     public PutRecordResult putRecordWithShardId(String streamName, byte[] data, String partitionKey, String region) {
         KinesisStream stream = resolveStream(streamName, region);
+        validateRecordSize(stream, data, partitionKey);
         KinesisShard shard = selectShard(stream, partitionKey);
 
         String sequenceNumber = String.valueOf(sequenceGenerator.incrementAndGet());
@@ -378,29 +489,63 @@ public class KinesisService {
 
     public String getShardIterator(String streamName, String shardId, String type, String sequenceNumber,
                                    Long timestampMillis, String region) {
-        resolveStream(streamName, region); // validate exists
+        KinesisStream stream = resolveStream(streamName, region);
         // Format: streamName|shardId|type|sequenceNumber|index|timestampMillis
         // The 6th slot was added for AT_TIMESTAMP; empty for other iterator types.
         // Old 5-part iterators still decode via split(-1) compatibility in getRecords.
+        // For LATEST the index slot carries the shard tip at iterator creation time,
+        // so records written afterwards are visible to getRecords.
         String raw = String.format("%s|%s|%s|%s|%d|%s",
                 streamName, shardId, type,
                 sequenceNumber != null ? sequenceNumber : "",
-                0,
+                iteratorStartIndex(stream, shardId, type),
                 timestampMillis != null ? timestampMillis.toString() : "");
         return Base64.getEncoder().encodeToString(raw.getBytes(StandardCharsets.UTF_8));
     }
 
-    public Map<String, Object> getRecords(String shardIterator, Integer limit, String region) {
-        byte[] decoded = Base64.getDecoder().decode(shardIterator);
+    // A shard iterator is an opaque token we mint; a client that replays a garbage one gets
+    // InvalidArgumentException, not a 500 from an unguarded base64 decode or Integer.parse.
+    private String[] decodeShardIterator(String shardIterator) {
+        byte[] decoded;
+        try {
+            decoded = Base64.getDecoder().decode(shardIterator);
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("InvalidArgumentException", "Invalid shard iterator", 400);
+        }
         // Use limit=-1 so trailing empty slots round-trip and old 5-part iterators still work.
         String[] parts = new String(decoded, StandardCharsets.UTF_8).split(java.util.regex.Pattern.quote("|"), -1);
-        if (parts.length < 5) throw new AwsException("InvalidArgumentException", "Invalid shard iterator", 400);
+        if (parts.length < 5) {
+            throw new AwsException("InvalidArgumentException", "Invalid shard iterator", 400);
+        }
+        return parts;
+    }
+
+    private int iteratorStartIndex(KinesisStream stream, String shardId, String type) {
+        // AWS validates the shard at GetShardIterator time for every iterator type.
+        KinesisShard shard = stream.getShards().stream()
+                .filter(s -> s.getShardId().equals(shardId))
+                .findFirst()
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Shard not found", 400));
+        // LATEST resumes from the tip snapshot taken now; other types resolve in getRecords.
+        return "LATEST".equals(type) ? shard.getRecords().size() : 0;
+    }
+
+    private int parseIteratorIndex(String value) {
+        try {
+            return Integer.parseInt(value);
+        } catch (NumberFormatException e) {
+            throw new AwsException("InvalidArgumentException", "Invalid shard iterator", 400);
+        }
+    }
+
+    public Map<String, Object> getRecords(String shardIterator, Integer limit, String region) {
+        String[] parts = decodeShardIterator(shardIterator);
 
         String streamName = parts[0];
         String shardId = parts[1];
         String type = parts[2];
         String startSeq = parts[3];
-        int lastIndex = Integer.parseInt(parts[4]);
+        int lastIndex = parseIteratorIndex(parts[4]);
         Long timestampMillis = null;
         if (parts.length >= 6 && !parts[5].isEmpty()) {
             try {
@@ -419,11 +564,11 @@ public class KinesisService {
         List<KinesisRecord> allRecords = shard.getRecords();
         int startIndex = 0;
 
-        // Simple implementation of iterator types
-        if ("TRIM_HORIZON".equals(type)) {
+        // Simple implementation of iterator types.
+        // LATEST resumes from the shard tip snapshot encoded at GetShardIterator time,
+        // so records appended after the iterator was obtained are returned.
+        if ("TRIM_HORIZON".equals(type) || "LATEST".equals(type)) {
             startIndex = lastIndex;
-        } else if ("LATEST".equals(type)) {
-            startIndex = allRecords.size();
         } else if ("AT_SEQUENCE_NUMBER".equals(type)) {
             for (int i = 0; i < allRecords.size(); i++) {
                 if (allRecords.get(i).getSequenceNumber().equals(startSeq)) {
@@ -477,6 +622,61 @@ public class KinesisService {
         return response;
     }
 
+    public record PeekedRecord(String shardId, KinesisRecord record) {}
+
+    /**
+     * Returns up to {@code limit} of the most-recent records across all (or one) shard.
+     * Records are returned in ascending arrival-timestamp order (oldest first).
+     *
+     * <p>With no pagination cursor, {@value MAX_INSPECTION_RECORD_LIMIT} is a hard ceiling
+     * on the total number of records reachable in a single call regardless of the {@code limit}
+     * parameter.
+     */
+    public List<PeekedRecord> peekRecords(String streamName, String shardId, Integer limit, String region) {
+        KinesisStream stream = resolveStream(streamName, region);
+        int resolvedLimit = resolveInspectionRecordLimit(limit);
+        if (resolvedLimit == 0) {
+            return List.of();
+        }
+
+        if (shardId != null && !shardId.isBlank()) {
+            boolean exists = stream.getShards().stream().anyMatch(shard -> shard.getShardId().equals(shardId));
+            if (!exists) {
+                throw new AwsException("ResourceNotFoundException", "Shard " + shardId + " not found", 400);
+            }
+        }
+
+        Comparator<PeekedRecord> oldestFirst = Comparator.comparing(
+                peeked -> peeked.record().getApproximateArrivalTimestamp(),
+                Comparator.nullsFirst(Comparator.naturalOrder()));
+        PriorityQueue<PeekedRecord> newest = new PriorityQueue<>(oldestFirst);
+        stream.getShards().stream()
+                .filter(shard -> shardId == null || shardId.isBlank() || shard.getShardId().equals(shardId))
+                .forEach(shard -> shard.getRecords().forEach(record -> {
+                    newest.add(new PeekedRecord(shard.getShardId(), record));
+                    if (newest.size() > resolvedLimit) {
+                        newest.poll();
+                    }
+                }));
+
+        return newest.stream()
+                .sorted(Comparator.comparing(peeked -> peeked.record().getApproximateArrivalTimestamp(),
+                        Comparator.nullsLast(Comparator.naturalOrder())))
+                .toList();
+    }
+
+    /**
+     * Resolves the caller-supplied limit to a value in {@code [0, MAX_INSPECTION_RECORD_LIMIT]}.
+     * Both ends are clamped silently, consistent with the behaviour of
+     * {@link #getRecords} and {@link #getRecordsForAccount}.
+     */
+    private int resolveInspectionRecordLimit(Integer limit) {
+        if (limit == null) {
+            return DEFAULT_INSPECTION_RECORD_LIMIT;
+        }
+        return Math.max(0, Math.min(limit, MAX_INSPECTION_RECORD_LIMIT));
+    }
+
     /**
      * Time delta in ms between the last record returned and the shard tip.
      * Zero when caught up, the shard is empty, or no records were returned.
@@ -509,25 +709,22 @@ public class KinesisService {
 
     public String getShardIteratorForAccount(String accountId, String streamName, String shardId,
                                              String type, String sequenceNumber, String region) {
-        resolveStreamForAccount(accountId, streamName, region);
+        KinesisStream stream = resolveStreamForAccount(accountId, streamName, region);
         String raw = String.format("%s|%s|%s|%s|%d|",
                 streamName, shardId, type,
-                sequenceNumber != null ? sequenceNumber : "", 0);
+                sequenceNumber != null ? sequenceNumber : "",
+                iteratorStartIndex(stream, shardId, type));
         return Base64.getEncoder().encodeToString(raw.getBytes(StandardCharsets.UTF_8));
     }
 
     public Map<String, Object> getRecordsForAccount(String accountId, String shardIterator,
                                                     Integer limit, String region) {
-        byte[] decoded = Base64.getDecoder().decode(shardIterator);
-        String[] parts = new String(decoded, StandardCharsets.UTF_8).split(java.util.regex.Pattern.quote("|"), -1);
-        if (parts.length < 5) {
-            throw new AwsException("InvalidArgumentException", "Invalid shard iterator", 400);
-        }
+        String[] parts = decodeShardIterator(shardIterator);
         String streamName = parts[0];
         String shardId = parts[1];
         String type = parts[2];
         String startSeq = parts[3];
-        int lastIndex = Integer.parseInt(parts[4]);
+        int lastIndex = parseIteratorIndex(parts[4]);
 
         KinesisStream stream = resolveStreamForAccount(accountId, streamName, region);
         KinesisShard shard = stream.getShards().stream()
@@ -537,10 +734,9 @@ public class KinesisService {
 
         List<KinesisRecord> allRecords = shard.getRecords();
         int startIndex = 0;
-        if ("TRIM_HORIZON".equals(type)) {
+        // LATEST resumes from the shard tip snapshot encoded at GetShardIterator time.
+        if ("TRIM_HORIZON".equals(type) || "LATEST".equals(type)) {
             startIndex = lastIndex;
-        } else if ("LATEST".equals(type)) {
-            startIndex = allRecords.size();
         } else if ("AFTER_SEQUENCE_NUMBER".equals(type)) {
             for (int i = 0; i < allRecords.size(); i++) {
                 if (allRecords.get(i).getSequenceNumber().equals(startSeq)) {
@@ -588,5 +784,31 @@ public class KinesisService {
 
     private String regionKey(String region, String name) {
         return region + "::" + name;
+    }
+
+    // ─── Resource Explorer 2 ───────────────────────────────────────────────────
+
+    @Override
+    public List<ExplorerResource> getResources() {
+        List<ExplorerResource> resources = new ArrayList<>();
+        for (KinesisStream stream : store.scan(k -> true)) {
+            String arn = stream.getStreamArn();
+            if (arn == null) {
+                continue;
+            }
+            AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+            resources.add(new ExplorerResource(
+                    arn, "kinesis:stream", "kinesis",
+                    parsed.region(), parsed.accountId(),
+                    stream.getStreamCreationTimestamp() != null
+                            ? stream.getStreamCreationTimestamp() : Instant.now(),
+                    stream.getTags() != null ? stream.getTags() : Map.of()));
+        }
+        return resources;
+    }
+
+    @Override
+    public Set<SupportedResourceType> getSupportedResourceTypes() {
+        return Set.of(new SupportedResourceType("kinesis:stream", "kinesis", true));
     }
 }

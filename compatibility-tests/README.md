@@ -95,6 +95,21 @@ just test-typescript
 just test-awscli
 ```
 
+### IaC tools
+
+The Terraform, OpenTofu, and CDK suites aren't part of `just test-all` — run them individually by name:
+
+```bash
+# Terraform
+compat-terraform/run.sh
+
+# OpenTofu
+compat-opentofu/run.sh
+
+# AWS CDK
+compat-cdk/run.sh
+```
+
 Bats-based suites keep their normal console output and also write JUnit XML reports:
 
 - `sdk-test-awscli/test-results/junit.xml`

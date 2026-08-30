@@ -20,7 +20,8 @@ RUN set -eux; \
         aarch64) gosuArch='arm64'; gosuSha256="$GOSU_ARM64_SHA256" ;; \
         *) echo >&2 "unsupported arch: $arch"; exit 1 ;; \
     esac; \
-    curl -fsSL -o /usr/local/bin/gosu "https://github.com/tianon/gosu/releases/download/${GOSU_VERSION}/gosu-${gosuArch}"; \
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 \
+        -o /usr/local/bin/gosu "https://github.com/tianon/gosu/releases/download/${GOSU_VERSION}/gosu-${gosuArch}"; \
     echo "${gosuSha256}  /usr/local/bin/gosu" | sha256sum -c -; \
     chmod +x /usr/local/bin/gosu; \
     gosu --version; \
@@ -34,8 +35,7 @@ RUN mkdir -p /app/data \
 
 VOLUME /app/data
 
-COPY --chown=1001:root native/${TARGETARCH}/ /app/
-RUN mv /app/*-runner /app/application && chmod +x /app/application
+COPY --chmod=755 --chown=1001:root native/${TARGETARCH}/ /app/
 
 COPY --chmod=755 docker/entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 COPY --chmod=755 docker/localstack-parity.sh /usr/local/bin/localstack-parity.sh

@@ -14,6 +14,7 @@ import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
 import java.util.Collection;
+import java.util.List;
 
 @ApplicationScoped
 public class NeptuneQueryHandler {
@@ -69,14 +70,17 @@ public class NeptuneQueryHandler {
     }
 
     private Response handleDescribeDbClusters(MultivaluedMap<String, String> params) {
-        String filterId = params.getFirst("DBClusterIdentifier");
+        String identifier = params.getFirst("DBClusterIdentifier");
+        String filterId = identifier;
         if (filterId == null || filterId.isBlank()) {
             filterId = extractFilterValue(params, "db-cluster-id");
         }
 
-        // When a specific cluster ID is requested, AWS returns 404 if not found
-        if (filterId != null && !filterId.isBlank()) {
-            service.getDbCluster(filterId); // throws DBClusterNotFoundFault if absent
+        // AWS parity: the DBClusterIdentifier parameter faults with
+        // DBClusterNotFoundFault when no cluster matches, while the
+        // db-cluster-id Filters form returns an empty list.
+        if (identifier != null && !identifier.isBlank()) {
+            service.getDbCluster(identifier); // throws DBClusterNotFoundFault if absent
         }
 
         Collection<NeptuneCluster> result = service.listDbClusters(filterId);
@@ -87,6 +91,34 @@ public class NeptuneQueryHandler {
         }
         xml.end("DBClusters").start("Marker").end("Marker");
         return Response.ok(AwsQueryResponse.envelope("DescribeDBClusters", AwsNamespaces.RDS, xml.build())).build();
+    }
+
+    /**
+     * The rows the list form of DescribeDBClusters would return for the region a request is signed
+     * for, for the RDS-family listing {@code RdsQueryHandler} assembles: a live account lists
+     * Neptune clusters from the RDS endpoint too. The Neptune store is not keyed by region, so the
+     * region is read off each record's ARN.
+     */
+    public List<String> clusterRowsXml(String filterId, String region) {
+        return service.listDbClusters(filterId).stream()
+                .filter(c -> inRegion(c.getDbClusterArn(), region))
+                .map(this::clusterInnerXml)
+                .toList();
+    }
+
+    public List<String> instanceRowsXml(String filterId, String region) {
+        return service.listDbInstances(filterId).stream()
+                .filter(i -> inRegion(i.getDbInstanceArn(), region))
+                .map(this::instanceInnerXml)
+                .toList();
+    }
+
+    private static boolean inRegion(String arn, String region) {
+        if (region == null || region.isBlank()) {
+            return true;
+        }
+        String[] parts = arn == null ? new String[0] : arn.split(":", -1);
+        return parts.length >= 4 && region.equals(parts[3]);
     }
 
     private Response handleDeleteDbCluster(MultivaluedMap<String, String> params) {
@@ -140,13 +172,17 @@ public class NeptuneQueryHandler {
     }
 
     private Response handleDescribeDbInstances(MultivaluedMap<String, String> params) {
-        String filterId = params.getFirst("DBInstanceIdentifier");
+        String identifier = params.getFirst("DBInstanceIdentifier");
+        String filterId = identifier;
         if (filterId == null || filterId.isBlank()) {
             filterId = extractFilterValue(params, "db-instance-id");
         }
 
-        if (filterId != null && !filterId.isBlank()) {
-            service.getDbInstance(filterId); // throws DBInstanceNotFound if absent
+        // AWS parity: the DBInstanceIdentifier parameter faults with
+        // DBInstanceNotFound when no instance matches, while the
+        // db-instance-id Filters form returns an empty list.
+        if (identifier != null && !identifier.isBlank()) {
+            service.getDbInstance(identifier); // throws DBInstanceNotFound if absent
         }
 
         Collection<NeptuneInstance> result = service.listDbInstances(filterId);

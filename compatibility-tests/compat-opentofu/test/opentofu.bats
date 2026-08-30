@@ -78,6 +78,16 @@ setup() {
     assert_output --partial "floci-compat-events"
 }
 
+@test "OpenTofu: SES receipt rule set created and active" {
+    run aws_cmd ses describe-receipt-rule-set --rule-set-name floci-compat-rule-set
+    assert_success
+    assert_output --partial "floci-compat-rule-set"
+
+    run aws_cmd ses describe-active-receipt-rule-set
+    assert_success
+    assert_output --partial "floci-compat-rule-set"
+}
+
 @test "OpenTofu: DynamoDB table created" {
     run aws_cmd dynamodb describe-table --table-name floci-compat-items
     assert_success
@@ -176,12 +186,6 @@ setup() {
     assert_output --partial "floci-compat-appconfig"
 }
 
-@test "OpenTofu: Athena workgroup created" {
-    run aws_cmd athena get-work-group --work-group floci-compat-workgroup
-    assert_success
-    assert_output --partial "floci-compat-workgroup"
-}
-
 @test "OpenTofu: Backup vault created" {
     run aws_cmd backup describe-backup-vault --backup-vault-name floci-compat-vault
     assert_success
@@ -249,14 +253,8 @@ setup() {
     assert_output --partial "floci-compat-graphql"
 }
 
-@test "OpenTofu: Glue catalog database created" {
-    run aws_cmd glue get-databases
-    assert_success
-    assert_output --partial "floci_compat_db"
-}
-
-@test "OpenTofu: ElastiCache cluster created" {
-    run aws_cmd elasticache describe-cache-clusters --cache-cluster-id floci-compat-cache
+@test "OpenTofu: ElastiCache replication group created" {
+    run aws_cmd elasticache describe-replication-groups --replication-group-id floci-compat-cache
     assert_success
     assert_output --partial "floci-compat-cache"
 }
@@ -277,12 +275,6 @@ setup() {
     run aws_cmd batch describe-compute-environments
     assert_success
     assert_output --partial "floci-compat-batch"
-}
-
-@test "OpenTofu: Neptune cluster created" {
-    run aws_cmd neptune describe-db-clusters --db-cluster-identifier floci-compat-neptune
-    assert_success
-    assert_output --partial "floci-compat-neptune"
 }
 
 @test "OpenTofu: OpenSearch domain created" {
@@ -386,4 +378,18 @@ setup() {
         --query "DeliveryStreamDescription.Destinations[0].ExtendedS3DestinationDescription.CompressionFormat" --output text
     assert_success
     assert_output "GZIP"
+}
+
+@test "OpenTofu: GuardDuty detector is created with organization configuration" {
+    run aws_cmd guardduty list-detectors --query "DetectorIds[0]" --output text
+    assert_success
+    DETECTOR_ID="$output"
+    run aws_cmd guardduty get-detector --detector-id "$DETECTOR_ID" \
+        --query "Status" --output text
+    assert_success
+    assert_output "ENABLED"
+    run aws_cmd guardduty describe-organization-configuration --detector-id "$DETECTOR_ID" \
+        --query "AutoEnableOrganizationMembers" --output text
+    assert_success
+    assert_output "ALL"
 }

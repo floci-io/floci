@@ -5,6 +5,7 @@ import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.model.Frame;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.ContainerTeardown;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
@@ -13,6 +14,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
+import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.services.codebuild.BuildspecParser.ParsedArtifacts;
 import io.github.hectorvent.floci.services.codebuild.BuildspecParser.ParsedBuildspec;
 import io.github.hectorvent.floci.services.codebuild.model.Build;
@@ -54,7 +56,7 @@ import java.util.zip.ZipInputStream;
 import java.util.zip.ZipOutputStream;
 
 @ApplicationScoped
-public class CodeBuildRunner {
+public class CodeBuildRunner implements ContainerTeardown {
 
     private static final Logger LOG = Logger.getLogger(CodeBuildRunner.class);
 
@@ -93,6 +95,25 @@ public class CodeBuildRunner {
         this.config = config;
         this.containerDetector = containerDetector;
         this.regionResolver = regionResolver;
+    }
+
+    /**
+     * Stops the containers of all in-flight builds on emulator shutdown; without this
+     * they outlive the process as orphans. Build state is transient, so there is no
+     * persisted status to update.
+     */
+    @Override
+    public void stopManagedContainers() {
+        for (Map.Entry<String, String> entry : new LinkedHashMap<>(runningContainers).entrySet()) {
+            if (runningContainers.remove(entry.getKey(), entry.getValue())) {
+                try {
+                    lifecycleManager.stopAndRemove(entry.getValue(), null);
+                } catch (Exception e) {
+                    LOG.warnv("Failed to stop CodeBuild container for build {0} on shutdown: {1}",
+                            entry.getKey(), e.getMessage());
+                }
+            }
+        }
     }
 
     public void startBuild(String region, Build build, Project project, String buildspecOverride) {
@@ -200,6 +221,8 @@ public class CodeBuildRunner {
                     .withHostDockerInternalOnLinux()
                     .withPrivileged(privileged)
                     .withLogRotation()
+                    .withLabels(ContainerStorageHelper.resourceIdentityLabels(
+                            "codebuild", buildId, regionResolver.getAccountId(), region))
                     .build();
 
             ContainerLifecycleManager.ContainerInfo info = lifecycleManager.createAndStart(spec);
@@ -349,12 +372,10 @@ public class CodeBuildRunner {
             }
         } finally {
             stopFlags.remove(buildId);
-            if (containerId != null) {
-                runningContainers.remove(buildId);
-                if (logHandle != null) {
-                    try { logHandle.close(); } catch (Exception ignored) {}
-                }
-                lifecycleManager.stopAndRemove(containerId, null);
+            if (containerId != null && runningContainers.remove(buildId, containerId)) {
+                lifecycleManager.stopAndRemove(containerId, logHandle);
+            } else if (logHandle != null) {
+                try { logHandle.close(); } catch (Exception ignored) {}
             }
             if (workspace != null) {
                 deleteDirectory(workspace);

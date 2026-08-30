@@ -1,0 +1,165 @@
+# Presentation for the generated "Supported Resource Types" table in
+# docs/services/cloudformation.md. The set of types is NOT configured here: it comes from
+# src/test/resources/cloudformation/supported-resource-types.tsv, which CfnResourceInventoryTest
+# pins to the CDI-resolved provisioner registry and the legacy switch. This file only decides how
+# those types are labelled, ordered and annotated.
+#
+# Adding a resource type: add the provisioner, update the TSV, run `make docs-sync`. Touch this
+# file only for a new namespace (which needs a label) or to add a note.
+
+# Row order. Namespaces omitted here are appended alphabetically after these, so a forgotten
+# entry degrades to a sensible position rather than disappearing.
+order:
+  - AWS::S3
+  - AWS::SQS
+  - AWS::SNS
+  - AWS::DynamoDB
+  - AWS::Lambda
+  - AWS::IAM
+  - AWS::Organizations
+  - AWS::SSM
+  - AWS::KMS
+  - AWS::SecretsManager
+  - AWS::ECR
+  - AWS::ECS
+  - AWS::EKS
+  - AWS::RDS
+  - AWS::EC2
+  - AWS::ElasticLoadBalancingV2
+  - AWS::AutoScaling
+  - AWS::Route53
+  - AWS::ApiGateway
+  - AWS::ApiGatewayV2
+  - AWS::StepFunctions
+  - AWS::CodePipeline
+  - AWS::CodeBuild
+  - AWS::Batch
+  - AWS::Cognito
+  - AWS::Events
+  - AWS::Pipes
+  - AWS::Kinesis
+  - AWS::KinesisFirehose
+  - AWS::CloudFront
+  - AWS::CloudWatch
+  - AWS::Logs
+  - AWS::WAFv2
+  - AWS::Config
+  - AWS::CloudFormation
+  - Custom
+  - AWS::CDK
+
+# Namespaces folded into another row. Custom::* types are CloudFormation's own extension
+# mechanism, not a service of their own, so they belong in the CloudFormation row.
+merge_namespaces:
+  Custom: AWS::CloudFormation
+
+# Overrides the name shown for a type. Only needed where the bare leaf would be ambiguous.
+display_names:
+  AWS::CDK::Metadata: CDK::Metadata
+
+# Order of type names within a row. Listed names come first in this order; anything else is
+# appended alphabetically, so a newly provisioned type appears without needing an entry here.
+# Curated where the reading order carries meaning (primary resources before their accessories).
+type_order:
+  AWS::S3: [Bucket, BucketPolicy]
+  AWS::SQS: [Queue, QueuePolicy]
+  AWS::SNS: [Topic, Subscription]
+  AWS::DynamoDB: [Table, GlobalTable]
+  AWS::Lambda: [Function, LayerVersion, EventSourceMapping, Version, Alias, Permission]
+  AWS::IAM: [Role, User, AccessKey, Policy, ManagedPolicy, InstanceProfile]
+  AWS::Organizations: [Organization, OrganizationalUnit, Account, Policy, ResourcePolicy]
+  AWS::KMS: [Key, Alias]
+  AWS::SecretsManager: [Secret, SecretTargetAttachment]
+  AWS::ECS: [Cluster, TaskDefinition, Service]
+  AWS::EKS: [Cluster, Nodegroup]
+  AWS::RDS:
+    [DBInstance, DBCluster, DBSubnetGroup, DBParameterGroup, DBClusterParameterGroup]
+  AWS::EC2:
+    [VPC, Subnet, SecurityGroup, SecurityGroupIngress, SecurityGroupEgress, InternetGateway,
+     RouteTable, SubnetRouteTableAssociation, Route, NatGateway, EIP, Instance, LaunchTemplate,
+     VPCGatewayAttachment, VPCEndpoint, NetworkAcl, NetworkAclEntry, SubnetNetworkAclAssociation,
+     FlowLog]
+  AWS::ElasticLoadBalancingV2: [LoadBalancer, TargetGroup, Listener, ListenerRule]
+  AWS::AutoScaling: [LaunchConfiguration, AutoScalingGroup, LifecycleHook]
+  AWS::Route53: [HostedZone, RecordSet]
+  AWS::ApiGateway: [RestApi, Resource, Authorizer, Method, Deployment, Stage, Account]
+  AWS::ApiGatewayV2: [Api, Authorizer, Route, Integration, Stage, Deployment]
+  AWS::CodePipeline: [Pipeline, CustomActionType, Webhook]
+  AWS::Batch: [ComputeEnvironment, JobQueue, JobDefinition]
+  AWS::Cognito: [UserPool, UserPoolClient]
+  AWS::Events: [Rule, EventBus, EventBusPolicy]
+  AWS::CloudFormation: [CustomResource]
+
+# Namespace -> the service name shown in the Service column.
+service_labels:
+  AWS::ApiGateway: API Gateway (v1)
+  AWS::ApiGatewayV2: API Gateway v2
+  AWS::AutoScaling: Auto Scaling
+  AWS::Batch: Batch
+  AWS::CDK: CDK
+  AWS::CloudFormation: CloudFormation
+  AWS::CloudFront: CloudFront
+  AWS::CloudWatch: CloudWatch
+  AWS::CodeBuild: CodeBuild
+  AWS::CodePipeline: CodePipeline
+  AWS::Cognito: Cognito
+  AWS::Config: Config
+  AWS::DynamoDB: DynamoDB
+  AWS::EC2: EC2
+  AWS::ECR: ECR
+  AWS::ECS: ECS
+  AWS::EKS: EKS
+  AWS::ElasticLoadBalancingV2: Elastic Load Balancing v2
+  AWS::Events: EventBridge
+  AWS::IAM: IAM
+  AWS::KMS: KMS
+  AWS::Kinesis: Kinesis
+  AWS::KinesisFirehose: Kinesis Data Firehose
+  AWS::Lambda: Lambda
+  AWS::Logs: CloudWatch Logs
+  AWS::Organizations: Organizations
+  AWS::Pipes: Pipes
+  AWS::RDS: RDS
+  AWS::Route53: Route 53
+  AWS::S3: S3
+  AWS::SNS: SNS
+  AWS::SQS: SQS
+  AWS::SSM: SSM
+  AWS::SecretsManager: Secrets Manager
+  AWS::StepFunctions: Step Functions
+  AWS::WAFv2: WAFv2
+  Custom: CloudFormation
+
+# Parenthetical shown after a type name. Keyed by the full type.
+notes:
+  AWS::S3::BucketPolicy: accepted; policy not enforced
+  AWS::SQS::QueuePolicy: accepted; policy not enforced
+  AWS::Lambda::Function: Zip via S3/inline `ZipFile`, and Image
+  AWS::Lambda::EventSourceMapping: SQS, Kinesis, DynamoDB Streams
+  AWS::Lambda::Alias: also what SAM's `AutoPublishAlias` expands into
+  AWS::EC2::SecurityGroup: inline `SecurityGroupIngress`/`SecurityGroupEgress` supported
+  AWS::RDS::DBInstance: starts a real container
+  AWS::RDS::DBCluster: starts a real container
+  AWS::CDK::Metadata: accepted; no-op
+  Custom::DynamoDBReplica: applied natively against DynamoDB, not via a provider Lambda
+
+# Trailing prose appended to a row after its type list, for behaviour that belongs to the service
+# rather than to one type.
+row_notes:
+  AWS::Lambda: >-
+    Inline `ZipFile` packages include the `cfn-response` (Node.js) / `cfnresponse` (Python) module
+    AWS injects for that code path, so Solutions-style custom-resource handlers work.
+
+# Capabilities that belong in this table but are not provisioner types, so they cannot come from
+# the inventory. Each needs a reason, because an entry here is exempt from the drift check.
+extra_types:
+  AWS::CloudFormation:
+    - name: Stack
+      note: nested stacks
+      reason: >-
+        Handled by CloudFormationService as a child-stack lifecycle, not by a resource provisioner.
+    - name: Custom::*
+      note: Lambda-backed
+      reason: >-
+        A wildcard prefix, not an exact type. The registry is keyed by exact type, so this is
+        dispatched by a prefix branch and can never appear in the inventory.

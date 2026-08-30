@@ -1,7 +1,9 @@
 package io.github.hectorvent.floci.lifecycle;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.ContainerTeardown;
 import io.github.hectorvent.floci.core.common.ServiceRegistry;
+import io.github.hectorvent.floci.core.storage.PersistentPathValidator;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.lifecycle.inithook.InitializationHook;
 import io.github.hectorvent.floci.lifecycle.inithook.InitializationHooksRunner;
@@ -9,6 +11,9 @@ import io.github.hectorvent.floci.services.ec2.Ec2MetadataServer;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.floci.ui.FlociUiManager;
 import io.github.hectorvent.floci.services.amazonmq.container.RabbitMqManager;
+import io.github.hectorvent.floci.services.kinesisanalytics.container.FlinkContainerManager;
+import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.elasticache.ElastiCacheService;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheContainerManager;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheMemcachedContainerManager;
 import io.github.hectorvent.floci.services.elasticache.proxy.ElastiCacheProxyManager;
@@ -20,6 +25,7 @@ import io.github.hectorvent.floci.services.neptune.container.NeptuneContainerMan
 import io.github.hectorvent.floci.services.neptune.proxy.NeptuneProxyManager;
 import io.github.hectorvent.floci.services.pipes.PipesService;
 import io.github.hectorvent.floci.services.appsync.graphql.SchemaCreationWorker;
+import io.github.hectorvent.floci.services.elbv2.ElbV2Service;
 import io.github.hectorvent.floci.services.rds.RdsService;
 import io.github.hectorvent.floci.services.memorydb.container.MemoryDbContainerManager;
 import io.github.hectorvent.floci.services.memorydb.proxy.MemoryDbProxyManager;
@@ -44,7 +50,6 @@ import java.util.Optional;
 public class EmulatorLifecycle {
 
     private static final Logger LOG = Logger.getLogger(EmulatorLifecycle.class);
-    private static final int HTTP_PORT = 4566;
     private static final int TLS_HTTP_BACKEND_PORT = 4510;
 
     @ConfigProperty(name = "quarkus.application.version", defaultValue = "")
@@ -61,6 +66,8 @@ public class EmulatorLifecycle {
     private final StorageFactory storageFactory;
     private final ServiceRegistry serviceRegistry;
     private final EmulatorConfig config;
+    private final IamService iamService;
+    private final ElastiCacheService elastiCacheService;
     private final ElastiCacheContainerManager elastiCacheContainerManager;
     private final ElastiCacheMemcachedContainerManager elastiCacheMemcachedContainerManager;
     private final ElastiCacheProxyManager elastiCacheProxyManager;
@@ -72,7 +79,9 @@ public class EmulatorLifecycle {
     private final NeptuneContainerManager neptuneContainerManager;
     private final NeptuneProxyManager neptuneProxyManager;
     private final RabbitMqManager rabbitMqManager;
+    private final FlinkContainerManager flinkContainerManager;
     private final RdsService rdsService;
+    private final ElbV2Service elbV2Service;
     private final InitializationHooksRunner initializationHooksRunner;
     private final SqsEventSourcePoller sqsPoller;
     private final KinesisEventSourcePoller kinesisPoller;
@@ -83,10 +92,14 @@ public class EmulatorLifecycle {
     private final FlociUiManager flociUiManager;
     private final InitLifecycleState initLifecycleState;
     private final SchemaCreationWorker schemaCreationWorker;
+    private final jakarta.enterprise.inject.Instance<ContainerTeardown> containerTeardowns;
+    private final PersistentPathValidator persistentPathValidator;
 
     @Inject
     public EmulatorLifecycle(StorageFactory storageFactory, ServiceRegistry serviceRegistry,
                              EmulatorConfig config,
+                             IamService iamService,
+                             ElastiCacheService elastiCacheService,
                              ElastiCacheContainerManager elastiCacheContainerManager,
                              ElastiCacheMemcachedContainerManager elastiCacheMemcachedContainerManager,
                              ElastiCacheProxyManager elastiCacheProxyManager,
@@ -98,7 +111,9 @@ public class EmulatorLifecycle {
                              NeptuneContainerManager neptuneContainerManager,
                              NeptuneProxyManager neptuneProxyManager,
                              RabbitMqManager rabbitMqManager,
+                             FlinkContainerManager flinkContainerManager,
                              RdsService rdsService,
+                             ElbV2Service elbV2Service,
                              InitializationHooksRunner initializationHooksRunner,
                              SqsEventSourcePoller sqsPoller,
                              KinesisEventSourcePoller kinesisPoller,
@@ -108,10 +123,14 @@ public class EmulatorLifecycle {
                              EcrRegistryManager ecrRegistryManager,
                              FlociUiManager flociUiManager,
                              InitLifecycleState initLifecycleState,
-                             SchemaCreationWorker schemaCreationWorker) {
+                             SchemaCreationWorker schemaCreationWorker,
+                             jakarta.enterprise.inject.Instance<ContainerTeardown> containerTeardowns,
+                             PersistentPathValidator persistentPathValidator) {
         this.storageFactory = storageFactory;
         this.serviceRegistry = serviceRegistry;
         this.config = config;
+        this.iamService = iamService;
+        this.elastiCacheService = elastiCacheService;
         this.elastiCacheContainerManager = elastiCacheContainerManager;
         this.elastiCacheMemcachedContainerManager = elastiCacheMemcachedContainerManager;
         this.elastiCacheProxyManager = elastiCacheProxyManager;
@@ -123,7 +142,9 @@ public class EmulatorLifecycle {
         this.neptuneContainerManager = neptuneContainerManager;
         this.neptuneProxyManager = neptuneProxyManager;
         this.rabbitMqManager = rabbitMqManager;
+        this.flinkContainerManager = flinkContainerManager;
         this.rdsService = rdsService;
+        this.elbV2Service = elbV2Service;
         this.initializationHooksRunner = initializationHooksRunner;
         this.sqsPoller = sqsPoller;
         this.kinesisPoller = kinesisPoller;
@@ -134,6 +155,8 @@ public class EmulatorLifecycle {
         this.flociUiManager = flociUiManager;
         this.initLifecycleState = initLifecycleState;
         this.schemaCreationWorker = schemaCreationWorker;
+        this.containerTeardowns = containerTeardowns;
+        this.persistentPathValidator = persistentPathValidator;
     }
 
     void onStart(@Observes StartupEvent ignored) {
@@ -154,15 +177,31 @@ public class EmulatorLifecycle {
         }
         initLifecycleState.markBootCompleted();
 
+        persistentPathValidator.validateAtBoot();
+
         serviceRegistry.logEnabledServices();
         storageFactory.loadAll();
+        int sweptSessions = iamService.sweepOrphanedLambdaExecutionRoleSessions();
+        if (sweptSessions > 0) {
+            LOG.infov("Removed {0} orphaned Lambda execution-role session(s)", sweptSessions);
+        }
         schemaCreationWorker.recoverOrphans();
+        schemaCreationWorker.rehydrateSchemas();
 
         sqsPoller.startPersistedPollers();
         kinesisPoller.startPersistedPollers();
         dynamodbStreamsPoller.startPersistedPollers();
         pipesService.startPersistedPollers();
         rdsService.restorePersistedRuntime();
+        if (config.services().elasticache().enabled()) {
+            elastiCacheService.restorePersistedRuntime().exceptionally(ex -> {
+                LOG.warnv("ElastiCache cluster-mode restore failed: {0}", ex.getMessage());
+                return null;
+            });
+        }
+        if (config.services().elbv2().enabled()) {
+            elbV2Service.restorePersistedRuntime();
+        }
 
         if (config.services().ec2().enabled() && !config.services().ec2().mock()) {
             ec2MetadataServer.start().exceptionally(ex -> {
@@ -181,7 +220,11 @@ public class EmulatorLifecycle {
     }
 
     void onHttpStart(@ObservesAsync HttpServerStart event) {
-        int expectedPort = config.tls().enabled() ? TLS_HTTP_BACKEND_PORT : HTTP_PORT;
+        // Non-TLS: Quarkus listens on floci.port (quarkus.http.port: ${floci.port} in
+        // application.yml). TLS mode: TlsConfigSource pins the HTTP backend to 4510 and the
+        // public port is served by TlsProxyServer. Comparing against a hardcoded 4566 here
+        // made start/ready hooks never run when FLOCI_PORT was non-default (#2437).
+        int expectedPort = config.tls().enabled() ? TLS_HTTP_BACKEND_PORT : config.port();
         if (event.options().getPort() != expectedPort) {
             return;
         }
@@ -262,8 +305,20 @@ public class EmulatorLifecycle {
         docDbContainerManager.stopAll();
         neptuneContainerManager.stopAll();
         rabbitMqManager.stopAll();
+        flinkContainerManager.stopAll();
         ecrRegistryManager.shutdown();
         flociUiManager.shutdown();
+        // Centralized teardown for process-bound containers (Lambda warm pool, ECS tasks,
+        // EC2 instances, in-flight build/job containers). Runs before shutdownAll() so any
+        // state written while stopping is captured by the final flush.
+        for (ContainerTeardown teardown : containerTeardowns) {
+            try {
+                teardown.stopManagedContainers();
+            } catch (Exception e) {
+                LOG.warnv("Container teardown failed for {0}: {1}",
+                        teardown.getClass().getSimpleName(), e.getMessage());
+            }
+        }
         storageFactory.shutdownAll();
 
         LOG.info("=== AWS Local Emulator Stopped ===");

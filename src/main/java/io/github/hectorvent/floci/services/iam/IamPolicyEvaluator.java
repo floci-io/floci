@@ -89,6 +89,14 @@ public class IamPolicyEvaluator {
         List<PolicyStatement> boundaryStmts = caller.boundaryPolicyDocument() == null
                 ? null : parseAll(List.of(caller.boundaryPolicyDocument()));
 
+        // 0. Service control policies gate everything: the action must be allowed at EVERY
+        //    organization level and explicitly denied at none, before identity policies are
+        //    even consulted. An empty level means FullAWSAccess semantics and is skipped;
+        //    a level holding an unparseable document denies.
+        if (!scpAllows(caller.scpLevels(), action, resource, ctx)) {
+            return Decision.DENY;
+        }
+
         // 1. Explicit deny in ANY policy → DENY immediately
         if (anyExplicitDeny(identityStmts, action, resource, ctx)
                 || anyExplicitDeny(resourceStmts, action, resource, ctx)
@@ -161,6 +169,39 @@ public class IamPolicyEvaluator {
             return SimulationDecision.IMPLICIT_DENY;
         }
         return SimulationDecision.ALLOWED;
+    }
+
+    /**
+     * SCP evaluation: at every organization level the action must be explicitly allowed
+     * and not explicitly denied. {@code null} levels mean SCPs don't apply; a level with
+     * no documents at all (defensive — the last SCP on a target can't be detached) is
+     * FullAWSAccess semantics and passes.
+     *
+     * <p>A level containing a document that fails to parse denies. The ceiling cannot tell
+     * what an unreadable guardrail would have said, and every target also carries
+     * FullAWSAccess, so skipping the bad document would silently leave the level allowing
+     * everything the operator meant to forbid.</p>
+     */
+    private boolean scpAllows(List<List<String>> scpLevels, String action, String resource,
+                              Map<String, String> ctx) {
+        if (scpLevels == null) {
+            return true;
+        }
+        for (List<String> level : scpLevels) {
+            ParsedDocuments parsed = parseAllTracked(level);
+            if (parsed.anyFailed()) {
+                return false;
+            }
+            List<PolicyStatement> levelStmts = parsed.statements();
+            if (levelStmts.isEmpty()) {
+                continue;
+            }
+            if (anyExplicitDeny(levelStmts, action, resource, ctx)
+                    || !anyExplicitAllow(levelStmts, action, resource, ctx)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     // -----------------------------------------------------------------------
@@ -436,18 +477,32 @@ public class IamPolicyEvaluator {
     // -----------------------------------------------------------------------
 
     private List<PolicyStatement> parseAll(List<String> documents) {
+        return parseAllTracked(documents).statements();
+    }
+
+    /**
+     * Parses every document, skipping (and logging) any that fails, and reports whether
+     * any did. Callers that can safely ignore a broken document use {@link #parseAll};
+     * SCP evaluation reads {@code anyFailed} so the ceiling can fail closed.
+     */
+    private ParsedDocuments parseAllTracked(List<String> documents) {
         List<PolicyStatement> result = new ArrayList<>();
         if (documents == null) {
-            return result;
+            return new ParsedDocuments(result, false);
         }
+        boolean anyFailed = false;
         for (String doc : documents) {
             try {
                 result.addAll(parseStatements(doc));
             } catch (Exception e) {
+                anyFailed = true;
                 LOG.warnv("Failed to parse policy document: {0}", e.getMessage());
             }
         }
-        return result;
+        return new ParsedDocuments(result, anyFailed);
+    }
+
+    private record ParsedDocuments(List<PolicyStatement> statements, boolean anyFailed) {
     }
 
     private List<PolicyStatement> parseStatements(String document) throws Exception {

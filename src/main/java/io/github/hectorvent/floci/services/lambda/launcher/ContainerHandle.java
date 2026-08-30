@@ -15,6 +15,8 @@ public class ContainerHandle {
     private final RuntimeApiServer runtimeApiServer;
     private final long createdAt;
     private final boolean hotReload;
+    private final String executionRoleAccessKeyId;
+    private final String executionRoleSessionAccountId;
     private volatile ContainerState state;
     private volatile long lastUsedMs;
     private Closeable logStream;
@@ -26,11 +28,19 @@ public class ContainerHandle {
 
     public ContainerHandle(String containerId, String functionName,
                            RuntimeApiServer runtimeApiServer, ContainerState state, boolean hotReload) {
+        this(containerId, functionName, runtimeApiServer, state, hotReload, null, null);
+    }
+
+    public ContainerHandle(String containerId, String functionName,
+                           RuntimeApiServer runtimeApiServer, ContainerState state, boolean hotReload,
+                           String executionRoleAccessKeyId, String executionRoleSessionAccountId) {
         this.containerId = containerId;
         this.functionName = functionName;
         this.runtimeApiServer = runtimeApiServer;
         this.state = state;
         this.hotReload = hotReload;
+        this.executionRoleAccessKeyId = executionRoleAccessKeyId;
+        this.executionRoleSessionAccountId = executionRoleSessionAccountId;
         this.createdAt = System.currentTimeMillis();
         this.lastUsedMs = this.createdAt;
     }
@@ -38,12 +48,26 @@ public class ContainerHandle {
     public String getContainerId() { return containerId; }
     public String getFunctionName() { return functionName; }
     public boolean isHotReload() { return hotReload; }
+    public String getExecutionRoleAccessKeyId() { return executionRoleAccessKeyId; }
+    public String getExecutionRoleSessionAccountId() { return executionRoleSessionAccountId; }
     public RuntimeApiServer getRuntimeApiServer() { return runtimeApiServer; }
     public long getCreatedAt() { return createdAt; }
     public long getLastUsedMs() { return lastUsedMs; }
     public void touchLastUsed() { this.lastUsedMs = System.currentTimeMillis(); }
     public ContainerState getState() { return state; }
     public void setState(ContainerState state) { this.state = state; }
+
     public Closeable getLogStream() { return logStream; }
     public void setLogStream(Closeable logStream) { this.logStream = logStream; }
+
+    /**
+     * True once an extension in this container reported an init or exit error. Real AWS treats
+     * both as fatal to the execution environment, so {@code WarmPool} must retire the container
+     * instead of pooling or reusing it. Read from the container's {@code RuntimeApiServer}, which
+     * is where extensions report the error; a handle with no runtime server (test fixtures) is
+     * never faulted.
+     */
+    public boolean isFaulted() {
+        return runtimeApiServer != null && runtimeApiServer.isFaulted();
+    }
 }

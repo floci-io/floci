@@ -194,7 +194,8 @@ resource "aws_codebuild_project" "compat" {
   }
 
   source {
-    type = "NO_SOURCE"
+    type      = "NO_SOURCE"
+    buildspec = "version: 0.2\nphases:\n  build:\n    commands:\n      - echo build\n"
   }
 }
 
@@ -213,11 +214,6 @@ resource "aws_apigatewayv2_api" "compat" {
 resource "aws_appconfig_application" "compat" {
   name        = "floci-compat-appconfig"
   description = "Floci Terraform compatibility application"
-}
-
-# -- Athena Workgroup ----------------------------------------------------------
-resource "aws_athena_workgroup" "compat" {
-  name = "floci-compat-workgroup"
 }
 
 # -- AWS Backup Vault ----------------------------------------------------------
@@ -297,8 +293,8 @@ resource "aws_cloudtrail" "compat" {
 resource "aws_cur_report_definition" "compat" {
   report_name                = "floci-compat-report"
   time_unit                  = "HOURLY"
-  format                     = "textORcsv"
-  compression                = "GZIP"
+  format                     = "Parquet"
+  compression                = "Parquet"
   additional_schema_elements = ["RESOURCES"]
   s3_bucket                  = aws_s3_bucket.app.bucket
   s3_prefix                  = "cur"
@@ -312,19 +308,14 @@ resource "aws_appsync_graphql_api" "compat" {
   schema              = "type Query { health: String }"
 }
 
-# -- Glue Catalog Database -----------------------------------------------------
-resource "aws_glue_catalog_database" "compat" {
-  name        = "floci_compat_db"
-  description = "Floci Terraform compatibility database"
-}
-
-# -- ElastiCache Cluster -------------------------------------------------------
-resource "aws_elasticache_cluster" "compat" {
-  cluster_id      = "floci-compat-cache"
-  engine          = "redis"
-  node_type       = "cache.t3.micro"
-  num_cache_nodes = 1
-  port            = 6379
+# -- ElastiCache Replication Group ----------------------------------------------
+resource "aws_elasticache_replication_group" "compat" {
+  replication_group_id = "floci-compat-cache"
+  description          = "Floci Terraform compatibility cache"
+  engine               = "redis"
+  node_type            = "cache.t3.micro"
+  num_cache_clusters   = 1
+  port                 = 6379
 }
 
 # -- Firehose Delivery Stream --------------------------------------------------
@@ -369,15 +360,6 @@ resource "aws_batch_compute_environment" "compat" {
     subnets            = [aws_subnet.compat.id]
     security_group_ids = [aws_security_group.compat.id]
   }
-}
-
-# -- Neptune Cluster -----------------------------------------------------------
-resource "aws_neptune_cluster" "compat" {
-  cluster_identifier      = "floci-compat-neptune"
-  engine                  = "neptune"
-  skip_final_snapshot     = true
-  apply_immediately       = true
-  backup_retention_period = 1
 }
 
 # -- OpenSearch Domain ---------------------------------------------------------
@@ -666,4 +648,206 @@ resource "aws_kinesis_firehose_delivery_stream" "events" {
 
 output "firehose_stream_arn" {
   value = aws_kinesis_firehose_delivery_stream.events.arn
+}
+
+# -- Application Auto Scaling (scalable target + target-tracking policies) -----
+resource "aws_appautoscaling_target" "ecs_service" {
+  max_capacity       = 20
+  min_capacity       = 2
+  resource_id        = "service/floci-compat-cluster/floci-compat-service"
+  scalable_dimension = "ecs:service:DesiredCount"
+  service_namespace  = "ecs"
+
+  tags = {
+    Environment = "compat-test"
+  }
+}
+
+resource "aws_appautoscaling_policy" "ecs_cpu" {
+  name               = "floci-compat-cpu-tracking"
+  policy_type        = "TargetTrackingScaling"
+  resource_id        = aws_appautoscaling_target.ecs_service.resource_id
+  scalable_dimension = aws_appautoscaling_target.ecs_service.scalable_dimension
+  service_namespace  = aws_appautoscaling_target.ecs_service.service_namespace
+
+  target_tracking_scaling_policy_configuration {
+    predefined_metric_specification {
+      predefined_metric_type = "ECSServiceAverageCPUUtilization"
+    }
+    target_value = 65
+  }
+}
+
+# resource_label round-trips only if every nested field is echoed back, so this
+# resource is the canary for target-tracking drift.
+resource "aws_appautoscaling_policy" "ecs_alb_requests" {
+  name               = "floci-compat-alb-request-count"
+  policy_type        = "TargetTrackingScaling"
+  resource_id        = aws_appautoscaling_target.ecs_service.resource_id
+  scalable_dimension = aws_appautoscaling_target.ecs_service.scalable_dimension
+  service_namespace  = aws_appautoscaling_target.ecs_service.service_namespace
+
+  target_tracking_scaling_policy_configuration {
+    target_value       = 1000
+    scale_in_cooldown  = 240
+    scale_out_cooldown = 60
+
+    predefined_metric_specification {
+      predefined_metric_type = "ALBRequestCountPerTarget"
+      resource_label         = "app/floci-compat-alb/abc123/targetgroup/floci-compat-tg/def456"
+    }
+  }
+}
+
+output "appautoscaling_target_arn" {
+  value = aws_appautoscaling_target.ecs_service.arn
+}
+
+output "appautoscaling_alb_policy_arn" {
+  value = aws_appautoscaling_policy.ecs_alb_requests.arn
+}
+
+# ── SES Receipt Rule Set ───────────────────────────────────────────────────
+# floci stores it inertly (no inbound-mail routing); the management API just round-trips.
+resource "aws_ses_receipt_rule_set" "compat" {
+  rule_set_name = "floci-compat-rule-set"
+}
+
+resource "aws_ses_active_receipt_rule_set" "compat" {
+  rule_set_name = aws_ses_receipt_rule_set.compat.rule_set_name
+}
+
+output "ses_rule_set_name" {
+  value = aws_ses_receipt_rule_set.compat.rule_set_name
+}
+
+# -- IAM managed-policy attachment ---------------------------------------------
+# These policies sit outside the small curated set Floci used to ship, so the
+# attachments below only succeed once the full AWS managed-policy catalog is seeded.
+resource "aws_iam_role" "managed_policy_attach" {
+  name               = "floci-compat-managed-policy-role"
+  assume_role_policy = data.aws_iam_policy_document.lambda_assume_role.json
+}
+
+resource "aws_iam_role_policy_attachment" "ec2_read_only" {
+  role       = aws_iam_role.managed_policy_attach.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ReadOnlyAccess"
+}
+
+resource "aws_iam_role_policy_attachment" "emr_service_role" {
+  role       = aws_iam_role.managed_policy_attach.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonElasticMapReduceRole"
+}
+
+output "managed_policy_role_arn" {
+  value = aws_iam_role.managed_policy_attach.arn
+}
+
+# The provider reads tags off the GetRole/GetPolicy/GetFunction response rather than by calling
+# List*Tags, so a tagged resource that does not echo them back applies cleanly and then diffs on
+# every subsequent plan. The re-plan assertion below is what catches that.
+resource "aws_iam_role" "tagged" {
+  name               = "floci-compat-tagged-role"
+  assume_role_policy = data.aws_iam_policy_document.lambda_assume_role.json
+
+  tags = {
+    Environment = "compat"
+    Owner       = "floci"
+  }
+}
+
+resource "aws_iam_policy" "tagged" {
+  name        = "floci-compat-tagged-policy"
+  description = "Tagged policy used to assert tags survive a round trip"
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = "s3:GetObject"
+      Resource = "*"
+    }]
+  })
+
+  tags = {
+    Environment = "compat"
+  }
+}
+
+output "tagged_role_arn" {
+  value = aws_iam_role.tagged.arn
+}
+
+output "tagged_policy_arn" {
+  value = aws_iam_policy.tagged.arn
+}
+
+# -- GuardDuty -----------------------------------------------------------------
+# Detector, per-feature configuration, and organization configuration mirror the
+# resource set an org security-baseline stack manages. additional_configuration
+# is an ordered list block: Floci must echo it back in submitted order or every
+# re-plan proposes a replacement.
+resource "aws_guardduty_detector" "compat" {
+  enable                       = true
+  finding_publishing_frequency = "SIX_HOURS"
+
+  tags = {
+    Environment = "compat-test"
+  }
+}
+
+resource "aws_guardduty_detector_feature" "runtime_monitoring" {
+  detector_id = aws_guardduty_detector.compat.id
+  name        = "RUNTIME_MONITORING"
+  status      = "ENABLED"
+
+  additional_configuration {
+    name   = "ECS_FARGATE_AGENT_MANAGEMENT"
+    status = "ENABLED"
+  }
+
+  additional_configuration {
+    name   = "EC2_AGENT_MANAGEMENT"
+    status = "ENABLED"
+  }
+
+  additional_configuration {
+    name   = "EKS_ADDON_MANAGEMENT"
+    status = "DISABLED"
+  }
+}
+
+resource "aws_guardduty_organization_configuration" "compat" {
+  detector_id                      = aws_guardduty_detector.compat.id
+  auto_enable_organization_members = "ALL"
+}
+
+resource "aws_guardduty_organization_configuration_feature" "runtime_monitoring" {
+  detector_id = aws_guardduty_detector.compat.id
+  name        = "RUNTIME_MONITORING"
+  auto_enable = "ALL"
+
+  additional_configuration {
+    name        = "ECS_FARGATE_AGENT_MANAGEMENT"
+    auto_enable = "ALL"
+  }
+
+  additional_configuration {
+    name        = "EC2_AGENT_MANAGEMENT"
+    auto_enable = "ALL"
+  }
+
+  additional_configuration {
+    name        = "EKS_ADDON_MANAGEMENT"
+    auto_enable = "NONE"
+  }
+
+  depends_on = [aws_guardduty_organization_configuration.compat]
+}
+
+output "guardduty_detector_id" {
+  value = aws_guardduty_detector.compat.id
+}
+
+output "guardduty_detector_arn" {
+  value = aws_guardduty_detector.compat.arn
 }

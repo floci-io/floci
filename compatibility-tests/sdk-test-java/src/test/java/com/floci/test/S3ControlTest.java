@@ -17,6 +17,11 @@ import software.amazon.awssdk.services.s3control.model.ListTagsForResourceRespon
 import software.amazon.awssdk.services.s3control.model.TagResourceRequest;
 import software.amazon.awssdk.services.s3control.model.UntagResourceRequest;
 import software.amazon.awssdk.services.s3control.model.S3ControlException;
+import software.amazon.awssdk.services.s3control.model.PutPublicAccessBlockRequest;
+import software.amazon.awssdk.services.s3control.model.GetPublicAccessBlockRequest;
+import software.amazon.awssdk.services.s3control.model.GetPublicAccessBlockResponse;
+import software.amazon.awssdk.services.s3control.model.DeletePublicAccessBlockRequest;
+import software.amazon.awssdk.services.s3control.model.PublicAccessBlockConfiguration;
 
 import java.util.List;
 import java.util.Map;
@@ -239,5 +244,69 @@ class S3ControlTest {
                         software.amazon.awssdk.services.s3control.model.Tag::value));
 
         assertThat(tags).containsEntry("PlainArn", "works");
+    }
+
+    // --- Account-level Block Public Access (s3control Put/Get/DeletePublicAccessBlock) ---
+    // Exercised by AWS LZA's Custom::PutPublicAccessBlock custom resource during LoggingStack deploy.
+
+    @Test
+    @Order(8)
+    @DisplayName("putPublicAccessBlock: account-level config is set and read back")
+    void putAndGetAccountPublicAccessBlock() {
+        s3control.putPublicAccessBlock(PutPublicAccessBlockRequest.builder()
+                .accountId(ACCOUNT_ID)
+                .publicAccessBlockConfiguration(PublicAccessBlockConfiguration.builder()
+                        .blockPublicAcls(true)
+                        .ignorePublicAcls(true)
+                        .blockPublicPolicy(true)
+                        .restrictPublicBuckets(true)
+                        .build())
+                .build());
+
+        GetPublicAccessBlockResponse resp = s3control.getPublicAccessBlock(
+                GetPublicAccessBlockRequest.builder().accountId(ACCOUNT_ID).build());
+
+        PublicAccessBlockConfiguration cfg = resp.publicAccessBlockConfiguration();
+        assertThat(cfg.blockPublicAcls()).isTrue();
+        assertThat(cfg.ignorePublicAcls()).isTrue();
+        assertThat(cfg.blockPublicPolicy()).isTrue();
+        assertThat(cfg.restrictPublicBuckets()).isTrue();
+    }
+
+    @Test
+    @Order(9)
+    @DisplayName("putPublicAccessBlock: absent flags default to false")
+    void putAccountPublicAccessBlockPartialDefaultsFalse() {
+        s3control.putPublicAccessBlock(PutPublicAccessBlockRequest.builder()
+                .accountId(ACCOUNT_ID)
+                .publicAccessBlockConfiguration(PublicAccessBlockConfiguration.builder()
+                        .blockPublicAcls(true)
+                        .build())
+                .build());
+
+        PublicAccessBlockConfiguration cfg = s3control.getPublicAccessBlock(
+                GetPublicAccessBlockRequest.builder().accountId(ACCOUNT_ID).build())
+                .publicAccessBlockConfiguration();
+        assertThat(cfg.blockPublicAcls()).isTrue();
+        assertThat(cfg.restrictPublicBuckets()).isFalse();
+    }
+
+    @Test
+    @Order(10)
+    @DisplayName("deletePublicAccessBlock: removes account-level config (subsequent get 404s)")
+    void deleteAccountPublicAccessBlock() {
+        s3control.putPublicAccessBlock(PutPublicAccessBlockRequest.builder()
+                .accountId(ACCOUNT_ID)
+                .publicAccessBlockConfiguration(PublicAccessBlockConfiguration.builder()
+                        .blockPublicAcls(true).build())
+                .build());
+
+        s3control.deletePublicAccessBlock(DeletePublicAccessBlockRequest.builder()
+                .accountId(ACCOUNT_ID).build());
+
+        assertThatThrownBy(() -> s3control.getPublicAccessBlock(
+                GetPublicAccessBlockRequest.builder().accountId(ACCOUNT_ID).build()))
+                .isInstanceOf(S3ControlException.class)
+                .satisfies(e -> assertThat(((S3ControlException) e).statusCode()).isEqualTo(404));
     }
 }

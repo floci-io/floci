@@ -39,6 +39,8 @@ provider "aws" {
     cloudwatch       = var.endpoint
     ec2              = var.endpoint
     route53          = var.endpoint
+    appautoscaling   = var.endpoint
+    guardduty        = var.endpoint
     elasticache      = var.endpoint
     ecr              = var.endpoint
     ecs              = var.endpoint

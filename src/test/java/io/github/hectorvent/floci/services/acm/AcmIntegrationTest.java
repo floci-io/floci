@@ -537,6 +537,150 @@ class AcmIntegrationTest {
             .body("__type", equalTo("ResourceNotFoundException"));
     }
 
+    @Test
+    @Order(40)
+    void updateCertificateOptions() {
+        given()
+            .header("X-Amz-Target", "CertificateManager.UpdateCertificateOptions")
+            .contentType(ACM_CONTENT_TYPE)
+            .body("""
+                {
+                    "CertificateArn": "%s",
+                    "Options": {"Export": "ENABLED"}
+                }
+                """.formatted(createdCertificateArn))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "CertificateManager.DescribeCertificate")
+            .contentType(ACM_CONTENT_TYPE)
+            .body("""
+                {"CertificateArn": "%s"}
+                """.formatted(createdCertificateArn))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Certificate.Options.Export", equalTo("ENABLED"));
+    }
+
+    @Test
+    @Order(41)
+    void updateCertificateOptionsRequiresOptions() {
+        given()
+            .header("X-Amz-Target", "CertificateManager.UpdateCertificateOptions")
+            .contentType(ACM_CONTENT_TYPE)
+            .body("""
+                {"CertificateArn": "%s"}
+                """.formatted(createdCertificateArn))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
+    }
+
+    @Test
+    @Order(42)
+    void revokeCertificate() {
+        String certificateArn = given()
+            .header("X-Amz-Target", "CertificateManager.RequestCertificate")
+            .contentType(ACM_CONTENT_TYPE)
+            .body("""
+                {"DomainName": "revocable.example.com"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().jsonPath().getString("CertificateArn");
+
+        given()
+            .header("X-Amz-Target", "CertificateManager.UpdateCertificateOptions")
+            .contentType(ACM_CONTENT_TYPE)
+            .body("""
+                {"CertificateArn": "%s", "Options": {"Export": "ENABLED"}}
+                """.formatted(certificateArn))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "CertificateManager.RevokeCertificate")
+            .contentType(ACM_CONTENT_TYPE)
+            .body("""
+                {"CertificateArn": "%s", "RevocationReason": "KEY_COMPROMISE"}
+                """.formatted(certificateArn))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("CertificateArn", equalTo(certificateArn));
+
+        given()
+            .header("X-Amz-Target", "CertificateManager.DescribeCertificate")
+            .contentType(ACM_CONTENT_TYPE)
+            .body("""
+                {"CertificateArn": "%s"}
+                """.formatted(certificateArn))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Certificate.Status", equalTo("REVOKED"));
+    }
+
+    @Test
+    @Order(43)
+    void renewPrivateCertificate() {
+        String certificateArn = given()
+            .header("X-Amz-Target", "CertificateManager.RequestCertificate")
+            .contentType(ACM_CONTENT_TYPE)
+            .body("""
+                {
+                    "DomainName": "renewable-private.example.com",
+                    "CertificateAuthorityArn": "arn:aws:acm-pca:us-east-1:000000000000:certificate-authority/test"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().jsonPath().getString("CertificateArn");
+
+        given()
+            .header("X-Amz-Target", "CertificateManager.RenewCertificate")
+            .contentType(ACM_CONTENT_TYPE)
+            .body("""
+                {"CertificateArn": "%s"}
+                """.formatted(certificateArn))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(equalTo("{}"));
+    }
+
+    @Test
+    @Order(44)
+    void renewCertificateNotFound() {
+        given()
+            .header("X-Amz-Target", "CertificateManager.RenewCertificate")
+            .contentType(ACM_CONTENT_TYPE)
+            .body("""
+                {"CertificateArn": "arn:aws:acm:us-east-1:123456789012:certificate/nonexistent"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(404)
+            .body("__type", equalTo("ResourceNotFoundException"));
+    }
+
     // ==================== Unsupported Operation ====================
 
     @Test

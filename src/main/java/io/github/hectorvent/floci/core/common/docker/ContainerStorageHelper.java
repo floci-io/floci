@@ -6,6 +6,8 @@ import org.jboss.logging.Logger;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 /**
  * Central helper for child-container volume management across RDS, OpenSearch, MSK, and ECR.
@@ -21,6 +23,8 @@ import java.nio.file.Path;
 public final class ContainerStorageHelper {
 
     private static final Logger LOG = Logger.getLogger(ContainerStorageHelper.class);
+
+    static final String CLOUD = "aws";
 
     private ContainerStorageHelper() {}
 
@@ -46,6 +50,84 @@ public final class ContainerStorageHelper {
             return "floci-" + namespace + "-" + baseName.substring("floci-".length());
         }
         return "floci-" + namespace + "-" + baseName;
+    }
+
+    /**
+     * Like {@link #dockerName} but with a caller-supplied base prefix in place of the default
+     * {@code floci}: {@code <prefix>-<rest>}, or {@code <prefix>-<namespace>-<rest>} when a
+     * resource namespace is configured.
+     */
+    public static String prefixedDockerName(EmulatorConfig config, String prefix, String rest) {
+        String namespace = resourceNamespace(config);
+        if (namespace.isBlank()) {
+            return prefix + "-" + rest;
+        }
+        return prefix + "-" + namespace + "-" + rest;
+    }
+
+    /**
+     * Label keys reserved for the emulator itself. {@code floci} and {@code floci_emulator}
+     * drive container/volume discovery and pruning (e.g.
+     * {@code docker volume prune --filter label=floci=true}); {@code floci_namespace} scopes
+     * resources when multiple Floci processes share one daemon. Extra labels using these keys
+     * are ignored so user configuration can never break cleanup.
+     */
+    private static final java.util.Set<String> RESERVED_LABEL_KEYS =
+            java.util.Set.of("floci", "floci_emulator", "floci_namespace");
+
+    /**
+     * Labels applied to every emulator-created container and volume:
+     * {@code floci=true} (umbrella across all Floci emulators),
+     * {@code floci_emulator=floci-aws} (per-emulator discriminator), and
+     * {@code floci_namespace} when a resource namespace is configured.
+     * User-configured {@code floci.docker.extra-labels} entries are included first;
+     * reserved keys always win on conflict.
+     */
+    public static Map<String, String> defaultLabels(EmulatorConfig config) {
+        Map<String, String> labels = new LinkedHashMap<>();
+        if (config != null && config.docker() != null && config.docker().extraLabels() != null) {
+            for (EmulatorConfig.DockerConfig.LabelEntry entry : config.docker().extraLabels()) {
+                String key = entry.key() == null ? "" : entry.key().trim();
+                if (key.isEmpty() || RESERVED_LABEL_KEYS.contains(key)) {
+                    LOG.warnv("Ignoring extra Docker label with {0} key: \"{1}\"",
+                            key.isEmpty() ? "blank" : "reserved", key);
+                    continue;
+                }
+                labels.put(key, entry.value() == null ? "" : entry.value());
+            }
+        }
+        labels.put("floci", "true");
+        labels.put("floci_emulator", "floci-" + CLOUD);
+        String namespace = resourceNamespace(config);
+        if (!namespace.isBlank()) {
+            labels.put("floci_namespace", namespace);
+        }
+        return labels;
+    }
+
+    /**
+     * Labels tying a container to the specific AWS resource it emulates: {@code io.floci}
+     * (cloud provider, for multi-cloud discovery), {@code io.floci.service},
+     * {@code io.floci.resource-id}, {@code io.floci.account}, and {@code io.floci.region}.
+     * Merged into a spec's own labels (never into {@link #defaultLabels}), so callers pass
+     * this to {@link ContainerBuilder.Builder#withLabels}. A blank or null value omits that
+     * key entirely, e.g. ECR's shared registry container has no per-resource id.
+     */
+    public static Map<String, String> resourceIdentityLabels(
+            String service, String resourceId, String accountId, String region) {
+        Map<String, String> labels = new LinkedHashMap<>();
+        labels.put("io.floci", CLOUD);
+        putIfNotBlank(labels, "io.floci.service", service);
+        putIfNotBlank(labels, "io.floci.resource-id", resourceId);
+        putIfNotBlank(labels, "io.floci.account", accountId);
+        putIfNotBlank(labels, "io.floci.region", region);
+        return labels;
+    }
+
+    private static void putIfNotBlank(Map<String, String> labels, String key, String value) {
+        if (value != null && !value.isBlank()) {
+            labels.put(key, value);
+        }
     }
 
     public static Path hostResourcePath(EmulatorConfig config, String service, String resourceId) {
@@ -102,6 +184,15 @@ public final class ContainerStorageHelper {
             String fallbackId,
             String internalMount) {
         String volumeName = resourceName(config, service, volumeId, fallbackId);
+        applyNamedVolume(builder, lifecycleManager, volumeName, internalMount);
+    }
+
+    /** Mounts a persisted, exact Docker volume name without applying namespace rules again. */
+    public static void applyNamedVolume(
+            ContainerBuilder.Builder builder,
+            ContainerLifecycleManager lifecycleManager,
+            String volumeName,
+            String internalMount) {
         lifecycleManager.ensureVolume(volumeName);
         builder.withNamedVolume(volumeName, internalMount);
     }
@@ -121,11 +212,35 @@ public final class ContainerStorageHelper {
             String volumeId,
             String fallbackId) {
         String volumeName = resourceName(config, service, volumeId, fallbackId);
+        removeNamedVolume(config, lifecycleManager, volumeName);
+    }
+
+    /** Removes or retains a persisted, exact Docker volume name according to storage policy. */
+    public static void removeNamedVolume(
+            EmulatorConfig config,
+            ContainerLifecycleManager lifecycleManager,
+            String volumeName) {
         boolean isMemory = "memory".equals(config.storage().mode());
         if (isMemory || config.storage().pruneVolumesOnDelete()) {
             lifecycleManager.removeVolume(volumeName);
         } else {
             LOG.infov("Retained Docker volume {0}. Remove manually: docker volume rm {0}", volumeName);
+        }
+    }
+
+    /**
+     * Removes an exact named volume according to storage policy and propagates Docker failures.
+     */
+    public static void removeNamedVolumeStrict(
+            EmulatorConfig config,
+            ContainerLifecycleManager lifecycleManager,
+            String volumeName) {
+        boolean isMemory = "memory".equals(config.storage().mode());
+        if (isMemory || config.storage().pruneVolumesOnDelete()) {
+            lifecycleManager.removeVolumeStrict(volumeName);
+        } else {
+            LOG.infov("Retained Docker volume {0}. Remove manually: docker volume rm {0}",
+                    volumeName);
         }
     }
 

@@ -155,6 +155,7 @@ class ElastiCacheTest {
 
         assertThat(response.userId()).isEqualTo(userId);
         assertThat(response.userName()).isEqualTo(userName);
+        assertThat(response.engine()).isEqualTo("redis");
         assertThat(response.authentication().typeAsString()).isEqualTo("password");
         assertThat(response.authentication().passwordCount()).isEqualTo(1);
         userCreated = true;
@@ -168,7 +169,8 @@ class ElastiCacheTest {
         var response = elasticache.describeUsers(DescribeUsersRequest.builder().build());
 
         assertThat(response.users())
-                .anyMatch(user -> user.userId().equals(userId) && user.userName().equals(userName));
+                .anyMatch(user -> user.userId().equals(userId) && user.userName().equals(userName)
+                        && "redis".equals(user.engine()));
     }
 
     @Test
@@ -271,6 +273,27 @@ class ElastiCacheTest {
 
     @Test
     @Order(11)
+    void valkeyUserRoundTripEchoesEngine() {
+        String valkeyUserId = TestFixtures.uniqueName("ec-valkey-user");
+        var created = elasticache.createUser(CreateUserRequest.builder()
+                .userId(valkeyUserId)
+                .userName(TestFixtures.uniqueName("ec-valkey-name"))
+                .engine("valkey")
+                .accessString("on ~* +@all")
+                .authenticationMode(AuthenticationMode.builder()
+                        .type(InputAuthenticationType.NO_PASSWORD_REQUIRED)
+                        .build())
+                .build());
+        assertThat(created.engine()).isEqualTo("valkey");
+
+        var deleted = elasticache.deleteUser(DeleteUserRequest.builder()
+                .userId(valkeyUserId)
+                .build());
+        assertThat(deleted.engine()).isEqualTo("valkey");
+    }
+
+    @Test
+    @Order(12)
     void deleteReplicationGroupReleasesPortForReuse() {
         requireGroup();
 

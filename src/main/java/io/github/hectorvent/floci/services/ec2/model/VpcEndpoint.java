@@ -22,6 +22,7 @@ public class VpcEndpoint {
     private List<String> subnetIds = new ArrayList<>();
     private List<String> securityGroupIds = new ArrayList<>();
     private boolean privateDnsEnabled;
+    private String policyDocument;
     private List<Tag> tags = new ArrayList<>();
 
     public VpcEndpoint() {}
@@ -58,6 +59,9 @@ public class VpcEndpoint {
 
     public boolean isPrivateDnsEnabled() { return privateDnsEnabled; }
     public void setPrivateDnsEnabled(boolean privateDnsEnabled) { this.privateDnsEnabled = privateDnsEnabled; }
+
+    public String getPolicyDocument() { return policyDocument; }
+    public void setPolicyDocument(String policyDocument) { this.policyDocument = policyDocument; }
 
     public List<Tag> getTags() { return tags; }
     public void setTags(List<Tag> tags) { this.tags = tags; }

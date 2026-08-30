@@ -1,4 +1,8 @@
 quarkus:
+  jackson:
+    # Quarkus 3.37 stopped tolerating empty response beans; AWS StartApplication/
+    # StopApplication legitimately return {}, so keep the pre-3.37 behaviour.
+    fail-on-empty-beans: false
   log:
     console:
       format: "%d{yyyy-MM-dd HH:mm:ss,SSS} %-5p [%c{3.}] %s%e%n"
@@ -13,6 +17,11 @@ quarkus:
       max-body-size: ${floci.max-request-size}M
   datasource:
     active: false
+  kubernetes-client:
+    devservices:
+      # Never auto-start a test API server; the kubernetes Lambda executor
+      # connects to a real cluster (in-cluster config or kubeconfig) only.
+      enabled: false
   security:
      security-providers: BC
   shutdown:
@@ -22,7 +31,8 @@ quarkus:
   native:
     resources:
       # The Pricing service reads its bundled snapshot, EC2 reads its image
-      # catalog (ec2/image-catalog.yaml), AppSync's GraphQL parser reads its
+      # catalog (ec2/image-catalog.yaml), IAM reads its AWS managed-policy
+      # catalog (iam/managed-policies.yaml), AppSync's GraphQL parser reads its
       # message bundles, and API Gateway's Velocity engine reads its default
       # properties at runtime via
       # ClassLoader#getResourceAsStream. Quarkus's static resource analysis
@@ -32,6 +42,7 @@ quarkus:
         - pricing-snapshots/**
         - ui/*.html
         - ec2/*.yaml
+        - iam/*.yaml
         - i18n/*.properties
         - org/apache/velocity/runtime/defaults/*.properties
     additional-build-args:
@@ -56,6 +67,12 @@ quarkus:
       - --initialize-at-run-time=io.github.hectorvent.floci.services.cloudfront.CloudFrontService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.emr.EmrService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.elasticbeanstalk.ElasticBeanstalkService
+      - --initialize-at-run-time=graphql.util.IdGenerator
+      - --initialize-at-run-time=io.github.hectorvent.floci.services.lambda.launcher.LambdaExecutionRoleCredentials
+      # snappy-java (Firehose Snappy/HADOOP_SNAPPY delivery) extracts and loads a
+      # bundled JNI library from the static initializers of these two classes.
+      - --initialize-at-run-time=org.xerial.snappy.Snappy
+      - --initialize-at-run-time=org.xerial.snappy.SnappyLoader
 
 
 floci:
@@ -66,6 +83,8 @@ floci:
                    # Needed for multi-container Docker setups. Example: FLOCI_HOSTNAME=floci
   default-region: us-east-1
   default-account-id: "000000000000"
+  # Shared mock-response config for Textract/Comprehend/Rekognition. See AiMockConfigLoader.
+  ai-mock-config-file: ${AI_MOCK_CONFIG:}
   storage:
     # Supported modes: memory, persistent, hybrid, wal
     mode: memory
@@ -113,6 +132,8 @@ floci:
         flush-interval-ms: 5000
       s3vectors:
         flush-interval-ms: 5000
+      s3tables:
+        flush-interval-ms: 5000
       ecs:
         flush-interval-ms: 5000
       codebuild:
@@ -135,6 +156,19 @@ floci:
         # instance metadata persist so CloudFormation-created VPC/subnet ids survive a restart (#1297).
         # mode: memory
       appsync:
+        flush-interval-ms: 5000
+      rum:
+        flush-interval-ms: 5000
+      resourceexplorer2:
+        mode: hybrid
+        flush-interval-ms: 5000
+      fis:
+        flush-interval-ms: 5000
+      guardduty:
+        flush-interval-ms: 5000
+      emrserverless:
+        flush-interval-ms: 5000
+      lakeformation:
         flush-interval-ms: 5000
 
   dns:
@@ -179,6 +213,7 @@ floci:
 
   protocols:
     strict-claiming: false             # FLOCI_PROTOCOLS_STRICT_CLAIMING — reject RPC-signaled requests that no supported wire protocol claims
+    reject-unknown-service-scope: true # FLOCI_PROTOCOLS_REJECT_UNKNOWN_SERVICE_SCOPE — reject REST requests signed for a service Floci does not implement
 
   docker:
     log-max-size: "10m"
@@ -186,6 +221,11 @@ floci:
     docker-host: unix:///var/run/docker.sock
     resource-namespace: ""          # FLOCI_DOCKER_RESOURCE_NAMESPACE; scopes child container/volume names
     docker-config-path: ""
+    # extra-labels:                 # Extra Docker labels applied to every Floci-created container and volume
+    #   - key: "com.example.project"  #   (FLOCI_DOCKER_EXTRA_LABELS_0__KEY / _0__VALUE; increment the index for more;
+    #     value: my-project           #   reserved keys floci, floci_emulator, floci_namespace are ignored)
+    #   - key: environment
+    #     value: dev
 
   services:
     ssm:
@@ -200,6 +240,7 @@ floci:
       enabled: true
       enforce-auth: false
       default-presign-expiry-seconds: 3600
+      global-bucket-namespace: false
     dynamodb:
       enabled: true
     sns:
@@ -209,14 +250,28 @@ floci:
       ephemeral: false
       default-memory-mb: 128
       default-timeout-seconds: 3
-      runtime-api-base-port: 9200
-      runtime-api-max-port: 9299
+      # 500 ports, not the former 100 (9200-9299): one port is held per running Lambda
+      # container, so this is the concurrent-execution ceiling, and a multi-account LZA needs
+      # ~112 at once. See EmulatorConfig.runtimeApiBasePort for why 12000 and not a wider 9200.
+      # Keep in step with the @WithDefault there — a value set here WINS over the annotation,
+      # so changing only the default silently does nothing (the issue #2225 trap).
+      runtime-api-base-port: 12000
+      runtime-api-max-port: 12499
       code-path: ./data/lambda-code
       poll-interval-ms: 1000
       container-idle-timeout-seconds: 300
       region-concurrency-limit: 1000
       unreserved-concurrency-min: 100
       # aws-config-path:                      # Host path to bind-mount (read-only) at /opt/aws-config for real credential discovery
+      # extra-hosts:                          # Extra /etc/hosts entries for Lambda containers, "hostname:ip" ("host-gateway" allowed as ip)
+      # container-name-prefix: floci          # FLOCI_SERVICES_LAMBDA_CONTAINER_NAME_PREFIX — base name prefix for spawned containers and code volumes ([A-Za-z0-9][A-Za-z0-9_.-]*; invalid values fall back to "floci")
+      executor: docker                        # docker | kubernetes (run Lambda environments as pods)
+      # kubernetes:
+      #   namespace: default                  # Namespace Lambda pods are created in
+      #   labels:                             # Extra pod labels, key=value entries
+      #     - team=platform
+      #   floci-address:                      # Host/IP pods use to reach Floci; auto-detected in-cluster
+      #   init-image: busybox:1.36            # Init container image (needs sh, wget, unzip)
       hot-reload:
         enabled: false
     apigateway:
@@ -227,6 +282,9 @@ floci:
       enabled: true
       enforcement-enabled: false
       seed-deployer-principal: false
+      # account-alias: ""  # When set, seeds the account alias at startup so callers can read one
+                           # without creating it first. Unset means the account has no alias,
+                           # matching AWS. Example: FLOCI_SERVICES_IAM_ACCOUNT_ALIAS=my-account
     msk:
       enabled: true
       mock: false
@@ -237,6 +295,13 @@ floci:
       enabled: true
       mock: false
       default-image: "rabbitmq:3-management"
+    kinesis-analytics:
+      enabled: true
+      mock: false
+      # default-image: optional override; uncomment to pin every application to a single image
+      # (e.g. a private registry mirror). When unset, the image is chosen from the requested
+      # RuntimeEnvironment (KinesisAnalyticsRuntimes.imageFor, e.g. FLINK-1_19 -> apache/flink:1.19).
+      # default-image: "apache/flink:1.18"
     elasticache:
       enabled: true
       proxy-base-port: 6379
@@ -249,14 +314,21 @@ floci:
       proxy-base-port: 6400
       proxy-max-port: 6419
       default-image: "valkey/valkey:8"
+    redshift:
+      enabled: true
+      default-port: 5439
+      image-version: postgres:15-alpine
     rds:
       enabled: true
       mock: false                                 # FLOCI_SERVICES_RDS_MOCK — true = metadata only, no Docker (useful for CI)
       proxy-base-port: 7001
       proxy-max-port: 7099
-      default-postgres-image: "postgres:16-alpine"
-      default-mysql-image: "mysql:8.0"
-      default-mariadb-image: "mariadb:11"
+      # endpoint-host: localhost                 # Hostname clients use; enables published-port translation in Docker
+      # Omit image overrides to adapt Floci's built-in images to EngineVersion.
+      # Uncomment an override to pin that engine to an exact image.
+      # default-postgres-image: "registry.example.com/postgres:16-alpine"
+      # default-mysql-image: "registry.example.com/mysql:8.0"
+      # default-mariadb-image: "registry.example.com/mariadb:11"
     rds-data:
       enabled: true
       transaction-ttl-seconds: 180
@@ -289,14 +361,25 @@ floci:
       enabled: true
     firehose:
       enabled: true
+      tick-interval-seconds: 10
+      flush-record-count: 0
     kms:
       enabled: true
     cognito:
       enabled: true
     stepfunctions:
       enabled: true
+      allow-plaintext-http: false
+      mock-config-file: ${SFN_MOCK_CONFIG:}
+    swf:
+      enabled: true
+      timeout-sweep-enabled: true
+      timeout-sweep-interval-seconds: 1
     cloudformation:
       enabled: true
+      # Fail an AWS::Lambda::Function whose S3 code cannot be read, as real CloudFormation
+      # does. Set true to fall back to the built-in stub handler instead (issue #2648).
+      allow-stub-lambda-code: false
     acm:
       enabled: true
       validation-wait-seconds: 0
@@ -336,6 +419,11 @@ floci:
       max-published-ports-per-instance: 20
       socat-image: alpine/socat
       mock: false
+      aws-faithful-private-ip: false
+      # container-ips-routable: true  # Auto-detected by default (a throwaway TCP probe toward
+                                       # the container network). Set explicitly when the probe
+                                       # can't speak for your clients, e.g. Floci itself running
+                                       # containerized. FLOCI_SERVICES_EC2_CONTAINER_IPS_ROUTABLE
     ecs:
       enabled: true
       mock: false
@@ -359,8 +447,18 @@ floci:
       container-name: floci-ui
       port: 4500
       keep-running-on-shutdown: false
+      # endpoint: unset by default — Floci derives the sidecar's callback address automatically.
+      # Set an absolute http:// or https:// URL here only to override that derivation.
+      insecure-skip-tls-verify: false
     bedrock-runtime:
       enabled: true
+      backend: stub
+      proxy:
+        passthrough: false
+        # url: http://localhost:11434/v1
+        # api-key: sk-...
+        # default-model: llama3
+        # model-mapping: "anthropic.claude-3-sonnet-20240229-v1:0=claude-3-sonnet"
     eks:
       enabled: true
       mock: false
@@ -373,6 +471,19 @@ floci:
       endpoint-mode: host          # host = https://localhost:<hostPort> (host-reachable); network = container DNS name
       iam-auth-webhook: true       # wire a token-auth webhook into k3s so `aws eks get-token` works
       ecr-registry-mirror: true    # inject a registries.yaml so pods can pull images pushed to Floci ECR
+      disable-cni: false           # start k3s without its bundled flannel/kube-proxy so a real CNI (e.g. Cilium) can take over
+    mwaa:
+      enabled: true
+      mock: false
+      default-postgres-image: "postgres:16-alpine"
+      supported-versions: "2.10.5,2.9.3,2.8.4"
+      default-version: "2.10.5"
+      proxy-base-port: 8700
+      proxy-max-port: 8799
+      data-path: ./data/mwaa
+      keep-running-on-shutdown: false
+      dag-sync-interval-seconds: 30
+      install-requirements: true
     elbv2:
       enabled: true
       mock: false
@@ -389,16 +500,24 @@ floci:
       enabled: true
     autoscaling:
       enabled: true
+    applicationautoscaling:
+      enabled: true
     elasticbeanstalk:
       enabled: true
     backup:
       enabled: true
       job-completion-delay-seconds: 3
+    fis:
+      enabled: true
     route53:
       enabled: true
     transfer:
       enabled: true
     textract:
+      enabled: true
+    comprehend:
+      enabled: true
+    rekognition:
       enabled: true
     pricing:
       enabled: true
@@ -417,15 +536,21 @@ floci:
     cloudtrail:
       enabled: true
     lightsail:
+      enabled: true
     cloudcontrol:
+      enabled: true
+    resourceexplorer2:
       enabled: true
     cloudfront:
       enabled: true
+      allowed-private-origin-hosts: []
     appsync:
       enabled: true
       schema-worker-threads: 4
       schema-worker-shutdown-timeout-seconds: 30
     s3vectors:
+      enabled: true
+    s3tables:
       enabled: true
     iot:
       enabled: true
@@ -435,4 +560,55 @@ floci:
         host: 0.0.0.0
         port: 1883
     iotdata:
+      enabled: true
+    cloudhsmv2:
+      enabled: true
+    efs:
+      enabled: true
+    organizations:
+      enabled: true
+      # management-account-email: ""  # When set, overrides the management-account email reported by DescribeOrganization and account listings.
+    rum:
+      enabled: true
+    networkfirewall:
+      enabled: true
+    servicecatalog:
+      enabled: true
+    guardduty:
+      enabled: true
+    emrserverless:
+      enabled: true
+    ssoadmin:
+      enabled: true
+    controltower:
+      enabled: true
+    route53resolver:
+      enabled: true
+    connect:
+      enabled: true
+    aps:
+      enabled: true
+    lakeformation:
+      enabled: true
+    tagging:
+      enabled: true
+    pipes:
+      enabled: true
+    configservice:
+      enabled: true
+    docdb:
+      enabled: true
+      mock: false
+      default-image: "mongo:7.0"
+    bedrock-agent-core:
+      enabled: true
+      # invoke-response: '{"output":"yes"}'   # Body returned by InvokeAgentRuntime
+      # validate-runtime-exists: false        # true = reject unknown runtime ARNs
+    bedrock-agent-core-control:
+      enabled: true
+    servicequotas:
+      enabled: true
+    ram:
+      enabled: true
+    codegurureviewer:
       enabled: true

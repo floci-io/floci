@@ -21,13 +21,18 @@ public class TextractJsonHandler {
     }
     /**
      * Dispatches Textract actions received via the AwsJson11Controller.
-     * The request body is accepted but not parsed — stub ignores document input.
+     * The request body's Document content is not decoded — stub ignores it beyond
+     * extracting Document.S3Object as an optional mock-response lookup key (see
+     * {@link TextractService}); a Bytes-based Document has no such key, so mock
+     * lookup is simply skipped and the default stub applies, same as always.
      */
     public Response handle(String action, JsonNode request, String region) {
         LOG.debugv("Textract action: {0}", action);
         return switch (action) {
-            case "DetectDocumentText"         -> textractService.detectDocumentText();
-            case "AnalyzeDocument"            -> textractService.analyzeDocument();
+            case "DetectDocumentText"         -> textractService.detectDocumentText(
+                    extractS3Key(request, "Document"));
+            case "AnalyzeDocument"            -> textractService.analyzeDocument(
+                    extractS3Key(request, "Document"));
             case "StartDocumentTextDetection" -> textractService.startDocumentTextDetection();
             case "GetDocumentTextDetection"   -> textractService.getDocumentTextDetection(
                     getStringField(request, "JobId"));
@@ -43,5 +48,25 @@ public class TextractJsonHandler {
     private String getStringField(JsonNode node, String field) {
         JsonNode value = node == null ? null : node.get(field);
         return (value != null && !value.isNull()) ? value.asText() : null;
+    }
+    /**
+     * Extracts an optional "Bucket/Name" mock-response lookup key from an S3Object-backed
+     * document field. Returns null when the field is absent, not an object, or Bytes-backed
+     * (no S3Object) — every caller treats a null key as "mock lookup does not apply".
+     */
+    private String extractS3Key(JsonNode request, String field) {
+        if (request == null) {
+            return null;
+        }
+        JsonNode s3Object = request.path(field).path("S3Object");
+        if (!s3Object.isObject()) {
+            return null;
+        }
+        JsonNode bucket = s3Object.get("Bucket");
+        JsonNode name = s3Object.get("Name");
+        if (bucket == null || !bucket.isTextual() || name == null || !name.isTextual()) {
+            return null;
+        }
+        return bucket.asText() + "/" + name.asText();
     }
 }

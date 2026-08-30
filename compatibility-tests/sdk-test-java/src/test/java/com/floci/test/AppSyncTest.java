@@ -117,10 +117,11 @@ class AppSyncTest {
     // ── API Keys ────────────────────────────────────────────────────────
 
     private static String keyId;
+    private static String apiKeyValue;
 
     @Test
     @Order(20)
-    void createApiKey() {
+    void createApiKey() throws Exception {
         long expiresEpoch = Instant.parse("2027-01-01T00:00:00Z").getEpochSecond();
         CreateApiKeyResponse resp = client.createApiKey(CreateApiKeyRequest.builder()
                 .apiId(apiId)
@@ -132,6 +133,9 @@ class AppSyncTest {
         keyId = resp.apiKey().id();
         assertThat(keyId).isNotBlank();
         assertThat(resp.apiKey().description()).isEqualTo("sdk-test-key");
+        // As on AWS, the id is the key value sent as x-api-key.
+        assertThat(keyId).matches("da2-[a-z0-9]{26}");
+        apiKeyValue = keyId;
     }
 
     @Test
@@ -171,6 +175,50 @@ class AppSyncTest {
                 .build());
 
         assertThat(resp).isNotNull();
+    }
+
+    @Test
+    @Order(24)
+    void httpExecuteWithApiKeyReturns200() throws Exception {
+        String url = TestFixtures.endpoint() + "/v1/apis/" + apiId + "/graphql";
+        HttpRequest req = HttpRequest.newBuilder()
+                .uri(URI.create(url))
+                .header("Content-Type", "application/json")
+                .header("x-api-key", apiKeyValue)
+                .POST(HttpRequest.BodyPublishers.ofString("{\"query\":\"{ hello }\"}"))
+                .build();
+        HttpResponse<String> resp = HttpClient.newHttpClient().send(req, HttpResponse.BodyHandlers.ofString());
+
+        assertThat(resp.statusCode()).isEqualTo(200);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> body = mapper.readValue(resp.body(), Map.class);
+        assertThat(body).containsKey("data");
+        assertThat(body.get("errors")).isNull();
+    }
+
+    @Test
+    @Order(25)
+    void httpExecuteWithoutApiKeyReturns401() throws Exception {
+        String url = TestFixtures.endpoint() + "/v1/apis/" + apiId + "/graphql";
+        HttpRequest req = HttpRequest.newBuilder()
+                .uri(URI.create(url))
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString("{\"query\":\"{ hello }\"}"))
+                .build();
+        HttpResponse<String> resp = HttpClient.newHttpClient().send(req, HttpResponse.BodyHandlers.ofString());
+
+        assertThat(resp.statusCode()).isEqualTo(401);
+        assertThat(resp.headers().firstValue("x-amzn-errortype").orElse(""))
+                .contains("UnauthorizedException");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> body = mapper.readValue(resp.body(), Map.class);
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> errors = (List<Map<String, Object>>) body.get("errors");
+        assertThat(errors).isNotEmpty();
+        assertThat(errors.get(0).get("errorType")).isEqualTo("UnauthorizedException");
+        assertThat(errors.get(0).get("message")).isEqualTo("Missing authorization header");
+        assertThat(body.get("data")).isNull();
+        assertThat(body.get("__type")).isNull();
     }
 
     // ── Data Sources ────────────────────────────────────────────────────
@@ -575,6 +623,8 @@ class AppSyncTest {
                         .build());
 
         assertThat(resp.status()).isNotNull();
+        SchemaStatus terminal = pollSchemaStatusToTerminal();
+        assertThat(terminal).isEqualTo(SchemaStatus.SUCCESS);
     }
 
     // ── Channel Namespaces ─────────────────────────────────────────────

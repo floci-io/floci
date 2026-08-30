@@ -37,6 +37,19 @@ public final class SigV4TokenTestHelper {
                 "elasticache", timestamp, expiresSeconds, params);
     }
 
+    public static String createElastiCacheTokenWithoutUser(
+            String clusterId,
+            String accessKeyId,
+            String secretKey,
+            Instant timestamp,
+            int expiresSeconds
+    ) throws Exception {
+        Map<String, String> params = new LinkedHashMap<>();
+        params.put("Action", "connect");
+        return signToken(clusterId, null, clusterId, accessKeyId, secretKey, "us-east-1",
+                "elasticache", timestamp, expiresSeconds, params);
+    }
+
     public static String createRdsToken(
             String host,
             int port,

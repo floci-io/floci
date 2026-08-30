@@ -10,6 +10,7 @@ public class InvokeResult {
     private String functionError;
     private String logResult;
     private String requestId;
+    private String executedVersion;
 
     public InvokeResult() {
     }
@@ -60,5 +61,13 @@ public class InvokeResult {
 
     public void setRequestId(String requestId) {
         this.requestId = requestId;
+    }
+
+    public String getExecutedVersion() {
+        return executedVersion;
+    }
+
+    public void setExecutedVersion(String executedVersion) {
+        this.executedVersion = executedVersion;
     }
 }

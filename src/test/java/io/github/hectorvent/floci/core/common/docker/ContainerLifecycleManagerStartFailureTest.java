@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.core.common.docker;
 
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.RemoveContainerCmd;
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.lambda.launcher.ImageCacheService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -43,13 +44,16 @@ class ContainerLifecycleManagerStartFailureTest {
     @Mock
     private PortAllocator portAllocator;
 
+    @Mock
+    private EmulatorConfig config;
+
     private ContainerLifecycleManager manager;
     private final ContainerSpec spec = new ContainerSpec("busybox:latest");
 
     @BeforeEach
     void setUp() {
         manager = spy(new ContainerLifecycleManager(
-                dockerClient, imageCacheService, containerDetector, portAllocator));
+                dockerClient, imageCacheService, containerDetector, portAllocator, config));
     }
 
     @Test

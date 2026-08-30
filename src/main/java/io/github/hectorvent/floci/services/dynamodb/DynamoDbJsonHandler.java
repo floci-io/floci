@@ -213,6 +213,12 @@ public class DynamoDbJsonHandler {
             table.setKmsMasterKeyArn(defaultKmsMasterKeyArn(region));
         }
 
+        // Everything above mutates the table AFTER createTable stored it, and a persistent
+        // backend serializes on write rather than holding the live object. Flush once so the
+        // stream, billing, class, tag and SSE settings survive a restart -- stream state
+        // especially, since startup rebuilds streams from the persisted table.
+        dynamoDbService.persistTable(tableName, table, region);
+
         ObjectNode response = objectMapper.createObjectNode();
         response.set("TableDescription", tableToNode(table));
         return Response.ok(response).build();
@@ -510,8 +516,10 @@ public class DynamoDbJsonHandler {
 
         // Validate EAN/EAV usage across UpdateExpression + ConditionExpression
         if (updateExpression != null) {
-            // Pre-validate syntax: expression must start with a valid clause keyword
-            String ue = updateExpression.trim();
+            // Pre-validate syntax: expression must start with a valid clause keyword.
+            // AWS tokenizes UpdateExpression whitespace-insensitively, so collapse runs
+            // of whitespace (newlines, tabs, multiple spaces) before matching keywords.
+            String ue = updateExpression.trim().replaceAll("\\s+", " ");
             if (!ue.isEmpty()) {
                 String upper = ue.toUpperCase();
                 if (!upper.startsWith("SET ") && !upper.startsWith("REMOVE ") && !upper.startsWith("ADD ") && !upper.startsWith("DELETE ")) {
@@ -568,6 +576,7 @@ public class DynamoDbJsonHandler {
     private void evaluateLegacyExpected(JsonNode existing, JsonNode expected, String conditionalOperator,
                                           String returnValuesOnConditionCheckFailure) {
         if (expected == null) return;
+        validateLegacyExpected(expected);
         boolean useOr = "OR".equals(conditionalOperator);
         boolean overall = !useOr;
         var fields = expected.fields();
@@ -577,10 +586,11 @@ public class DynamoDbJsonHandler {
             JsonNode condition = entry.getValue();
             JsonNode attrValue = existing != null ? existing.get(attrName) : null;
             boolean condResult;
-            if (condition.has("Exists")) {
-                boolean exists = condition.get("Exists").asBoolean();
-                condResult = exists ? attrValue != null : attrValue == null;
+            if (condition.has("Exists") && !condition.get("Exists").asBoolean()) {
+                condResult = attrValue == null;
             } else {
+                // Exists:true always carries a Value, so it evaluates as an attribute
+                // comparison exactly like a bare Value: must exist AND match.
                 condResult = dynamoDbService.matchesKeyConditionPublic(attrValue, normalizeLegacyCondition(condition));
             }
             if (useOr) overall = overall || condResult;
@@ -593,6 +603,55 @@ public class DynamoDbJsonHandler {
                 throw new ConditionalCheckFailedException(null);
             }
         }
+    }
+
+    /**
+     * Validates every entry of a legacy Expected map before any condition is evaluated.
+     * The rules and their precedence mirror ExpectedAttributeValue:
+     * <ul>
+     *   <li>{@code AttributeValueList} is only meaningful alongside a {@code ComparisonOperator}.</li>
+     *   <li>{@code Exists} cannot be combined with a {@code ComparisonOperator} — they are
+     *       alternative forms.</li>
+     *   <li>Without a {@code ComparisonOperator}, a {@code Value} is required unless
+     *       {@code Exists: false} asks for plain absence.</li>
+     *   <li>{@code Exists: false} forbids a {@code Value} — an attribute cannot be expected to
+     *       hold a value while also being expected to be absent.</li>
+     * </ul>
+     * DynamoDB reports only the first offending entry, so validation stops at the first error.
+     */
+    private void validateLegacyExpected(JsonNode expected) {
+        var fields = expected.fields();
+        while (fields.hasNext()) {
+            var entry = fields.next();
+            String attrName = entry.getKey();
+            JsonNode condition = entry.getValue();
+            boolean hasComparisonOperator = condition.has("ComparisonOperator");
+            boolean hasExists = condition.has("Exists");
+            boolean hasValue = condition.has("Value");
+
+            if (condition.has("AttributeValueList") && !hasComparisonOperator) {
+                throw legacyExpectedValidationError(
+                        "AttributeValueList can only be used with a ComparisonOperator for Attribute: " + attrName);
+            }
+            if (hasExists && hasComparisonOperator) {
+                throw legacyExpectedValidationError(
+                        "Exists and ComparisonOperator cannot be used together for Attribute: " + attrName);
+            }
+            boolean expectsValue = !hasExists || condition.get("Exists").asBoolean();
+            if (!hasComparisonOperator && expectsValue && !hasValue) {
+                throw legacyExpectedValidationError("Value must be provided when Exists is "
+                        + (hasExists ? "true" : "null") + " for Attribute: " + attrName);
+            }
+            if (!expectsValue && hasValue) {
+                throw legacyExpectedValidationError(
+                        "Value cannot be used when Exists is false for Attribute: " + attrName);
+            }
+        }
+    }
+
+    private AwsException legacyExpectedValidationError(String detail) {
+        return new AwsException("ValidationException",
+                "1 validation error detected: One or more parameter values were invalid: " + detail, 400);
     }
 
     /**
@@ -659,29 +718,65 @@ public class DynamoDbJsonHandler {
         return changedAttributes;
     }
 
-    // DynamoDB rejects an ExclusiveStartKey whose attribute set does not exactly match the
-    // key schema being paged: the table's primary key, plus the index's key attributes when
-    // an IndexName is supplied. Query and Scan report different messages for the same fault.
+    // DynamoDB requires an ExclusiveStartKey to exactly match the paged key schema's
+    // attribute names and scalar types. Query and Scan report different messages for faults.
     private void validateExclusiveStartKey(JsonNode exclusiveStartKey, TableDefinition table,
-                                           String indexName, boolean isScan) {
+                                           DynamoDbAccessPath accessPath, boolean isScan) {
         if (exclusiveStartKey == null || exclusiveStartKey.isNull()) return;
         Set<String> expected = new HashSet<>();
         expected.add(table.getPartitionKeyName());
         String sortKey = table.getSortKeyName();
         if (sortKey != null) expected.add(sortKey);
-        if (indexName != null) {
-            table.findGsi(indexName).ifPresent(g ->
-                    g.getKeySchema().forEach(k -> expected.add(k.getAttributeName())));
-            table.findLsi(indexName).ifPresent(l ->
-                    l.getKeySchema().forEach(k -> expected.add(k.getAttributeName())));
+        if (accessPath.isIndex()) {
+            expected.addAll(accessPath.keyAttributeNames());
         }
         Set<String> actual = new HashSet<>();
         exclusiveStartKey.fieldNames().forEachRemaining(actual::add);
-        if (!actual.equals(expected)) {
-            throw new AwsException("ValidationException", isScan
-                    ? "The provided starting key is invalid: The provided key element does not match the schema"
-                    : "The provided starting key is invalid", 400);
+        if (!actual.equals(expected) || hasInvalidKeyValue(exclusiveStartKey, table, expected)) {
+            throw invalidStartingKey(isScan);
         }
+    }
+
+    private boolean hasInvalidKeyValue(JsonNode exclusiveStartKey, TableDefinition table,
+                                       Set<String> expected) {
+        if (table.getAttributeDefinitions() == null) {
+            return true;
+        }
+        for (String attribute : expected) {
+            String expectedType = table.getAttributeDefinitions().stream()
+                    .filter(definition -> attribute.equals(definition.getAttributeName()))
+                    .map(AttributeDefinition::getAttributeType)
+                    .findFirst()
+                    .orElse(null);
+            if (expectedType == null || hasInvalidScalarValue(exclusiveStartKey.get(attribute), expectedType)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean hasInvalidScalarValue(JsonNode value, String expectedType) {
+        if (value == null || !value.isObject() || value.size() != 1 || !value.has(expectedType)) {
+            return true;
+        }
+        JsonNode payload = value.get(expectedType);
+        if (payload == null || !payload.isTextual() || payload.textValue().isEmpty()) {
+            return true;
+        }
+        if ("N".equals(expectedType)) {
+            DynamoDbNumberUtils.validateAndNormalize(payload.textValue());
+        }
+        if ("B".equals(expectedType)) {
+            return !payload.textValue().matches(
+                    "(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?");
+        }
+        return false;
+    }
+
+    private AwsException invalidStartingKey(boolean isScan) {
+        return new AwsException("ValidationException", isScan
+                ? "The provided starting key is invalid: The provided key element does not match the schema"
+                : "The provided starting key is invalid", 400);
     }
 
     private static final Set<String> VALID_SELECT = Set.of(
@@ -755,6 +850,7 @@ public class DynamoDbJsonHandler {
 
         ExpressionEvaluator.validateExpression(keyConditionExpr, "KeyConditionExpression", exprAttrNames, exprAttrValues);
         ExpressionEvaluator.validateExpression(filterExpr, "FilterExpression", exprAttrNames, exprAttrValues);
+        ProjectionEvaluator.validateExpression(projectionExpression);
 
         if (select != null && !VALID_SELECT.contains(select)) {
             throw new AwsException("ValidationException",
@@ -768,10 +864,16 @@ public class DynamoDbJsonHandler {
                     "Select type SPECIFIC_ATTRIBUTES requires the ProjectionExpression to be provided.", 400);
         }
 
+        TableDefinition queryTable = dynamoDbService.describeTable(tableName, region);
+        DynamoDbAccessPath queryAccessPath = DynamoDbAccessPath.resolve(queryTable, indexName);
+        DynamoDbAccessPathValidator.validateQuery(queryTable, queryAccessPath, keyConditions,
+                keyConditionExpr, filterExpr, queryFilter, exprAttrNames, exprAttrValues);
+        DynamoDbAccessPathValidator.validateSelection(queryTable, queryAccessPath, select,
+                projectionExpression, attributesToGet, exprAttrNames);
+
         // ConsistentRead on GSI check
         boolean consistentRead = request.path("ConsistentRead").asBoolean(false);
         if (consistentRead && indexName != null) {
-            TableDefinition queryTable = dynamoDbService.describeTable(tableName, region);
             if (queryTable.findGsi(indexName).isPresent()) {
                 throw new AwsException("ValidationException",
                         "Consistent reads are not supported on global secondary indexes", 400);
@@ -795,8 +897,7 @@ public class DynamoDbJsonHandler {
         }
 
         if (exclusiveStartKey != null) {
-            validateExclusiveStartKey(exclusiveStartKey,
-                    dynamoDbService.describeTable(tableName, region), indexName, false);
+            validateExclusiveStartKey(exclusiveStartKey, queryTable, queryAccessPath, false);
         }
 
         DynamoDbService.QueryResult result = dynamoDbService.query(tableName, keyConditions,
@@ -813,8 +914,7 @@ public class DynamoDbJsonHandler {
         }
         // Apply index projection (KEYS_ONLY / INCLUDE) when querying a secondary index
         if (indexName != null && projectionExpression == null && attributesToGet == null) {
-            TableDefinition queryTable = dynamoDbService.describeTable(tableName, region);
-            queryItems = applyIndexProjection(queryItems, indexName, queryTable, select);
+            queryItems = applyIndexProjection(queryItems, queryTable, queryAccessPath, select);
         }
         if (projectionExpression != null) {
             queryItems = queryItems.stream()
@@ -861,6 +961,9 @@ public class DynamoDbJsonHandler {
                 ? request.get("ExclusiveStartKey") : null;
         String select = request.has("Select") ? request.get("Select").asText() : null;
         String indexNameScan = request.has("IndexName") ? request.get("IndexName").asText() : null;
+        String projectionExpressionScan = request.has("ProjectionExpression")
+                ? request.get("ProjectionExpression").asText() : null;
+        JsonNode attributesToGetScan = request.has("AttributesToGet") ? request.get("AttributesToGet") : null;
         Integer segment = request.has("Segment") ? request.get("Segment").asInt() : null;
         Integer totalSegments = request.has("TotalSegments") ? request.get("TotalSegments").asInt() : null;
 
@@ -891,13 +994,32 @@ public class DynamoDbJsonHandler {
         }
 
         ExpressionEvaluator.validateExpression(filterExpr, "FilterExpression", exprAttrNames, exprAttrValues);
+        ProjectionEvaluator.validateExpression(projectionExpressionScan);
 
-        String projectionExpressionScan = request.has("ProjectionExpression")
-                ? request.get("ProjectionExpression").asText() : null;
+        if (select != null && !VALID_SELECT.contains(select)) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value '" + select + "' at 'select' failed to satisfy constraint: "
+                    + "Member must satisfy enum value set: [SPECIFIC_ATTRIBUTES, COUNT, ALL_ATTRIBUTES, ALL_PROJECTED_ATTRIBUTES]", 400);
+        }
+        if (projectionExpressionScan != null && attributesToGetScan != null) {
+            throw new AwsException("ValidationException",
+                    "Can not use both expression and non-expression parameters in the same request: "
+                    + "Non-expression parameters: {AttributesToGet} Expression parameters: {ProjectionExpression}", 400);
+        }
+        boolean hasAttributesToGetScan = attributesToGetScan != null && attributesToGetScan.size() > 0;
+        if ("SPECIFIC_ATTRIBUTES".equals(select)
+                && projectionExpressionScan == null && !hasAttributesToGetScan) {
+            throw new AwsException("ValidationException",
+                    "Select type SPECIFIC_ATTRIBUTES requires the ProjectionExpression to be provided.", 400);
+        }
+
+        TableDefinition scanTable = dynamoDbService.describeTable(tableName, region);
+        DynamoDbAccessPath scanAccessPath = DynamoDbAccessPath.resolve(scanTable, indexNameScan);
+        DynamoDbAccessPathValidator.validateSelection(scanTable, scanAccessPath, select,
+                projectionExpressionScan, attributesToGetScan, exprAttrNames);
 
         if (exclusiveStartKey != null) {
-            validateExclusiveStartKey(exclusiveStartKey,
-                    dynamoDbService.describeTable(tableName, region), indexNameScan, true);
+            validateExclusiveStartKey(exclusiveStartKey, scanTable, scanAccessPath, true);
         }
 
         DynamoDbService.ScanResult result = dynamoDbService.scan(
@@ -915,11 +1037,9 @@ public class DynamoDbJsonHandler {
             }
         }
         // Apply index projection (KEYS_ONLY / INCLUDE) when scanning a secondary index
-        if (indexNameScan != null && projectionExpressionScan == null) {
-            TableDefinition scanTable = dynamoDbService.describeTable(tableName, region);
-            scanItems = applyIndexProjection(scanItems, indexNameScan, scanTable, select);
+        if (indexNameScan != null && projectionExpressionScan == null && attributesToGetScan == null) {
+            scanItems = applyIndexProjection(scanItems, scanTable, scanAccessPath, select);
         }
-        JsonNode attributesToGetScan = request.has("AttributesToGet") ? request.get("AttributesToGet") : null;
         if (projectionExpressionScan != null) {
             scanItems = scanItems.stream()
                     .map(i -> (JsonNode) ProjectionEvaluator.project(i, projectionExpressionScan, exprAttrNames))
@@ -1085,6 +1205,32 @@ public class DynamoDbJsonHandler {
 
     private Response handleUpdateTable(JsonNode request, String region) {
         String tableName = request.path("TableName").asText();
+        JsonNode replicaUpdates = request.path("ReplicaUpdates");
+        List<String> addRegions = new ArrayList<>();
+        List<String> removeRegions = new ArrayList<>();
+        List<String> updateRegions = new ArrayList<>();
+        if (replicaUpdates.isArray()) {
+            for (JsonNode update : replicaUpdates) {
+                JsonNode create = update.path("Create");
+                if (create.isObject()) {
+                    String replicaRegion = create.path("RegionName").asText(null);
+                    validateReplicaRegion(replicaRegion);
+                    addRegions.add(replicaRegion);
+                }
+                JsonNode delete = update.path("Delete");
+                if (delete.isObject()) {
+                    String replicaRegion = delete.path("RegionName").asText(null);
+                    validateReplicaRegion(replicaRegion);
+                    removeRegions.add(replicaRegion);
+                }
+                JsonNode updateNode = update.path("Update");
+                if (updateNode.isObject()) {
+                    String replicaRegion = updateNode.path("RegionName").asText(null);
+                    validateReplicaRegion(replicaRegion);
+                    updateRegions.add(replicaRegion);
+                }
+            }
+        }
         Long readCapacity = null;
         Long writeCapacity = null;
         JsonNode pt = request.path("ProvisionedThroughput");
@@ -1145,6 +1291,11 @@ public class DynamoDbJsonHandler {
             }
         }
 
+        if (!addRegions.isEmpty() || !removeRegions.isEmpty() || !updateRegions.isEmpty()) {
+            dynamoDbService.validateReplicaUpdates(
+                    tableName, addRegions, removeRegions, updateRegions, region);
+        }
+
         TableDefinition table = dynamoDbService.updateTable(tableName, readCapacity, writeCapacity,
                 gsiCreates, gsiDeletes, newAttrDefs, region);
 
@@ -1193,9 +1344,24 @@ public class DynamoDbJsonHandler {
             }
         }
 
+        // Same flush as CreateTable: the stream mutations above land after updateTable's write,
+        // so without this a retargeted view type is rebuilt from the stale persisted value on
+        // restart and records resume the old image shape.
+        dynamoDbService.persistTable(tableName, table, region);
+
+        if (!addRegions.isEmpty() || !removeRegions.isEmpty() || !updateRegions.isEmpty()) {
+            table = dynamoDbService.applyReplicaUpdates(tableName, addRegions, removeRegions, updateRegions, region);
+        }
+
         ObjectNode response = objectMapper.createObjectNode();
         response.set("TableDescription", tableToNode(table));
         return Response.ok(response).build();
+    }
+
+    private static void validateReplicaRegion(String replicaRegion) {
+        if (replicaRegion == null || replicaRegion.isBlank()) {
+            throw new AwsException("ValidationException", "Replica RegionName must not be empty", 400);
+        }
     }
 
     private Response handleDescribeTimeToLive(JsonNode request, String region) {
@@ -1720,40 +1886,13 @@ public class DynamoDbJsonHandler {
     }
 
     // Filters items to only include the attributes projected into the given index.
-    // Returns items unchanged when projectionType is ALL or no matching index is found.
-    private List<JsonNode> applyIndexProjection(List<JsonNode> items, String indexName,
-                                                 TableDefinition table, String select) {
-        if (indexName == null || "ALL_ATTRIBUTES".equals(select)) return items;
-
-        String projectionType = "ALL";
-        List<String> nonKeyAttributes = new ArrayList<>();
-        Set<String> indexKeyNames = new HashSet<>();
-
-        for (GlobalSecondaryIndex gsi : table.getGlobalSecondaryIndexes()) {
-            if (gsi.getIndexName().equals(indexName)) {
-                projectionType = gsi.getProjectionType() != null ? gsi.getProjectionType() : "ALL";
-                nonKeyAttributes = gsi.getNonKeyAttributes() != null ? gsi.getNonKeyAttributes() : List.of();
-                gsi.getKeySchema().forEach(k -> indexKeyNames.add(k.getAttributeName()));
-                break;
-            }
-        }
-        for (LocalSecondaryIndex lsi : table.getLocalSecondaryIndexes()) {
-            if (lsi.getIndexName().equals(indexName)) {
-                projectionType = lsi.getProjectionType() != null ? lsi.getProjectionType() : "ALL";
-                nonKeyAttributes = lsi.getNonKeyAttributes() != null ? lsi.getNonKeyAttributes() : List.of();
-                lsi.getKeySchema().forEach(k -> indexKeyNames.add(k.getAttributeName()));
-                break;
-            }
+    private List<JsonNode> applyIndexProjection(List<JsonNode> items, TableDefinition table,
+                                                 DynamoDbAccessPath accessPath, String select) {
+        if ("ALL_ATTRIBUTES".equals(select) || "ALL".equals(accessPath.projectionType())) {
+            return items;
         }
 
-        if ("ALL".equals(projectionType)) return items;
-
-        Set<String> allowed = new HashSet<>(indexKeyNames);
-        allowed.add(table.getPartitionKeyName());
-        String sortKeyName = table.getSortKeyName();
-        if (sortKeyName != null) allowed.add(sortKeyName);
-        if ("INCLUDE".equals(projectionType)) allowed.addAll(nonKeyAttributes);
-
+        Set<String> allowed = accessPath.projectedAttributeNames(table);
         return items.stream().map(item -> {
             ObjectNode filtered = objectMapper.createObjectNode();
             item.fields().forEachRemaining(e -> {
@@ -1859,6 +1998,22 @@ public class DynamoDbJsonHandler {
         warmThroughput.put("ReadUnitsPerSecond", 0);
         warmThroughput.put("WriteUnitsPerSecond", 0);
         node.set("WarmThroughput", warmThroughput);
+
+        // Global-table replicas. In a single-process emulator every region is served by this same
+        // table, so a replica is metadata; AWS reports each as an ACTIVE Replica and marks the table
+        // a 2019.11.21 global table.
+        List<String> replicaRegions = table.getReplicaRegions();
+        if (replicaRegions != null && !replicaRegions.isEmpty()) {
+            ArrayNode replicas = objectMapper.createArrayNode();
+            for (String replicaRegion : replicaRegions) {
+                ObjectNode replica = objectMapper.createObjectNode();
+                replica.put("RegionName", replicaRegion);
+                replica.put("ReplicaStatus", "ACTIVE");
+                replicas.add(replica);
+            }
+            node.set("Replicas", replicas);
+            node.put("GlobalTableVersion", "2019.11.21");
+        }
 
         ArrayNode keySchemaArray = objectMapper.createArrayNode();
         for (var ks : table.getKeySchema()) {

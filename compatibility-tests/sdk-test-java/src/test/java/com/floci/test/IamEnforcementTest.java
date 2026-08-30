@@ -1,6 +1,7 @@
 package com.floci.test;
 
 import org.junit.jupiter.api.*;
+import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.AwsSessionCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
@@ -8,9 +9,18 @@ import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.iam.IamClient;
 import software.amazon.awssdk.services.iam.model.*;
 import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.model.CreateBucketRequest;
+import software.amazon.awssdk.services.s3.model.DeleteBucketRequest;
+import software.amazon.awssdk.services.s3.model.DeleteObjectRequest;
+import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
+import software.amazon.awssdk.services.s3.model.ListObjectsV2Response;
+import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 import software.amazon.awssdk.services.s3.model.S3Exception;
 import software.amazon.awssdk.services.sts.StsClient;
 import software.amazon.awssdk.services.sts.model.*;
+
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 import static org.assertj.core.api.Assertions.*;
 
@@ -31,11 +41,14 @@ import static org.assertj.core.api.Assertions.*;
  *   <li>Assumed role with no policies → DENY</li>
  *   <li>Assumed role with attached allow policy → ALLOW</li>
  *   <li>Assumed role session policy deny overrides role allow → DENY</li>
+ *   <li>Assumed role session policy ListBucket prefix condition → matching prefix only</li>
  * </ul>
  */
 @DisplayName("IAM Enforcement Mode")
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class IamEnforcementTest {
+
+    private static final Logger LOG = Logger.getLogger(IamEnforcementTest.class.getName());
 
     // ── Resource names ─────────────────────────────────────────────────────────
     private static final String USER        = "iam-enf-test-user";
@@ -44,7 +57,7 @@ class IamEnforcementTest {
 
     private static final String TRUST_POLICY = """
             {"Version":"2012-10-17","Statement":[
-              {"Effect":"Allow","Principal":{"Service":"sts.amazonaws.com"},
+              {"Effect":"Allow","Principal":{"AWS":"arn:aws:iam::000000000000:root"},
                "Action":"sts:AssumeRole"}
             ]}""";
 
@@ -68,6 +81,21 @@ class IamEnforcementTest {
             {"Version":"2012-10-17","Statement":[
               {"Effect":"Allow","Action":"s3:ListAllMyBuckets","Resource":"*"},
               {"Effect":"Deny","Action":"s3:ListAllMyBuckets","Resource":"*"}
+            ]}""";
+
+    private static final String ALLOW_S3_LIST_PREFIX_SESSION_POLICY = """
+            {"Version":"2012-10-17","Statement":[
+              {"Effect":"Allow","Action":"s3:ListBucket","Resource":"arn:aws:s3:::%s",
+               "Condition":{"StringLike":{"s3:prefix":["%s","%s*"]}}},
+              {"Effect":"Allow","Action":["s3:GetObject","s3:PutObject","s3:DeleteObject"],
+               "Resource":"arn:aws:s3:::%s/%s*"}
+            ]}""";
+
+    private static final String ALLOW_S3_BUCKET_POLICY = """
+            {"Version":"2012-10-17","Statement":[
+              {"Effect":"Allow","Action":"s3:ListBucket","Resource":"arn:aws:s3:::%s"},
+              {"Effect":"Allow","Action":["s3:GetObject","s3:PutObject","s3:DeleteObject"],
+               "Resource":"arn:aws:s3:::%s/*"}
             ]}""";
 
     // ── Shared state ───────────────────────────────────────────────────────────
@@ -122,6 +150,9 @@ class IamEnforcementTest {
                 .userName(USER).policyArn(allowPolicyArn).build()); } catch (Exception ignored) {}
         try { iam.deleteUserPolicy(DeleteUserPolicyRequest.builder()
                 .userName(USER).policyName("inline-deny").build()); } catch (Exception ignored) {}
+        cleanupResource("delete inline-prefix-allow policy from role " + ROLE,
+                () -> iam.deleteRolePolicy(DeleteRolePolicyRequest.builder()
+                        .roleName(ROLE).policyName("inline-prefix-allow").build()));
         try { iam.deleteAccessKey(DeleteAccessKeyRequest.builder()
                 .userName(USER).accessKeyId(userAccessKeyId).build()); } catch (Exception ignored) {}
         try { iam.deleteRole(DeleteRoleRequest.builder().roleName(ROLE).build()); } catch (Exception ignored) {}
@@ -325,5 +356,87 @@ class IamEnforcementTest {
                     .extracting(e -> ((S3Exception) e).statusCode())
                     .isEqualTo(403);
         }
+    }
+
+    @Test
+    @Order(8)
+    @DisplayName("assumed role session policy ListBucket prefix condition restricts ListObjectsV2")
+    void assumedRoleSessionPolicyListBucketPrefixConditionRestrictsListObjectsV2() {
+        assumeEnforcementEnabled();
+
+        String bucket = TestFixtures.uniqueName("iam-prefix");
+        String allowedPrefix = "my_namespace/table/";
+        String allowedKey = allowedPrefix + "metadata.json";
+        String deniedPrefix = "other_namespace/table/";
+        String deniedKey = deniedPrefix + "metadata.json";
+        String inlinePolicyName = "inline-prefix-allow";
+
+        try (S3Client adminS3 = TestFixtures.s3Client()) {
+            try {
+                adminS3.createBucket(CreateBucketRequest.builder().bucket(bucket).build());
+                iam.putRolePolicy(PutRolePolicyRequest.builder()
+                        .roleName(ROLE)
+                        .policyName(inlinePolicyName)
+                        .policyDocument(ALLOW_S3_BUCKET_POLICY.formatted(bucket, bucket))
+                        .build());
+                adminS3.putObject(PutObjectRequest.builder().bucket(bucket).key(allowedKey).build(),
+                        RequestBody.fromString("{}"));
+                adminS3.putObject(PutObjectRequest.builder().bucket(bucket).key(deniedKey).build(),
+                        RequestBody.fromString("{}"));
+
+                AssumeRoleResponse assumed = sts.assumeRole(AssumeRoleRequest.builder()
+                        .roleArn(roleArn)
+                        .roleSessionName("enf-test-prefix-condition")
+                        .policy(ALLOW_S3_LIST_PREFIX_SESSION_POLICY.formatted(
+                                bucket, allowedPrefix, allowedPrefix, bucket, allowedPrefix))
+                        .build());
+
+                try (S3Client s3 = s3WithSessionCredentials(
+                        assumed.credentials().accessKeyId(),
+                        assumed.credentials().secretAccessKey(),
+                        assumed.credentials().sessionToken())) {
+                    ListObjectsV2Response allowed = s3.listObjectsV2(ListObjectsV2Request.builder()
+                            .bucket(bucket)
+                            .prefix(allowedPrefix)
+                            .build());
+
+                    assertThat(allowed.contents())
+                            .anyMatch(object -> allowedKey.equals(object.key()));
+
+                    assertThatThrownBy(() -> s3.listObjectsV2(ListObjectsV2Request.builder()
+                            .bucket(bucket)
+                            .prefix(deniedPrefix)
+                            .build()))
+                            .isInstanceOf(S3Exception.class)
+                            .extracting(e -> ((S3Exception) e).statusCode())
+                            .isEqualTo(403);
+                }
+            } finally {
+                cleanupResource("delete inline role policy " + inlinePolicyName + " from role " + ROLE,
+                        () -> iam.deleteRolePolicy(DeleteRolePolicyRequest.builder()
+                                .roleName(ROLE).policyName(inlinePolicyName).build()));
+                cleanupResource("delete S3 object " + bucket + "/" + allowedKey,
+                        () -> adminS3.deleteObject(DeleteObjectRequest.builder()
+                                .bucket(bucket).key(allowedKey).build()));
+                cleanupResource("delete S3 object " + bucket + "/" + deniedKey,
+                        () -> adminS3.deleteObject(DeleteObjectRequest.builder()
+                                .bucket(bucket).key(deniedKey).build()));
+                cleanupResource("delete S3 bucket " + bucket,
+                        () -> adminS3.deleteBucket(DeleteBucketRequest.builder().bucket(bucket).build()));
+            }
+        }
+    }
+
+    private static void cleanupResource(String description, CleanupAction action) {
+        try {
+            action.run();
+        } catch (Exception e) {
+            LOG.log(Level.FINE, "Failed to " + description, e);
+        }
+    }
+
+    @FunctionalInterface
+    private interface CleanupAction {
+        void run() throws Exception;
     }
 }

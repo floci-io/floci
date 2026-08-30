@@ -47,6 +47,7 @@ public class ElbV2DataPlane {
     private static final List<String> HOP_BY_HOP_HEADERS = List.of(
             "connection", "keep-alive", "transfer-encoding", "upgrade", "te", "trailers", "proxy-authorization", "proxy-authenticate"
     );
+    private static final String PRESERVE_HOST_HEADER_ATTRIBUTE = "routing.http.preserve_host_header.enabled";
 
     @Inject
     Vertx vertx;
@@ -78,7 +79,7 @@ public class ElbV2DataPlane {
 
     private HttpClient proxyClient;
 
-    private record ListenerBinding(int port, String host) {}
+    private record ListenerBinding(int port, String host, String loadBalancerArn) {}
 
     @PostConstruct
     void init() {
@@ -204,7 +205,7 @@ public class ElbV2DataPlane {
     private ListenerBinding binding(Listener listener, String region) {
         LoadBalancer loadBalancer = elbV2Service.getLoadBalancer(region, listener.getLoadBalancerArn());
         String host = loadBalancer != null ? normalizeHost(loadBalancer.getDnsName()) : listener.getLoadBalancerArn();
-        return new ListenerBinding(listener.getPort(), host);
+        return new ListenerBinding(listener.getPort(), host, listener.getLoadBalancerArn());
     }
 
     private void handleRequest(io.vertx.core.http.HttpServerRequest req, int port) {
@@ -226,7 +227,7 @@ public class ElbV2DataPlane {
         List<CompiledRule> chain = ref.get();
         for (CompiledRule compiled : chain) {
             if (compiled.matches(req)) {
-                executeAction(req, compiled.action, region);
+                executeAction(req, compiled.action, region, listenerArn);
                 return;
             }
         }
@@ -262,20 +263,20 @@ public class ElbV2DataPlane {
         return normalized;
     }
 
-    private void executeAction(io.vertx.core.http.HttpServerRequest req, Action action, String region) {
+    private void executeAction(io.vertx.core.http.HttpServerRequest req, Action action, String region, String listenerArn) {
         if (action == null) {
             req.response().setStatusCode(502).end("No action");
             return;
         }
         switch (action.getType() != null ? action.getType() : "") {
-            case "forward" -> executeForward(req, action, region);
+            case "forward" -> executeForward(req, action, region, listenerArn);
             case "redirect" -> executeRedirect(req, action);
             case "fixed-response" -> executeFixedResponse(req, action);
             default -> req.response().setStatusCode(502).end("Unsupported action type");
         }
     }
 
-    private void executeForward(io.vertx.core.http.HttpServerRequest req, Action action, String region) {
+    private void executeForward(io.vertx.core.http.HttpServerRequest req, Action action, String region, String listenerArn) {
         String tgArn = resolveTgArn(action);
         if (tgArn == null) {
             req.response().setStatusCode(502).end("No target group");
@@ -311,7 +312,19 @@ public class ElbV2DataPlane {
         int idx = Math.abs(counter.getAndIncrement() % candidates.size());
         TargetDescription target = candidates.get(idx);
         int targetPort = ElbV2HealthChecker.effectivePort(target, tg);
-        proxyRequest(req, ElbV2TargetResolver.resolveHost(ec2Service, tg, target), targetPort);
+        proxyRequest(req, ElbV2TargetResolver.resolveHost(ec2Service, tg, target), targetPort,
+                preserveHostHeader(listenerArn, region));
+    }
+
+    private boolean preserveHostHeader(String listenerArn, String region) {
+        ListenerBinding binding = listenerBindings.get(listenerArn);
+        if (binding == null) {
+            return false;
+        }
+        LoadBalancer loadBalancer = elbV2Service.getLoadBalancer(region, binding.loadBalancerArn());
+        return loadBalancer != null
+                && loadBalancer.getAttributes() != null
+                && Boolean.parseBoolean(loadBalancer.getAttributes().get(PRESERVE_HOST_HEADER_ATTRIBUTE));
     }
 
     private void invokeLambdaTarget(io.vertx.core.http.HttpServerRequest req, String functionArn, String region) {
@@ -460,7 +473,8 @@ public class ElbV2DataPlane {
         return tuples.get(tuples.size() - 1).getTargetGroupArn();
     }
 
-    private void proxyRequest(io.vertx.core.http.HttpServerRequest req, String host, int port) {
+    private void proxyRequest(io.vertx.core.http.HttpServerRequest req, String host, int port,
+                              boolean preserveHostHeader) {
         req.bodyHandler(body -> {
             RequestOptions opts = new RequestOptions()
                     .setHost(host)
@@ -474,7 +488,9 @@ public class ElbV2DataPlane {
                                 clientReq.putHeader(entry.getKey(), entry.getValue());
                             }
                         });
-                        clientReq.putHeader("Host", host + ":" + port);
+                        if (!preserveHostHeader) {
+                            clientReq.putHeader("Host", host + ":" + port);
+                        }
                         clientReq.send(body)
                                 .onSuccess(resp -> {
                                     req.response().setStatusCode(resp.statusCode());

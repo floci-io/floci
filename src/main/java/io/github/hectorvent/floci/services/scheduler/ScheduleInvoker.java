@@ -12,8 +12,10 @@ import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.scheduler.model.EventBridgeParameters;
 import io.github.hectorvent.floci.services.scheduler.model.EcsParameters;
 import io.github.hectorvent.floci.services.scheduler.model.Target;
+import io.github.hectorvent.floci.services.sns.SnsMessageAttributes;
 import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.SqsService;
+import io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -85,8 +87,7 @@ public class ScheduleInvoker {
             sqsService.sendMessage(queueUrl, payload, 0, messageGroupId, null, targetRegion);
             LOG.debugv("Scheduler delivered to SQS: {0}", arn);
         } else if (arn.contains(":lambda:") || arn.contains(":function:")) {
-            String fnName = arn.substring(arn.lastIndexOf(':') + 1);
-            lambdaService.invoke(targetRegion, fnName, payload.getBytes(), InvocationType.Event);
+            lambdaService.invokeArn(arn, payload.getBytes(), InvocationType.Event);
             LOG.debugv("Scheduler delivered to Lambda: {0}", arn);
         } else if (arn.contains(":sns:")) {
             snsService.publish(arn, null, payload, "Scheduler", targetRegion);
@@ -168,8 +169,9 @@ public class ScheduleInvoker {
                 String subject = text(params, "Subject");
                 String messageGroupId = text(params, "MessageGroupId");
                 String messageDeduplicationId = text(params, "MessageDeduplicationId");
+                Map<String, MessageAttributeValue> messageAttributes = SnsMessageAttributes.parse(params.path("MessageAttributes"));
                 String snsRegion = extractRegion(topicArn != null ? topicArn : targetArn, region);
-                snsService.publish(topicArn, targetArn, null, message, subject, null,
+                snsService.publish(topicArn, targetArn, null, message, subject, messageAttributes,
                         messageGroupId, messageDeduplicationId, snsRegion);
                 LOG.debugv("Scheduler delivered to SNS (universal target): {0}", topicArn);
             }

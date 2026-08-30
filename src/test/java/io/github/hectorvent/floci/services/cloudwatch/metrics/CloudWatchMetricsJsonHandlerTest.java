@@ -1,17 +1,19 @@
 package io.github.hectorvent.floci.services.cloudwatch.metrics;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import jakarta.ws.rs.core.Response;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-
 import java.math.BigDecimal;
 import java.time.Instant;
-
-import static org.junit.jupiter.api.Assertions.assertEquals;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 /**
  * Handler-level tests for CloudWatchMetricsJsonHandler.
@@ -97,6 +99,56 @@ class CloudWatchMetricsJsonHandlerTest {
                 EPOCH_NOW.minusSeconds(10), EPOCH_NOW.plusSeconds(10), 60);
         assertEquals(0, narrow.get("Datapoints").size(),
                 "metric stored with 24h-ago timestamp must not appear in a 20-second window around now");
+    }
+
+    @Test
+    void setAlarmState_updatesFieldsCorrectly() {
+        putMetric("NS", "M", "type", "current", 100.0, EPOCH_NOW);
+
+        ObjectNode putAlarmReq = MAPPER.createObjectNode();
+        putAlarmReq.put("AlarmName", "TestAlarm");
+        putAlarmReq.put("MetricName", "M");
+        putAlarmReq.put("Namespace", "NS");
+        putAlarmReq.putArray("AlarmActions").add("alarm-action");
+        putAlarmReq.putArray("OKActions").add("ok-action");
+        putAlarmReq.putArray("InsufficientDataActions").add("insufficient-action");
+        ArrayNode dimensions = putAlarmReq.putArray("Dimensions");
+        dimensions.addObject().put("Name", "period").put("Value", "60");
+        dimensions.addObject().put("Name", "count").put("Value", "2");
+        Response putAlarmResp = handler.handle("PutMetricAlarm", putAlarmReq, REGION);
+        assertEquals(200, putAlarmResp.getStatus());
+
+        ObjectNode alarmReq = MAPPER.createObjectNode();
+        alarmReq.put("AlarmName", "TestAlarm");
+        alarmReq.put("StateValue", "ALARM");
+        alarmReq.put("StateReason", "Test reason");
+        alarmReq.put("StateReasonData", "{\"k\":\"v\"}");
+        Response resp = handler.handle("SetAlarmState", alarmReq, REGION);
+        assertEquals(200, resp.getStatus());
+
+        // Verify that the alarm state is reflected in the metrics service
+        ObjectNode getAlarmReq = MAPPER.createObjectNode();
+        getAlarmReq.putArray("AlarmNames").add("TestAlarm");
+        Response getResp = handler.handle("DescribeAlarms", getAlarmReq, REGION);
+        assertEquals(200, getResp.getStatus());
+        ObjectNode alarmData = (ObjectNode) ((ObjectNode) getResp.getEntity()).get("MetricAlarms").get(0);
+        assertEquals("ALARM", alarmData.get("StateValue").asText());
+        assertEquals("Test reason", alarmData.get("StateReason").asText());
+        assertEquals("{\"k\":\"v\"}", alarmData.get("StateReasonData").asText());
+        assertTrue(alarmData.path("AlarmActions").isArray());
+        assertEquals("alarm-action", alarmData.path("AlarmActions").get(0).asText());
+        assertTrue(alarmData.path("OKActions").isArray());
+        assertEquals("ok-action", alarmData.path("OKActions").get(0).asText());
+        assertTrue(alarmData.path("InsufficientDataActions").isArray());
+        assertEquals("insufficient-action", alarmData.path("InsufficientDataActions").get(0).asText());
+        assertTrue(alarmData.path("StateUpdatedTimestamp").asLong() > 0);
+        assertTrue(alarmData.path("Dimensions").isArray());
+        JsonNode dimensionPeriod = alarmData.path("Dimensions").get(0);
+        assertEquals("period", dimensionPeriod.get("Name").asText());
+        assertEquals("60", dimensionPeriod.get("Value").asText());
+        JsonNode dimensionCount = alarmData.path("Dimensions").get(1);
+        assertEquals("count", dimensionCount.get("Name").asText());
+        assertEquals("2", dimensionCount.get("Value").asText());
     }
 
     @Test
