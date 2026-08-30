@@ -27,11 +27,7 @@ class RedshiftProxyIntegrationTest {
     @AfterEach
     void cleanUp() {
         if (clusterId != null) {
-            try {
-                service.deleteCluster(clusterId);
-            } catch (RuntimeException ignored) {
-                // best-effort teardown
-            }
+            service.deleteCluster(clusterId);
         }
     }
 
