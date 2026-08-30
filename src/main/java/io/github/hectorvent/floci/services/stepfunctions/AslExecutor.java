@@ -581,15 +581,15 @@ public class AslExecutor {
         return switch (type) {
             case "Pass" -> executePassState(stateDef, input, jsonata, context, variables);
             case "Task" -> executeTaskState(name, stateDef, input, history, producedEventCount, sm,
-                    jsonata, context, variables, attempt);
+                    jsonata, context, variables, attempt, executionDeadlineNanos);
             case "Choice" -> executeChoiceState(stateDef, input, jsonata, context, variables);
             case "Wait" -> executeWaitState(stateDef, input, jsonata, context, variables, executionDeadlineNanos);
             case "Succeed" -> executeSucceedState(stateDef, input, jsonata, context, variables);
             case "Fail" -> executeFail(stateDef, input, jsonata, context, variables);
             case "Parallel" -> executeParallelState(name, stateDef, input, producedEventCount, sm, jsonata,
-                    topLevelQueryLanguage, context, variables);
+                    topLevelQueryLanguage, context, variables, executionDeadlineNanos);
             case "Map" -> executeMapState(name, stateDef, input, producedEventCount, sm, jsonata,
-                    topLevelQueryLanguage, context, variables);
+                    topLevelQueryLanguage, context, variables, executionDeadlineNanos);
             default -> new StateResult(input, stateDef.path("Next").asText(null));
         };
     }
@@ -622,7 +622,8 @@ public class AslExecutor {
     private StateResult executeTaskState(String stateName, JsonNode stateDef, JsonNode input,
                                          List<HistoryEvent> history, AtomicLong producedEventCount,
                                          StateMachine sm, boolean jsonata, JsonNode context,
-                                         ObjectNode variables, int attempt) throws Exception {
+                                         ObjectNode variables, int attempt,
+                                         long executionDeadlineNanos) throws Exception {
         var resource = stateDef.path("Resource").asText();
         var isWaitForToken = resource.endsWith(".waitForTaskToken");
         var effectiveResource = isWaitForToken
@@ -658,25 +659,41 @@ public class AslExecutor {
         }
 
         var profile = taskEventProfile(resource, isActivity);
-        addTaskScheduledEvent(history, producedEventCount, profile, stateDef, effectiveInput, sm);
-        addTaskStartedEvent(history, producedEventCount, profile);
-
         JsonNode taskResult;
         try {
-            taskResult = mockedSteps != null
-                    ? mockedTaskResult(mockedSteps, stateName, attempt)
-                    : invokeResource(effectiveResource, effectiveInput, sm, taskToken);
-            if (tokenFuture != null) {
-                taskResult = awaitToken(tokenFuture, stateDef, taskToken);
+            addTaskScheduledEvent(history, producedEventCount, profile, stateDef, effectiveInput, sm);
+            addTaskStartedEvent(history, producedEventCount, profile);
+            try {
+                taskResult = mockedSteps != null
+                        ? mockedTaskResult(mockedSteps, stateName, attempt)
+                        : invokeResource(effectiveResource, effectiveInput, sm, taskToken, executionDeadlineNanos);
+                if (tokenFuture != null) {
+                    taskResult = awaitToken(tokenFuture, stateDef, taskToken, executionDeadlineNanos);
+                }
+            } catch (ExecutionTimedOutException e) {
+                // The state machine's TimeoutSeconds budget ran out while this task was waiting. AWS
+                // ends the execution there and writes nothing about the state it cut: the history of
+                // a task still waiting on its token is ExecutionStarted, TaskStateEntered,
+                // ActivityScheduled, ExecutionTimedOut, with no TaskFailed and no TaskTimedOut.
+                throw e;
+            } catch (TaskTimedOutException e) {
+                addTaskTimedOutEvent(history, producedEventCount, profile);
+                throw e;
+            } catch (Exception e) {
+                var failure = e instanceof FailStateException f ? f : null;
+                addTaskFailedEvent(history, producedEventCount, profile,
+                        failure != null && failure.error != null ? failure.error : "States.Runtime",
+                        failure != null ? failure.cause : e.getMessage());
+                throw e;
             }
-        } catch (TaskTimedOutException e) {
-            addTaskTimedOutEvent(history, producedEventCount, profile);
-            throw e;
         } catch (Exception e) {
-            var failure = e instanceof FailStateException f ? f : null;
-            addTaskFailedEvent(history, producedEventCount, profile,
-                    failure != null && failure.error != null ? failure.error : "States.Runtime",
-                    failure != null ? failure.cause : e.getMessage());
+            // A token registered above is normally discarded by awaitToken's own finally. Anything
+            // that throws before awaitToken runs — the scheduled/started events themselves, or the
+            // resource invocation — would otherwise leave it pending forever; the discard here is a
+            // no-op once awaitToken already ran it.
+            if (needsToken) {
+                sfnService.get().discardPendingToken(taskToken);
+            }
             throw e;
         }
         addTaskSucceededEvent(history, producedEventCount, profile, taskResult);
@@ -734,8 +751,8 @@ public class AslExecutor {
      * picks the task up, which is the instant it emits ActivityStarted; Floci emits that event at
      * schedule time, so there is no later instant to anchor on here.
      */
-    private JsonNode awaitToken(CompletableFuture<JsonNode> future, JsonNode stateDef, String taskToken)
-            throws Exception {
+    private JsonNode awaitToken(CompletableFuture<JsonNode> future, JsonNode stateDef, String taskToken,
+                                long executionDeadlineNanos) throws Exception {
         int timeoutSeconds = stateDef.path("TimeoutSeconds").asInt(0);
         if (timeoutSeconds <= 0) {
             timeoutSeconds = DEFAULT_TASK_TOKEN_TIMEOUT_SECONDS;
@@ -744,11 +761,17 @@ public class AslExecutor {
         long timeoutDeadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds);
         try {
             while (true) {
-                long wakeAtNanos = Math.min(timeoutDeadlineNanos,
-                        heartbeatDeadlineNanos(taskToken, heartbeatSeconds));
+                long wakeAtNanos = Math.min(executionDeadlineNanos, Math.min(timeoutDeadlineNanos,
+                        heartbeatDeadlineNanos(taskToken, heartbeatSeconds)));
                 try {
                     return future.get(wakeAtNanos - System.nanoTime(), TimeUnit.NANOSECONDS);
                 } catch (java.util.concurrent.TimeoutException e) {
+                    // The execution's budget is read first: when it is the clock that ran out, the
+                    // execution ends as TIMED_OUT and the task's own timeout never applies.
+                    if (System.nanoTime() >= executionDeadlineNanos) {
+                        future.cancel(true);
+                        throw new ExecutionTimedOutException();
+                    }
                     if (System.nanoTime() >= timeoutDeadlineNanos) {
                         future.cancel(true);
                         throw new TaskTimedOutException("States.Timeout");
@@ -823,7 +846,8 @@ public class AslExecutor {
         CustomResourceLiveness.tokenIn(payload).ifPresent(customResourceLiveness::touch);
     }
 
-    private JsonNode invokeResource(String resource, JsonNode input, StateMachine sm, String taskToken) throws Exception {
+    private JsonNode invokeResource(String resource, JsonNode input, StateMachine sm, String taskToken,
+                                    long executionDeadlineNanos) throws Exception {
         // Support Lambda resources: direct ARN or optimized integration
         String functionName = null;
         JsonNode lambdaPayload = input;
@@ -947,7 +971,7 @@ public class AslExecutor {
                     ? ".waitForTaskToken"
                     : resource.substring("arn:aws:states:::ecs:runTask".length());
             String region = extractRegionFromArn(sm.getStateMachineArn());
-            return invokeEcsRunTask(mode, input, region);
+            return invokeEcsRunTask(mode, input, region, executionDeadlineNanos);
         }
 
         // AWS SDK service integrations: Step Functions
@@ -974,7 +998,7 @@ public class AslExecutor {
         if (resource.startsWith("arn:aws:states:::states:startExecution")) {
             String mode = resource.substring("arn:aws:states:::states:startExecution".length());
             String region = extractRegionFromArn(sm.getStateMachineArn());
-            return invokeNestedStateMachine(mode, input, region);
+            return invokeNestedStateMachine(mode, input, region, executionDeadlineNanos);
         }
 
         // Activity resource: arn:aws:states:{region}:{account}:activity:{name}
@@ -1307,7 +1331,8 @@ public class AslExecutor {
         return envelope;
     }
 
-    private JsonNode invokeNestedStateMachine(String mode, JsonNode input, String region) throws Exception {
+    private JsonNode invokeNestedStateMachine(String mode, JsonNode input, String region,
+                                              long executionDeadlineNanos) throws Exception {
         String smArn = input.path("StateMachineArn").asText(null);
         if (smArn == null || smArn.isBlank()) {
             throw new FailStateException("States.TaskFailed",
@@ -1328,9 +1353,10 @@ public class AslExecutor {
             return result;
         }
 
-        // .sync or .sync:2 — poll until terminal
+        // .sync or .sync:2 — poll until terminal, or until the parent execution's TimeoutSeconds
+        // budget runs out, which ends the parent as TIMED_OUT and leaves the child running.
         for (int i = 0; i < 600; i++) {
-            Thread.sleep(100);
+            sleepOrTimeOutExecution(TimeUnit.MILLISECONDS.toNanos(100), executionDeadlineNanos);
             io.github.hectorvent.floci.services.stepfunctions.model.Execution current =
                     sfnService.get().describeExecution(execArn);
             String status = current.getStatus();
@@ -1380,7 +1406,8 @@ public class AslExecutor {
      *             STOPPED, or ".waitForTaskToken" to launch and let the token future carry the result
      *             (both ".sync" and ".waitForTaskToken" fail the state on a placement failure).
      */
-    private JsonNode invokeEcsRunTask(String mode, JsonNode input, String region) throws Exception {
+    private JsonNode invokeEcsRunTask(String mode, JsonNode input, String region,
+                                      long executionDeadlineNanos) throws Exception {
         String taskDefinition = input.path("TaskDefinition").asText(null);
         if (taskDefinition == null || taskDefinition.isBlank()) {
             throw new FailStateException("States.TaskFailed",
@@ -1452,7 +1479,8 @@ public class AslExecutor {
         // fail the state, otherwise tasks beyond the first would run unmonitored.
         List<String> taskArns = launched.stream().map(EcsTask::getTaskArn).toList();
         for (int i = 0; i < ECS_SYNC_POLL_ATTEMPTS; i++) {
-            Thread.sleep(ECS_SYNC_POLL_INTERVAL_MS);
+            sleepOrTimeOutExecution(TimeUnit.MILLISECONDS.toNanos(ECS_SYNC_POLL_INTERVAL_MS),
+                    executionDeadlineNanos);
             List<EcsTask> described = ecsService.describeTasks(cluster, taskArns, region);
             boolean allStopped = described.size() == taskArns.size()
                     && described.stream().allMatch(t -> "STOPPED".equals(t.getLastStatus()));
@@ -2004,7 +2032,8 @@ public class AslExecutor {
     private StateResult executeParallelState(String name, JsonNode stateDef, JsonNode input,
                                               AtomicLong producedEventCount, StateMachine sm, boolean jsonata,
                                               String topLevelQueryLanguage, JsonNode context,
-                                              ObjectNode variables) throws Exception {
+                                              ObjectNode variables, long executionDeadlineNanos)
+            throws Exception {
         JsonNode branches = stateDef.path("Branches");
         List<Future<JsonNode>> futures = new ArrayList<>();
 
@@ -2028,23 +2057,24 @@ public class AslExecutor {
         }
 
         int timeoutSeconds = stateDef.path("TimeoutSeconds").asInt(0);
-        long deadlineNanos = timeoutSeconds > 0
+        long stateDeadlineNanos = timeoutSeconds > 0
                 ? System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds)
                 : Long.MAX_VALUE;
+        // Two clocks can end this wait, and the join stops at whichever comes first: the state's
+        // own TimeoutSeconds, and the state machine's budget for the whole execution.
+        long joinDeadlineNanos = Math.min(stateDeadlineNanos, executionDeadlineNanos);
 
         ArrayNode results = objectMapper.createArrayNode();
         try {
             for (Future<JsonNode> future : futures) {
-                long remainingNanos = deadlineNanos - System.nanoTime();
+                long remainingNanos = joinDeadlineNanos - System.nanoTime();
                 if (remainingNanos <= 0) {
-                    throw new FailStateException("States.Timeout",
-                            "Parallel state timed out after " + timeoutSeconds + " seconds");
+                    throw parallelJoinExpired(stateDeadlineNanos, timeoutSeconds);
                 }
                 try {
                     results.add(future.get(remainingNanos, TimeUnit.NANOSECONDS));
                 } catch (java.util.concurrent.TimeoutException e) {
-                    throw new FailStateException("States.Timeout",
-                            "Parallel state timed out after " + timeoutSeconds + " seconds");
+                    throw parallelJoinExpired(stateDeadlineNanos, timeoutSeconds);
                 }
             }
         } catch (InterruptedException e) {
@@ -2085,10 +2115,24 @@ public class AslExecutor {
         return new StateResult(output, stateDef.path("Next").asText(null));
     }
 
+    /**
+     * Names the clock that ended a Parallel's join. The state's own {@code TimeoutSeconds} fails
+     * the state, so its Retry and Catch still apply; the state machine's budget ends the whole
+     * execution and no Catch sees it.
+     */
+    private RuntimeException parallelJoinExpired(long stateDeadlineNanos, int timeoutSeconds) {
+        if (System.nanoTime() < stateDeadlineNanos) {
+            return new ExecutionTimedOutException();
+        }
+        return new FailStateException("States.Timeout",
+                "Parallel state timed out after " + timeoutSeconds + " seconds");
+    }
+
     private StateResult executeMapState(String name, JsonNode stateDef, JsonNode input,
                                          AtomicLong producedEventCount, StateMachine sm, boolean jsonata,
                                          String topLevelQueryLanguage, JsonNode context,
-                                         ObjectNode variables) throws Exception {
+                                         ObjectNode variables, long executionDeadlineNanos)
+            throws Exception {
         String processorMode = stateDef.path("ItemProcessor").path("ProcessorConfig")
                 .path("Mode").asText("INLINE");
         boolean distributed = "DISTRIBUTED".equals(processorMode);
@@ -2169,9 +2213,17 @@ public class AslExecutor {
         };
 
         if (itemCount > 0) {
-            List<JsonNode> itemOutputs = MapIterationScheduler.execute(
-                    itemCount, Math.max(1, effectiveConcurrency),
-                    i -> () -> callUnderExecutionAccount(sm, makeTask.apply(i)));
+            List<JsonNode> itemOutputs;
+            try {
+                itemOutputs = MapIterationScheduler.execute(
+                        itemCount, Math.max(1, effectiveConcurrency),
+                        i -> () -> callUnderExecutionAccount(sm, makeTask.apply(i)),
+                        executionDeadlineNanos);
+            } catch (java.util.concurrent.TimeoutException e) {
+                // The only deadline the scheduler is given is the state machine's budget, so its
+                // expiry ends the execution rather than failing the Map state.
+                throw new ExecutionTimedOutException();
+            }
             results.addAll(itemOutputs);
         }
 

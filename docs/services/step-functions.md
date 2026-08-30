@@ -114,7 +114,9 @@ so emulated runs stay fast.
 ## Timeouts
 
 ASL carries two `TimeoutSeconds` fields and Floci enforces both, in the two terminal shapes
-AWS uses.
+AWS uses. The state machine's own field bounds every state; a `Task`'s own field only bounds
+one that waits for a task token — an activity, or a `.waitForTaskToken` integration. A Lambda
+or other SDK task that returns directly is not bound by it.
 
 The state machine's own `TimeoutSeconds` is the whole execution's budget. It is checked before
 every state and inside a `Wait`, so a `Wait` longer than what is left is cut rather than slept

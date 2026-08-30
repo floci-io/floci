@@ -86,9 +86,10 @@ class StepFunctionsTimeoutSecondsIntegrationTest {
     }
 
     @Test
-    void stateMachineTimeoutSecondsStopsTheLoopBeforeEnteringTheNextState() throws Exception {
-        // A Parallel branch runs on its own thread and sleeps its Wait out in full, so the budget
-        // is already spent by the time the state loop reaches the state after it.
+    void stateMachineTimeoutSecondsCutsTheWaitForAParallelBranch() throws Exception {
+        // A branch is never cut mid-state, so its Wait sleeps out in full on its own thread. What
+        // the budget cuts is the join: the execution ends while the branch is still running, and
+        // the Parallel state gets no Exited event and no state after it is entered.
         String smArn = createStateMachine("top-level-timeout-loop", """
                 {
                     "StartAt": "Fork",
@@ -108,12 +109,158 @@ class StepFunctionsTimeoutSecondsIntegrationTest {
                 """);
 
         String execArn = startExecution(smArn, "{}");
+        long startedAt = System.currentTimeMillis();
         Response timedOut = waitForTerminalExecution(execArn);
+        long elapsedMillis = System.currentTimeMillis() - startedAt;
 
         assertEquals("TIMED_OUT", timedOut.jsonPath().getString("status"));
+        assertTrue(elapsedMillis < 3_000,
+                "the branch's 3-second Wait outlasted the 1-second budget: " + elapsedMillis + " ms");
         JsonNode events = mapper.readTree(getExecutionHistory(execArn).body().asString()).path("events");
-        assertEquals(List.of("ExecutionStarted", "ParallelStateEntered", "ParallelStateExited",
-                "ExecutionTimedOut"), eventTypes(events), "history was " + events);
+        assertEquals(List.of("ExecutionStarted", "ParallelStateEntered", "ExecutionTimedOut"),
+                eventTypes(events), "history was " + events);
+    }
+
+    @Test
+    void stateMachineTimeoutSecondsCutsTheWaitForATaskToken() throws Exception {
+        // Measured against us-east-1: a state machine whose budget is shorter than the Task's own
+        // TimeoutSeconds ends TIMED_OUT the instant the budget runs out, and writes nothing about
+        // the task it cut. No ActivityTimedOut, no TaskFailed, no ExecutionFailed.
+        String activityArn = createActivity("top-level-timeout-token");
+        String smArn = createStateMachine("top-level-timeout-token", """
+                {
+                    "StartAt": "Await",
+                    "TimeoutSeconds": 1,
+                    "States": {
+                        "Await": {
+                            "Type": "Task",
+                            "Resource": "%s",
+                            "TimeoutSeconds": 60,
+                            "End": true
+                        }
+                    }
+                }
+                """.formatted(activityArn));
+
+        String execArn = startExecution(smArn, "{}");
+        long startedAt = System.currentTimeMillis();
+        Response timedOut = waitForTerminalExecution(execArn);
+        long elapsedMillis = System.currentTimeMillis() - startedAt;
+
+        assertEquals("TIMED_OUT", timedOut.jsonPath().getString("status"), timedOut.body().asString());
+        assertTrue(elapsedMillis < 5_000,
+                "the task's 60-second wait outlasted the 1-second budget: " + elapsedMillis + " ms");
+        JsonNode events = mapper.readTree(getExecutionHistory(execArn).body().asString()).path("events");
+        assertEquals(List.of("ExecutionStarted", "TaskStateEntered", "ActivityScheduled",
+                "ActivityStarted", "ExecutionTimedOut"), eventTypes(events), "history was " + events);
+    }
+
+    @Test
+    void stateMachineTimeoutSecondsCutsTheWaitForANestedExecution() throws Exception {
+        // The child sleeps far past the parent's budget. The parent ends TIMED_OUT where its budget
+        // runs out; the child keeps running, since nothing in ASL propagates the parent's timeout.
+        String childArn = createStateMachine("nested-child", """
+                {
+                    "StartAt": "Linger",
+                    "States": {"Linger": {"Type": "Wait", "Seconds": 10, "End": true}}
+                }
+                """);
+        String parentArn = createStateMachine("nested-parent", """
+                {
+                    "StartAt": "RunChild",
+                    "TimeoutSeconds": 1,
+                    "States": {
+                        "RunChild": {
+                            "Type": "Task",
+                            "Resource": "arn:aws:states:::states:startExecution.sync",
+                            "Parameters": {"StateMachineArn": "%s", "Input": {}},
+                            "End": true
+                        }
+                    }
+                }
+                """.formatted(childArn));
+
+        String execArn = startExecution(parentArn, "{}");
+        long startedAt = System.currentTimeMillis();
+        Response timedOut = waitForTerminalExecution(execArn);
+        long elapsedMillis = System.currentTimeMillis() - startedAt;
+
+        assertEquals("TIMED_OUT", timedOut.jsonPath().getString("status"), timedOut.body().asString());
+        assertTrue(elapsedMillis < 5_000,
+                "the child's 10-second Wait outlasted the 1-second budget: " + elapsedMillis + " ms");
+        JsonNode events = mapper.readTree(getExecutionHistory(execArn).body().asString()).path("events");
+        assertEquals("ExecutionTimedOut", events.get(events.size() - 1).path("type").asText(),
+                "history was " + events);
+    }
+
+    @Test
+    void stateMachineTimeoutSecondsCutsTheWaitForMapIterations() throws Exception {
+        // Two iterations run concurrently and each sleeps past the budget, so what the budget cuts
+        // is the Map state's wait for them rather than any single iteration.
+        String smArn = createStateMachine("top-level-timeout-map", """
+                {
+                    "StartAt": "OverItems",
+                    "TimeoutSeconds": 1,
+                    "States": {
+                        "OverItems": {
+                            "Type": "Map",
+                            "ItemsPath": "$.items",
+                            "ItemProcessor": {
+                                "StartAt": "Linger",
+                                "States": {"Linger": {"Type": "Wait", "Seconds": 10, "End": true}}
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """);
+
+        String execArn = startExecution(smArn, "{\"items\": [1, 2]}");
+        long startedAt = System.currentTimeMillis();
+        Response timedOut = waitForTerminalExecution(execArn);
+        long elapsedMillis = System.currentTimeMillis() - startedAt;
+
+        assertEquals("TIMED_OUT", timedOut.jsonPath().getString("status"), timedOut.body().asString());
+        assertTrue(elapsedMillis < 5_000,
+                "the iterations' 10-second Wait outlasted the 1-second budget: " + elapsedMillis + " ms");
+        JsonNode events = mapper.readTree(getExecutionHistory(execArn).body().asString()).path("events");
+        assertEquals(List.of("ExecutionStarted", "MapStateEntered", "ExecutionTimedOut"),
+                eventTypes(events), "history was " + events);
+    }
+
+    @Test
+    void stateMachineTimeoutSecondsCutsTheWaitForASingleMapIteration() throws Exception {
+        // A single item runs the Map state's serial path rather than the concurrent one; the
+        // budget must cut it the same way it cuts a concurrent iteration above.
+        String smArn = createStateMachine("top-level-timeout-map-single-item", """
+                {
+                    "StartAt": "OverItems",
+                    "TimeoutSeconds": 1,
+                    "States": {
+                        "OverItems": {
+                            "Type": "Map",
+                            "ItemsPath": "$.items",
+                            "ItemProcessor": {
+                                "StartAt": "Linger",
+                                "States": {"Linger": {"Type": "Wait", "Seconds": 10, "End": true}}
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """);
+
+        String execArn = startExecution(smArn, "{\"items\": [1]}");
+        long startedAt = System.currentTimeMillis();
+        Response timedOut = waitForTerminalExecution(execArn);
+        long elapsedMillis = System.currentTimeMillis() - startedAt;
+
+        assertEquals("TIMED_OUT", timedOut.jsonPath().getString("status"), timedOut.body().asString());
+        assertTrue(elapsedMillis < 5_000,
+                "the single iteration's 10-second Wait outlasted the 1-second budget: " + elapsedMillis + " ms");
+        JsonNode events = mapper.readTree(getExecutionHistory(execArn).body().asString()).path("events");
+        assertEquals(List.of("ExecutionStarted", "MapStateEntered", "ExecutionTimedOut"),
+                eventTypes(events), "history was " + events);
     }
 
     @Test
