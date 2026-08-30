@@ -4738,7 +4738,7 @@ class Ec2IntegrationTest {
             .statusCode(200)
             .extract().path("RunInstancesResponse.instancesSet.item.instanceId");
 
-        given()
+        String eniId = given()
             .formParam("Action", "DescribeNetworkInterfaces")
             .formParam("Filter.1.Name", "attachment.instance-id")
             .formParam("Filter.1.Value.1", taggedInstanceId)
@@ -4753,11 +4753,13 @@ class Ec2IntegrationTest {
                     equalTo("Name"))
             .body("DescribeNetworkInterfacesResponse.networkInterfaceSet.item[0].tagSet.item[0].value",
                     equalTo("eni-tagspec-interface"))
-            .body(not(containsString("eni-tagspec-instance")));
+            .body(not(containsString("eni-tagspec-instance")))
+            .extract().path("DescribeNetworkInterfacesResponse.networkInterfaceSet.item[0].networkInterfaceId");
 
         // The launch-time interface tag must also surface through DescribeTags under its own
         // resource type: eni- ids classify as network-interface, not as an unknown type the
-        // resource-type filter then drops.
+        // resource-type filter then drops. Pinned to the interface's id, not just the tag pair,
+        // so the whole RunInstances -> createTags -> DescribeTags path is exercised.
         given()
             .formParam("Action", "DescribeTags")
             .formParam("Filter.1.Name", "resource-type")
@@ -4767,7 +4769,11 @@ class Ec2IntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("DescribeTagsResponse.tagSet.item.find { it.key == 'Name' && it.value == 'eni-tagspec-interface' }.resourceType",
+            .body("DescribeTagsResponse.tagSet.item.find { it.resourceId == '" + eniId + "' }.key",
+                    equalTo("Name"))
+            .body("DescribeTagsResponse.tagSet.item.find { it.resourceId == '" + eniId + "' }.value",
+                    equalTo("eni-tagspec-interface"))
+            .body("DescribeTagsResponse.tagSet.item.find { it.resourceId == '" + eniId + "' }.resourceType",
                     equalTo("network-interface"));
 
         given()
