@@ -176,4 +176,49 @@ class CognitoUserPoolDomainIntegrationTest {
                 .statusCode(404)
                 .body("__type", equalTo("ResourceNotFoundException"));
     }
+
+    @Test
+    @Order(10)
+    void deleteUserPoolWithDomainIsRejected() throws Exception {
+        // The DeleteUserPool API reference's own example documents this refusal verbatim.
+        String blockingDomain = "floci-block-" + UUID.randomUUID().toString().substring(0, 8);
+        cognitoJson("CreateUserPoolDomain", """
+                {
+                  "Domain": "%s",
+                  "UserPoolId": "%s"
+                }
+                """.formatted(blockingDomain, poolId));
+
+        cognitoAction("DeleteUserPool", """
+                {
+                  "UserPoolId": "%s"
+                }
+                """.formatted(poolId))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidParameterException"))
+                .body("message", equalTo(
+                        "User pool cannot be deleted. It has a domain configured that should be deleted first."));
+
+        cognitoAction("DeleteUserPoolDomain", """
+                {
+                  "Domain": "%s",
+                  "UserPoolId": "%s"
+                }
+                """.formatted(blockingDomain, poolId))
+                .then()
+                .statusCode(200);
+    }
+
+    @Test
+    @Order(11)
+    void deleteUserPoolSucceedsOnceDomainIsGone() {
+        cognitoAction("DeleteUserPool", """
+                {
+                  "UserPoolId": "%s"
+                }
+                """.formatted(poolId))
+                .then()
+                .statusCode(200);
+    }
 }
