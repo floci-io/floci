@@ -152,14 +152,12 @@ public class RedshiftService {
             cluster.setEndpoint(endpoint);
             cluster.setClusterStatus("available");
         } catch (AwsException e) {
-            try { proxyManager.stopProxy(relayKey(clusters.accountId(), identifier)); } catch (Exception ex) { LOG.warnv(ex, "Failed to stop proxy during rollback of cluster {0}", identifier); }
+            stopProxyAndReleasePortSafely(identifier, proxyPort);
             try { containerManager.stop(clusters.accountId(), identifier); } catch (Exception ex) { LOG.warnv(ex, "Failed to stop container during rollback of cluster {0}", identifier); }
-            releaseProxyPort(proxyPort);
             throw e;
         } catch (Exception e) {
-            try { proxyManager.stopProxy(relayKey(clusters.accountId(), identifier)); } catch (Exception ex) { LOG.warnv(ex, "Failed to stop proxy during rollback of cluster {0}", identifier); }
+            stopProxyAndReleasePortSafely(identifier, proxyPort);
             try { containerManager.stop(clusters.accountId(), identifier); } catch (Exception ex) { LOG.warnv(ex, "Failed to stop container during rollback of cluster {0}", identifier); }
-            releaseProxyPort(proxyPort);
             throw new AwsException("InternalFailure", "Failed to start container: " + e.getMessage(), 500);
         }
 
@@ -188,8 +186,7 @@ public class RedshiftService {
 
         // Tear down the auth proxy and return its port before stopping the container.
         String accountId = clusters.accountId();
-        proxyManager.stopProxy(relayKey(accountId, identifier));
-        releaseProxyPort(cluster.getProxyPort());
+        stopProxyAndReleasePortSafely(identifier, cluster.getProxyPort());
 
         containerManager.stop(clusters.accountId(), identifier);
         clusters.delete(identifier);
@@ -488,14 +485,12 @@ public class RedshiftService {
 
             cluster.setClusterStatus("available");
         } catch (AwsException e) {
-            try { proxyManager.stopProxy(relayKey(clusters.accountId(), clusterIdentifier)); } catch (Exception ex) { LOG.warnv(ex, "Failed to stop proxy during rollback of cluster {0}", clusterIdentifier); }
+            stopProxyAndReleasePortSafely(clusterIdentifier, proxyPort);
             try { containerManager.stop(clusters.accountId(), clusterIdentifier); } catch (Exception ex) { LOG.warnv(ex, "Failed to stop container during rollback of cluster {0}", clusterIdentifier); }
-            releaseProxyPort(proxyPort);
             throw e;
         } catch (Exception e) {
-            try { proxyManager.stopProxy(relayKey(clusters.accountId(), clusterIdentifier)); } catch (Exception ex) { LOG.warnv(ex, "Failed to stop proxy during rollback of cluster {0}", clusterIdentifier); }
+            stopProxyAndReleasePortSafely(clusterIdentifier, proxyPort);
             try { containerManager.stop(clusters.accountId(), clusterIdentifier); } catch (Exception ex) { LOG.warnv(ex, "Failed to stop container during rollback of cluster {0}", clusterIdentifier); }
-            releaseProxyPort(proxyPort);
             throw new AwsException("InternalFailure", "Failed to restore cluster from snapshot: " + e.getMessage(), 500);
         }
 
@@ -810,6 +805,19 @@ public class RedshiftService {
         }
         throw new AwsException("InsufficientClusterCapacity",
                 "No available Redshift proxy ports in range " + base + "-" + max, 503);
+    }
+
+    private void stopProxyAndReleasePortSafely(String identifier, int proxyPort) {
+        boolean proxyStopped = false;
+        try {
+            proxyManager.stopProxy(relayKey(clusters.accountId(), identifier));
+            proxyStopped = true;
+        } catch (Exception ex) {
+            LOG.warnv(ex, "Failed to stop proxy for cluster {0}; leaking proxy port {1} to prevent reallocation", identifier, proxyPort);
+        }
+        if (proxyStopped) {
+            releaseProxyPort(proxyPort);
+        }
     }
 
     private void releaseProxyPort(int port) {
