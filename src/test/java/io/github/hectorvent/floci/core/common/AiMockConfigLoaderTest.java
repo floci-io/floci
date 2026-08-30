@@ -79,6 +79,14 @@ class AiMockConfigLoaderTest {
     }
 
     @Test
+    void fallsBackWhenConfiguredPathIsUnparseable() {
+        // An embedded NUL byte makes Path.of() throw InvalidPathException, an unchecked
+        // exception that a plain "catch (IOException)" does not cover.
+        var loader = new AiMockConfigLoader(Optional.of("bad\0path.json"), new ObjectMapper());
+        assertTrue(loader.lookup("comprehend", "I love this", "DetectSentiment").isEmpty());
+    }
+
+    @Test
     void fallsBackWhenFileIsNotAJsonObject() throws IOException {
         var loader = loader("[1, 2, 3]");
         assertTrue(loader.lookup("comprehend", "I love this", "DetectSentiment").isEmpty());

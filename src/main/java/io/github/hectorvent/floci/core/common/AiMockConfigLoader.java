@@ -75,6 +75,21 @@ public class AiMockConfigLoader {
     }
 
     private JsonNode load(String path) {
+        try {
+            return loadOrThrow(path);
+        } catch (RuntimeException e) {
+            // Path.of(path) throws InvalidPathException (unchecked) for a malformed path
+            // string (e.g. an embedded NUL character), and filesystem access can throw
+            // other unchecked exceptions (e.g. SecurityException) that IOException alone
+            // does not cover. None of that may ever break a real request: mocking is
+            // optional, so any failure to load the config falls back to the default stub,
+            // exactly like the IOException cases below.
+            LOG.warnv("AI mock configuration at {0} could not be loaded ({1}); using default stub responses.",
+                    path, e);
+            return null;
+        }
+    }
+    private JsonNode loadOrThrow(String path) {
         var file = Path.of(path);
         long lastModified;
         try {
