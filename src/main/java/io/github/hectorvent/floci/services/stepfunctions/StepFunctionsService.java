@@ -82,11 +82,16 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
     private static final Set<String> RESULT_WRITER_OUTPUT_TYPES = Set.of("JSON", "JSONL");
     // Measured against real AWS: TimeoutSeconds is accepted on Task only, Catch and Retry are
     // accepted on Task, Parallel and Map only. Every other state type refuses these fields with
-    // "Field '<name>' is not supported".
-    private static final Map<String, Set<String>> FIELDS_ALLOWED_STATE_TYPES = Map.of(
-            "TimeoutSeconds", Set.of("Task"),
-            "Catch", Set.of("Task", "Parallel", "Map"),
-            "Retry", Set.of("Task", "Parallel", "Map"));
+    // "Field '<name>' is not supported". A List, not a Map.of: Map.of's iteration order is salted
+    // per JVM, so a state carrying more than one disallowed field needs a fixed emission order
+    // instead. TimeoutSeconds, Catch, Retry is not an AWS-observed order — field declaration order
+    // is not observable in the response — it is simply the one this code commits to.
+    private record FieldStateTypeRule(String field, Set<String> allowedTypes) {}
+
+    private static final List<FieldStateTypeRule> FIELDS_ALLOWED_STATE_TYPES = List.of(
+            new FieldStateTypeRule("TimeoutSeconds", Set.of("Task")),
+            new FieldStateTypeRule("Catch", Set.of("Task", "Parallel", "Map")),
+            new FieldStateTypeRule("Retry", Set.of("Task", "Parallel", "Map")));
 
     @Inject
     public StepFunctionsService(StorageFactory storageFactory, RegionResolver regionResolver,
@@ -1064,9 +1069,12 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
     private static final String UNSUPPORTED_FIELD_MARKER = "UNSUPPORTED_FIELD:";
     private static final String MISSING_END_STATE_MARKER = "MISSING_END_STATE:";
     private static final String UNREACHABLE_STATE_MARKER = "UNREACHABLE_STATE:";
-    // Payload is "<target state name><SOH><location>"; SOH cannot appear in a state name.
+    // Payload is "<value><SOH><location>", shared by every marker that must carry structured data
+    // (a state name, a JSONata parser message) past its flat-string marker without re-parsing free
+    // text; SOH cannot appear in a state name or in JSONata parser output.
     private static final String DANGLING_TARGET_MARKER = "DANGLING_TARGET:";
-    private static final char DANGLING_TARGET_SEPARATOR = '\u0001';
+    private static final char MARKER_PAYLOAD_SEPARATOR = '\u0001';
+    private static final String INVALID_JSONATA_MARKER = "INVALID_JSONATA_EXPRESSION:";
 
     // Parse the structured location out of validator flat error strings,
     // which currently encode it as "...field 'X' ... at /States/Y".
@@ -1140,7 +1148,14 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
                     error.substring(PARSE_ERROR_MARKER.length()).trim(), null);
         }
         if (error.startsWith(UNSUPPORTED_JSONATA_MARKER)) {
-            return toJsonataDiagnostic(error.substring(UNSUPPORTED_JSONATA_MARKER.length()).trim());
+            return toJsonataDiagnostic("UNSUPPORTED_JSONATA_EXPRESSION",
+                    error.substring(UNSUPPORTED_JSONATA_MARKER.length()).trim());
+        }
+        if (error.startsWith(INVALID_JSONATA_MARKER)) {
+            String payload = error.substring(INVALID_JSONATA_MARKER.length());
+            int separator = payload.indexOf(MARKER_PAYLOAD_SEPARATOR);
+            return new Diagnostic("ERROR", "INVALID_JSONATA_EXPRESSION",
+                    payload.substring(0, separator), payload.substring(separator + 1));
         }
         if (error.startsWith(UNSUPPORTED_FIELD_MARKER)) {
             return toUnsupportedFieldDiagnostic(error.substring(UNSUPPORTED_FIELD_MARKER.length()));
@@ -1149,14 +1164,15 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
             return new Diagnostic("ERROR", "MISSING_END_STATE", "Workflow has no terminal state", null);
         }
         if (error.startsWith(UNREACHABLE_STATE_MARKER)) {
-            String location = error.substring(UNREACHABLE_STATE_MARKER.length());
-            String name = location.substring(location.lastIndexOf('/') + 1);
+            String payload = error.substring(UNREACHABLE_STATE_MARKER.length());
+            int separator = payload.indexOf(MARKER_PAYLOAD_SEPARATOR);
             return new Diagnostic("ERROR", "MISSING_TRANSITION_TARGET",
-                    "State \"" + name + "\" is not reachable.", location);
+                    "State \"" + payload.substring(0, separator) + "\" is not reachable.",
+                    payload.substring(separator + 1));
         }
         if (error.startsWith(DANGLING_TARGET_MARKER)) {
             String payload = error.substring(DANGLING_TARGET_MARKER.length());
-            int separator = payload.indexOf(DANGLING_TARGET_SEPARATOR);
+            int separator = payload.indexOf(MARKER_PAYLOAD_SEPARATOR);
             return new Diagnostic("ERROR", "MISSING_TRANSITION_TARGET",
                     "Missing 'Next' target: " + payload.substring(0, separator),
                     payload.substring(separator + 1));
@@ -1178,12 +1194,12 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
         return new Diagnostic("ERROR", "SCHEMA_VALIDATION_FAILED", message, location);
     }
 
-    private static Diagnostic toJsonataDiagnostic(String message) {
+    private static Diagnostic toJsonataDiagnostic(String code, String message) {
         Matcher locationMatcher = JSONATA_LOCATION_SUFFIX_PATTERN.matcher(message);
         if (!locationMatcher.find()) {
-            return new Diagnostic("ERROR", "UNSUPPORTED_JSONATA_EXPRESSION", message, null);
+            return new Diagnostic("ERROR", code, message, null);
         }
-        return new Diagnostic("ERROR", "UNSUPPORTED_JSONATA_EXPRESSION",
+        return new Diagnostic("ERROR", code,
                 message.substring(0, locationMatcher.start()).trim(), locationMatcher.group(1));
     }
 
@@ -1450,7 +1466,8 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
         // A JSONata error already carries its own AWS code and location, so it is reported on its
         // own rather than folded into the rest.
         List<String> nonJsonataErrors = errors.stream()
-                .filter(error -> !error.startsWith(UNSUPPORTED_JSONATA_MARKER))
+                .filter(error -> !error.startsWith(UNSUPPORTED_JSONATA_MARKER)
+                        && !error.startsWith(INVALID_JSONATA_MARKER))
                 .toList();
         if (nonJsonataErrors.isEmpty()) {
             throw new AwsException("InvalidDefinition",
@@ -1499,9 +1516,6 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
             errors.add("The field 'States' is required and must be a non-empty object");
             return errors;
         }
-        if (startAt != null && !startAt.isBlank() && !states.has(startAt)) {
-            errors.add("The value of 'StartAt' must match a state in 'States'");
-        }
 
         String topLevelQL = def.path("QueryLanguage").asText("JSONPath");
         boolean topLevelJsonata = "JSONata".equals(topLevelQL);
@@ -1520,7 +1534,7 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
         // that same level: a workflow with no terminal state anywhere is refused outright, with no
         // "not reachable" diagnostics piled on top of it.
         if (hasTerminalState(states)) {
-            validateReachability("/States", states, startAt, errors);
+            validateReachability("/States", states, startAt, "/StartAt", errors);
         } else {
             errors.add(MISSING_END_STATE_MARKER);
         }
@@ -1542,29 +1556,31 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
 
     /**
      * Walks the transition graph of one container of states (the top-level {@code States}, a
-     * Map's {@code ItemProcessor}, or a Parallel branch) from its {@code StartAt} and flags every
-     * state nothing routes to. Skipped when {@code startAt} does not resolve to a state in the
-     * same container — that shape is reported elsewhere and there is no root to walk from.
+     * Map's {@code ItemProcessor}, or a Parallel branch) from its {@code StartAt}, flagging every
+     * state nothing routes to. A {@code StartAt} that does not resolve to a state in the same
+     * container is itself a dangling transition target, reported at {@code startAtLocation}; the
+     * walk then starts from nothing, so every state in the container comes back unreachable too.
      */
     private static void validateReachability(String containerPath, JsonNode states, String startAt,
-                                              List<String> errors) {
-        if (startAt == null || !states.has(startAt)) {
-            return;
-        }
+                                              String startAtLocation, List<String> errors) {
         Set<String> reachable = new HashSet<>();
-        Deque<String> pending = new ArrayDeque<>();
-        reachable.add(startAt);
-        pending.add(startAt);
-        while (!pending.isEmpty()) {
-            for (String target : transitionTargets(states.path(pending.poll()))) {
-                if (states.has(target) && reachable.add(target)) {
-                    pending.add(target);
+        if (startAt != null && !startAt.isBlank() && states.has(startAt)) {
+            Deque<String> pending = new ArrayDeque<>();
+            reachable.add(startAt);
+            pending.add(startAt);
+            while (!pending.isEmpty()) {
+                for (String target : transitionTargets(states.path(pending.poll()))) {
+                    if (states.has(target) && reachable.add(target)) {
+                        pending.add(target);
+                    }
                 }
             }
+        } else if (startAt != null && !startAt.isBlank()) {
+            errors.add(DANGLING_TARGET_MARKER + startAt + MARKER_PAYLOAD_SEPARATOR + startAtLocation);
         }
         states.fieldNames().forEachRemaining(name -> {
             if (!reachable.contains(name)) {
-                errors.add(UNREACHABLE_STATE_MARKER + containerPath + "/" + name);
+                errors.add(UNREACHABLE_STATE_MARKER + name + MARKER_PAYLOAD_SEPARATOR + containerPath + "/" + name);
             }
         });
     }
@@ -1614,17 +1630,17 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
                                        Set<String> siblingStateNames, List<String> errors) {
         JsonNode value = node.path(field);
         if (value.isTextual() && !siblingStateNames.contains(value.asText())) {
-            errors.add(DANGLING_TARGET_MARKER + value.asText() + DANGLING_TARGET_SEPARATOR + location);
+            errors.add(DANGLING_TARGET_MARKER + value.asText() + MARKER_PAYLOAD_SEPARATOR + location);
         }
     }
 
     private static void validateFieldsAllowedForType(String statePath, JsonNode stateDef,
                                                       String stateType, List<String> errors) {
-        FIELDS_ALLOWED_STATE_TYPES.forEach((field, allowedTypes) -> {
-            if (stateDef.has(field) && !allowedTypes.contains(stateType)) {
-                errors.add(UNSUPPORTED_FIELD_MARKER + field + " " + statePath);
+        for (FieldStateTypeRule rule : FIELDS_ALLOWED_STATE_TYPES) {
+            if (stateDef.has(rule.field()) && !rule.allowedTypes().contains(stateType)) {
+                errors.add(UNSUPPORTED_FIELD_MARKER + rule.field() + " " + statePath);
             }
-        });
+        }
     }
 
     private void validateState(String statePath, JsonNode stateDef, boolean topLevelJsonata,
@@ -1676,15 +1692,17 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
                 validateResultWriter(statePath, stateDef.get("ResultWriter"), stateIsJsonata, errors);
             }
             String processorField = stateDef.has("ItemProcessor") ? "ItemProcessor" : "Iterator";
+            String processorPath = statePath + "/" + processorField;
             JsonNode processor = stateDef.path(processorField);
-            validateNestedStates(processor.path("States"), statePath + "/" + processorField + "/States",
+            validateNestedStates(processor.path("States"), processorPath + "/States", processorPath + "/StartAt",
                     processor.path("StartAt").asText(null), topLevelJsonata, errors);
         } else if ("Parallel".equals(stateType)) {
             JsonNode branches = stateDef.path("Branches");
             if (branches.isArray()) {
                 for (int i = 0; i < branches.size(); i++) {
                     JsonNode branch = branches.path(i);
-                    validateNestedStates(branch.path("States"), statePath + "/Branches[" + i + "]/States",
+                    String branchPath = statePath + "/Branches[" + i + "]";
+                    validateNestedStates(branch.path("States"), branchPath + "/States", branchPath + "/StartAt",
                             branch.path("StartAt").asText(null), topLevelJsonata, errors);
                 }
             }
@@ -1692,12 +1710,14 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
     }
 
     /**
-     * Reports every JSONata expression in the state that reads the top-level context, which real
-     * AWS refuses at CreateStateMachine time. Only the fields AWS parses as JSONata are walked:
-     * measured against {@code validate-state-machine-definition}, a {@code {% %}} string in
-     * Comment, Next, Default, Resource, ErrorEquals, Retry, Credentials or ReaderConfig.CSVHeaders
-     * is left alone, while Output, Assign, Arguments, Items, Seconds, Condition, ItemBatcher,
-     * ItemReader, ItemSelector, ResultWriter and the rest are parsed and reported.
+     * Reports every JSONata expression in the state that does not parse, or that reads the
+     * top-level context, or that reads {@code $states.errorOutput} outside the one place it
+     * exists: all three are refused by real AWS at CreateStateMachine time. Only the fields AWS
+     * parses as JSONata are walked: measured against {@code validate-state-machine-definition}, a
+     * {@code {% %}} string in Comment, Next, Default, Resource, ErrorEquals, Retry, Credentials or
+     * ReaderConfig.CSVHeaders is left alone, while Output, Assign, Arguments, Items, Seconds,
+     * Condition, ItemBatcher, ItemReader, ItemSelector, ResultWriter and the rest are parsed and
+     * reported.
      *
      * <p>Those names are ASL fields, not payload keys. AWS parses a payload whole, so
      * {@code Assign: {"Next": "{% phone %}"}} and {@code Arguments: {"Payload": {"Comment":
@@ -1705,39 +1725,88 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
      * walk enters one of {@link #JSONATA_PAYLOAD_FIELDS}.
      */
     private static void collectTopLevelReferences(String path, JsonNode node, List<String> errors) {
-        collectTopLevelReferences(path, node, false, errors);
+        collectTopLevelReferences(path, node, JsonataScope.STATE_ROOT, errors);
     }
 
-    private static void collectTopLevelReferences(String path, JsonNode node, boolean insidePayload,
+    private static void collectTopLevelReferences(String path, JsonNode node, JsonataScope scope,
                                                   List<String> errors) {
         if (node.isObject()) {
             node.fields().forEachRemaining(field -> {
-                String name = field.getKey();
-                if (insidePayload || !ASL_FIELDS_AWS_DOES_NOT_PARSE_AS_JSONATA.contains(name)) {
-                    collectTopLevelReferences(path + "/" + name, field.getValue(),
-                            insidePayload || JSONATA_PAYLOAD_FIELDS.contains(name), errors);
+                if (scope.parsesAsJsonata(field.getKey())) {
+                    collectTopLevelReferences(path + "/" + field.getKey(), field.getValue(),
+                            scope.enter(field.getKey()), errors);
                 }
             });
             return;
         }
         if (node.isArray()) {
             for (int index = 0; index < node.size(); index++) {
-                collectTopLevelReferences(path + "[" + index + "]", node.get(index), insidePayload,
-                        errors);
+                collectTopLevelReferences(path + "[" + index + "]", node.get(index), scope, errors);
             }
             return;
         }
         if (!node.isTextual() || !JsonataEvaluator.isExpression(node.asText())) {
             return;
         }
-        for (String reference : JsonataTopLevelReferences.in(JsonataEvaluator.unwrap(node.asText()))) {
-            errors.add(UNSUPPORTED_JSONATA_MARKER + " Reference to '" + reference
-                    + "' at the top level is not supported. at " + path);
+        JsonataTopLevelReferences.Analysis analysis =
+                JsonataTopLevelReferences.analyze(JsonataEvaluator.unwrap(node.asText()));
+        if (analysis.parseError() != null) {
+            errors.add(INVALID_JSONATA_MARKER + analysis.parseError() + MARKER_PAYLOAD_SEPARATOR + path);
+            return;
+        }
+        for (String reference : analysis.topLevelReferences()) {
+            addUnsupportedReferenceError(path, reference, scope, errors);
         }
     }
 
-    private void validateNestedStates(JsonNode states, String statesPath, String startAt,
-                                      boolean inheritedJsonata, List<String> errors) {
+    /**
+     * The three things the walk carries down from the ASL fields it has already entered, each of
+     * which changes how a {@code {% %}} string below is read: inside a payload every key is a
+     * payload key, so {@link #ASL_FIELDS_AWS_DOES_NOT_PARSE_AS_JSONATA} no longer applies;
+     * {@code atCatchEntry} marks a catcher object, whose own {@code Output} and {@code Assign} are
+     * the one place {@code $states.errorOutput} resolves; and {@code insideCatchOutputOrAssign}
+     * says the walk is in one of those two, at any depth.
+     */
+    private record JsonataScope(boolean insidePayload, boolean atCatchEntry,
+                                boolean insideCatchOutputOrAssign) {
+
+        private static final JsonataScope STATE_ROOT = new JsonataScope(false, false, false);
+
+        private boolean parsesAsJsonata(String field) {
+            return insidePayload || !ASL_FIELDS_AWS_DOES_NOT_PARSE_AS_JSONATA.contains(field);
+        }
+
+        private JsonataScope enter(String field) {
+            if (insidePayload) {
+                return this;
+            }
+            return new JsonataScope(
+                    JSONATA_PAYLOAD_FIELDS.contains(field),
+                    "Catch".equals(field),
+                    insideCatchOutputOrAssign
+                            || (atCatchEntry && ("Output".equals(field) || "Assign".equals(field))));
+        }
+    }
+
+    private static void addUnsupportedReferenceError(String path, String reference,
+                                                     JsonataScope scope, List<String> errors) {
+        if (JsonataTopLevelReferences.STATES_ERROR_OUTPUT.equals(reference)) {
+            if (!scope.insideCatchOutputOrAssign()) {
+                errors.add(UNSUPPORTED_JSONATA_MARKER
+                        + " Field '$states.errorOutput' does not exist. at " + path);
+            }
+            return;
+        }
+        if (JsonataTopLevelReferences.ROOT_REFERENCE.equals(reference)) {
+            errors.add(UNSUPPORTED_JSONATA_MARKER + " Reference to '$$' is not supported. at " + path);
+            return;
+        }
+        errors.add(UNSUPPORTED_JSONATA_MARKER + " Reference to '" + reference
+                + "' at the top level is not supported. at " + path);
+    }
+
+    private void validateNestedStates(JsonNode states, String statesPath, String startAtLocation,
+                                      String startAt, boolean inheritedJsonata, List<String> errors) {
         if (!states.isObject()) {
             return;
         }
@@ -1747,7 +1816,7 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
                 statesPath + "/" + entry.getKey(), entry.getValue(), inheritedJsonata, stateNames, errors));
         // Unlike the top level, MISSING_END_STATE does not apply here: ItemProcessor and Branches
         // are always walked for reachability regardless of whether they have a terminal state.
-        validateReachability(statesPath, states, startAt, errors);
+        validateReachability(statesPath, states, startAt, startAtLocation, errors);
     }
 
     private void validateMapConcurrency(String statePath, JsonNode stateDef,

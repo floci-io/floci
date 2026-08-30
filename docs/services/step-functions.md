@@ -272,10 +272,17 @@ in a predicate, in a sort term or in an object grouping stays legal and
 `$states.input.items[value > 3]` is accepted. A lambda body keeps the context of the expression
 that defines it, so `$map($states.input.a, function($x){ b })` does name `b` at the top level.
 
-Two neighbouring rules stay with the execution rather than the definition. A syntax error such as
-`{% a[1,2) %}` is accepted here and fails the execution, where AWS reports
-`INVALID_JSONATA_EXPRESSION` when the state machine is created; and `$$`, which AWS refuses under
-its own message, is accepted here.
+A JSONata expression that fails to parse, such as `{% a[1,2) %}`, is refused the same way, with
+`INVALID_JSONATA_EXPRESSION` and the parser's own message at the field's location. `$$`, the
+reference to the top-level context, is refused under `UNSUPPORTED_JSONATA_EXPRESSION` with the
+message `Reference to '$$' is not supported.`; so is `$states.errorOutput` outside the one place it
+resolves, a catcher's own `Output` or `Assign`.
+
+A definition is refused outright, with no state machine created, for a graph that never reaches a
+terminal state (`MISSING_END_STATE`), for a `StartAt`, `Next`, `Default` or `Catch[].Next` naming a
+state absent from its container or a state nothing transitions to (`MISSING_TRANSITION_TARGET`),
+and for a field the state type does not carry: `TimeoutSeconds` only on `Task`, and `Catch`/`Retry`
+only on `Task`, `Parallel` and `Map`.
 
 ## Mocked service integrations
 
