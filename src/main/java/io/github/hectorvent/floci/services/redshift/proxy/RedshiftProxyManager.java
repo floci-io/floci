@@ -25,6 +25,7 @@ public class RedshiftProxyManager {
     private final RdsSigV4Validator sigV4Validator;
     private final RdsProxyTlsCertificates tlsCertificates;
     private final ConcurrentHashMap<String, RedshiftAuthProxy> proxies = new ConcurrentHashMap<>();
+    private final java.util.Set<String> failedCleanups = ConcurrentHashMap.newKeySet();
 
     @Inject
     public RedshiftProxyManager(RdsSigV4Validator sigV4Validator, RdsProxyTlsCertificates tlsCertificates) {
@@ -47,7 +48,7 @@ public class RedshiftProxyManager {
         } catch (IOException | RuntimeException e) {
             RuntimeException failure = new RuntimeException(
                     "Failed to start Redshift proxy for cluster " + relayKey + " on port " + proxyPort, e);
-            cleanupFailedStart(proxy, failure);
+            cleanupFailedStart(relayKey, proxy, failure);
             throw failure;
         }
         RedshiftAuthProxy previous = proxies.put(relayKey, proxy);
@@ -58,7 +59,7 @@ public class RedshiftProxyManager {
                 proxies.put(relayKey, previous);
                 RuntimeException failure = new RuntimeException(
                         "Failed to replace Redshift proxy for cluster " + relayKey, e);
-                cleanupFailedStart(proxy, failure);
+                cleanupFailedStart(relayKey, proxy, failure);
                 throw failure;
             }
         }
@@ -73,12 +74,13 @@ public class RedshiftProxyManager {
     }
 
     public synchronized void stopProxy(String relayKey) {
+        if (failedCleanups.remove(relayKey)) {
+            throw new RuntimeException("Proxy listener cleanup previously failed for " + relayKey);
+        }
         RedshiftAuthProxy proxy = proxies.remove(relayKey);
         if (proxy != null) {
             proxy.stop();
             LOG.infov("Stopped Redshift proxy for cluster {0}", relayKey);
-        } else {
-            throw new RuntimeException("Proxy not found for cluster " + relayKey);
         }
     }
 
@@ -91,6 +93,7 @@ public class RedshiftProxyManager {
                 LOG.warnv(e, "Failed to stop Redshift proxy for cluster {0} during shutdown", relayKey);
             }
         });
+        failedCleanups.clear();
         LOG.info("Stopped all Redshift proxies");
     }
 
@@ -98,10 +101,11 @@ public class RedshiftProxyManager {
         stopAll();
     }
 
-    private void cleanupFailedStart(RedshiftAuthProxy proxy, RuntimeException failure) {
+    private void cleanupFailedStart(String relayKey, RedshiftAuthProxy proxy, RuntimeException failure) {
         try {
             proxy.stop();
         } catch (RuntimeException cleanupFailure) {
+            failedCleanups.add(relayKey);
             failure.addSuppressed(cleanupFailure);
         }
     }
