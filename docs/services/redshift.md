@@ -2,9 +2,9 @@
 
 **Protocol:** Query (XML) for the management API
 **Management Endpoint:** `POST http://localhost:4566/` with `Action=` param
-**Data Endpoint:** the `Endpoint` and `Port` returned by `DescribeClusters` (PostgreSQL wire protocol)
+**Data Endpoint:** Floci's auth proxy on the `Endpoint` and `Port` returned by `DescribeClusters` (PostgreSQL wire protocol)
 
-Floci emulates Amazon Redshift by managing a real [PostgreSQL](https://www.postgresql.org/) Docker container per cluster behind a Redshift-shaped control plane. Redshift speaks the PostgreSQL wire protocol, so the cluster endpoint returned by `DescribeClusters` works with any standard PostgreSQL driver (`psql`, JDBC, `psycopg`, …).
+Floci emulates Amazon Redshift by managing a real [PostgreSQL](https://www.postgresql.org/) Docker container per cluster behind a Redshift-shaped control plane. Each cluster sits behind a lightweight auth proxy on the Floci host, so the endpoint is reachable from outside Docker and the master password is validated at the proxy — a `ModifyCluster` password change takes effect for new connections immediately. Redshift speaks the PostgreSQL wire protocol, so the cluster endpoint returned by `DescribeClusters` works with any standard PostgreSQL driver (`psql`, JDBC, `psycopg`, …).
 
 > **Always read the host and port from `DescribeClusters`** rather than assuming a fixed port. PostgreSQL listens on `5432` *inside* the container; the port you connect to is dynamically assigned on the host and returned as `Clusters[0].Endpoint.Port`. Redshift's conventional port is `5439`, but the emulator does not bind it — use whatever `DescribeClusters` reports.
 
@@ -45,6 +45,9 @@ The container has **no persistent volume**: if the physical container survives a
 | `FLOCI_SERVICES_REDSHIFT_ENABLED` | `true` | Enable or disable Redshift |
 | `FLOCI_SERVICES_REDSHIFT_IMAGE_VERSION` | `postgres:15-alpine` | PostgreSQL Docker image backing each cluster |
 | `FLOCI_SERVICES_REDSHIFT_DEFAULT_PORT` | `5439` | Reported Redshift port hint (the real host port is dynamic and comes from `DescribeClusters`) |
+| `FLOCI_SERVICES_REDSHIFT_PROXY_BASE_PORT` | `7100` | Lowest host port the per-cluster auth proxies bind |
+| `FLOCI_SERVICES_REDSHIFT_PROXY_MAX_PORT` | `7199` | Highest host port the per-cluster auth proxies bind |
+| `FLOCI_SERVICES_REDSHIFT_ENDPOINT_HOST` | _(unset)_ | Hostname advertised in `DescribeClusters`; unset resolves from the Docker host |
 
 Redshift needs the Docker socket so it can launch PostgreSQL containers. Each cluster's container is published on a dynamically assigned host port, returned by `DescribeClusters`.
 
@@ -139,3 +142,5 @@ print(cluster["Cluster"]["Endpoint"])
 - Parameter groups apply no real engine settings; values are stored and echoed back only.
 - Subnet groups, VPC routing, and security groups are metadata only.
 - Resize, pause/resume, IAM authentication, snapshot schedules, and cross-region snapshot copy.
+- The auth proxy validates only the master user's password. Non-master users pass straight through to PostgreSQL, which remains the authority for their credentials.
+- IAM database authentication (`GetClusterCredentials`), and `sslmode=verify-full` against the self-signed proxy certificate.
