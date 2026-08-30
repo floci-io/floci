@@ -35,6 +35,8 @@ class RedshiftServiceTest {
     private AccountAwareStorageBackend<ClusterSubnetGroup> subnetGroupBackend;
     private RedshiftContainerManager cm;
     private io.github.hectorvent.floci.core.common.RegionResolver regionResolver;
+    private io.github.hectorvent.floci.services.redshift.proxy.RedshiftProxyManager proxyManager;
+    private io.github.hectorvent.floci.core.common.docker.DockerHostResolver dockerHostResolver;
     private RedshiftService service;
 
     @BeforeEach
@@ -47,11 +49,24 @@ class RedshiftServiceTest {
         parameterGroupBackend = mock(AccountAwareStorageBackend.class);
         subnetGroupBackend = mock(AccountAwareStorageBackend.class);
         cm = mock(RedshiftContainerManager.class);
-        
+        proxyManager = mock(io.github.hectorvent.floci.services.redshift.proxy.RedshiftProxyManager.class);
+        dockerHostResolver = mock(io.github.hectorvent.floci.core.common.docker.DockerHostResolver.class);
+        when(dockerHostResolver.resolve()).thenReturn("localhost");
+
         io.github.hectorvent.floci.config.EmulatorConfig config = mock(io.github.hectorvent.floci.config.EmulatorConfig.class);
         io.github.hectorvent.floci.config.EmulatorConfig.StorageConfig storageConfig = mock(io.github.hectorvent.floci.config.EmulatorConfig.StorageConfig.class);
         when(config.storage()).thenReturn(storageConfig);
         when(storageConfig.persistentPath()).thenReturn("target/test-data");
+
+        io.github.hectorvent.floci.config.EmulatorConfig.ServicesConfig servicesConfig =
+                mock(io.github.hectorvent.floci.config.EmulatorConfig.ServicesConfig.class);
+        io.github.hectorvent.floci.config.EmulatorConfig.RedshiftServiceConfig redshiftConfig =
+                mock(io.github.hectorvent.floci.config.EmulatorConfig.RedshiftServiceConfig.class);
+        when(config.services()).thenReturn(servicesConfig);
+        when(servicesConfig.redshift()).thenReturn(redshiftConfig);
+        when(redshiftConfig.proxyBasePort()).thenReturn(7100);
+        when(redshiftConfig.proxyMaxPort()).thenReturn(7199);
+        when(redshiftConfig.endpointHost()).thenReturn(java.util.Optional.empty());
 
         when(sf.<Cluster>create(eq("redshift"), eq("redshift-clusters.json"), any())).thenReturn(clusterBackend);
         when(sf.<Snapshot>create(eq("redshift"), eq("redshift-snapshots.json"), any())).thenReturn(snapshotBackend);
@@ -61,7 +76,7 @@ class RedshiftServiceTest {
 
         regionResolver = new io.github.hectorvent.floci.core.common.RegionResolver("us-east-1", "111111111111");
 
-        service = new RedshiftService(sf, cm, config, regionResolver);
+        service = new RedshiftService(sf, cm, config, regionResolver, proxyManager, dockerHostResolver);
     }
 
     /** Absolute dump path as {@code createSnapshot} now stores it: under {@code <persistentPath>/redshift-dumps/<accountId>}. */
@@ -161,6 +176,29 @@ class RedshiftServiceTest {
 
         assertEquals("my-subnet-group", cluster.getClusterSubnetGroupName());
         assertEquals(List.of("sg-1", "sg-2"), cluster.getVpcSecurityGroupIds());
+    }
+
+    @Test
+    void createClusterStartsAProxyAndAdvertisesTheProxyEndpoint() {
+        when(clusterBackend.get("c1")).thenReturn(Optional.empty());
+        when(clusterBackend.accountId()).thenReturn("111111111111");
+        RedshiftContainerHandle handle = mock(RedshiftContainerHandle.class);
+        when(handle.getHost()).thenReturn("172.17.0.9");
+        when(handle.getPort()).thenReturn(32800);
+        when(cm.start(eq("111111111111"), eq("c1"), eq("admin"), eq("Secret123"))).thenReturn(handle);
+
+        Cluster cluster = service.createCluster("c1", "dc2.large", "admin", "Secret123");
+
+        // Endpoint is the proxy, not the container.
+        assertEquals("localhost", cluster.getEndpoint().getAddress());
+        assertTrue(cluster.getEndpoint().getPort() >= 7100 && cluster.getEndpoint().getPort() <= 7199);
+        assertEquals("172.17.0.9", cluster.getContainerHost());
+        assertEquals(32800, cluster.getContainerPort());
+        assertEquals(cluster.getEndpoint().getPort(), cluster.getProxyPort());
+
+        verify(proxyManager).startProxy(eq("111111111111:c1"), eq(cluster.getProxyPort()),
+                eq("172.17.0.9"), eq(32800), eq("localhost"),
+                eq("admin"), eq("Secret123"), eq("dev"), any());
     }
 
     @Test
