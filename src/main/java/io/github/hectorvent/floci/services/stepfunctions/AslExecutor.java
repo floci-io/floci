@@ -1928,25 +1928,12 @@ public class AslExecutor {
                             branchContext, branchVariables))));
         }
 
-        int timeoutSeconds = stateDef.path("TimeoutSeconds").asInt(0);
-        long deadlineNanos = timeoutSeconds > 0
-                ? System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds)
-                : Long.MAX_VALUE;
-
+        // TimeoutSeconds is not a valid field on Parallel — the validator refuses it at
+        // CreateStateMachine, so no definition that reaches execution can carry one.
         ArrayNode results = objectMapper.createArrayNode();
         try {
             for (Future<JsonNode> future : futures) {
-                long remainingNanos = deadlineNanos - System.nanoTime();
-                if (remainingNanos <= 0) {
-                    throw new FailStateException("States.Timeout",
-                            "Parallel state timed out after " + timeoutSeconds + " seconds");
-                }
-                try {
-                    results.add(future.get(remainingNanos, TimeUnit.NANOSECONDS));
-                } catch (java.util.concurrent.TimeoutException e) {
-                    throw new FailStateException("States.Timeout",
-                            "Parallel state timed out after " + timeoutSeconds + " seconds");
-                }
+                results.add(future.get());
             }
         } catch (InterruptedException e) {
             futures.forEach(future -> future.cancel(true));
