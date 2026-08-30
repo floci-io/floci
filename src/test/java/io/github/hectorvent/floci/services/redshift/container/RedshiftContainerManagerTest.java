@@ -65,6 +65,28 @@ class RedshiftContainerManagerTest {
         when(config.services().redshift().imageVersion()).thenReturn("postgres:16-alpine");
         when(config.services().redshift().dockerNetwork()).thenReturn(Optional.empty());
 
+        // Default mock for execCreateCmd/execStartCmd/inspectExecCmd to make waitForReady succeed instantly
+        ExecCreateCmd defaultCreateCmd = mock(ExecCreateCmd.class, org.mockito.Mockito.RETURNS_SELF);
+        ExecCreateCmdResponse defaultCreateResponse = mock(ExecCreateCmdResponse.class);
+        when(defaultCreateResponse.getId()).thenReturn("exec-default");
+        when(defaultCreateCmd.exec()).thenReturn(defaultCreateResponse);
+        when(dockerClient.execCreateCmd(anyString())).thenReturn(defaultCreateCmd);
+
+        ExecStartCmd defaultStartCmd = mock(ExecStartCmd.class);
+        when(defaultStartCmd.exec(any())).thenAnswer(invocation -> {
+            @SuppressWarnings("unchecked")
+            ResultCallback.Adapter<Frame> adapter = invocation.getArgument(0);
+            adapter.onComplete();
+            return adapter;
+        });
+        when(dockerClient.execStartCmd(anyString())).thenReturn(defaultStartCmd);
+
+        InspectExecCmd defaultInspectCmd = mock(InspectExecCmd.class);
+        InspectExecResponse defaultInspectResponse = mock(InspectExecResponse.class);
+        when(defaultInspectResponse.getExitCodeLong()).thenReturn(0L);
+        when(defaultInspectCmd.exec()).thenReturn(defaultInspectResponse);
+        when(dockerClient.inspectExecCmd(anyString())).thenReturn(defaultInspectCmd);
+
         manager = new RedshiftContainerManager(
                 containerBuilder,
                 lifecycleManager,
@@ -258,7 +280,7 @@ class RedshiftContainerManagerTest {
         try {
             manager.restoreSnapshot(ACCOUNT_ID, "test-cluster", "admin", "dev",tempFile);
             verify(dockerClient).copyArchiveToContainerCmd("cont-123");
-            verify(dockerClient).execCreateCmd("cont-123");
+            verify(dockerClient, org.mockito.Mockito.times(2)).execCreateCmd("cont-123");
         } finally {
             java.nio.file.Files.deleteIfExists(tempFile);
         }
@@ -363,7 +385,7 @@ class RedshiftContainerManagerTest {
 
         manager.alterUserPassword(ACCOUNT_ID, "test-cluster", "admin", "NewSecret1");
 
-        verify(dockerClient).execCreateCmd("cont-123");
+        verify(dockerClient, org.mockito.Mockito.times(2)).execCreateCmd("cont-123");
     }
 
     @Test
