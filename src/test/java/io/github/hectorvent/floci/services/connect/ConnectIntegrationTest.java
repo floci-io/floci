@@ -162,6 +162,34 @@ class ConnectIntegrationTest {
     }
 
     @Test
+    @Order(7)
+    void attributeValueIsValidatedAndCanonicalized() {
+        given()
+            .contentType("application/json")
+            .body("{\"Value\": \"yes\"}")
+        .when()
+            .post("/instance/" + instanceId + "/attribute/AUTO_RESOLVE_BEST_VOICES")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameterException"));
+
+        given()
+            .contentType("application/json")
+            .body("{\"Value\": \"TRUE\"}")
+        .when()
+            .post("/instance/" + instanceId + "/attribute/AUTO_RESOLVE_BEST_VOICES")
+        .then()
+            .statusCode(200);
+
+        given()
+        .when()
+            .get("/instance/" + instanceId + "/attribute/AUTO_RESOLVE_BEST_VOICES")
+        .then()
+            .statusCode(200)
+            .body("Attribute.Value", equalTo("true"));
+    }
+
+    @Test
     @Order(8)
     void listInstanceAttributes() {
         given()

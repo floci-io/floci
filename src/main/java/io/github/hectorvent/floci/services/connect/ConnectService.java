@@ -185,12 +185,19 @@ public class ConnectService implements TagHandler {
         if (value == null || value.isBlank()) {
             throw new AwsException("InvalidRequestException", "Value is required", 400);
         }
+        // Instance attributes are boolean-valued; storing the canonical form keeps the
+        // attributes map and the inbound/outbound flags from diverging on read.
+        if (!"true".equalsIgnoreCase(value) && !"false".equalsIgnoreCase(value)) {
+            throw new AwsException("InvalidParameterException",
+                    "Value must be 'true' or 'false' for attribute " + attributeType, 400);
+        }
+        String canonical = value.toLowerCase(java.util.Locale.ROOT);
         ConnectInstance instance = describeInstance(instanceId, region);
-        instance.getAttributes().put(attributeType, value);
+        instance.getAttributes().put(attributeType, canonical);
         if ("INBOUND_CALLS".equals(attributeType)) {
-            instance.setInboundCallsEnabled(Boolean.parseBoolean(value));
+            instance.setInboundCallsEnabled(Boolean.parseBoolean(canonical));
         } else if ("OUTBOUND_CALLS".equals(attributeType)) {
-            instance.setOutboundCallsEnabled(Boolean.parseBoolean(value));
+            instance.setOutboundCallsEnabled(Boolean.parseBoolean(canonical));
         }
         instances.put(key(region, instance.getId()), instance);
         return instance;
