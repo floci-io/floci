@@ -158,7 +158,7 @@ top of the JSONata language, alongside every function JSONata itself provides.
 
 | Function | Returns |
 | --- | --- |
-| `$parse(jsonString)` | the deserialized value; the replacement for `$eval`, which AWS disables |
+| `$parse(jsonString)` | the deserialized value; the replacement for `$eval`, which AWS disables and so does Floci, answering `T1006` to a call |
 | `$partition(array, chunkSize)` | `array` split into chunks of `chunkSize`, the last one holding the remainder |
 | `$range(start, end, step)` | the values from `start` to `end`, inclusive when `step` lands on `end` |
 | `$hash(str, algorithm)` | the hex digest of `str`; `algorithm` is `MD5`, `SHA-1`, `SHA-256`, `SHA-384` or `SHA-512`, case-sensitive |
@@ -179,16 +179,41 @@ JSONata's own `$string` follows AWS's number notation: a whole number is written
 `1e21` and in exponent notation from there, on both signs, so `$string(1e20)` is
 `100000000000000000000` and `$string(1e21)` is `1e+21`.
 
-Evaluation is bounded, as it is on AWS: one expression may run for five seconds and nest 500
-levels deep, and past either the state fails with `States.QueryEvaluationError`. Both bounds sit
-well above what AWS itself accepts, so an expression that evaluates there evaluates here. AWS
-refuses a non-tail-recursive function past a nesting depth near 100, and the largest sequence it
-accepts evaluates here in about a tenth of a second.
+JSONata's own `$formatNumber` checks its picture string against the fourteen rules of XPath F&O
+4.7.3, as AWS does, so `$formatNumber(1, "x")` fails with `D3086` rather than answering `x1`: a
+picture with no digit in it describes no number.
 
-One deviation. AWS also bounds the *memory* an expression may use, refusing
-`[1..900000] ~> $count()` with `Expression evaluation memory limit exceeded` while accepting the
-same expression at 800,000 elements. Floci bounds time and depth but not memory, and its ranges
-are lazy, so that expression answers immediately at any size.
+Evaluation is bounded on three axes, as it is on AWS, and past any of them the state fails with
+`States.QueryEvaluationError`.
+
+- **Depth**: one expression may nest 100 levels, which is AWS's own ceiling: AWS accepts `1+1+…+1`
+  at 100 terms, 99 parentheses, 99 brackets, 99 `~>` stages, and a non-tail-recursive `$f(31)`,
+  which nests `3n+5`, and refuses one level more of each. The refusal names the depth reached, as
+  in `Stack overflow error: … Depth=101 max=100`.
+- **Memory**: one value an expression builds may hold 6,990,256 bytes, counting a number as eight
+  bytes and a character as one. That is AWS's own bound: AWS accepts `[1..873782]` and refuses one
+  element more, and it accepts a string doubled 22 times, 2^22 characters, refusing the 23rd. The
+  refusal is AWS's own
+  `Expression evaluation memory limit exceeded`, which is what `[1..900000] ~> $count()` and
+  `$sum([1..900000])` now answer.
+- **Time**: five seconds, which is the library's own default and roughly fifty times the slowest
+  evaluation of a payload AWS itself accepts. A recursive expression with no base case is a tail
+  call, so it loops rather than nesting and only the clock ends it.
+
+JSON has no literal for a non-finite number, so AWS writes each one as the string JavaScript names
+it by, wherever it lands: `1/0` is `"Infinity"`, `1e308 * 10` is `"Infinity"`, `0/0` is `"NaN"` and
+`$parseInteger("abc", "0")` is `"NaN"`, and nested, `[1/0]` is `["Infinity"]` and `{"k": 1/0}` is
+`{"k": "Infinity"}`.
+
+One deviation, on the arithmetic half of that. A non-finite number a **function** answers is a value
+like any other here, so `$parseInteger("abc", "0")` is `"NaN"` on its own, inside an array and
+inside an object, as on AWS. One the **arithmetic** produces is not: the JSONata library refuses to
+carry it and raises instead, so Floci sees the value only in that refusal, after it has unwound
+whatever was being built around it. `1/0`, `-1/0` and `1e308 * 10` are answered because the
+expression's own result is what was refused; `[1/0]`, `{"k": 1/0}` and `$string(1/0)` fail the state
+with `States.QueryEvaluationError` where AWS answers a string, and `0/0` fails the field that holds
+it, because NaN is dropped as not-a-number without even a refusal to read it from. A state that
+fails is one a `Catch` fires on, which is the half of the divergence worth keeping.
 
 ## Nested workflows
 
