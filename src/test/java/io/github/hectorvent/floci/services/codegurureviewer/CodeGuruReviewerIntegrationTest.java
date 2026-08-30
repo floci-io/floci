@@ -259,6 +259,13 @@ class CodeGuruReviewerIntegrationTest {
         .then()
             .statusCode(400)
             .body("__type", equalTo("ValidationException"));
+
+        given()
+        .when()
+            .get("/associations?MaxResults=abc")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
     }
 
     @Test

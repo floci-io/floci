@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.JsonErrorResponseUtils;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -95,12 +96,12 @@ public class CodeGuruReviewerController {
                                                @QueryParam("State") List<String> states,
                                                @QueryParam("Name") List<String> names,
                                                @QueryParam("Owner") List<String> owners,
-                                               @QueryParam("MaxResults") Integer maxResults,
+                                               @QueryParam("MaxResults") String maxResults,
                                                @QueryParam("NextToken") String nextToken,
                                                @Context HttpHeaders headers) {
         String region = regionResolver.resolveRegion(headers);
         PaginatedResult<RepositoryAssociation> page = codeGuruReviewerService.listRepositoryAssociations(
-                providerTypes, states, names, owners, maxResults, nextToken, region);
+                providerTypes, states, names, owners, parseMaxResults(maxResults), nextToken, region);
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode summaries = response.putArray("RepositoryAssociationSummaries");
         for (RepositoryAssociation association : page.items()) {
@@ -167,6 +168,21 @@ public class CodeGuruReviewerController {
 
     private long epochSeconds(Instant instant) {
         return instant != null ? instant.getEpochSecond() : 0L;
+    }
+
+    // Bound as String so a malformed value reaches this method: a JAX-RS Integer binding
+    // fails during parameter conversion and surfaces as 404, where AWS models 400.
+    private Integer parseMaxResults(String maxResults) {
+        if (maxResults == null || maxResults.isBlank()) {
+            return null;
+        }
+        try {
+            return Integer.valueOf(maxResults);
+        } catch (NumberFormatException e) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value '" + maxResults
+                            + "' at 'maxResults' failed to satisfy constraint: Member must be an integer.", 400);
+        }
     }
 
     private JsonNode readTree(String body) {
