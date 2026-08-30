@@ -52,6 +52,33 @@
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_SERVICES_REKOGNITION_ENABLED` | `true` | Enable or disable the service |
+| `AI_MOCK_CONFIG` | unset | Path to a shared mock-response config file — see "Mock Responses" below |
+
+## Mock Responses
+
+The default stub responses above are the same for every call. To exercise application
+logic that branches on detection results, point `AI_MOCK_CONFIG` at a JSON file shared
+across Rekognition, Textract, and Comprehend:
+
+```json
+{
+  "rekognition": {
+    "my-bucket/cat.jpg": {
+      "DetectLabels": {
+        "Labels": [{ "Name": "Cat", "Confidence": 97.2 }, { "Name": "Animal", "Confidence": 98.1 }],
+        "LabelModelVersion": "1.0"
+      }
+    }
+  }
+}
+```
+
+The lookup key is **`"<Bucket>/<Name>"`** from `Image.S3Object` (or `SourceImage.S3Object`
+for `CompareFaces` — `TargetImage` has no independent key in this scheme). A `Bytes`-backed
+image has no such key, so mocking only applies to S3Object-based calls. The file is re-read
+when its modification time changes, so it can be edited without restarting the emulator. A
+missing file, an unset `AI_MOCK_CONFIG`, or no matching entry all fall back to the default
+stub.
 
 ## Examples
 

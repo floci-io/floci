@@ -38,6 +38,21 @@ class RekognitionIntegrationTest {
             .body("LabelModelVersion", equalTo("1.0"));
     }
     @Test
+    void detectLabels_matchingMockConfig_returnsConfiguredResponse() {
+        // src/test/resources/fixtures/ai-mock-config.json maps mock-bucket/cat.jpg.
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "RekognitionService.DetectLabels")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"Image\":{\"S3Object\":{\"Bucket\":\"mock-bucket\",\"Name\":\"cat.jpg\"}}}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Labels", hasSize(2))
+            .body("Labels.Name", hasItems("Cat", "Animal"));
+    }
+    @Test
     void detectLabels_missingImage_returns400() {
         given()
             .contentType(CONTENT_TYPE)

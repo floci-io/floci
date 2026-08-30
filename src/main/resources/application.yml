@@ -83,6 +83,8 @@ floci:
                    # Needed for multi-container Docker setups. Example: FLOCI_HOSTNAME=floci
   default-region: us-east-1
   default-account-id: "000000000000"
+  # Shared mock-response config for Textract/Comprehend/Rekognition. See AiMockConfigLoader.
+  ai-mock-config-file: ${AI_MOCK_CONFIG:}
   storage:
     # Supported modes: memory, persistent, hybrid, wal
     mode: memory

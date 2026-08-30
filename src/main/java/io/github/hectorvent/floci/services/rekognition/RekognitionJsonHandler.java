@@ -32,27 +32,15 @@ public class RekognitionJsonHandler {
     public Response handle(String action, JsonNode request, String region) {
         LOG.debugv("Rekognition action: {0}", action);
         return switch (action) {
-            case "DetectLabels" -> {
-                requireImage(request, "Image");
-                yield rekognitionService.detectLabels();
-            }
-            case "DetectFaces" -> {
-                requireImage(request, "Image");
-                yield rekognitionService.detectFaces();
-            }
-            case "DetectText" -> {
-                requireImage(request, "Image");
-                yield rekognitionService.detectText();
-            }
+            case "DetectLabels" -> rekognitionService.detectLabels(requireImage(request, "Image"));
+            case "DetectFaces" -> rekognitionService.detectFaces(requireImage(request, "Image"));
+            case "DetectText" -> rekognitionService.detectText(requireImage(request, "Image"));
             case "CompareFaces" -> {
-                requireImage(request, "SourceImage");
+                String sourceKey = requireImage(request, "SourceImage");
                 requireImage(request, "TargetImage");
-                yield rekognitionService.compareFaces();
+                yield rekognitionService.compareFaces(sourceKey);
             }
-            case "DetectModerationLabels" -> {
-                requireImage(request, "Image");
-                yield rekognitionService.detectModerationLabels();
-            }
+            case "DetectModerationLabels" -> rekognitionService.detectModerationLabels(requireImage(request, "Image"));
             default -> Response.status(400)
                     .entity(new AwsErrorResponse("UnknownOperationException",
                             "Unknown operation: RekognitionService." + action))
@@ -62,9 +50,12 @@ public class RekognitionJsonHandler {
     /**
      * The Image shape (real content ignored — the response is a fixed stub) is still
      * required and must carry Bytes or S3Object, matching AWS's own required-member
-     * and one-of-Bytes-or-S3Object modeling for Image/SourceImage/TargetImage.
+     * and one-of-Bytes-or-S3Object modeling for Image/SourceImage/TargetImage. Returns
+     * an optional "Bucket/Name" mock-response lookup key when S3Object is present (null
+     * for a Bytes-backed image, which has no such key — mock lookup then simply doesn't
+     * apply, same as always).
      */
-    private void requireImage(JsonNode request, String field) {
+    private String requireImage(JsonNode request, String field) {
         JsonNode image = request == null ? null : request.get(field);
         if (image == null || image.isNull()) {
             throw new AwsException("InvalidParameterException", field + " is a required field.", 400);
@@ -79,6 +70,18 @@ public class RekognitionJsonHandler {
             throw new AwsException("InvalidParameterException",
                     field + " must specify Bytes or S3Object.", 400);
         }
+        return extractS3Key(image.get("S3Object"));
+    }
+    private String extractS3Key(JsonNode s3Object) {
+        if (s3Object == null || !s3Object.isObject()) {
+            return null;
+        }
+        JsonNode bucket = s3Object.get("Bucket");
+        JsonNode name = s3Object.get("Name");
+        if (bucket == null || !bucket.isTextual() || name == null || !name.isTextual()) {
+            return null;
+        }
+        return bucket.asText() + "/" + name.asText();
     }
     /**
      * Bytes (a blob shape, base64-encoded string on the wire) and S3Object (a structure)

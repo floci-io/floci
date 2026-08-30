@@ -19,6 +19,7 @@ floci:
   base-url: "http://localhost:4566"
   default-region: us-east-1
   default-account-id: "000000000000"
+  ai-mock-config-file: ${AI_MOCK_CONFIG:src/test/resources/fixtures/ai-mock-config.json}
   storage:
     mode: memory
     persistent-path: ./target/test-data
