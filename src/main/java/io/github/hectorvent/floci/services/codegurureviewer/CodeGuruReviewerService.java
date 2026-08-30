@@ -4,6 +4,8 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.TagHandler;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
@@ -144,11 +146,11 @@ public class CodeGuruReviewerService implements TagHandler {
         return association;
     }
 
-    public List<RepositoryAssociation> listRepositoryAssociations(List<String> providerTypes, List<String> states,
-                                                                  List<String> names, List<String> owners,
-                                                                  String region) {
+    public PaginatedResult<RepositoryAssociation> listRepositoryAssociations(
+            List<String> providerTypes, List<String> states, List<String> names, List<String> owners,
+            Integer maxResults, String nextToken, String region) {
         String regionPrefix = region + "::";
-        return associations.scan(key -> key.startsWith(regionPrefix)).stream()
+        List<RepositoryAssociation> matching = associations.scan(key -> key.startsWith(regionPrefix)).stream()
                 .filter(association -> matches(providerTypes, association.getProviderType()))
                 .filter(association -> matches(states, association.getState()))
                 .filter(association -> matches(names, association.getName()))
@@ -156,6 +158,8 @@ public class CodeGuruReviewerService implements TagHandler {
                 .sorted(Comparator.comparing(RepositoryAssociation::getName)
                         .thenComparing(RepositoryAssociation::getAssociationId))
                 .toList();
+        return Pagination.paginate(matching, RepositoryAssociation::getAssociationId,
+                maxResults, nextToken, 100, "ValidationException");
     }
 
     // ──────────────────────────── Tags ────────────────────────────

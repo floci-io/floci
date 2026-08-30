@@ -1,10 +1,13 @@
 package io.github.hectorvent.floci.services.codegurureviewer.model;
 
+import io.quarkus.runtime.annotations.RegisterForReflection;
+
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
 /** An association between CodeGuru Reviewer and a source repository. */
+@RegisterForReflection
 public class RepositoryAssociation {
 
     private String associationId;

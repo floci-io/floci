@@ -8,17 +8,22 @@ Floci implements the CodeGuru Reviewer repository-association lifecycle for loca
 CLI, and Terraform workflows. Associations are isolated by region and use the configured
 Floci storage mode.
 
-## Supported Operations
+## Supported Actions
 
-| Operation | Method and path | Description |
-|---|---|---|
-| `AssociateRepository` | `POST /associations` | Associate a CodeCommit, Bitbucket, GitHub Enterprise Server, or S3 repository |
-| `DescribeRepositoryAssociation` | `GET /associations/{associationArn}` | Return the association, its state, and its tags |
-| `DisassociateRepository` | `DELETE /associations/{associationArn}` | Remove the association |
-| `ListRepositoryAssociations` | `GET /associations` | List association summaries, filtered by `ProviderType`, `State`, `Name`, `Owner` |
-| `TagResource` | `POST /tags/{resourceArn}` | Add tags to an association |
-| `UntagResource` | `DELETE /tags/{resourceArn}` | Remove tags from an association |
-| `ListTagsForResource` | `GET /tags/{resourceArn}` | List association tags |
+<!-- floci:actions:start -->
+| Action | Description |
+| --- | --- |
+| `AssociateRepository` | Associates a CodeCommit, Bitbucket, GitHub Enterprise Server, or S3 repository (`POST /associations`) |
+| `DescribeRepositoryAssociation` | Returns the association, its state, and its tags (`GET /associations/{associationArn}`) |
+| `DisassociateRepository` | Removes the association (`DELETE /associations/{associationArn}`) |
+| `ListRepositoryAssociations` | Lists association summaries with filters and pagination (`GET /associations`) |
+| `ListTagsForResource` | Lists association tags (`GET /tags/{resourceArn}`) |
+| `TagResource` | Adds tags to an association (`POST /tags/{resourceArn}`) |
+| `UntagResource` | Removes tag keys from an association (`DELETE /tags/{resourceArn}`) |
+<!-- floci:actions:end -->
+
+`ListRepositoryAssociations` accepts the documented filters (`ProviderType`,
+`State`, `Name`, `Owner`) plus `MaxResults` and `NextToken` pagination.
 
 An association reaches the terminal `Associated` state as soon as `AssociateRepository`
 returns, so a provider waiter polling `DescribeRepositoryAssociation` completes on its

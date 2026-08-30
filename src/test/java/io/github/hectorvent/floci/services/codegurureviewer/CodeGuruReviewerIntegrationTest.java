@@ -12,6 +12,7 @@ import static org.hamcrest.Matchers.emptyIterable;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.matchesPattern;
+import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
 
 @QuarkusTest
@@ -224,6 +225,44 @@ class CodeGuruReviewerIntegrationTest {
 
     @Test
     @Order(11)
+    void listRepositoryAssociationsPaginates() {
+        String firstPageArn =
+        given()
+        .when()
+            .get("/associations?MaxResults=1")
+        .then()
+            .statusCode(200)
+            .body("RepositoryAssociationSummaries.size()", equalTo(1))
+            .body("NextToken", notNullValue())
+        .extract()
+            .path("RepositoryAssociationSummaries[0].AssociationArn");
+
+        String nextToken =
+        given()
+        .when()
+            .get("/associations?MaxResults=1")
+        .then()
+        .extract()
+            .path("NextToken");
+
+        given()
+        .when()
+            .get("/associations?MaxResults=1&NextToken=" + nextToken)
+        .then()
+            .statusCode(200)
+            .body("RepositoryAssociationSummaries.size()", equalTo(1))
+            .body("RepositoryAssociationSummaries[0].AssociationArn", not(equalTo(firstPageArn)));
+
+        given()
+        .when()
+            .get("/associations?MaxResults=0")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
+    }
+
+    @Test
+    @Order(12)
     void tagRoundTripOverTheSharedTagsPath() {
         given()
         .when()
@@ -271,7 +310,7 @@ class CodeGuruReviewerIntegrationTest {
     }
 
     @Test
-    @Order(12)
+    @Order(13)
     void tagsForUnknownAssociationReturnResourceNotFound() {
         given()
         .when()
@@ -283,7 +322,7 @@ class CodeGuruReviewerIntegrationTest {
     }
 
     @Test
-    @Order(13)
+    @Order(14)
     void disassociateRepository() {
         given()
         .when()
@@ -309,7 +348,7 @@ class CodeGuruReviewerIntegrationTest {
     }
 
     @Test
-    @Order(14)
+    @Order(15)
     void describeRejectsAnArnFromAnotherService() {
         given()
         .when()

@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.JsonErrorResponseUtils;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.codegurureviewer.model.RepositoryAssociation;
 import jakarta.inject.Inject;
@@ -82,18 +83,27 @@ public class CodeGuruReviewerController {
                 codeGuruReviewerService.disassociateRepository(associationArn, region))).build();
     }
 
+    /**
+     * The filter query keys are singular ({@code ProviderType=...&State=...}) because that is
+     * the wire mapping the API reference documents for the plural request fields
+     * ({@code ProviderTypes}, {@code States}, ...): the SDK serializes each list member as a
+     * repeated singular query parameter.
+     */
     @GET
     @Path("/associations")
     public Response listRepositoryAssociations(@QueryParam("ProviderType") List<String> providerTypes,
                                                @QueryParam("State") List<String> states,
                                                @QueryParam("Name") List<String> names,
                                                @QueryParam("Owner") List<String> owners,
+                                               @QueryParam("MaxResults") Integer maxResults,
+                                               @QueryParam("NextToken") String nextToken,
                                                @Context HttpHeaders headers) {
         String region = regionResolver.resolveRegion(headers);
+        PaginatedResult<RepositoryAssociation> page = codeGuruReviewerService.listRepositoryAssociations(
+                providerTypes, states, names, owners, maxResults, nextToken, region);
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode summaries = response.putArray("RepositoryAssociationSummaries");
-        for (RepositoryAssociation association :
-                codeGuruReviewerService.listRepositoryAssociations(providerTypes, states, names, owners, region)) {
+        for (RepositoryAssociation association : page.items()) {
             ObjectNode summary = summaries.addObject();
             summary.put("AssociationArn", association.getAssociationArn());
             if (association.getConnectionArn() != null) {
@@ -105,6 +115,9 @@ public class CodeGuruReviewerController {
             summary.put("Owner", association.getOwner());
             summary.put("ProviderType", association.getProviderType());
             summary.put("State", association.getState());
+        }
+        if (page.nextToken() != null) {
+            response.put("NextToken", page.nextToken());
         }
         return Response.ok(response).build();
     }
