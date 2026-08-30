@@ -152,10 +152,12 @@ public class RedshiftService {
             cluster.setEndpoint(endpoint);
             cluster.setClusterStatus("available");
         } catch (AwsException e) {
+            proxyManager.stopProxy(relayKey(clusters.accountId(), identifier));
             try { containerManager.stop(clusters.accountId(), identifier); } catch (Exception ignored) {}
             releaseProxyPort(proxyPort);
             throw e;
         } catch (Exception e) {
+            proxyManager.stopProxy(relayKey(clusters.accountId(), identifier));
             try { containerManager.stop(clusters.accountId(), identifier); } catch (Exception ignored) {}
             releaseProxyPort(proxyPort);
             throw new AwsException("InternalFailure", "Failed to start container: " + e.getMessage(), 500);
@@ -486,10 +488,12 @@ public class RedshiftService {
 
             cluster.setClusterStatus("available");
         } catch (AwsException e) {
+            proxyManager.stopProxy(relayKey(clusters.accountId(), clusterIdentifier));
             try { containerManager.stop(clusters.accountId(), clusterIdentifier); } catch (Exception ignored) {}
             releaseProxyPort(proxyPort);
             throw e;
         } catch (Exception e) {
+            proxyManager.stopProxy(relayKey(clusters.accountId(), clusterIdentifier));
             try { containerManager.stop(clusters.accountId(), clusterIdentifier); } catch (Exception ignored) {}
             releaseProxyPort(proxyPort);
             throw new AwsException("InternalFailure", "Failed to restore cluster from snapshot: " + e.getMessage(), 500);
