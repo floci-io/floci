@@ -71,7 +71,7 @@ class RedshiftContainerManagerTest {
         when(config.services().redshift().dockerNetwork()).thenReturn(Optional.empty());
 
         // Default mock for execCreateCmd/execStartCmd/inspectExecCmd to make waitForReady succeed instantly
-        ExecCreateCmd defaultCreateCmd = mock(ExecCreateCmd.class, RETURNS_SELF);
+        ExecCreateCmd defaultCreateCmd = mock(ExecCreateCmd.class, org.mockito.Mockito.RETURNS_SELF);
         ExecCreateCmdResponse defaultCreateResponse = mock(ExecCreateCmdResponse.class);
         when(defaultCreateResponse.getId()).thenReturn("exec-default");
         when(defaultCreateCmd.exec()).thenReturn(defaultCreateResponse);
@@ -137,7 +137,7 @@ class RedshiftContainerManagerTest {
 
     @Test
     void testTakeSnapshotSuccess() throws Exception {
-        ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, org.mockito.Mockito.RETURNS_SELF);
         when(containerBuilder.newContainer(anyString())).thenReturn(specBuilder);
         ContainerInfo info = new ContainerInfo("cont-123", Map.of(5432, new EndpointInfo("localhost", 5432)));
         when(lifecycleManager.createAndStart(any())).thenReturn(info);
@@ -148,7 +148,7 @@ class RedshiftContainerManagerTest {
         assertTrue(manager.getContainer(ACCOUNT_ID, "test-cluster").isPresent());
 
         // Mock docker exec for pg_dump
-        ExecCreateCmd createCmd = mock(ExecCreateCmd.class, RETURNS_SELF);
+        ExecCreateCmd createCmd = mock(ExecCreateCmd.class, org.mockito.Mockito.RETURNS_SELF);
         ExecCreateCmdResponse createResponse = mock(ExecCreateCmdResponse.class);
         when(createResponse.getId()).thenReturn("exec-1");
         when(createCmd.exec()).thenReturn(createResponse);
@@ -170,7 +170,7 @@ class RedshiftContainerManagerTest {
         when(dockerClient.inspectExecCmd("exec-1")).thenReturn(inspectCmd);
 
         // mock copyArchiveFromContainerCmd
-        CopyArchiveFromContainerCmd copyCmd = mock(CopyArchiveFromContainerCmd.class, RETURNS_SELF);
+        CopyArchiveFromContainerCmd copyCmd = mock(CopyArchiveFromContainerCmd.class, org.mockito.Mockito.RETURNS_SELF);
         byte[] tarBytes = "-- PostgreSQL dump\nCREATE TABLE foo (id int);\n".getBytes(StandardCharsets.UTF_8);
         ByteArrayOutputStream bos = new ByteArrayOutputStream();
         try (org.apache.commons.compress.archivers.tar.TarArchiveOutputStream tar = new org.apache.commons.compress.archivers.tar.TarArchiveOutputStream(bos)) {
@@ -196,14 +196,14 @@ class RedshiftContainerManagerTest {
 
     @Test
     void testTakeSnapshotFailureExitCode() throws Exception {
-        ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, org.mockito.Mockito.RETURNS_SELF);
         when(containerBuilder.newContainer(anyString())).thenReturn(specBuilder);
         ContainerInfo info = new ContainerInfo("cont-123", Map.of(5432, new EndpointInfo("localhost", 5432)));
         when(lifecycleManager.createAndStart(any())).thenReturn(info);
 
         manager.start(ACCOUNT_ID, "test-cluster", "admin", "pass");
 
-        ExecCreateCmd createCmd = mock(ExecCreateCmd.class, RETURNS_SELF);
+        ExecCreateCmd createCmd = mock(ExecCreateCmd.class, org.mockito.Mockito.RETURNS_SELF);
         ExecCreateCmdResponse createResponse = mock(ExecCreateCmdResponse.class);
         when(createResponse.getId()).thenReturn("exec-fail");
         when(createCmd.exec()).thenReturn(createResponse);
@@ -234,7 +234,7 @@ class RedshiftContainerManagerTest {
 
     @Test
     void testRestoreSnapshotEmptyDump() {
-        ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, org.mockito.Mockito.RETURNS_SELF);
         when(containerBuilder.newContainer(anyString())).thenReturn(specBuilder);
         ContainerInfo info = new ContainerInfo("cont-123", Map.of(5432, new EndpointInfo("localhost", 5432)));
         when(lifecycleManager.createAndStart(any())).thenReturn(info);
@@ -248,7 +248,7 @@ class RedshiftContainerManagerTest {
 
     @Test
     void testRestoreSnapshotSuccess() throws Exception {
-        ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, org.mockito.Mockito.RETURNS_SELF);
         when(containerBuilder.newContainer(anyString())).thenReturn(specBuilder);
         ContainerInfo info = new ContainerInfo("cont-123", Map.of(5432, new EndpointInfo("localhost", 5432)));
         when(lifecycleManager.createAndStart(any())).thenReturn(info);
@@ -256,11 +256,11 @@ class RedshiftContainerManagerTest {
         manager.start(ACCOUNT_ID, "test-cluster", "admin", "pass");
 
         // Mock copyArchiveToContainerCmd
-        CopyArchiveToContainerCmd copyCmd = mock(CopyArchiveToContainerCmd.class, RETURNS_SELF);
+        CopyArchiveToContainerCmd copyCmd = mock(CopyArchiveToContainerCmd.class, org.mockito.Mockito.RETURNS_SELF);
         when(dockerClient.copyArchiveToContainerCmd("cont-123")).thenReturn(copyCmd);
 
         // Mock docker exec for psql
-        ExecCreateCmd createCmd = mock(ExecCreateCmd.class, RETURNS_SELF);
+        ExecCreateCmd createCmd = mock(ExecCreateCmd.class, org.mockito.Mockito.RETURNS_SELF);
         ExecCreateCmdResponse createResponse = mock(ExecCreateCmdResponse.class);
         when(createResponse.getId()).thenReturn("exec-restore");
         when(createCmd.exec()).thenReturn(createResponse);
@@ -293,7 +293,7 @@ class RedshiftContainerManagerTest {
 
     @Test
     void testStopRemovesContainer() {
-        ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, org.mockito.Mockito.RETURNS_SELF);
         when(containerBuilder.newContainer(anyString())).thenReturn(specBuilder);
         ContainerInfo info = new ContainerInfo("cont-123", Map.of(5432, new EndpointInfo("localhost", 5432)));
         when(lifecycleManager.createAndStart(any())).thenReturn(info);
@@ -308,7 +308,7 @@ class RedshiftContainerManagerTest {
 
     @Test
     void testSameClusterIdentifierAcrossAccountsDoesNotCollide() {
-        ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, org.mockito.Mockito.RETURNS_SELF);
         when(containerBuilder.newContainer(anyString())).thenReturn(specBuilder);
         ContainerInfo infoA = new ContainerInfo("cont-account-a", Map.of(5432, new EndpointInfo("localhost", 5432)));
         ContainerInfo infoB = new ContainerInfo("cont-account-b", Map.of(5432, new EndpointInfo("localhost", 5433)));
@@ -348,7 +348,7 @@ class RedshiftContainerManagerTest {
     void testAdoptOrStartFallsBackToStartWhenNoExistingContainer() {
         String containerName = "floci-redshift-" + ACCOUNT_ID + "-test-cluster";
         when(lifecycleManager.findByName(containerName)).thenReturn(Optional.empty());
-        ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, org.mockito.Mockito.RETURNS_SELF);
         when(containerBuilder.newContainer(anyString())).thenReturn(specBuilder);
         ContainerInfo info = new ContainerInfo("cont-fresh", Map.of(5432, new EndpointInfo("localhost", 5432)));
         when(lifecycleManager.createAndStart(any())).thenReturn(info);
@@ -361,13 +361,13 @@ class RedshiftContainerManagerTest {
 
     @Test
     void testAlterUserPasswordSuccess() throws Exception {
-        ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, org.mockito.Mockito.RETURNS_SELF);
         when(containerBuilder.newContainer(anyString())).thenReturn(specBuilder);
         ContainerInfo info = new ContainerInfo("cont-123", Map.of(5432, new EndpointInfo("localhost", 5432)));
         when(lifecycleManager.createAndStart(any())).thenReturn(info);
         manager.start(ACCOUNT_ID, "test-cluster", "admin", "pass");
 
-        ExecCreateCmd createCmd = mock(ExecCreateCmd.class, RETURNS_SELF);
+        ExecCreateCmd createCmd = mock(ExecCreateCmd.class, org.mockito.Mockito.RETURNS_SELF);
         ExecCreateCmdResponse createResponse = mock(ExecCreateCmdResponse.class);
         when(createResponse.getId()).thenReturn("exec-alter");
         when(createCmd.exec()).thenReturn(createResponse);
@@ -403,7 +403,7 @@ class RedshiftContainerManagerTest {
 
     @Test
     void testAlterUserPasswordInvalidUsername() throws Exception {
-        ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, org.mockito.Mockito.RETURNS_SELF);
         when(containerBuilder.newContainer(anyString())).thenReturn(specBuilder);
         ContainerInfo info = new ContainerInfo("cont-123", Map.of(5432, new EndpointInfo("localhost", 5432)));
         when(lifecycleManager.createAndStart(any())).thenReturn(info);
@@ -424,7 +424,7 @@ class RedshiftContainerManagerTest {
 
     @Test
     void testAlterUserPasswordInvalidPassword() throws Exception {
-        ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, org.mockito.Mockito.RETURNS_SELF);
         when(containerBuilder.newContainer(anyString())).thenReturn(specBuilder);
         ContainerInfo info = new ContainerInfo("cont-123", Map.of(5432, new EndpointInfo("localhost", 5432)));
         when(lifecycleManager.createAndStart(any())).thenReturn(info);
@@ -457,13 +457,13 @@ class RedshiftContainerManagerTest {
 
     @Test
     void testAlterUserPasswordExecFailure() throws Exception {
-        ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, org.mockito.Mockito.RETURNS_SELF);
         when(containerBuilder.newContainer(anyString())).thenReturn(specBuilder);
         ContainerInfo info = new ContainerInfo("cont-123", Map.of(5432, new EndpointInfo("localhost", 5432)));
         when(lifecycleManager.createAndStart(any())).thenReturn(info);
         manager.start(ACCOUNT_ID, "test-cluster", "admin", "pass");
 
-        ExecCreateCmd createCmd = mock(ExecCreateCmd.class, RETURNS_SELF);
+        ExecCreateCmd createCmd = mock(ExecCreateCmd.class, org.mockito.Mockito.RETURNS_SELF);
         ExecCreateCmdResponse createResponse = mock(ExecCreateCmdResponse.class);
         when(createResponse.getId()).thenReturn("exec-fail");
         when(createCmd.exec()).thenReturn(createResponse);
