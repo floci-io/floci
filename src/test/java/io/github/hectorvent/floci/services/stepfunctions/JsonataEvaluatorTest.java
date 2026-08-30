@@ -908,6 +908,29 @@ class JsonataEvaluatorTest {
                 + expectedFieldPath + "' returned nothing (undefined).", failure.cause);
     }
 
+    /**
+     * #2738: {@code evaluate} caught {@code Exception}, not {@code Error}, so a
+     * {@code java.lang.Error} raised while parsing or evaluating an expression escaped straight
+     * past this method to {@code AslExecutor}'s last-resort {@code catch (Error e)}, failing the
+     * whole execution as {@code States.Runtime} before the state's own {@code Retry}/{@code Catch}
+     * ever ran. This pins the {@code StackOverflowError} arm of the catch, with an expression
+     * nested 200,000 parentheses deep that overflows the JVM call stack during parsing in a few
+     * milliseconds and never grows a string past a few hundred KB. The other arm,
+     * {@code OutOfMemoryError}, is the issue's own reproduction and is pinned end to end by
+     * {@code StepFunctionsJsonataIntegrationTest.parallelBranchErrorIsCatchableByStatesAll}.
+     */
+    @Test
+    void aStackOverflowErrorDuringParsingBecomesAQueryEvaluationError() {
+        JsonNode statesVar = objectMapper.createObjectNode();
+        String deeplyNested = "(".repeat(200_000) + "1" + ")".repeat(200_000);
+
+        AslExecutor.FailStateException ex = assertThrows(AslExecutor.FailStateException.class,
+                () -> evaluator.evaluate("{% " + deeplyNested + " %}", statesVar));
+
+        assertEquals("States.QueryEvaluationError", ex.error);
+        assertTrue(ex.cause.contains("StackOverflowError"), ex.cause);
+    }
+
     @Test
     void evaluateFieldNamesTheFieldOfAPositionThatHoldsASingleExpression() throws Exception {
         JsonNode statesVar = objectMapper.readTree("{\"input\": {}}");

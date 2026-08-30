@@ -1300,6 +1300,59 @@ class StepFunctionsJsonataIntegrationTest {
         assertTrue(caught.path("caught").asBoolean(), caught.toString());
     }
 
+    /**
+     * #2738: a {@code java.lang.Error} raised while evaluating a branch's expression used to
+     * escape {@code JsonataEvaluator}'s catch and reach {@code AslExecutor}'s own last-resort
+     * {@code catch (Error e)}, failing the whole execution as {@code States.Runtime} before the
+     * {@code Parallel}'s own {@code Catch} ever ran. On real AWS (measured in us-east-1) the same
+     * definition ends {@code SUCCEEDED} with output {@code {"caught":true}}.
+     *
+     * <p>The branch expression is the issue's own reproduction verbatim (quotes swapped to
+     * JSONata's single-quote string literal, which embeds in this JSON body without escaping):
+     * a tail-recursive function doubles a string 31 times, which dashjoin loops rather than
+     * recursing on (JSONata optimises the tail call), so it grows the string until doubling it
+     * once more would exceed the JVM's maximum array length and throws
+     * {@code OutOfMemoryError: Overflow: String length out of range} from that bound check, not
+     * from a filled heap. Measured in isolation against the {@code -Xmx6g} this suite's own
+     * surefire {@code argLine} sets, the expression peaks around 1.5 GB of transient garbage and
+     * completes in ~200 ms, comfortably inside the 6 GB budget: it does not exhaust the heap of
+     * the run. This is the only test that reaches the {@code OutOfMemoryError} arm of
+     * {@code JsonataEvaluator.evaluate}'s catch; the {@code StackOverflowError} arm is pinned by
+     * {@code JsonataEvaluatorTest.aStackOverflowErrorDuringParsingBecomesAQueryEvaluationError}.
+     */
+    @Test
+    void parallelBranchErrorIsCatchableByStatesAll() throws Exception {
+        String definition = """
+                {
+                    "QueryLanguage": "JSONata",
+                    "StartAt": "P",
+                    "States": {
+                        "P": {
+                            "Type": "Parallel",
+                            "Branches": [{
+                                "StartAt": "E",
+                                "States": {
+                                    "E": {
+                                        "Type": "Pass",
+                                        "Output": {"r": "{% ($p := function($s, $n) { $n = 0 ? $s : $p($s & $s, $n - 1) }; $length($p('x', 31))) %}"},
+                                        "End": true
+                                    }
+                                }
+                            }],
+                            "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "Caught"}],
+                            "End": true
+                        },
+                        "Caught": {"Type": "Pass", "Output": {"caught": true}, "End": true}
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("sfn-error-catchable-test", definition);
+        JsonNode output = objectMapper.readTree(waitForExecution(startExecution(smArn, "{}")));
+
+        assertTrue(output.path("caught").asBoolean(), output.toString());
+    }
+
     @Test
     void assignExpressionReturningNothingFailsTheState() throws Exception {
         // Real AWS names 'Assign/x' for this definition; before this guard the variable was never

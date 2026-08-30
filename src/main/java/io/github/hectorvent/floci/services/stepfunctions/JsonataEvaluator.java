@@ -191,6 +191,16 @@ public class JsonataEvaluator {
             return toJsonNode(result);
         } catch (Exception e) {
             throw new AslExecutor.FailStateException("States.QueryEvaluationError", queryEvaluationCause(e));
+        } catch (StackOverflowError | OutOfMemoryError e) {
+            // These two are the resource an expression itself spends: nesting deep enough to
+            // exhaust the parser's stack, and asking for a value larger than the JVM can hold.
+            // AWS bounds both and fails the state with States.QueryEvaluationError, so the state's
+            // own Retry and Catch (and a Catch on States.ALL) still see it. Every other Error says
+            // the runtime is broken rather than this expression, and it keeps going to
+            // AslExecutor's terminal catch (Error e), which fails the execution as States.Runtime
+            // and rethrows. The message is often null here, so toString() carries the diagnosis,
+            // the same way that terminal catch already renders it.
+            throw new AslExecutor.FailStateException("States.QueryEvaluationError", e.toString());
         }
     }
 
